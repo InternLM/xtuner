@@ -58,10 +58,11 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.accelerator = accelerator
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
-        limits = httpx.Limits(
-            max_connections=config.rollout_max_batch_size * config.allow_over_concurrency,
-            max_keepalive_connections=int(config.rollout_max_batch_size / 5),
+        # http_concurrency is calculated based on the max batch size per engine and the total number of engines
+        http_concurrency = config.rollout_max_batch_size * (
+            int(os.environ.get("NODE_COUNT", 1)) * config.gpus_per_node / config.tensor_parallel_size
         )
+        limits = httpx.Limits(max_connections=http_concurrency, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.paused = False
         self.server_task = None
@@ -294,10 +295,10 @@ class RolloutWorker(SingleAcceleratorWorker):
                 json=payload,
             )
             r = await self.client.send(req)
-            r.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+            r.raise_for_status()
             return r, True, None
-        # NOTE(@duanyanhui): 目前只有超时会返回 None，继续rollout任务
-        # 其他错误都认为是请求失败，会返回 exit 状态，中断程序；如果有可以处理的其他错误，继续补充在这里
+        # NOTE(@duanyanhui): 目前只有TimeoutException时，第二个返回值为True ，即continue_rollout=True，不影响主程序正常运行
+        # 其他错误都认为是请求失败，会通过assert进行报错，并且根据错误类型返回不同的error msg.
         except httpx.TimeoutException as e:
             error_msg = f"create_request error: Request to {url} timed out: {e}"
             self.logger.warning(error_msg)
