@@ -118,13 +118,13 @@ class RolloutConfig(BaseModel):
             help="Maximum batch size for the rollout worker. If not set, it will be determined automatically based on the model and GPU memory.",
         ),
     ] = 512
-    prompt_repeat_k: Annotated[
-        int,
+    allow_over_concurrency: Annotated[
+        float,
         Parameter(
             group=infer_group,
-            help="Number of times to repeat the prompt for each request in the rollout worker.",
+            help="Factor to allow over concurrency in the http request for rollout worker to improve GPU utilization.",
         ),
-    ] = 8
+    ] = 1.2
     tensor_parallel_size: Annotated[
         int,
         Parameter(
@@ -176,12 +176,12 @@ class RolloutConfig(BaseModel):
         ),
     ] = 1200.0
     context_length: Annotated[
-        Optional[int],
+        int,
         Parameter(
             group=infer_group,
             help="Context length for the rollout worker.",
         ),
-    ] = None
+    ]
     extra_rollout_config: Annotated[
         dict,
         Parameter(
@@ -244,15 +244,18 @@ class RolloutConfig(BaseModel):
             kwargs["launch_server_method"] = "ray"
             kwargs["rollout_cross_node_comm"] = True
 
-        # `rollout_max_batch_size` is the max batch size for each inference engine.
-        # In Xtuner, It is derived from `max_concurrent` in `DataflowConfig`. `max_concurrent` represents the concurrency level for group data batch.
-        # The total data received by all inference workers is `max_concurrent * prompt_repeat_k`.
-        # This is then divided by the number of inference engines (i.e., workers with TP_RANK=0) to determine the max batch size per engine.
-        kwargs["rollout_max_batch_size"] = (
-            kwargs.get("rollout_max_batch_size", 512)
-            * kwargs.get("prompt_repeat_k", 1)
-            / (int(os.environ.get("NODE_COUNT", 1)) * kwargs["gpus_per_node"] / kwargs.get("tensor_parallel_size", 1))
-        )
+        if "rollout_max_batch_size" not in kwargs:
+            context_length = kwargs["context_length"]
+
+            if context_length <= 2048:
+                kwargs["rollout_max_batch_size"] = 1024
+            elif context_length <= 4096:
+                kwargs["rollout_max_batch_size"] = 512
+            elif context_length <= 8192:
+                kwargs["rollout_max_batch_size"] = 256
+            else:
+                kwargs["rollout_max_batch_size"] = 128
+
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 

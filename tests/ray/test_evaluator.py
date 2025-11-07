@@ -35,15 +35,14 @@ class TestEvaluator(unittest.TestCase):
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
         self.max_prompt_length = 512
+        self.max_response_length = 1024
         self.rollout_cfg = RolloutConfig(
             env="test_rollout",
             model_path=MODEL_PATH,
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
             tensor_parallel_size=8,
-            extra_rollout_config={
-                "lmdeploy_log_level": "CRITICAL",
-            }
+            context_length=self.max_prompt_length + self.max_response_length,
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
@@ -70,7 +69,7 @@ class TestEvaluator(unittest.TestCase):
         self.sample_params = SampleParams(
             top_p=1.0, 
             temperature=0.0,
-            max_tokens=1024, 
+            max_tokens=self.max_response_length, 
             top_k=1
         )
 

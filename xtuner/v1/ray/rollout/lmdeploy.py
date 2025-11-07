@@ -312,6 +312,7 @@ class LMDeployWorker(RolloutWorker):
             api_key=self.api_keys,
             api_keys=self.api_keys,
             ray_runtime_env={"env_vars": env},
+            enable_abort_handling=True,
             **lmdeploy_config_kwargs,
         )
 
