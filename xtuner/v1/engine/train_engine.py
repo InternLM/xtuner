@@ -211,7 +211,9 @@ class TrainEngine:
             isinstance(getattr(self.model_cfg, "router", None), NoAuxRouterConfig)
             and self.model_cfg.router.router_bias_update_speed > 0
         )
-        if moe_need_update_bias:
+        moe_need_log_maxvio = getattr(self.model_cfg, "router", None) is not None
+
+        if moe_need_log_maxvio:
             tokens_per_expert_global_for_bias = torch.zeros(
                 self.model_cfg.num_hidden_layers - self.model_cfg.first_k_dense_replace,
                 self.model_cfg.n_routed_experts,
@@ -231,6 +233,8 @@ class TrainEngine:
 
         train_engine_extra_info = ModelForwardExtraLogInfo()
         micro_batch_iter = 0
+        efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             ProberList.set_micro_batch_iter(micro_batch_iter)
             micro_batch_iter += 1
@@ -243,6 +247,10 @@ class TrainEngine:
                 seq_ctx_list.append(seq_ctx)
                 loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()
+
+                num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
+                efficient_forward_tokens += (num_tokens**2).sum()
+                total_forward_tokens += (num_tokens.sum()) ** 2
 
             if self.intra_layer_micro_batch == 1:
                 output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
@@ -279,7 +287,7 @@ class TrainEngine:
                 else:
                     step_z_loss += z_loss
 
-            if moe_need_update_bias:
+            if moe_need_log_maxvio:
                 assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
                 tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
 
@@ -289,12 +297,13 @@ class TrainEngine:
             ProberList.after_micro_iter_forward()
             step_loss += loss.detach().clone()
 
-        if moe_need_update_bias:
+        if moe_need_log_maxvio:
             avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
             max_load_i, _ = torch.max(tokens_per_expert_global_for_bias, dim=1)
             maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
             maxvio = maxvio_all_layers.mean()
-            self.model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
+            if moe_need_update_bias:
+                self.model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
             other_log["maxvio"] = maxvio.item()
 
         reduced_llm_loss = step_llm_loss
@@ -312,6 +321,7 @@ class TrainEngine:
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
         other_log["extra_info"] = train_engine_extra_info
+        other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
         return loss_log, other_log
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
