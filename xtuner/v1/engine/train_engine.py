@@ -213,7 +213,7 @@ class TrainEngine:
         )
         moe_need_log_maxvio = getattr(self.model_cfg, "router", None) is not None
 
-        if moe_need_update_bias or moe_need_log_maxvio:
+        if moe_need_log_maxvio:
             tokens_per_expert_global_for_bias = torch.zeros(
                 self.model_cfg.num_hidden_layers - self.model_cfg.first_k_dense_replace,
                 self.model_cfg.n_routed_experts,
@@ -249,8 +249,8 @@ class TrainEngine:
                 step_consumed_tokens += seq_ctx.mask.sum()
 
                 num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
-                efficient_forward_tokens += (num_tokens ** 2).sum()
-                total_forward_tokens += (num_tokens.sum())**2
+                efficient_forward_tokens += (num_tokens**2).sum()
+                total_forward_tokens += (num_tokens.sum()) ** 2
 
             if self.intra_layer_micro_batch == 1:
                 output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
@@ -287,7 +287,7 @@ class TrainEngine:
                 else:
                     step_z_loss += z_loss
 
-            if moe_need_update_bias or moe_need_log_maxvio:
+            if moe_need_log_maxvio:
                 assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
                 tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
 
@@ -297,7 +297,7 @@ class TrainEngine:
             ProberList.after_micro_iter_forward()
             step_loss += loss.detach().clone()
 
-        if moe_need_update_bias or moe_need_log_maxvio:
+        if moe_need_log_maxvio:
             avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
             max_load_i, _ = torch.max(tokens_per_expert_global_for_bias, dim=1)
             maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
@@ -308,8 +308,6 @@ class TrainEngine:
 
         reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
-
-        train_engine_extra_info["efficient_attn_ratio"] = torch.round(efficient_forward_tokens / total_forward_tokens, 2)
 
         loss_log["total_loss"] = step_loss.item()
         loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
@@ -323,6 +321,7 @@ class TrainEngine:
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
         other_log["extra_info"] = train_engine_extra_info
+        other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
         return loss_log, other_log
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):

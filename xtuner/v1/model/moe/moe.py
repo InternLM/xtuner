@@ -216,9 +216,9 @@ class MoE(BaseModel):
             max=num_layers * n_routed_experts,
         )
         tokens_per_expert = tokens_per_expert_flat.view(num_layers, n_routed_experts)  # (nlayers, ne)
-        tokens_per_expert_global = tokens_per_expert.to(router_weights.dtype)  # (nlayers, ne)
+        tokens_per_expert_global = tokens_per_expert.to(torch.long)  # (nlayers, ne)
         if dist.is_initialized():
-            tokens_per_expert_global = all_reduce(tokens_per_expert_global, "sum", dist.group.WORLD)  # (nlayers, ne)
+            tokens_per_expert_global = all_reduce(tokens_per_expert_global, "sum", dist.group.WORLD)  # type: ignore
         return tokens_per_expert_global
 
     @torch.no_grad()
