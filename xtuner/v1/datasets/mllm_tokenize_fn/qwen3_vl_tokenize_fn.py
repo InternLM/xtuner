@@ -257,7 +257,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
         self.size = SimpleNamespace(**self.video_processor.size)
         # 必须要最后调用
-        super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
+        super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash, data_name=self.data_name)
 
     def _truncated_data_item(
         self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
@@ -331,11 +331,16 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             print(f"ERROR of image_wh: {e}, data_name: {self.data_name}")
             return {"num_tokens": 0}  # type: ignore
 
-        media_grid_thw = []
-        for size in self._image_wh_list:
-            media_grid_thw.append(smart_get_thw(size, self.image_processor))
-        media_grid_thw = torch.tensor(media_grid_thw, dtype=torch.int).reshape(-1, 3)  # type: ignore
-        sum_media_grid_thw = media_grid_thw.prod(dim=1) // self.merge_length  # type: ignore
+        # 图片宽高比可能不符合 qwen3vl 要求
+        try:
+            media_grid_thw = []
+            for size in self._image_wh_list:
+                media_grid_thw.append(smart_get_thw(size, self.image_processor))
+            media_grid_thw = torch.tensor(media_grid_thw, dtype=torch.int).reshape(-1, 3)  # type: ignore
+            sum_media_grid_thw = media_grid_thw.prod(dim=1) // self.merge_length  # type: ignore
+        except ValueError as e:
+            print(f"ERROR of {self._image_wh_list}: {e}, data_name: {self.data_name}")
+            return {"num_tokens": 0}  # type: ignore
 
         messages = ChatMessages(messages=data_item["messages"])
         replace_image_token(messages, self.chat_template, sum_media_grid_thw, add_vision_id=self.add_vision_id)
@@ -442,15 +447,21 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_frames, _, _, timestamps = self._calc_frame_info(data_item)
 
         height, width = self._video_wh_list[0]
-        resized_height, resized_width = video_smart_resize(
-            num_frames=num_frames,
-            height=height,
-            width=width,
-            temporal_factor=self.video_processor.temporal_patch_size,
-            factor=self.video_processor.patch_size * self.video_processor.merge_size,
-            min_pixels=self.size.shortest_edge,
-            max_pixels=self.size.longest_edge,
-        )
+
+        # 图片宽高比可能不符合 qwen3vl 要求
+        try:
+            resized_height, resized_width = video_smart_resize(
+                num_frames=num_frames,
+                height=height,
+                width=width,
+                temporal_factor=self.video_processor.temporal_patch_size,
+                factor=self.video_processor.patch_size * self.video_processor.merge_size,
+                min_pixels=self.size.shortest_edge,
+                max_pixels=self.size.longest_edge,
+            )
+        except ValueError as e:
+            print(f"ERROR of {self._video_wh_list}: {e}, data_name: {self.data_name}")
+            return {"num_tokens": 0}  # type: ignore
 
         # 如果 num_frames 不是 temporal_patch_size 的整数倍，需要确保可以整除
         if num_frames % self.video_processor.temporal_patch_size != 0:

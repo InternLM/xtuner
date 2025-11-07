@@ -156,7 +156,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.eos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
 
         # 必须要最后调用
-        super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash)
+        super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash, data_name=self.data_name)
 
     def _get_transform(self):
         transform = build_transform(

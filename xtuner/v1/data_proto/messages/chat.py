@@ -18,6 +18,7 @@ class TextContentItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["text"] = "text"
     text: str
+    timestamp: Optional[float] = None
 
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
         return self.text
@@ -43,8 +44,9 @@ class VideoURL(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: str
     detail: Optional[Literal["auto", "low", "high"]] = None
-    video_length: Optional[int] = None  # duration or frame count
     image_wh: Optional[List[int]] = None  # width, height
+    origin_video_length: Optional[int] = None  # duration or frame count
+    origin_fps: Optional[float] = None
     processed_video_length: Optional[int] = None
     processed_fps: Optional[float] = None
 

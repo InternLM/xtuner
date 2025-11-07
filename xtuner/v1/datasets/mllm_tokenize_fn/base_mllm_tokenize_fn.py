@@ -125,12 +125,14 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         max_length: int | None = None,
         tokenizer_hash: str | None = None,
         hash: str | None = None,
+        data_name: str | None = None,
     ):
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
         self._hash = hash
         self._hash_str = ""
         self.chat_template = chat_template
+        self.data_name = data_name
 
         self._image_path: list[str] = []
         self._video_path: list[str] = []
@@ -173,10 +175,13 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         return input_ids, labels
 
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
-        self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
-        self._image_wh_list = extra_info["image_wh"]
-        self._video_wh_list = extra_info["video_wh"]
-        self._video_extra_info_list = extra_info["video_extra_info"]
+        try:
+            self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
+            self._image_wh_list = extra_info["image_wh"]
+            self._video_wh_list = extra_info["video_wh"]
+            self._video_extra_info_list = extra_info["video_extra_info"]
+        except RuntimeError as e:
+            raise RuntimeError(f"RuntimeError: {e} of {self.data_name}")
         if len(self._image_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
