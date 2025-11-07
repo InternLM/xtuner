@@ -58,11 +58,10 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.accelerator = accelerator
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
-        # http_concurrency is calculated based on the max batch size per engine and the total number of engines
-        http_concurrency = config.rollout_max_batch_size * (
-            int(os.environ.get("NODE_COUNT", 1)) * config.gpus_per_node / config.tensor_parallel_size
+        limits = httpx.Limits(
+            max_connections=config.rollout_max_batch_size * config.allow_over_concurrency,
+            max_keepalive_connections=int(config.rollout_max_batch_size / 5),
         )
-        limits = httpx.Limits(max_connections=http_concurrency, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.paused = False
         self.server_task = None
@@ -285,6 +284,46 @@ class RolloutWorker(SingleAcceleratorWorker):
                     )
             self.check_flag = False
 
+    async def _post_request(self, url, headers, payload):
+        try:
+            # new_url = self.server_url[-2] + str(int(self.server_url[-1]) + 1) + "'"
+            req = self.client.build_request(
+                "POST",
+                url,
+                headers=headers,
+                json=payload,
+            )
+            r = await self.client.send(req)
+            r.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+            return r, True, None
+        # NOTE(@duanyanhui): 目前只有超时会返回 None，继续rollout任务
+        # 其他错误都认为是请求失败，会返回 exit 状态，中断程序；如果有可以处理的其他错误，继续补充在这里
+        except httpx.TimeoutException as e:
+            error_msg = f"create_request error: Request to {url} timed out: {e}"
+            self.logger.warning(error_msg)
+            return None, True, None
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                log_payload = copy.deepcopy(payload)
+                if "input_ids" in log_payload and log_payload["input_ids"] is not None:
+                    log_payload["input_ids"] = str(log_payload["input_ids"])
+                error_msg = (
+                    f"Bad Request (400) Error for {url} with payload {log_payload}. Server response: {e.response.text}"
+                )
+                return None, False, error_msg
+            else:
+                error_msg = f"HTTP error occurred for {url}: {e.response.status_code} - {e.response.text}"
+                return None, False, error_msg
+        except httpx.RequestError as e:
+            log_payload = copy.deepcopy(payload)
+            if "input_ids" in log_payload and log_payload["input_ids"] is not None:
+                log_payload["input_ids"] = str(log_payload["input_ids"])
+            error_msg = f"Request Error occurred while requesting {payload} to {url}: {e}"
+            return None, False, error_msg
+        except Exception as e:
+            error_msg = f"Unexpected Error occurred: {e} with traceback: \n {traceback.format_exc()}"
+            return None, False, error_msg
+
     async def rollout_task(
         self,
         prompts: Union[str, List[Dict[str, Any]]] | None,
@@ -298,70 +337,55 @@ class RolloutWorker(SingleAcceleratorWorker):
     ) -> RLRolloutResponseItem:
         uid = str(uuid.uuid4())
         response = None
-        log_payload = {}
         failed_rollout_response = RLRolloutResponseItem(
-            response="",
             finish_reason="failed",
         )
         self._check_infer_engine_version("return_token_ids" in extra_params and extra_params["return_token_ids"])
 
-        try:
-            if format == "openai":
-                openai_prompts, openai_tools = prompts, tools
-            else:
-                openai_prompts, openai_tools = self._adapt_input_to_openai_spec(prompts, tools, tool_choice)
-            if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                payload, response = await self._create_request(
-                    f"{self.server_url}/{self.endpoints['generate']}",
-                    openai_prompts,
-                    input_ids,
-                    openai_tools,
-                    tool_choice,
-                    sample_params=sample_params,
-                    extra_params=extra_params,
-                    extra_info=extra_info,
-                )
-            else:
-                assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
-                payload, response = await self._create_request(
-                    f"{self.server_url}/{self.endpoints['v1/chat/completions']}",
-                    openai_prompts,
-                    None,
-                    openai_tools,
-                    tool_choice,
-                    sample_params=sample_params,
-                    extra_params=extra_params,
-                    extra_info=extra_info,
-                )
-            log_payload = payload
-            response.raise_for_status()
-            rollout_response = (
-                await self._handle_stream_response(uid, sample_params, extra_params, response)
-                if extra_params["stream"]
-                else await self._handle_non_stream_response(uid, sample_params, extra_params, response)
+        if format == "openai":
+            openai_prompts, openai_tools = prompts, tools
+        else:
+            openai_prompts, openai_tools = self._adapt_input_to_openai_spec(prompts, tools, tool_choice)
+        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+            response, continue_rollout, error_msg = await self._create_request(
+                f"{self.server_url}/{self.endpoints['generate']}",
+                openai_prompts,
+                input_ids,
+                openai_tools,
+                tool_choice,
+                sample_params=sample_params,
+                extra_params=extra_params,
+                extra_info=extra_info,
             )
+        else:
+            assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
+            response, continue_rollout, error_msg = await self._create_request(
+                f"{self.server_url}/{self.endpoints['v1/chat/completions']}",
+                openai_prompts,
+                None,
+                openai_tools,
+                tool_choice,
+                sample_params=sample_params,
+                extra_params=extra_params,
+                extra_info=extra_info,
+            )
+        assert continue_rollout, (
+            f"Unhandled error occurred during rollout request creation, You should check infer engine or input params. \n Error message: {error_msg}"
+        )
+        if response:
+            try:
+                rollout_response = (
+                    await self._handle_stream_response(uid, sample_params, extra_params, response)
+                    if extra_params["stream"]
+                    else await self._handle_non_stream_response(uid, sample_params, extra_params, response)
+                )
+            finally:
+                if hasattr(response, "aclose"):
+                    await response.aclose()
             return rollout_response
-
-        except Exception as e:
-            if "input_ids" in log_payload and log_payload["input_ids"] is not None:
-                log_payload["input_ids"] = str(log_payload["input_ids"])
-            error_details = {
-                "uid": uid,
-                "request_payload": log_payload,
-                "error_type": type(e).__name__,
-                "error_message": str(e),
-                "traceback": traceback.format_exc().splitlines(),
-            }
-            self.logger.error(f"An unexpected error occurred in rollout_task: {json.dumps(error_details, indent=2)}")
-            if response is not None:
-                try:
-                    self.logger.error(f"Response content on error: {await response.aread()}")
-                except Exception as resp_e:
-                    self.logger.error(f"Failed to read response content on error: {resp_e}")
+        else:
+            self.logger.warning(f"Retrying rollout for {uid} due to httpx timeout")
             return failed_rollout_response
-        finally:
-            if response:
-                await response.aclose()
 
     async def _handle_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
         last_trajectory = ""
@@ -432,45 +456,46 @@ class RolloutWorker(SingleAcceleratorWorker):
             # generate API response
             last_token_ids = []
             last_logprobs = []
-            finish_reason = response["meta_info"]["finish_reason"]["type"]
+            try:
+                finish_reason = response["meta_info"]["finish_reason"]["type"]
+                if "output_token_logprobs" in response["meta_info"]:
+                    last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
+                    last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
+                    assert len(last_token_ids) <= sample_params["max_tokens"], (
+                        f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
+                    )
+                else:
+                    num_return_tokens = response["meta_info"].get("completion_tokens", 0)
+                    last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
 
-            if finish_reason == "abort":
+                last_trajectory = response["text"]
+
                 rollout_response = RLRolloutResponseItem(
-                    response="",
-                    finish_reason="abort",
+                    response=last_trajectory,
+                    response_ids=last_token_ids if len(last_token_ids) > 0 else None,
+                    num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
+                    finish_reason=finish_reason,
+                    logprobs=last_logprobs if len(last_logprobs) > 0 else None,
+                    valid_response=True if len(last_token_ids) > 0 or len(last_trajectory) > 0 else False,
                 )
                 return rollout_response
-
-            if "output_token_logprobs" in response["meta_info"]:
-                last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
-                last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
-                assert len(last_token_ids) <= sample_params["max_tokens"], (
-                    f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
-                )
-            else:
-                num_return_tokens = response["meta_info"].get("completion_tokens", 0)
-                last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
-
-            last_trajectory = response["text"]
-
-            rollout_response = RLRolloutResponseItem(
-                response=last_trajectory,
-                response_ids=last_token_ids if len(last_token_ids) > 0 else None,
-                num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
-                finish_reason=finish_reason,
-                logprobs=last_logprobs if len(last_logprobs) > 0 else None,
-            )
-            return rollout_response
+            except Exception as e:
+                error_msg = f"Failed to parse response {response} for {uid}: {e}"
+                raise RuntimeError(error_msg)
         else:
             # v1/chat/completions API response
-            last_trajectory = response["choices"][0]["message"]["content"]
-            finish_reason = response["choices"][0]["finish_reason"]
-            rollout_response = RLRolloutResponseItem(
-                response=last_trajectory,
-                finish_reason=finish_reason,
-                num_return_tokens=response["usage"]["completion_tokens"],
-            )
-            return rollout_response
+            try:
+                last_trajectory = response["choices"][0]["message"]["content"]
+                finish_reason = response["choices"][0]["finish_reason"]
+                rollout_response = RLRolloutResponseItem(
+                    response=last_trajectory,
+                    finish_reason=finish_reason,
+                    num_return_tokens=response["usage"]["completion_tokens"],
+                )
+                return rollout_response
+            except Exception as e:
+                error_msg = f"Failed to parse chat/completions response {response} for {uid}: {e}"
+                raise RuntimeError(error_msg)
 
     async def rollout(
         self,

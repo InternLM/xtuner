@@ -48,8 +48,6 @@ class SGLangWorker(RolloutWorker):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
-        stream = extra_params["stream"]
-        # note: 此处默认使用tokne_id的话，则不使用流式；异步rollout+token_id进出后续修复
         payload = {"model": self.model_name}
         sglang_sample_params = self._transform_sample_params(sample_params)
         sglang_extra_params = self._transform_extra_params(extra_params)
@@ -77,14 +75,7 @@ class SGLangWorker(RolloutWorker):
             payload.pop("max_new_tokens", None)
             payload.pop("min_new_tokens", None)
 
-        req = self.client.build_request(
-            "POST",
-            url,
-            headers=headers,
-            json=payload,
-        )
-        r = await self.client.send(req, stream=stream)
-        return payload, r
+        return await self._post_request(url, headers, payload)
 
     def _make_request(self, endpoint: str, payload=None):
         # TODO: 支持 tp

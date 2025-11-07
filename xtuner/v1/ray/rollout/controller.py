@@ -266,7 +266,16 @@ class RolloutController:
             format=format,
             extra_info=extra_info,
         )
-        return await response_ref
+        try:
+            response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout)
+            return response
+        except asyncio.TimeoutError:
+            self.logger.error("Get response from rollout worker timeout and return the failed response.")
+            failed_response = RLRolloutResponseItem(
+                response="",
+                finish_reason="failed",
+            )
+            return failed_response
 
     def start_api_server(self, host: str = "0.0.0.0", port: int = 8000):
         """Starts the API server to expose the rollout functionality."""

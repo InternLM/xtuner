@@ -68,9 +68,10 @@ class RLRolloutResponseItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     response: Optional[str] = None
     response_ids: Optional[List[int]] = None
-    num_return_tokens: Optional[int] = None
+    num_return_tokens: int = 0
     finish_reason: Optional[str] = None
     logprobs: Optional[List[float]] = None
+    valid_response: bool = False
     extra_info: Dict[str, Any] = dict()
 
 
@@ -160,6 +161,10 @@ def check_dataflow_item(group_data_items):
     if not no_failures:
         return False
 
+    no_judger_failures = all(item.env.judger.extra_info.get("state", "") != "failed" for item in group_data_items)
+    if not no_judger_failures:
+        return False
+
     all_responses_valid = all(item.env.rollout.response for item in group_data_items)
     all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
 
@@ -185,15 +190,27 @@ def update_dataflow_item(group_data_items, target_key, target_value):
         >>> update_dataflow_item(items, "env.rollout.response", responses)
         # Now items[0].env.rollout.response == "hello", items[1].env.rollout.response == "world"
     """
+
     group_length = len(group_data_items)
     assert group_length == len(target_value)
 
     keys = target_key.split(".")
+
     for i in range(group_length):
         parent_obj = group_data_items[i]
         for key in keys[:-1]:
             parent_obj = getattr(parent_obj, key)
-        setattr(parent_obj, keys[-1], target_value[i])
+        attr = getattr(parent_obj, keys[-1])
+        if keys[-1] == "rollout" and attr.valid_response:
+            if attr.response_ids is not None:
+                attr.response_ids.extend(target_value[i].response_ids or [])
+                # attr.logprobs = attr.logprobs.extend(target_value[i].logprobs or [])
+            if attr.response is not None:
+                attr.response = attr.response + (target_value[i].response or "")
+            attr.num_return_tokens += target_value[i].num_return_tokens
+            attr.finish_reason = target_value[i].finish_reason
+        else:
+            setattr(parent_obj, keys[-1], target_value[i])
 
     return group_data_items
 
