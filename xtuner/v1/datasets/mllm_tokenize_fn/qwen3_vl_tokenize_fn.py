@@ -592,6 +592,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     video_min_frames: int | None = None
     video_max_frames: int | None = None
     fps: int | None = None
+    rand_video_max_frames: int = 24
 
     # When handling multiple images, it's helpful to add labels to the images and videos for better reference.
     add_vision_id: bool = True
@@ -607,6 +608,10 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             max_pixels=self.max_pixels,
             video_min_total_pixels=self.video_min_total_pixels,
             video_max_total_pixels=self.video_max_total_pixels,
+            video_min_frames=self.video_min_frames,
+            video_max_frames=self.video_max_frames,
+            rand_video_max_frames=self.rand_video_max_frames,
+            fps=self.fps,
             add_vision_id=self.add_vision_id,
             max_length=self.max_length,
             system_message=self.system_message,
