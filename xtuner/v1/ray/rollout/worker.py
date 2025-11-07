@@ -477,7 +477,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                     num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
                     finish_reason=finish_reason,
                     logprobs=last_logprobs if len(last_logprobs) > 0 else None,
-                    valid_response=True if len(last_token_ids) > 0 or len(last_trajectory) > 0 else False,
                 )
                 return rollout_response
             except Exception as e:
@@ -531,6 +530,25 @@ class RolloutWorker(SingleAcceleratorWorker):
         """Resume the worker's generation process."""
         self.paused = False
         self.continue_generation()
+
+    def check_health(self) -> bool:
+        """Check the health of the worker's server.
+
+        Returns:
+            bool: True if the server is healthy, False otherwise.
+        """
+        try:
+            headers = {
+                "Content-Type": "application/json; charset=utf-8",
+                "Authorization": f"Bearer {self.config.api_key}",
+            }
+            response = requests.get(
+                f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers, timeout=5.0
+            )
+            return response.status_code == 200
+        except requests.RequestException as e:
+            self.logger.error(f"Health check failed for server {self.server_url}: {e}")
+            return False
 
     def shutdown(self):
         """Shut down the worker, its server task, and any child processes."""

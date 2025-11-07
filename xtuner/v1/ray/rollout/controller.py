@@ -25,12 +25,12 @@ from .worker import RolloutWorker
 class SessionRouter:
     def __init__(
         self,
-        workers: List[Any],
+        worker_status: Dict[Any, Any],  # worker: worker_status
         max_sessions: int = 10000,
         max_idle_seconds: Optional[float] = 3600.0,
     ):
-        assert len(workers) > 0
-        self._workers = list(workers)
+        assert len(worker_status) > 0
+        self._workers = list(worker_status.items())
         self._max_sessions = max_sessions
         self._max_idle = max_idle_seconds
 
@@ -67,13 +67,16 @@ class SessionRouter:
             if session_id in self._map:
                 worker, _ = self._map.pop(session_id)
                 self._map[session_id] = (worker, self._now())
-                return worker
+                if worker[1]:  # worker is healthy
+                    return worker[0]
 
             worker = next(self._worker_cycler)
+            while worker[1] is False:
+                worker = next(self._worker_cycler)
             self._map[session_id] = (worker, self._now())
 
             self._evict_lru_to_capacity()
-            return worker
+            return worker[0]
 
 
 @ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
@@ -98,6 +101,7 @@ class RolloutController:
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
         self.active_rollout_workers: List[RolloutWorker] = []
+        self.active_rollout_workers_status: Dict = {}
         self.tokenizer = AutoTokenizer.from_pretrained(infer_config.tokenizer_path, trust_remote_code=True)
         self.workers, self.rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
             self._get_worker_cls(), infer_config, placement_group
@@ -105,7 +109,7 @@ class RolloutController:
         self.engine_mesh_list, self.server_url_dict = self.init_workers()
         self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
-        self.router = SessionRouter(self.active_rollout_workers)
+        self.router = SessionRouter(self.active_rollout_workers_status)
         self.sample_params = SampleParams().dict()
         # note: 目前默认使用return_token_ids和return_logprob，并且不使用流式
         self.extra_params = dict(
@@ -212,7 +216,23 @@ class RolloutController:
             )
         )
         self.worker_server_urls = list(worker_server_urls_map.values())
+        self.active_rollout_workers_status = {worker: True for worker in self.active_rollout_workers}
         return engine_mesh_list, worker_server_urls_map
+
+    def check_active_workers(self):
+        """Check the health of all active rollout workers.
+
+        Returns:
+            List[bool]: A list of booleans indicating the health status of
+                each active rollout worker.
+        """
+
+        active_worker_response = ray.get(
+            [worker.check_health.remote() for worker in self.active_rollout_workers]  # type: ignore[attr-defined]
+        )
+        for idx, status in enumerate(active_worker_response):
+            if not status:
+                self.active_rollout_workers_status[self.active_rollout_workers[idx]] = False
 
     async def rollout(
         self,
@@ -361,7 +381,11 @@ class RolloutController:
         Returns:
             A list of futures if `block` is False, otherwise a list of results.
         """
-        futures = [getattr(worker, method_name).remote() for worker in self.active_rollout_workers]
+        futures = []
+        for worker, status in self.active_rollout_workers_status.items():
+            if status:
+                futures.append(getattr(worker, method_name).remote())
+
         if not block:
             return futures
 

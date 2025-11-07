@@ -1,5 +1,4 @@
 import asyncio
-import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -78,9 +77,6 @@ class DataFlowConfig(BaseModel):
 
     def __init__(self, **kwargs):
         # TODO: calculate max_concurrent based on env and resources
-        assert os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1" and kwargs.get("enable_partial_rollout", 0) == 0, (
-            "LMDeploy only supports sync rollout mode."
-        )
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
