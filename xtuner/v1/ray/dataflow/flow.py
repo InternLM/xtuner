@@ -72,7 +72,6 @@ class DataFlowConfig(BaseModel):
     enable_partial_rollout: Annotated[
         int, Parameter(help="Whether to enable async rollout_controller. 1 for enabled, 0 for disabled")
     ] = 0
-    partial_rollout_step: Annotated[int, Parameter(help="Allowed steps off for partial rollout_controller.")] = 0
     sample_params: Annotated[SampleParams, Parameter(help="Parameters for sampling from the model.")] = SampleParams()
     extra_params: Annotated[Dict, Parameter(help="Extra parameters for rollout.")] = {}
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"

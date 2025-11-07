@@ -6,7 +6,7 @@ import time
 import traceback
 import uuid
 from abc import abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import httpx
 import ray
@@ -284,7 +284,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     )
             self.check_flag = False
 
-    async def _post_request(self, url, headers, payload):
+    async def _safe_post_request(self, url, headers, payload) -> Tuple[Optional[httpx.Response], bool, Optional[str]]:
         try:
             # new_url = self.server_url[-2] + str(int(self.server_url[-1]) + 1) + "'"
             req = self.client.build_request(

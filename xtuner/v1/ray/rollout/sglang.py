@@ -75,7 +75,7 @@ class SGLangWorker(RolloutWorker):
             payload.pop("max_new_tokens", None)
             payload.pop("min_new_tokens", None)
 
-        return await self._post_request(url, headers, payload)
+        return await self._safe_post_request(url, headers, payload)
 
     def _make_request(self, endpoint: str, payload=None):
         # TODO: 支持 tp

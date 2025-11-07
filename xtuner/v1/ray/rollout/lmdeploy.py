@@ -127,7 +127,7 @@ class LMDeployWorker(RolloutWorker):
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
         payload.update(lmdeploy_sample_params)
 
-        return await self._post_request(url, headers, payload)
+        return await self._safe_post_request(url, headers, payload)
 
     def get_logprobs(self, input_ids, sampling_params):
         """This method will be implemented for the LMDeploy worker in the

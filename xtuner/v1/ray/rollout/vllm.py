@@ -61,7 +61,7 @@ class vLLMWorker(RolloutWorker):
         payload.update(sample_params)
         payload.update(extra_params)
 
-        return await self._post_request(url, headers, payload)
+        return await self._safe_post_request(url, headers, payload)
 
     def get_logprobs(self, input_ids, sampling_params):
         pass
