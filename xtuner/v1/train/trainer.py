@@ -544,6 +544,9 @@ class Trainer:
                 extra_info_dict = extra_info_updated.get()
             loss_log.update(extra_info_dict)
 
+            if 'maxvio' in other_log:
+                loss_log['maxvio'] = other_log['maxvio']
+
             self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
             self._train_time = time_after_train_step - train_begin

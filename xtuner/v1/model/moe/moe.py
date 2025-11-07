@@ -200,21 +200,14 @@ class MoE(BaseModel):
         return router_logits
 
     @torch.no_grad()
-    def _cal_tokens_per_expert(self, router_logits: torch.Tensor):
-        scoring_func = self.config.router.scoring_func
+    def _cal_tokens_per_expert(self, router_weights: torch.Tensor):
         n_routed_experts = self.config.n_routed_experts
         num_experts_per_tok = self.config.num_experts_per_tok
-        num_layers = router_logits.shape[0]
-        router_logits = router_logits.float()  # (nlayers, seq, ne)
-        if scoring_func == "softmax":
-            routing_weights = F.softmax(router_logits, dim=-1)
-        elif scoring_func == "sigmoid":
-            routing_weights = router_logits / torch.sum(router_logits, dim=-1, keepdim=True)
-        else:
-            raise ValueError(f"Unknown scoring function: {scoring_func}")
-        _, selected_experts = torch.topk(routing_weights, num_experts_per_tok, dim=-1)
+        num_layers = router_weights.shape[0]
+        router_weights = router_weights.float()  # (nlayers, seq, ne)
+        _, selected_experts = torch.topk(router_weights, num_experts_per_tok, dim=-1)
         selected_experts_flat = selected_experts.view(num_layers, -1)
-        offset = torch.arange(num_layers, device=router_logits.device).unsqueeze(1) * n_routed_experts
+        offset = torch.arange(num_layers, device=router_weights.device).unsqueeze(1) * n_routed_experts
         selected_experts_offset = selected_experts_flat + offset
         tokens_per_expert_flat = torch.histc(
             selected_experts_offset.view(-1),
@@ -223,11 +216,10 @@ class MoE(BaseModel):
             max=num_layers * n_routed_experts,
         )
         tokens_per_expert = tokens_per_expert_flat.view(num_layers, n_routed_experts)  # (nlayers, ne)
+        tokens_per_expert_global = tokens_per_expert.to(router_weights.dtype)  # (nlayers, ne)
         if dist.is_initialized():
-            tokens_per_expert_global_for_bias = all_reduce(tokens_per_expert, "sum", dist.group.WORLD)  # type: ignore
-        else:
-            tokens_per_expert_global_for_bias = tokens_per_expert
-        return tokens_per_expert_global_for_bias
+            tokens_per_expert_global = all_reduce(tokens_per_expert_global, "sum", dist.group.WORLD)  # (nlayers, ne)
+        return tokens_per_expert_global
 
     @torch.no_grad()
     def update_bias(self, total_expert_counts_pre_iter, expected_loads):
@@ -445,9 +437,8 @@ class MoE(BaseModel):
                 output["z_loss"] = z_loss
 
             # Calculate tokens per expert for bias update (if applicable)
-            if isinstance(self.config.router, NoAuxRouterConfig) and self.config.router.router_bias_update_speed > 0:
-                tokens_per_expert_global = self._cal_tokens_per_expert(combined_router_logits)
-                output["tokens_per_expert_global"] = tokens_per_expert_global
+            tokens_per_expert_global = self._cal_tokens_per_expert(combined_router_logits)
+            output["tokens_per_expert_global"] = tokens_per_expert_global
 
             del combined_router_logits
 
@@ -559,9 +550,8 @@ class MoE(BaseModel):
             z_loss = self.z_loss(router_logits=router_logits)
             output["z_loss"] = z_loss
 
-        if isinstance(self.config.router, NoAuxRouterConfig) and self.config.router.router_bias_update_speed > 0:
-            tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
-            output["tokens_per_expert_global"] = tokens_per_expert_global
+        tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
+        output["tokens_per_expert_global"] = tokens_per_expert_global
 
         del router_logits
 
