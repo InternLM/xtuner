@@ -184,6 +184,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         oss_time_log_thr: int = 10,  # 10s
         tokenizer_hash: str | None = None,
         hash: str | None = None,
+        add_eos_token: bool = True,  # for mllm pretrain
+        add_bos_token: bool = False,  # for mllm pretrain
     ):
         self.oss_loader = None
         self.debug = debug
@@ -243,8 +245,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if system_message is not None:
             self.chat_template.default_system = system_message
 
-        self.image_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_context_token)
-        self.video_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.video_context_token)
+        self.img_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_context_token)
+        self.video_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.video_context_token)
+        self.img_start_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_start_token)
+        self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
         self._hash_str = (
@@ -256,6 +260,17 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
 
         self.size = SimpleNamespace(**self.video_processor.size)
+
+        self.add_eos_token = add_eos_token
+        self.add_bos_token = add_bos_token
+        self.bos_token_id = None
+        if self.add_bos_token and tokenizer.bos_token is None:
+            logger.warning("tokenizer has no bos_token, set add_bos_token=False")
+            self.add_bos_token = False
+        if self.add_bos_token:
+            self.bos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.bos_token)
+        self.eos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
+
         # 必须要最后调用
         super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash, data_name=self.data_name)
 
@@ -296,6 +311,12 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
     def pure_text_get_item(self, data_item: dict) -> QwenVL3DataItem:
         messages = ChatMessages(messages=data_item["messages"])
+
+        is_pretrain = False
+        if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
+            is_pretrain = True
+        assert is_pretrain is False, "Text pretrain data should not be processed by this function"
+
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels: list[int] = tokenized["labels"]
@@ -347,10 +368,19 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
 
+        is_pretrain = False
+        if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
+            is_pretrain = True
+        if is_pretrain:
+            if self.add_bos_token:
+                input_ids = [self.bos_token_id] + input_ids
+            if self.add_eos_token:
+                input_ids = input_ids + [self.eos_token_id]
+
         input_ids, _, _ = self._truncated_data_item(input_ids)
 
         # 如果图片被截断，则该数据丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.image_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()
         num_image_tokens_2 = sum_media_grid_thw.sum()
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
@@ -376,6 +406,22 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
 
+        is_pretrain = False
+        if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
+            is_pretrain = True
+        if is_pretrain:
+            if self.add_bos_token:
+                input_ids = [self.bos_token_id] + input_ids
+                labels = [self.bos_token_id] + labels
+            if self.add_eos_token:
+                input_ids = input_ids + [self.eos_token_id]
+                labels = labels + [self.eos_token_id]
+            np_labels = np.array(labels)
+            np_labels[np_labels == self.img_start_token_id] = -100
+            np_labels[np_labels == self.img_context_token_id] = -100
+            np_labels[np_labels == self.img_end_token_id] = -100
+            labels = np_labels.tolist()
+
         position_ids = get_rope_index_3(
             torch.tensor(input_ids).unsqueeze(0),
             spatial_merge_size=self.image_processor.merge_size,
@@ -385,7 +431,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
         # 如果图片被截断，则该数据要丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.image_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()
         num_image_tokens_2 = torch.stack(grid_thw_merged, dim=0).sum()
         # assert 会被捕获，该数据会丢弃
         assert num_image_tokens_1.shape == num_image_tokens_2.shape, (
@@ -482,10 +528,19 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
 
+        is_pretrain = False
+        if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
+            is_pretrain = True
+        if is_pretrain:
+            if self.add_bos_token:
+                input_ids = [self.bos_token_id] + input_ids
+            if self.add_eos_token:
+                input_ids = input_ids + [self.eos_token_id]
+
         input_ids, _, _ = self._truncated_data_item(input_ids)
 
         # 如果图片被截断，则该数据丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()
         num_image_tokens_2 = sum_media_grid_thw
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
@@ -559,6 +614,22 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
 
+        is_pretrain = False
+        if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
+            is_pretrain = True
+        if is_pretrain:
+            if self.add_bos_token:
+                input_ids = [self.bos_token_id] + input_ids
+                labels = [self.bos_token_id] + labels
+            if self.add_eos_token:
+                input_ids = input_ids + [self.eos_token_id]
+                labels = labels + [self.eos_token_id]
+            np_labels = np.array(labels)
+            np_labels[np_labels == self.img_start_token_id] = -100
+            np_labels[np_labels == self.video_context_token_id] = -100
+            np_labels[np_labels == self.img_end_token_id] = -100
+            labels = np_labels.tolist()
+
         position_ids = get_rope_index_3(
             torch.tensor(input_ids).unsqueeze(0),
             spatial_merge_size=self.image_processor.merge_size,
@@ -568,7 +639,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
         # 如果图片被截断，则该数据要丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()
         num_image_tokens_2 = sum_media_grid_thw
         # assert 会被捕获，该数据会丢弃
         assert num_image_tokens_1.shape == num_image_tokens_2.shape, (
@@ -597,6 +668,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     processor_path: str
     min_pixels: int | None = None
     max_pixels: int | None = None
+    oss_loader_cfg: OSSLoaderConfig | None = None
 
     video_min_total_pixels: int | None = None
     video_max_total_pixels: int | None = None
@@ -617,6 +689,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             anno_name,
             min_pixels=self.min_pixels,
             max_pixels=self.max_pixels,
+            oss_loader_cfg=self.oss_loader_cfg,
             video_min_total_pixels=self.video_min_total_pixels,
             video_max_total_pixels=self.video_max_total_pixels,
             video_min_frames=self.video_min_frames,
@@ -628,4 +701,8 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             system_message=self.system_message,
             tokenizer_hash=tokenizer_hash,
             hash=self.hash,
+            debug=self.debug,
+            oss_time_log_thr=self.oss_time_log_thr,
+            add_eos_token=self.add_eos_token,  # for mllm pretrain
+            add_bos_token=self.add_bos_token,  # for mllm pretrain
         )
