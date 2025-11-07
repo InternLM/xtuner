@@ -48,7 +48,7 @@ class Qwen3DenseConfig(TransformerConfig):
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
-            pad_token_id=hf_config.get("pad_token_id"),
+            pad_token_id=getattr(hf_config, "pad_token_id"),
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
