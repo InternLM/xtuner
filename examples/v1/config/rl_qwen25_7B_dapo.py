@@ -32,7 +32,7 @@ enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
 # basic settings
 experimental_name = "dapo_math"
 total_epochs = 1
-global_batch_size = 16
+global_batch_size = 512
 prompt_repeat_k = 16
 rollout_tp_size = 2
 rollout_ep_size = 1
