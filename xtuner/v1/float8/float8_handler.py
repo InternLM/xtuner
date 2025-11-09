@@ -15,6 +15,8 @@ from xtuner.v1.float8.fsdp_utils import (
 )
 from xtuner.v1.utils import get_logger, is_evenly_distributed
 
+from .fsdp_utils import WeightWithDynamicTensorWiseFloat8CastTensor, WeightWithDynamicTilewiseFloat8CastTensor
+
 
 logger = get_logger()
 
@@ -46,6 +48,12 @@ class Float8Handler:
         scaling_granularity_grouped_gemm: Optional[ScalingGranularity] = None,
     ) -> None:
         self.enabled = False
+        torch.serialization.add_safe_globals(
+            [
+                WeightWithDynamicTilewiseFloat8CastTensor,
+                WeightWithDynamicTensorWiseFloat8CastTensor,
+            ]
+        )
 
         if not _is_sm89_or_later():
             logger.warning(
