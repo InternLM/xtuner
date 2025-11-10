@@ -20,6 +20,7 @@ class NoAuxRouterConfig(BaseModel):
     topk_group: int
     router_bias_update_speed: float = 0.001
     use_grouped_router: bool = False
+    router_n_groups: int | None = None
 
     def build(
         self,
@@ -28,12 +29,15 @@ class NoAuxRouterConfig(BaseModel):
     ):
         cfg = self.model_dump()
         use_grouped_router = cfg.pop("use_grouped_router")
+        router_n_groups = cfg.pop("router_n_groups")
         if use_grouped_router:
             print("Using NoAuxGroupedRouter")
+            assert router_n_groups is not None, "router_n_groups must be specified for NoAuxGroupedRouter"
             return NoAuxGroupedRouter(
                 **cfg,
                 n_routed_experts=n_routed_experts,
                 num_experts_per_tok=num_experts_per_tok,
+                router_n_groups=router_n_groups,
             )
         else:
             return NoAuxRouter(
@@ -141,6 +145,10 @@ class NoAuxRouter(nn.Module, RouterProtocol):
 class NoAuxGroupedRouter(NoAuxRouter):
     """Only works for ep_size == topk."""
 
+    def __init__(self, router_n_groups, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.router_n_groups = router_n_groups
+
     def forward(self, logits) -> RouterResults:
         seq, ne = logits.shape
         if self.scoring_func == "sigmoid":
@@ -156,7 +164,7 @@ class NoAuxGroupedRouter(NoAuxRouter):
             scores_for_choice = scores + noise
 
         # group-based selection (group size = n_routed_experts // 8) ---
-        n_groups = int(os.getenv("ROUTER_N_GROUPS", 8))
+        n_groups = self.router_n_groups
         assert self.n_routed_experts % n_groups == 0, f"n_routed_experts must be divisible by {n_groups}"
         assert self.top_k == 8, "top_k must be 8 for NoAuxRouterOpt"
         group_size = max(1, self.n_routed_experts // n_groups)

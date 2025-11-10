@@ -17,6 +17,7 @@ class GreedyRouterConfig(BaseModel):
     router_scaling_factor: Annotated[float, Parameter(group="router")]
     norm_topk_prob: Annotated[bool, Parameter(group="router")]
     use_grouped_router: bool = False
+    router_n_groups: int | None = None
 
     def build(
         self,
@@ -25,12 +26,15 @@ class GreedyRouterConfig(BaseModel):
     ) -> "GreedyRouter":
         cfg = self.model_dump()
         use_grouped_router = cfg.pop("use_grouped_router")
+        router_n_groups = cfg.pop("router_n_groups")
         if use_grouped_router:
             print("Using GreedyGroupedRouter")
+            assert router_n_groups is not None, "router_n_groups must be specified for GreedyGroupedRouter"
             return GreedyGroupedRouter(
                 **cfg,
                 n_routed_experts=n_routed_experts,
                 num_experts_per_tok=num_experts_per_tok,
+                router_n_groups=router_n_groups,
             )
         else:
             return GreedyRouter(
@@ -88,6 +92,10 @@ class GreedyRouter(nn.Module, RouterProtocol):
 
 
 class GreedyGroupedRouter(GreedyRouter):
+    def __init__(self, router_n_groups, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.router_n_groups = router_n_groups
+
     def forward(self, logits: torch.Tensor) -> RouterResults:
         if os.getenv("XTUNER_ROUTER_DEBUG") == "true":
             noise = torch.randn_like(logits) * 50
@@ -100,7 +108,7 @@ class GreedyGroupedRouter(GreedyRouter):
             routing_weights = F.softmax(logits, dim=1, dtype=torch.float)
 
         # group-based selection
-        n_groups = int(os.getenv("ROUTER_N_GROUPS", 8))
+        n_groups = self.router_n_groups
         assert self.n_routed_experts % n_groups == 0, f"n_routed_experts must be divisible by {n_groups}"
         assert self.top_k == 8, "top_k must be 8 for NoAuxRouterOpt"
         group_size = max(1, self.n_routed_experts // n_groups)
