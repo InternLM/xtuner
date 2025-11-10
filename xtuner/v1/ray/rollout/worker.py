@@ -479,8 +479,23 @@ class RolloutWorker(SingleAcceleratorWorker):
                     logprobs=last_logprobs if len(last_logprobs) > 0 else None,
                 )
                 return rollout_response
+            except KeyError as e:
+                error_msg = f"Missing expected key {e} in response {response} for {uid}"
+                raise RuntimeError(error_msg)
+            except IndexError as e:
+                error_msg = f"Index error {e} while processing response {response} for {uid}"
+                raise RuntimeError(error_msg)
+            except AssertionError as e:
+                error_msg = f"AssertionError: {e} when processing response {response} for {uid}"
+                raise RuntimeError(error_msg)
+            except json.JSONDecodeError as e:
+                error_msg = f"JSONDecodeError: {e} when processing response {response} for {uid}"
+                raise RuntimeError(error_msg)
+            except TypeError as e:
+                error_msg = f"TypeError: {e} when processing response {response} for {uid}"
+                raise RuntimeError(error_msg)
             except Exception as e:
-                error_msg = f"Failed to parse response {response} for {uid}: {e}"
+                error_msg = f"Unexpected error: {e} when processing response {response} for {uid}\nTraceback: {traceback.format_exc()}"
                 raise RuntimeError(error_msg)
         else:
             # v1/chat/completions API response
@@ -493,8 +508,23 @@ class RolloutWorker(SingleAcceleratorWorker):
                     num_return_tokens=response["usage"]["completion_tokens"],
                 )
                 return rollout_response
+            except KeyError as e:
+                error_msg = f"Missing expected key {e} in response {response} for {uid}"
+                raise RuntimeError(error_msg)
+            except IndexError as e:
+                error_msg = f"Index error {e} while processing response {response} for {uid}"
+                raise RuntimeError(error_msg)
+            except AssertionError as e:
+                error_msg = f"AssertionError: {e} when processing response {response} for {uid}"
+                raise RuntimeError(error_msg)
+            except json.JSONDecodeError as e:
+                error_msg = f"JSONDecodeError: {e} when processing response {response} for {uid}"
+                raise RuntimeError(error_msg)
+            except TypeError as e:
+                error_msg = f"TypeError: {e} when processing response {response} for {uid}"
+                raise RuntimeError(error_msg)
             except Exception as e:
-                error_msg = f"Failed to parse chat/completions response {response} for {uid}: {e}"
+                error_msg = f"Unexpected error: {e} when processing response {response} for {uid}\nTraceback: {traceback.format_exc()}"
                 raise RuntimeError(error_msg)
 
     async def rollout(

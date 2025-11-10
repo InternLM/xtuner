@@ -25,7 +25,7 @@ from .worker import RolloutWorker
 class SessionRouter:
     def __init__(
         self,
-        worker_status: Dict[Any, Any],  # worker: worker_status
+        worker_status: Dict[Any, bool],  # worker: worker_status
         max_sessions: int = 10000,
         max_idle_seconds: Optional[float] = 3600.0,
     ):
