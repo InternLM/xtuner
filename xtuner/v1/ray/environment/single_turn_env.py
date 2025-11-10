@@ -70,7 +70,9 @@ class SingleTurnEnvironment(BaseEnvironment):
                 for sample in group_data_items
             ]
             rollout_responses = await asyncio.gather(*response_future)  # RLRolloutResponseItem
+            self.logger.debug(f"Rollout responses: {rollout_responses}")
             group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_responses)
+            self.logger.debug(f"Updated group_data_items: {group_data_items}")
         return group_data_items
 
     async def run(
