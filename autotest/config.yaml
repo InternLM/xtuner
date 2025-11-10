@@ -1,0 +1,40 @@
+base_model_path: /mnt/shared-storage-user/models
+base_output_path: /mnt/shared-storage-user/output
+
+default_config:
+    train: 
+        resource:
+            gpus_per_task: 0
+            num_cpus: 4
+            memory: 16G
+            image: registry.h.pjlab.org.cn/ailab-puyu-puyu_gpu/xtuner:pt28_20250911_6652194
+    eval:
+        resource:
+            gpus_per_task: 0
+            num_cpus: 4
+            memory: 16G
+            
+case: 
+    qwen3-tiny:
+        - 
+            type: pre_train
+            parameters:
+                config: examples/v1/config/sft_qwen3_tiny.py
+                assert_result_path: autotest/baseline/qwen3-tiny-pretrian-0.json
+                dataset: tests/resource/openai_sft.jsonl
+                chat_template: qwen3
+            resource:
+                gpus_per_task: 1
+            timeout: 600
+        - 
+            type: eval
+            eval_type: base
+        - 
+            type: rl
+            config: examples/v1/config/sft_qwen3_tiny.py
+        - 
+            type: sft
+            config: examples/v1/config/sft_qwen3_tiny.py
+        - 
+            type: eval
+            eval_type: chat
