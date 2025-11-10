@@ -236,7 +236,7 @@ class LMDeployWorker(RolloutWorker):
                 tp=tp_size,
                 ep=ep_size,
                 dp=dp_size,
-                max_batch_size=self.config.rollout_max_batch_size,
+                max_batch_size=self.config.rollout_max_batch_size_per_instance,
                 empty_init=self.config.skip_load_weights,
                 distributed_executor_backend=distributed_executor_backend,
                 mp_engine_backend="ray",  # force ray to pass placement group
@@ -247,7 +247,7 @@ class LMDeployWorker(RolloutWorker):
             if backend == "pytorch"
             else TurbomindEngineConfig(
                 tp=tp_size,
-                max_batch_size=self.config.rollout_max_batch_size,
+                max_batch_size=self.config.rollout_max_batch_size_per_instance,
                 devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
                 empty_init=self.config.skip_load_weights,
                 session_len=self.config.context_length,
@@ -312,6 +312,7 @@ class LMDeployWorker(RolloutWorker):
             api_key=self.api_keys,
             api_keys=self.api_keys,
             ray_runtime_env={"env_vars": env},
+            enable_abort_handling=True,
             **lmdeploy_config_kwargs,
         )
 

@@ -74,9 +74,11 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.75,
+    context_length=max_prompt_length+max_response_length,
     extra_rollout_config={
             "sglang_grammar_backend": 'none',
         }
+    # rollout_max_batch_size_per_instance=16,  # optional
 )
 
 # sampling params
@@ -135,7 +137,7 @@ dataflow_config = DataFlowConfig(
     prompt_repeat_k=prompt_repeat_k,
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
-    max_concurrent=64,
+    # max_concurrent=64, # optional 
 )
 
 evaluator_cfg = EvaluatorConfig(
