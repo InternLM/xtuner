@@ -1,5 +1,4 @@
 import asyncio
-import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -78,9 +77,6 @@ class DataFlowConfig(BaseModel):
 
     def __init__(self, **kwargs):
         # TODO: calculate max_concurrent based on env and resources
-        assert os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1" and kwargs.get("enable_partial_rollout", 0) == 0, (
-            "LMDeploy only supports sync rollout mode."
-        )
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -244,7 +240,7 @@ class DataFlow:
                         if result[0].extra_info.retry_times < self.config.max_retry_times:
                             # If the retry count is less than max_retry_times, retry the task
                             self.logger.info(
-                                f"Retrying task for {result[0].data}. Retry count: {result[0].extra_info.retry_times}"
+                                f"Retrying task for {result[0].uid.action_id}. Retry count: {result[0].extra_info.retry_times}"
                             )
                             retry_task = create_task(self.worker_task(group_samples_for_retry=result))
                             pending_tasks.add(retry_task)

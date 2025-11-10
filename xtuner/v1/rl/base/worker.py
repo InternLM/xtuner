@@ -174,9 +174,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.log_dir = None
         if log_dir is not None:
             self.log_dir = Path(log_dir) if isinstance(log_dir, str) else log_dir
-            self.log_level = os.environ.get("XTUNER_LOG_LEVEL", "INFO").upper()
             self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
-
         else:
             self.logger = get_logger()
 
