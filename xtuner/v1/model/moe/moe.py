@@ -96,7 +96,7 @@ class MoEConfig(TransformerConfig):
     hidden_factor: Annotated[float, Parameter(group="moe")] = 1.0
     moe_intermediate_size: Annotated[int, Parameter(group="moe")]
     ep_size: Annotated[int, Parameter(group="moe")] = 1
-    dispatcher: Annotated[Literal["deepep", "all2all"] | None, Parameter(group="moe")] = None
+    dispatcher: Annotated[Literal["deepep", "all2all", "agrs"] | None, Parameter(group="moe")] = None
     router: GreedyRouterConfig | NoAuxRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None

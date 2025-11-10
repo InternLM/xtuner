@@ -194,7 +194,7 @@ class MoEDecoderLayer(nn.Module):
         moe_act_fn_cfg: MoEActFnConfig,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
-        dispatcher: Literal["deepep", "all2all"] | None,
+        dispatcher: Literal["deepep", "all2all", "agrs"] | None,
         ep_mesh: DeviceMesh | None = None,
     ):
         super().__init__()
