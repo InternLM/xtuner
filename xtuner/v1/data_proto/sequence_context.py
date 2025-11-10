@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from dataclasses import dataclass
 from typing import cast
 
 import torch
@@ -9,7 +8,10 @@ from typing_extensions import Self
 from .utils import pad_to_multiple_of, split_for_sequence_parallel
 
 
-@dataclass
+# Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
+# The extra ops is introduced by function _apply_to_tensors in
+# https://github.com/pytorch/pytorch/blob/v2.8.0/torch/distributed/fsdp/_fully_shard/_fsdp_state.py
+# Due to dataclasses.replace is called in _apply_to_tensors that triggering SequenceContext.__init__
 class SequenceContext:
     """Keyword arguments for Flash Attention with Compile.
 
