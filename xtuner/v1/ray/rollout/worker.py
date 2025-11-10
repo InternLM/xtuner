@@ -59,9 +59,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
         # http_concurrency is calculated based on the max batch size per engine and the total number of engines
-        http_concurrency = config.rollout_max_batch_size * (
-            int(os.environ.get("NODE_COUNT", 1)) * config.gpus_per_node / config.tensor_parallel_size
-        )
+        http_concurrency = config.rollout_max_batch_size_per_instance * config.allow_over_concurrency_ratio
         limits = httpx.Limits(max_connections=http_concurrency, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
         self.paused = False

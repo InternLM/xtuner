@@ -33,7 +33,7 @@ class RolloutConfig(BaseModel):
         model_path (str | Path): Path to the inference model.
         model_name (str): Model name for the backend engine.
         tokenizer_path (str): Path to the model tokenizer. Defaults to "".
-        api_key (Optional[Union[List[str], str]]): API keys for rollout service. åSupports single key or list of keys. Defaults to None.
+        api_key (Optional[Union[List[str], str]]): API keys for rollout service. Supports single key or list of keys. Defaults to None.
         api_port (Optional[int]): Port number for the rollout API server. If not set, it will find an available port starting from 8000. Defaults to 8000.
         gpus_per_node (int): Number of GPUs per node. Defaults to 8.
         dtype (str): Model data type ('bfloat16', 'float16', 'int8'). Defaults to "bfloat16".
