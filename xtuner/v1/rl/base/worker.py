@@ -856,7 +856,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         cpu_mesh = self.rollout_device_mesh["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()
-        num_tensors = len(state_dict)
 
         if self.rollout_cfg_info["backend"] == "pytorch":
             # TODO(chenchiyu): remove lmdeploy related code
@@ -870,7 +869,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             if self.rollout_cfg_info["backend"] == "pytorch" and self.rollout_cfg_info["tp"] > 1:
                 serialized_data = [None] * self.rollout_cfg_info["tp"]
-                if use_flattened_tensor_bucket and num_tensors > 0:
+                if use_flattened_tensor_bucket:
                     flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(state_dict.items()))
                     metadata = flattened_tensor_bucket.get_metadata()
                     flattened_tensor_data = {
@@ -887,7 +886,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     group=cpu_group,
                 )
             elif self.rollout_cfg_info["backend"] == "pytorch":
-                if use_flattened_tensor_bucket and num_tensors > 0:
+                if use_flattened_tensor_bucket:
                     flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(state_dict.items()))
                     metadata = flattened_tensor_bucket.get_metadata()
                     flattened_tensor_data = {
@@ -984,7 +983,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                     use_flattened_tensor_bucket = True
                 except Exception:
                     use_flattened_tensor_bucket = False
-                if use_flattened_tensor_bucket and num_tensors > 0:
+
+                if use_flattened_tensor_bucket:
                     data["load_format"] = "flattened_bucket"
 
                 response = requests.post(
