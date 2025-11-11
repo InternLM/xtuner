@@ -104,7 +104,6 @@ class LMDeployWorker(RolloutWorker):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
-        stream = extra_params["stream"]
         payload = {
             "model": self.model_name,
             "tools": tools if len(tools) > 0 else None,
@@ -128,14 +127,7 @@ class LMDeployWorker(RolloutWorker):
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
         payload.update(lmdeploy_sample_params)
 
-        req = self.client.build_request(
-            "POST",
-            url,
-            headers=headers,
-            json=payload,
-        )
-        r = await self.client.send(req, stream=stream)
-        return payload, r
+        return await self._safe_post_request(url, headers, payload)
 
     def get_logprobs(self, input_ids, sampling_params):
         """This method will be implemented for the LMDeploy worker in the

@@ -160,6 +160,10 @@ def check_dataflow_item(group_data_items):
     if not no_failures:
         return False
 
+    no_judger_failures = all(item.env.judger.extra_info.get("state", "") != "failed" for item in group_data_items)
+    if not no_judger_failures:
+        return False
+
     all_responses_valid = all(item.env.rollout.response for item in group_data_items)
     all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
 
@@ -185,10 +189,12 @@ def update_dataflow_item(group_data_items, target_key, target_value):
         >>> update_dataflow_item(items, "env.rollout.response", responses)
         # Now items[0].env.rollout.response == "hello", items[1].env.rollout.response == "world"
     """
+
     group_length = len(group_data_items)
     assert group_length == len(target_value)
 
     keys = target_key.split(".")
+
     for i in range(group_length):
         parent_obj = group_data_items[i]
         for key in keys[:-1]:

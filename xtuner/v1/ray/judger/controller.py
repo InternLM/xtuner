@@ -71,6 +71,7 @@ class JudgerConfig(BaseModel):
         List[BaseModel],
         Parameter(help="A custom Python function for computing reward given model output and label."),
     ] = []
+    judger_timeout: Annotated[float, Parameter(help="Timeout for each judger request in seconds.")] = 1200.0
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
