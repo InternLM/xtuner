@@ -109,6 +109,12 @@ class MoEConfig(TransformerConfig):
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
 
+        if self.dispatcher == "agrs":
+            assert self.router.use_grouped_router, "AGRS dispatcher requires grouped router"
+            assert self.ep_size == self.router.router_n_groups == 8, (
+                "Currently, AGRS dispatcher requires ep_size and router_n_groups to be 8"
+            )
+
         return MoE(self)
 
 

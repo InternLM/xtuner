@@ -52,6 +52,7 @@ class NoAuxRouter(nn.Module, RouterProtocol):
 
     def __init__(
         self,
+        *,
         n_routed_experts: int,
         num_experts_per_tok: int,
         router_scaling_factor: float,
@@ -145,8 +146,29 @@ class NoAuxRouter(nn.Module, RouterProtocol):
 class NoAuxGroupedRouter(NoAuxRouter):
     """Only works for ep_size == topk."""
 
-    def __init__(self, router_n_groups, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        *,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+        router_scaling_factor: float,
+        router_n_groups: int,
+        scoring_func: Literal["sigmoid", "softmax"],
+        n_group: int,
+        topk_group: int,
+        norm_topk_prob: bool = True,
+        router_bias_update_speed: float = 0.001,
+    ):
+        super().__init__(
+            n_routed_experts=n_routed_experts,
+            num_experts_per_tok=num_experts_per_tok,
+            router_scaling_factor=router_scaling_factor,
+            scoring_func=scoring_func,
+            n_group=n_group,
+            topk_group=topk_group,
+            norm_topk_prob=norm_topk_prob,
+            router_bias_update_speed=router_bias_update_speed,
+        )
         self.router_n_groups = router_n_groups
 
     def forward(self, logits) -> RouterResults:
