@@ -202,49 +202,45 @@ class DataFlow:
             Optional[List[RLDataFlowItem]]: The group of samples if the task
             fails and needs to be retried, otherwise None.
         """
-        try:
-            # step 1: sample
-            # TODO(@duanyanhui): More fine-grained control over group data generation:
-            # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency
-            # Resend only the failed prompts in a group when retrying worker_task to avoid wasted computation resources."
-            if group_samples_for_retry is None or len(group_samples_for_retry) == 0:
-                group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
-                    self.env,
-                    self.config.enable_partial_rollout,
-                    self.config.prompt_repeat_k,
-                    self.sample_from_expired_storage,
-                )
-                self.send_samples_count += 1
-                self.logger.debug(
-                    f"[ROLLOUT] Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
-                )
-            else:
-                group_data_items = group_samples_for_retry
-                for data_item in group_samples_for_retry:
-                    data_item.extra_info.retry_times += 1
-
-            # step 2: env generate
-            group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
-                group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
+        # step 1: sample
+        # TODO(@duanyanhui): More fine-grained control over group data generation:
+        # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency
+        # Resend only the failed prompts in a group when retrying worker_task to avoid wasted computation resources."
+        if group_samples_for_retry is None or len(group_samples_for_retry) == 0:
+            group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
+                self.env,
+                self.config.enable_partial_rollout,
+                self.config.prompt_repeat_k,
+                self.sample_from_expired_storage,
             )
-            # 需要在这里处理check_dataflow_item，因为要保留group_data_items的data信息，作为retry的输入
-            check_result, msg = check_dataflow_item(group_data_items)
-            if not check_result:
-                self.logger.warning(
-                    f"Dataflow item check failed because {msg} for {group_data_items[0].uid.action_id} response {group_data_items[0].env.rollout}. Returning meta for retry."
-                )
-                return group_data_items
+            self.send_samples_count += 1
+            self.logger.debug(
+                f"[ROLLOUT] Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
+            )
+            assert group_data_items is not None and len(group_data_items) > 0, "Sampled group data items is empty."
+        else:
+            group_data_items = group_samples_for_retry
+            for data_item in group_samples_for_retry:
+                data_item.extra_info.retry_times += 1
 
-            # step 3: filter
-            filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
-
-            # step 4: add to replay buffer
-            await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
-
-            self.logger.debug(f"Worker task completed successfully for {group_data_items[0].uid.action_id}.")
-        except Exception as e:
-            self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
+        # step 2: env generate
+        group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
+            group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
+        )
+        check_result, msg = check_dataflow_item(group_data_items)
+        if not check_result:
+            self.logger.warning(
+                f"Dataflow item check failed because {msg} for {group_data_items[0].uid.action_id} response {group_data_items[0].env.rollout}. Returning meta for retry."
+            )
             return group_data_items
+
+        # step 3: filter
+        filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
+
+        # step 4: add to replay buffer
+        await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
+
+        self.logger.debug(f"Worker task completed successfully for {group_data_items[0].uid.action_id}.")
 
     async def concurrent_task_runner(self):
         """Orchestrates the concurrent execution of worker tasks to generate a

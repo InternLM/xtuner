@@ -165,6 +165,10 @@ def check_dataflow_item(group_data_items):
         error_msg = "Found failed in rollout finish_reason."
         return False, error_msg
 
+    no_judger_failures = all(item.env.judger.extra_info.get("state", "") != "failed" for item in group_data_items)
+    if not no_judger_failures:
+        return False
+
     all_responses_valid = all(item.env.rollout.response for item in group_data_items)
     all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
 
@@ -175,7 +179,7 @@ def check_dataflow_item(group_data_items):
                     return False, "logprobs length does not match response_ids length."
             else:
                 return False, "logprobs is None while response_ids is not None."
-                
+
     error_msg = f"responses valid: {all_responses_valid}, ids valid: {all_ids_valid}."
     return all_responses_valid or all_ids_valid, error_msg
 
@@ -199,10 +203,12 @@ def update_dataflow_item(group_data_items, target_key, target_value):
         >>> update_dataflow_item(items, "env.rollout.response", responses)
         # Now items[0].env.rollout.response == "hello", items[1].env.rollout.response == "world"
     """
+
     group_length = len(group_data_items)
     assert group_length == len(target_value)
 
     keys = target_key.split(".")
+
     for i in range(group_length):
         parent_obj = group_data_items[i]
         for key in keys[:-1]:
@@ -214,7 +220,9 @@ def update_dataflow_item(group_data_items, target_key, target_value):
                 if attr.response_ids is not None:
                     attr.response_ids.extend(target_value[i].response_ids or [])
                     attr.logprobs.extend(target_value[i].logprobs or [])
-                    assert len(attr.response_ids) == len(attr.logprobs), "token_ids length does not match logprobs length."
+                    assert len(attr.response_ids) == len(attr.logprobs), (
+                        "token_ids length does not match logprobs length."
+                    )
                 if attr.response is not None:
                     attr.response = attr.response + (target_value[i].response or "")
                 attr.num_return_tokens += target_value[i].num_return_tokens

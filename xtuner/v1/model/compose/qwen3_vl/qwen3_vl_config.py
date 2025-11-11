@@ -79,6 +79,7 @@ class Qwen3VLBaseConfig(BaseModel):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
+    hf_save_worker: int = 16
 
     def build(self):
         from .modeling_qwen3_vl import Qwen3VLForConditionalGeneration

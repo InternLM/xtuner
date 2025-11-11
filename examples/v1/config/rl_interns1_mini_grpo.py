@@ -119,7 +119,7 @@ if enable_evaluate:
                                      sample_ratio=1.0),
             "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length,
                                               tokenize_fn_cfg=tokenize_fn_cfg,
-                                              ignore_mm_process=True),
+                                              ignore_multimodal_info=True),
         }
     ]
 
@@ -144,7 +144,7 @@ evaluator_cfg = EvaluatorConfig(
     enable_evaluate=enable_evaluate,
     enable_initial_evaluate=enable_initial_evaluate,
     dataset_cfg=eval_dataset_cfg,
-    dataloader_config=dataloader_config,
+    dataloader_cfg=dataloader_config,
     tokenizer=model_path,
     evaluate_step=evaluate_step,
     compute_metric_func=None,

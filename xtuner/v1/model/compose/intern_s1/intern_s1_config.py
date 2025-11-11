@@ -96,6 +96,7 @@ class InternS1BaseConfig(BaseModel):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
+    hf_save_worker: int = 16
 
     def build(self) -> "InternS1ForConditionalGeneration":
         from .modeling_intern_s1 import InternS1ForConditionalGeneration
