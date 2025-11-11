@@ -53,9 +53,9 @@ class DataFlowConfig(BaseModel):
         Parameter(help="Environment name to set for the dataflow."),
     ] = ""
     max_concurrent: Annotated[
-        int,
+        Optional[int],
         Parameter(help="Maximum number of concurrent tasks."),
-    ] = 512
+    ] = None
     max_retry_times: Annotated[
         int,
         Parameter(help="Maximum number of retry task for failed samples."),
@@ -76,7 +76,6 @@ class DataFlowConfig(BaseModel):
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
     def __init__(self, **kwargs):
-        # TODO: calculate max_concurrent based on env and resources
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -120,9 +119,28 @@ class DataFlow:
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
-        self.worker_url_dict = ray.get(self.env_controller.get_rollout_info.remote())["server_url_dict"]  # type: ignore[attr-defined]
-        self.worker_url_list = list(self.worker_url_dict.values())
+        rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
+        self.worker_url_list = list(rollout_info["server_url_dict"].values())
         self.logger.info(f"DataFlow connected to active rollout workers url: {self.worker_url_list}")
+        rollout_config = rollout_info["rollout_config"]
+        max_concurrent = int(
+            (
+                rollout_config.rollout_max_batch_size_per_instance
+                * len(self.worker_url_list)
+                / self.config.prompt_repeat_k
+            )
+            * rollout_config.allow_over_concurrency_ratio
+        )
+
+        if self.config.max_concurrent is None:
+            self.config.max_concurrent = max_concurrent
+            self.logger.info(
+                f"Set Dataflow max_concurrent to {self.config.max_concurrent} based on rollout max batch size and number of workers."
+            )
+        else:
+            self.logger.warning(
+                f"Dataflow max_concurrent is set to {self.config.max_concurrent}, we proposed to set max_concurrent to {max_concurrent} based on rollout_max_batch_size_per_instance."
+            )
 
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""

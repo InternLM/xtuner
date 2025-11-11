@@ -34,23 +34,22 @@ class RolloutConfig(BaseModel):
         model_path (str | Path): Path to the inference model.
         model_name (str): Model name for the backend engine.
         tokenizer_path (str): Path to the model tokenizer. Defaults to "".
-        api_key (Optional[Union[List[str], str]]): API keys for rollout service.
-            Supports single key or list of keys. Defaults to None.
-
+        api_key (Optional[Union[List[str], str]]): API keys for rollout service. Supports single key or list of keys. Defaults to None.
+        api_port (Optional[int]): Port number for the rollout API server. If not set, it will find an available port starting from 8000. Defaults to 8000.
         gpus_per_node (int): Number of GPUs per node. Defaults to 8.
         dtype (str): Model data type ('bfloat16', 'float16', 'int8'). Defaults to "bfloat16".
         gpu_memory_utilization (float): GPU memory utilization ratio. Defaults to 0.85.
         random_seed (int): Random seed for reproducible generation. Defaults to 1024.
-
         rollout_cross_node_comm (bool): Enable cross-node communication. Defaults to False.
+        rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it will be determined automatically based on `context_length`. Defaults to 512.
+        allow_over_concurrency_ratio (float): Factor to allow over-concurrency in HTTP requests for the rollout worker to improve GPU utilization. Defaults to 1.2.
         tensor_parallel_size (int): GPUs per inference engine (tensor parallelism). Defaults to 1.
         expert_parallel_size (int): Experts per inference engine (expert parallelism). Defaults to 1.
-
         enable_chunked_prefill (bool): Enable chunked prefill for memory efficiency. Defaults to False.
         chunked_prefill_size (int): Chunk size for prefill operations. Defaults to 128.
         skip_load_weights (bool): Skip weight loading for rollout worker. Defaults to False.
         rollout_timeout (float): Timeout duration in seconds for rollout requests. Defaults to 3600.0.
-
+        context_length (int): Context length for the rollout worker.
         launch_server_method (Literal["ray", "multiprocessing"]): Server launch method. Defaults to "ray".
         system_prompt (Optional[str]): System prompt to guide generation behavior. Defaults to None.
         extra_rollout_config (Optional[dict]): Backend-specific configurations using engine prefixes
@@ -114,20 +113,20 @@ class RolloutConfig(BaseModel):
             help="Whether to enable cross-node communication for the rollout worker.",
         ),
     ] = False
-    rollout_max_batch_size: Annotated[
+    rollout_max_batch_size_per_instance: Annotated[
         int,
         Parameter(
             group=infer_group,
             help="Maximum batch size for the rollout worker. If not set, it will be determined automatically based on the model and GPU memory.",
         ),
     ] = 512
-    prompt_repeat_k: Annotated[
-        int,
+    allow_over_concurrency_ratio: Annotated[
+        float,
         Parameter(
             group=infer_group,
-            help="Number of times to repeat the prompt for each request in the rollout worker.",
+            help="Factor to allow over concurrency in the http request for rollout worker to improve GPU utilization.",
         ),
-    ] = 8
+    ] = 1.2
     tensor_parallel_size: Annotated[
         int,
         Parameter(
@@ -247,15 +246,21 @@ class RolloutConfig(BaseModel):
             kwargs["launch_server_method"] = "ray"
             kwargs["rollout_cross_node_comm"] = True
 
-        # `rollout_max_batch_size` is the max batch size for each inference engine.
-        # In Xtuner, It is derived from `max_concurrent` in `DataflowConfig`. `max_concurrent` represents the concurrency level for group data batch.
-        # The total data received by all inference workers is `max_concurrent * prompt_repeat_k`.
-        # This is then divided by the number of inference engines (i.e., workers with TP_RANK=0) to determine the max batch size per engine.
-        kwargs["rollout_max_batch_size"] = (
-            kwargs.get("rollout_max_batch_size", 512)
-            * kwargs.get("prompt_repeat_k", 1)
-            / (int(os.environ.get("NODE_COUNT", 1)) * kwargs["gpus_per_node"] / kwargs.get("tensor_parallel_size", 1))
-        )
+        if "rollout_max_batch_size_per_instance" not in kwargs:
+            assert "context_length" in kwargs, (
+                "`context_length` must be provided to determine `rollout_max_batch_size_per_instance`."
+            )
+
+            context_length = kwargs["context_length"]
+
+            # TODO(@duanyanhui): Provide better suggestions for different models/input-output lengths
+            if context_length <= 4096:
+                kwargs["rollout_max_batch_size_per_instance"] = 1024
+            elif context_length <= 8192:
+                kwargs["rollout_max_batch_size_per_instance"] = 512
+            else:
+                kwargs["rollout_max_batch_size_per_instance"] = 128
+
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 

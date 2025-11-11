@@ -161,7 +161,7 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.mem_fraction_static = self.config.gpu_memory_utilization
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
-        sglang_server_args.max_running_requests = self.config.rollout_max_batch_size
+        sglang_server_args.max_running_requests = self.config.rollout_max_batch_size_per_instance
         sglang_server_args.log_level = log_level
         sglang_server_args.log_level_http = log_level_http
         if grammar_backend is not None:

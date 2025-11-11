@@ -28,7 +28,6 @@ data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_evaluate = True if eval_data_path != "" else False
 enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
-max_concurrent = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 512))
 
 # basic settings
 experimental_name = "grpo_gsm8k"
@@ -44,6 +43,11 @@ train_optimizer_steps = 4
 hf_interval = 15
 enable_initial_evaluate = True
 evaluate_step = 10
+# TODO: 提供不同模型/不同输入输出长度下最优的rollout_max_batch_size_per_instance配置建议
+# NOTE: 目前Xtuner的数据流并发度由rollout_max_batch_size_per_instance控制，并且提供allow_over_concurrency_ratio来控制数据流并发度略大于推理引擎并发度，
+# 具体逻辑可见 xtuner/v1/ray/dataflow/flow.py 中 max_concurrent 的计算方式
+# 当然你也可以手动调整 dataflow_config 中的 max_concurrent 参数来控制数据流并发度
+rollout_max_batch_size_per_instance = 128
 
 # grpo quick test settings for rapid accuracy validation within ~30 minutes:
 # - Initial eval accuracy: ~25%
@@ -79,8 +83,8 @@ rollout_config = RolloutConfig(
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.75,
     context_length = max_response_length + max_prompt_length,
-    rollout_max_batch_size=max_concurrent,
     prompt_repeat_k=prompt_repeat_k,
+    # rollout_max_batch_size_per_instance=rollout_max_batch_size_per_instance,  # optional, will be determined automatically if not set
 )
 
 # sampling params
@@ -114,7 +118,7 @@ dataflow_config = DataFlowConfig(
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
     enable_partial_rollout=enbale_partial_rollout,
-    max_concurrent=max_concurrent
+    # max_concurrent=64,  # optional, will be determined automatically if not set
 )
 
 evaluator_cfg = EvaluatorConfig(
