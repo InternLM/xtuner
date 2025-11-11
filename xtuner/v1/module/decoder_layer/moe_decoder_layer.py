@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Literal, Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias, cast
 
 import torch
 import torch.nn as nn
@@ -488,8 +488,10 @@ class MoEDecoderLayer(nn.Module):
             )
             combined_list.append(combined)
 
+        shared_experts_out_list: list[torch.Tensor | None]
+
         if self.n_shared_experts > 0:
-            shared_experts_out_list: list[torch.Tensor] = []
+            shared_experts_out_list = []
             for pre_moe_forward_out in pre_moe_forward_out_list:
                 shared_experts_out = self._shared_experts_forward(
                     hidden_states=pre_moe_forward_out,
@@ -583,6 +585,7 @@ class MoEDecoderLayer(nn.Module):
         shared_experts_out: torch.Tensor | None,
     ) -> torch.Tensor:
         if self.n_shared_experts > 0:
+            shared_experts_out = cast(torch.Tensor, shared_experts_out)
             combined_hidden_states = combined_hidden_states + shared_experts_out
         return combined_hidden_states * self.hidden_factor + residual
 
