@@ -168,6 +168,14 @@ def check_dataflow_item(group_data_items):
     all_responses_valid = all(item.env.rollout.response for item in group_data_items)
     all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
 
+    if all_ids_valid:
+        for item in group_data_items:
+            if item.env.rollout.logprobs is not None:
+                if len(item.env.rollout.logprobs) != len(item.env.rollout.response_ids):
+                    return False, "logprobs length does not match response_ids length."
+            else:
+                return False, "logprobs is None while response_ids is not None."
+                
     error_msg = f"responses valid: {all_responses_valid}, ids valid: {all_ids_valid}."
     return all_responses_valid or all_ids_valid, error_msg
 
@@ -205,7 +213,8 @@ def update_dataflow_item(group_data_items, target_key, target_value):
             if attr.response_ids is not None or attr.response is not None:
                 if attr.response_ids is not None:
                     attr.response_ids.extend(target_value[i].response_ids or [])
-                    attr.logprobs = attr.logprobs.extend(target_value[i].logprobs or [])
+                    attr.logprobs.extend(target_value[i].logprobs or [])
+                    assert len(attr.response_ids) == len(attr.logprobs), "token_ids length does not match logprobs length."
                 if attr.response is not None:
                     attr.response = attr.response + (target_value[i].response or "")
                 attr.num_return_tokens += target_value[i].num_return_tokens

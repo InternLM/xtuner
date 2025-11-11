@@ -312,9 +312,9 @@ class ReplayBufferStorage:
 
     def __init__(self, worker_log_dir):
         """Initializes the data structures for storing replay data."""
-        self._interrupted_actions: deque[int] = deque()   # FIFO queue of paused action_id,
-        self._completed_actions: deque[int] = deque()   # FIFO queue of returned action_id,
-        self._expired_actions: deque[int] = deque()   # FIFO queue of paused action_id over version
+        self._interrupted_actions: deque[int] = deque()  # FIFO queue of paused action_id,
+        self._completed_actions: deque[int] = deque()  # FIFO queue of returned action_id,
+        self._expired_actions: deque[int] = deque()  # FIFO queue of paused action_id over version
 
         self._actions: Dict[int, ReplayMeta] = {}  # action_id: ReplayMeta
         self._root2actions: Dict[int, List[int]] = {}  # root_id: [action_id, action_id, ...], designed for grpo

@@ -440,7 +440,6 @@ class RolloutWorker(SingleAcceleratorWorker):
 
             if finish_reason == "abort":
                 rollout_response = RLRolloutResponseItem(
-                    response="",
                     finish_reason="abort",
                 )
                 return rollout_response
@@ -451,6 +450,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 assert len(last_token_ids) <= sample_params["max_tokens"], (
                     f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
                 )
+                assert len(last_token_ids) == len(last_logprobs), "token_ids length does not match logprobs length."
             else:
                 num_return_tokens = response["meta_info"].get("completion_tokens", 0)
                 last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
