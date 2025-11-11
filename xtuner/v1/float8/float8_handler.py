@@ -93,6 +93,8 @@ class Float8Handler:
                 chunk_size = math.ceil(ideal_chunk_size / fp8_block_size) * fp8_block_size
             else:
                 chunk_size = ideal_chunk_size // fp8_block_size * fp8_block_size + 64
+                if (chunk_size * num_chunks) % 128 != 0:
+                    chunk_size += 64
         else:
             # 如果小于base_size，找到大于等于 ideal_chunk_size 的 128 的因数
             factors = [1, 2, 4, 8, 16, 32, 64, 128]
@@ -139,7 +141,8 @@ class Float8Handler:
 
         self.fsdp_mesh = fsdp_mesh
         if self.is_tilewise_fp8:
-            self._build_reduce_mesh_devided_64(fsdp_mesh)
+            if fsdp_mesh.size(-1) >= 2:
+                self._build_reduce_mesh_devided_64(fsdp_mesh)
             self._build_reduce_mesh_mapping(model, fsdp_mesh)
 
     def _build_reduce_mesh_devided_64(self, fsdp_mesh: DeviceMesh):
