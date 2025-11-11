@@ -118,7 +118,8 @@ if enable_evaluate:
                                      media_root=media_root,
                                      sample_ratio=1.0),
             "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length,
-                                              tokenize_fn_cfg=tokenize_fn_cfg),
+                                              tokenize_fn_cfg=tokenize_fn_cfg,
+                                              ignore_multimodal_info=True),
         }
     ]
 

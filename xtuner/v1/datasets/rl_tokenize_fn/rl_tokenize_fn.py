@@ -35,12 +35,14 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
         tokenizer_fn: CachableTokenizeFunction | None,
         tokenizer: PreTrainedTokenizer,
         max_length: int | None = None,
+        ignore_multimodal_info: bool = False,
     ):
         super().__init__(tokenizer)
         self.tokenizer_fn = tokenizer_fn
         self.max_length = max_length
 
         self.img_context_id = None
+        self.ignore_multimodal_info = ignore_multimodal_info
         self.model_name = "default"
         if self.tokenizer_fn:
             if isinstance(self.tokenizer_fn, Qwen3VLTokenizeFunction):
@@ -117,14 +119,15 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
         else:
             if self.max_length is not None:
                 assert num_tokens <= self.max_length, f"num_tokens {num_tokens} > max_length {self.max_length}"
-            if "pixel_values" in data:
-                multimodal_train_info["pixel_values"] = data["pixel_values"]
-            if "image_flags" in data:
-                multimodal_train_info["image_flags"] = data["image_flags"]  # intern-s1 or intern-vl
-            if "image_grid_thw" in data:
-                multimodal_train_info["image_grid_thw"] = data["image_grid_thw"]  # qwen3-vl
-            if "position_ids" in data:
-                multimodal_train_info["position_ids"] = data["position_ids"]  # qwen3-vl
+            if not self.ignore_multimodal_info:
+                if "pixel_values" in data:
+                    multimodal_train_info["pixel_values"] = data["pixel_values"]
+                if "image_flags" in data:
+                    multimodal_train_info["image_flags"] = data["image_flags"]  # intern-s1 or intern-vl
+                if "image_grid_thw" in data:
+                    multimodal_train_info["image_grid_thw"] = data["image_grid_thw"]  # qwen3-vl
+                if "position_ids" in data:
+                    multimodal_train_info["position_ids"] = data["position_ids"]  # qwen3-vl
 
             # 在多模态场景下，训练和 rollout 的 prompt ids 是不一样的
             # 为了统一训练处理逻辑，额外保存 train_prompt_ids
@@ -150,6 +153,7 @@ class RLTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base RL dataset config for xtuner", extra="forbid")
     tokenize_fn_cfg: BaseModel | None = None
     max_length: int | None = None
+    ignore_multimodal_info: bool = False  # eval is True
 
     def build(
         self, tokenizer: PreTrainedTokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None, **kwargs
@@ -162,4 +166,9 @@ class RLTokenizeFnConfig(BaseModel):
                 anno_name=anno_name,
                 **kwargs,
             )
-        return RLTokenizeFn(tokenizer_fn, tokenizer=tokenizer, max_length=self.max_length)
+        return RLTokenizeFn(
+            tokenizer_fn,
+            tokenizer=tokenizer,
+            max_length=self.max_length,
+            ignore_multimodal_info=self.ignore_multimodal_info,
+        )
