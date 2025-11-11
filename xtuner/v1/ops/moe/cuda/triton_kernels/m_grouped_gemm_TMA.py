@@ -4,6 +4,8 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
+from xtuner.v1.utils import DISTRIBUTED_COMMUNICATION_SM, NUM_SMS
+
 from .utils import TmaAutoTuneHelper
 
 
@@ -230,7 +232,10 @@ def repeat_interleave(
 
 @torch.library.custom_op("moe::m_grouped_gemm", mutates_args=())
 def m_grouped_gemm(
-    A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False, numSM: int = -1
+    A: Tensor,
+    B: Tensor,
+    size_per_group: torch.Tensor,
+    trans_b: bool = False,
 ) -> Tensor:
     assert A.dim() == 2
     assert B.dim() == 3
@@ -264,7 +269,7 @@ def m_grouped_gemm(
     group_end = size_per_group.cumsum(0) - size_per_group + size_per_group
     group_start = size_per_group.cumsum(0) - size_per_group
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count if numSM <= 0 else numSM
+    NUM_AVAILABLE_SMS = NUM_SMS - DISTRIBUTED_COMMUNICATION_SM
 
     dtype_mapping = {torch.bfloat16: 0, torch.float16: 1}
     dtype_a = dtype_mapping.get(A.dtype, -1)
@@ -313,7 +318,7 @@ def m_grouped_gemm(
             C.element_size(),
         )
 
-        return (NUM_SMS,)
+        return (NUM_AVAILABLE_SMS,)
 
     desc_a = desc_helper.get_tma_descriptor_kernel_param("a")
     desc_b = desc_helper.get_tma_descriptor_kernel_param("b")
@@ -347,7 +352,7 @@ def m_grouped_gemm(
 
 
 @m_grouped_gemm.register_fake
-def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False, numSM: int = -1) -> Tensor:
+def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False) -> Tensor:
     M, K = A.shape
     if trans_b:
         num_groups, N, BK = B.shape
