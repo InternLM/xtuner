@@ -747,7 +747,6 @@ class RLTrainer:
             new_exp = ExpInfo(
                 history=[new_history],
                 exp_dir=str(exp_dir),
-                latest_checkpoint=None,
             )
             meta.exps.append(new_exp)
         return meta
