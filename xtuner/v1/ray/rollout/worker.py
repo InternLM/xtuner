@@ -319,7 +319,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                     extra_params=extra_params,
                     extra_info=extra_info,
                 )
-                self.logger.debug(f"Rollout request sent for {uid} to {self.server_url}/{self.endpoints['generate']} with payload: {payload}, repsonse: {response}")
+                self.logger.debug(
+                    f"Rollout request sent for {uid} to {self.server_url}/{self.endpoints['generate']} with payload: {payload}, repsonse: {response}"
+                )
             else:
                 assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
                 payload, response = await self._create_request(
@@ -332,7 +334,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                     extra_params=extra_params,
                     extra_info=extra_info,
                 )
-                self.logger.debug(f"Rollout request sent for {uid} to {self.server_url}/{self.endpoints['v1/chat/completions']} with payload: {payload}, repsonse: {response}")
+                self.logger.debug(
+                    f"Rollout request sent for {uid} to {self.server_url}/{self.endpoints['v1/chat/completions']} with payload: {payload}, repsonse: {response}"
+                )
             log_payload = payload
             response.raise_for_status()
             rollout_response = (

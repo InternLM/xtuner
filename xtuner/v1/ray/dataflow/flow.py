@@ -149,19 +149,30 @@ class DataFlow:
                 f"Dataflow max_concurrent is set to {self.config.max_concurrent}, we proposed to set max_concurrent to {max_concurrent} based on rollout_max_batch_size_per_instance."
             )
 
-    def _reset_internal_states_on_step(self, global_batch_size: Optional[int] = None, sample_params: Optional[SampleParams] = None, extra_params: Optional[Dict] = None):
+    def _reset_internal_states_on_step(
+        self,
+        global_batch_size: Optional[int] = None,
+        sample_params: Optional[SampleParams] = None,
+        extra_params: Optional[Dict] = None,
+    ):
         """Resets all internal state variables of DataFlow."""
         self.send_samples_count = 0
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
-        self.logger.info(f"global_batch_size: {global_batch_size}, sample_params: {sample_params}, extra_params: {extra_params}")
+        self.logger.info(
+            f"global_batch_size: {global_batch_size}, sample_params: {sample_params}, extra_params: {extra_params}"
+        )
         if global_batch_size and global_batch_size > 0:
             self.target_batch_size = global_batch_size
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
-        self.sample_from_expired_storage = ray.get(self.replay_buffer.get_expired_samples.remote()) >= self.target_batch_size
-        self.config.enable_partial_rollout = 0 if self.sample_from_expired_storage else self.config.enable_partial_rollout
+        self.sample_from_expired_storage = (
+            ray.get(self.replay_buffer.get_expired_samples.remote()) >= self.target_batch_size
+        )
+        self.config.enable_partial_rollout = (
+            0 if self.sample_from_expired_storage else self.config.enable_partial_rollout
+        )
         logger_msg = (
             f"DataFlow internal states reset for new run: target_batch_size={self.target_batch_size}, "
             f"sample_params: {self.config.sample_params}, extra_params: {self.config.extra_params}, "
@@ -201,7 +212,7 @@ class DataFlow:
                     self.env,
                     self.config.enable_partial_rollout,
                     self.config.prompt_repeat_k,
-                    self.sample_from_expired_storage
+                    self.sample_from_expired_storage,
                 )
                 self.send_samples_count += 1
                 self.logger.debug(
@@ -375,7 +386,9 @@ class DataFlow:
             List[RLDataFlowItem]: A list of collected training samples.
         """
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
-        self._reset_internal_states_on_step(global_batch_size = num, sample_params=sample_params, extra_params=extra_params)
+        self._reset_internal_states_on_step(
+            global_batch_size=num, sample_params=sample_params, extra_params=extra_params
+        )
         ray.get(self.replay_buffer.refresh_completed_states_on_step.remote(self.sample_from_expired_storage))
         self.logging_replaybuffer_state()
         assert dump is False, "dump is not supported yet."

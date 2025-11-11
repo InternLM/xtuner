@@ -86,6 +86,7 @@ class ReplayMeta:
 
 
 def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> ReplayMeta:
+    # TODO: 单独管理每一条query，而不是一组query，提高效率
     assert len(grouped_dataitem) > 0
 
     env_str = grouped_dataitem[0].uid.env
@@ -103,6 +104,8 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         observation_refs.append(ray.put(item.env))
         observation_versions.append(version)
         group_rollout_finish_reason.append(item.env.rollout.finish_reason)
+
+    version = max(observation_versions)
 
     rollout_finish_reason = "completed"
     if any(item.env.rollout.finish_reason == "failed" for item in grouped_dataitem):
@@ -144,6 +147,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         observation_refs=observation_refs,
         observation_versions=observation_versions,
         state=replay_state,
+        version=version,
         extra_info={},
     )
     return replay_meta
@@ -160,7 +164,7 @@ def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowIt
         replay_meta.observation_ids, replay_meta.observation_refs, replay_meta.observation_versions
     ):
         item = RLDataFlowItem(
-            uid=RLUIDItem(env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=version),
+            uid=RLUIDItem(env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=replay_meta.version),
             extra_info=RLExtraDataItem(state=state_str, retry_times=0),
         )
         if data_ref is not None:
@@ -457,22 +461,6 @@ class ReplayBufferStorage:
             "observation_count": len(self._observations),
         }
 
-    def print(self):
-        rollout_finished_count = len(self._completed_actions)
-        rollout_paused_count = len(self._interrupted_actions)
-        abort_over_version = len(self._expired_actions)
-        action_count = len(self._actions)
-        observation_count = len(self._observations)
-        
-        log_message = (
-            "[ReplayBuffer] ReplayBufferStorage states:\n"
-            f"  - Rollout States: Completed={rollout_finished_count}, Interrupted={rollout_paused_count}, Expired={abort_over_version},\n"
-            f"  - History Prompts: {len(self._root2actions)}\n"
-            f"  - History Actions: {action_count}\n"
-            f"  - History Observations: {observation_count}"
-        )
-        self.logger.info(log_message)
-
     def dump(self, file_path: str):
         """Dumps the entire state of the replay buffer storage to a single
         file, resolving all ray.ObjectRefs to their actual values.
@@ -668,9 +656,7 @@ class ReplayBuffer:
                 else:
                     sample.data.input_ids = sample.data.input_ids + sample.env.rollout.response_ids
             elif sample.env.rollout.response:
-                sample.data.input_ids += self.tokenizer.encode(
-                    sample.env.rollout.response, add_special_tokens=False
-                )
+                sample.data.input_ids += self.tokenizer.encode(sample.env.rollout.response, add_special_tokens=False)
         self.logger.debug(
             f"Sampling interrupted action_id: {action_id} from replay buffer, remain interrupted samples: {len(self.storage._interrupted_actions)}"
         )

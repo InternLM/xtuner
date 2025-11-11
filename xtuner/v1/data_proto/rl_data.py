@@ -26,7 +26,7 @@ class RLUIDItem(BaseModel):
     root_id: int = -1
     action_id: int = -1
     observation_id: int = -1
-    version: int = -1
+    version: int = 0
 
 
 class RLDatasetItem(BaseModel):
