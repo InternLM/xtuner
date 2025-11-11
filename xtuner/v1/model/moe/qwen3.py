@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+import torch
 from typing_extensions import Self
 
 from transformers.models.qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
@@ -118,6 +119,7 @@ class Qwen3MoEConfig(MoEConfig):
             num_experts=self.n_routed_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             norm_topk_prob=self.router.norm_topk_prob,
+            dtype=torch.bfloat16,
         )
 
 

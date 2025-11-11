@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+import torch
 from typing_extensions import Self
 
 from transformers.models.deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
@@ -194,4 +195,5 @@ class DeepSeekV3Config(MoEConfig):
             norm_topk_prob=self.router.norm_topk_prob,
             routed_scaling_factor=self.router.router_scaling_factor,
             tie_word_embeddings=self.tie_word_embeddings,
+            dtype=torch.bfloat16,
         )
