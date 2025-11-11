@@ -743,11 +743,7 @@ class RLTrainer:
                 timestamp=timestamp,
                 git_info=git_info,
             )
-            new_exp = ExpInfo(
-                history=[new_history],
-                exp_dir=str(exp_dir),
-                latest_checkpoint=None,
-            )
+            new_exp = ExpInfo(history=[new_history], exp_dir=str(exp_dir))
             meta.exps.append(new_exp)
         return meta
 
