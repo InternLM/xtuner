@@ -1,6 +1,6 @@
 import json
 import math
-from concurrent.futures import ProcessPoolExecutor, wait
+from concurrent.futures import Future, ProcessPoolExecutor, wait
 from functools import reduce
 from itertools import chain
 from pathlib import Path
@@ -73,6 +73,7 @@ class TransformerConfig(PydanticBaseModel):
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
+    hf_save_worker: Annotated[int, Parameter(group="model")] = 16
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -722,6 +723,7 @@ class BaseModel(nn.Module):
                     hf_dir / safetensor_name,
                 )
                 save_futures.append(future)
+                self._wait_save_task(save_futures)
 
         safetensor_index = 0
         for name_list, hf_tensor_list in chain(same_gen, shard_gen):
@@ -745,6 +747,7 @@ class BaseModel(nn.Module):
                     hf_dir / safetensor_name,
                 )
                 save_futures.append(future)
+                self._wait_save_task(save_futures)
 
         if save_executor is not None:
             wait(save_futures)
@@ -1115,3 +1118,17 @@ class BaseModel(nn.Module):
                 module.to_empty(device=self.device, recurse=False)
         DEVICE_MODULE.synchronize()
         return
+
+    def _wait_save_task(self, tasks: list[Future]):
+        "Limit the number of concurrent save tasks to avoid OOM."
+        # The older version of xtuner does not have hf_save_worker attributes, using `getattr` avoid from unpickling
+        # the old config for backward compatibility.
+        if len(tasks) >= getattr(self.config, "hf_save_worker", 16):
+            done, pending = wait(tasks)
+            for future in done:
+                if (exception := future.exception()) is not None:
+                    raise exception
+            tasks.clear()
+            tasks.extend(pending)
+        else:
+            return
