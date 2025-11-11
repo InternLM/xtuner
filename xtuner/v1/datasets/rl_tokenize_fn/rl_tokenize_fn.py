@@ -102,8 +102,11 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             # 为了确保一致，必须要通过 tokenizer_fn 得到 prompt_token_ids
             # raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             # prompt_token_ids = self.tokenizer(raw_prompt, add_special_tokens=False)["input_ids"]
-            prompt_token_ids = remove_consecutive_twos(data["input_ids"], self.img_context_id)
-            raw_prompt = self.tokenizer.decode(prompt_token_ids)  # 仅仅用于打印
+            if self.state != "cache":
+                prompt_token_ids = remove_consecutive_twos(data["input_ids"], self.img_context_id)
+            else:
+                prompt_token_ids = [1]  # Just a placeholder
+            raw_prompt = self.tokenizer.decode(prompt_token_ids)  # Just for logging
 
         multimodal_train_info = {}
         extra_info["raw_prompt"] = raw_prompt
