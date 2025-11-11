@@ -1,25 +1,52 @@
-base_model_path: /mnt/shared-storage-user/models
-base_output_path: /mnt/shared-storage-user/output
+base_path:
+    base_model_path: /mnt/shared-storage-user/models
+    base_output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
 
 default_config:
     train: 
         resource:
-            gpus_per_task: 0
-            num_cpus: 4
-            memory: 16G
+            gpus_per_task: 8
+            cpus_per_task: 120
+            memory_per_task: 512
             image: registry.h.pjlab.org.cn/ailab-puyu-puyu_gpu/xtuner:pt28_20250911_6652194
     eval:
         resource:
             gpus_per_task: 0
-            num_cpus: 4
-            memory: 16G
+            cpus_per_task: 4
+            memory_per_task: 512
             
 case: 
-    qwen3-tiny:
+    interns1-sft:
+        -
+            type: sft
+            parameters:
+                config: examples/v1/sft_intern_s1_tiny_config.py
+            assert_cfg:
+                assert_result_path: autotest/baseline/qwen3-sft.json
+            timeout: 600
         - 
+            type: eval
+            eval_type: chat
+
+case_bk: 
+    qwen3-sft:
+        -
+            type: sft
+            parameters:
+                model: examples/v1/sft_qwen3_tiny.py
+                dataset: tests/resource/openai_sft.jsonl
+                chat_template: qwen3
+            assert_cfg:
+                assert_result_path: autotest/baseline/qwen3-sft.json
+            timeout: 600
+        - 
+            type: eval
+            eval_type: chat
+    qwen3-tiny:
+        -
             type: pre_train
             parameters:
-                config: examples/v1/config/sft_qwen3_tiny.py
+                config: examples/v1/pretrain_qwen3_tiny.py
                 assert_result_path: autotest/baseline/qwen3-tiny-pretrian-0.json
                 dataset: tests/resource/openai_sft.jsonl
                 chat_template: qwen3
@@ -31,7 +58,7 @@ case:
             eval_type: base
         - 
             type: rl
-            config: examples/v1/config/sft_qwen3_tiny.py
+            config: examples/v1/config/rl_qwen3_8B_grpo.py
         - 
             type: sft
             config: examples/v1/config/sft_qwen3_tiny.py

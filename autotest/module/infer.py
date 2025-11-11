@@ -1,6 +1,6 @@
 class Infer:
     def get_cmd(config=None):
-        return "echo 'infer success'"
+        return 'echo "Not implemented"; exit 1', config
 
     def validate(config=None):
         return True, "infer validate executed"

@@ -38,13 +38,15 @@ def test_all(config, case, task_executor):
 
 def run_all_cases(config, case_name, task_executor) -> None:
     case_config = config["case"].get(case_name)
+    base_path_config = config["base_path"]
 
     for step_config in case_config:
         step_config["case_name"] = case_name
         step_config["run_id"] = config.get("run_id")
+        step_config["base_path"] = base_path_config
 
         # get cmd
-        command = handler.get_cmd(step_config.get("type"))
+        command, step_config = handler.get_cmd(step_config.get("type"), step_config)
         step_config["command"] = command
 
         # run task
@@ -53,5 +55,5 @@ def run_all_cases(config, case_name, task_executor) -> None:
         assert task_result, task_info
 
         # verify task result
-        result, info = handler.validate(step_config.get("type"))
+        result, info = handler.validate(step_config.get("type"), step_config)
         assert result, info

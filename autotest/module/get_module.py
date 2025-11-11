@@ -12,11 +12,11 @@ class TestHandler:
             raise ValueError(f"Unsupported type: {type}")
 
         handler_class = self.type_map[type]
-        return handler_class.get_cmd(config=None)
+        return handler_class.get_cmd(config=config)
 
     def validate(self, type, config=None):
         if type not in self.type_map:
             raise ValueError(f"Unsupported type: {type}")
 
         handler_class = self.type_map[type]
-        return handler_class.validate(config=None)
+        return handler_class.validate(config=config)
