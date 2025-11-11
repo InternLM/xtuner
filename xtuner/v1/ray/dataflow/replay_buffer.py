@@ -1,5 +1,5 @@
 import itertools
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -164,7 +164,9 @@ def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowIt
         replay_meta.observation_ids, replay_meta.observation_refs, replay_meta.observation_versions
     ):
         item = RLDataFlowItem(
-            uid=RLUIDItem(env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=replay_meta.version),
+            uid=RLUIDItem(
+                env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=replay_meta.version
+            ),
             extra_info=RLExtraDataItem(state=state_str, retry_times=0),
         )
         if data_ref is not None:
@@ -310,9 +312,9 @@ class ReplayBufferStorage:
 
     def __init__(self, worker_log_dir):
         """Initializes the data structures for storing replay data."""
-        self._interrupted_actions: List[int] = []  # List of paused action_id,
-        self._completed_actions: List[int] = []  # List of returned action_id,
-        self._expired_actions: List[int] = []  # List of paused action_id over version
+        self._interrupted_actions: deque[int] = deque()   # FIFO queue of paused action_id,
+        self._completed_actions: deque[int] = deque()   # FIFO queue of returned action_id,
+        self._expired_actions: deque[int] = deque()   # FIFO queue of paused action_id over version
 
         self._actions: Dict[int, ReplayMeta] = {}  # action_id: ReplayMeta
         self._root2actions: Dict[int, List[int]] = {}  # root_id: [action_id, action_id, ...], designed for grpo
@@ -369,7 +371,7 @@ class ReplayBufferStorage:
             )
         elif replay_meta.state == ReplayState.COMPLETED:
             self._completed_actions.append(action_id)
-            self.logger.info(f"Add sample with root_id: {root_id}, action_id: {action_id} to finished_actions.")
+            self.logger.debug(f"Add sample with root_id: {root_id}, action_id: {action_id} to finished_actions.")
         elif replay_meta.state == ReplayState.FAILED or replay_meta.state == ReplayState.FAILED:
             assert False, "Currently, failed samples are not supported in the replay buffer."
 
@@ -620,7 +622,7 @@ class ReplayBuffer:
     def _sample_from_expired_storage(self) -> List[RLDataFlowItem]:
         # note: 预先假定从expired storage中采样一定是同步模式，且并发度不会大于global_batch_size且不会多采样
         assert self.storage.get_expired_samples() > 0
-        action_id = self.storage._expired_actions.pop(0)
+        action_id = self.storage._expired_actions.popleft()
         replay_meta = self.storage._actions[action_id]
         group_samples = mapping_replaymeta_to_dataitem(replay_meta)
 
@@ -638,7 +640,7 @@ class ReplayBuffer:
 
     def _sample_from_interrupted_storage(self) -> List[RLDataFlowItem]:
         assert self.storage.get_interrupted_samples() > 0
-        action_id = self.storage._interrupted_actions.pop(0)
+        action_id = self.storage._interrupted_actions.popleft()
         replay_meta = self.storage._actions[action_id]
         group_samples = mapping_replaymeta_to_dataitem(replay_meta)
 
