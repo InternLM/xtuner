@@ -19,7 +19,7 @@ logger = get_logger()
 class Qwen3VLVisionConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     in_channels: int = 3
     depth: int = 27
@@ -50,6 +50,7 @@ class Qwen3VLVisionConfig(BaseModel):
 
 
 class Qwen3VLProjectorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     vision_hidden_size: int = 1152
     text_hidden_size: int = 2048
     spatial_merge_size: int = 2
@@ -65,7 +66,7 @@ class Qwen3VLProjectorConfig(BaseModel):
 class Qwen3VLBaseConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     vision_config: Qwen3VLVisionConfig
     projector_config: Qwen3VLProjectorConfig

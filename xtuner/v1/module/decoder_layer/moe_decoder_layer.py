@@ -3,7 +3,7 @@ from typing import Literal, Protocol, TypeAlias
 
 import torch
 import torch.nn as nn
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
@@ -31,6 +31,7 @@ from ..linear.linear import build_linear
 
 
 RouterLogits: TypeAlias = torch.Tensor
+RouterWeights: TypeAlias = torch.Tensor
 HiddenStates: TypeAlias = torch.Tensor
 
 
@@ -39,6 +40,7 @@ class MoEActFnProtocol(Protocol):
 
 
 class MoEActFnConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     act_type: Literal["clipped_swiglu", "swiglu"] = "swiglu"
 
     clip_alpha: float | None = None
@@ -137,7 +139,6 @@ class MoEBlock(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = moe_intermediate_size
         self.num_routed_experts = n_routed_experts
-
         self.ep_mesh = ep_mesh
         # self.fused_w1 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
         # self.fused_w3 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
@@ -304,7 +305,7 @@ class MoEDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> tuple[HiddenStates, RouterLogits]:
+    ) -> tuple[HiddenStates, RouterLogits, RouterWeights]:
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -315,6 +316,9 @@ class MoEDecoderLayer(nn.Module):
         origin_shape = hidden_states.shape
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
+        # ProberList.before_dispatch(
+        #     self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"]
+        # )
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
             topk_ids=router_results["topk_ids"],
@@ -328,11 +332,24 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
+        # ProberList.after_dispatch(
+        #     self.layer_idx,
+        #     post_dispatched["hidden_states"],
+        #     post_dispatched["tokens_per_expert"],
+        #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
+        #     dispatched["topk_weights"],
+        # )
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
             decoding=False,
         )
+        # ProberList.before_combine(
+        #     self.layer_idx,
+        #     experts_out,
+        #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
+        #     dispatched["topk_weights"],
+        # )
         pre_combined = self.dispatcher.combine_preprocess(
             hidden_states=experts_out,
             pre_dispatched=pre_dispatched,
@@ -357,13 +374,14 @@ class MoEDecoderLayer(nn.Module):
         )
         combined_hidden_states = post_combined["hidden_states"]
         combined_hidden_states = combined_hidden_states.view(*origin_shape)
+        # ProberList.after_combine(self.layer_idx, combined_hidden_states)
 
         hidden_states = self._post_moe_forward(
             hidden_states=hidden_states,
             combined_hidden_states=combined_hidden_states,
             residual=residual,
         )
-        return hidden_states, router_results["logits"]
+        return hidden_states, router_results["logits"], router_results["router_weights"]
 
     def _micro_batch_forward(
         self,
@@ -483,7 +501,8 @@ class MoEDecoderLayer(nn.Module):
             hidden_states_out_list.append(hidden_states)
 
         router_logits = [router_results["logits"] for router_results in router_results_list]
-        return tuple(hidden_states_out_list + router_logits)
+        router_weights = [router_results["router_weights"] for router_results in router_results_list]
+        return tuple(hidden_states_out_list + router_logits + router_weights)
 
     @maybe_compile(fullgraph=True)
     def _pre_moe_forward(
@@ -498,7 +517,6 @@ class MoEDecoderLayer(nn.Module):
         # attention, post-layernorm and gate are implemented in one function
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        # hidden_states =
 
         # Self Attention
         if state == ForwardState.TRAINING:
@@ -523,7 +541,6 @@ class MoEDecoderLayer(nn.Module):
                 seq_ctx=seq_ctx,
                 past_key_values=past_key_values,
             )
-
         hidden_states = residual + hidden_states
 
         # Fully Connected

@@ -45,7 +45,7 @@ from .chunk_loss import ChunkLoss
 class BaseLossKwargs(BaseModel):
     """Everything needed to compute the loss."""
 
-    model_config = ConfigDict(title="loss keyword arguments", extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(title="loss keyword arguments", extra="forbid", arbitrary_types_allowed=True)
     shifted_labels: torch.Tensor
 
     def chunk(self, chunk_size) -> list["BaseLossKwargs"]:
@@ -67,7 +67,7 @@ class BaseLossKwargs(BaseModel):
 
 
 class BaseLossConfig(BaseModel):
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(title="BaseLossConfig", extra="forbid", arbitrary_types_allowed=True)
     ignore_idx: Annotated[int, Parameter(help="ignore index for loss calculation")] = -100
     mode: Annotated[Literal["eager", "chunk"], Parameter(help="loss calculation mode")] = "eager"
     chunk_size: Annotated[int | None, Parameter(help="chunk size when mode is chunk")] = 1024

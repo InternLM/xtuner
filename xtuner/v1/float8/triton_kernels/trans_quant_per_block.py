@@ -1,10 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 from typing import Tuple
 
 import torch
 import triton
 import triton.language as tl
-from torch.library import triton_op, wrap_triton
 
 from xtuner.v1.float8.float8_utils import to_fp8_saturated
 
@@ -109,42 +109,28 @@ def trans_per_block_quant_expand_128x_kernel(
         tl.store(output_scale_offset, output_block_scale)
 
 
-@triton_op("float8::trans_per_block_quant_expand_128x", mutates_args={})
-def trans_per_block_quant_expand_128x(
+@torch.library.custom_op("float8::_trans_per_block_quant_expand_128x", mutates_args=())
+def _trans_per_block_quant_expand_128x(
     input_tensor: torch.Tensor,
     size_per_group: torch.Tensor,
-    group_size: int = 128,
-    dtype: torch.dtype = torch.float8_e4m3fn,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    M, N = input_tensor.shape
-    assert N % group_size == 0
+    group_size: int,
+    dtype: torch.dtype,
+    group_pad_off: torch.Tensor,
+    token_cumdiff: torch.Tensor,
+    token_end: torch.Tensor,
+    M_pad: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     finfo = torch.finfo(dtype)
     fmin = finfo.min
     fmax = finfo.max
-
-    group_pad_off = torch.zeros(size_per_group.shape[0] + 1, device="cuda", dtype=torch.int32)
-
-    BLOCK_M = group_size
-    size_per_group_padding = triton.cdiv(size_per_group, BLOCK_M) * BLOCK_M
-    group_pad_off[1:] = size_per_group_padding.cumsum(0)
-
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count - int(os.getenv("MinusSM", 0))
+    grid = (NUM_SMS,)
     num_experts = size_per_group.shape[0]
+    M, N = input_tensor.shape
     M_EXPAND = M + group_size * num_experts - M % group_size
     output_tensor = input_tensor.new_empty((N, M_EXPAND), dtype=dtype)
     output_scales = input_tensor.new_empty((N // group_size, triton.cdiv(M_EXPAND, group_size)), dtype=torch.float32)
-
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
-    grid = (NUM_SMS,)
-
-    M_pad = size_per_group_padding.sum()
-
-    token_diff = size_per_group_padding - size_per_group
-    token_cumdiff = token_diff.cumsum(0)
-    token_end = size_per_group.cumsum(0)
-
-    token_cumdiff = token_diff.cumsum(0) - token_diff
-
-    wrap_triton(trans_per_block_quant_expand_128x_kernel)[grid](
+    trans_per_block_quant_expand_128x_kernel[grid](
         input_tensor,
         output_tensor,
         output_scales,
@@ -161,7 +147,61 @@ def trans_per_block_quant_expand_128x(
         BLOCK_M=group_size,
         BLOCK_N=group_size,
     )
+    return output_tensor, output_scales
 
+
+@_trans_per_block_quant_expand_128x.register_fake
+def _(
+    input_tensor: torch.Tensor,
+    size_per_group: torch.Tensor,
+    group_size: int,
+    dtype: torch.dtype,
+    group_pad_off: torch.Tensor,
+    token_cumdiff: torch.Tensor,
+    token_end: torch.Tensor,
+    M_pad: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    num_experts = size_per_group.shape[0]
+    M, N = input_tensor.shape
+    M_EXPAND = M + group_size * num_experts - M % group_size
+    output_tensor = input_tensor.new_empty((N, M_EXPAND), dtype=dtype)
+    output_scales = input_tensor.new_empty((N // group_size, triton.cdiv(M_EXPAND, group_size)), dtype=torch.float32)
+    return output_tensor, output_scales
+
+
+def trans_per_block_quant_expand_128x(
+    input_tensor: torch.Tensor,
+    size_per_group: torch.Tensor,
+    group_size: int = 128,
+    dtype: torch.dtype = torch.float8_e4m3fn,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    M, N = input_tensor.shape
+    assert N % group_size == 0
+
+    group_pad_off = torch.zeros(size_per_group.shape[0] + 1, device="cuda", dtype=torch.int32)
+
+    BLOCK_M = group_size
+    size_per_group_padding = triton.cdiv(size_per_group, BLOCK_M) * BLOCK_M
+    group_pad_off[1:] = size_per_group_padding.cumsum(0)
+
+    M_pad = size_per_group_padding.sum()
+
+    token_diff = size_per_group_padding - size_per_group
+    token_cumdiff = token_diff.cumsum(0)
+    token_end = size_per_group.cumsum(0)
+
+    token_cumdiff = token_diff.cumsum(0) - token_diff
+
+    output_tensor, output_scales = _trans_per_block_quant_expand_128x(
+        input_tensor,
+        size_per_group,
+        group_size,
+        dtype,
+        group_pad_off,
+        token_cumdiff,
+        token_end,
+        M_pad,
+    )
     return output_tensor, output_scales, size_per_group_padding
 
 

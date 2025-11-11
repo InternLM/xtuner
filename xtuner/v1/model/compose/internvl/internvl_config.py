@@ -19,7 +19,7 @@ logger = get_logger()
 class InternVLVisionConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     num_channels: int = 3
     patch_size: tuple[int, int] = (14, 14)
@@ -60,6 +60,7 @@ class InternVLVisionConfig(BaseModel):
 
 
 class InternVLProjectorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     vision_hidden_size: int = 1024
     text_hidden_size: int = 4096
     downsample_ratio: float = 0.5
@@ -75,7 +76,7 @@ class InternVLProjectorConfig(BaseModel):
 class InternVLBaseConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     vision_config: InternVLVisionConfig
     projector_config: InternVLProjectorConfig

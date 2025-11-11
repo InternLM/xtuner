@@ -10,6 +10,7 @@ class FSDPConfig(BaseModel):
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         protected_namespaces=(),
+        extra="forbid",
     )
     tp_size: Annotated[int, Parameter(help="Tensor parallel size")] = 1
     sp_size: Annotated[int, Parameter(help="Sequence parallel size")] = 1
