@@ -47,6 +47,7 @@ class GreedyRouterConfig(BaseModel):
 class GreedyRouter(nn.Module, RouterProtocol):
     def __init__(
         self,
+        *,
         n_routed_experts: int,
         num_experts_per_tok: int,
         norm_topk_prob: bool = True,
@@ -92,8 +93,23 @@ class GreedyRouter(nn.Module, RouterProtocol):
 
 
 class GreedyGroupedRouter(GreedyRouter):
-    def __init__(self, router_n_groups, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        *,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+        router_n_groups: int,
+        norm_topk_prob: bool = True,
+        scoring_func: Literal["sigmoid", "softmax"] = "softmax",
+        router_scaling_factor: float = 1.0,
+    ):
+        super().__init__(
+            n_routed_experts=n_routed_experts,
+            num_experts_per_tok=num_experts_per_tok,
+            norm_topk_prob=norm_topk_prob,
+            scoring_func=scoring_func,
+            router_scaling_factor=router_scaling_factor,
+        )
         self.router_n_groups = router_n_groups
 
     def forward(self, logits: torch.Tensor) -> RouterResults:
