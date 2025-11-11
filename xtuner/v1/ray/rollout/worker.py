@@ -457,6 +457,10 @@ class RolloutWorker(SingleAcceleratorWorker):
             last_logprobs = []
             try:
                 finish_reason = response["meta_info"]["finish_reason"]["type"]
+                if finish_reason == "abort":
+                    return RLRolloutResponseItem(
+                        finish_reason="abort",
+                    )
                 if "output_token_logprobs" in response["meta_info"]:
                     last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
                     last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
