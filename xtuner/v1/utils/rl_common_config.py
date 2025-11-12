@@ -20,7 +20,7 @@ def _filter_pydantic_kwargs(target_class: Any, kwargs: Dict) -> Dict:
 
 
 def _build_config(config_class, **kwargs):
-    filtered_params = _filter_pydantic_kwargs(config_class, **kwargs)
+    filtered_params = _filter_pydantic_kwargs(config_class, kwargs)
     return config_class(**filtered_params)
 
 

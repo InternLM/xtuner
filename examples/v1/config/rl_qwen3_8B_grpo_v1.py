@@ -46,9 +46,9 @@ params = {
     # resource setting
     "num_workers": 8,
 }
-params["pack_max_length"] = params["max_prompt_length"] + params["max_response_length"]
 params["context_length"] = params["pack_max_length"]
-
+if params["pack_max_length"] < params["max_prompt_length"] + params["max_response_length"]:
+    params["pack_max_length"] = params["max_prompt_length"] + params["max_response_length"]
 
 # 创建核心组件
 tokenizer = AutoTokenizer.from_pretrained(params["model_path"], trust_remote_code=True)
