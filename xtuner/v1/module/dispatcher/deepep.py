@@ -92,6 +92,15 @@ class DeepEPDispatch(torch.autograd.Function):
         tuple,
         EventOverlap,
     ]:
+        if (forward_previous_event is None) != (backward_finished_event is None):
+            raise ValueError(
+                "Internal Error! `forward_previous_event` and `backward_finished_event` should be both None or both "
+                "not None"
+            )
+        is_async = forward_previous_event is not None
+        ctx.is_async = is_async
+        if not is_async:
+            forward_previous_event = buffer_capture()
         (
             recv_x,
             recv_topk_idx,
@@ -101,6 +110,8 @@ class DeepEPDispatch(torch.autograd.Function):
             event,
         ) = dispatch_forward(x, topk_idx, topk_weights, num_experts, group, forward_previous_event)
         # save deep comm handle
+        if not is_async:
+            event.current_stream_wait()
         ctx.save_for_backward(*handle)
         ctx.group = group
         ctx.num_experts = num_experts
@@ -127,7 +138,9 @@ class DeepEPDispatch(torch.autograd.Function):
         combined_grad_x, combined_grad_recv_topk_weights, event = dispatch_backward(
             grad_recv_x, grad_recv_topk_weights, ctx.num_experts, handle, ctx.group, buffer_capture()
         )
-        if ctx.backward_finished_event is not None:
+        if not ctx.is_async:
+            event.current_stream_wait()
+        else:
             ctx.backward_finished_event.event = event.event
         return (
             combined_grad_x,
@@ -157,7 +170,24 @@ class DeepEPCombine(torch.autograd.Function):
         backward_previous_event: EventOverlap | None = None,
         backward_finished_event: EventOverlap | None = None,
     ) -> tuple[torch.Tensor, EventOverlap]:
+        if not (
+            (forward_previous_event is None) == (backward_finished_event is None) == (backward_previous_event is None)
+        ):
+            raise ValueError(
+                "Internal Error! `forward_previous_event`, `backward_finished_event` and `backward_previous_event` "
+                "should be all None or all not None"
+            )
+        is_async = forward_previous_event is not None
+        ctx.is_async = is_async
+
+        if not is_async:
+            forward_previous_event = buffer_capture()
+
         combined_x, event = combine_forward(x, num_experts, handle, group, forward_previous_event)
+
+        if not is_async:
+            event.current_stream_wait()
+
         # save deep comm handle
         ctx.save_for_backward(*handle)
         ctx.group = group
@@ -172,10 +202,17 @@ class DeepEPCombine(torch.autograd.Function):
     ) -> tuple[torch.Tensor | tuple[torch.Tensor, torch.Tensor], None, None, None, None, None, None]:
         # load saved comm handle
         handle = ctx.saved_tensors
-        grad_x, event = combine_backward(
-            grad_combined_x, ctx.num_experts, handle, ctx.group, ctx.backward_previous_event
-        )
-        ctx.backward_finished_event.event = event.event
+        if not ctx.is_async:
+            previous_event = buffer_capture()
+        else:
+            previous_event = ctx.backward_previous_event
+
+        grad_x, event = combine_backward(grad_combined_x, ctx.num_experts, handle, ctx.group, previous_event)
+
+        if not ctx.is_async:
+            event.current_stream_wait()
+        else:
+            ctx.backward_finished_event.event = event.event
         return grad_x, None, None, None, None, None, None
 
 

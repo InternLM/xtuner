@@ -2,7 +2,7 @@
 import copy
 from typing import Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.utils import IGNORE_INDEX
@@ -15,6 +15,7 @@ logger = get_logger()
 
 
 class TextContentItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     type: Literal["text"] = "text"
     text: str
 
@@ -23,12 +24,14 @@ class TextContentItem(BaseModel):
 
 
 class ImageURL(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     url: str
     detail: Optional[Literal["auto", "low", "high"]] = None
     image_wh: Optional[List[int]] = None  # width, height
 
 
 class ImageContentItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     type: Literal["image_url"] = "image_url"
     image_url: ImageURL
 
@@ -37,12 +40,14 @@ class ImageContentItem(BaseModel):
 
 
 class VideoURL(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     url: str
     detail: Optional[Literal["auto", "low", "high"]] = None
     video_length: Optional[int] = None  # duration or frame count
 
 
 class VideoContentItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     type: Literal["video_url"] = "video_url"
     video_url: VideoURL
 
@@ -55,7 +60,8 @@ ContentType = Union[str, List[MultModalContentType]]
 
 
 class ChatMsg(BaseModel):
-    role: Literal["assistant", "user", "system", "developer"]
+    role: Literal["assistant", "user", "system", "developer", "pretrain"]
+    model_config = ConfigDict(extra="forbid")
     content: ContentType
     loss: Optional[bool] = None
     thinking: Optional[str] = None  # only for assistant
@@ -72,6 +78,8 @@ class ChatMsg(BaseModel):
             elif self.role == "user":
                 self.loss = False
             elif self.role == "assistant":
+                self.loss = True
+            elif self.role == "pretrain":
                 self.loss = True
             else:
                 raise NotImplementedError
@@ -92,6 +100,8 @@ class ChatMsg(BaseModel):
             prompt = chat_template.decorate_developer(text)
         elif self.role == "user":
             prompt = chat_template.decorate_user(text)
+        elif self.role == "pretrain":
+            prompt = text
         elif self.role == "assistant":
             prompt = ""
             if self.thinking is not None:

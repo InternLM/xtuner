@@ -112,7 +112,7 @@ class WorkerConfig(BaseModel):
        for KL divergence computation during training.
     """
 
-    model_config = ConfigDict(title="Worker config", extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(title="Worker config", extra="forbid", arbitrary_types_allowed=True)
     model_cfg: TransformerConfig | VisionComposeConfigProtocol
     optim_cfg: OptimConfig
     loss_cfg: BaseRLLossConfig
@@ -384,7 +384,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     f"rollout_logprobs {rollout_logprobs.shape} vs old_logprobs {old_logprobs.shape}"
                 )
                 if rollout_logprobs.numel() == 0:  # pad 情况下是空的
-                    min_diff = torch.tensor(0)
+                    min_diff = torch.tensor(0.0)
                     max_diff = min_diff
                     std_diff = min_diff
                     mean_diff = min_diff
@@ -393,7 +393,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     max_diff = torch.max(rollout_logprobs - old_logprobs)
                     mean_diff = torch.mean(rollout_logprobs - old_logprobs)
                     if rollout_logprobs.numel() == 1:
-                        std_diff = torch.tensor(0)
+                        std_diff = torch.tensor(0.0)
                     else:
                         std_diff = torch.std(rollout_logprobs - old_logprobs)
                 all_diffs.append((min_diff, max_diff, mean_diff, std_diff))

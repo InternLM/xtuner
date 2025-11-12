@@ -22,7 +22,7 @@ def get_flash_attn_varlen() -> FlashAttnVarlenProtocol:
         if os.environ.get("XTUNER_USE_FA3", "0") == "1":
             from .gpu import gpu_flash_varlen_attn_v3 as flash_attn_varlen_func
         else:
-            from flash_attn import flash_attn_varlen_func  # type: ignore
+            from .gpu import flash_attn_varlen_func_v2 as flash_attn_varlen_func  # type: ignore
 
         return flash_attn_varlen_func
     else:

@@ -189,11 +189,13 @@ class TrainingController:
         pad_num = math.ceil(num_packed_data_batches / dp_size) * dp_size - num_packed_data_batches
         if pad_num > 0:
             # Reduce the attn calculation time by using multiple short sequence packs
+            assert data_batches[0]["seq_ctx"].input_ids is not None
             pad_tokens = tuple(
                 torch.zeros(1, 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu")
                 for _ in range(pack_max_length // 1024)
             )
             if pack_max_length % 1024 > 0:
+                assert data_batches[0]["seq_ctx"].input_ids is not None
                 pad_tokens = pad_tokens + (
                     torch.zeros(
                         1, pack_max_length % 1024, dtype=data_batches[0]["seq_ctx"].input_ids.dtype, device="cpu"

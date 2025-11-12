@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 import requests
 import uvicorn
 from fastapi import FastAPI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.ray.judger.native import NativeJudger
 
@@ -36,9 +36,11 @@ class JudgeRequest(BaseModel):
     response: str
     label: str
     extra_info: Dict[str, Any] = Field(default_factory=dict)
+    model_config = ConfigDict(extra="forbid")
 
 
 class JudgeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     score: float
 
 
@@ -102,6 +104,7 @@ class GSM8KRemoteJudgerConfig(BaseModel):
     judger_name: str
     remote_url: str
     extra_info: dict = {"score": 1, "format_score": 0}
+    model_config = ConfigDict(extra="forbid")
 
     def build(self):
         return NativeJudger(

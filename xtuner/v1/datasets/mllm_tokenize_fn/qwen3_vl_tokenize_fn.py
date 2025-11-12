@@ -233,7 +233,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
 
 class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
-    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    model_config = ConfigDict(title="Base dataset config for xtuner", extra="forbid")
     processor_path: str
     min_pixels: int | None = None
     max_pixels: int | None = None
