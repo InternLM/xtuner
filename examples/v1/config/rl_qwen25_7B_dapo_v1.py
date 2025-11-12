@@ -35,7 +35,7 @@ params = {
     "rollout_max_batch_size_per_instance": 1024,
     # dataflow settings
     "global_batch_size": 512,
-    "prompt_repeat_k": 512,
+    "prompt_repeat_k": 16,
     "enable_partial_rollout": 0,
     "partial_rollout_step": 0,
     "max_concurrent": 1024,
