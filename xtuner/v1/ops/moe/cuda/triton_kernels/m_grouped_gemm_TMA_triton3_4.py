@@ -6,8 +6,7 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-
-# from .utils import TmaAutoTuneHelper
+from xtuner.v1.utils import DISTRIBUTED_COMMUNICATION_SM, NUM_SMS
 
 
 def get_cuda_autotune_config():
@@ -82,8 +81,8 @@ def m_grouped_gemm_bKmajor_kernel(
     for tile_id in tl.range(start_pid, num_tiles, BLOCKS):
         pid_m, pid_n = grouped_launch(tile_id, M_pad, N, BLOCK_M, BLOCK_N, GROUP_M)
 
-        group = tl.load(m_indices_pad + pid_m)
-        pad_off = tl.load(pad_starts + group)
+        group = tl.load(m_indices_pad + pid_m).to(tl.int32)
+        pad_off = tl.load(pad_starts + group).to(tl.int32)
 
         group_start = (tl.load(group_starts + group) + (pid_m * BLOCK_M - pad_off)).to(tl.int32)
         group_end = tl.load(group_ends + group).to(tl.int32)
@@ -92,42 +91,41 @@ def m_grouped_gemm_bKmajor_kernel(
         offs_bn = (pid_n * BLOCK_N).to(tl.int32)
         offs_k = 0
 
-        a_ptr = (A + group_start * K).to(tl.pointer_type(dtypeA))
-        b_ptr = (B + group * N * K).to(tl.pointer_type(dtypeB))
-        c_ptr = (C + group_start * N).to(tl.pointer_type(dtypeC))
+        a_ptr = A.to(tl.pointer_type(dtypeA))
+        b_ptr = B.to(tl.pointer_type(dtypeB))
+        c_ptr = C.to(tl.pointer_type(dtypeC))
 
         a_desc = tl.make_tensor_descriptor(
             a_ptr,
-            shape=[(group_end - group_start), K],
+            shape=[group_end, K],
             strides=[K, 1],
             block_shape=[BLOCK_M, BLOCK_K],
         )
 
         b_desc = tl.make_tensor_descriptor(
             b_ptr,
-            shape=[N, K],
+            shape=[(group + 1) * N, K],
             strides=[K, 1],
             block_shape=[BLOCK_N, BLOCK_K],
         )
         c_desc = tl.make_tensor_descriptor(
             c_ptr,
-            shape=[(group_end - group_start), N],
+            shape=[group_end, N],
             strides=[N, 1],
             block_shape=[BLOCK_M, BLOCK_N],
         )
 
         accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
-            a = a_desc.load([offs_am, offs_k])
-            b = b_desc.load([offs_bn, offs_k])
+            a = a_desc.load([group_start + offs_am, offs_k])
+            b = b_desc.load([group * N + offs_bn, offs_k])
 
             # mma
             accumulator = tl.dot(a, b.T, acc=accumulator, input_precision="tf32x3")
             offs_k += BLOCK_K
 
         c = accumulator.to(dtypeC)
-        # offs_cm = group_start
-        offs_cm = 0
+        offs_cm = group_start
         offs_cn = (pid_n * BLOCK_N).to(tl.int32)
         c_desc.store([offs_cm, offs_cn], c)
 
@@ -171,52 +169,52 @@ def m_grouped_gemm_bNmajor_kernel(
     for tile_id in tl.range(start_pid, num_tiles, BLOCKS):
         pid_m, pid_n = grouped_launch(tile_id, M_pad, N, BLOCK_M, BLOCK_N, GROUP_M)
 
-        group = tl.load(m_indices_pad + pid_m)
-        pad_off = tl.load(pad_starts + group)
+        group = tl.load(m_indices_pad + pid_m).to(tl.int32)
+        pad_off = tl.load(pad_starts + group).to(tl.int32)
 
         group_start = (tl.load(group_starts + group) + (pid_m * BLOCK_M - pad_off)).to(tl.int32)
-        group_end = tl.load(group_ends + group)
+        group_end = tl.load(group_ends + group).to(tl.int32)
 
         offs_am = 0
         offs_bn = (pid_n * BLOCK_N).to(tl.int32)
         offs_k = 0
         offs_bk = 0
-
-        a_ptr = (A + group_start * K).to(tl.pointer_type(dtypeA))
-        b_ptr = (B + group * K * N).to(tl.pointer_type(dtypeB))
-        c_ptr = (C + group_start * N).to(tl.pointer_type(dtypeC))
+        a_ptr = A.to(tl.pointer_type(dtypeA))
+        b_ptr = B.to(tl.pointer_type(dtypeB))
+        c_ptr = C.to(tl.pointer_type(dtypeC))
 
         a_desc = tl.make_tensor_descriptor(
             a_ptr,
-            shape=[(group_end - group_start), K],
+            shape=[group_end, K],
             strides=[K, 1],
             block_shape=[BLOCK_M, BLOCK_K],
         )
 
         b_desc = tl.make_tensor_descriptor(
             b_ptr,
-            shape=[K, N],
+            shape=[(group + 1) * K, N],
             strides=[N, 1],
             block_shape=[BLOCK_K, BLOCK_N],
         )
         c_desc = tl.make_tensor_descriptor(
             c_ptr,
-            shape=[(group_end - group_start), N],
+            shape=[group_end, N],
             strides=[N, 1],
             block_shape=[BLOCK_M, BLOCK_N],
         )
 
         accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k in tl.range(0, tl.cdiv(K, BLOCK_K)):
-            a = a_desc.load([offs_am, offs_k])
-            b = b_desc.load([offs_bk, offs_bn])
+            a = a_desc.load([group_start + offs_am, offs_k])
+            b = b_desc.load([group * K + offs_bk, offs_bn])
             # mma
             accumulator = tl.dot(a, b, acc=accumulator, input_precision="tf32x3")
             offs_k += BLOCK_K
             offs_bk += BLOCK_K
 
         c = accumulator.to(dtypeC)
-        offs_cm = 0
+        offs_cm = group_start
+
         offs_cn = (pid_n * BLOCK_N).to(tl.int32)
         c_desc.store([offs_cm, offs_cn], c)
 
@@ -227,7 +225,6 @@ def repeat_interleave_kernel(
     repeats_ptr,
     repeat_cum_ptr,
     output_ptr,
-    # BLOCK_M: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     repeat = tl.load(repeats_ptr + pid)
@@ -250,9 +247,7 @@ def repeat_interleave(
 
 
 @torch.library.custom_op("moe::m_grouped_gemm", mutates_args=())
-def m_grouped_gemm(
-    A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False, numSM: int = -1
-) -> Tensor:
+def m_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False) -> Tensor:
     assert A.dim() == 2
     assert B.dim() == 3
 
@@ -285,7 +280,7 @@ def m_grouped_gemm(
     group_end = size_per_group.cumsum(0) - size_per_group + size_per_group
     group_start = size_per_group.cumsum(0) - size_per_group
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count if numSM <= 0 else numSM
+    NUM_AVAILABLE_SMS = NUM_SMS - DISTRIBUTED_COMMUNICATION_SM
 
     dtype_mapping = {torch.bfloat16: 0, torch.float16: 1}
     dtype_a = dtype_mapping.get(A.dtype, -1)
@@ -295,7 +290,7 @@ def m_grouped_gemm(
     def grid(META):
         # assert N % META["BLOCK_N"] == 0, "Only support when N is a multiple of BLOCK_N"
 
-        return (NUM_SMS,)
+        return (NUM_AVAILABLE_SMS,)
 
     # TMA descriptors require a global memory allocation
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
@@ -329,7 +324,7 @@ def m_grouped_gemm(
 
 
 @m_grouped_gemm.register_fake
-def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False, numSM: int = -1) -> Tensor:
+def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False) -> Tensor:
     M, K = A.shape
     if trans_b:
         num_groups, N, BK = B.shape

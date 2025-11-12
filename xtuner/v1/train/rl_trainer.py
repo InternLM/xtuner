@@ -12,7 +12,7 @@ import torch
 from mmengine import load
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
 from typing_extensions import Self
 
@@ -51,6 +51,7 @@ def bind_train_rollout(
 
 
 class RLTrainerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     load_from: str | Path
     resources: AcceleratorResourcesConfig
     rollout_config: RolloutConfig
@@ -393,8 +394,8 @@ class RLTrainer:
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
+                ray.get(self._rollout_env_controller.check_active_workers.remote())
                 data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
-
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):
                 ray.get(self._rollout_env_controller.offload.remote())
@@ -743,11 +744,7 @@ class RLTrainer:
                 timestamp=timestamp,
                 git_info=git_info,
             )
-            new_exp = ExpInfo(
-                history=[new_history],
-                exp_dir=str(exp_dir),
-                latest_checkpoint=None,
-            )
+            new_exp = ExpInfo(history=[new_history], exp_dir=str(exp_dir))
             meta.exps.append(new_exp)
         return meta
 

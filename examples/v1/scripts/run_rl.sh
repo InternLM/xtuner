@@ -21,14 +21,16 @@ export RAY_RANK=${RANK:-0} # 0 代表主节点, >0 代表工作节点
 export RAY_HEAD_PORT=${RAY_HEAD_PORT:-"6379"}
 export RAY_CLIENT_PORT=${RAY_CLIENT_PORT:-"10001"}
 export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-"8265"}
+# TODO: 提供非环境变量方式配置 ray_max_concurrency
+export RAY_MAX_CONCURRENCY=${RAY_MAX_CONCURRENCY:-1024} # dataflow_max_concurrency * prompt_repeat_k
 
 # xtuner 环境变量
 export MODEL_PATH=$MODEL_PATH
 export DATA_PATH=$DATA_PATH
 export EVAL_DATA_PATH=$EVAL_DATA_PATH
-export XTUNER_USE_FA3=1
-export XTUNER_MAX_CONCURRENCY=2048
-export XTUNER_LOG_LEVEL="INFO"
+export XTUNER_USE_FA3=${XTUNER_USE_FA3:-1}
+export XTUNER_MAX_CONCURRENCY=${XTUNER_MAX_CONCURRENCY:-1024}
+export XTUNER_LOG_LEVEL=${XTUNER_LOG_LEVEL:-"INFO"}
 
 infer_backend_lower=$(echo "$INFER_BACKEND" | tr '[:upper:]' '[:lower:]')
 if [ "$infer_backend_lower" = "sglang" ]; then

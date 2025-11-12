@@ -4,7 +4,7 @@ import inspect
 from typing import Annotated, Union
 
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.datasets.data_item import CacheItem, DataItem
@@ -28,7 +28,12 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
         super().__init__(tokenizer)
 
     def __call__(self, item: dict, **kwargs) -> DataItem | CacheItem:
-        text = item["content"]
+        if "messages" in item:
+            messages = item["messages"]
+            assert messages[0]["role"] == "pretrain", "messages[0] must be pretrain role"
+            text = messages[0]["content"]
+        else:
+            text = item["content"]
 
         if self.add_bos_token:
             assert self.tokenizer.bos_token is not None, "tokenizer has no bos_token"
@@ -71,6 +76,7 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
 
 
 class PretrainTokenizeFunctionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     add_eos_token: Annotated[bool, Parameter(group="tokenize_fn")] = True
     add_bos_token: Annotated[bool, Parameter(group="tokenize_fn")] = False
     hash: Annotated[str | None, Parameter(group="tokenize_fn")] = None

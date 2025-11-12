@@ -15,7 +15,8 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     apt install --no-install-recommends bc wget -y && \
     apt install --no-install-recommends build-essential sudo -y && \
     apt install --no-install-recommends git curl pkg-config tree unzip tmux \
-    openssh-server openssh-client dnsutils iproute2 lsof net-tools zsh rclone -y && \
+    openssh-server openssh-client dnsutils iproute2 lsof net-tools zsh rclone \
+    iputils-ping telnet netcat-openbsd -y && \
     apt clean && rm -rf /var/lib/apt/lists/*
 
 RUN if [ -d /etc/pip ] && [ -f /etc/pip/constraint.txt ]; then echo > /etc/pip/constraint.txt; fi
@@ -41,7 +42,7 @@ ARG FLASH_ATTN3_DIR=/tmp/flash-attn3
 ARG ADAPTIVE_GEMM_DIR=/tmp/adaptive_gemm
 ARG GROUPED_GEMM_DIR=/tmp/grouped_gemm
 ARG DEEP_EP_DIR=/tmp/deep_ep
-ARG NVSHMEM_WHL_DIR=/tmp/nvshmem
+ARG NVSHMEM_PREFIX=/usr/local/nvshmem
 
 RUN mkdir -p $CODESPACE
 WORKDIR ${CODESPACE}
@@ -105,21 +106,36 @@ FROM setup_env AS deep_ep
 ARG CODESPACE
 ARG DEEP_EP_DIR
 ARG DEEP_EP_URL
-ARG NVSHMEM_WHL_DIR
 # build sm90 and sm100 for deep_ep for now
 ARG TORCH_CUDA_ARCH_LIST="9.0 10.0"
 
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
-    pip wheel -w ${NVSHMEM_WHL_DIR} -v "nvidia-nvshmem-cu12>=3.4.5" && \
-    pip install ${NVSHMEM_WHL_DIR}/*.whl && \
-    git clone $(echo ${DEEP_EP_URL} | cut -d '@' -f 1) && \
+    curl -LO https://github.com/NVIDIA/nvshmem/releases/download/v3.4.5-0/nvshmem_src_cuda-all-all-3.4.5.tar.gz && \
+    tar -zxvf nvshmem_src_cuda-all-all-3.4.5.tar.gz && \
+    cd ${CODESPACE}/nvshmem_src && \
+    NVSHMEM_SHMEM_SUPPORT=0 \
+    NVSHMEM_UCX_SUPPORT=0 \
+    NVSHMEM_USE_NCCL=0 \
+    NVSHMEM_MPI_SUPPORT=0 \
+    NVSHMEM_IBGDA_SUPPORT=1 \
+    NVSHMEM_USE_GDRCOPY=0 \
+    NVSHMEM_PMIX_SUPPORT=0 \
+    NVSHMEM_TIMEOUT_DEVICE_POLLING=0 \
+    NVSHMEM_BUILD_TESTS=0 \
+    NVSHMEM_BUILD_EXAMPLES=0 \
+    NVSHMEM_BUILD_HYDRA_LAUNCHER=0 \
+    NVSHMEM_BUILD_TXZ_PACKAGE=0 \
+    NVSHMEM_BUILD_PYTHON_LIB=OFF \
+    cmake -S . -B build/ -DCMAKE_INSTALL_PREFIX=${NVSHMEM_PREFIX} -DMLX5_lib=/lib/x86_64-linux-gnu/libmlx5.so.1 && \
+    cmake --build build --target install --parallel 32 && \
+    cd ${CODESPACE} && git clone $(echo ${DEEP_EP_URL} | cut -d '@' -f 1) && \
     cd ${CODESPACE}/DeepEP && \
     git checkout $(echo ${DEEP_EP_URL} | cut -d '@' -f 2) && \
     git submodule update --init --recursive --force
 
 WORKDIR ${CODESPACE}/DeepEP
 
-RUN pip wheel -w ${DEEP_EP_DIR} -v --no-deps .
+RUN NVSHMEM_DIR=${NVSHMEM_PREFIX} pip wheel -w ${DEEP_EP_DIR} -v --no-deps .
 
 # integration xtuner
 FROM setup_env AS xtuner_dev
@@ -132,21 +148,19 @@ ARG FLASH_ATTN3_DIR
 ARG ADAPTIVE_GEMM_DIR
 ARG GROUPED_GEMM_DIR
 ARG DEEP_EP_DIR
-ARG NVSHMEM_WHL_DIR
 
 COPY --from=flash_attn ${FLASH_ATTN3_DIR} ${FLASH_ATTN3_DIR}
 COPY --from=flash_attn ${FLASH_ATTN_DIR} ${FLASH_ATTN_DIR}
 COPY --from=adaptive_gemm ${ADAPTIVE_GEMM_DIR} ${ADAPTIVE_GEMM_DIR}
 COPY --from=grouped_gemm ${GROUPED_GEMM_DIR} ${GROUPED_GEMM_DIR}
 COPY --from=deep_ep ${DEEP_EP_DIR} ${DEEP_EP_DIR}
-COPY --from=deep_ep ${NVSHMEM_WHL_DIR} ${NVSHMEM_WHL_DIR}
+COPY --from=deep_ep ${NVSHMEM_PREFIX} ${NVSHMEM_PREFIX}
 
 RUN unzip ${FLASH_ATTN_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${FLASH_ATTN3_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${ADAPTIVE_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${GROUPED_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${DEEP_EP_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
-RUN unzip ${NVSHMEM_WHL_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 
 # install sglang and its runtime requirements
 ARG SGLANG_VERSION
@@ -188,6 +202,12 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     pip install .[all] -v --no-cache-dir
 
 WORKDIR ${CODESPACE}
+
+# nccl update for torch 2.6.0
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    if [ "x${TORCH_VERSION}" = "x2.6.0" ]; then \
+        pip install nvidia-nccl-cu12==2.25.1 --no-cache-dir; \
+    fi
 
 # setup sysctl
 RUN echo "fs.file-max=100000" >> /etc/sysctl.conf

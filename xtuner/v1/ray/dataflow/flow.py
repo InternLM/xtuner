@@ -2,9 +2,10 @@ import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import httpx
 import ray
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
@@ -12,7 +13,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem, check_dataflow_item
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
-from xtuner.v1.utils import get_logger, timer
+from xtuner.v1.utils import get_logger
 
 from .replay_buffer import ReplayBuffer, ReplayBufferConfig
 
@@ -45,14 +46,16 @@ class DataFlowConfig(BaseModel):
         )
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     env: Annotated[
         str,
         Parameter(help="Environment name to set for the dataflow."),
     ] = ""
     max_concurrent: Annotated[
-        int,
+        Optional[int],
         Parameter(help="Maximum number of concurrent tasks."),
-    ] = 512
+    ] = None
     max_retry_times: Annotated[
         int,
         Parameter(help="Maximum number of retry task for failed samples."),
@@ -73,7 +76,6 @@ class DataFlowConfig(BaseModel):
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
     def __init__(self, **kwargs):
-        # TODO: calculate max_concurrent based on env and resources
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -116,8 +118,29 @@ class DataFlow:
         self.failed_samples_count = 0
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
-        self.timer_dict: dict[str, float] = {}
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
+        rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
+        self.worker_url_list = list(rollout_info["server_url_dict"].values())
+        self.logger.info(f"DataFlow connected to active rollout workers url: {self.worker_url_list}")
+        rollout_config = rollout_info["rollout_config"]
+        max_concurrent = int(
+            (
+                rollout_config.rollout_max_batch_size_per_instance
+                * len(self.worker_url_list)
+                / self.config.prompt_repeat_k
+            )
+            * rollout_config.allow_over_concurrency_ratio
+        )
+
+        if self.config.max_concurrent is None:
+            self.config.max_concurrent = max_concurrent
+            self.logger.info(
+                f"Set Dataflow max_concurrent to {self.config.max_concurrent} based on rollout max batch size and number of workers."
+            )
+        else:
+            self.logger.warning(
+                f"Dataflow max_concurrent is set to {self.config.max_concurrent}, we proposed to set max_concurrent to {max_concurrent} based on rollout_max_batch_size_per_instance."
+            )
 
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
@@ -141,47 +164,43 @@ class DataFlow:
             Optional[List[RLDataFlowItem]]: The group of samples if the task
             fails and needs to be retried, otherwise None.
         """
-        try:
-            # step 1: sample
-            # TODO(@duanyanhui): More fine-grained control over group data generation:
-            # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency
-            # Resend only the failed prompts in a group when retrying worker_task to avoid wasted computation resources."
-            if group_samples_for_retry is None or len(group_samples_for_retry) == 0:
-                with timer("sample", self.timer_dict):
-                    group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
-                        self.env,
-                        self.config.enable_partial_rollout,
-                        self.config.prompt_repeat_k,
-                    )
-                    self.send_samples_count += 1
-                    self.logger.debug(
-                        f"[ROLLOUT] Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
-                    )
-            else:
-                group_data_items = group_samples_for_retry
-                for data_item in group_samples_for_retry:
-                    data_item.extra_info.retry_times += 1
+        # step 1: sample
+        # TODO(@duanyanhui): More fine-grained control over group data generation:
+        # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency
+        # Resend only the failed prompts in a group when retrying worker_task to avoid wasted computation resources."
+        if group_samples_for_retry is None or len(group_samples_for_retry) == 0:
+            group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
+                self.env,
+                self.config.enable_partial_rollout,
+                self.config.prompt_repeat_k,
+            )
+            self.send_samples_count += 1
+            self.logger.debug(
+                f"[ROLLOUT] Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
+            )
+            assert group_data_items is not None and len(group_data_items) > 0, "Sampled group data items is empty."
+        else:
+            group_data_items = group_samples_for_retry
+            for data_item in group_samples_for_retry:
+                data_item.extra_info.retry_times += 1
 
-            # step 2: env generate
-            with timer("generate", self.timer_dict):
-                group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
-                    group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
-                )
-                # 需要在这里处理check_dataflow_item，因为要保留group_data_items的data信息，作为retry的输入
-                if not check_dataflow_item(group_data_items):
-                    return group_data_items
-
-            # step 3: filter
-            with timer("post_process", self.timer_dict):
-                filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
-
-            # step 4: add to replay buffer
-            with timer("put_to_buffer", self.timer_dict):
-                await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
-
-        except Exception as e:
-            self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.", exc_info=True)
+        # step 2: env generate
+        group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
+            group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
+        )
+        if not check_dataflow_item(group_data_items):
+            self.logger.warning(
+                f"Dataflow item check failed for {group_data_items[0].uid.action_id} response. Returning meta for retry."
+            )
             return group_data_items
+
+        # step 3: filter
+        filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
+
+        # step 4: add to replay buffer
+        await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
+
+        self.logger.debug(f"Worker task completed successfully for {group_data_items[0].uid.action_id}.")
 
     async def concurrent_task_runner(self):
         """Orchestrates the concurrent execution of worker tasks to generate a
@@ -206,7 +225,7 @@ class DataFlow:
         """
         waiting_tasks = set()
         with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
-            update_step = max(1, int(self.target_batch_size * 0.1))
+            update_step = max(1, int(self.target_batch_size * 0.01))
             next_update_threshold = update_step
             while (
                 self.finished_samples_count < self.target_batch_size
@@ -250,20 +269,58 @@ class DataFlow:
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
-        if self.finished_samples_count == self.target_batch_size:
+        if self.finished_samples_count >= self.target_batch_size:
             self.logger.info("Target batch size reached. Pausing env controller.")
-        if self.failed_samples_count == self.target_batch_size:
+        if self.failed_samples_count >= self.target_batch_size:
             self.logger.info("Max failed samples reached. Pausing env controller.")
 
-        ray.get(self.env_controller.pause.remote())
+        # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
+        # would be queued behind many worker tasks, causing a significant delay.
+        await self.pause()
+        while len(waiting_tasks) > 0:
+            done_tasks, pending_tasks = await asyncio.wait(
+                waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
+            )
+            if len(pending_tasks) > 0:
+                await self.pause()
+            waiting_tasks = pending_tasks
+        self.logger.info("All worker tasks have completed after pausing env controller.")
 
-        if waiting_tasks:
-            await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
-
-        if self.finished_samples_count == self.target_batch_size:
+        if self.finished_samples_count >= self.target_batch_size:
             self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())
             self.logging_replaybuffer_state()
-            self.logging_timing_perf()
+
+    async def _send_abort_request(self, client, url, timeout):
+        worker_url = f"{url}/abort_request"
+        try:
+            response = await client.post(worker_url, json={"abort_all": True}, timeout=timeout)
+            response.raise_for_status()
+            self.logger.debug(f"Successfully sent abort request to {url}")
+            return url, True
+        except Exception as e:
+            self.logger.error(f"Failed to send abort request to {url}: {e}")
+            return url, False
+
+    async def pause(self, timeout: float = 60.0):
+        """Asynchronously sends abort requests to all rollout workers."""
+        if not self.worker_url_list:
+            self.logger.info("No active rollout workers to pause.")
+            return
+
+        async with httpx.AsyncClient() as client:
+            tasks = [self._send_abort_request(client, url, timeout=timeout) for url in self.worker_url_list]
+            results = await asyncio.gather(*tasks)
+
+        failed_workers = [url for url, success in results if not success]
+        succeeded_count = len(self.worker_url_list) - len(failed_workers)
+
+        if failed_workers:
+            self.logger.warning(
+                f"Abort requests completed. Succeeded: {succeeded_count}, "
+                f"Failed: {len(failed_workers)}. Failed workers: {failed_workers}"
+            )
+        else:
+            self.logger.debug(f"All {succeeded_count} abort requests sent successfully.")
 
     async def run(
         self,
@@ -311,15 +368,8 @@ class DataFlow:
     def logging_replaybuffer_state(self):
         ray.get(self.replay_buffer.print.remote())
 
-    def logging_timing_perf(self):
-        log_messages = ["Single sample average time cost: "]
-        for name, times in self.timer_dict.items():
-            avg_time_str = "N/A"
-            if times:
-                avg_time = times / self.finished_samples_count
-                avg_time_str = f"{avg_time:.4f}s"
+    def get_replaybuffer_status(self):
+        return ray.get(self.replay_buffer.status.remote())
 
-            formatted_name = name.replace("_", " ")
-            log_messages.append(f"{formatted_name}: {avg_time_str}, ")
-
-        self.logger.info("".join(log_messages))
+    def clear_replaybuffer(self):
+        return ray.get(self.replay_buffer.clear.remote())

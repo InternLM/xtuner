@@ -15,6 +15,8 @@ from xtuner.v1.float8.fsdp_utils import (
 )
 from xtuner.v1.utils import get_logger, is_evenly_distributed
 
+from .fsdp_utils import WeightWithDynamicTensorWiseFloat8CastTensor, WeightWithDynamicTilewiseFloat8CastTensor
+
 
 logger = get_logger()
 
@@ -46,6 +48,12 @@ class Float8Handler:
         scaling_granularity_grouped_gemm: Optional[ScalingGranularity] = None,
     ) -> None:
         self.enabled = False
+        torch.serialization.add_safe_globals(
+            [
+                WeightWithDynamicTilewiseFloat8CastTensor,
+                WeightWithDynamicTensorWiseFloat8CastTensor,
+            ]
+        )
 
         if not _is_sm89_or_later():
             logger.warning(
@@ -70,7 +78,8 @@ class Float8Handler:
         self.enabled = True
 
     @staticmethod
-    def get_num_features_after_pad(tensor_size, fsdp_shard_dim, num_chunks, fp8_block_size=128):
+    def get_num_features_after_pad(tensor_size, fsdp_shard_dim, num_chunks):
+        fp8_block_size = 128
         total_size = tensor_size[fsdp_shard_dim]
         if total_size < fp8_block_size:
             # 对于小 tensor，需要 pad 到 fp8_block_size （实际场景几乎不会出现）
@@ -84,10 +93,16 @@ class Float8Handler:
                 chunk_size = math.ceil(ideal_chunk_size / fp8_block_size) * fp8_block_size
             else:
                 chunk_size = ideal_chunk_size // fp8_block_size * fp8_block_size + 64
+                if (chunk_size * num_chunks) % 128 != 0:
+                    chunk_size += 64
         else:
             # 如果小于base_size，找到大于等于 ideal_chunk_size 的 128 的因数
             factors = [1, 2, 4, 8, 16, 32, 64, 128]
-            chunk_size = next(size for size in factors if size >= ideal_chunk_size)
+            for size in factors:
+                # 找到大于等于 ideal_chunk_size 的 128 的因数，同时要求 chunk_size * num_chunks（即dout_pad）能被 128 整除
+                if ideal_chunk_size <= size and (size * num_chunks) % 128 == 0:
+                    chunk_size = size
+                    break
         return chunk_size * num_chunks
 
     def pad_for_fsdp(self, model: nn.Module, fsdp_mesh: DeviceMesh, callback_after_pad: Callable | None = None):
@@ -112,7 +127,7 @@ class Float8Handler:
                 else:
                     tensor_size = module.weight.size()
                     parallel_size = 1
-                padded_out_features = self.get_num_features_after_pad(tensor_size, 0, fsdp_mesh.size(-1), 128)
+                padded_out_features = self.get_num_features_after_pad(tensor_size, 0, fsdp_mesh.size(-1))
                 padded_out_features *= parallel_size
                 module.pad_for_fsdp(padded_out_features=padded_out_features)
 
@@ -126,7 +141,8 @@ class Float8Handler:
 
         self.fsdp_mesh = fsdp_mesh
         if self.is_tilewise_fp8:
-            self._build_reduce_mesh_devided_64(fsdp_mesh)
+            if fsdp_mesh.size(-1) >= 2:
+                self._build_reduce_mesh_devided_64(fsdp_mesh)
             self._build_reduce_mesh_mapping(model, fsdp_mesh)
 
     def _build_reduce_mesh_devided_64(self, fsdp_mesh: DeviceMesh):
