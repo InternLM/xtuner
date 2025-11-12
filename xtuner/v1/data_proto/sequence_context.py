@@ -105,8 +105,8 @@ class SequenceContext:
             _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
             position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.cu_seq_lens_k.device)  # type: ignore[assignment]
 
-        if self.sequence_parallel_mesh is not None:
-            position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)  # type: ignore
+            if self.sequence_parallel_mesh is not None:
+                position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)  # type: ignore
 
         self.position_ids = position_ids
 
