@@ -412,7 +412,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         logger_msg = f"Rollout {rollout_idx}: "
 
         if len(rollout_logprobs_list) > 0:
-            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs]).to(dtype=torch.float32)  # n, 4
+            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs]).to(
+                dtype=torch.float32
+            )  # n, 4
             min_diff_val = torch.min(all_diffs_tensor[:, 0]).item()
             max_diff_val = torch.max(all_diffs_tensor[:, 1]).item()
             mean_diff_val = torch.mean(all_diffs_tensor[:, 2]).item()
@@ -860,6 +862,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rollout_cfg_info["backend"] == "pytorch":
             # TODO(chenchiyu): remove lmdeploy related code
             from lmdeploy.utils import serialize_state_dict
+
             try:
                 from lmdeploy.utils import FlattenedTensorBucket
 
