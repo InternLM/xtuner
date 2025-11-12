@@ -408,7 +408,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         logger_msg = f"Rollout {rollout_idx}: "
 
         if len(all_rollout_is_metrics) > 0:
-            rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics)
+            rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
             logger_msg += f"\n\nrollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
 
         sum_entropy = cast(torch.Tensor, sum_entropy)

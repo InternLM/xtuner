@@ -41,6 +41,7 @@ from typing import Any, Optional, Tuple
 import numpy as np
 import torch
 from pydantic import BaseModel, ConfigDict
+import torch.distributed as dist
 
 from xtuner.v1.data_proto.utils import convert_packed_to_padded, convert_padded_to_packed, masked_mean, masked_sum
 
@@ -521,14 +522,20 @@ def compute_mismatch_metrics(
     return metrics
 
 
-def merge_rollout_is_metrics(rollout_is_metrics: list[dict[str, float]]) -> dict[str, float]:
+def merge_rollout_is_metrics(rollout_is_metrics: list[dict[str, float]], device="cuda") -> dict[str, float]:
     metrics = {}
     for key in rollout_is_metrics[0].keys():
         all_values = [m[key] for m in rollout_is_metrics]
         if "max" in key:
-            metrics[key] = np.max(all_values)
+            max_value = torch.tensor(all_values).max().to(torch.float32).to(device)
+            dist.all_reduce(max_value, op=dist.ReduceOp.MAX)
+            metrics[key] = max_value.item()
         elif "min" in key:
-            metrics[key] = np.min(all_values)
+            min_value = torch.tensor(all_values).min().to(torch.float32).to(device)
+            dist.all_reduce(min_value, op=dist.ReduceOp.MIN)
+            metrics[key] = min_value.item()
         else:
-            metrics[key] = np.mean(all_values)
+            mean_value = torch.tensor(all_values).mean().to(torch.float32).to(device)
+            dist.all_reduce(mean_value, op=dist.ReduceOp.AVG)
+            metrics[key] = mean_value.item()
     return metrics
