@@ -148,6 +148,7 @@ class DataFlow:
             self.logger.warning(
                 f"Dataflow max_concurrent is set to {self.config.max_concurrent}, we proposed to set max_concurrent to {max_concurrent} based on rollout_max_batch_size_per_instance."
             )
+        self.enable_partial_rollout = self.config.enable_partial_rollout
 
     def _reset_internal_states_on_step(
         self,
@@ -170,13 +171,13 @@ class DataFlow:
         self.sample_from_expired_storage = (
             ray.get(self.replay_buffer.get_expired_samples.remote()) >= self.target_batch_size
         )
-        self.config.enable_partial_rollout = (
+        self.enable_partial_rollout = (
             0 if self.sample_from_expired_storage else self.config.enable_partial_rollout
         )
         logger_msg = (
             f"DataFlow internal states reset for new run: target_batch_size={self.target_batch_size}, "
             f"sample_params: {self.config.sample_params}, extra_params: {self.config.extra_params}, "
-            f"sample_from_expired_storage={self.sample_from_expired_storage}, enable_partial_rollout={self.config.enable_partial_rollout}."
+            f"sample_from_expired_storage={self.sample_from_expired_storage}, enable_partial_rollout={self.enable_partial_rollout}."
         )
         self.logger.info(logger_msg)
 
@@ -209,7 +210,7 @@ class DataFlow:
         if group_samples_for_retry is None or len(group_samples_for_retry) == 0:
             group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
                 self.env,
-                self.config.enable_partial_rollout,
+                self.enable_partial_rollout,
                 self.config.prompt_repeat_k,
                 self.sample_from_expired_storage,
             )
@@ -278,7 +279,7 @@ class DataFlow:
                 while len(waiting_tasks) < self.config.max_concurrent:
                     # In async mode, we keep spawning. In sync mode, we stop if we have enough tasks in flight.
                     if (
-                        not self.config.enable_partial_rollout
+                        not self.enable_partial_rollout
                         and self.finished_samples_count + len(waiting_tasks) >= self.target_batch_size
                     ):
                         break
@@ -316,7 +317,7 @@ class DataFlow:
 
         # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
         # would be queued behind many worker tasks, causing a significant delay.
-        if self.config.enable_partial_rollout:
+        if self.enable_partial_rollout:
             await self.pause()
             while len(waiting_tasks) > 0:
                 done_tasks, pending_tasks = await asyncio.wait(
