@@ -457,7 +457,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             last_logprobs = []
             try:
                 finish_reason = response["meta_info"]["finish_reason"]["type"]
-                if "finish_reason" == "abort":
+                if finish_reason == "abort":
                     return RLRolloutResponseItem(
                         finish_reason="abort",
                     )
