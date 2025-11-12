@@ -31,23 +31,22 @@ class SequenceContext:
     cu_seq_lens_k: torch.IntTensor
     max_length_q: torch.Tensor
     max_length_k: torch.Tensor
-    num_padding: int = 0
-    sequence_parallel_mesh: DeviceMesh | None = None
-    block_table: torch.Tensor | None = None
-    device: str | torch.device = "cpu"  # TODO: 这个地方有点乱，到处是 device
-    position_ids: torch.LongTensor | None = None
+    num_padding: int
+    sequence_parallel_mesh: DeviceMesh | None
+    block_table: torch.Tensor | None
+    device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
+    position_ids: torch.LongTensor | None
 
     # Intern-S1
-    image_flags: torch.LongTensor | None = None
+    image_flags: torch.LongTensor | None
     # Qwen3VL
-    image_grid_thw: torch.Tensor | None = None
-    deepstack_visual_embeds: list[torch.Tensor] | None = None
-    visual_pos_masks: torch.Tensor | None = None
-
+    image_grid_thw: torch.Tensor | None
+    deepstack_visual_embeds: list[torch.Tensor] | None
+    visual_pos_masks: torch.Tensor | None
     # mllm model
-    pixel_values: torch.FloatTensor | None = None
-    inputs_embeds: torch.FloatTensor | None = None
-    num_img_tokens: list[int] | None = None
+    pixel_values: torch.FloatTensor | None
+    inputs_embeds: torch.FloatTensor | None
+    num_img_tokens: list[int] | None
 
     # moe routed_experts
     rollout_routed_experts: torch.LongTensor | None = None
