@@ -97,6 +97,11 @@ class RolloutController:
                 RolloutWorker actors.
         """
         self.config = infer_config
+        self.num_gpus_per_engine = (
+            self.config.expert_parallel_size
+            if self.config.expert_parallel_size > 1
+            else self.config.tensor_parallel_size
+        )
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
@@ -125,11 +130,6 @@ class RolloutController:
             )
         )
         self.print_params_flag = True
-        self.num_gpus_per_engine = (
-            self.config.expert_parallel_size
-            if self.config.expert_parallel_size > 1
-            else self.config.tensor_parallel_size
-        )
 
     def _get_worker_cls(self):
         if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
