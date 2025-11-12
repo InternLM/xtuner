@@ -72,6 +72,7 @@ class SequenceContext:
         pixel_values: torch.FloatTensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[int] | None = None,
+        rollout_routed_experts: torch.LongTensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
@@ -100,6 +101,7 @@ class SequenceContext:
         self.pixel_values = pixel_values
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
+        self.rollout_routed_experts = rollout_routed_experts
 
         seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
         seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]

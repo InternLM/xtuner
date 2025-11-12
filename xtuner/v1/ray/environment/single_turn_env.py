@@ -40,7 +40,6 @@ class SingleTurnEnvironment(BaseEnvironment):
         self.rollout_timeout = rollout_cfg.rollout_timeout if rollout_cfg else 1200.0
         self.judger_timeout = judger_cfg.judger_timeout if judger_cfg else 1200.0
 
-
     async def generate(
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
     ) -> List[RLDataFlowItem]:

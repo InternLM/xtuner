@@ -495,7 +495,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
                     finish_reason=finish_reason,
                     logprobs=last_logprobs if len(last_logprobs) > 0 else None,
-                    extra_info=extra_info
+                    extra_info=extra_info,
                 )
                 return rollout_response
             except KeyError as e:
