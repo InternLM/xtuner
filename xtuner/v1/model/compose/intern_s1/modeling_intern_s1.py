@@ -228,13 +228,16 @@ class InternS1ForConditionalGeneration(BaseModel):
                 inputs_embeds_list = distF.all_gather(inputs_embeds, group=sequence_parallel_mesh.get_group())
                 inputs_embeds = torch.cat(inputs_embeds_list, dim=1)
 
+                assert input_ids is not None
                 input_ids_list = [torch.empty_like(input_ids) for _ in range(sequence_parallel_mesh.size())]
                 dist.all_gather(input_ids_list, input_ids, group=sequence_parallel_mesh.get_group())
                 input_ids = torch.cat(input_ids_list, dim=1)  # type: ignore
 
             B, N, C = inputs_embeds.shape
+            assert inputs_embeds is not None
             inputs_embeds = inputs_embeds.reshape(B * N, C)
 
+            assert input_ids is not None
             input_ids = cast(torch.LongTensor, input_ids.reshape(B * N))
 
             selected = input_ids == self.img_context_token_id
@@ -261,13 +264,19 @@ class InternS1ForConditionalGeneration(BaseModel):
             vit_embeds = self.extract_feature(fake_pixel_values)
             inputs_embeds = inputs_embeds + vit_embeds.sum() * 0
 
-        seq_ctx.image_flags = None
-        seq_ctx.pixel_values = None
-        seq_ctx.input_ids = None  # type: ignore
-        seq_ctx.inputs_embeds = inputs_embeds
+        # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
+        lang_seq_ctx = SequenceContext(input_ids=None,
+                                       cu_seq_lens_q=seq_ctx.cu_seq_lens_q,
+                                       cu_seq_lens_k=seq_ctx.cu_seq_lens_k,
+                                       max_length_q=seq_ctx.max_length_q,
+                                       max_length_k=seq_ctx.max_length_k,
+                                       position_ids=seq_ctx.position_ids,
+                                       num_padding=seq_ctx.num_padding,
+                                       sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
+                                       inputs_embeds=inputs_embeds)
 
         outputs = self.language_model(
-            seq_ctx,
+            lang_seq_ctx,
             loss_ctx
         )
         return outputs

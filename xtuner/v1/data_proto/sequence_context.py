@@ -24,8 +24,7 @@ class SequenceContext:
             Maximum sequence length for key state.
     """
 
-    # TODO(HHA): 在仅计算 loss 情况下或者多模态情况下，input_ids 其实应该都可以为 None，不够通用
-    input_ids: torch.LongTensor  # shape (1, seq_len)
+    input_ids: torch.LongTensor | None  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
     max_length_q: torch.Tensor
@@ -50,7 +49,7 @@ class SequenceContext:
 
     def __init__(
         self,
-        input_ids: torch.LongTensor,  # shape (1, seq_len)
+        input_ids: torch.LongTensor | None,  # shape (1, seq_len)
         cu_seq_lens_q: torch.IntTensor,
         cu_seq_lens_k: torch.IntTensor,
         max_length_q: torch.Tensor | int,
@@ -106,8 +105,8 @@ class SequenceContext:
             _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
             position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.cu_seq_lens_k.device)  # type: ignore[assignment]
 
-        if self.sequence_parallel_mesh is not None:
-            position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)  # type: ignore
+            if self.sequence_parallel_mesh is not None:
+                position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)  # type: ignore
 
         self.position_ids = position_ids
 
@@ -207,7 +206,8 @@ class SequenceContext:
 
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
-            packed_input_ids.append(seq_ctx.input_ids)
+            if seq_ctx.input_ids is not None:
+                packed_input_ids.append(seq_ctx.input_ids)
             cu_seq_lens_q.append(
                 seq_ctx.cu_seq_lens_q  # type: ignore
                 if len(cu_seq_lens_q) == 0
@@ -240,7 +240,7 @@ class SequenceContext:
             pixel_values = None
 
         return cls(
-            input_ids=torch.cat(packed_input_ids, dim=1),  # type: ignore
+            input_ids=torch.cat(packed_input_ids, dim=1) if len(packed_input_ids) > 0 else None,  # type: ignore
             cu_seq_lens_q=torch.cat(cu_seq_lens_q, dim=0),  # type: ignore
             cu_seq_lens_k=torch.cat(cu_seq_lens_k, dim=0),  # type: ignore
             max_length_q=max_length_q,
@@ -260,6 +260,7 @@ class SequenceContext:
         if self.input_ids is not None:
             mask = cast(torch.BoolTensor, torch.ones_like(self.input_ids, dtype=torch.bool))
         else:
+            assert self.inputs_embeds is not None, "input_ids or inputs_embeds must be provided"
             mask = cast(torch.BoolTensor, torch.ones_like(self.inputs_embeds[..., 0], dtype=torch.bool))
         if self.num_padding > 0:
             mask[..., -self.num_padding :] = False

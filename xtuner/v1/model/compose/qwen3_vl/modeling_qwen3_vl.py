@@ -197,6 +197,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             assert image_grid_thw is not None
             viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values, image_grid_thw)
             viusal_embeds = torch.cat(viusal_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            assert input_ids is not None
             visual_pos_masks = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, visual_features=viusal_embeds
             )
@@ -215,14 +216,20 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             deepstack_visual_embeds = None
             visual_pos_masks = None
 
-        seq_ctx.pixel_values = None
-        seq_ctx.input_ids = None  # type: ignore
-        seq_ctx.inputs_embeds = inputs_embeds
-        seq_ctx.deepstack_visual_embeds = deepstack_visual_embeds
-        seq_ctx.visual_pos_masks = visual_pos_masks
-
+        # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
+        lang_seq_ctx = SequenceContext(input_ids=None,
+                                       cu_seq_lens_q=seq_ctx.cu_seq_lens_q,
+                                       cu_seq_lens_k=seq_ctx.cu_seq_lens_k,
+                                       max_length_q=seq_ctx.max_length_q,
+                                       max_length_k=seq_ctx.max_length_k,
+                                       position_ids=seq_ctx.position_ids,
+                                       num_padding=seq_ctx.num_padding,
+                                       sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
+                                       inputs_embeds=inputs_embeds,
+                                       deepstack_visual_embeds=deepstack_visual_embeds,
+                                       visual_pos_masks=visual_pos_masks)
         outputs = self.language_model(
-            seq_ctx,
+            lang_seq_ctx,
             loss_ctx
         )
         return outputs
