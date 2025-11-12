@@ -150,10 +150,11 @@ class SGLangWorker(RolloutWorker):
         enable_deterministic_inference = sglang_config_kwargs.get("enable_deterministic_inference", False)
 
         sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
-        num_gpus_per_engine = self.config.tensor_parallel_size
-        if self.config.expert_parallel_size > 1:
-            num_gpus_per_engine = self.config.expert_parallel_size
-
+        num_gpus_per_engine = (
+            self.config.expert_parallel_size
+            if self.config.expert_parallel_size > 1
+            else self.config.tensor_parallel_size
+        )
         sglang_server_args.host = self.host
         sglang_server_args.port = self.server_port
         sglang_server_args.nccl_port = self.nccl_port
