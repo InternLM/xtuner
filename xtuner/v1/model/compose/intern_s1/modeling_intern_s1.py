@@ -234,7 +234,8 @@ class InternS1ForConditionalGeneration(BaseModel):
                 input_ids = torch.cat(input_ids_list, dim=1)  # type: ignore
 
             B, N, C = inputs_embeds.shape
-            inputs_embeds = inputs_embeds.reshape(B * N, C)  # type: ignore
+            assert inputs_embeds is not None
+            inputs_embeds = inputs_embeds.reshape(B * N, C)
 
             assert input_ids is not None
             input_ids = cast(torch.LongTensor, input_ids.reshape(B * N))

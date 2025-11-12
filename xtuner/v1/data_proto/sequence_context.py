@@ -24,7 +24,6 @@ class SequenceContext:
             Maximum sequence length for key state.
     """
 
-    # TODO(HHA): 在仅计算 loss 情况下或者多模态情况下，input_ids 其实应该都可以为 None，不够通用
     input_ids: torch.LongTensor | None  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
@@ -241,7 +240,7 @@ class SequenceContext:
             pixel_values = None
 
         return cls(
-            input_ids=torch.cat(packed_input_ids, dim=1) if packed_input_ids else None,  # type: ignore
+            input_ids=torch.cat(packed_input_ids, dim=1) if len(packed_input_ids) > 0 else None,  # type: ignore
             cu_seq_lens_q=torch.cat(cu_seq_lens_q, dim=0),  # type: ignore
             cu_seq_lens_k=torch.cat(cu_seq_lens_k, dim=0),  # type: ignore
             max_length_q=max_length_q,
