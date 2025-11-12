@@ -478,11 +478,17 @@ class RolloutWorker(SingleAcceleratorWorker):
                         "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                     )
                     routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
-                    routed_experts = torch.tensor(routed_experts)  # n,layer,expert
-                    extra_info = {"routed_experts": ray.put(routed_experts)}
+                    if isinstance(routed_experts, str):
+                        import base64
+
+                        data = base64.b64decode(routed_experts)
+                        routed_experts = ray.cloudpickle.loads(data)
+                    else:
+                        routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                        routed_experts = ray.put(routed_experts)
+                    extra_info = {"routed_experts": routed_experts}
 
                 last_trajectory = response["text"]
-
                 rollout_response = RLRolloutResponseItem(
                     response=last_trajectory,
                     response_ids=last_token_ids if len(last_token_ids) > 0 else None,
