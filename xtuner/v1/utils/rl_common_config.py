@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
-from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig
@@ -20,83 +19,54 @@ def _filter_pydantic_kwargs(target_class: Any, kwargs: Dict) -> Dict:
     return {k: v for k, v in kwargs.items() if k in accepted_keys}
 
 
+def _build_config(config_class, **kwargs):
+    filtered_params = _filter_pydantic_kwargs(config_class, **kwargs)
+    return config_class(**filtered_params)
+
+
 def get_resources_config(**kwargs) -> AcceleratorResourcesConfig:
-    defaults = {
-        "accelerator": "GPU",
-        "num_workers": 8,
-        "num_cpus_per_worker": 12,
-        "cpu_memory_per_worker": 16 * 1024**3,
-    }
-    config_params = {**defaults, **kwargs}
-    filtered_params = _filter_pydantic_kwargs(AcceleratorResourcesConfig, config_params)
-    return AcceleratorResourcesConfig(**filtered_params)
+    return _build_config(AcceleratorResourcesConfig, **kwargs)
 
 
 def get_rollout_config(**kwargs) -> RolloutConfig:
-    defaults = {
-        "env": "",
-        "device": "GPU",
-        "dtype": "bfloat16",
-        "gpu_memory_utilization": 0.85,
-        "tensor_parallel_size": 1,
-        "expert_parallel_size": 1,
-    }
-    config_params = {**defaults, **kwargs}
-    filtered_params = _filter_pydantic_kwargs(RolloutConfig, config_params)
-    return RolloutConfig(**filtered_params)
+    return _build_config(RolloutConfig, **kwargs)
 
 
 def get_dataflow_config(**kwargs) -> DataFlowConfig:
-    defaults = {
-        "env": "",
-        "max_concurrent": 64,
-        "max_retry_times": 1,
-        "prompt_repeat_k": 1,
-        "global_batch_size": 8,
-        "enable_partial_rollout": 0,
-        "partial_rollout_step": 0,
-        "sample_params": SampleParams(),
-    }
-    config_params = {**defaults, **kwargs}
-    filtered_params = _filter_pydantic_kwargs(DataFlowConfig, config_params)
-    return DataFlowConfig(**filtered_params)
+    return _build_config(DataFlowConfig, **kwargs)
 
 
 def get_replay_buffer_config(tokenizer: Any, **kwargs) -> ReplayBufferConfig:
-    defaults = {"max_prompt_length": 2048, "pack_max_length": 4096, "filter_func": None}
-    config_params = {**defaults, **kwargs}
-
-    tokenizer_config = RLTokenizeFnConfig(max_length=config_params["max_prompt_length"])
-    train_dataset = DatasetConfig(anno_path=config_params["data_path"])
+    tokenizer_config = RLTokenizeFnConfig(max_length=kwargs["max_prompt_length"])
+    train_dataset = DatasetConfig(anno_path=kwargs["data_path"])
     train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
     dataloader_config = DataloaderConfig(
-        pack_max_length=config_params["pack_max_length"], collator="fake_collator", pack_level="none"
+        pack_max_length=kwargs["pack_max_length"], collator="fake_collator", pack_level="none"
     )
-
     return ReplayBufferConfig(
         dataset_cfg=train_dataset_cfg,
         dataloader_cfg=dataloader_config,
         tokenizer=tokenizer,
-        postprocessor_func=config_params["filter_func"],
+        postprocessor_func=kwargs.get("filter_func"),
     )
 
 
 def get_dapo_judger_config(tokenizer: Any, **kwargs):
-    defaults = {
+    dapo_defaults_args = {
         "enable_overlong_buffer": True,
         "overlong_buffer_len": 4096,
         "overlong_penalty_factor": 1.0,
     }
-    config_params = {**defaults, **kwargs}
-    eos_token_id = get_eos_token(config_params["model_path"])
+    dapo_config_params = {**dapo_defaults_args, **kwargs}
+    eos_token_id = get_eos_token(kwargs["model_path"])
     eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
     from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
 
-    filtered_params = _filter_pydantic_kwargs(DapoMathJudgerConfig, config_params)
+    filtered_params = _filter_pydantic_kwargs(DapoMathJudgerConfig, dapo_config_params)
     dapomath_judger_config = DapoMathJudgerConfig(
         judger_name="dapo_math",
         eos_token=eos_token_str,
-        max_response_len=config_params["max_response_length"],
+        max_response_len=kwargs["max_response_length"],
         tokenizer=tokenizer,
         **filtered_params,
     )
@@ -112,26 +82,14 @@ def get_gsm8k_judger_config():
 
 
 def get_evaluator_config(tokenizer: Any, **kwargs) -> Optional[EvaluatorConfig]:
-    """创建 Evaluator 配置."""
-    defaults = {
-        "enable_evaluate": False,
-        "enable_initial_evaluate": False,
-        "evaluate_step": 1,
-        "max_prompt_length": 2048,
-        "compute_metric_func": None,
-        "sample_params": SampleParams(),
-        "max_concurrent": 512,
-    }
-    config_params = {**defaults, **kwargs}
-
-    if not config_params["enable_evaluate"]:
+    if not kwargs["enable_evaluate"]:
         return None
 
-    eval_dataset = DatasetConfig(anno_path=config_params["eval_data_path"])
-    tokenizer_config = RLTokenizeFnConfig(max_length=config_params["max_prompt_length"])
+    eval_dataset = DatasetConfig(anno_path=kwargs["eval_data_path"])
+    tokenizer_config = RLTokenizeFnConfig(max_length=kwargs["max_prompt_length"])
     eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
 
-    filtered_params = _filter_pydantic_kwargs(EvaluatorConfig, config_params)
+    filtered_params = _filter_pydantic_kwargs(EvaluatorConfig, kwargs)
 
     return EvaluatorConfig(
         dataset_cfg=eval_dataset_cfg,

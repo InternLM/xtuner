@@ -26,6 +26,7 @@ params = {
     "total_epochs": 1,
     "train_optimizer_steps": 16,
     "hf_interval": 50,
+    "pack_max_length": 32768,
     # model settings
     "max_prompt_length": 2048,
     "max_response_length": 8192,
@@ -46,9 +47,9 @@ params = {
     # resource setting
     "num_workers": 8,
 }
-params["pack_max_length"] = params["max_prompt_length"] + params["max_response_length"]
 params["context_length"] = params["pack_max_length"]
-
+if params["pack_max_length"] < params["max_prompt_length"] + params["max_response_length"]:
+    params["pack_max_length"] = params["max_prompt_length"] + params["max_response_length"]
 
 # 创建核心组件
 tokenizer = AutoTokenizer.from_pretrained(params["model_path"], trust_remote_code=True)
