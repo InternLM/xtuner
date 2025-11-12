@@ -120,6 +120,7 @@ if [ "$RAY_RANK" -eq 0 ]; then
         \"XTUNER_USE_VLLM\": \"${XTUNER_USE_VLLM:-}\",
         \"PYTORCH_CUDA_ALLOC_CONF\": \"${PYTORCH_CUDA_ALLOC_CONF:-}\",
         \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
+        \"PYTHONUNBUFFERED\": \"1\",
         \"SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN\": \"1\"
       }
     }"

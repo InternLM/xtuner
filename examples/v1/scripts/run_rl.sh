@@ -31,6 +31,7 @@ export DATA_PATH=$DATA_PATH
 export EVAL_DATA_PATH=$EVAL_DATA_PATH
 export XTUNER_USE_FA3=${XTUNER_USE_FA3:-1}
 export XTUNER_LOG_LEVEL=${XTUNER_LOG_LEVEL:-"INFO"}
+export PYTHONUNBUFFERED=1
 
 infer_backend_lower=$(echo "$INFER_BACKEND" | tr '[:upper:]' '[:lower:]')
 if [ "$infer_backend_lower" = "sglang" ]; then
