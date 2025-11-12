@@ -40,9 +40,7 @@ def get_replay_buffer_config(tokenizer: Any, **kwargs) -> ReplayBufferConfig:
     tokenizer_config = RLTokenizeFnConfig(max_length=kwargs["max_prompt_length"])
     train_dataset = DatasetConfig(anno_path=kwargs["data_path"])
     train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
-    dataloader_config = DataloaderConfig(
-        pack_max_length=kwargs["pack_max_length"], collator="fake_collator", pack_level="none"
-    )
+    dataloader_config = DataloaderConfig(collator="fake_collator", pack_level="none")
     return ReplayBufferConfig(
         dataset_cfg=train_dataset_cfg,
         dataloader_cfg=dataloader_config,
