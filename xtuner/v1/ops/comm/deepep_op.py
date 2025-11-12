@@ -9,7 +9,7 @@ import torch.distributed as dist
 from deep_ep import Buffer, EventOverlap
 from deep_ep_cpp import EventHandle
 
-from xtuner.v1.utils import DEEPEP_SM, get_logger
+from xtuner.v1.utils import get_logger
 
 
 logger = get_logger()
@@ -20,7 +20,8 @@ _buffer: Optional[Buffer] = None
 _low_latency_buffer: Optional[Buffer] = None
 # Set the number of SMs to use
 # NOTES: this is a static variable
-Buffer.set_num_sms(DEEPEP_SM)
+# Buffer.set_num_sms(24)
+Buffer.set_num_sms(20)
 
 
 # You may call this function at the framework initialization
