@@ -4,7 +4,7 @@ from typing import List
 
 import ray
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
@@ -59,6 +59,8 @@ class JudgerConfig(BaseModel):
             }
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     enable_batch_reward: Annotated[
         bool, Parameter(help="Whether to enable batch reward calculation for multiple samples at once.")
     ] = False
@@ -69,6 +71,7 @@ class JudgerConfig(BaseModel):
         List[BaseModel],
         Parameter(help="A custom Python function for computing reward given model output and label."),
     ] = []
+    judger_timeout: Annotated[float, Parameter(help="Timeout for each judger request in seconds.")] = 1200.0
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 

@@ -438,15 +438,15 @@ class Qwen3VLVisionModel(BaseModel):
             dtype=torch.int32,
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
-                cu_seqlens=cu_seqlens,
-                max_seqlen=max_seqlen,
-                position_embeddings=position_embeddings
+                cu_seqlens,
+                max_seqlen,
+                position_embeddings
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = hidden_states

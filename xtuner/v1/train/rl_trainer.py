@@ -12,7 +12,7 @@ import torch
 from mmengine import load
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
 from typing_extensions import Self
 
@@ -51,6 +51,7 @@ def bind_train_rollout(
 
 
 class RLTrainerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     load_from: str | Path
     resources: AcceleratorResourcesConfig
     rollout_config: RolloutConfig
@@ -92,6 +93,26 @@ class RLTrainerConfig(BaseModel):
     @field_serializer("judger_config")
     def serialize_judger_config(self, judger_config: JudgerConfig) -> str:
         return judger_config.model_dump(exclude={"tokenizer", "reward_func"})
+
+
+def get_train_seq_ctx(
+    input_ids: torch.LongTensor, multimodal_train_info: dict | None = None, len_response_ids: int = 0
+):
+    seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
+    if multimodal_train_info and len(multimodal_train_info) > 0:
+        position_ids = multimodal_train_info.get("position_ids")  # (1,n) or (3,1,n)
+        if position_ids is not None and len(position_ids.shape) == 3:
+            # qwen3vl 需要特殊处理，其余的不需要额外处理
+            max_value = position_ids.max(dim=-1).values  # (3,1)
+            response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
+                1, len_response_ids + 1, device=max_value.device
+            )
+            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+            seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
+        seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
+        seq_ctx.image_flags = multimodal_train_info.get("image_flags")
+    return seq_ctx
 
 
 class RLTrainer:
@@ -191,8 +212,15 @@ class RLTrainer:
         trainer_cfg: RLTrainerConfig | None = None,
     ):
         """Initialize the RL training system."""
-        # TODO
-        rollout_config.model_path = load_from
+        if os.environ.get("XTUNER_USE_FA3", "0") == "1":
+            try:
+                from xtuner.v1.ops.flash_attn import get_flash_attn_varlen
+
+                get_flash_attn_varlen()
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0."
+                )
         train_worker_cfg.load_from = load_from
 
         self._total_epochs = total_epochs
@@ -366,8 +394,8 @@ class RLTrainer:
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
-                data_groups = ray.get(self._rollout_dataflow.run.remote())
-
+                ray.get(self._rollout_env_controller.check_active_workers.remote())
+                data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):
                 ray.get(self._rollout_env_controller.offload.remote())
@@ -379,7 +407,9 @@ class RLTrainer:
             with timer("onload_and_prepare_data", step_timer_dict):
                 ray.get(self._train_controller.onload.remote(target="all"))
                 self.logger.info("Training controller loaded")
-                data_batches, data_info = self._prepare_train_data(data_groups, self._train_worker_cfg.pack_max_length)
+                data_batches, data_info = self._prepare_train_data(
+                    data_groups, self._train_worker_cfg.pack_max_length, multimodal_train_infos
+                )
                 self.logger.info(f"Prepared {len(data_batches)} training data batches")
                 self._log_data_info(rollout_idx, data_info)
 
@@ -426,21 +456,30 @@ class RLTrainer:
 
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
-    def _prepare_train_data(self, data_groups, pack_max_length):
+    def _prepare_train_data(self, data_groups, pack_max_length, multimodal_train_infos=None):
         rewards_list = []
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
 
         data_batches = []
-        for group in data_groups:
+        is_multimodal = False
+        if multimodal_train_infos and len(multimodal_train_infos) > 0:
+            assert len(multimodal_train_infos) == len(data_groups), (
+                f"{len(multimodal_train_infos)} vs {len(data_groups)}"
+            )
+            is_multimodal = True
+
+        for j, group in enumerate(data_groups):
             if not check_dataflow_item(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
-            text_prompt = self.tokenizer.apply_chat_template(
-                group[0].data.messages, add_generation_prompt=True, tokenize=False
-            )
-            prompt_ids = self.tokenizer(text_prompt, return_tensors="pt")["input_ids"].flatten().tolist()
+            if is_multimodal:
+                multimodal_train_info = multimodal_train_infos[j]
+            else:
+                multimodal_train_info = None
+
+            prompt_ids = group[0].data.extra_info["train_prompt_ids"]
             rewards = [data.env.judger.reward["score"] for data in group]
             rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)
@@ -467,11 +506,7 @@ class RLTrainer:
                 advantages_list.extend([advantages[i]] * len(response_ids))
 
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids + [-100]
-                if len(input_ids) > pack_max_length:
-                    input_ids = input_ids[:pack_max_length]
-                    shifted_labels = shifted_labels[:pack_max_length]
-                    if logprobs is not None:
-                        logprobs = logprobs[:pack_max_length]
+                assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
@@ -483,9 +518,10 @@ class RLTrainer:
                 else:
                     rollout_logprobs = None
 
+                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids))
                 data_batches.append(
                     dict(
-                        seq_ctx=SequenceContext.from_input_ids((input_ids,), device="cpu"),
+                        seq_ctx=seq_ctx,
                         shifted_labels=shifted_labels,
                         advantage=advantages[i].item(),
                         rollout_logprobs=rollout_logprobs,
@@ -708,11 +744,7 @@ class RLTrainer:
                 timestamp=timestamp,
                 git_info=git_info,
             )
-            new_exp = ExpInfo(
-                history=[new_history],
-                exp_dir=str(exp_dir),
-                latest_checkpoint=None,
-            )
+            new_exp = ExpInfo(history=[new_history], exp_dir=str(exp_dir))
             meta.exps.append(new_exp)
         return meta
 

@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+import torch
 from typing_extensions import Self
 
 from transformers.models.deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
@@ -52,7 +53,7 @@ class DeepSeekV3(MoE):
 class DeepSeekV3Config(MoEConfig):
     vocab_size: int = 129280
     max_position_embeddings: int = 163840
-    pad_token_id: int = 1  # eos_id
+    pad_token_id: int | None = None
     eos_token_id: int = 1
     num_hidden_layers: int = 61
     first_k_dense_replace: int = 3
@@ -110,7 +111,7 @@ class DeepSeekV3Config(MoEConfig):
         config = cls(
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
-            pad_token_id=cfg.eos_token_id,
+            pad_token_id=getattr(cfg, "pad_token_id"),
             eos_token_id=cfg.eos_token_id,
             num_hidden_layers=cfg.num_hidden_layers,
             first_k_dense_replace=cfg.first_k_dense_replace,
@@ -194,4 +195,5 @@ class DeepSeekV3Config(MoEConfig):
             norm_topk_prob=self.router.norm_topk_prob,
             routed_scaling_factor=self.router.router_scaling_factor,
             tie_word_embeddings=self.tie_word_embeddings,
+            dtype=torch.bfloat16,
         )

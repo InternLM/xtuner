@@ -47,6 +47,7 @@ class vLLMWorker(RolloutWorker):
         tool_choice: str,  # reserved for agent tool use
         sample_params: dict,
         extra_params: dict,
+        extra_info: dict,
     ):
         headers = {
             "Content-Type": "application/json",
@@ -60,14 +61,7 @@ class vLLMWorker(RolloutWorker):
         payload.update(sample_params)
         payload.update(extra_params)
 
-        req = self.client.build_request(
-            "POST",
-            url,
-            headers=headers,
-            json=payload,
-        )
-        r = await self.client.send(req, stream=True)
-        return r
+        return await self._safe_post_request(url, headers, payload)
 
     def get_logprobs(self, input_ids, sampling_params):
         pass

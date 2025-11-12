@@ -1,7 +1,7 @@
 from typing import Optional
 
 from cyclopts import Group, Parameter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Annotated
 
 from xtuner.v1.engine.config import EngineConfig
@@ -20,6 +20,7 @@ rollout_resources_group = Group("Rollout Resources", sort_key=90, help="Configur
 class GRPOTrainerConfig(BaseModel):
     """Configuration for the GRPO Ray Trainer."""
 
+    model_config = ConfigDict(extra="forbid")
     actor: Annotated[
         EngineConfig,
         Parameter(group=actor_worker_group, help="Configuration for the rollout worker."),

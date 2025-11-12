@@ -8,7 +8,7 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.data_proto.rl_data import SampleParams
-from xtuner.v1.datasets import RLTextTokenizeFnConfig
+from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig
@@ -30,7 +30,7 @@ data_path = os.environ["DATA_PATH"]
 experimental_name = "grpo_gsm8k_tiny"
 total_epochs = 1
 global_batch_size = 128
-prompt_repeat_k = 1
+prompt_repeat_k = 8
 rollout_tp_size = 1
 rollout_ep_size = 1
 max_prompt_length = 512
@@ -55,6 +55,8 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.75,
+    context_length=max_prompt_length+max_response_length,
+    # rollout_max_batch_size_per_instance=1024,  # optional
 )
 
 # sampling params
@@ -64,14 +66,14 @@ training_sample_params = SampleParams(
 
 # dataset: 不需要修改
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
+tokenizer_config = RLTokenizeFnConfig(max_length=max_prompt_length)
 train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
 train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="fake_collator", pack_level="none")
 
 # 3. judger
-dapomath_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
-judger_cfg = JudgerConfig(reward_judger_configs=[dapomath_judger_config])
+gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
+judger_cfg = JudgerConfig(reward_judger_configs=[gsm8k_judger_config])
 
 # 4. dataflow and evaluator
 dataflow_config = DataFlowConfig(

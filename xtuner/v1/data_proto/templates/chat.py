@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Dict, List
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class ChatTemplate(BaseModel):
@@ -10,6 +10,7 @@ class ChatTemplate(BaseModel):
     and results."""
 
     # Normal Chat
+    model_config = ConfigDict(extra="forbid")
     meta_instruction: str = ""
     system: str  # System message format
     user: str  # User message format

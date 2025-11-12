@@ -30,6 +30,7 @@ class Qwen3Dense(Dense):
 
 class Qwen3DenseConfig(TransformerConfig):
     use_sliding_window: bool = False
+    pad_token_id: int | None = None
     bos_token_id: int
 
     def build(self) -> Qwen3Dense:
@@ -47,7 +48,7 @@ class Qwen3DenseConfig(TransformerConfig):
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
-            pad_token_id=hf_config.eos_token_id,
+            pad_token_id=getattr(hf_config, "pad_token_id"),
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
@@ -101,7 +102,6 @@ class Qwen3DenseConfig(TransformerConfig):
 class Qwen3Dense8BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    pad_token_id: int = 151643
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 36
@@ -121,7 +121,6 @@ class Qwen3Dense8BConfig(Qwen3DenseConfig):
 class Qwen3Dense4BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 262144
-    pad_token_id: int = 151643
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 36
@@ -136,3 +135,22 @@ class Qwen3Dense4BConfig(Qwen3DenseConfig):
         num_attention_heads=32, num_key_value_heads=8, head_dim=128, qk_norm=True, sliding_window=1024
     )
     tie_word_embeddings: bool = True
+
+
+class Qwen3Dense0P6BConfig(Qwen3DenseConfig):
+    vocab_size: int = 151936
+    max_position_embeddings: int = 40960
+    eos_token_id: int = 151645
+    bos_token_id: int = 151643
+    num_hidden_layers: int = 28
+    max_window_layers: int = 28
+    hidden_size: int = 1024
+    intermediate_size: int = 3072
+    rms_norm_eps: float = 1e-6
+    rope_theta: float = 1000000.0
+    hidden_act: str = "silu"
+
+    attention: MHAConfig = MHAConfig(
+        num_attention_heads=16, num_key_value_heads=8, head_dim=128, qk_norm=True, sliding_window=None
+    )
+    tie_word_embeddings: bool = False  # 官方的是 False

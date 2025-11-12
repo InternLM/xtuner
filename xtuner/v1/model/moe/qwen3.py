@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+import torch
 from typing_extensions import Self
 
 from transformers.models.qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
@@ -57,11 +58,11 @@ class Qwen3MoEConfig(MoEConfig):
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
-            pad_token_id=hf_config.eos_token_id,
+            pad_token_id=getattr(hf_config, "pad_token_id"),
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
-            max_window_layers=hf_config.max_window_layers,
+            max_window_layers=getattr(hf_config, "max_window_layers"),
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
@@ -102,6 +103,7 @@ class Qwen3MoEConfig(MoEConfig):
             eos_token_id=self.eos_token_id,
             pad_token_id=self.pad_token_id,
             num_hidden_layers=self.num_hidden_layers,
+            max_window_layers=self.max_window_layers,
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
             moe_intermediate_size=self.moe_intermediate_size,
@@ -117,13 +119,17 @@ class Qwen3MoEConfig(MoEConfig):
             num_experts=self.n_routed_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             norm_topk_prob=self.router.norm_topk_prob,
+            dtype=torch.bfloat16,
         )
 
 
 class Qwen3MoE30BA3Config(Qwen3MoEConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    pad_token_id: int = 151643
+    # Qwen3 Model(dense and moe)'s pad_token_id is not set, so we need to set it to None.
+    # If this pad_token_id is not set, the embedding module will not act specially for pad token.
+    # Note: Qwen3 Model's pad_token_id may be different from Qwen tokenizer's pad_token_id.
+    pad_token_id: int | None = None
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 48
@@ -155,7 +161,7 @@ class Qwen3MoE30BA3Config(Qwen3MoEConfig):
 class Qwen3MoE235BA22Config(Qwen3MoEConfig):
     vocab_size: int = 151936
     max_position_embeddings: int = 40960
-    pad_token_id: int = 151643
+    pad_token_id: int | None = None
     eos_token_id: int = 151645
     bos_token_id: int = 151643
     num_hidden_layers: int = 94

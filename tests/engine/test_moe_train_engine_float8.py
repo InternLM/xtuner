@@ -335,7 +335,6 @@ class TestMoEEngineFloat8Case2(DeterministicDDPTestCase):
             torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
-            max_length=8192,
             hsdp_sharding_size=hsdp_sharding_size,
         )
         engine_bf16 = TrainEngine(
