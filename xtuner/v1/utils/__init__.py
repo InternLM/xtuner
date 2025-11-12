@@ -4,7 +4,6 @@ from .device import get_device, get_torch_device_module
 from .dtensor import is_evenly_distributed
 from .enum_helper import StrEnum
 from .exception_helper import ParallelConfigException
-from .global_var import DEEPEP_SM, DISTRIBUTED_COMMUNICATION_SM, NUM_SMS
 from .init_weight import default_init_weights, init_params
 from .loader import HFCheckpointLoader
 from .logger import get_logger, log_format
@@ -46,7 +45,4 @@ __all__ = [
     "default_init_weights",
     "IGNORE_INDEX",
     "monkey_unpatch_torch_reductions",
-    "DEEPEP_SM",
-    "DISTRIBUTED_COMMUNICATION_SM",
-    "NUM_SMS",
 ]

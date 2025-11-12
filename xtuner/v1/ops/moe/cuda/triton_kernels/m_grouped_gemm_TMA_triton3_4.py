@@ -6,8 +6,6 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from xtuner.v1.utils import DISTRIBUTED_COMMUNICATION_SM, NUM_SMS
-
 
 def get_cuda_autotune_config():
     return [
@@ -247,7 +245,9 @@ def repeat_interleave(
 
 
 @torch.library.custom_op("moe::m_grouped_gemm", mutates_args=())
-def m_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False) -> Tensor:
+def m_grouped_gemm(
+    A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False, numSM: int = -1
+) -> Tensor:
     assert A.dim() == 2
     assert B.dim() == 3
 
@@ -280,7 +280,7 @@ def m_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: 
     group_end = size_per_group.cumsum(0) - size_per_group + size_per_group
     group_start = size_per_group.cumsum(0) - size_per_group
 
-    NUM_AVAILABLE_SMS = NUM_SMS - DISTRIBUTED_COMMUNICATION_SM
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count if numSM <= 0 else numSM
 
     dtype_mapping = {torch.bfloat16: 0, torch.float16: 1}
     dtype_a = dtype_mapping.get(A.dtype, -1)
@@ -290,7 +290,7 @@ def m_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: 
     def grid(META):
         # assert N % META["BLOCK_N"] == 0, "Only support when N is a multiple of BLOCK_N"
 
-        return (NUM_AVAILABLE_SMS,)
+        return (NUM_SMS,)
 
     # TMA descriptors require a global memory allocation
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):
@@ -324,7 +324,7 @@ def m_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: 
 
 
 @m_grouped_gemm.register_fake
-def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False) -> Tensor:
+def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False, numSM: int = -1) -> Tensor:
     M, K = A.shape
     if trans_b:
         num_groups, N, BK = B.shape
