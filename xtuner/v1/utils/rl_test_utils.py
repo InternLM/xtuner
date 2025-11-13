@@ -4,7 +4,6 @@ import time
 from typing import Any, Dict, List
 
 import httpx
-import ray
 import requests
 import uvicorn
 from fastapi import FastAPI
@@ -37,7 +36,6 @@ def get_eos_token(model_path: str) -> int | List[int]:
     return eos_token_id
 
 
-@ray.remote
 class MockTimeoutRolloutWorker(LMDeployWorker):
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
         try:
@@ -52,7 +50,6 @@ class MockTimeoutRolloutWorker(LMDeployWorker):
         pass  # Override
 
 
-@ray.remote
 class MockRequestErrorRolloutWorker(LMDeployWorker):
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
         try:
@@ -67,7 +64,6 @@ class MockRequestErrorRolloutWorker(LMDeployWorker):
         pass  # Override
 
 
-@ray.remote
 class MockClientErrorRolloutWorker(LMDeployWorker):
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
         try:
@@ -84,7 +80,6 @@ class MockClientErrorRolloutWorker(LMDeployWorker):
         pass  # Override
 
 
-@ray.remote
 class MockServerErrorRolloutWorker(LMDeployWorker):
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
         try:

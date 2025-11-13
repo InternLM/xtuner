@@ -6,7 +6,7 @@ import time
 import traceback
 import uuid
 from abc import abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import httpx
 import ray
@@ -21,7 +21,7 @@ from xtuner.v1.ray import find_master_addr_and_port
 from xtuner.v1.ray.base import AutoAcceleratorWorkers, SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import get_logger
-from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
+from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult, set_rollout_response_status
 
 
 class RolloutWorker(SingleAcceleratorWorker):
@@ -315,7 +315,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         extra_params: dict,
         format: str,
         extra_info: dict,
-    ) -> Tuple[RLRolloutResponseItem, HttpRequestResult]:
+    ) -> RLRolloutResponseItem:
         uid = extra_info.get("action_id", str(uuid.uuid4()))
         response = None
         failed_rollout_response = RLRolloutResponseItem(finish_reason="failed")
@@ -353,30 +353,15 @@ class RolloutWorker(SingleAcceleratorWorker):
             finally:
                 if hasattr(response, "aclose"):
                     await response.aclose()
-            return rollout_response, http_result
+            return rollout_response
         else:
-            if http_result.is_retryable:
-                failed_rollout_response.finish_reason = "failed"
-                self.logger.warning(f"Retryable error occurred during rollout request {uid} to {http_result.url}")
-                return failed_rollout_response
-            elif http_result.is_server_error:
-                failed_rollout_response.finish_reason = "failed"
-                failed_rollout_response.extra_info = {"url": self.server_url}
-                self.logger.error(
-                    f"Server error during rollout request {uid} to {http_result.url}, please check the server logs."
-                )
-                http_result.url = self.server_url
-                return failed_rollout_response
-            elif http_result.is_client_error:
-                failed_rollout_response.finish_reason = "skipped"
-                self.logger.error(
-                    f"Client error during rollout request {uid} to {http_result.url} and skip this request."
-                )
-                return failed_rollout_response
-            else:
+            if http_result.is_unknown_error:
                 raise RuntimeError(
                     f"Unexpected error during rollout request {uid} to {http_result.url}: {http_result.exception}"
                 )
+            else:
+                set_rollout_response_status(http_result, failed_rollout_response, self.server_url)
+                return failed_rollout_response
 
     async def _handle_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
         last_trajectory = ""
@@ -546,7 +531,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         extra_params: dict = dict(),
         format: str = "openai",
         extra_info: dict = dict(),
-    ) -> Tuple[RLRolloutResponseItem, HttpRequestResult]:
+    ) -> RLRolloutResponseItem:
         """Public method to initiate a rollout.
 
         Args:
