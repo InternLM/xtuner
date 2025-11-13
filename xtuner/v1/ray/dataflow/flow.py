@@ -196,6 +196,7 @@ class DataFlow:
             self.logger.warning(
                 f"Bad request for {group_data_items[0].uid.action_id} response. Skipping this request."
             )
+            self.logger.debug(f"Worker task skipped successfully for {group_data_items[0].uid.action_id}.")
             return
 
         # step 3: filter
@@ -258,14 +259,14 @@ class DataFlow:
                         if result[0].extra_info.retry_times < self.config.max_retry_times:
                             # If the retry count is less than max_retry_times, retry the task
                             self.logger.info(
-                                f"Retrying task for {result[0].data}. Retry count: {result[0].extra_info.retry_times}"
+                                f"Retrying task for {result[0].uid.action_id}. Retry count: {result[0].extra_info.retry_times}"
                             )
                             retry_task = create_task(self.worker_task(group_samples_for_retry=result))
                             pending_tasks.add(retry_task)
                         else:
                             self.failed_samples_count += 1
                             self.logger.error(
-                                f"Max retry reached for {result[0].data}. Not retrying. Current failed count: {self.failed_samples_count}"
+                                f"Max retry reached for {result[0].uid.action_id}. Not retrying. Current failed count: {self.failed_samples_count}"
                             )
                 self.finished_samples_count = ray.get(self.replay_buffer.get_finished_samples.remote())
                 waiting_tasks = pending_tasks

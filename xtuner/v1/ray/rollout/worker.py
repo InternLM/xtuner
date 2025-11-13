@@ -356,19 +356,26 @@ class RolloutWorker(SingleAcceleratorWorker):
             return rollout_response, http_result
         else:
             if http_result.is_retryable:
+                failed_rollout_response.finish_reason = "failed"
                 self.logger.warning(f"Retryable error occurred during rollout request {uid} to {http_result.url}")
-                return failed_rollout_response, http_result
+                return failed_rollout_response
             elif http_result.is_server_error:
+                failed_rollout_response.finish_reason = "failed"
                 self.logger.error(
                     f"Server error during rollout request {uid} to {http_result.url}, please check the server logs."
                 )
                 http_result.url = self.server_url
-                return failed_rollout_response, http_result
-            else:  # http_result.is_client_error:
+                return failed_rollout_response
+            elif http_result.is_client_error:
+                failed_rollout_response.finish_reason = "skipped"
                 self.logger.error(
                     f"Client error during rollout request {uid} to {http_result.url} and skip this request."
                 )
-                return failed_rollout_response, http_result
+                return failed_rollout_response
+            else:
+                raise RuntimeError(
+                    f"Unexpected error during rollout request {uid} to {http_result.url}: {http_result.exception}"
+                )
 
     async def _handle_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
         last_trajectory = ""
