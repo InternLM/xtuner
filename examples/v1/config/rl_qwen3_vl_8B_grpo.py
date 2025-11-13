@@ -92,7 +92,7 @@ train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
 eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path) if enable_evaluate else None
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path)
+tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path, max_length=max_prompt_length)
 train_dataset_cfg = [
     {
             "dataset": DatasetConfig(name="geo3k",
