@@ -192,6 +192,11 @@ class DataFlow:
                 f"Dataflow item check failed for {group_data_items[0].uid.action_id} response. Returning meta for retry."
             )
             return group_data_items
+        if any(item.env.rollout.finish_reason == "skipped" for item in group_data_items):
+            self.logger.warning(
+                f"Bad request for {group_data_items[0].uid.action_id} response. Skipping this request."
+            )
+            return
 
         # step 3: filter
         filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
