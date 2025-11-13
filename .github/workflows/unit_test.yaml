@@ -10,7 +10,7 @@ on:
 env:
   WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
   WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)
-  IMAGE: registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_20250911_6652194_fix_pip
+  IMAGE: registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_20251113_22badb0_grouped_router_topk1
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -30,4 +30,4 @@ jobs:
     - name: unit-test
       run: |
         export PYTHONPYCACHEPREFIX=/tmp
-        python ci/scripts/xtuner_unittest.py "$IMAGE" "source ${{env.WORKSPACE_PREFIX}}/BASE_ENV.sh;source ci/scripts/CI_ENV.sh" "pytest tests --ignore=./tests/module/dispatcher/test_deepep.py"
+        python ci/scripts/xtuner_unittest.py "$IMAGE" "source ${{env.WORKSPACE_PREFIX}}/BASE_ENV.sh;source ci/scripts/CI_ENV.sh" "pytest tests"
