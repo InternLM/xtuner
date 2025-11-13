@@ -69,7 +69,7 @@ class RLRolloutResponseItem(BaseModel):
     response: Optional[str] = None
     response_ids: Optional[List[int]] = None
     num_return_tokens: Optional[int] = None
-    finish_reason: Optional[str] = None
+    finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
     logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
 

@@ -62,18 +62,18 @@ class SingleTurnEnvironment(BaseEnvironment):
                 and state from the rollout controller.
         """
         if self.rollout_controller:
-            # 在env中对输入的数据进行转换，是为了支持rollout_controller单独作为rollout engine使用，使各个模块进行解耦
-            # 每个模块返回独立的data item, 在env中进行更新
-            response_future = [
-                self.rollout_controller.rollout.remote(
+            response_future = []
+            for sample in group_data_items:
+                sample.data.extra_info["root_id"] = sample.uid.root_id
+                sample.data.extra_info["action_id"] = sample.uid.action_id
+                fut = self.rollout_controller.rollout.remote(
                     prompt=sample.data.messages,
                     input_ids=sample.data.input_ids,
                     sample_params=sample_params,
                     extra_params=extra_params,
                     extra_info=sample.data.extra_info,
                 )
-                for sample in group_data_items
-            ]
+                response_future.append(fut)
             try:
                 rollout_responses = await asyncio.wait_for(
                     asyncio.gather(*response_future), timeout=self.rollout_timeout
@@ -109,8 +109,7 @@ class SingleTurnEnvironment(BaseEnvironment):
         """
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
         skip_judger = any(
-            item.env.rollout.finish_reason == "abort" or item.env.rollout.finish_reason == "failed"
-            for item in group_data_items
+            item.env.rollout.finish_reason in ["failed", "skipped", "abort"] for item in group_data_items
         )
         if self.judger_controller and not skip_judger:
             try:
