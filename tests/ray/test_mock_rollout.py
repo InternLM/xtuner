@@ -98,6 +98,9 @@ class TestMockRollout(unittest.TestCase):
             tokenizer=tokenizer,
         )
 
+    def tearDown(self):
+        ray.shutdown()
+
     def _run_mock_test(self, mock_controller_cls, error_name: str):
         rollout_controller = mock_controller_cls.remote(self.rollout_cfg, self.pg)
         self.test_env = SingleTurnEnvironment.remote("env", self.pg, self.rollout_cfg, rollout_controller=rollout_controller)
@@ -111,8 +114,7 @@ class TestMockRollout(unittest.TestCase):
         self.assertEqual(len(completed_rollouts[0]), 0, f"[{error_name}] Expected no rollouts to complete successfully.")
         self.assertEqual(status["rollout_finished_count"], 0, f"[{error_name}] Completed count in buffer should be 0.")
         self.assertEqual(status["rollout_paused_count"], 0, f"[{error_name}] Expected {self.global_batch_size} rollouts to be interrupted.")
-        ray.get(self.test_env.shutdown.remote(), timeout=300)
-
+        
     def test_rollout_with_timeout_mock(self):
         self._run_mock_test(MockTimeoutRolloutController, "timeout")
         
