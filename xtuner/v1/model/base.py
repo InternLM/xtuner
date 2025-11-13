@@ -414,7 +414,11 @@ class BaseModel(nn.Module):
         return gathered_tensor_list_new, name_list_new
 
     def _get_shard_hf_param(
-        self, params: list[tuple[torch.Tensor, LoadSpec]], dtype: torch.dtype = torch.bfloat16
+        self,
+        params: list[tuple[torch.Tensor, LoadSpec]],
+        dtype: torch.dtype,
+        device="cpu",
+        bucket_size=None,
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
@@ -442,9 +446,11 @@ class BaseModel(nn.Module):
                 self.param_to_safetensor(safetensor, name)
                 for safetensor, name in zip(unsharded_tensor_list, name_list)
             ]
-            unsharded_tensor_list = [t.cpu() for t in unsharded_tensor_list]
+            unsharded_tensor_list = [t.to(device) for t in unsharded_tensor_list]
             return unsharded_tensor_list
 
+        if bucket_size is None:
+            bucket_size = self.SAFETENSOR_SIZE
         safetensor_size = 0
         tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
         name_list: list[str] = []
@@ -453,7 +459,7 @@ class BaseModel(nn.Module):
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.to(dtype=dtype)
             tensor_size = self._get_tensor_size(param, dtype)
-            if safetensor_size + tensor_size > self.SAFETENSOR_SIZE and tensor_list:
+            if safetensor_size + tensor_size > bucket_size and tensor_list:
                 hf_params = _get_hf_params(tensor_list)
 
                 yield name_list, hf_params
