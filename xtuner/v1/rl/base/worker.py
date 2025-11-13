@@ -1,6 +1,7 @@
 import json
 import math
 import os
+from itertools import chain
 from pathlib import Path
 from typing import Dict, List, TypeAlias, TypedDict, cast
 
@@ -36,6 +37,7 @@ from xtuner.v1.utils import (
     get_torch_device_module,
     monkey_unpatch_torch_reductions,
 )
+from xtuner.v1.utils.load_spec import LoadEnum
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig, RLLossContextInputItem
@@ -543,9 +545,50 @@ class TrainingWorker(SingleAcceleratorWorker):
                 "lmdeploy_backend", "pytorch"
             )
 
+    def update_weights(self):
+        """Update the model weights."""
+        if self.rollout_cfg_info.get("backend") == "turbomind":
+            self._update_weights_by_layer()
+        else:
+            self._update_weights_with_generator()
+
+    def _update_weights_with_generator(self):
+        """Update the model weights."""
+        self.endpoints["update_weights"] = "update_weights"
+        assert self.rollout_device_mesh is not None
+
+        model = self._engine.model
+        DEVICE_MODULE.empty_cache()
+
+        if isinstance(model.config, VisionComposeConfigProtocol):
+            dtype = torch.bfloat16
+        else:
+            if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
+                dtype = torch.float8_e4m3fn
+            else:
+                dtype = torch.bfloat16
+
+        same_gen = model._get_same_hf_param(model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE)
+        fused_gen = model._get_fused_hf_param(
+            model._group_param_by_load_spec(LoadEnum.FUSED), dtype=dtype, device=DEVICE
+        )
+        shard_gen = model._get_shard_hf_param(
+            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE
+        )
+        for name_list, param_list in chain(same_gen, fused_gen, shard_gen):
+            state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
+            self.request_update_params(state_dict, finished=False)
+
+        if self.rollout_cfg_info["backend"] == "pytorch":
+            self.request_update_params({}, finished=True)
+
+        dist.barrier()
+        DEVICE_MODULE.empty_cache()
+        return
+
     # TODO(hha): 这个逻辑和某个模型绑定死了。一定要重构掉
     # TODO(hha): 如果有 freeze 参数应该不需要同步
-    def update_weights(self):
+    def _update_weights_by_layer(self):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
@@ -611,14 +654,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 name_list.append(name)
                 tensor_list.append((local_tensor, load_spec))
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
-            if self.rollout_cfg_info["backend"] == "pytorch":
-                state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
-                self.request_update_params(state_dict)
-            else:
-                state_dict = []
-                for name, tensor in zip(name_list, fsdp_unshard_tensor_list):
-                    state_dict.append((name, tensor))
-                self.request_update_params(state_dict)
+            state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+            self.request_update_params(state_dict)
 
         for name, param in model.state_dict().items():
             if name in saved_list:
@@ -646,14 +683,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             tensor_list = [(local_tensor, load_spec)]
             name_list = [name]
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
-            if self.rollout_cfg_info["backend"] == "pytorch":
-                state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
-                self.request_update_params(state_dict)
-            else:
-                state_dict = []
-                for name, tensor in zip(name_list, fsdp_unshard_tensor_list):
-                    state_dict.append((name, tensor))
-                self.request_update_params(state_dict)
+            state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
+            self.request_update_params(state_dict)
 
         if self.rollout_cfg_info["backend"] == "pytorch":
             self.request_update_params({}, finished=True)
@@ -914,6 +945,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             # NOTE: xtuner目前去掉sglang的patch也不会出问题，但为了保险起见，还是保留patch逻辑，并且在update_weights结束后unpatch
             monkey_patch_torch_reductions()
+            state_dict = state_dict.items()
             if self.rollout_cfg_info["tp"] == 1:
                 if use_flattened_tensor_bucket:
                     flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=state_dict)
