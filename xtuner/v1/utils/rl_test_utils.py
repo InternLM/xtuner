@@ -45,7 +45,7 @@ class MockTimeoutRolloutWorker(LMDeployWorker):
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked exception: {e.__class__.__name__}")
+            self.logger.info(f"Caught mocked timeout exception: {e.__class__.__name__}")
             return result
 
     def launch_server(self):
@@ -60,7 +60,7 @@ class MockRequestErrorRolloutWorker(LMDeployWorker):
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked exception: {e.__class__.__name__}")
+            self.logger.info(f"Caught mocked request error exception: {e.__class__.__name__}")
             return result
 
     def launch_server(self):
@@ -77,7 +77,7 @@ class MockClientErrorRolloutWorker(LMDeployWorker):
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked exception: {e.__class__.__name__}")
+            self.logger.info(f"Caught mocked client exception: {e.__class__.__name__}")
             return result
 
     def launch_server(self):
@@ -94,7 +94,7 @@ class MockServerErrorRolloutWorker(LMDeployWorker):
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked exception: {e.__class__.__name__}")
+            self.logger.info(f"Caught mocked server exception: {e.__class__.__name__}")
             return result
 
     def launch_server(self):

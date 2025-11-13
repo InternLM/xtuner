@@ -269,6 +269,7 @@ class RolloutController:
                 f"Rollout worker {url} failed {self.url_failed_counts[url]} times, but not deactivated yet."
             )
             return
+        self.logger.error(f"Deactivating rollout worker {url} due to repeated failures.")
         inactive_workers = self.active_url_to_workers.get(url)
         self.active_workers_to_status[inactive_workers] = False
 
@@ -325,6 +326,10 @@ class RolloutController:
         )
         try:
             response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout)
+            if response.extra_info and "url" in response.extra_info:
+                url = response.extra_info["url"]
+                if response.finish_reason == "failed":
+                    self.deactivate_worker_by_url(url)
             return response
         except asyncio.TimeoutError:
             self.logger.error("Get response from rollout worker timeout and return the failed response.")

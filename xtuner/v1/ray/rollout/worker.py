@@ -361,6 +361,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 return failed_rollout_response
             elif http_result.is_server_error:
                 failed_rollout_response.finish_reason = "failed"
+                failed_rollout_response.extra_info = {"url": self.server_url}
                 self.logger.error(
                     f"Server error during rollout request {uid} to {http_result.url}, please check the server logs."
                 )
