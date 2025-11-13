@@ -550,9 +550,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rollout_cfg_info.get("backend") == "turbomind":
             self._update_weights_by_layer()
         else:
-            self._update_weights_with_generator()
+            self._update_weights_hf_generator()
 
-    def _update_weights_with_generator(self):
+    def _update_weights_hf_generator(self):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
@@ -586,8 +586,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         DEVICE_MODULE.empty_cache()
         return
 
-    # TODO(hha): 这个逻辑和某个模型绑定死了。一定要重构掉
-    # TODO(hha): 如果有 freeze 参数应该不需要同步
     def _update_weights_by_layer(self):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
