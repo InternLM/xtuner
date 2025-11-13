@@ -120,8 +120,8 @@ def is_hf_model_path(path: str | Path) -> bool:
         AutoConfig.from_pretrained(path, trust_remote_code=True)
     except KeyboardInterrupt as e:
         raise e
-    except Exception:
-        logger.debug(f"Model path {path} is not a valid HuggingFace model path.")
+    except Exception as e:
+        logger.debug(f"Model path {path} is not a valid HuggingFace model path. Error: {e}")
         return False
     else:
         return True
