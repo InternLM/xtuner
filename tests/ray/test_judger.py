@@ -209,21 +209,19 @@ class TestJudgerController(unittest.TestCase):
 
         server = JudgerServer(port=8018)
         server.start()
-
-        remote_judger_config = GSM8KRemoteJudgerConfig(judger_name="openai/gsm8k", remote_url=server.url)
-        judger_cfg = JudgerConfig(
-            reward_judger_configs=[remote_judger_config]
-        )
-        judger_controller = JudgerController.remote(judger_cfg)
-        judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
-        group_data = ray.get(judger_controller.run.remote(judger_data))
-        reward = [data.reward["score"] for data in group_data]
-        verl_score = 0.2418
-        self.assertEqual(round(np.mean(reward), 4), verl_score)
-        server.stop()
-
-    def tearDown(self):
-        ray.shutdown()
+        try:
+            remote_judger_config = GSM8KRemoteJudgerConfig(judger_name="openai/gsm8k", remote_url=server.url)
+            judger_cfg = JudgerConfig(
+                reward_judger_configs=[remote_judger_config]
+            )
+            judger_controller = JudgerController.remote(judger_cfg)
+            judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
+            group_data = ray.get(judger_controller.run.remote(judger_data))
+            reward = [data.reward["score"] for data in group_data]
+            verl_score = 0.2418
+            self.assertEqual(round(np.mean(reward), 4), verl_score)
+        finally:
+            server.stop()
 
 
 if __name__ == "__main__":

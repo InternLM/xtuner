@@ -385,6 +385,7 @@ class RLTrainer:
         """
         self.logger.info("Start RL training")
         if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator:
+            ray.get(self._rollout_env_controller.check_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)

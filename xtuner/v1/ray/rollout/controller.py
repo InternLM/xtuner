@@ -97,6 +97,11 @@ class RolloutController:
                 RolloutWorker actors.
         """
         self.config = infer_config
+        self.num_gpus_per_engine = (
+            self.config.expert_parallel_size
+            if self.config.expert_parallel_size > 1
+            else self.config.tensor_parallel_size
+        )
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
@@ -155,6 +160,23 @@ class RolloutController:
             except OSError:
                 return True
 
+    def _update_active_workers_and_urls(self):
+        """Update the list of active rollout workers and their server URLs.
+
+        When the inference engine is launched across nodes (rollout_cross_node_comm=True), only the worker with
+        tp_rank=0 in each engine is responsible for receiving input data. Other tp_ranks do not accept input.
+        Therefore, this function updates active_rollout_workers and worker_server_urls_map to keep only the tp_rank=0
+        workers and their corresponding URLs.
+        """
+        if self.config.rollout_cross_node_comm or self.num_gpus_per_engine < self.config.gpus_per_node:
+            return
+        else:
+            active_worker_interval = self.num_gpus_per_engine // self.config.gpus_per_node
+            self.active_rollout_workers = self.active_rollout_workers[::active_worker_interval]
+            active_rank = list(self.worker_server_urls_map.keys())[::active_worker_interval]
+            active_worker_server_urls = list(self.worker_server_urls_map.values())[::active_worker_interval]
+            self.worker_server_urls_map = dict(zip(active_rank, active_worker_server_urls))
+
     def get_rollout_info(self):
         """Get information about the current rollout setup.
 
@@ -203,11 +225,9 @@ class RolloutController:
         ray.get(set_bundle_idxs_objectref)
         # init dist_init_addr for each worker according to parallel settings
         init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in self.active_rollout_workers])  # type: ignore[attr-defined]
-        dist_init_addrs = self._update_dist_init_addr(
-            nodes_per_engine, init_dist_init_addrs, self.config.tensor_parallel_size
-        )
+        dist_init_addrs = self._update_dist_init_addr(nodes_per_engine, init_dist_init_addrs, self.num_gpus_per_engine)
         # launch rollout servers
-        worker_server_urls_map = dict(
+        self.worker_server_urls_map = dict(
             ray.get(
                 [
                     worker.init.remote(dist_init_addrs[i])  # type: ignore[attr-defined]
@@ -215,9 +235,10 @@ class RolloutController:
                 ]
             )
         )
-        self.worker_server_urls = list(worker_server_urls_map.values())
+        self._update_active_workers_and_urls()
+        self.worker_server_urls = list(self.worker_server_urls_map.values())
         self.active_rollout_workers_status = {worker: True for worker in self.active_rollout_workers}
-        return engine_mesh_list, worker_server_urls_map
+        return engine_mesh_list, self.worker_server_urls_map
 
     def check_active_workers(self):
         """Check the health of all active rollout workers.
@@ -232,6 +253,9 @@ class RolloutController:
         )
         for idx, status in enumerate(active_worker_response):
             if not status:
+                self.logger.info(
+                    f"Rollout worker {self.active_rollout_workers[idx]} is unhealthy. Removing it from active workers."
+                )
                 self.active_rollout_workers_status[self.active_rollout_workers[idx]] = False
 
     async def rollout(
@@ -366,9 +390,12 @@ class RolloutController:
         # of active servers based on the configuration.
         support_cross_node_comm = infer_config.rollout_cross_node_comm
         gpus_per_node = infer_config.gpus_per_node
-        tp_size = infer_config.tensor_parallel_size
-        nodes_per_engine = 1 if support_cross_node_comm or tp_size < gpus_per_node else tp_size // gpus_per_node
-        active_servers_count = int((gpu_nums // tp_size) * nodes_per_engine)
+        nodes_per_engine = (
+            1
+            if support_cross_node_comm or self.num_gpus_per_engine < gpus_per_node
+            else self.num_gpus_per_engine // gpus_per_node
+        )
+        active_servers_count = int((gpu_nums // self.num_gpus_per_engine) * nodes_per_engine)
         return active_servers_count, nodes_per_engine
 
     def _broadcast_to_active_workers(self, method_name: str, block: bool):
