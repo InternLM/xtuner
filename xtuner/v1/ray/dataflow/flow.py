@@ -116,6 +116,7 @@ class DataFlow:
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
+        self.input_error_sample_count = 0
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
@@ -198,6 +199,7 @@ class DataFlow:
                 f"Bad request for {group_data_items[0].uid.action_id} response. Skipping this request."
             )
             self.logger.debug(f"Worker task skipped successfully for {group_data_items[0].uid.action_id}.")
+            self.input_error_sample_count += 1
             return
 
         # step 3: filter
@@ -236,6 +238,7 @@ class DataFlow:
             while (
                 self.finished_samples_count < self.target_batch_size
                 and self.failed_samples_count < self.target_batch_size
+                and self.input_error_sample_count < self.target_batch_size
             ):
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
@@ -277,7 +280,10 @@ class DataFlow:
 
         if self.finished_samples_count >= self.target_batch_size:
             self.logger.info("Target batch size reached. Pausing env controller.")
-        if self.failed_samples_count >= self.target_batch_size:
+        if (
+            self.failed_samples_count >= self.target_batch_size
+            or self.input_error_sample_count >= self.target_batch_size
+        ):
             self.logger.info("Max failed samples reached. Pausing env controller.")
 
         # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
@@ -351,6 +357,7 @@ class DataFlow:
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
+        self.input_error_sample_count = 0
         self.target_batch_size = num if num and num > 0 else self.config.global_batch_size
         self.logger.info(f"Start generate dataflow and target batch size set to {self.target_batch_size}.")
         self.sample_params = sample_params if sample_params else self.config.sample_params

@@ -75,6 +75,7 @@ class TestMockRollout(unittest.TestCase):
             tokenizer_path=MODEL_PATH,
             tensor_parallel_size=1,
             context_length=self.max_prompt_length + self.max_response_length,
+            max_retry_per_worker=2
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
@@ -106,7 +107,6 @@ class TestMockRollout(unittest.TestCase):
         self.test_env = SingleTurnEnvironment.remote("env", self.pg, self.rollout_cfg, rollout_controller=rollout_controller)
         self.test_dataflow = DataFlow.remote("dataflow", self.dataflow_cfg, self.replay_buffer_cfg, self.test_env)
         
-        # 运行一个批次
         completed_rollouts = ray.get(self.test_dataflow.run.remote(num=3))
 
         status = ray.get(self.test_dataflow.get_replaybuffer_status.remote())
@@ -114,11 +114,10 @@ class TestMockRollout(unittest.TestCase):
         self.assertEqual(len(completed_rollouts[0]), 0, f"[{error_name}] Expected no rollouts to complete successfully.")
         self.assertEqual(status["rollout_finished_count"], 0, f"[{error_name}] Completed count in buffer should be 0.")
         self.assertEqual(status["rollout_paused_count"], 0, f"[{error_name}] Expected {self.global_batch_size} rollouts to be interrupted.")
-        
+
     def test_rollout_with_timeout_mock(self):
         self._run_mock_test(MockTimeoutRolloutController, "timeout")
         
-
     def test_rollout_with_request_error_mock(self):
         self._run_mock_test(MockRequestErrorRolloutController, "request error")
     
