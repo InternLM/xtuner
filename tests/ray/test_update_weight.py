@@ -51,9 +51,7 @@ class TestUpdateWeight(unittest.TestCase):
             gpus_per_node=8, # gpu: 8, npu: 16
             dtype="bfloat16",
             skip_load_weights=True,
-            extra_rollout_config = {
-                "lmdeploy_backend": "pytorch",
-            }
+            context_length=256,
         )
 
         # training config
@@ -108,7 +106,7 @@ class TestUpdateWeight(unittest.TestCase):
         ray.get(train_controller.__ray_ready__.remote())
 
         # fixed sample params
-        sample_params = SampleParams(temperature=0.0, top_k=1)
+        sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
 
         # init rollout_update
         rollout_controller = RolloutController.remote(
