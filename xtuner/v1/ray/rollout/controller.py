@@ -136,15 +136,15 @@ class RolloutController:
         if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
             from .lmdeploy import LMDeployWorker
 
-            return LMDeployWorker
+            return ray.remote(LMDeployWorker)
         elif os.environ.get("XTUNER_USE_VLLM") == "1":
             from .vllm import vLLMWorker
 
-            return vLLMWorker
+            return ray.remote(vLLMWorker)
         elif os.environ.get("XTUNER_USE_SGLANG") == "1":
             from .sglang import SGLangWorker
 
-            return SGLangWorker
+            return ray.remote(SGLangWorker)
         else:
             raise NotImplementedError(
                 "Rollout backend is not supported."
