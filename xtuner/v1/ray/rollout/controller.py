@@ -79,7 +79,6 @@ class SessionRouter:
             return worker[0]
 
 
-@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class RolloutController:
     """Controller for managing and coordinating multiple RolloutWorker
     actors."""
@@ -325,18 +324,8 @@ class RolloutController:
             extra_info=extra_info,
         )
         try:
-            response, http_result = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout)
-            if http_result.is_success:
-                return response
-            elif http_result.is_retryable or http_result.is_server_error:
-                response.finish_reason = "failed"
-                return response
-            elif http_result.is_client_error:
-                response.finish_reason = "skipped"
-                return response
-            else:  # unknown error
-                raise RuntimeError("Unknown error occurred during rollout. Error message: ", http_result.error_message)
-
+            response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout)
+            return response
         except asyncio.TimeoutError:
             self.logger.error("Get response from rollout worker timeout and return the failed response.")
             failed_response = RLRolloutResponseItem(

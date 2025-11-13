@@ -23,12 +23,25 @@ class BaseEnvironment(ABC):
     """
 
     def __init__(
-        self, environment: str, rollout_pg: Any, rollout_cfg: Any, judger_pg: Any = None, judger_cfg: Any = None
+        self,
+        environment: str,
+        rollout_pg: Any,
+        rollout_cfg: Any,
+        judger_pg: Any = None,
+        judger_cfg: Any = None,
+        rollout_controller=None,
+        judger_controller=None,
     ):
         judger_pg = judger_pg if judger_pg else rollout_pg
         self.environment = environment
-        self.rollout_controller = self.init_rollout_controller(rollout_cfg, rollout_pg)
-        self.judger_controller = self.init_judger_controller(judger_cfg, judger_pg)
+        if rollout_controller:
+            self.rollout_controller = rollout_controller
+        else:
+            self.rollout_controller = self.init_rollout_controller(rollout_cfg, rollout_pg)
+        if judger_controller:
+            self.judger_controller = judger_controller
+        else:
+            self.judger_controller = self.init_judger_controller(judger_cfg, judger_pg)
 
     def init_rollout_controller(self, rollout_cfg: Any, placement_group: Any):
         """Initializes the rollout controller with the appropriate worker
