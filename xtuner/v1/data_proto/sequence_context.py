@@ -47,6 +47,9 @@ class SequenceContext:
     inputs_embeds: torch.FloatTensor | None = None
     num_img_tokens: list[int] | None = None
 
+    # moe routed_experts
+    rollout_routed_experts: torch.LongTensor | None = None
+
     def __init__(
         self,
         input_ids: torch.LongTensor | None,  # shape (1, seq_len)
@@ -69,6 +72,7 @@ class SequenceContext:
         pixel_values: torch.FloatTensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[int] | None = None,
+        rollout_routed_experts: torch.LongTensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
@@ -97,6 +101,7 @@ class SequenceContext:
         self.pixel_values = pixel_values
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
+        self.rollout_routed_experts = rollout_routed_experts
 
         seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
         seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
@@ -181,6 +186,9 @@ class SequenceContext:
                 image_flags=self.image_flags,
                 pixel_values=self.pixel_values,
                 image_grid_thw=self.image_grid_thw,
+                inputs_embeds=self.inputs_embeds,
+                num_img_tokens=self.num_img_tokens,
+                rollout_routed_experts=self.rollout_routed_experts,
             )
             return sp_seq_ctx
         else:
@@ -203,6 +211,7 @@ class SequenceContext:
         image_grid_thw = []
         position_ids = []
         image_flags = []
+        rollout_routed_experts = []
 
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
@@ -230,6 +239,8 @@ class SequenceContext:
                 image_grid_thw.append(seq_ctx.image_grid_thw)
             if seq_ctx.image_flags is not None:
                 image_flags.append(seq_ctx.image_flags)
+            if seq_ctx.rollout_routed_experts is not None:
+                rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             position_ids.append(seq_ctx.position_ids)
         assert len(set(device)) == 1, f"All sequence contexts must be on the same device. Got {set(device)}"
 
@@ -252,6 +263,7 @@ class SequenceContext:
             image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             image_flags=torch.cat(image_flags, dim=0) if image_flags else None,  # type: ignore
+            rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
         )
 
     @property
@@ -346,6 +358,9 @@ class SequenceContext:
 
         if self.image_grid_thw is not None and hasattr(self.image_grid_thw, "to"):
             self.image_grid_thw = self.image_grid_thw.to(device)  # type: ignore
+
+        if self.rollout_routed_experts is not None and hasattr(self.rollout_routed_experts, "to"):
+            self.rollout_routed_experts = self.rollout_routed_experts.to(device)  # type: ignore
 
         self.device = device
 

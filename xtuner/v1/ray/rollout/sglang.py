@@ -32,6 +32,7 @@ class SGLangWorker(RolloutWorker):
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path, trust_remote_code=True)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
+        self.enable_return_routed_experts = self.config.enable_return_routed_experts
 
     async def _create_request(
         self,
@@ -51,6 +52,9 @@ class SGLangWorker(RolloutWorker):
         payload = {"model": self.model_name}
         sglang_sample_params = self._transform_sample_params(sample_params)
         sglang_extra_params = self._transform_extra_params(extra_params)
+        if self.enable_return_routed_experts:
+            sglang_extra_params["return_routed_experts"] = True
+
         payload.update(sglang_extra_params)
 
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
@@ -168,6 +172,10 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.mem_fraction_static = self.config.gpu_memory_utilization
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
+
+        if self.enable_return_routed_experts:
+            sglang_server_args.enable_return_routed_experts = True
+
         sglang_server_args.max_running_requests = self.config.rollout_max_batch_size_per_instance
         sglang_server_args.log_level = log_level
         sglang_server_args.log_level_http = log_level_http

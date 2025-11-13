@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import httpx
 import ray
 import requests  # type: ignore[import-untyped]
+import torch
 from packaging.version import Version
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -69,6 +70,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.check_flag = True  # only print once
+        self.enable_return_routed_experts = self.config.enable_return_routed_experts
         if self.rank == 0:
             self.logger.info(f"RolloutConfig:\n{self.config.model_dump_json(indent=2)}")
 
@@ -453,9 +455,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         response = response.json()
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
             # generate API response
-            last_token_ids = []
             last_logprobs = []
             try:
+                extra_info = {}
                 finish_reason = response["meta_info"]["finish_reason"]["type"]
                 if finish_reason == "abort":
                     return RLRolloutResponseItem(
@@ -471,14 +473,29 @@ class RolloutWorker(SingleAcceleratorWorker):
                     num_return_tokens = response["meta_info"].get("completion_tokens", 0)
                     last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
 
-                last_trajectory = response["text"]
+                if self.enable_return_routed_experts:
+                    assert "routed_experts" in response["meta_info"], (
+                        "enable_return_routed_experts is True, but routed_experts is not in meta_info"
+                    )
+                    routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
+                    if isinstance(routed_experts, str):
+                        import base64
 
+                        data = base64.b64decode(routed_experts)
+                        routed_experts = ray.cloudpickle.loads(data)
+                    else:
+                        routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                        routed_experts = ray.put(routed_experts)
+                    extra_info = {"routed_experts": routed_experts}
+
+                last_trajectory = response["text"]
                 rollout_response = RLRolloutResponseItem(
                     response=last_trajectory,
                     response_ids=last_token_ids if len(last_token_ids) > 0 else None,
                     num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
                     finish_reason=finish_reason,
                     logprobs=last_logprobs if len(last_logprobs) > 0 else None,
+                    extra_info=extra_info,
                 )
                 return rollout_response
             except KeyError as e:

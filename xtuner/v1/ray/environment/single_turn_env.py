@@ -35,6 +35,8 @@ class SingleTurnEnvironment(BaseEnvironment):
         super().__init__(environment, rollout_pg, rollout_cfg, judger_pg, judger_cfg)
         worker_log_dir = rollout_cfg.worker_log_dir if rollout_cfg else judger_cfg.worker_log_dir
         self.logger = get_logger(log_dir=worker_log_dir, tag="SingleTurnEnv")
+        if rollout_cfg.enable_return_routed_experts:
+            self.logger.info("！！！ Enable `return routed experts` in rollout controller. ！！！")
         self.rollout_timeout = rollout_cfg.rollout_timeout if rollout_cfg else 1200.0
         self.judger_timeout = judger_cfg.judger_timeout if judger_cfg else 1200.0
 
