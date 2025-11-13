@@ -201,7 +201,7 @@ class NoAuxGroupedRouter(NoAuxRouter):
         topk_idx = (group_local_max_idx + group_offsets).to(torch.long)  # [seq, n_groups, top_k_per_group]
         scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
         topk_idx = topk_idx.view(seq, -1)  # [seq, top_k]
-        topk_weight = scores_for_choice.gather(1, topk_idx)  # [seq, n_groups]
+        topk_weight = scores.gather(1, topk_idx)  # [seq, n_groups]
         scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
 
         # The returned `router_weights` is only used for computing balance loss
