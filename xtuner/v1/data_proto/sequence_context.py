@@ -49,7 +49,7 @@ class SequenceContext:
     num_img_tokens: list[int] | None
 
     # moe routed_experts
-    rollout_routed_experts: torch.LongTensor | None = None
+    rollout_routed_experts: torch.LongTensor | None
 
     def __init__(
         self,
