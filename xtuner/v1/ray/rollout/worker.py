@@ -466,8 +466,11 @@ class RolloutWorker(SingleAcceleratorWorker):
                 if "output_token_logprobs" in response["meta_info"]:
                     last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
                     last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
-                    assert len(last_token_ids) <= sample_params["max_tokens"], (
-                        f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
+                    assert len(last_logprobs) == len(last_token_ids), (
+                        f"生成的token_ids和logprobs长度不匹配, token_ids长度 {len(last_token_ids)}，logprobs长度 {len(last_logprobs)}"
+                    )
+                    assert len(last_token_ids) > 0 and len(last_logprobs) > 0, (
+                        f"生成的token_ids或logprobs长度为0, token_ids长度 {len(last_token_ids)}，logprobs长度 {len(last_logprobs)}"
                     )
                 else:
                     num_return_tokens = response["meta_info"].get("completion_tokens", 0)
