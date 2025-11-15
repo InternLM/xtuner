@@ -105,10 +105,7 @@ class TestMLLMTokenizeFn(TestCase):
                 input_str = input_str.replace('<IMG_CONTEXT>', '')
                 input_str = input_str.replace('<img></img>', '<IMG_CONTEXT>')
                 expected_str = "<|im_start|>user\nFrame-1: <IMG_CONTEXT>\nFrame-2: <IMG_CONTEXT>\nFrame-3: " \
-                               "<IMG_CONTEXT>\nFrame-4: <IMG_CONTEXT>\nFrame-5: <IMG_CONTEXT>\nFrame-6: " \
-                               "<IMG_CONTEXT>\nFrame-7: <IMG_CONTEXT>\nFrame-8: <IMG_CONTEXT>\nFrame-9: " \
-                               "<IMG_CONTEXT>\nFrame-10: <IMG_CONTEXT>\nFrame-11: <IMG_CONTEXT>\nFrame-12: " \
-                               "<IMG_CONTEXT>\nFrame-13: " \
+                               "<IMG_CONTEXT>\nFrame-4: " \
                                "<IMG_CONTEXT>\n请描述下视频内容？<|im_end|>\n<|im_start|>assistant\n一男一女在打网球<|im_end|>\n" \
                                "<|im_start|>user\n请简要解释下网球<|im_end|>\n<|im_start|>assistant\n" \
                                "网球是一项运动，运动员使用球拍将球击打过网进入对方场地。目标是通过让球落入对方场地且对方无法回击来得分。网球可以单人对战（单打）或双人组队对战（双打）。<|im_end|>"

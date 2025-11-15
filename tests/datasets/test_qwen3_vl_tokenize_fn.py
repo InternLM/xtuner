@@ -1,8 +1,6 @@
 import os
-from unittest import TestCase, skipIf
-from packaging import version
-from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
-import transformers
+from unittest import TestCase
+from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig, PretrainTokenizeFunction
 from transformers import AutoTokenizer, AutoProcessor
 import json
 import torch
@@ -18,7 +16,7 @@ class TestMLLMTokenizeFn(TestCase):
         self.tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH).build(self.tokenizer)
         self.processor = AutoProcessor.from_pretrained(QWEN3_VL_PATH)
 
-    def test_qwen3_vl_single_image(self):
+    def test_qwen3_vl_sft_single_image(self):
         data_path = 'tests/resource/mllm_sft_single_image_example_data.jsonl'
         total_step = 5
         with open(data_path) as f:
@@ -54,7 +52,7 @@ class TestMLLMTokenizeFn(TestCase):
                 self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))
 
     @parametrize.parametrize("add_vision_id", [(True,), (False,)])
-    def test_qwen3_vl_multi_image(self, add_vision_id):
+    def test_qwen3_vl_sft_multi_image(self, add_vision_id):
         tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
                                               add_vision_id=add_vision_id).build(self.tokenizer)
         data_path = 'tests/resource/mllm_sft_multi_image_example_data.jsonl'
@@ -96,7 +94,7 @@ class TestMLLMTokenizeFn(TestCase):
                 self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
                 self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))
 
-    def test_qwen3_vl_pure_text(self):
+    def test_qwen3_vl_sft_pure_text(self):
         data_path = 'tests/resource/mllm_sft_text_example_data.jsonl'
         total_step = 5
         with open(data_path) as f:
@@ -118,3 +116,100 @@ class TestMLLMTokenizeFn(TestCase):
                                                          return_dict=True)
                 input_ids_hf = ret['input_ids'][0]
                 assert input_ids_xtuner == input_ids_hf
+
+    def test_qwen3_vl_sft_video(self):
+        data_path = 'tests/resource/mllm_sft_video_example_data.jsonl'
+        total_index = [1, 4, 5]
+        with open(data_path) as f:
+            for i, line in enumerate(f):
+                if i not in total_index:
+                    continue
+                raw_data = json.loads(line)
+
+                ret = self.tokenize_fn(raw_data, media_root=VIDEO_ROOT)
+                input_ids_xtuner = ret['input_ids']
+                pixel_values_xtuner: torch.Tensor = ret['pixel_values']
+                image_grid_thw_xtuner: torch.Tensor = ret['image_grid_thw']
+
+                # to hf openai format
+                messages = raw_data['messages']
+                messages[0]['content'][0]['type'] = 'video'
+                messages[0]['content'][0]['path'] = VIDEO_ROOT + messages[0]['content'][0]['video_url']['url']
+                messages[0]['content'][1]['text'] = messages[0]['content'][1]['text'].replace('<VIDEO_CONTEXT>', '')
+                del messages[0]['content'][0]['video_url']
+                for msg in messages:
+                    if not isinstance(msg['content'], list):
+                        msg['content'] = [{"type": "text", "text": msg['content']}]
+
+                ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
+                                                         return_dict=True, return_tensors="pt")
+                input_ids_hf = ret['input_ids'][0]
+                pixel_values_hf = ret['pixel_values_videos']
+                image_grid_thw_hf = ret['video_grid_thw']
+                if i == 1:
+                    # 不应该包括 seconds> 内容
+                    text = self.tokenize_fn.tokenizer.decode(input_ids_xtuner)
+                    self.assertTrue('seconds>' not in text)
+                else:
+                    self.assertEqual(input_ids_xtuner, input_ids_hf.tolist())
+                    text = self.tokenize_fn.tokenizer.decode(input_ids_xtuner)
+                    self.assertTrue('seconds>' in text)
+                    self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
+                    self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))
+
+    def test_qwen3_vl_pretrain_pure_text(self):
+        data_path = 'tests/resource/pretrain_example_data.jsonl'
+        tokenize_fn = PretrainTokenizeFunction(self.tokenizer)
+        total_step = 5
+        with open(data_path, encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                if i >= total_step:
+                    break
+                raw_data = json.loads(line)
+
+                ret = tokenize_fn(raw_data)
+                input_ids_xtuner = ret['input_ids'][:-1]  # remove eos_token_id
+
+                content = raw_data['messages'][0]['content']
+                input_ids_hf = self.tokenizer(content)['input_ids']
+                self.assertEqual(input_ids_xtuner, input_ids_hf)
+
+    def test_qwen3_vl_pretrain_image(self):
+        data_path = 'tests/resource/mllm_pretrain_image_example_data.jsonl'
+        total_step = 6
+        with open(data_path, encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                if i >= total_step:
+                    break
+                raw_data = json.loads(line)
+
+                ret = self.tokenize_fn(raw_data, media_root='tests/')
+                input_ids_xtuner = ret['input_ids']
+                labels_xtuner = torch.tensor(ret['labels'])
+                input_str = self.tokenize_fn.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
+                input_str = input_str.replace('<|image_pad|>', '')
+                input_xtuner_str = input_str.replace('<|vision_start|><|vision_end|>', '<IMG_CONTEXT>')
+                ground_truth_content = raw_data['messages'][0]
+                for item in ground_truth_content['content']:
+                    if item['type'] == 'text':
+                        ground_truth_str = item['text'] + "<|im_end|>"
+                image_cnt = ground_truth_str.count('<IMG_CONTEXT>')
+                if image_cnt>1:
+                    for i in range(image_cnt):
+                        ground_truth_str = ground_truth_str.replace('<IMG_CONTEXT>', f'Picture {i+1}: <IMG_CONTEXT_1>', 1)
+                    ground_truth_str=ground_truth_str.replace('<IMG_CONTEXT_1>', '<IMG_CONTEXT>')
+                self.assertEqual(input_xtuner_str.strip(), ground_truth_str.strip())
+                self.assertTrue((labels_xtuner == self.tokenize_fn.img_context_token_id).sum() == 0)
+
+    def test_intern_vl_pretrain_video(self):
+        data_path = 'tests/resource/mllm_pretrain_video_example_data.jsonl'
+        total_step = 6
+        with open(data_path, encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                if i >= total_step:
+                    break
+                raw_data = json.loads(line)
+
+                ret = self.tokenize_fn(raw_data, media_root=VIDEO_ROOT)
+                labels_xtuner = torch.tensor(ret['labels'])
+                self.assertTrue((labels_xtuner == self.tokenize_fn.video_context_token_id).sum() == 0)
