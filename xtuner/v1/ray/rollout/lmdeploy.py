@@ -36,7 +36,6 @@ def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
     serve(**lmdeploy_serve_kwargs)
 
 
-@ray.remote
 class LMDeployWorker(RolloutWorker):
     """A Ray actor that runs a text generation server using LMDeploy."""
 
