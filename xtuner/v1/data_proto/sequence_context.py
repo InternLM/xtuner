@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from dataclasses import dataclass
 from typing import cast
 
 import torch
@@ -9,7 +8,10 @@ from typing_extensions import Self
 from .utils import pad_to_multiple_of, split_for_sequence_parallel
 
 
-@dataclass
+# Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
+# The extra ops is introduced by function _apply_to_tensors in
+# https://github.com/pytorch/pytorch/blob/v2.8.0/torch/distributed/fsdp/_fully_shard/_fsdp_state.py
+# Due to dataclasses.replace is called in _apply_to_tensors that triggering SequenceContext.__init__
 class SequenceContext:
     """Keyword arguments for Flash Attention with Compile.
 
@@ -29,26 +31,25 @@ class SequenceContext:
     cu_seq_lens_k: torch.IntTensor
     max_length_q: torch.Tensor
     max_length_k: torch.Tensor
-    num_padding: int = 0
-    sequence_parallel_mesh: DeviceMesh | None = None
-    block_table: torch.Tensor | None = None
-    device: str | torch.device = "cpu"  # TODO: 这个地方有点乱，到处是 device
-    position_ids: torch.LongTensor | None = None
+    num_padding: int
+    sequence_parallel_mesh: DeviceMesh | None
+    block_table: torch.Tensor | None
+    device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
+    position_ids: torch.LongTensor | None
 
     # Intern-S1
-    image_flags: torch.LongTensor | None = None
+    image_flags: torch.LongTensor | None
     # Qwen3VL
-    image_grid_thw: torch.Tensor | None = None
-    deepstack_visual_embeds: list[torch.Tensor] | None = None
-    visual_pos_masks: torch.Tensor | None = None
-
+    image_grid_thw: torch.Tensor | None
+    deepstack_visual_embeds: list[torch.Tensor] | None
+    visual_pos_masks: torch.Tensor | None
     # mllm model
-    pixel_values: torch.FloatTensor | None = None
-    inputs_embeds: torch.FloatTensor | None = None
-    num_img_tokens: list[int] | None = None
+    pixel_values: torch.FloatTensor | None
+    inputs_embeds: torch.FloatTensor | None
+    num_img_tokens: list[int] | None
 
     # moe routed_experts
-    rollout_routed_experts: torch.LongTensor | None = None
+    rollout_routed_experts: torch.LongTensor | None
 
     def __init__(
         self,
