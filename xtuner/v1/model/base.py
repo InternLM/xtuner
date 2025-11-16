@@ -521,7 +521,7 @@ class BaseModel(nn.Module):
                 _hf_key_list = all_hf_keys[start:end]
 
                 if not _hf_key_list:
-                    return [], []
+                    continue
 
                 hf_keys_list.append(_hf_key_list)
 
