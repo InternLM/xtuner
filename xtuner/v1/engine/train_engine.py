@@ -139,11 +139,10 @@ class TrainEngine:
 
     def __has_freeze_params(self) -> bool:
         has_freeze_params = False
-        for module in self.model.modules():
-            for param in module.parameters(recurse=False):
-                if not param.requires_grad:
-                    has_freeze_params = True
-                    break
+        for param in self.model.parameters(recurse=True):
+            if not param.requires_grad:
+                has_freeze_params = True
+                break
         return has_freeze_params
 
     def build_model(self) -> BaseModel:
