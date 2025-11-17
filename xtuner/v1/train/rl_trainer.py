@@ -472,7 +472,7 @@ class RLTrainer:
             is_multimodal = True
 
         for j, group in enumerate(data_groups):
-            if not check_dataflow_item(group):
+            if not check_dataflow_item(group)[0]:
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             if is_multimodal:
@@ -563,7 +563,7 @@ class RLTrainer:
         # mismatch_token_ids_count = 0
         # response_len_list = []
         for group in data_groups:
-            if not check_dataflow_item(group):
+            if not check_dataflow_item(group)[0]:
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             for data in group:

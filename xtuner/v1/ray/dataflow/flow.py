@@ -31,6 +31,7 @@ class DataFlowConfig(BaseModel):
         global_batch_size (int): Target samples to collect. Defaults to 8.
         max_retry_times (int): Maximum retry attempts. Defaults to 1.
         enable_partial_rollout (int): Enable async mode (1) or disable (0). Defaults to 0.
+        partial_rollout_step(int): allowed steps off for partial rollout. Defaults to 0.
         sample_params (SampleParams): Model sampling parameters. Defaults to SampleParams().
 
     **Examples:**
@@ -71,6 +72,7 @@ class DataFlowConfig(BaseModel):
     enable_partial_rollout: Annotated[
         int, Parameter(help="Whether to enable async rollout_controller. 1 for enabled, 0 for disabled")
     ] = 0
+    partial_rollout_step: Annotated[int, Parameter(help="Allowed steps off for partial rollout_controller.")] = 0
     sample_params: Annotated[SampleParams, Parameter(help="Parameters for sampling from the model.")] = SampleParams()
     extra_params: Annotated[Dict, Parameter(help="Extra parameters for rollout.")] = {}
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
@@ -110,12 +112,18 @@ class DataFlow:
         self.env = env
         self.config = dataflow_cfg
         replay_buffer_cfg.worker_log_dir = self.config.worker_log_dir
-        self.replay_buffer = ReplayBuffer.remote(replay_buffer_cfg)  # type: ignore[attr-defined]
+        self.replay_buffer = ReplayBuffer.remote(  # type: ignore[attr-defined]
+            replay_buffer_cfg,
+            enable_partial_rollout=self.config.enable_partial_rollout,
+            partial_rollout_step=self.config.partial_rollout_step,
+        )
         self.env_controller = environment
         self.send_samples_count = 0
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
+        self.sample_from_expired_storage = False
+        self.skipped_sample_count = 0
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
@@ -141,6 +149,37 @@ class DataFlow:
             self.logger.warning(
                 f"Dataflow max_concurrent is set to {self.config.max_concurrent}, we proposed to set max_concurrent to {max_concurrent} based on rollout_max_batch_size_per_instance."
             )
+        self.enable_partial_rollout = self.config.enable_partial_rollout
+
+    def _reset_internal_states_on_step(
+        self,
+        global_batch_size: Optional[int] = None,
+        sample_params: Optional[SampleParams] = None,
+        extra_params: Optional[Dict] = None,
+    ):
+        """Resets all internal state variables of DataFlow."""
+        self.send_samples_count = 0
+        self.finished_samples_count = 0
+        self.unfinished_samples_count = 0
+        self.failed_samples_count = 0
+        self.skipped_sample_count = 0
+        self.logger.info(
+            f"global_batch_size: {global_batch_size}, sample_params: {sample_params}, extra_params: {extra_params}"
+        )
+        if global_batch_size and global_batch_size > 0:
+            self.target_batch_size = global_batch_size
+        self.sample_params = sample_params if sample_params else self.config.sample_params
+        self.extra_params = extra_params if extra_params else self.config.extra_params
+        self.sample_from_expired_storage = (
+            ray.get(self.replay_buffer.get_expired_samples.remote()) >= self.target_batch_size
+        )
+        self.enable_partial_rollout = 0 if self.sample_from_expired_storage else self.config.enable_partial_rollout
+        logger_msg = (
+            f"DataFlow internal states reset for new run: target_batch_size={self.target_batch_size}, "
+            f"sample_params: {self.config.sample_params}, extra_params: {self.config.extra_params}, "
+            f"sample_from_expired_storage={self.sample_from_expired_storage}, enable_partial_rollout={self.enable_partial_rollout}."
+        )
+        self.logger.info(logger_msg)
 
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
@@ -171,8 +210,9 @@ class DataFlow:
         if group_samples_for_retry is None or len(group_samples_for_retry) == 0:
             group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
                 self.env,
-                self.config.enable_partial_rollout,
+                self.enable_partial_rollout,
                 self.config.prompt_repeat_k,
+                self.sample_from_expired_storage,
             )
             self.send_samples_count += 1
             self.logger.debug(
@@ -188,11 +228,19 @@ class DataFlow:
         group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
             group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
         )
-        if not check_dataflow_item(group_data_items):
+        check_result, msg = check_dataflow_item(group_data_items)
+        if not check_result:
             self.logger.warning(
-                f"Dataflow item check failed for {group_data_items[0].uid.action_id} response. Returning meta for retry."
+                f"Dataflow item check failed because {msg} for {group_data_items[0].uid.action_id} response {group_data_items[0].env.rollout}. Returning meta for retry."
             )
             return group_data_items
+        if any(item.env.rollout.finish_reason == "skipped" for item in group_data_items):
+            self.logger.warning(
+                f"Bad request for {group_data_items[0].uid.action_id} response. Skipping this request."
+            )
+            self.logger.debug(f"Worker task skipped successfully for {group_data_items[0].uid.action_id}.")
+            self.skipped_sample_count += 1
+            return
 
         # step 3: filter
         filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
@@ -230,6 +278,7 @@ class DataFlow:
             while (
                 self.finished_samples_count < self.target_batch_size
                 and self.failed_samples_count < self.target_batch_size
+                and self.skipped_sample_count < self.target_batch_size
             ):
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
@@ -238,7 +287,7 @@ class DataFlow:
                 while len(waiting_tasks) < self.config.max_concurrent:
                     # In async mode, we keep spawning. In sync mode, we stop if we have enough tasks in flight.
                     if (
-                        not self.config.enable_partial_rollout
+                        not self.enable_partial_rollout
                         and self.finished_samples_count + len(waiting_tasks) >= self.target_batch_size
                     ):
                         break
@@ -254,16 +303,16 @@ class DataFlow:
                         if result[0].extra_info.retry_times < self.config.max_retry_times:
                             # If the retry count is less than max_retry_times, retry the task
                             self.logger.info(
-                                f"Retrying task for {result[0].data}. Retry count: {result[0].extra_info.retry_times}"
+                                f"Retrying task for {result[0].uid.action_id}. Retry count: {result[0].extra_info.retry_times}"
                             )
                             retry_task = create_task(self.worker_task(group_samples_for_retry=result))
                             pending_tasks.add(retry_task)
                         else:
                             self.failed_samples_count += 1
                             self.logger.error(
-                                f"Max retry reached for {result[0].data}. Not retrying. Current failed count: {self.failed_samples_count}"
+                                f"Max retry reached for {result[0].uid.action_id}. Not retrying. Current failed count: {self.failed_samples_count}"
                             )
-                self.finished_samples_count = ray.get(self.replay_buffer.get_finished_samples.remote())
+                self.finished_samples_count = ray.get(self.replay_buffer.get_completed_samples.remote())
                 waiting_tasks = pending_tasks
 
             pbar.n = self.finished_samples_count
@@ -271,23 +320,24 @@ class DataFlow:
 
         if self.finished_samples_count >= self.target_batch_size:
             self.logger.info("Target batch size reached. Pausing env controller.")
-        if self.failed_samples_count >= self.target_batch_size:
+        if self.failed_samples_count >= self.target_batch_size or self.skipped_sample_count >= self.target_batch_size:
             self.logger.info("Max failed samples reached. Pausing env controller.")
 
         # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
         # would be queued behind many worker tasks, causing a significant delay.
-        await self.pause()
-        while len(waiting_tasks) > 0:
-            done_tasks, pending_tasks = await asyncio.wait(
-                waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
-            )
-            if len(pending_tasks) > 0:
-                await self.pause()
-            waiting_tasks = pending_tasks
-        self.logger.info("All worker tasks have completed after pausing env controller.")
+        if self.enable_partial_rollout:
+            await self.pause()
+            while len(waiting_tasks) > 0:
+                done_tasks, pending_tasks = await asyncio.wait(
+                    waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
+                )
+                if len(pending_tasks) > 0:
+                    await self.pause()
+                waiting_tasks = pending_tasks
+            self.logger.info("All worker tasks have completed after pausing env controller.")
 
         if self.finished_samples_count >= self.target_batch_size:
-            self.unfinished_samples_count = ray.get(self.replay_buffer.get_unfinished_samples.remote())
+            self.unfinished_samples_count = ray.get(self.replay_buffer.get_interrupted_samples.remote())
             self.logging_replaybuffer_state()
 
     async def _send_abort_request(self, client, url, timeout):
@@ -341,16 +391,13 @@ class DataFlow:
             List[RLDataFlowItem]: A list of collected training samples.
         """
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
-        self.send_samples_count = 0
-        self.finished_samples_count = 0
-        self.unfinished_samples_count = 0
-        self.failed_samples_count = 0
-        self.target_batch_size = num if num and num > 0 else self.config.global_batch_size
-        self.logger.info(f"Start generate dataflow and target batch size set to {self.target_batch_size}.")
-        self.sample_params = sample_params if sample_params else self.config.sample_params
-        self.extra_params = extra_params if extra_params else self.config.extra_params
-        self.logger.info(f"Sample parameters set to {self.sample_params}.")
-
+        self._reset_internal_states_on_step(
+            global_batch_size=num, sample_params=sample_params, extra_params=extra_params
+        )
+        ray.get(self.replay_buffer.refresh_completed_states_on_step.remote(self.sample_from_expired_storage))
+        self.logging_replaybuffer_state()
+        assert dump is False, "dump is not supported yet."
+        assert resume is False, "resume is not supported yet."
         if resume:
             assert resume_path, "Resuming is enabled but no resume path is provided."
             self.logger.info(f"Resuming replay buffer from {resume_path}")
@@ -365,8 +412,11 @@ class DataFlow:
 
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
 
-    def logging_replaybuffer_state(self):
-        ray.get(self.replay_buffer.print.remote())
+    def logging_replaybuffer_state(self, logging_msg: Optional[str] = None):
+        status = self.get_replaybuffer_status()
+        logging_msg = logging_msg if logging_msg else ""
+        logging_msg += f"ReplayBuffer Status: {status}"
+        self.logger.info(logging_msg)
 
     def get_replaybuffer_status(self):
         return ray.get(self.replay_buffer.status.remote())

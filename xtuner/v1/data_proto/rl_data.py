@@ -26,7 +26,7 @@ class RLUIDItem(BaseModel):
     root_id: int = -1
     action_id: int = -1
     observation_id: int = -1
-    version: int = -1
+    version: int = 0
 
 
 class RLDatasetItem(BaseModel):
@@ -68,8 +68,8 @@ class RLRolloutResponseItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     response: Optional[str] = None
     response_ids: Optional[List[int]] = None
-    num_return_tokens: Optional[int] = None
-    finish_reason: Optional[str] = None
+    num_return_tokens: int = 0
+    finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
     logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
 
@@ -124,6 +124,7 @@ class RLExtraDataItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     retry_times: int = 0
+    state: str = ""
     extra_info: Dict[str, Any] = dict()
 
 
@@ -148,17 +149,26 @@ class RLDataFlowItem(BaseModel):
 
 
 def check_dataflow_item(group_data_items):
+    error_msg = ""
     if not group_data_items or len(group_data_items) == 0:
-        return False
+        error_msg = "group_data_items is empty."
+        return False, error_msg
+
+    is_skipped = any(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
+    if is_skipped:
+        error_msg = "All items are skipped in rollout finish_reason."
+        return True, error_msg
+
+    no_failures = all(item.env.rollout.finish_reason != "failed" for item in group_data_items)
+    if not no_failures:
+        error_msg = "Found failed in rollout finish_reason."
+        return False, error_msg
 
     # 如果存在abort的状态，相当于跳过检查，下次会重新rollout
     is_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
     if is_abort:
-        return True
-
-    no_failures = all(item.env.rollout.finish_reason != "failed" for item in group_data_items)
-    if not no_failures:
-        return False
+        error_msg = "Found abort in rollout finish_reason."
+        return True, error_msg
 
     no_judger_failures = all(item.env.judger.extra_info.get("state", "") != "failed" for item in group_data_items)
     if not no_judger_failures:
@@ -167,7 +177,16 @@ def check_dataflow_item(group_data_items):
     all_responses_valid = all(item.env.rollout.response for item in group_data_items)
     all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
 
-    return all_responses_valid or all_ids_valid
+    if all_ids_valid:
+        for item in group_data_items:
+            if item.env.rollout.logprobs is not None:
+                if len(item.env.rollout.logprobs) != len(item.env.rollout.response_ids):
+                    return False, "logprobs length does not match response_ids length."
+            else:
+                return False, "logprobs is None while response_ids is not None."
+
+    error_msg = f"responses valid: {all_responses_valid}, ids valid: {all_ids_valid}."
+    return all_responses_valid or all_ids_valid, error_msg
 
 
 def update_dataflow_item(group_data_items, target_key, target_value):
@@ -199,7 +218,24 @@ def update_dataflow_item(group_data_items, target_key, target_value):
         parent_obj = group_data_items[i]
         for key in keys[:-1]:
             parent_obj = getattr(parent_obj, key)
-        setattr(parent_obj, keys[-1], target_value[i])
+        # todo: move this special logic out of this function ??
+        attr = getattr(parent_obj, keys[-1])
+        if keys[-1] == "rollout":
+            if attr.response_ids is not None or attr.response is not None:
+                if attr.response_ids is not None:
+                    attr.response_ids.extend(target_value[i].response_ids or [])
+                    attr.logprobs.extend(target_value[i].logprobs or [])
+                    assert len(attr.response_ids) == len(attr.logprobs), (
+                        "token_ids length does not match logprobs length."
+                    )
+                if attr.response is not None:
+                    attr.response = attr.response + (target_value[i].response or "")
+                attr.num_return_tokens += target_value[i].num_return_tokens
+                attr.finish_reason = target_value[i].finish_reason
+            else:
+                setattr(parent_obj, keys[-1], target_value[i])
+        else:
+            setattr(parent_obj, keys[-1], target_value[i])
 
     return group_data_items
 
