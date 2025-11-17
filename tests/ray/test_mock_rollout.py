@@ -25,22 +25,19 @@ resource_map = {"npu": "NPU", "cuda": "GPU"}
 @ray.remote
 class MockTimeoutRolloutController(RolloutController):
     def _get_worker_cls(self):
-        return MockTimeoutRolloutWorker
-
+        return ray.remote(MockTimeoutRolloutWorker)
 @ray.remote
 class MockRequestErrorRolloutController(RolloutController):
     def _get_worker_cls(self):
-        return MockRequestErrorRolloutWorker
-
+        return ray.remote(MockRequestErrorRolloutWorker)
 @ray.remote
 class MockClientErrorRolloutController(RolloutController):
     def _get_worker_cls(self):
-        return MockClientErrorRolloutWorker
-
+        return ray.remote(MockClientErrorRolloutWorker)
 @ray.remote
 class MockServerErrorRolloutController(RolloutController):
     def _get_worker_cls(self):
-        return MockServerErrorRolloutWorker
+        return ray.remote(MockServerErrorRolloutWorker)
 
 class TestMockRollout(unittest.TestCase):
     @classmethod
@@ -103,7 +100,7 @@ class TestMockRollout(unittest.TestCase):
         ray.shutdown()
 
     def _run_mock_test(self, mock_controller_cls, error_name: str):
-        rollout_controller = ray.remote(mock_controller_cls).remote(self.rollout_cfg, self.pg)
+        rollout_controller = mock_controller_cls.remote(self.rollout_cfg, self.pg)
         self.test_env = SingleTurnEnvironment.remote("env", self.pg, self.rollout_cfg, rollout_controller=rollout_controller)
         self.test_dataflow = DataFlow.remote("dataflow", self.dataflow_cfg, self.replay_buffer_cfg, self.test_env)
         

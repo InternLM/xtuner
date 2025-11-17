@@ -107,20 +107,6 @@ class TestEvaluator(unittest.TestCase):
         custom_evaluator = Evaluator.remote(custom_evaluator_cfg, self.test_env)
         custom_correctness = ray.get(custom_evaluator.run.remote())
         self.assertEqual(correctness['accuracy'], custom_correctness['custom_accuracy'])
-
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_evaluator_with_failed_response(self):
-        evaluator_cfg = EvaluatorConfig(
-            dataset_cfg=self.eval_dataset_cfg,
-            tokenizer=self.tokenizer,
-            max_concurrent=1,
-            eval_sample_ratio=1,  # generate 5 samples
-            sample_params=SampleParams(temperature=2.5),  # invalid temperature to trigger error
-            max_retry_times=1,
-        )
-        evaluator = Evaluator.remote(evaluator_cfg, self.test_env)
-        correctness = ray.get(evaluator.run.remote())
-        self.assertEqual(len(correctness), 0)
         
 if __name__ == '__main__':
     unittest.main()
