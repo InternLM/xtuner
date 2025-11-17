@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Literal, Tuple, TypeVar
+from typing import Any, Dict, List, Literal, Tuple, TypeVar
 
 import ray
 import torch
@@ -62,29 +62,31 @@ class AcceleratorResourcesConfig(BaseModel):
         Parameter(help="Number of accelerators to allocate for each worker in the placement group."),
     ] = 1
 
-    def __init__(self, **kwargs):
-        if kwargs.get("accelerator") == "NPU":
+    def model_post_init(self, __context: Any) -> None:
+        if self.accelerator == "NPU":
             # NOTE: Ascend 910 has 16 NPUs per node
-            kwargs["num_accelerators_per_node"] = 16
+            self.num_accelerators_per_node = 16
 
         assert ray.is_initialized(), "Ray must be initialized before creating AcceleratorResourcesConfig."
+
         available_resources = ray.available_resources()
         available_cpus = available_resources.get("CPU", 0)
         available_memory = available_resources.get("memory", 0)
-        available_gpus = available_resources.get("GPU", 0)
+        if self.accelerator == "GPU":
+            available_gpus = available_resources.get("GPU", 0)
+            assert self.num_workers <= available_gpus, (
+                f"Not enough available GPUS in Ray cluster, available_gpus is {available_gpus} but xtuner needs {self.num_workers}."
+            )
 
-        assert kwargs["num_workers"] <= available_gpus, (
-            f"Not enough available GPUS in Ray cluster, available_gpus is {available_gpus} but xtuner needs {kwargs['num_workers']}."
-        )
-        # TODO: manage single controller's cpu resource to replace "10" here
-        assert (kwargs["num_cpus_per_worker"] * kwargs["num_workers"]) + 10 <= available_cpus, (
-            f"Not enough available CPUs in Ray cluster, available_cpus is {available_cpus} but xtuner needs {kwargs['num_cpus_per_worker'] * kwargs['num_workers'] + 10}."
-        )
-        assert kwargs["cpu_memory_per_worker"] * kwargs["num_workers"] + 10 * 1024**3 <= available_memory, (
-            f"Not enough available memory in Ray cluster, available_memory is {available_memory} but xtuner needs {kwargs['cpu_memory_per_worker'] * kwargs['num_workers']}."
+        needed_cpus = (self.num_cpus_per_worker * self.num_workers) + 10
+        assert needed_cpus <= available_cpus, (
+            f"Not enough available CPUs in Ray cluster, available_cpus is {available_cpus} but xtuner needs {needed_cpus}."
         )
 
-        super().__init__(**kwargs)
+        needed_memory = self.cpu_memory_per_worker * self.num_workers + 10 * 1024**3
+        assert needed_memory <= available_memory, (
+            f"Not enough available memory in Ray cluster, available_memory is {available_memory} but xtuner needs {needed_memory}."
+        )
 
     @classmethod
     def from_total(
