@@ -135,6 +135,15 @@ class TrainEngine:
         self.optimizer = self.build_optimizer(optim_cfg)
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
+        self.has_freeze_params = self.__has_freeze_params()
+
+    def __has_freeze_params(self) -> bool:
+        has_freeze_params = False
+        for param in self.model.parameters(recurse=True):
+            if not param.requires_grad:
+                has_freeze_params = True
+                break
+        return has_freeze_params
 
     def build_model(self) -> BaseModel:
         with torch.device("meta"):
@@ -398,7 +407,7 @@ class TrainEngine:
             if optimizer_dir is not None:
                 optimizer_dir.mkdir(parents=True, exist_ok=True)
 
-        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
+        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params)
         with profile_time_and_memory(f"[DCP Checkpoint to {model_dir}]"):
             model_state = get_model_state_dict(self.model, options=_options)
             dcp.save(
@@ -426,8 +435,13 @@ class TrainEngine:
         Args:
             dcp_dir (str): The directory to load the model from.
         """
-        _load_options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
-        _set_options = StateDictOptions(cpu_offload=True, strict=True)
+        _load_options = StateDictOptions(
+            cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params
+        )
+        if self.has_freeze_params:
+            _set_options = StateDictOptions(cpu_offload=True, strict=False)
+        else:
+            _set_options = StateDictOptions(cpu_offload=True, strict=True)
         with profile_time_and_memory(f"[Load DCP Model from {model_dir}]"):
             shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
             # inplace state_dict

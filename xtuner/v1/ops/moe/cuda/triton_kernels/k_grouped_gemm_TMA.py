@@ -3,8 +3,6 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from xtuner.v1.utils import DISTRIBUTED_COMMUNICATION_SM, NUM_SMS
-
 from .utils import TmaAutoTuneHelper
 
 
@@ -150,7 +148,7 @@ def k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor
     assert dtype_b >= 0, f"data type {B.dtype} not supported"
     assert dtype_c >= 0, f"data type {C.dtype} not supported"
 
-    NUM_AVAILABLE_SMS = NUM_SMS - DISTRIBUTED_COMMUNICATION_SM
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
     desc_helper = TmaAutoTuneHelper()
     desc_helper.init_tma_descriptor("a")
@@ -190,7 +188,7 @@ def k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor
             C.element_size(),
         )
 
-        return (NUM_AVAILABLE_SMS,)
+        return (NUM_SMS,)
 
     desc_a = desc_helper.get_tma_descriptor_kernel_param("a")
     desc_b = desc_helper.get_tma_descriptor_kernel_param("b")

@@ -322,6 +322,29 @@ class TrainingWorker(SingleAcceleratorWorker):
                     pixel_values = torch.cat(pixel_values, dim=0)
                     seq_ctx.pixel_values = pixel_values
 
+            rollout_routed_experts = seq_ctx.rollout_routed_experts
+            if rollout_routed_experts is not None:
+                if isinstance(rollout_routed_experts, list):
+                    # list[n,l,e]
+                    if not isinstance(rollout_routed_experts[0], torch.Tensor):
+                        rollout_routed_experts_refs = rollout_routed_experts
+                        rollout_routed_experts = [ray.get(routed_experts) for routed_experts in rollout_routed_experts]
+                        # free obj store explicitly
+                        for ref in rollout_routed_experts_refs:
+                            ray._private.internal_api.free(ref)
+                        if not isinstance(rollout_routed_experts[0], torch.Tensor):
+                            rollout_routed_experts = [
+                                torch.as_tensor(routed_experts, dtype=torch.long)
+                                for routed_experts in rollout_routed_experts
+                            ]
+                    seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts, dim=0)  # max_len,l,e
+                else:
+                    rollout_routed_experts = ray.get(rollout_routed_experts)
+                    seq_ctx.rollout_routed_experts = rollout_routed_experts
+
+                assert seq_ctx.input_ids is not None, "input_ids is None"
+                assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
+
             seq_ctx = data["seq_ctx"].to(DEVICE)
             loss_ctx_input = RLLossContextInputItem(
                 shifted_labels=data["shifted_labels"],
@@ -389,7 +412,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         logger_msg = f"Rollout {rollout_idx}: "
 
         if len(rollout_logprobs_list) > 0:
-            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs])  # n, 4
+            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs]).to(
+                dtype=torch.float32
+            )  # n, 4
             min_diff_val = torch.min(all_diffs_tensor[:, 0]).item()
             max_diff_val = torch.max(all_diffs_tensor[:, 1]).item()
             mean_diff_val = torch.mean(all_diffs_tensor[:, 2]).item()
@@ -474,6 +499,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         # tp and pp will affect the data replicate size in engine
         # sp will affect the data replicate size in worker
         return self._engine.data_replicate_size * self.sp_mesh.size()
+
+    def get_model_cfg(self):
+        model_cfg = self._engine.model_cfg
+        return model_cfg
 
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
@@ -834,16 +863,42 @@ class TrainingWorker(SingleAcceleratorWorker):
             # TODO(chenchiyu): remove lmdeploy related code
             from lmdeploy.utils import serialize_state_dict
 
+            try:
+                from lmdeploy.utils import FlattenedTensorBucket
+
+                use_flattened_tensor_bucket = True
+            except Exception:
+                use_flattened_tensor_bucket = False
+
             if self.rollout_cfg_info["backend"] == "pytorch" and self.rollout_cfg_info["tp"] > 1:
                 serialized_data = [None] * self.rollout_cfg_info["tp"]
+                if use_flattened_tensor_bucket:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(state_dict.items()))
+                    metadata = flattened_tensor_bucket.get_metadata()
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    tp_serialized_data = serialize_state_dict(flattened_tensor_data)
+                else:
+                    tp_serialized_data = serialize_state_dict(state_dict)
                 dist.gather_object(
-                    serialize_state_dict(state_dict),
+                    tp_serialized_data,
                     serialized_data if dist.get_rank() == head_rank else None,
                     dst=head_rank,
                     group=cpu_group,
                 )
             elif self.rollout_cfg_info["backend"] == "pytorch":
-                serialized_data = serialize_state_dict(state_dict)
+                if use_flattened_tensor_bucket:
+                    flattened_tensor_bucket = FlattenedTensorBucket(named_tensors=list(state_dict.items()))
+                    metadata = flattened_tensor_bucket.get_metadata()
+                    flattened_tensor_data = {
+                        "flattened_tensor": flattened_tensor_bucket.get_flattened_tensor(),
+                        "metadata": metadata,
+                    }
+                    serialized_data = serialize_state_dict(flattened_tensor_data)
+                else:
+                    serialized_data = serialize_state_dict(state_dict)
             else:
                 # for turbomind backend, only head_rank should serialize data
                 serialized_data = serialize_state_dict(state_dict) if dist.get_rank() == head_rank else None
@@ -925,6 +980,16 @@ class TrainingWorker(SingleAcceleratorWorker):
                 response.raise_for_status()
             else:
                 data = dict(serialized_named_tensors=serialized_data, finished=finished)
+                try:
+                    from lmdeploy.utils import FlattenedTensorBucket
+
+                    use_flattened_tensor_bucket = True
+                except Exception:
+                    use_flattened_tensor_bucket = False
+
+                if use_flattened_tensor_bucket:
+                    data["load_format"] = "flattened_bucket"
+
                 response = requests.post(
                     f"{self.rollout_url}/{self.endpoints['update_weights']}", headers=headers, json=data
                 )

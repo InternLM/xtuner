@@ -103,7 +103,9 @@ class MoEGate(nn.Module):
         if self.gate_bias:
             self.bias = nn.Parameter(torch.zeros(self.n_routed_experts))
 
-    def forward(self, hidden_states: torch.Tensor) -> RouterResults:
+    def forward(
+        self, hidden_states: torch.Tensor, rollout_routed_experts: torch.Tensor | None = None
+    ) -> RouterResults:
         _, _, h = hidden_states.shape
         ### compute gating score
         hidden_states = hidden_states.view(-1, h)
@@ -120,7 +122,7 @@ class MoEGate(nn.Module):
 
         logits = F.linear(hidden_states.float(), weight.float(), bias)
 
-        return self.router(logits)
+        return self.router(logits, rollout_routed_experts)
 
 
 class MoEBlock(nn.Module):
@@ -565,7 +567,11 @@ class MoEDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
 
-        router_results: RouterResults = self.gate(hidden_states)
+        if seq_ctx.rollout_routed_experts is not None:
+            rollout_routed_experts = seq_ctx.rollout_routed_experts[:, self.layer_idx, :]  # seq_l, expert
+        else:
+            rollout_routed_experts = None
+        router_results: RouterResults = self.gate(hidden_states, rollout_routed_experts)
         return residual, hidden_states, router_results
 
     @maybe_compile(fullgraph=True)

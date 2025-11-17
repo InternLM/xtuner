@@ -6,8 +6,6 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from xtuner.v1.utils import DISTRIBUTED_COMMUNICATION_SM, NUM_SMS
-
 
 def get_cuda_autotune_config():
     return [
@@ -162,13 +160,13 @@ def k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor
     assert dtype_b >= 0, f"data type {B.dtype} not supported"
     assert dtype_c >= 0, f"data type {C.dtype} not supported"
 
-    NUM_AVAILABLE_SMS = NUM_SMS - DISTRIBUTED_COMMUNICATION_SM
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
 
     def grid(META):
         # assert N % META["BLOCK_N"] == 0, "Only support when N is a multiple of BLOCK_N"
         # assert M % META["BLOCK_M"] == 0, "Only support when M is a multiple of BLOCK_M"
 
-        return (NUM_AVAILABLE_SMS,)
+        return (NUM_SMS,)
 
     # TMA descriptors require a global memory allocation
     def alloc_fn(size: int, alignment: int, stream: Optional[int]):

@@ -75,7 +75,7 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             "e_score_correction_bias", torch.empty((self.n_routed_experts), device=get_device(), dtype=torch.float32)
         )
 
-    def forward(self, logits) -> RouterResults:
+    def forward(self, logits, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
         else:
@@ -115,7 +115,14 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         # select top-k experts
         # (only applicable when ep_size >= 64. when ep_size=32 (4 nodes), there is no need to employ this strategy)
         _, topk_idx = torch.topk(scores_for_choice, k=self.top_k, dim=-1)
-        topk_weight = scores.gather(1, topk_idx)
+
+        if rollout_routed_experts is not None:
+            # seq_l, expert
+            topk_ids = rollout_routed_experts
+            # seq_l, expert
+            topk_weight = scores.gather(dim=1, index=topk_ids)
+        else:
+            topk_weight = scores.gather(1, topk_idx)
 
         # The returned `router_weights` is only used for computing balance loss
         # It should be normalized
@@ -171,7 +178,7 @@ class NoAuxGroupedRouter(NoAuxRouter):
         )
         self.router_n_groups = router_n_groups
 
-    def forward(self, logits) -> RouterResults:
+    def forward(self, logits, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
         seq, ne = logits.shape
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
@@ -200,8 +207,14 @@ class NoAuxGroupedRouter(NoAuxRouter):
         )  # [1, n_groups, 1]
         topk_idx = (group_local_max_idx + group_offsets).to(torch.long)  # [seq, n_groups, top_k_per_group]
         scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
-        topk_idx = topk_idx.view(seq, -1)  # [seq, top_k]
-        topk_weight = scores_for_choice.gather(1, topk_idx)  # [seq, n_groups]
+        if rollout_routed_experts is not None:
+            # seq_l, expert
+            topk_ids = rollout_routed_experts
+            # seq_l, expert
+            topk_weight = scores.gather(dim=1, index=topk_ids)
+        else:
+            topk_idx = topk_idx.view(seq, -1)  # [seq, top_k]
+            topk_weight = scores.gather(1, topk_idx)  # [seq, n_groups]
         scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
 
         # The returned `router_weights` is only used for computing balance loss

@@ -97,6 +97,7 @@ class InternS1BaseConfig(BaseModel):
     freeze_projector: bool = False
     freeze_language: bool = False
     hf_save_worker: int = 16
+    dcp_ignore_frozen_params: bool = True
 
     def build(self) -> "InternS1ForConditionalGeneration":
         from .modeling_intern_s1 import InternS1ForConditionalGeneration
@@ -110,11 +111,15 @@ class InternS1BaseConfig(BaseModel):
 
 class InternS1Config(InternS1BaseConfig):
     vision_config: InternS1VisionConfig = InternS1VisionConfig(
-        hidden_size=3200, intermediate_size=12800, num_hidden_layers=45, use_qk_norm=True, num_attention_heads=25
+        hidden_size=3200,
+        intermediate_size=12800,
+        num_hidden_layers=45,
+        use_qk_norm=True,
+        num_attention_heads=25,
+        attention_bias=False,
+        norm_type="rms_norm",
     )
-    projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig(
-        vision_hidden_size=3200, text_hidden_size=12800
-    )
+    projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig(vision_hidden_size=3200, text_hidden_size=4096)
     text_config: MoEConfig = Qwen3MoE235BA22Config(vocab_size=153216)
 
     @property

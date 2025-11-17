@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from dataclasses import dataclass
 from typing import cast
 
 import torch
@@ -9,7 +8,10 @@ from typing_extensions import Self
 from .utils import pad_to_multiple_of, split_for_sequence_parallel
 
 
-@dataclass
+# Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
+# The extra ops is introduced by function _apply_to_tensors in
+# https://github.com/pytorch/pytorch/blob/v2.8.0/torch/distributed/fsdp/_fully_shard/_fsdp_state.py
+# Due to dataclasses.replace is called in _apply_to_tensors that triggering SequenceContext.__init__
 class SequenceContext:
     """Keyword arguments for Flash Attention with Compile.
 
@@ -24,33 +26,34 @@ class SequenceContext:
             Maximum sequence length for key state.
     """
 
-    # TODO(HHA): 在仅计算 loss 情况下或者多模态情况下，input_ids 其实应该都可以为 None，不够通用
-    input_ids: torch.LongTensor  # shape (1, seq_len)
+    input_ids: torch.LongTensor | None  # shape (1, seq_len)
     cu_seq_lens_q: torch.IntTensor
     cu_seq_lens_k: torch.IntTensor
     max_length_q: torch.Tensor
     max_length_k: torch.Tensor
-    num_padding: int = 0
-    sequence_parallel_mesh: DeviceMesh | None = None
-    block_table: torch.Tensor | None = None
-    device: str | torch.device = "cpu"  # TODO: 这个地方有点乱，到处是 device
-    position_ids: torch.LongTensor | None = None
+    num_padding: int
+    sequence_parallel_mesh: DeviceMesh | None
+    block_table: torch.Tensor | None
+    device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
+    position_ids: torch.LongTensor | None
 
     # Intern-S1
-    image_flags: torch.LongTensor | None = None
+    image_flags: torch.LongTensor | None
     # Qwen3VL
-    image_grid_thw: torch.Tensor | None = None
-    deepstack_visual_embeds: list[torch.Tensor] | None = None
-    visual_pos_masks: torch.Tensor | None = None
-
+    image_grid_thw: torch.Tensor | None
+    deepstack_visual_embeds: list[torch.Tensor] | None
+    visual_pos_masks: torch.Tensor | None
     # mllm model
-    pixel_values: torch.FloatTensor | None = None
-    inputs_embeds: torch.FloatTensor | None = None
-    num_img_tokens: list[int] | None = None
+    pixel_values: torch.FloatTensor | None
+    inputs_embeds: torch.FloatTensor | None
+    num_img_tokens: list[int] | None
+
+    # moe routed_experts
+    rollout_routed_experts: torch.LongTensor | None
 
     def __init__(
         self,
-        input_ids: torch.LongTensor,  # shape (1, seq_len)
+        input_ids: torch.LongTensor | None,  # shape (1, seq_len)
         cu_seq_lens_q: torch.IntTensor,
         cu_seq_lens_k: torch.IntTensor,
         max_length_q: torch.Tensor | int,
@@ -70,6 +73,7 @@ class SequenceContext:
         pixel_values: torch.FloatTensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[int] | None = None,
+        rollout_routed_experts: torch.LongTensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
@@ -98,6 +102,7 @@ class SequenceContext:
         self.pixel_values = pixel_values
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
+        self.rollout_routed_experts = rollout_routed_experts
 
         seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
         seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
@@ -106,8 +111,8 @@ class SequenceContext:
             _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
             position_ids = torch.cat(_position_ids).unsqueeze(0).to(self.cu_seq_lens_k.device)  # type: ignore[assignment]
 
-        if self.sequence_parallel_mesh is not None:
-            position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)  # type: ignore
+            if self.sequence_parallel_mesh is not None:
+                position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)  # type: ignore
 
         self.position_ids = position_ids
 
@@ -182,6 +187,9 @@ class SequenceContext:
                 image_flags=self.image_flags,
                 pixel_values=self.pixel_values,
                 image_grid_thw=self.image_grid_thw,
+                inputs_embeds=self.inputs_embeds,
+                num_img_tokens=self.num_img_tokens,
+                rollout_routed_experts=self.rollout_routed_experts,
             )
             return sp_seq_ctx
         else:
@@ -204,10 +212,12 @@ class SequenceContext:
         image_grid_thw = []
         position_ids = []
         image_flags = []
+        rollout_routed_experts = []
 
         for seq_ctx in sequence_context_list:
             assert seq_ctx.sequence_parallel_mesh is None
-            packed_input_ids.append(seq_ctx.input_ids)
+            if seq_ctx.input_ids is not None:
+                packed_input_ids.append(seq_ctx.input_ids)
             cu_seq_lens_q.append(
                 seq_ctx.cu_seq_lens_q  # type: ignore
                 if len(cu_seq_lens_q) == 0
@@ -230,6 +240,8 @@ class SequenceContext:
                 image_grid_thw.append(seq_ctx.image_grid_thw)
             if seq_ctx.image_flags is not None:
                 image_flags.append(seq_ctx.image_flags)
+            if seq_ctx.rollout_routed_experts is not None:
+                rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             position_ids.append(seq_ctx.position_ids)
         assert len(set(device)) == 1, f"All sequence contexts must be on the same device. Got {set(device)}"
 
@@ -240,7 +252,7 @@ class SequenceContext:
             pixel_values = None
 
         return cls(
-            input_ids=torch.cat(packed_input_ids, dim=1),  # type: ignore
+            input_ids=torch.cat(packed_input_ids, dim=1) if len(packed_input_ids) > 0 else None,  # type: ignore
             cu_seq_lens_q=torch.cat(cu_seq_lens_q, dim=0),  # type: ignore
             cu_seq_lens_k=torch.cat(cu_seq_lens_k, dim=0),  # type: ignore
             max_length_q=max_length_q,
@@ -252,6 +264,7 @@ class SequenceContext:
             image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
             image_flags=torch.cat(image_flags, dim=0) if image_flags else None,  # type: ignore
+            rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
         )
 
     @property
@@ -260,6 +273,7 @@ class SequenceContext:
         if self.input_ids is not None:
             mask = cast(torch.BoolTensor, torch.ones_like(self.input_ids, dtype=torch.bool))
         else:
+            assert self.inputs_embeds is not None, "input_ids or inputs_embeds must be provided"
             mask = cast(torch.BoolTensor, torch.ones_like(self.inputs_embeds[..., 0], dtype=torch.bool))
         if self.num_padding > 0:
             mask[..., -self.num_padding :] = False
@@ -345,6 +359,9 @@ class SequenceContext:
 
         if self.image_grid_thw is not None and hasattr(self.image_grid_thw, "to"):
             self.image_grid_thw = self.image_grid_thw.to(device)  # type: ignore
+
+        if self.rollout_routed_experts is not None and hasattr(self.rollout_routed_experts, "to"):
+            self.rollout_routed_experts = self.rollout_routed_experts.to(device)  # type: ignore
 
         self.device = device
 

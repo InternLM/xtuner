@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 from typing import Tuple
 
 import torch
@@ -6,7 +7,6 @@ import triton
 import triton.language as tl
 
 from xtuner.v1.float8.float8_utils import to_fp8_saturated
-from xtuner.v1.utils import DISTRIBUTED_COMMUNICATION_SM, NUM_SMS
 
 
 @triton.jit
@@ -123,8 +123,8 @@ def _trans_per_block_quant_expand_128x(
     finfo = torch.finfo(dtype)
     fmin = finfo.min
     fmax = finfo.max
-    NUM_AVAILABLE_SMS = NUM_SMS - DISTRIBUTED_COMMUNICATION_SM
-    grid = (NUM_AVAILABLE_SMS,)
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count - int(os.getenv("MinusSM", 0))
+    grid = (NUM_SMS,)
     num_experts = size_per_group.shape[0]
     M, N = input_tensor.shape
     M_EXPAND = M + group_size * num_experts - M % group_size

@@ -74,6 +74,7 @@ class TransformerConfig(PydanticBaseModel):
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
     hf_save_worker: Annotated[int, Parameter(group="model")] = 16
+    dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -552,7 +553,13 @@ class BaseModel(nn.Module):
             hf_tensor_list: list[torch.Tensor] = []
             # used in self._to_float8 to determine whether to convert a unshard hf_tensor to fp8
             fsdp_shard_tensor_list: list[torch.Tensor] = []
-            for saved_tensor, load_spec, hf_keys in zip(saved_fused_tensor_list, spec_list, hf_keys_list):
+            # `origin_tensor_list` is only used to mark, which tensors are float8 weights for the
+            # `_to_float8` function
+            origin_tensor_list: list[torch.Tensor] = []
+
+            for saved_tensor, load_spec, hf_keys, origin_tensor in zip(
+                saved_fused_tensor_list, spec_list, hf_keys_list, tensor_list
+            ):
                 dim = cast(int, load_spec.dim)
                 hf_tensor_size = saved_tensor.shape[dim] / len(hf_keys)
                 assert hf_tensor_size.is_integer(), "Internal Error, hf_tensor_size is not integer"
@@ -560,6 +567,7 @@ class BaseModel(nn.Module):
                 hf_tensor = saved_tensor.split([hf_tensor_size] * len(hf_keys), dim=dim)
                 hf_tensor_list.extend(hf_tensor)
                 fsdp_shard_tensor_list.extend([saved_tensor] * len(hf_tensor))
+                origin_tensor_list.extend([origin_tensor] * len(hf_tensor))
 
             name_list = list(chain.from_iterable(hf_keys_list))
             hf_tensor_list = [
@@ -568,7 +576,7 @@ class BaseModel(nn.Module):
 
             if dtype == torch.float8_e4m3fn:
                 hf_tensor_list_new, name_list_new = self._to_float8(
-                    hf_tensor_list, name_list, fsdp_shard_tensor_list, dtype
+                    hf_tensor_list, name_list, origin_tensor_list, dtype
                 )
                 return hf_tensor_list_new, name_list_new
 
