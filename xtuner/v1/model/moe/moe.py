@@ -69,7 +69,6 @@ class BalancingLossConfig(PydanticBaseModel):
         return BalancingLoss(
             self.balancing_loss_alpha,
             self.balancing_loss_global_average,
-            router_scoring_func=router_scoring_func,
         )
 
 
@@ -549,6 +548,7 @@ class MoE(BaseModel):
                 router_weights=router_weights,
                 n_routed_experts=self.config.n_routed_experts,
                 num_experts_per_tok=self.config.num_experts_per_tok,
+                router_n_groups=self.config.router.router_n_groups or 1,
             )
             output["balancing_loss"] = balancing_loss
 
