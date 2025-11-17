@@ -22,10 +22,7 @@ def extract_value(file, metrics):
     return total_step, metric_all
 
 
-def check1(base_path, cur_path, check_metric):
-    print(base_path)
-    print(cur_path)
-    print(check_metric)
+def check_result(base_path, cur_path, check_metric):
     fail_metric = {}
     check_metric = check_metric
     metric_list = list(check_metric.keys())
@@ -39,7 +36,7 @@ def check1(base_path, cur_path, check_metric):
         max_error = 0.0
         max_error_idx = 0
         check_flag = True
-        if metric == "runtime_info/e2e_tgs":
+        if metric == "runtime_info/tgs":
             if cur_steps > 10:
                 max_error = abs(mean(base_metrics[metric][10:-1]) - mean(cur_metrics[metric][10:-1]))
                 if max_error > threshold:
