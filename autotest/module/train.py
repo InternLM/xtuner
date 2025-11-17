@@ -1,4 +1,6 @@
-from utils.check_metric import check1
+import os
+
+from utils.check_metric import check_result
 
 
 class Train:
@@ -39,10 +41,17 @@ class Train:
             return "", config
 
     def validate(config):
-        print(config)
         work_dir = config.get("work_dir", None)
         base_path = config.get("assert_info", {}).get("base_metric", None)
-        print(work_dir)
-        cur_path = work_dir + "/20251111072735" + "/logs/exp_tracking/rank0/tracker.jsonl"
+        cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/rank0/tracker.jsonl")
         check_metrics = config.get("assert_info", {}).get("check_metrics", {})
-        return check1(base_path, cur_path, check_metrics)
+        return check_result(base_path, cur_path, check_metrics)
+
+
+def get_latest_subdir(work_dir):
+    dirs = [d for d in os.listdir(work_dir) if os.path.isdir(os.path.join(work_dir, d))]
+
+    if not dirs:
+        return None
+    latest = max(dirs, key=lambda d: os.path.getmtime(os.path.join(work_dir, d)))
+    return os.path.join(work_dir, latest)
