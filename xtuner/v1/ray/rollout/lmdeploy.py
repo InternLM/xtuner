@@ -228,6 +228,8 @@ class LMDeployWorker(RolloutWorker):
         dp_size = ep_size = self.config.expert_parallel_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
         lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "CRITICAL")
+        lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "CRITICAL")
+        lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "CRITICAL")
 
         extra_engine_config = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
@@ -296,11 +298,11 @@ class LMDeployWorker(RolloutWorker):
                     }
                 )
             if "uvicorn_log_level" in lmdeploy_config_kwargs:
-                env.update({"UVICORN_LOG_LEVEL": lmdeploy_config_kwargs.get("uvicorn_log_level", "CRITICAL")})
+                env.update({"UVICORN_LOG_LEVEL": lmdeploy_config_kwargs["uvicorn_log_level"]})
         else:
             env.update({"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
             if "tm_log_level" in lmdeploy_config_kwargs:
-                env.update({"TM_LOG_LEVEL": lmdeploy_config_kwargs.get("tm_log_level", "CRITICAL")})
+                env.update({"TM_LOG_LEVEL": lmdeploy_config_kwargs["tm_log_level"]})
 
         if "backend" in lmdeploy_config_kwargs:
             lmdeploy_config_kwargs.pop("backend")

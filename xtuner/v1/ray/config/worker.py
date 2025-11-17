@@ -220,15 +220,13 @@ class RolloutConfig(BaseModel):
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 try:
                     s.bind(("localhost", port))
-                    break  # 端口可用
+                    break
                 except OSError:
                     port += 1
         self.api_port = port
 
         if self.device == "NPU":
             self.gpus_per_node = 16
-        else:
-            self.gpus_per_node = 8
 
         rollout_backend = ""
         if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
