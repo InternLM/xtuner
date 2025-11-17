@@ -79,7 +79,6 @@ class SessionRouter:
             return worker[0]
 
 
-@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class RolloutController:
     """Controller for managing and coordinating multiple RolloutWorker
     actors."""
@@ -97,11 +96,18 @@ class RolloutController:
                 RolloutWorker actors.
         """
         self.config = infer_config
+        self.num_gpus_per_engine = (
+            self.config.expert_parallel_size
+            if self.config.expert_parallel_size > 1
+            else self.config.tensor_parallel_size
+        )
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.num_workers = 0
         self.worker_server_urls: List[str] = []
         self.active_rollout_workers: List[RolloutWorker] = []
-        self.active_rollout_workers_status: Dict = {}
+        self.active_workers_to_status: Dict[RolloutWorker, bool] = {}
+        self.active_url_to_workers: Dict[str, RolloutWorker] = {}
+        self.url_failed_counts: Dict[str, int] = {}
         self.tokenizer = AutoTokenizer.from_pretrained(infer_config.tokenizer_path, trust_remote_code=True)
         self.workers, self.rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
             self._get_worker_cls(), infer_config, placement_group
@@ -109,7 +115,7 @@ class RolloutController:
         self.engine_mesh_list, self.server_url_dict = self.init_workers()
         self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
-        self.router = SessionRouter(self.active_rollout_workers_status)
+        self.router = SessionRouter(self.active_workers_to_status)
         self.sample_params = SampleParams().dict()
         # note: 目前默认使用return_token_ids和return_logprob，并且不使用流式
         self.extra_params = dict(
@@ -130,15 +136,15 @@ class RolloutController:
         if os.environ.get("XTUNER_USE_LMDEPLOY") == "1":
             from .lmdeploy import LMDeployWorker
 
-            return LMDeployWorker
+            return ray.remote(LMDeployWorker)
         elif os.environ.get("XTUNER_USE_VLLM") == "1":
             from .vllm import vLLMWorker
 
-            return vLLMWorker
+            return ray.remote(vLLMWorker)
         elif os.environ.get("XTUNER_USE_SGLANG") == "1":
             from .sglang import SGLangWorker
 
-            return SGLangWorker
+            return ray.remote(SGLangWorker)
         else:
             raise NotImplementedError(
                 "Rollout backend is not supported."
@@ -154,6 +160,23 @@ class RolloutController:
                 return False
             except OSError:
                 return True
+
+    def _update_active_workers_and_urls(self):
+        """Update the list of active rollout workers and their server URLs.
+
+        When the inference engine is launched across nodes (rollout_cross_node_comm=True), only the worker with
+        tp_rank=0 in each engine is responsible for receiving input data. Other tp_ranks do not accept input.
+        Therefore, this function updates active_rollout_workers and worker_server_urls_map to keep only the tp_rank=0
+        workers and their corresponding URLs.
+        """
+        if self.config.rollout_cross_node_comm or self.num_gpus_per_engine < self.config.gpus_per_node:
+            return
+        else:
+            active_worker_interval = self.num_gpus_per_engine // self.config.gpus_per_node
+            self.active_rollout_workers = self.active_rollout_workers[::active_worker_interval]
+            active_rank = list(self.worker_server_urls_map.keys())[::active_worker_interval]
+            active_worker_server_urls = list(self.worker_server_urls_map.values())[::active_worker_interval]
+            self.worker_server_urls_map = dict(zip(active_rank, active_worker_server_urls))
 
     def get_rollout_info(self):
         """Get information about the current rollout setup.
@@ -203,11 +226,9 @@ class RolloutController:
         ray.get(set_bundle_idxs_objectref)
         # init dist_init_addr for each worker according to parallel settings
         init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in self.active_rollout_workers])  # type: ignore[attr-defined]
-        dist_init_addrs = self._update_dist_init_addr(
-            nodes_per_engine, init_dist_init_addrs, self.config.tensor_parallel_size
-        )
+        dist_init_addrs = self._update_dist_init_addr(nodes_per_engine, init_dist_init_addrs, self.num_gpus_per_engine)
         # launch rollout servers
-        worker_server_urls_map = dict(
+        self.worker_server_urls_map = dict(
             ray.get(
                 [
                     worker.init.remote(dist_init_addrs[i])  # type: ignore[attr-defined]
@@ -215,9 +236,13 @@ class RolloutController:
                 ]
             )
         )
-        self.worker_server_urls = list(worker_server_urls_map.values())
-        self.active_rollout_workers_status = {worker: True for worker in self.active_rollout_workers}
-        return engine_mesh_list, worker_server_urls_map
+        self._update_active_workers_and_urls()
+        self.worker_server_urls = list(self.worker_server_urls_map.values())
+        self.logger.info(f"Rollout worker server URLs: {self.worker_server_urls}")
+        self.active_workers_to_status = {worker: True for worker in self.active_rollout_workers}
+        self.active_url_to_workers = dict(zip(self.worker_server_urls, self.active_rollout_workers))
+        self.url_failed_counts = {url: 0 for url in self.worker_server_urls}
+        return engine_mesh_list, self.worker_server_urls_map
 
     def check_active_workers(self):
         """Check the health of all active rollout workers.
@@ -232,7 +257,21 @@ class RolloutController:
         )
         for idx, status in enumerate(active_worker_response):
             if not status:
-                self.active_rollout_workers_status[self.active_rollout_workers[idx]] = False
+                self.logger.info(
+                    f"Rollout worker {self.worker_server_urls[idx]} is unhealthy. Removing it from active workers."
+                )
+                self.active_workers_to_status[self.active_rollout_workers[idx]] = False
+
+    def deactivate_worker_by_url(self, url):
+        self.url_failed_counts[url] += 1
+        if self.url_failed_counts[url] < self.config.max_retry_per_worker:
+            self.logger.warning(
+                f"Rollout worker {url} failed {self.url_failed_counts[url]} times, but not deactivated yet."
+            )
+            return
+        self.logger.error(f"Deactivating rollout worker {url} due to repeated failures.")
+        inactive_workers = self.active_url_to_workers.get(url)
+        self.active_workers_to_status[inactive_workers] = False
 
     async def rollout(
         self,
@@ -272,7 +311,6 @@ class RolloutController:
         self.sample_params.update(sample_params.dict() if sample_params else {})
         self.extra_params.update(extra_params if extra_params else {})
         if self.print_params_flag:
-            # 通过print_params_flag控制只打印一次参数
             self.logger.info(f"Rollout with sample params: {self.sample_params}, extra params: {self.extra_params}")
             self.print_params_flag = False
         assert prompt is not None or input_ids is not None, "Either prompt or input_ids must be provided."
@@ -288,6 +326,10 @@ class RolloutController:
         )
         try:
             response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout)
+            if response.extra_info and "url" in response.extra_info:
+                url = response.extra_info["url"]
+                if response.finish_reason == "failed":
+                    self.deactivate_worker_by_url(url)
             return response
         except asyncio.TimeoutError:
             self.logger.error("Get response from rollout worker timeout and return the failed response.")
@@ -366,9 +408,12 @@ class RolloutController:
         # of active servers based on the configuration.
         support_cross_node_comm = infer_config.rollout_cross_node_comm
         gpus_per_node = infer_config.gpus_per_node
-        tp_size = infer_config.tensor_parallel_size
-        nodes_per_engine = 1 if support_cross_node_comm or tp_size < gpus_per_node else tp_size // gpus_per_node
-        active_servers_count = int((gpu_nums // tp_size) * nodes_per_engine)
+        nodes_per_engine = (
+            1
+            if support_cross_node_comm or self.num_gpus_per_engine < gpus_per_node
+            else self.num_gpus_per_engine // gpus_per_node
+        )
+        active_servers_count = int((gpu_nums // self.num_gpus_per_engine) * nodes_per_engine)
         return active_servers_count, nodes_per_engine
 
     def _broadcast_to_active_workers(self, method_name: str, block: bool):
@@ -382,7 +427,7 @@ class RolloutController:
             A list of futures if `block` is False, otherwise a list of results.
         """
         futures = []
-        for worker, status in self.active_rollout_workers_status.items():
+        for worker, status in self.active_workers_to_status.items():
             if status:
                 futures.append(getattr(worker, method_name).remote())
 

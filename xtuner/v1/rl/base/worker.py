@@ -322,6 +322,29 @@ class TrainingWorker(SingleAcceleratorWorker):
                     pixel_values = torch.cat(pixel_values, dim=0)
                     seq_ctx.pixel_values = pixel_values
 
+            rollout_routed_experts = seq_ctx.rollout_routed_experts
+            if rollout_routed_experts is not None:
+                if isinstance(rollout_routed_experts, list):
+                    # list[n,l,e]
+                    if not isinstance(rollout_routed_experts[0], torch.Tensor):
+                        rollout_routed_experts_refs = rollout_routed_experts
+                        rollout_routed_experts = [ray.get(routed_experts) for routed_experts in rollout_routed_experts]
+                        # free obj store explicitly
+                        for ref in rollout_routed_experts_refs:
+                            ray._private.internal_api.free(ref)
+                        if not isinstance(rollout_routed_experts[0], torch.Tensor):
+                            rollout_routed_experts = [
+                                torch.as_tensor(routed_experts, dtype=torch.long)
+                                for routed_experts in rollout_routed_experts
+                            ]
+                    seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts, dim=0)  # max_len,l,e
+                else:
+                    rollout_routed_experts = ray.get(rollout_routed_experts)
+                    seq_ctx.rollout_routed_experts = rollout_routed_experts
+
+                assert seq_ctx.input_ids is not None, "input_ids is None"
+                assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
+
             seq_ctx = data["seq_ctx"].to(DEVICE)
             loss_ctx_input = RLLossContextInputItem(
                 shifted_labels=data["shifted_labels"],
@@ -372,7 +395,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     f"rollout_logprobs {rollout_logprobs.shape} vs old_logprobs {old_logprobs.shape}"
                 )
                 if rollout_logprobs.numel() == 0:  # pad 情况下是空的
-                    min_diff = torch.tensor(0)
+                    min_diff = torch.tensor(0.0)
                     max_diff = min_diff
                     std_diff = min_diff
                     mean_diff = min_diff
@@ -381,7 +404,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     max_diff = torch.max(rollout_logprobs - old_logprobs)
                     mean_diff = torch.mean(rollout_logprobs - old_logprobs)
                     if rollout_logprobs.numel() == 1:
-                        std_diff = torch.tensor(0)
+                        std_diff = torch.tensor(0.0)
                     else:
                         std_diff = torch.std(rollout_logprobs - old_logprobs)
                 all_diffs.append((min_diff, max_diff, mean_diff, std_diff))
@@ -474,6 +497,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         # tp and pp will affect the data replicate size in engine
         # sp will affect the data replicate size in worker
         return self._engine.data_replicate_size * self.sp_mesh.size()
+
+    def get_model_cfg(self):
+        model_cfg = self._engine.model_cfg
+        return model_cfg
 
     def offload_model(self):
         self._engine.put_model_to_device("cpu")

@@ -163,6 +163,13 @@ class RolloutConfig(BaseModel):
             help="Whether to skip loading weights for the rollout worker.",
         ),
     ] = False
+    enable_return_routed_experts: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to enable returning routed experts for the rollout worker.",
+        ),
+    ] = False
     launch_server_method: Annotated[
         Literal["ray", "multiprocessing"],
         Parameter(
@@ -191,6 +198,13 @@ class RolloutConfig(BaseModel):
             help='Extra configuration for different rollout worker. vllm parameters will start with prefix "vllm", etc.',
         ),
     ] = {"lmdeploy_log_level": "CRITICAL", "lmdeploy_uvicorn_log_level": "CRITICAL"}
+    max_retry_per_worker: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="Maximum number of retries per rollout worker before deactivation.",
+        ),
+    ] = None
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
     def __init__(self, **kwargs):
@@ -260,6 +274,9 @@ class RolloutConfig(BaseModel):
                 kwargs["rollout_max_batch_size_per_instance"] = 512
             else:
                 kwargs["rollout_max_batch_size_per_instance"] = 128
+
+        if "max_retry_per_worker" not in kwargs:
+            kwargs["max_retry_per_worker"] = int(kwargs["rollout_max_batch_size_per_instance"] * 0.1)
 
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)

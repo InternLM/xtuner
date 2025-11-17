@@ -123,6 +123,7 @@ class DataFlow:
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
         self.sample_from_expired_storage = False
+        self.skipped_sample_count = 0
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
@@ -161,6 +162,7 @@ class DataFlow:
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
+        self.skipped_sample_count = 0
         self.logger.info(
             f"global_batch_size: {global_batch_size}, sample_params: {sample_params}, extra_params: {extra_params}"
         )
@@ -171,9 +173,7 @@ class DataFlow:
         self.sample_from_expired_storage = (
             ray.get(self.replay_buffer.get_expired_samples.remote()) >= self.target_batch_size
         )
-        self.enable_partial_rollout = (
-            0 if self.sample_from_expired_storage else self.config.enable_partial_rollout
-        )
+        self.enable_partial_rollout = 0 if self.sample_from_expired_storage else self.config.enable_partial_rollout
         logger_msg = (
             f"DataFlow internal states reset for new run: target_batch_size={self.target_batch_size}, "
             f"sample_params: {self.config.sample_params}, extra_params: {self.config.extra_params}, "
@@ -234,6 +234,13 @@ class DataFlow:
                 f"Dataflow item check failed because {msg} for {group_data_items[0].uid.action_id} response {group_data_items[0].env.rollout}. Returning meta for retry."
             )
             return group_data_items
+        if any(item.env.rollout.finish_reason == "skipped" for item in group_data_items):
+            self.logger.warning(
+                f"Bad request for {group_data_items[0].uid.action_id} response. Skipping this request."
+            )
+            self.logger.debug(f"Worker task skipped successfully for {group_data_items[0].uid.action_id}.")
+            self.skipped_sample_count += 1
+            return
 
         # step 3: filter
         filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
@@ -271,6 +278,7 @@ class DataFlow:
             while (
                 self.finished_samples_count < self.target_batch_size
                 and self.failed_samples_count < self.target_batch_size
+                and self.skipped_sample_count < self.target_batch_size
             ):
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
@@ -295,14 +303,14 @@ class DataFlow:
                         if result[0].extra_info.retry_times < self.config.max_retry_times:
                             # If the retry count is less than max_retry_times, retry the task
                             self.logger.info(
-                                f"Retrying task for {result[0].data}. Retry count: {result[0].extra_info.retry_times}"
+                                f"Retrying task for {result[0].uid.action_id}. Retry count: {result[0].extra_info.retry_times}"
                             )
                             retry_task = create_task(self.worker_task(group_samples_for_retry=result))
                             pending_tasks.add(retry_task)
                         else:
                             self.failed_samples_count += 1
                             self.logger.error(
-                                f"Max retry reached for {result[0].data}. Not retrying. Current failed count: {self.failed_samples_count}"
+                                f"Max retry reached for {result[0].uid.action_id}. Not retrying. Current failed count: {self.failed_samples_count}"
                             )
                 self.finished_samples_count = ray.get(self.replay_buffer.get_completed_samples.remote())
                 waiting_tasks = pending_tasks
@@ -312,7 +320,7 @@ class DataFlow:
 
         if self.finished_samples_count >= self.target_batch_size:
             self.logger.info("Target batch size reached. Pausing env controller.")
-        if self.failed_samples_count >= self.target_batch_size:
+        if self.failed_samples_count >= self.target_batch_size or self.skipped_sample_count >= self.target_batch_size:
             self.logger.info("Max failed samples reached. Pausing env controller.")
 
         # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`

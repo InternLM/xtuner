@@ -252,7 +252,7 @@ class Evaluator:
                             retry_task = create_task(self.eval_worker_task(result))
                             pending_tasks.add(retry_task)
                         else:
-                            self.logger.error(f"Max retry reached for {result.data}. Not retrying.")
+                            self.logger.error(f"Max retry reached for {result.uid.action_id}. Not retrying.")
                             self.failed_samples_count += 1
 
                 waiting_tasks = pending_tasks

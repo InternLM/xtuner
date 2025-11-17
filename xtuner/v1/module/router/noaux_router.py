@@ -20,6 +20,7 @@ class NoAuxRouterConfig(BaseModel):
     topk_group: int
     router_bias_update_speed: float = 0.001
     use_grouped_router: bool = False
+    router_n_groups: int | None = None
 
     def build(
         self,
@@ -28,12 +29,15 @@ class NoAuxRouterConfig(BaseModel):
     ):
         cfg = self.model_dump()
         use_grouped_router = cfg.pop("use_grouped_router")
+        router_n_groups = cfg.pop("router_n_groups")
         if use_grouped_router:
             print("Using NoAuxGroupedRouter")
+            assert router_n_groups is not None, "router_n_groups must be specified for NoAuxGroupedRouter"
             return NoAuxGroupedRouter(
                 **cfg,
                 n_routed_experts=n_routed_experts,
                 num_experts_per_tok=num_experts_per_tok,
+                router_n_groups=router_n_groups,
             )
         else:
             return NoAuxRouter(
@@ -48,6 +52,7 @@ class NoAuxRouter(nn.Module, RouterProtocol):
 
     def __init__(
         self,
+        *,
         n_routed_experts: int,
         num_experts_per_tok: int,
         router_scaling_factor: float,
@@ -70,7 +75,7 @@ class NoAuxRouter(nn.Module, RouterProtocol):
             "e_score_correction_bias", torch.empty((self.n_routed_experts), device=get_device(), dtype=torch.float32)
         )
 
-    def forward(self, logits) -> RouterResults:
+    def forward(self, logits, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
         else:
@@ -110,7 +115,14 @@ class NoAuxRouter(nn.Module, RouterProtocol):
         # select top-k experts
         # (only applicable when ep_size >= 64. when ep_size=32 (4 nodes), there is no need to employ this strategy)
         _, topk_idx = torch.topk(scores_for_choice, k=self.top_k, dim=-1)
-        topk_weight = scores.gather(1, topk_idx)
+
+        if rollout_routed_experts is not None:
+            # seq_l, expert
+            topk_ids = rollout_routed_experts
+            # seq_l, expert
+            topk_weight = scores.gather(dim=1, index=topk_ids)
+        else:
+            topk_weight = scores.gather(1, topk_idx)
 
         # The returned `router_weights` is only used for computing balance loss
         # It should be normalized
@@ -141,7 +153,32 @@ class NoAuxRouter(nn.Module, RouterProtocol):
 class NoAuxGroupedRouter(NoAuxRouter):
     """Only works for ep_size == topk."""
 
-    def forward(self, logits) -> RouterResults:
+    def __init__(
+        self,
+        *,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+        router_scaling_factor: float,
+        router_n_groups: int,
+        scoring_func: Literal["sigmoid", "softmax"],
+        n_group: int,
+        topk_group: int,
+        norm_topk_prob: bool = True,
+        router_bias_update_speed: float = 0.001,
+    ):
+        super().__init__(
+            n_routed_experts=n_routed_experts,
+            num_experts_per_tok=num_experts_per_tok,
+            router_scaling_factor=router_scaling_factor,
+            scoring_func=scoring_func,
+            n_group=n_group,
+            topk_group=topk_group,
+            norm_topk_prob=norm_topk_prob,
+            router_bias_update_speed=router_bias_update_speed,
+        )
+        self.router_n_groups = router_n_groups
+
+    def forward(self, logits, rollout_routed_experts: torch.Tensor | None = None) -> RouterResults:
         seq, ne = logits.shape
         if self.scoring_func == "sigmoid":
             scores = logits.sigmoid()
@@ -156,7 +193,7 @@ class NoAuxGroupedRouter(NoAuxRouter):
             scores_for_choice = scores + noise
 
         # group-based selection (group size = n_routed_experts // 8) ---
-        n_groups = int(os.getenv("ROUTER_N_GROUPS", 8))
+        n_groups = self.router_n_groups
         assert self.n_routed_experts % n_groups == 0, f"n_routed_experts must be divisible by {n_groups}"
         assert self.top_k == 8, "top_k must be 8 for NoAuxRouterOpt"
         group_size = max(1, self.n_routed_experts // n_groups)
@@ -170,8 +207,14 @@ class NoAuxGroupedRouter(NoAuxRouter):
         )  # [1, n_groups, 1]
         topk_idx = (group_local_max_idx + group_offsets).to(torch.long)  # [seq, n_groups, top_k_per_group]
         scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
-        topk_idx = topk_idx.view(seq, -1)  # [seq, top_k]
-        topk_weight = scores_for_choice.gather(1, topk_idx)  # [seq, n_groups]
+        if rollout_routed_experts is not None:
+            # seq_l, expert
+            topk_ids = rollout_routed_experts
+            # seq_l, expert
+            topk_weight = scores.gather(dim=1, index=topk_ids)
+        else:
+            topk_idx = topk_idx.view(seq, -1)  # [seq, top_k]
+            topk_weight = scores.gather(1, topk_idx)  # [seq, n_groups]
         scores_for_choice = scores_for_choice.view(seq, self.n_routed_experts)
 
         # The returned `router_weights` is only used for computing balance loss
