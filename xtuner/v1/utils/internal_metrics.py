@@ -96,7 +96,7 @@ class InternalMetricsRecorder:
         additional_kwargs = {}
         if isinstance(self.model, MoE):
             # for MoE model, add additional kwargs to return necessary stats
-            additional_kwargs["return_tokens_per_expert_global"] = True
+            # additional_kwargs["return_tokens_per_expert_global"] = True
             additional_kwargs["return_router_logits"] = True
         
         # metrics before aggregation

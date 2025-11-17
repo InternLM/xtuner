@@ -1414,10 +1414,6 @@ class Trainer:
             f"est_global_batch_tokens: {est_global_batch_tokens} "
             f"eta: {eta_hms} "
         )
-        if internal_metrics:
-            internal_metrics_log_list = [f"{k}: {v:.8f}" for k, v in internal_metrics.items()]
-            internal_metrics_log_str = ", ".join(internal_metrics_log_list)
-            self.logger.info(f"Step {self.cur_step}/{self.total_step} internal_metrics: {internal_metrics_log_str}")
 
         log_scalars = {
             "lr": lr,
