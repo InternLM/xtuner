@@ -4,6 +4,8 @@ import numpy as np
 import torch
 from torch import nn
 import torch.distributed as dist
+from torch.utils.hooks import RemovableHandle
+
 from xtuner.v1.module import (
     RMSNorm,
     MultiHeadAttention,
@@ -35,11 +37,6 @@ RMS_NORM_MONITOR_MODULES = (
     DenseDecoderLayer,
     MoEDecoderLayer,
     LMHead,
-    # MultiHeadAttention,
-    # MultiLatentAttention,
-    # MoEGate,
-    # MoEBlock,
-    # RMSNorm,
 )
 
 MOE_MODEL_CLS = (MoE,)
@@ -77,7 +74,10 @@ class InternalMetricsRecorder:
         param_rms = param_l2_norm / total_numel**0.5
         self.metrics['weight_rms'][layer_name] = param_rms.item()
 
-    def register_attn_extra_info_hook(self, module, layer_name=None):
+    def register_attn_extra_info_hook(self, module: nn.Module, layer_name: str):
+        """
+        Register attention extra info hook as a forward hook
+        """
         def hook(module, input, output):
             extra_info = output[1]
             if extra_info.get("softmax_lse", None) is not None:
@@ -95,7 +95,7 @@ class InternalMetricsRecorder:
                     prev_logits_max = self.attn_max_logits[layer_name]
                     self.attn_max_logits[layer_name] = max(prev_logits_max, extra_info["attn_logits"].max())
 
-        hook_handle = module.register_forward_hook(hook)
+        hook_handle: RemovableHandle = module.register_forward_hook(hook)
         self.hooks.append(hook_handle)
 
     @torch.no_grad()
@@ -162,14 +162,14 @@ class InternalMetricsRecorder:
             self.metrics["maxvio"]["total"] = maxvio.item()
             self.metrics["drop_ratio"]["total"] = drop_ratio.item()
 
-        if len(router_logits_max) > 0:
+        if router_logits_max:
             for layer_name, router_logits_list in router_logits_max.items():
                 # [bsz/intra_layer_micro_batch, ]
                 local_router_logits_max = torch.max(torch.stack(router_logits_list))
                 dist.all_reduce(local_router_logits_max, op=dist.ReduceOp.MAX)
                 self.metrics["router_logits_max"][layer_name] = local_router_logits_max.item()
 
-        if len(router_logits_mean) > 0:
+        if router_logits_mean:
             for layer_name, router_logits_list in router_logits_mean.items():
                 # [bsz/intra_layer_micro_batch, ]
                 local_router_logits_mean = torch.mean(torch.stack(router_logits_list))
@@ -177,12 +177,12 @@ class InternalMetricsRecorder:
                 self.metrics["router_logits_mean"][layer_name] = local_router_logits_mean.item()
 
         if self.metrics["attn_max_lse"]:
-            for layer_name, local_attn_max_lse in self.attn_max_lse.items():
+            for layer_name, local_attn_max_lse in self.metrics["attn_max_lse"].items():
                 dist.all_reduce(local_attn_max_lse, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_lse"][layer_name] = local_attn_max_lse.item()
 
-        if self.attn_max_logits:
-            for layer_name, local_attn_max_logits in self.attn_max_logits.items():
+        if self.metrics["attn_max_logits"]:
+            for layer_name, local_attn_max_logits in self.metrics["attn_max_logits"].items():
                 dist.all_reduce(local_attn_max_logits, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_logits"][layer_name] = local_attn_max_logits.item()
 
