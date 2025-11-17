@@ -268,6 +268,12 @@ class RolloutConfig(BaseModel):
             else:
                 kwargs["rollout_max_batch_size_per_instance"] = 128
 
+        default_extra_config = self.__class__.__fields__["extra_rollout_config"].default.copy()
+        extra_config = kwargs.get("extra_rollout_config")
+        if extra_config:
+            default_extra_config.update(extra_config)
+        kwargs["extra_rollout_config"] = default_extra_config
+
         super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
