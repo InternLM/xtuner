@@ -16,7 +16,6 @@ from xtuner.v1.utils.rl_test_utils import MockTimeoutRolloutWorker, MockRequestE
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"] 
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
-TEST_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 resource_map = {"npu": "NPU", "cuda": "GPU"}
 
 @ray.remote

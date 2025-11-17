@@ -30,6 +30,8 @@ class SingleTurnEnvironment(BaseEnvironment):
         judger_pg (Any): The placement group for scheduling judger Ray actors.
                          Defaults to None indicates using the rollout_pg.
         judger_cfg (optional): Configuration for the judger controller. Defaults to None.
+        rollout_controller (optional): An instance of the rollout controller. Defaults to None.
+        judger_controller (optional): An instance of the judger controller. Defaults to None.
     """
 
     def __init__(

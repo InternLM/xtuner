@@ -269,9 +269,10 @@ class RolloutController:
                 f"Rollout worker {url} failed {self.url_failed_counts[url]} times, but not deactivated yet."
             )
             return
-        self.logger.error(f"Deactivating rollout worker {url} due to repeated failures.")
         inactive_workers = self.active_url_to_workers.get(url)
-        self.active_workers_to_status[inactive_workers] = False
+        if inactive_workers:
+            self.logger.warning(f"Deactivating rollout worker {url} due to repeated failures.")
+            self.active_workers_to_status[inactive_workers] = False
 
     async def rollout(
         self,

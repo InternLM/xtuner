@@ -1,3 +1,4 @@
+import copy
 import traceback
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -80,8 +81,10 @@ class HttpRequestResult:
         error_msg is not already set."""
         # Only generate a message if one hasn't been provided already.
         if self.error_msg is None and self.error_type != HttpRequestErrorType.SUCCESS:
+            log_payload = {}
             if self.payload is not None and "input_ids" in self.payload:
-                self.payload["input_ids"] = str(self.payload["input_ids"])
+                log_payload = copy.deepcopy(self.payload)
+                log_payload["input_ids"] = str(log_payload["input_ids"])
 
             default_messages = {
                 HttpRequestErrorType.UNKNOWN_ERROR: f"An unknown error {self.exception} occurred, Traceback: {traceback.format_exc()}",
@@ -105,7 +108,7 @@ class HttpRequestResult:
             )
             if self.error_type == HttpRequestErrorType.REQUEST_ERROR and self.exception:
                 if hasattr(self.exception, "__cause__") and self.exception.__cause__:
-                    self.error_msg += f"__cause__: {self.exception.__cause__}"
+                    self.error_msg += f" __cause__: {self.exception.__cause__}"
 
     @property
     def is_success(self) -> bool:
