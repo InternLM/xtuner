@@ -62,6 +62,7 @@ class VisionComposeConfigProtocol(Protocol):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
+    dcp_ignore_frozen_params: bool = True
 
     def build(self) -> VisionComposeModelProtocol: ...
 

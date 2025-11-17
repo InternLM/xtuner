@@ -407,7 +407,7 @@ class TrainEngine:
             if optimizer_dir is not None:
                 optimizer_dir.mkdir(parents=True, exist_ok=True)
 
-        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
+        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params)
         with profile_time_and_memory(f"[DCP Checkpoint to {model_dir}]"):
             model_state = get_model_state_dict(self.model, options=_options)
             dcp.save(
@@ -435,7 +435,9 @@ class TrainEngine:
         Args:
             dcp_dir (str): The directory to load the model from.
         """
-        _load_options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
+        _load_options = StateDictOptions(
+            cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params
+        )
         if self.has_freeze_params:
             _set_options = StateDictOptions(cpu_offload=True, strict=False)
         else:

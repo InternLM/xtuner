@@ -755,7 +755,7 @@ class Trainer:
                 model_cfg=model_config,
                 intra_layer_micro_batch=intra_layer_micro_batch,
             )
-        if model_path is not None and resume_cfg.resume_from is None:
+        if model_path is not None and (model_config.dcp_ignore_frozen_params or resume_cfg.resume_from is None):
             engine.from_hf(hf_path=model_path, strict=strict)
         elif resume_cfg.resume_from is None:
             engine.init_model_weights()

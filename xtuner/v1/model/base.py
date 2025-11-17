@@ -74,6 +74,7 @@ class TransformerConfig(PydanticBaseModel):
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
     hf_save_worker: Annotated[int, Parameter(group="model")] = 16
+    dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
 
     @computed_field
     def num_attention_heads(self) -> int:
