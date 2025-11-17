@@ -570,7 +570,10 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         same_gen = model._get_same_hf_param(model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE)
         fused_gen = model._get_fused_hf_param(
-            model._group_param_by_load_spec(LoadEnum.FUSED), dtype=dtype, device=DEVICE
+            model._group_param_by_load_spec(LoadEnum.FUSED),
+            dtype=dtype,
+            device=DEVICE,
+            return_full_key_per_rank=True,
         )
         shard_gen = model._get_shard_hf_param(
             model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE

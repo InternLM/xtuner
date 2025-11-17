@@ -481,6 +481,7 @@ class BaseModel(nn.Module):
         dtype: torch.dtype,
         device="cpu",
         bucket_size=None,
+        return_full_key_per_rank: bool = False,
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
@@ -521,8 +522,12 @@ class BaseModel(nn.Module):
                     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
                 )
 
-                start = int(current_rank * key_per_rank)
-                end = int(start + key_per_rank)
+                if not return_full_key_per_rank:
+                    start = int(current_rank * key_per_rank)
+                    end = int(start + key_per_rank)
+                else:
+                    start = 0
+                    end = len(all_hf_keys)
 
                 _hf_key_list = all_hf_keys[start:end]
 

@@ -19,7 +19,7 @@ from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.model import get_model_config_from_hf
 
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
-MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
+MODEL_PATH = os.environ["QWEN3_MOE_PATH"]
 
 class TestUpdateWeight(unittest.TestCase):
     def setUp(self):
@@ -52,6 +52,7 @@ class TestUpdateWeight(unittest.TestCase):
             dtype="bfloat16",
             skip_load_weights=True,
             context_length=256,
+            gpu_memory_utilization=0.5,
         )
 
         # training config
