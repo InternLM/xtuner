@@ -2,7 +2,7 @@ import json
 import os
 import socket
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
 from cyclopts import Group, Parameter
 from pydantic import BaseModel, ConfigDict
@@ -93,7 +93,7 @@ class RolloutConfig(BaseModel):
         ),
     ] = None
     api_port: Annotated[
-        Optional[int],
+        int,
         Parameter(group=infer_group, help="Port number for the rollout API server. If not set, 8000 will be used."),
     ] = 8000
     gpus_per_node: Annotated[int, Parameter(group=infer_group, help="Number of GPUs allocated per node.")] = 8
@@ -114,12 +114,12 @@ class RolloutConfig(BaseModel):
         ),
     ] = False
     rollout_max_batch_size_per_instance: Annotated[
-        int,
+        Optional[int],
         Parameter(
             group=infer_group,
             help="Maximum batch size for the rollout worker. If not set, it will be determined automatically based on the model and GPU memory.",
         ),
-    ] = 512
+    ] = None
     allow_over_concurrency_ratio: Annotated[
         float,
         Parameter(
@@ -197,30 +197,25 @@ class RolloutConfig(BaseModel):
             group=infer_group,
             help='Extra configuration for different rollout worker. vllm parameters will start with prefix "vllm", etc.',
         ),
-    ] = {"lmdeploy_log_level": "CRITICAL", "lmdeploy_uvicorn_log_level": "CRITICAL"}
+    ] = {}
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
-    def __init__(self, **kwargs):
-        if "model_name" not in kwargs:
+    def model_post_init(self, __context: Any) -> None:
+        if self.model_name is None:
             model_name_from_config = None
-            model_path = Path(kwargs["model_path"])
-            config_json_path = model_path / "config.json"
+            config_json_path = Path(self.model_path) / "config.json"
             try:
                 with open(config_json_path, encoding="utf-8") as f:
                     config_data = json.load(f)
                     model_name_from_config = config_data.get("model_type")
             except (json.JSONDecodeError, OSError):
                 pass
+            self.model_name = model_name_from_config or Path(self.model_path).name
 
-            if model_name_from_config:
-                kwargs["model_name"] = model_name_from_config
-            else:
-                kwargs["model_name"] = model_path.name
+        if self.tokenizer_path is None:
+            self.tokenizer_path = str(self.model_path)
 
-        if "tokenizer_path" not in kwargs:
-            kwargs["tokenizer_path"] = str(kwargs["model_path"])
-
-        port = kwargs.get("api_port", 8000)
+        port = self.api_port
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 try:
@@ -228,12 +223,10 @@ class RolloutConfig(BaseModel):
                     break
                 except OSError:
                     port += 1
-        kwargs["api_port"] = port
+        self.api_port = port
 
-        if "device" in kwargs and kwargs["device"] == "NPU":
-            kwargs["gpus_per_node"] = 16
-        else:
-            kwargs["gpus_per_node"] = 8
+        if self.device == "NPU":
+            self.gpus_per_node = 16
 
         rollout_backend = ""
         if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
@@ -246,35 +239,26 @@ class RolloutConfig(BaseModel):
         assert rollout_backend in ["sglang", "vllm", "lmdeploy"], (
             f"Unsupported rollout backend: {rollout_backend}. Please set XTUNER_USE_SGLANG, XTUNER_USE_VLLM, or XTUNER_USE_LMDEPLOY to 1."
         )
+
         if rollout_backend == "sglang":
-            kwargs["launch_server_method"] = "multiprocessing"
-            kwargs["rollout_cross_node_comm"] = False
+            self.launch_server_method = "multiprocessing"
+            self.rollout_cross_node_comm = False
         else:
-            kwargs["launch_server_method"] = "ray"
-            kwargs["rollout_cross_node_comm"] = True
+            self.launch_server_method = "ray"
+            self.rollout_cross_node_comm = True
 
-        if "rollout_max_batch_size_per_instance" not in kwargs:
-            assert "context_length" in kwargs, (
-                "`context_length` must be provided to determine `rollout_max_batch_size_per_instance`."
+        if self.rollout_max_batch_size_per_instance is None:
+            assert self.context_length is not None, (
+                "context_length must be set if rollout_max_batch_size_per_instance is not provided."
             )
-
-            context_length = kwargs["context_length"]
-
             # TODO(@duanyanhui): Provide better suggestions for different models/input-output lengths
-            if context_length <= 4096:
-                kwargs["rollout_max_batch_size_per_instance"] = 1024
-            elif context_length <= 8192:
-                kwargs["rollout_max_batch_size_per_instance"] = 512
+            if self.context_length <= 4096:
+                self.rollout_max_batch_size_per_instance = 1024
+            elif self.context_length <= 8192:
+                self.rollout_max_batch_size_per_instance = 512
             else:
-                kwargs["rollout_max_batch_size_per_instance"] = 128
+                self.rollout_max_batch_size_per_instance = 128
 
-        default_extra_config = self.__class__.__fields__["extra_rollout_config"].default.copy()
-        extra_config = kwargs.get("extra_rollout_config")
-        if extra_config:
-            default_extra_config.update(extra_config)
-        kwargs["extra_rollout_config"] = default_extra_config
-
-        super().__init__(**kwargs)
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
 

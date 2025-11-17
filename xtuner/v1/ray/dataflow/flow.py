@@ -1,6 +1,6 @@
 import asyncio
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 import ray
@@ -75,8 +75,7 @@ class DataFlowConfig(BaseModel):
     extra_params: Annotated[Dict, Parameter(help="Extra parameters for rollout.")] = {}
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    def model_post_init(self, __context: Any) -> None:
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
 
