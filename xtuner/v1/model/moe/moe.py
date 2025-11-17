@@ -96,7 +96,7 @@ class MoEConfig(TransformerConfig):
     hidden_factor: Annotated[float, Parameter(group="moe")] = 1.0
     moe_intermediate_size: Annotated[int, Parameter(group="moe")]
     ep_size: Annotated[int, Parameter(group="moe")] = 1
-    dispatcher: Annotated[Literal["deepep", "all2all"] | None, Parameter(group="moe")] = None
+    dispatcher: Annotated[Literal["deepep", "all2all", "agrs"] | None, Parameter(group="moe")] = None
     router: GreedyRouterConfig | NoAuxRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
@@ -108,6 +108,12 @@ class MoEConfig(TransformerConfig):
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
+
+        if self.dispatcher == "agrs":
+            assert self.router.use_grouped_router, "AGRS dispatcher requires grouped router"
+            assert self.ep_size == self.router.router_n_groups == 8, (
+                "Currently, AGRS dispatcher requires ep_size and router_n_groups to be 8"
+            )
 
         return MoE(self)
 

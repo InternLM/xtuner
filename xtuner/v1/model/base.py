@@ -1,6 +1,6 @@
 import json
 import math
-from concurrent.futures import Future, ProcessPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import reduce
 from itertools import chain
 from pathlib import Path
@@ -74,6 +74,7 @@ class TransformerConfig(PydanticBaseModel):
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
     hf_save_worker: Annotated[int, Parameter(group="model")] = 16
+    dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -483,33 +484,99 @@ class BaseModel(nn.Module):
             name_list: list[str],
         ) -> tuple[list[torch.Tensor], list[str]]:
             # Get fsdp unsharded params
-            _tensor_list, _spec_list = list(zip(*fsdp_tensor_list))
+            spec_list: list[LoadSpec]
+            tensor_list: list[torch.Tensor]
+
+            tensor_list, spec_list = list(zip(*fsdp_tensor_list))  # type: ignore[assignment]
             if self.fsdp_mesh is not None:
-                fsdp_unshard_tensor_list = self._fsdp_foreach_allgather(_tensor_list, _spec_list)  # type: ignore
+                fsdp_unshard_tensor_list = self._fsdp_foreach_allgather(tensor_list, spec_list)  # type: ignore
             else:
-                fsdp_unshard_tensor_list = _tensor_list  # type: ignore
+                fsdp_unshard_tensor_list = tensor_list  # type: ignore
+
+            saved_fused_tensor_list: list[torch.Tensor] = []
+            hf_keys_list: list[list[str]] = []
+
+            for load_spec, fsdp_unshared_tensor in zip(spec_list, fsdp_unshard_tensor_list):
+                hf_keys = load_spec.hf_keys
+
+                if load_spec.group is not None:
+                    all_hf_keys_list: list[None] | list[list[str]] = [None for _ in range(load_spec.group.size())]
+                    dist.all_gather_object(all_hf_keys_list, hf_keys, group=load_spec.group)
+                    all_hf_keys_list = cast(list[list[str]], all_hf_keys_list)
+                    all_hf_keys = list(chain(*all_hf_keys_list))
+                else:
+                    all_hf_keys = hf_keys
+
+                current_rank = dist.get_rank()
+                fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
+                key_per_rank = len(all_hf_keys) / len(fused_save_ranks)
+                assert key_per_rank.is_integer(), (
+                    f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
+                    f"size of `fused_save_ranks` {len(fused_save_ranks)}"
+                )
+
+                start = int(current_rank * key_per_rank)
+                end = int(start + key_per_rank)
+
+                _hf_key_list = all_hf_keys[start:end]
+
+                if not _hf_key_list:
+                    continue
+
+                hf_keys_list.append(_hf_key_list)
+
+                assert load_spec.dim is not None
+                if load_spec.group is not None:
+                    assert load_spec.dim is not None
+                    _gathered_tensor_list = [
+                        torch.zeros_like(fsdp_unshared_tensor) for _ in range(load_spec.group.size())
+                    ]
+                    dist.all_gather(_gathered_tensor_list, fsdp_unshared_tensor, group=load_spec.group)
+                    _gathered_tensor = torch.cat(_gathered_tensor_list, dim=load_spec.dim)
+                else:
+                    _gathered_tensor = fsdp_unshared_tensor
+
+                hf_tensor_size = _gathered_tensor.shape[load_spec.dim] / len(all_hf_keys)
+                _saved_fused_tensor = torch.index_select(
+                    _gathered_tensor,
+                    dim=load_spec.dim,
+                    index=torch.arange(
+                        int(start * hf_tensor_size),
+                        int(end * hf_tensor_size),
+                        dtype=torch.int64,
+                        device=_gathered_tensor.device,
+                    ),
+                )
+                saved_fused_tensor_list.append(_saved_fused_tensor)
 
             # Split the fused tensor into hf tensors
             hf_tensor_list: list[torch.Tensor] = []
             # used in self._to_float8 to determine whether to convert a unshard hf_tensor to fp8
             fsdp_shard_tensor_list: list[torch.Tensor] = []
-            for unshard_tensor, load_spec, shard_tensor in zip(fsdp_unshard_tensor_list, _spec_list, _tensor_list):
-                dim = load_spec.dim
-                hf_tensor_size = unshard_tensor.shape[dim] / len(load_spec.hf_keys)
+            # `origin_tensor_list` is only used to mark, which tensors are float8 weights for the
+            # `_to_float8` function
+            origin_tensor_list: list[torch.Tensor] = []
+
+            for saved_tensor, load_spec, hf_keys, origin_tensor in zip(
+                saved_fused_tensor_list, spec_list, hf_keys_list, tensor_list
+            ):
+                dim = cast(int, load_spec.dim)
+                hf_tensor_size = saved_tensor.shape[dim] / len(hf_keys)
                 assert hf_tensor_size.is_integer(), "Internal Error, hf_tensor_size is not integer"
                 hf_tensor_size = int(hf_tensor_size)
-                hf_tensor = unshard_tensor.split([hf_tensor_size] * len(load_spec.hf_keys), dim=dim)
+                hf_tensor = saved_tensor.split([hf_tensor_size] * len(hf_keys), dim=dim)
                 hf_tensor_list.extend(hf_tensor)
-                fsdp_shard_tensor_list.extend([shard_tensor] * len(hf_tensor))
-            assert len(name_list) == len(hf_tensor_list)
+                fsdp_shard_tensor_list.extend([saved_tensor] * len(hf_tensor))
+                origin_tensor_list.extend([origin_tensor] * len(hf_tensor))
 
+            name_list = list(chain.from_iterable(hf_keys_list))
             hf_tensor_list = [
                 self.param_to_safetensor(safetensor, name) for safetensor, name in zip(hf_tensor_list, name_list)
             ]
 
             if dtype == torch.float8_e4m3fn:
                 hf_tensor_list_new, name_list_new = self._to_float8(
-                    hf_tensor_list, name_list, fsdp_shard_tensor_list, dtype
+                    hf_tensor_list, name_list, origin_tensor_list, dtype
                 )
                 return hf_tensor_list_new, name_list_new
 
@@ -671,36 +738,15 @@ class BaseModel(nn.Module):
         same_gen = self._get_same_hf_param(self._group_param_by_load_spec(LoadEnum.SAME), dtype=save_dtype)
         fused_gen = self._get_fused_hf_param(self._group_param_by_load_spec(LoadEnum.FUSED), dtype=save_dtype)
 
-        # We do not save HF tensor with FSDP sharded tensor since if 1 HF tensor is sharded by 2 FSDP
-        # rank, it's hard to determine which FSDP rank should save the HF tensor.
-        if self.fsdp_mesh is not None:
-            if self.hsdp_mesh:
-                # is_fused_save_rank = (dist.get_rank(group=self.hsdp_mesh.get_group(0)) == 0 and dist.get_rank(group=self.hsdp_mesh.get_group(1)) == 0)
-                is_fused_save_rank = self.hsdp_mesh.get_coordinate() == [0, 0]
-            else:
-                is_fused_save_rank = self.fsdp_mesh.get_local_rank() == 0
-        else:
-            if dist.is_initialized():
-                is_fused_save_rank = dist.get_rank() == 0
-            else:
-                is_fused_save_rank = True
-
         is_others_save_rank = not dist.is_initialized() or dist.get_rank() == 0
 
-        if is_fused_save_rank or is_others_save_rank:
-            # save_executor = ThreadPoolExecutor(max_workers=16)
-            save_executor = ProcessPoolExecutor(max_workers=16)
-        else:
-            save_executor = None
+        # Tell me why! why! old cao! @HIT-cwh
+        # mp_context = multiprocessing.get_context("fork")
+        # save_executor = ProcessPoolExecutor(max_workers=16, mp_context=mp_context)
+        save_executor = ThreadPoolExecutor(max_workers=16)
 
         if dist.is_initialized():
-            if self.fsdp_mesh is not None:
-                if self.hsdp_mesh:
-                    save_rank = dist.get_rank() % (dist.get_world_size() // self.hsdp_mesh.size())
-                else:
-                    save_rank = dist.get_rank() % (dist.get_world_size() // self.fsdp_mesh.size())
-            else:
-                save_rank = dist.get_rank()
+            save_rank = dist.get_rank()
         else:
             save_rank = 0
 
@@ -712,18 +758,20 @@ class BaseModel(nn.Module):
         safetensor_index = 0
 
         for name_list, hf_tensor_list in fused_gen:
+            if not name_list:
+                continue
+
             safetensor_index += 1
             safetensor_name = f"model-{safetensor_index:04d}-fused-save_rank{save_rank}.safetensors"
-            if is_fused_save_rank:
-                weight_map.update({name: safetensor_name for name in name_list})
-                assert save_executor is not None, "Internal Error, save_executor should not be None"
-                future = save_executor.submit(
-                    _save_file,
-                    dict(zip(name_list, hf_tensor_list)),
-                    hf_dir / safetensor_name,
-                )
-                save_futures.append(future)
-                self._wait_save_task(save_futures)
+            weight_map.update({name: safetensor_name for name in name_list})
+            assert save_executor is not None, "Internal Error, save_executor should not be None"
+            future = save_executor.submit(
+                _save_file,
+                dict(zip(name_list, hf_tensor_list)),
+                hf_dir / safetensor_name,
+            )
+            save_futures.append(future)
+            self._wait_save_task(save_futures)
 
         safetensor_index = 0
         for name_list, hf_tensor_list in chain(same_gen, shard_gen):
@@ -749,12 +797,12 @@ class BaseModel(nn.Module):
                 save_futures.append(future)
                 self._wait_save_task(save_futures)
 
-        if save_executor is not None:
+        if save_futures:
             wait(save_futures)
             for future in save_futures:
                 if future.exception():
                     raise future.exception()  # type: ignore
-            save_executor.shutdown()
+        save_executor.shutdown()
 
         if dist.is_initialized():
             world_size = dist.get_world_size()
@@ -1104,6 +1152,38 @@ class BaseModel(nn.Module):
                         maybe_compile.set_compile_target(target)
             else:
                 maybe_compile.clear_compile_targets()
+
+    def _get_ranks_to_save_fused_tensor(self, fused_size: int) -> list[int]:
+        # Goal: decide how many ranks are used to store model/expert parameters.
+        # Policy: choose d such that:
+        #   1) d is a positive divisor of world_size,
+        #   2) d <= num_experts,
+        #   3) d is as close to num_experts as possible under (1)(2).
+        # This is equivalent to: pick the largest divisor of world_size that does not exceed num_experts.
+        # Rationale: ensures feasibility under expert count, maximizes utilization, and yields balanced groups.
+        # Implementation hint: enumerate divisor pairs (i, world_size // i) for i up to sqrt(world_size) and keep the max d <= num_experts.
+        # Complexity: O(sqrt(world_size)).
+        world_size = dist.get_world_size()
+
+        if world_size >= fused_size:
+            return list(range(fused_size))
+
+        num_ranks_to_save = None
+        best_diff = None
+
+        i = 1
+        while i * i <= fused_size:
+            if fused_size % i == 0:
+                for d in (i, fused_size // i):
+                    diff = abs(d - world_size)
+                    if (
+                        num_ranks_to_save is None
+                        or (diff < best_diff)  # type: ignore
+                        or (diff == best_diff and d < num_ranks_to_save)
+                    ):
+                        num_ranks_to_save, best_diff = d, diff
+            i += 1
+        return list(range(cast(int, num_ranks_to_save)))
 
     def to_device(self, device: torch.device | str):
         if self.fsdp_config is not None and self.fsdp_config.cpu_offload:

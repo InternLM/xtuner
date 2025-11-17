@@ -163,6 +163,13 @@ class RolloutConfig(BaseModel):
             help="Whether to skip loading weights for the rollout worker.",
         ),
     ] = False
+    enable_return_routed_experts: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to enable returning routed experts for the rollout worker.",
+        ),
+    ] = False
     launch_server_method: Annotated[
         Literal["ray", "multiprocessing"],
         Parameter(

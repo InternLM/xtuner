@@ -28,7 +28,5 @@ export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 
 proxy_off
 pip install -e .
-pip install openai-harmony
-pip install numpy==1.26.4
 
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH

@@ -59,6 +59,11 @@ class VisionComposeConfigProtocol(Protocol):
     projector_config: BaseModel
     text_config: TransformerConfig
 
+    freeze_vision: bool = False
+    freeze_projector: bool = False
+    freeze_language: bool = False
+    dcp_ignore_frozen_params: bool = True
+
     def build(self) -> VisionComposeModelProtocol: ...
 
     @property
