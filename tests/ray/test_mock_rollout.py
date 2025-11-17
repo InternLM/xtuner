@@ -4,13 +4,10 @@ import ray
 from transformers import AutoTokenizer
 import torch
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.ray.environment import SingleTurnEnvironment
-from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
-from xtuner.v1.datasets import RLTokenizeFnConfig, build_datasets
+from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.ray.rollout.controller import RolloutController
 # 导入 Mock Worker

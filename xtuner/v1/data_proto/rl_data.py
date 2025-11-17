@@ -153,7 +153,7 @@ def check_dataflow_item(group_data_items):
 
     # 如果存在abort的状态，相当于跳过检查，下次会重新rollout
     is_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
-    is_skipped = all(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
+    is_skipped = any(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
     if is_abort or is_skipped:
         return True
 

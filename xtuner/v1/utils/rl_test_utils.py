@@ -53,7 +53,8 @@ class MockTimeoutRolloutWorker(LMDeployWorker):
 class MockRequestErrorRolloutWorker(LMDeployWorker):
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
         try:
-            raise httpx.RequestError("Mocked httpx request error")
+            req = httpx.Request("POST", url)
+            raise httpx.RequestError("Mocked httpx request error", request=req)
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)

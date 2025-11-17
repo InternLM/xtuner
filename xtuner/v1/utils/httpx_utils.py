@@ -16,9 +16,9 @@ class HttpRequestErrorType(IntEnum):
     an HTTP status code.
 
     Example:
-        if error_code == RequestErrorType.BAD_REQUEST:
+        if error_code == HttpRequestErrorType.BAD_REQUEST:
             print("Bad request from server!")
-        elif error_code == RequestErrorType.TIMEOUT_ERROR:
+        elif error_code == HttpRequestErrorType.TIMEOUT_ERROR:
             print("Client-side request timed out!")
     """
 
@@ -86,7 +86,7 @@ class HttpRequestResult:
             default_messages = {
                 HttpRequestErrorType.UNKNOWN_ERROR: f"An unknown error {self.exception} occurred, Traceback: {traceback.format_exc()}",
                 HttpRequestErrorType.TIMEOUT_ERROR: "The request timed out.",
-                HttpRequestErrorType.REQUEST_ERROR: f"A network request error occurred occurred. TypeError: {type(self.exception)}",
+                HttpRequestErrorType.REQUEST_ERROR: f"A network request error occurred. TypeError: {type(self.exception)}",
                 HttpRequestErrorType.BAD_REQUEST: f"Bad Request (400): The server could not process the request {self.payload}",
                 HttpRequestErrorType.UNAUTHORIZED: "Unauthorized (401): Authentication failed or is required.",
                 HttpRequestErrorType.FORBIDDEN: "Forbidden (403): Access is denied.",
@@ -139,4 +139,6 @@ def set_rollout_response_status(http_result: HttpRequestResult, response: RLRoll
     elif http_result.is_server_error:
         response.finish_reason = "failed"
         if server_url:
-            response.extra_info = {"url": server_url}
+            if response.extra_info is None:
+                response.extra_info = {}
+            response.extra_info.update({"url": server_url})
