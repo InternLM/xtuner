@@ -47,6 +47,7 @@ from xtuner.v1.utils import (
     log_format,
     record_git_info,
     InternalMetricsRecorder,
+    InternalMetrics,
 )
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
@@ -609,7 +610,7 @@ class Trainer:
         self._exp_tracker.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
-    def _maybe_check_model_internal_metrics(self, data_batches: list[ModelItem]) -> dict[str, float] | None:
+    def _maybe_check_model_internal_metrics(self, data_batches: list[ModelItem]) -> InternalMetrics | None:
         if self._internal_metrics_interval is None:
             return None
 
@@ -1183,7 +1184,7 @@ class Trainer:
         if internal_metrics is None:
             internal_metrics = {}
         else:
-            internal_metrics = _flatten_dict(internal_metrics)
+            internal_metrics = _flatten_nested_metrics(internal_metrics)
 
         self.logger.info(
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
@@ -1437,14 +1438,15 @@ class Trainer:
         logger.info(log_str)
 
 
-def _flatten_dict(d: dict, parent_key: str = '', sep: str = '/') -> dict:
+def _flatten_nested_metrics(metrics: InternalMetrics, sep: str = '/') -> dict:
     items = []
-    for k, v in d.items():
-        new_key = f"{parent_key}{sep}{k}" if parent_key else k
-        if isinstance(v, dict):
-            items.extend(_flatten_dict(v, new_key, sep=sep).items())
-        elif isinstance(v, torch.Tensor):
-            items.append((new_key, v.item()))
+    for name, sub_metrics in metrics.items():
+        if isinstance(sub_metrics, dict):
+            for k, v in sub_metrics.items():
+                if isinstance(v, (float, int)):
+                    items.append((f"{name}{sep}{k}", v))
+                else:
+                    raise ValueError(f"Unsupported metric value type: expected float or int, but got {type(v)}")
         else:
-            items.append((new_key, v))
+            raise ValueError(f"Unsupported metric type for internal metrics: expected dict, but got {type(sub_metrics)}")
     return dict(items)
