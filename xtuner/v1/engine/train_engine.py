@@ -424,7 +424,11 @@ class TrainEngine:
                 )
 
     def load_dcp(
-        self, model_dir: Path, optimizer_dir: Path | None = None, load_states: bool = True, load_args: bool = True
+        self,
+        model_dir: Path,
+        optimizer_dir: Path | None = None,
+        load_states: bool = True,
+        load_args: bool = True,
     ):
         """Load the dcp model from the given directory.
 
