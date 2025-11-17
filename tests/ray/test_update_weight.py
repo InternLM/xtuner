@@ -36,8 +36,8 @@ class TestUpdateWeight(unittest.TestCase):
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator="GPU",
-            num_workers=2,
-            num_cpus_per_worker=16,
+            num_workers=4,
+            num_cpus_per_worker=12,
             cpu_memory_per_worker=16 * 1024 ** 3,  # 16 GB
         )
         self.rollout_cfg = RolloutConfig(
@@ -46,7 +46,7 @@ class TestUpdateWeight(unittest.TestCase):
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
             rollout_cross_node_comm=False,
-            tensor_parallel_size=2,
+            tensor_parallel_size=4,
             expert_parallel_size=1,
             gpus_per_node=8, # gpu: 8, npu: 16
             dtype="bfloat16",
