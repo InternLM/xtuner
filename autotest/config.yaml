@@ -25,7 +25,7 @@ default_config:
                 - HF_HUB_OFFLINE=1
             
 case: 
-    qwen3-sft: # tested
+    qwen3-sft:
         -
             type: sft
             parameters:
@@ -41,3 +41,4 @@ case:
                     text_tokens: 0
                     grad_norm: 0.02
             timeout: 600
+
