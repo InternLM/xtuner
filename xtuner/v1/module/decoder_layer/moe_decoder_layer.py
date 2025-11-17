@@ -1,9 +1,9 @@
 from functools import partial
-from typing import Literal, Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias, cast
 
 import torch
 import torch.nn as nn
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from torch.autograd.function import Function
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
@@ -31,6 +31,7 @@ from ..linear.linear import build_linear
 
 
 RouterLogits: TypeAlias = torch.Tensor
+RouterWeights: TypeAlias = torch.Tensor
 HiddenStates: TypeAlias = torch.Tensor
 
 
@@ -39,6 +40,7 @@ class MoEActFnProtocol(Protocol):
 
 
 class MoEActFnConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     act_type: Literal["clipped_swiglu", "swiglu"] = "swiglu"
 
     clip_alpha: float | None = None
@@ -101,7 +103,9 @@ class MoEGate(nn.Module):
         if self.gate_bias:
             self.bias = nn.Parameter(torch.zeros(self.n_routed_experts))
 
-    def forward(self, hidden_states: torch.Tensor) -> RouterResults:
+    def forward(
+        self, hidden_states: torch.Tensor, rollout_routed_experts: torch.Tensor | None = None
+    ) -> RouterResults:
         _, _, h = hidden_states.shape
         ### compute gating score
         hidden_states = hidden_states.view(-1, h)
@@ -118,7 +122,7 @@ class MoEGate(nn.Module):
 
         logits = F.linear(hidden_states.float(), weight.float(), bias)
 
-        return self.router(logits)
+        return self.router(logits, rollout_routed_experts)
 
 
 class MoEBlock(nn.Module):
@@ -137,7 +141,6 @@ class MoEBlock(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = moe_intermediate_size
         self.num_routed_experts = n_routed_experts
-
         self.ep_mesh = ep_mesh
         # self.fused_w1 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
         # self.fused_w3 = GroupedLinear(self.hidden_size, self.intermediate_size, self.num_routed_experts, ep_mesh)
@@ -193,7 +196,7 @@ class MoEDecoderLayer(nn.Module):
         moe_act_fn_cfg: MoEActFnConfig,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
-        dispatcher: Literal["deepep", "all2all"] | None,
+        dispatcher: Literal["deepep", "all2all", "agrs"] | None,
         ep_mesh: DeviceMesh | None = None,
     ):
         super().__init__()
@@ -304,7 +307,7 @@ class MoEDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-    ) -> tuple[HiddenStates, RouterLogits]:
+    ) -> tuple[HiddenStates, RouterLogits, RouterWeights]:
         residual, hidden_states, router_results = self._pre_moe_forward(
             hidden_states=hidden_states,
             seq_ctx=seq_ctx,
@@ -315,6 +318,9 @@ class MoEDecoderLayer(nn.Module):
         origin_shape = hidden_states.shape
 
         # reshape hidden_states to (batch_size * seq_len, hidden_size)
+        # ProberList.before_dispatch(
+        #     self.layer_idx, hidden_states, router_results["topk_ids"], router_results["topk_weights"]
+        # )
         pre_dispatched = self.dispatcher.dispatch_preprocess(
             hidden_states=hidden_states.view(-1, hidden_states.shape[-1]),
             topk_ids=router_results["topk_ids"],
@@ -328,11 +334,24 @@ class MoEDecoderLayer(nn.Module):
             pre_dispatched=pre_dispatched,
             dispatched=dispatched,
         )
+        # ProberList.after_dispatch(
+        #     self.layer_idx,
+        #     post_dispatched["hidden_states"],
+        #     post_dispatched["tokens_per_expert"],
+        #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
+        #     dispatched["topk_weights"],
+        # )
         experts_out = self.experts(
             post_dispatched["hidden_states"],
             post_dispatched["tokens_per_expert"],
             decoding=False,
         )
+        # ProberList.before_combine(
+        #     self.layer_idx,
+        #     experts_out,
+        #     post_dispatched.get("row_ids_map"),  # type: ignore[arg-type]
+        #     dispatched["topk_weights"],
+        # )
         pre_combined = self.dispatcher.combine_preprocess(
             hidden_states=experts_out,
             pre_dispatched=pre_dispatched,
@@ -357,13 +376,19 @@ class MoEDecoderLayer(nn.Module):
         )
         combined_hidden_states = post_combined["hidden_states"]
         combined_hidden_states = combined_hidden_states.view(*origin_shape)
+        # ProberList.after_combine(self.layer_idx, combined_hidden_states)
+
+        if self.n_shared_experts > 0:
+            shared_experts_out = self._shared_experts_forward(hidden_states=hidden_states)
+        else:
+            shared_experts_out = None
 
         hidden_states = self._post_moe_forward(
-            hidden_states=hidden_states,
             combined_hidden_states=combined_hidden_states,
             residual=residual,
+            shared_experts_out=shared_experts_out,
         )
-        return hidden_states, router_results["logits"]
+        return hidden_states, router_results["logits"], router_results["router_weights"]
 
     def _micro_batch_forward(
         self,
@@ -465,6 +490,18 @@ class MoEDecoderLayer(nn.Module):
             )
             combined_list.append(combined)
 
+        shared_experts_out_list: list[torch.Tensor | None]
+
+        if self.n_shared_experts > 0:
+            shared_experts_out_list = []
+            for pre_moe_forward_out in pre_moe_forward_out_list:
+                shared_experts_out = self._shared_experts_forward(
+                    hidden_states=pre_moe_forward_out,
+                )
+                shared_experts_out_list.append(shared_experts_out)
+        else:
+            shared_experts_out_list = [None] * intra_layer_micro_batch
+
         hidden_states_out_list: list[torch.Tensor] = []
         for i in range(intra_layer_micro_batch):
             post_combined = self.dispatcher.combine_postprocess(
@@ -476,14 +513,16 @@ class MoEDecoderLayer(nn.Module):
                 async_op=True,
             )
             hidden_states = self._post_moe_forward(
-                hidden_states=pre_moe_forward_out_list[i],
+                # hidden_states=pre_moe_forward_out_list[i],
                 combined_hidden_states=post_combined["hidden_states"].view(*pre_moe_forward_out_list[i].shape),
                 residual=residual_list[i],
+                shared_experts_out=shared_experts_out_list[i],
             )
             hidden_states_out_list.append(hidden_states)
 
         router_logits = [router_results["logits"] for router_results in router_results_list]
-        return tuple(hidden_states_out_list + router_logits)
+        router_weights = [router_results["router_weights"] for router_results in router_results_list]
+        return tuple(hidden_states_out_list + router_logits + router_weights)
 
     @maybe_compile(fullgraph=True)
     def _pre_moe_forward(
@@ -498,7 +537,6 @@ class MoEDecoderLayer(nn.Module):
         # attention, post-layernorm and gate are implemented in one function
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        # hidden_states =
 
         # Self Attention
         if state == ForwardState.TRAINING:
@@ -523,29 +561,38 @@ class MoEDecoderLayer(nn.Module):
                 seq_ctx=seq_ctx,
                 past_key_values=past_key_values,
             )
-
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
 
-        router_results: RouterResults = self.gate(hidden_states)
+        if seq_ctx.rollout_routed_experts is not None:
+            rollout_routed_experts = seq_ctx.rollout_routed_experts[:, self.layer_idx, :]  # seq_l, expert
+        else:
+            rollout_routed_experts = None
+        router_results: RouterResults = self.gate(hidden_states, rollout_routed_experts)
         return residual, hidden_states, router_results
+
+    @maybe_compile(fullgraph=True)
+    def _shared_experts_forward(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.shared_experts is not None, "Shared experts should be initialized when n_shared_experts > 0"
+        shared_experts_out = self.shared_experts(hidden_states)
+        return shared_experts_out
 
     @maybe_compile(fullgraph=True)
     def _post_moe_forward(
         self,
-        hidden_states: torch.Tensor,
         combined_hidden_states: torch.Tensor,
         residual: torch.Tensor,
+        shared_experts_out: torch.Tensor | None,
     ) -> torch.Tensor:
-        # This part can be fullgraph compiled
         if self.n_shared_experts > 0:
-            assert self.shared_experts is not None, "Shared experts should be initialized when n_shared_experts > 0"
-            shared_experts_out = self.shared_experts(hidden_states)
+            shared_experts_out = cast(torch.Tensor, shared_experts_out)
             combined_hidden_states = combined_hidden_states + shared_experts_out
-
         return combined_hidden_states * self.hidden_factor + residual
 
     def build_kv_cache(

@@ -2,7 +2,7 @@ from typing import Dict, TypeVar
 
 import ray
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from ray.util.placement_group import PlacementGroup, placement_group
 from typing_extensions import Annotated
 
@@ -24,6 +24,7 @@ class CPUResourcesConfig(BaseModel):
         num_workers (int): Total number of workers in the placement group.
     """
 
+    model_config = ConfigDict(extra="forbid")
     num_workers: Annotated[int, Parameter(help="Number of workers in the placement group.")] = 1
     num_cpus_per_worker: Annotated[float, Parameter(help="Number of CPUs to allocate for the placement group.")] = 1
     cpu_memory_per_worker: Annotated[

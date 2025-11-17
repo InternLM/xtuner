@@ -70,3 +70,8 @@ repos:
         require_serial: true
         verbose: true
         types: [python]
+      - id: pydantic-extra-check
+        name: pydantic-extra-check 
+        language: system
+        entry: .dev_scripts/test_pydantic.py
+        verbose: false

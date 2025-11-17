@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, cast
 
 import torch
 import torch.nn as nn
@@ -156,14 +156,10 @@ class slice_weight(torch.autograd.Function):
         ctx,
         w_fp8: Float8Tensor,
         ori_shape: Tuple[int, int, int],
-        # pad_shape: Tuple,
     ):
         ne, dout, din = ori_shape
         pad_shape = w_fp8._data.shape
         num_features_padded, din = pad_shape
-        # assert w_fp8._data.shape == (num_features_padded, din), (
-        #     f"w_fp8._data.shape {w_fp8._data.shape} != pad_shape {pad_shape}"
-        # )
         assert w_fp8._scale.shape == (num_features_padded // 128, din // 128), (
             f"w_fp8._scale.shape {w_fp8._scale.shape} != {(num_features_padded // 128, din // 128)}"
         )
@@ -178,16 +174,10 @@ class slice_weight(torch.autograd.Function):
             w_fp8._group_size,
         )
         ctx.pad_shape = pad_shape
-        # ctx.ori_shape = ori_shape
         return w_fp8
 
     @staticmethod
     def backward(ctx, g):
-        # assert g.shape == ctx.ori_shape, (
-        #     f"g.shape {g.shape} != ctx.ori_shape {ctx.ori_shape}"
-        # )
-        # ne, dout, din = ctx.ori_shape
-        # g = g.view(ne * dout, din)
         pad_len = ctx.pad_shape[0] - g.shape[0]
         g_padded = torch.nn.functional.pad(g, (0, 0, 0, pad_len))
         return g_padded, None
@@ -240,8 +230,6 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         )
 
         # We have padded the dim0 of GroupedLinear's weight to make fsdp compatible with block-wise fp8.
-        # if padded_out_features is None:
-        #     padded_out_features = num_routed_experts * out_features
         weight = WeightWithDynamicTilewiseFloat8CastTensor(
             torch.empty(num_routed_experts * out_features, in_features),
             torch.float8_e4m3fn,
@@ -252,29 +240,25 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
             self.weight = nn.Parameter(distribute_tensor(weight, ep_mesh, [Shard(0)]))
         else:
             self.weight = nn.Parameter(weight)
-        # weight = nn.Parameter(
-        #     torch.empty(num_routed_experts * out_features, in_features)
-        # )
 
         self.pad_shape: Optional[Tuple[int, int]] = None
         self.reset_parameters()
-        # self.weight = nn.Parameter(
-        #     WeightWithDynamicTilewiseFloat8CastTensor(
-        #         weight,
-        #         torch.float8_e4m3fn,
-        #     )
-        # )
 
     def reset_parameters(self) -> None:
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
     def _check_shape(self, weight):
+        ep_size = self.ep_mesh.size() if self.ep_mesh is not None else 1
         if self.is_padded:
-            # We dont support padding for EP training.
-            assert weight.shape == self.pad_shape, f"Expected weight shape {self.pad_shape}, but got {weight.shape}."
+            assert weight.shape == (
+                self.pad_shape[0] // ep_size,
+                self.pad_shape[1],
+            ), f"Expected weight shape {(self.pad_shape[0] // ep_size, self.pad_shape[1])}, but got {weight.shape}."
         else:
-            # EP1 without padding or EP training
-            assert weight.shape == (self.ori_local_shape[0] * self.ori_local_shape[1], self.ori_local_shape[2]), (
+            assert weight.shape == (
+                self.ori_local_shape[0] * self.ori_local_shape[1],
+                self.ori_local_shape[2],
+            ), (
                 f"Expected weight shape {(self.ori_local_shape[0] * self.ori_local_shape[1], self.ori_local_shape[2])}, "
                 f"but got {weight.shape}."
             )
@@ -316,22 +300,27 @@ class TileWiseFloat8GroupedLinear(torch.nn.Module):
         )
         if padded_out_features == self.weight.shape[0]:
             return
-        if isinstance(self.weight, DTensor):
-            assert padded_out_features == self.weight.shape[0], "Padding is not support for EP training."
-            return
+
         weight = torch.empty(
             (padded_out_features, self.in_features),
             dtype=self.weight.dtype,
             layout=self.weight.layout,
             device=self.weight.device,
         )
-        weight[: self.weight.shape[0]].data.copy_(self.weight.data)  # copy the original weight
-        weight[self.weight.shape[0] :].data.copy_(0.0)  # type: ignore  # zero pad the weight
         weight = WeightWithDynamicTilewiseFloat8CastTensor(
             weight,
             torch.float8_e4m3fn,
             (self.num_routed_experts * self.out_features, self.in_features),
         )
+        if self.ep_mesh is not None and self.ep_mesh.size() > 1:
+            weight = distribute_tensor(weight, self.ep_mesh, [Shard(0)])
+            ori_local_weight = cast(DTensor, self.weight)._local_tensor
+            local_weight = weight._local_tensor
+            local_weight[: ori_local_weight.shape[0]].data.copy_(ori_local_weight.data)  # copy the original weight
+            local_weight[ori_local_weight.shape[0] :].data.copy_(0.0)  # type: ignore  # zero pad the weight
+        else:
+            weight[: self.weight.shape[0]].data.copy_(self.weight.data)  # copy the original weight
+            weight[self.weight.shape[0] :].data.copy_(0.0)  # type: ignore  # zero pad the weight
         self.register_parameter("weight", nn.Parameter(weight))
         self.pad_shape = (padded_out_features, self.in_features)
 

@@ -5,7 +5,7 @@ import ray
 import torch
 import torch.distributed as dist
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from ray.util.placement_group import PlacementGroup, placement_group, placement_group_table
 from typing_extensions import Annotated
 
@@ -49,6 +49,7 @@ class AcceleratorResourcesConfig(BaseModel):
         )
     """
 
+    model_config = ConfigDict(extra="forbid")
     accelerator: Annotated[AcceleratorType, Parameter(help="Architecture of accelerator to use (e.g., 'GPU', 'NPU').")]
     num_workers: Annotated[int, Parameter(help="Number of accelerators in the placement group.")]
     num_cpus_per_worker: Annotated[float, Parameter(help="Number of CPUs to allocate for the placement group.")] = 12
@@ -220,7 +221,7 @@ class AutoAcceleratorWorkers:
     workers on accelerators within a Ray PlacementGroup."""
 
     @staticmethod
-    def build_placement_group(resources_config: AcceleratorResourcesConfig):
+    def build_placement_group(resources_config: AcceleratorResourcesConfig, name="train"):
         """Build a Ray PlacementGroup based on the provided resource
         configuration.
 
@@ -238,10 +239,11 @@ class AutoAcceleratorWorkers:
                 resources_config.accelerator: resources_config.num_accelerators_per_worker,
             }
         ] * resources_config.num_workers
-
-        pg = placement_group(bundles=bundles, strategy="PACK", name="train")
-
-        ray.get(pg.ready())
+        if name in ray.util.placement_group_table().keys():
+            pg = ray.util.get_placement_group(name)
+        else:
+            pg = placement_group(bundles=bundles, strategy="PACK", name=name)
+            ray.get(pg.ready())
         return pg
 
     @staticmethod
@@ -321,7 +323,6 @@ class AutoAcceleratorWorkers:
         """
         if not ray.is_initialized():
             raise RuntimeError("Ray is not initialized. Please initialize Ray before calling this method.")
-
         accelerator = AutoAcceleratorWorkers.get_device_type(pg)
         pg_options = AutoAcceleratorWorkers.get_pg_options(pg)
         pg_info = placement_group_table(pg)
@@ -345,7 +346,7 @@ class AutoAcceleratorWorkers:
 
         sorted_bundle_idxs = []
         for node_id, infos in node_accelerator_infos.items():
-            for rank in range(len(infos.keys())):
+            for rank in sorted(infos.keys()):
                 bundle_idx = infos[rank]
                 sorted_bundle_idxs.append(bundle_idx)
 

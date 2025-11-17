@@ -2,7 +2,7 @@ import enum
 from typing import Optional
 
 from cyclopts import Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
 
@@ -30,6 +30,7 @@ class Float8Config(BaseModel):
             Parameter(help="Scaling granularity for grouped GEMM operations. Currently only TILEWISE is supported"),
         ]
     ] = None
+    model_config = ConfigDict(extra="forbid")
 
     @property
     def enable_float8(self) -> bool:

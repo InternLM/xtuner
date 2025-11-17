@@ -1,6 +1,6 @@
 import re
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 try:
@@ -41,6 +41,7 @@ class GEO3KJudgerConfig(BaseModel):
 
     judger_name: str = "hiyouga/geometry3k"
     extra_info: dict = {"format_score": 0.1, "use_boxed": True}
+    model_config = ConfigDict(extra="forbid")
 
     def build(self):
         """Build a NativeJudger instance from the configuration.

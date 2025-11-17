@@ -17,6 +17,7 @@ class ModelConfigProto(Protocol):
 
 class EngineConfig(PydanticBaseModel):
     model_config = ConfigDict(
+        extra="forbid",
         arbitrary_types_allowed=True,
         protected_namespaces=(),
     )

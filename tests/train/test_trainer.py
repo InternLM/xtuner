@@ -38,15 +38,16 @@ class FakeEngine:
         self.grad_norm_calls = 0
         self.optimizer_step_calls = 0
 
-        model = nn.Linear(10, 10)
+        self.model = model = nn.Linear(10, 10)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        self.has_freeze_params = False
 
     def grad_accumulation_steps(self, *args, **kwargs):
         return 1
 
     def train_step(self, *args, **kwargs):
         self.train_step_calls += 1
-        return {"total_loss": 1.0, "reduced_llm_loss": 0.8}, {"consumed_tokens": 100, "grad_norm": torch.tensor(1.0)}
+        return {"total_loss": 1.0, "reduced_llm_loss": 0.8}, {"consumed_tokens": 100, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5}
 
     def save_hf(self, hf_path):
         self.save_hf_calls.append(hf_path)
@@ -63,7 +64,7 @@ class FakeEngine:
         self.optimizer_step_calls += 1
         return 1.0
 
-    def clip_grad_norm(self):
+    def clip_grad_norm(self, do_clip: bool=True, dtype=torch.float32):
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
 
@@ -155,11 +156,11 @@ class TestTrainerSaveHF(DistributedTestBase):
         exp_dir = self.work_dir / trainer.exp_dir.name
         hf_dirs = [d for d in exp_dir.iterdir() if d.name.startswith("hf-") and d.is_dir()]
 
-        # Should only have 2 directories left due to max_keep=2
-        self.assertEqual(len(hf_dirs), 2)
+        # Should only have 3 directories: hf-9, hf-10, hf-latest left due to max_keep=2
+        self.assertEqual(len(hf_dirs), 3)
 
-        # Should have the last 2 checkpoints: hf-9 and hf-10
-        expected_dirs = {"hf-9", "hf-10"}
+        # Should have the last 2 checkpoints: hf-9 and hf-10, and hf-latest
+        expected_dirs = {"hf-9", "hf-10", "hf-latest"}
         actual_dirs = {d.name for d in hf_dirs}
         self.assertEqual(actual_dirs, expected_dirs)
 
@@ -277,21 +278,24 @@ class TestTrainerSaveHF(DistributedTestBase):
             lr_cfg=lr_cfg,
             tokenizer_path=self.tokenizer_path,
             global_batch_size=2,
-            total_step=10,
+            total_step=6,
             work_dir=str(self.work_dir),
             hf_interval=3,
             hf_max_keep=2,
             seed=42,
             debug=False,
-            checkpoint_interval=5,
+            checkpoint_interval=2,
+            checkpoint_maxkeep=2,
         )
 
         trainer.fit()
         dist.barrier()
+        # 0. Test checkpoint_maxkeep is consistent with meta file
+        assert len(trainer.meta.latest_exp.checkpoint_list) == 2
 
         # Test resume
         # TODO: It's hard to test the accuracy of resuming in unit test now, need to improve
-        # 1. Test auto resume
+        # 1. Test auto_resume
         resume_trainer1 = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -308,14 +312,47 @@ class TestTrainerSaveHF(DistributedTestBase):
             hf_max_keep=2,
             seed=42,
             debug=False,
-            checkpoint_interval=3,
+            checkpoint_interval=2,
+            checkpoint_maxkeep=2,
             resume_cfg=ResumeConfig(
                 auto_resume=True,
             ),
         )
-        assert resume_trainer1.cur_step == 10
+        assert resume_trainer1.cur_step == 6
         assert resume_trainer1.exp_dir == trainer.exp_dir
+        resume_trainer1.fit()
+        dist.barrier()
 
+        # 1.1 auto_resume twice
+        resume_trainer1_2 = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=16,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=2,
+            checkpoint_maxkeep=2,
+            resume_cfg=ResumeConfig(
+                auto_resume=True,
+            ),
+        )
+        assert resume_trainer1_2.cur_step == 10
+        assert resume_trainer1_2.exp_dir == trainer.exp_dir
+        resume_trainer1_2.fit()
+        assert resume_trainer1_2.cur_step == 16
+        dist.barrier()
+
+        # 2. Test resume_from 
         resume_trainer2 = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -326,20 +363,22 @@ class TestTrainerSaveHF(DistributedTestBase):
             lr_cfg=lr_cfg,
             tokenizer_path=self.tokenizer_path,
             global_batch_size=2,
-            total_step=10,
+            total_step=20,
             work_dir=str(self.work_dir),
             hf_interval=3,
             hf_max_keep=2,
             seed=42,
             debug=False,
-            checkpoint_interval=3,
+            checkpoint_interval=5,
+            checkpoint_maxkeep=2,
             resume_cfg=ResumeConfig(
-                resume_from=trainer.meta.latest_exp.checkpoint_list[-2],
+                resume_from=resume_trainer1_2.meta.latest_exp.checkpoint_list[-2],
             ),
         )
-        assert resume_trainer2.cur_step == 5 
+        assert resume_trainer2.cur_step == 14
         resume_trainer2.fit()
-        assert resume_trainer2.cur_step == 10
+        assert resume_trainer2.cur_step == 20
+        assert resume_trainer2.exp_dir != resume_trainer1_2.exp_dir
 
     @property
     def world_size(self) -> int:

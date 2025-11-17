@@ -2,7 +2,6 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import distributed as dist
 from torch.distributed._functional_collectives import all_reduce
 
@@ -35,23 +34,16 @@ class BalancingLoss(nn.Module):
         super().__init__()
         self.loss_weight = balancing_loss_alpha
         self.global_average = balancing_loss_global_average
-        self.loss_type = router_scoring_func
 
-    def forward(self, router_logits, n_routed_experts, num_experts_per_tok):
+    def forward(self, router_weights, n_routed_experts, num_experts_per_tok):
         if self.loss_weight == 0:
-            return torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
+            return torch.tensor(0.0, device=router_weights.device, dtype=torch.float32)
 
-        num_layers = router_logits.shape[0]
-        router_logits = router_logits.float()  # (nlayers, seq, ne)
-        if self.loss_type == "softmax":
-            routing_weights = F.softmax(router_logits, dim=-1)
-        elif self.loss_type == "sigmoid":
-            routing_weights = router_logits / torch.sum(router_logits, dim=-1, keepdim=True)
-        else:
-            raise ValueError(f"Unknown loss type: {self.loss_type}")
-        _, selected_experts = torch.topk(routing_weights, num_experts_per_tok, dim=-1)
+        num_layers = router_weights.shape[0]
+        router_weights = router_weights.float()  # (nlayers, seq, ne)
+        _, selected_experts = torch.topk(router_weights, num_experts_per_tok, dim=-1)
         selected_experts_flat = selected_experts.view(num_layers, -1)
-        offset = torch.arange(num_layers, device=router_logits.device).unsqueeze(1) * n_routed_experts
+        offset = torch.arange(num_layers, device=router_weights.device).unsqueeze(1) * n_routed_experts
         selected_experts_offset = selected_experts_flat + offset
         tokens_per_expert_flat = torch.histc(
             selected_experts_offset.view(-1),
@@ -61,22 +53,25 @@ class BalancingLoss(nn.Module):
         )
         tokens_per_expert = tokens_per_expert_flat.view(num_layers, n_routed_experts)  # (nlayers, ne)
 
-        tokens_per_expert_global = tokens_per_expert.to(routing_weights.dtype)  # (nlayers, ne)
+        tokens_per_expert_global = tokens_per_expert.to(router_weights.dtype)  # (nlayers, ne)
         if self.global_average and dist.is_initialized():
             tokens_per_expert_global = all_reduce(tokens_per_expert_global, "sum", dist.group.WORLD)  # (nlayers, ne)
             tokens_global = tokens_per_expert_global.sum(-1)  # (nlayers, )
             seqlen_global = tokens_global // num_experts_per_tok
             routing_weights_sum_global = all_reduce_autograd(
-                routing_weights.sum(dim=1), "sum", dist.group.WORLD
+                router_weights.sum(dim=1), "sum", dist.group.WORLD
             )  # (nlayers, )
             routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
             scale_global = n_routed_experts / tokens_global
         else:
-            scale_global = n_routed_experts / (router_logits.shape[1] * num_experts_per_tok)
-            routing_weights_mean_global = routing_weights.mean(dim=1)
+            scale_global = n_routed_experts / (router_weights.shape[1] * num_experts_per_tok)
+            routing_weights_mean_global = router_weights.mean(dim=1)
         loss = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1)
         loss = loss.sum()
-
+        # from xtuner.v1.profiler.prober import ProberList
+        # ProberList.record_tensor(routing_weights_mean_global, "[balancing_loss][after]routing_weights_mean_global")
+        # ProberList.record_tensor(tokens_per_expert_global, "[balancing_loss][after]tokens_per_expert_global")
+        # ProberList.record_tensor(scale_global, "[balancing_loss][after]scale_global")
         return loss * self.loss_weight
 
 
@@ -92,6 +87,7 @@ def z_loss(router_logits: torch.Tensor, global_average: bool = False):
         unmasked_num_global = all_reduce(unmasked_num_rank, "sum", dist.group.WORLD)  # type: ignore
         world_size = dist.get_world_size()
         z_loss = z_loss * unmasked_num * world_size / unmasked_num_global
+
     return z_loss
 
 

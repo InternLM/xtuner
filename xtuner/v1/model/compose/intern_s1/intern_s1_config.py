@@ -9,7 +9,7 @@ from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_device, get_logger
 
 
 if TYPE_CHECKING:
@@ -21,7 +21,7 @@ logger = get_logger()
 class InternS1VisionConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     num_channels: int = 3
     patch_size: tuple[int, int] = (14, 14)
@@ -50,7 +50,7 @@ class InternS1VisionConfig(BaseModel):
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
-        if not is_installed("flash-attn") and self.attn_impl == "flash_attention":
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
             logger.warning("flash-attn is not installed, using `flex_attention` instead.")
             self.attn_impl = "flex_attention"
         return self
@@ -62,6 +62,9 @@ class InternS1VisionConfig(BaseModel):
 
 
 class InternS1ProjectorConfig(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
     vision_hidden_size: int = 1024
     text_hidden_size: int = 4096
     downsample_ratio: float = 0.5
@@ -77,7 +80,7 @@ class InternS1ProjectorConfig(BaseModel):
 class InternS1BaseConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     vision_config: InternS1VisionConfig
     projector_config: InternS1ProjectorConfig
@@ -93,6 +96,8 @@ class InternS1BaseConfig(BaseModel):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
+    hf_save_worker: int = 16
+    dcp_ignore_frozen_params: bool = True
 
     def build(self) -> "InternS1ForConditionalGeneration":
         from .modeling_intern_s1 import InternS1ForConditionalGeneration
@@ -106,11 +111,15 @@ class InternS1BaseConfig(BaseModel):
 
 class InternS1Config(InternS1BaseConfig):
     vision_config: InternS1VisionConfig = InternS1VisionConfig(
-        hidden_size=3200, intermediate_size=12800, num_hidden_layers=45, use_qk_norm=True, num_attention_heads=25
+        hidden_size=3200,
+        intermediate_size=12800,
+        num_hidden_layers=45,
+        use_qk_norm=True,
+        num_attention_heads=25,
+        attention_bias=False,
+        norm_type="rms_norm",
     )
-    projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig(
-        vision_hidden_size=3200, text_hidden_size=12800
-    )
+    projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig(vision_hidden_size=3200, text_hidden_size=4096)
     text_config: MoEConfig = Qwen3MoE235BA22Config(vocab_size=153216)
 
     @property

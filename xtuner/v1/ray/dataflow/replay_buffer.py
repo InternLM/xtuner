@@ -65,7 +65,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         observation_versions.append(version)
         group_states.append(item.env.rollout.finish_reason)
 
-    state_str = "paused" if "paused" in group_states else "returned"
+    state_str = "abort" if "abort" in group_states else "returned"
     replay_meta = ReplayMeta(
         env=env_str,
         root_id=root_id,
@@ -137,7 +137,7 @@ class ReplayBufferConfig(BaseModel):
         )
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     dataset_cfg: Annotated[List, Parameter(help="The dataset object to sample initial prompts from.")]
 
@@ -185,6 +185,8 @@ class Sampler:
             else AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
         )
         self.storage = storage
+        self.sample_count = 0
+        self.logger = get_logger()
 
     def sample_from_datasets(self, env: str, repeat_prompt_k: int) -> List[RLDataFlowItem]:
         """Samples a new group of prompts from the original dataset.
@@ -225,8 +227,12 @@ class Sampler:
     def sample_from_unfinished_buffer(self) -> List[RLDataFlowItem]:
         """Samples a prompt from a partially completed (unfinished) rollout."""
         action_id = self.storage._paused.pop(0)
+        self.logger.debug(f"Sampling unfinished action_id: {action_id} from replay buffer")
         replay_meta = self.storage._actions[action_id]
         group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+        self.sample_count += 1
+        if len(self.storage._paused) == 0:
+            self.logger.info(f"Sampled {self.sample_count} unfinished samples from replay buffer")
         return group_samples
 
     def sample(self, env: str, enable_partial_rollout: int, prompt_repeat_k: int) -> List[RLDataFlowItem]:
@@ -243,6 +249,8 @@ class Sampler:
         Returns:
             List[RLDataFlowItem]: A list of sampled data items.
         """
+        # TODO(@duanyanhui): 考虑sampler结构的独立性，不要传入replay buffer storage,
+        # sample_from_unfinished_buffer可以作为replay buffer的一个方法
         if enable_partial_rollout > 0 and len(self.storage._paused) > 0:
             return self.sample_from_unfinished_buffer()
         else:
@@ -292,11 +300,15 @@ class ReplayBufferStorage:
         # The logic for "paused" is user-defined, indicating that this data was
         # interrupted before inference was completed. Other states are returned
         # by the inference engine.
-        if state_str == "paused":
+
+        if state_str == "abort":
             self._paused.append(action_id)
         elif state_str == "returned":
             self._returned.append(action_id)
 
+        self.logger.debug(
+            f"Adding action_id: {action_id} with state: {state_str} to ReplayBufferStorage. Paused count: {len(self._paused)}, Returned count: {len(self._returned)}"
+        )
         # action
         self._root2actions[root_id].append(action_id)
         self._actions[action_id] = replay_meta
@@ -307,6 +319,20 @@ class ReplayBufferStorage:
             self._observations[observation_id] = replay_meta
             self._observations2states[observation_id] = replay_meta.state
             self._states[replay_meta.state].append(observation_id)
+
+    def clear(self):
+        attrs_to_clear = [
+            "_paused",
+            "_returned",
+            "_actions",
+            "_root2actions",
+            "_observations",
+            "_observations2states",
+            "_states",
+            "_action2observations",
+        ]
+        for attr in attrs_to_clear:
+            getattr(self, attr).clear()
 
     def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any]]]:
         """Retrieves a batch of finished sample groups from the buffer.
@@ -329,6 +355,9 @@ class ReplayBufferStorage:
             self.logger.error("Not enough finished samples in replay buffer")
             return [], []
         else:
+            self.logger.info(
+                f"Retrieving global_batch_size {global_batch_size} from replay buffer, len of self.returned: {len(self._returned)}"
+            )
             target_finished_list = self._returned[:global_batch_size]
             remain_finished_list = self._returned[global_batch_size:]
             for action_id in target_finished_list:
@@ -339,8 +368,9 @@ class ReplayBufferStorage:
                 multimodal_train_info = None
                 # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
                 for data_item in group_samples:
-                    if "multimodal_train_info" in data_item.data:
-                        multimodal_train_info = data_item.data.pop("multimodal_train_info")
+                    if hasattr(data_item.data, "multimodal_train_info"):
+                        multimodal_train_info = data_item.data.multimodal_train_info
+                        del data_item.data.multimodal_train_info
                 samples.append(group_samples)
                 if multimodal_train_info is not None:
                     multimodal_train_infos.append(multimodal_train_info)
@@ -359,6 +389,14 @@ class ReplayBufferStorage:
     def get_prompt_num(self):
         return len(self._action2observations)
 
+    def status(self):
+        return {
+            "rollout_finished_count": len(self._returned),
+            "rollout_paused_count": len(self._paused),
+            "action_count": len(self._actions),
+            "observation_count": len(self._observations),
+        }
+
     def print(self):
         rollout_finished_count = len(self._returned)
         rollout_paused_count = len(self._paused)
@@ -367,7 +405,7 @@ class ReplayBufferStorage:
 
         log_message = (
             "[ReplayBuffer] ReplayBufferStorage states:\n"
-            f"  - Rollout States: Returned={rollout_finished_count}, Paused={rollout_paused_count}\n"
+            f"  - Rollout States: Finished={rollout_finished_count}, Paused={rollout_paused_count}\n"
             f"  - History Actions: {action_count}\n"
             f"  - History Observations: {observation_count}"
         )
@@ -419,7 +457,7 @@ class ReplayBufferStorage:
             root_id = replay_meta.root_id
             action_id = replay_meta.action_id
             state_str = replay_meta.state
-            if state_str == "paused":
+            if state_str == "abort":
                 self._paused.append(action_id)
             elif state_str == "returned":
                 self._returned.append(action_id)
@@ -450,6 +488,7 @@ class ReplayBuffer:
         Args:
             config (ReplayBufferConfig): The configuration object.
         """
+        self.config = config
         self.storage = ReplayBufferStorage(config.worker_log_dir)
         self.tokenizer = config.tokenizer
         if isinstance(self.tokenizer, str):
@@ -546,6 +585,9 @@ class ReplayBuffer:
         """
         self.storage.dump(file_path)
 
+    def status(self):
+        return self.storage.status()
+
     def resume(self, file_path: str):
         """Resumes the replay buffer's storage from a file.
 
@@ -564,3 +606,7 @@ class ReplayBuffer:
     def get_unfinished_samples(self):
         """Returns the number of unfinished sample groups in the storage."""
         return self.storage.get_unfinished_samples()
+
+    def clear(self):
+        """Clears the replay buffer storage."""
+        self.storage.clear()

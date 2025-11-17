@@ -10,7 +10,7 @@ from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VLTextDense8BConfig
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_device, get_logger
 
 
 logger = get_logger()
@@ -19,7 +19,7 @@ logger = get_logger()
 class Qwen3VLVisionConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     in_channels: int = 3
     depth: int = 27
@@ -38,7 +38,7 @@ class Qwen3VLVisionConfig(BaseModel):
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
-        if not is_installed("flash-attn") and self.attn_impl == "flash_attention":
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
             logger.warning("flash-attn is not installed, using `flex_attention` instead.")
             self.attn_impl = "flex_attention"
         return self
@@ -50,6 +50,7 @@ class Qwen3VLVisionConfig(BaseModel):
 
 
 class Qwen3VLProjectorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     vision_hidden_size: int = 1152
     text_hidden_size: int = 2048
     spatial_merge_size: int = 2
@@ -65,7 +66,7 @@ class Qwen3VLProjectorConfig(BaseModel):
 class Qwen3VLBaseConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     vision_config: Qwen3VLVisionConfig
     projector_config: Qwen3VLProjectorConfig
@@ -78,6 +79,8 @@ class Qwen3VLBaseConfig(BaseModel):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
+    hf_save_worker: int = 16
+    dcp_ignore_frozen_params: bool = True
 
     def build(self):
         from .modeling_qwen3_vl import Qwen3VLForConditionalGeneration

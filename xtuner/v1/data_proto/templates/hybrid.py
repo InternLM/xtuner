@@ -1,13 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class HybridChatTemplate(BaseModel):
     """Define a Pydantic data model for a hybrid chat with attributes for
     system, user and assistant chat as well as function and interpreter calls
     and results."""
+
+    model_config = ConfigDict(extra="forbid")
 
     # Normal Chat
     system: str  # System message format, role

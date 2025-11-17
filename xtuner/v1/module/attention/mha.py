@@ -27,7 +27,7 @@ logger = get_logger()
 
 
 class MHAConfig(BaseModel):
-    model_config = ConfigDict(title="Base attention config for xtuner", extra="allow")
+    model_config = ConfigDict(title="Base attention config for xtuner", extra="forbid")
     num_attention_heads: Annotated[int, Parameter(group="attention")]
     num_key_value_heads: int
     head_dim: Annotated[int, Parameter(group="attention")]
@@ -279,7 +279,6 @@ class MultiHeadAttention(nn.Module):
         _key_states = key_states.transpose(1, 2).squeeze(0)
         _value_states = value_states.transpose(1, 2).squeeze(0)
 
-        # torch.distributed.breakpoint()
         block_index = block_table[:, 0] + (seq_lens_k[:bs] - 1) // block_size
         past_key_values[self.layer_idx][0][block_index, (seq_lens_k[:bs] - 1) % block_size] = _key_states
         past_key_values[self.layer_idx][1][block_index, (seq_lens_k[:bs] - 1) % block_size] = _value_states
@@ -370,9 +369,6 @@ class MultiHeadAttention(nn.Module):
         assert query_states.size(0) == 1
         assert key_states.size(0) == 1
         assert value_states.size(0) == 1
-
-        assert isinstance(seq_ctx.max_length_q, int)
-        assert isinstance(seq_ctx.max_length_k, int)
 
         kwargs = {}
         if self.with_sink:

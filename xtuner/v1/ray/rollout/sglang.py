@@ -11,7 +11,7 @@ from xtuner.v1.ray.config import RolloutConfig
 from .worker import RolloutWorker
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class SGLangWorker(RolloutWorker):
     def __init__(
         self,
@@ -32,6 +32,7 @@ class SGLangWorker(RolloutWorker):
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path, trust_remote_code=True)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
+        self.enable_return_routed_experts = self.config.enable_return_routed_experts
 
     async def _create_request(
         self,
@@ -48,47 +49,37 @@ class SGLangWorker(RolloutWorker):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
-        stream = extra_params["stream"]
-        # note: 此处默认使用tokne_id的话，则不使用流式；异步rollout+token_id进出后续修复
         payload = {"model": self.model_name}
         sglang_sample_params = self._transform_sample_params(sample_params)
         sglang_extra_params = self._transform_extra_params(extra_params)
-        payload.update(sglang_extra_params)
-        if stream:
-            raise NotImplementedError("Streaming mode is not supported for SGLangWorker.")
-        else:
-            if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                # 多模态场景下，由于 input_ids 处理比较复杂，现在不支持 prompt 输入，必须要有 input_ids
-                if "image_data" in extra_info:
-                    assert input_ids is not None, "input_ids is required when image_data is provided."
-                if input_ids is not None:
-                    payload["input_ids"] = input_ids
-                    if "image_data" in extra_info:
-                        payload["image_data"] = extra_info["image_data"]
-                else:
-                    text_prompt = self.tokenizer.apply_chat_template(
-                        prompt, tokenize=False, add_generation_prompt=True
-                    )
-                    prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
-                    payload["input_ids"] = prompt_token_ids
-                payload["sampling_params"] = sglang_sample_params
-            else:
-                payload["messages"] = prompt
-                payload.update(sglang_sample_params)
-                # note: chat completions 接口需要传入 max_tokens 和 min_tokens 参数
-                payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
-                payload["min_tokens"] = sglang_sample_params["min_new_tokens"]
-                payload.pop("max_new_tokens", None)
-                payload.pop("min_new_tokens", None)
+        if self.enable_return_routed_experts:
+            sglang_extra_params["return_routed_experts"] = True
 
-        req = self.client.build_request(
-            "POST",
-            url,
-            headers=headers,
-            json=payload,
-        )
-        r = await self.client.send(req, stream=stream)
-        return payload, r
+        payload.update(sglang_extra_params)
+
+        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+            # 多模态场景下，由于 input_ids 处理比较复杂，现在不支持 prompt 输入，必须要有 input_ids
+            if "image_data" in extra_info:
+                assert input_ids is not None, "input_ids is required when image_data is provided."
+            if input_ids is not None:
+                payload["input_ids"] = input_ids
+                if "image_data" in extra_info:
+                    payload["image_data"] = extra_info["image_data"]
+            else:
+                text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+                prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+                payload["input_ids"] = prompt_token_ids
+            payload["sampling_params"] = sglang_sample_params
+        else:
+            payload["messages"] = prompt
+            payload.update(sglang_sample_params)
+            # note: chat completions 接口需要传入 max_tokens 和 min_tokens 参数
+            payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
+            payload["min_tokens"] = sglang_sample_params["min_new_tokens"]
+            payload.pop("max_new_tokens", None)
+            payload.pop("min_new_tokens", None)
+
+        return await self._safe_post_request(url, headers, payload)
 
     def _make_request(self, endpoint: str, payload=None):
         # TODO: 支持 tp
@@ -134,16 +125,17 @@ class SGLangWorker(RolloutWorker):
         return self._make_request("resume_memory_occupation", {"tags": ["kv_cache"]})
 
     def pause_generation(self):
-        pass
+        return self._make_request("pause_generation")
 
     def continue_generation(self):
-        pass
+        return self._make_request("continue_generation")
 
     def shutdown(self):
         pass
 
     def reset_prefix_cache(self):
-        pass
+        self.flush_cache()
+        return self._make_request("release_memory_occupation")
 
     def _transform_rollout_config_to_server_configs(self):
         # remove the CUDA_VISIBLE_DEVICES set by ray and use base_gpu_id
@@ -157,21 +149,40 @@ class SGLangWorker(RolloutWorker):
         grammar_backend = sglang_config_kwargs.get(
             "grammar_backend", None
         )  # for intern-s1 series models, have to set the grammar_backend to "none"
+        log_level = sglang_config_kwargs.get("log_level", "critical")
+        log_level_http = sglang_config_kwargs.get("log_level_http", "critical")
+        enable_deterministic_inference = sglang_config_kwargs.get("enable_deterministic_inference", False)
 
         sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
+        num_gpus_per_engine = (
+            self.config.expert_parallel_size
+            if self.config.expert_parallel_size > 1
+            else self.config.tensor_parallel_size
+        )
         sglang_server_args.host = self.host
         sglang_server_args.port = self.server_port
         sglang_server_args.nccl_port = self.nccl_port
         sglang_server_args.dist_init_addr = self.dist_init_addr
-        sglang_server_args.base_gpu_id = self.rank % self.config.gpus_per_node
+        base_gpu_id_interval = min(num_gpus_per_engine, self.config.gpus_per_node)
+        sglang_server_args.base_gpu_id = (self.rank * base_gpu_id_interval) % self.config.gpus_per_node
         sglang_server_args.gpu_id_step = 1
-        sglang_server_args.nnodes = max(1, self.config.tensor_parallel_size // self.config.gpus_per_node)
+        sglang_server_args.nnodes = max(1, num_gpus_per_engine // self.config.gpus_per_node)
         sglang_server_args.skip_server_warmup = True
-        sglang_server_args.tp_size = self.config.tensor_parallel_size
+
         sglang_server_args.mem_fraction_static = self.config.gpu_memory_utilization
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
-        sglang_server_args.max_running_requests = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000))
+
+        if self.enable_return_routed_experts:
+            sglang_server_args.enable_return_routed_experts = True
+
+        sglang_server_args.max_running_requests = self.config.rollout_max_batch_size_per_instance
+        sglang_server_args.log_level = log_level
+        sglang_server_args.log_level_http = log_level_http
+        sglang_server_args.enable_deterministic_inference = enable_deterministic_inference
+        sglang_server_args.tp_size = num_gpus_per_engine
+        sglang_server_args.ep_size = num_gpus_per_engine
+
         if grammar_backend is not None:
             sglang_server_args.grammar_backend = grammar_backend
 
@@ -182,6 +193,7 @@ class SGLangWorker(RolloutWorker):
             sglang_server_args.node_rank = self.rank // self.config.gpus_per_node
         else:
             sglang_server_args.node_rank = 0
+
         return sglang_server_args
 
     def _transform_sample_params(self, sample_params: Dict):

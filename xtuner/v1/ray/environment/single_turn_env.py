@@ -7,13 +7,14 @@ import ray
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
     RLJudgerResponseItem,
+    RLRolloutResponseItem,
     update_dataflow_item,
 )
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
 from xtuner.v1.utils import get_logger
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
+@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class SingleTurnEnvironment(BaseEnvironment):
     """A single-turn environment for handling generation and evaluation tasks.
 
@@ -34,6 +35,10 @@ class SingleTurnEnvironment(BaseEnvironment):
         super().__init__(environment, rollout_pg, rollout_cfg, judger_pg, judger_cfg)
         worker_log_dir = rollout_cfg.worker_log_dir if rollout_cfg else judger_cfg.worker_log_dir
         self.logger = get_logger(log_dir=worker_log_dir, tag="SingleTurnEnv")
+        if rollout_cfg.enable_return_routed_experts:
+            self.logger.info("！！！ Enable `return routed experts` in rollout controller. ！！！")
+        self.rollout_timeout = rollout_cfg.rollout_timeout if rollout_cfg else 1200.0
+        self.judger_timeout = judger_cfg.judger_timeout if judger_cfg else 1200.0
 
     async def generate(
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
@@ -69,7 +74,18 @@ class SingleTurnEnvironment(BaseEnvironment):
                 )
                 for sample in group_data_items
             ]
-            rollout_responses = await asyncio.gather(*response_future)  # RLRolloutResponseItem
+            try:
+                rollout_responses = await asyncio.wait_for(
+                    asyncio.gather(*response_future), timeout=self.rollout_timeout
+                )
+            except asyncio.TimeoutError:
+                self.logger.error("Get rollout controller response timeout and return the failed response.")
+                rollout_responses = [
+                    RLRolloutResponseItem(
+                        finish_reason="failed",
+                    )
+                    for _ in group_data_items
+                ]
             group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_responses)
         return group_data_items
 
@@ -92,7 +108,22 @@ class SingleTurnEnvironment(BaseEnvironment):
             The format of the return value matches the format of the input `data`.
         """
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
-        if self.judger_controller:
-            judger_responses: RLJudgerResponseItem = await self.judger_controller.run.remote(group_data_items)
+        skip_judger = any(
+            item.env.rollout.finish_reason == "abort" or item.env.rollout.finish_reason == "failed"
+            for item in group_data_items
+        )
+        if self.judger_controller and not skip_judger:
+            try:
+                judger_responses: List[RLJudgerResponseItem] = await asyncio.wait_for(
+                    self.judger_controller.run.remote(group_data_items), timeout=self.judger_timeout
+                )
+            except asyncio.TimeoutError:
+                self.logger.error("Get judger controller response timeout and return the failed response.")
+                judger_responses = [
+                    RLJudgerResponseItem(
+                        extra_info={"state": "failed"},
+                    )
+                    for _ in group_data_items
+                ]
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
         return group_data_items

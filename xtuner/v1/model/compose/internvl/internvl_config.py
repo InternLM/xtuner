@@ -7,7 +7,7 @@ from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_device, get_logger
 
 
 if TYPE_CHECKING:
@@ -19,7 +19,7 @@ logger = get_logger()
 class InternVLVisionConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     num_channels: int = 3
     patch_size: tuple[int, int] = (14, 14)
@@ -48,7 +48,7 @@ class InternVLVisionConfig(BaseModel):
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
-        if not is_installed("flash-attn") and self.attn_impl == "flash_attention":
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
             logger.warning("flash-attn is not installed, using `flex_attention` instead.")
             self.attn_impl = "flex_attention"
         return self
@@ -60,6 +60,7 @@ class InternVLVisionConfig(BaseModel):
 
 
 class InternVLProjectorConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     vision_hidden_size: int = 1024
     text_hidden_size: int = 4096
     downsample_ratio: float = 0.5
@@ -75,7 +76,7 @@ class InternVLProjectorConfig(BaseModel):
 class InternVLBaseConfig(BaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
-        extra="allow",
+        extra="forbid",
     )
     vision_config: InternVLVisionConfig
     projector_config: InternVLProjectorConfig
@@ -91,6 +92,8 @@ class InternVLBaseConfig(BaseModel):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
+    hf_save_worker: int = 16
+    dcp_ignore_frozen_params: bool = True
 
     def build(self) -> "InternVLForConditionalGeneration":
         from .modeling_internvl import InternVLForConditionalGeneration

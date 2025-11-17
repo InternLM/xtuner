@@ -199,8 +199,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         self.tokenize_fn = tokenize_fn
         self.path = str(anno_path)
         self.name = name
+        self._shared_memory = None
         self.tokenizer_workers = int(os.environ.get("XTUNER_TOKENIZE_WORKERS", 8))
-        self._shared_memory = self._init_shared_memory(anno_path)
         self.meta_path = os.path.join(cache_dir, CACHE_META) if cache_dir else None
 
         logger.info(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
@@ -210,6 +210,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             offsets = np.load(offset_path)
             num_tokens = np.load(num_tokens_path)
         elif cache_dir:
+            self._shared_memory = self._init_shared_memory(anno_path)
             assert self.meta_path is not None
 
             if get_rank() == 0:
@@ -341,6 +342,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 offsets = offsets
                 num_tokens = num_tokens
         else:
+            self._shared_memory = self._init_shared_memory(anno_path)
             offsets = self.count_offsets()
             num_tokens = None
             if tokenize_fn is not None:
@@ -378,7 +380,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         self.num_tokens = num_tokens
         self.offsets = offsets[self.sampled]
-        self._release_shared_memory()
+
+        if self._shared_memory is not None:
+            self._release_shared_memory()
 
     def _init_shared_memory(self, path: str) -> SharedMemory:
         if dist.is_initialized():
@@ -554,21 +558,17 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         return cast(ThreadPoolExecutor, cls._thread_executor)
 
     def _release_shared_memory(self):
-        """Release shared memory if it exists."""
+        """Release shared memory."""
         if dist.is_initialized():
             dist.barrier()
-
-            if self._shared_memory is not None:
-                self._shared_memory.close()
+            self._shared_memory.close()
         else:
-            if self._shared_memory is not None:
-                self._shared_memory.close()
+            self._shared_memory.close()
 
-        if self._shared_memory is not None:
-            local_rank_concurrency = _get_local_concurrency()
-            if not dist.is_initialized() or dist.get_rank() % local_rank_concurrency == 0:
-                self._shared_memory.unlink()
-            self._shared_memory = None
+        local_rank_concurrency = _get_local_concurrency()
+        if not dist.is_initialized() or dist.get_rank() % local_rank_concurrency == 0:
+            self._shared_memory.unlink()
+        self._shared_memory = None
 
     def _get_cached_tag(self, tag: str, tokenizer_fn: CachableTokenizeFunction | Callable | None) -> dict | None:
         """Check if the dataset is cached with the given tag."""

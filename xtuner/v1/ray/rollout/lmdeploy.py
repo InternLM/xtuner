@@ -73,6 +73,7 @@ class LMDeployWorker(RolloutWorker):
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
+        self.enable_return_routed_experts = self.config.enable_return_routed_experts
 
     async def _create_request(
         self,
@@ -104,39 +105,33 @@ class LMDeployWorker(RolloutWorker):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
         }
-        stream = extra_params["stream"]
-        # note: 此处默认使用tokne_id的话，则不使用流式；异步rollout+token_id进出后续修复
         payload = {
             "model": self.model_name,
             "tools": tools if len(tools) > 0 else None,
             "tool_choice": tool_choice if tool_choice else None,
         }
-        if stream:
-            payload["messages"] = prompt
-        else:
-            if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-                if input_ids is not None:
-                    payload["input_ids"] = input_ids
-                else:
-                    text_prompt = self.tokenizer.apply_chat_template(
-                        prompt, tokenize=False, add_generation_prompt=True
-                    )
-                    prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
-                    payload["input_ids"] = prompt_token_ids
+        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
+            if "image_data" in extra_info:
+                assert input_ids is not None, "input_ids is required when image_data is provided."
+
+            if input_ids is not None:
+                payload["input_ids"] = input_ids
+                if "image_data" in extra_info:
+                    payload["image_data"] = extra_info["image_data"]
             else:
-                payload["messages"] = prompt
+                text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+                prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+                payload["input_ids"] = prompt_token_ids
+        else:
+            payload["messages"] = prompt
+
+        if self.enable_return_routed_experts:
+            extra_params["return_routed_experts"] = True
 
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
         payload.update(lmdeploy_sample_params)
 
-        req = self.client.build_request(
-            "POST",
-            url,
-            headers=headers,
-            json=payload,
-        )
-        r = await self.client.send(req, stream=stream)
-        return payload, r
+        return await self._safe_post_request(url, headers, payload)
 
     def get_logprobs(self, input_ids, sampling_params):
         """This method will be implemented for the LMDeploy worker in the
@@ -232,23 +227,29 @@ class LMDeployWorker(RolloutWorker):
         tp_size = self.config.tensor_parallel_size
         dp_size = ep_size = self.config.expert_parallel_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
+
+        extra_engine_config = {}
+        if backend == "pytorch" and self.config.enable_return_routed_experts:
+            extra_engine_config["enable_return_routed_experts"] = True
+
         backend_config = (
             PytorchEngineConfig(
                 tp=tp_size,
                 ep=ep_size,
                 dp=dp_size,
-                max_batch_size=self.config.rollout_max_batch_size,
+                max_batch_size=self.config.rollout_max_batch_size_per_instance,
                 empty_init=self.config.skip_load_weights,
                 distributed_executor_backend=distributed_executor_backend,
                 mp_engine_backend="ray",  # force ray to pass placement group
                 device_type=accelerator_to_device_type[self.accelerator],
                 logprobs_mode="raw_logprobs",
                 session_len=self.config.context_length,
+                **extra_engine_config,
             )
             if backend == "pytorch"
             else TurbomindEngineConfig(
                 tp=tp_size,
-                max_batch_size=self.config.rollout_max_batch_size,
+                max_batch_size=self.config.rollout_max_batch_size_per_instance,
                 devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
                 empty_init=self.config.skip_load_weights,
                 session_len=self.config.context_length,
@@ -313,6 +314,7 @@ class LMDeployWorker(RolloutWorker):
             api_key=self.api_keys,
             api_keys=self.api_keys,
             ray_runtime_env={"env_vars": env},
+            enable_abort_handling=True,
             **lmdeploy_config_kwargs,
         )
 

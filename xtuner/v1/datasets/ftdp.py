@@ -784,7 +784,7 @@ class FtdpTokenizedDataMapping(CachableTokenizeFunction):
 
 # TODO: Maybe rename
 class FTDPTokenizeFnConfig(BaseModel):
-    model_config = ConfigDict(title="Base dataset config for xtuner", extra="allow")
+    model_config = ConfigDict(title="Base dataset config for xtuner", extra="forbid")
     chat_template: Annotated[str, Parameter(group="tokenize_fn")] = "internlm2"
     max_length: int | None = None
     hash: Annotated[str | None, Parameter(group="tokenize_fn")] = None
