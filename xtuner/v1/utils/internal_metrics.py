@@ -15,6 +15,20 @@ from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.model import MoE
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.utils.grad_norm import group_tensors_by_device_mesh_and_placements, cal_total_norm
+
+from typing_extensions import TypedDict
+
+
+class InternalMetrics(TypedDict):
+    weight_rms: dict[str, float]
+    maxvio: dict[str, float]
+    drop_ratio: dict[str, float]
+    router_logits_max: dict[str, float]
+    router_logits_mean: dict[str, float]
+    attn_max_lse: dict[str, float]
+    attn_max_logits: dict[str, float]
+
 
 RMS_NORM_MONITOR_MODULES = (
     nn.Embedding,
@@ -35,58 +49,51 @@ class InternalMetricsRecorder:
     def __init__(self, engine: TrainEngine):
         self.model = engine.model
         self.intra_layer_micro_batch = engine.intra_layer_micro_batch
-        self.hooks: list[Any] = []
-        self.metrics: dict[str, dict[str, Any]] = dict[str, dict[str, Any]](
-            weight_rms=dict[str, Any](),
-            maxvio=dict[str, Any](),
-            drop_ratio=dict[str, Any](),
-            router_logits_max=dict[str, Any](),
-            router_logits_mean=dict[str, Any](),
-            attn_max_lse=dict[str, Any](),
-            attn_max_logits=dict[str, Any](),
-        )
+        self.hooks: list[RemovableHandle] = []
+        self.metrics: InternalMetrics = {
+            "weight_rms": {},
+            "maxvio": {},
+            "drop_ratio": {},
+            "router_logits_max": {},
+            "router_logits_mean": {},
+            "attn_max_lse": {},
+            "attn_max_logits": {},
+        }
+        self.attn_max_lse: dict[str, torch.Tensor] = {}
+        self.attn_max_logits: dict[str, torch.Tensor] = {}
 
-    def register_weight_rms_hook(self, module, layer_name=None):
-        """
-        Register weight RMS hook as a pre-forward hook, as at this point, the parameters are should be 
-        all-gathered into current rank.
-        """
-        if layer_name is None:
-            layer_name = f"layer_{len(self.weight_rms_dict)}"
-
-        def hook(module, args, kwargs=None):
-            if layer_name in self.metrics['weight_rms']: # only calculate before the first batch
-                return
-            l2_norm = 0.0
-            total_params = 0
-            for param in module.parameters():
-                if param.requires_grad:
-                    l2_norm += torch.norm(param.detach().flatten().float(), p=2) ** 2
-                    total_params += param.numel()
-            if total_params > 0:
-                rms = torch.sqrt(l2_norm / total_params)
-                self.metrics['weight_rms'][layer_name] = rms
-
-        hook_handle = module.register_forward_pre_hook(hook)
-        self.hooks.append(hook_handle)
+    def calculate_module_weight_rms(self, module: nn.Module, layer_name: str, dtype: torch.dtype = torch.float32):
+        all_params = [param for param in module.parameters() if param.requires_grad]
+        if not all_params:
+            return
+        grouped_params = group_tensors_by_device_mesh_and_placements(all_params)  # type: ignore[arg-type]
+        total_norms = []
+        total_numel = 0
+        for params in grouped_params.values():
+            total_norm = cal_total_norm(params, norm_type=2.0, foreach=True, dtype=dtype)
+            total_norms.append(total_norm)
+            total_numel += sum(p.numel() for p in params)
+        param_l2_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=dtype)
+        param_rms = param_l2_norm / total_numel**0.5
+        self.metrics['weight_rms'][layer_name] = param_rms.item()
 
     def register_attn_extra_info_hook(self, module, layer_name=None):
         def hook(module, input, output):
             extra_info = output[1]
             if extra_info.get("softmax_lse", None) is not None:
-                if layer_name not in self.metrics["attn_max_lse"]:
+                if layer_name not in self.attn_max_lse:
                     # original shape: [n_head, seq]
-                    self.metrics["attn_max_lse"][layer_name] = extra_info["softmax_lse"].max()
+                    self.attn_max_lse[layer_name] = extra_info["softmax_lse"].max()
                 else:
-                    prev_lse_max = self.metrics["attn_max_lse"][layer_name]
-                    self.metrics["attn_max_lse"][layer_name] = max(prev_lse_max, extra_info["softmax_lse"].max())
+                    prev_lse_max = self.attn_max_lse[layer_name]
+                    self.attn_max_lse[layer_name] = max(prev_lse_max, extra_info["softmax_lse"].max())
             if extra_info.get("attn_logits", None) is not None:
-                if layer_name not in self.metrics["attn_max_logits"]:
+                if layer_name not in self.attn_max_logits:
                     # original shape: [b, n_head, seq, seq]
-                    self.metrics["attn_max_logits"][layer_name] = extra_info["attn_logits"].max()
+                    self.attn_max_logits[layer_name] = extra_info["attn_logits"].max()
                 else:
-                    prev_logits_max = self.metrics["attn_max_logits"][layer_name]
-                    self.metrics["attn_max_logits"][layer_name] = max(prev_logits_max, extra_info["attn_logits"].max())
+                    prev_logits_max = self.attn_max_logits[layer_name]
+                    self.attn_max_logits[layer_name] = max(prev_logits_max, extra_info["attn_logits"].max())
 
         hook_handle = module.register_forward_hook(hook)
         self.hooks.append(hook_handle)
@@ -152,8 +159,8 @@ class InternalMetricsRecorder:
                 {f"layer{idx}": maxvio_all_layers[idx].item() for idx in range(max_load_i.shape[0])}
             )
             maxvio = maxvio_all_layers.mean()
-            self.metrics["maxvio"]["total"] = maxvio
-            self.metrics["drop_ratio"]["total"] = drop_ratio
+            self.metrics["maxvio"]["total"] = maxvio.item()
+            self.metrics["drop_ratio"]["total"] = drop_ratio.item()
 
         if len(router_logits_max) > 0:
             for layer_name, router_logits_list in router_logits_max.items():
@@ -169,13 +176,13 @@ class InternalMetricsRecorder:
                 dist.all_reduce(local_router_logits_mean.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
                 self.metrics["router_logits_mean"][layer_name] = local_router_logits_mean.item()
 
-        if len(self.metrics["attn_max_lse"]) > 0:
-            for layer_name, local_attn_max_lse in self.metrics["attn_max_lse"].items():
+        if self.metrics["attn_max_lse"]:
+            for layer_name, local_attn_max_lse in self.attn_max_lse.items():
                 dist.all_reduce(local_attn_max_lse, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_lse"][layer_name] = local_attn_max_lse.item()
 
-        if len(self.metrics["attn_max_logits"]) > 0:
-            for layer_name, local_attn_max_logits in self.metrics["attn_max_logits"].items():
+        if self.attn_max_logits:
+            for layer_name, local_attn_max_logits in self.attn_max_logits.items():
                 dist.all_reduce(local_attn_max_logits, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_logits"][layer_name] = local_attn_max_logits.item()
 
@@ -186,9 +193,7 @@ class InternalMetricsRecorder:
             if isinstance(module, ATTENTION_CLS):
                 self.register_attn_extra_info_hook(module, self._clean_module_name(name))
             if isinstance(module, RMS_NORM_MONITOR_MODULES):
-                self.register_weight_rms_hook(module, self._clean_module_name(name))
-            else:
-                pass
+                self.calculate_module_weight_rms(module, self._clean_module_name(name), dtype=torch.float32)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
