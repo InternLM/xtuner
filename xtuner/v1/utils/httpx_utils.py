@@ -59,7 +59,7 @@ class HttpRequestErrorType(IntEnum):
                 return cls.UNKNOWN_ERROR
 
         if isinstance(e, httpx.RequestError):
-            # This check comes after its subclasses (TimeoutException, HTTPStatusError)
+            # This check comes after its subclass (TimeoutException)
             return cls.REQUEST_ERROR
 
         # For any other standard Python exception
@@ -89,12 +89,12 @@ class HttpRequestResult:
             default_messages = {
                 HttpRequestErrorType.UNKNOWN_ERROR: f"An unknown error {self.exception} occurred, Traceback: {traceback.format_exc()}",
                 HttpRequestErrorType.TIMEOUT_ERROR: "The request timed out.",
-                HttpRequestErrorType.REQUEST_ERROR: f"A network request error occurred. TypeError: {type(self.exception)}",
-                HttpRequestErrorType.BAD_REQUEST: f"Bad Request (400): The server could not process the request {self.payload}",
+                HttpRequestErrorType.REQUEST_ERROR: f"A network request error occurred. ExceptionType: {type(self.exception)}",
+                HttpRequestErrorType.BAD_REQUEST: f"Bad Request (400): The server could not process the request {log_payload}",
                 HttpRequestErrorType.UNAUTHORIZED: "Unauthorized (401): Authentication failed or is required.",
                 HttpRequestErrorType.FORBIDDEN: "Forbidden (403): Access is denied.",
                 HttpRequestErrorType.NOT_FOUND: "Not Found (404): The resource was not found.",
-                HttpRequestErrorType.REQUEST_TIMEOUT: f"Request Timeout (408): The server timed out waiting for the request {self.payload}.",
+                HttpRequestErrorType.REQUEST_TIMEOUT: f"Request Timeout (408): The server timed out waiting for the request {log_payload}.",
                 HttpRequestErrorType.TOO_MANY_REQUESTS: "Too Many Requests (429): Rate limit exceeded.",
                 HttpRequestErrorType.INTERNAL_SERVER_ERROR: f"Internal Server Error (500) {self.exception} occurred in {self.url}, Traceback: {traceback.format_exc()}",
                 HttpRequestErrorType.BAD_GATEWAY: f"Bad Gateway (502) in {self.url}.",
@@ -142,6 +142,4 @@ def set_rollout_response_status(http_result: HttpRequestResult, response: RLRoll
     elif http_result.is_server_error:
         response.finish_reason = "failed"
         if server_url:
-            if response.extra_info is None:
-                response.extra_info = {}
             response.extra_info.update({"url": server_url})

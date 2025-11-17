@@ -106,17 +106,21 @@ class TestMockRollout(unittest.TestCase):
         print(f"[{error_name}] Completed rollouts: {completed_rollouts}, Status: {status}")
         self.assertEqual(len(completed_rollouts[0]), 0, f"[{error_name}] Expected no rollouts to complete successfully.")
         self.assertEqual(status["rollout_finished_count"], 0, f"[{error_name}] Completed count in buffer should be 0.")
-        self.assertEqual(status["rollout_paused_count"], 0, f"[{error_name}] Expected {self.global_batch_size} rollouts to be interrupted.")
+        self.assertEqual(status["rollout_paused_count"], 0, f"[{error_name}] Expected no rollouts to be interrupted.")
 
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_rollout_with_timeout_mock(self):
         self._run_mock_test(MockTimeoutRolloutController, "timeout")
-        
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")  
     def test_rollout_with_request_error_mock(self):
         self._run_mock_test(MockRequestErrorRolloutController, "request error")
     
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_rollout_with_client_error_mock(self):
         self._run_mock_test(MockClientErrorRolloutController, "client error")
     
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_rollout_with_server_error_mock(self):
         self._run_mock_test(MockServerErrorRolloutController, "server error")
 
