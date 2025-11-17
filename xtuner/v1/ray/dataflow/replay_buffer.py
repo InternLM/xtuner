@@ -372,7 +372,7 @@ class ReplayBufferStorage:
         elif replay_meta.state == ReplayState.COMPLETED:
             self._completed_actions.append(action_id)
             self.logger.debug(f"Add sample with root_id: {root_id}, action_id: {action_id} to finished_actions.")
-        elif replay_meta.state == ReplayState.FAILED or replay_meta.state == ReplayState.FAILED:
+        elif replay_meta.state == ReplayState.FAILED:
             assert False, "Currently, failed samples are not supported in the replay buffer."
 
         # 3. observation

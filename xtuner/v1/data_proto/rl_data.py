@@ -154,12 +154,7 @@ def check_dataflow_item(group_data_items):
         error_msg = "group_data_items is empty."
         return False, error_msg
 
-    # 如果存在abort的状态，相当于跳过检查，下次会重新rollout
-    is_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
-    if is_abort:
-        error_msg = "Found abort in rollout finish_reason."
-        return True, error_msg
-    is_skipped = all(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
+    is_skipped = any(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
     if is_skipped:
         error_msg = "All items are skipped in rollout finish_reason."
         return True, error_msg
@@ -168,6 +163,12 @@ def check_dataflow_item(group_data_items):
     if not no_failures:
         error_msg = "Found failed in rollout finish_reason."
         return False, error_msg
+
+    # 如果存在abort的状态，相当于跳过检查，下次会重新rollout
+    is_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
+    if is_abort:
+        error_msg = "Found abort in rollout finish_reason."
+        return True, error_msg
 
     no_judger_failures = all(item.env.judger.extra_info.get("state", "") != "failed" for item in group_data_items)
     if not no_judger_failures:
