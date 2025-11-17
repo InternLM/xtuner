@@ -21,13 +21,25 @@ class ClusterTaskExecutor:
         resource = task_config.get("resource", {})
         command = task_config.get("command", "")
         timeout = task_config.get("timeout", 600)
+        envs = resource.get("envs", [])
         job_schema = None
+
+        if not command:
+            return False, "Command is empty. Not implemented! Please check!"
+
+        all_command = []
+        print(envs, resource)
+        for env in envs:
+            all_command.append(f"export {env}")
+
+        all_command.append(command)
+        run_command = "\n".join(all_command)
 
         try:
             job_name = "-".join([task_config["type"], task_config["case_name"], task_config["run_id"]])
             params = self.params_cls(
                 job_name=job_name,
-                cmd=command,
+                cmd=run_command,
                 gpus_per_task=resource.get("gpus_per_task", 8),
                 cpus_per_task=resource.get("cpus_per_task", 32),
                 memory_per_task=resource.get("memory_per_task", 512),

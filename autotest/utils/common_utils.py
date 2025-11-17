@@ -62,6 +62,3 @@ def get_case_list(type: str = "all"):
             if type in filter_type_set and len(filter_type_set) == 1:
                 filtered_cases.append(case)
         return filtered_cases
-
-
-print(get_config())
