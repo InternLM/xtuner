@@ -1,6 +1,7 @@
 import re
 from pathlib import Path
 
+import torch
 from typing_extensions import Self
 
 from transformers.models.qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
@@ -61,7 +62,7 @@ class Qwen3MoEConfig(MoEConfig):
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
-            max_window_layers=hf_config.max_window_layers,
+            max_window_layers=getattr(hf_config, "max_window_layers"),
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
@@ -102,6 +103,7 @@ class Qwen3MoEConfig(MoEConfig):
             eos_token_id=self.eos_token_id,
             pad_token_id=self.pad_token_id,
             num_hidden_layers=self.num_hidden_layers,
+            max_window_layers=self.max_window_layers,
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
             moe_intermediate_size=self.moe_intermediate_size,
@@ -117,6 +119,7 @@ class Qwen3MoEConfig(MoEConfig):
             num_experts=self.n_routed_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             norm_topk_prob=self.router.norm_topk_prob,
+            dtype=torch.bfloat16,
         )
 
 

@@ -40,6 +40,7 @@ class FakeEngine:
 
         self.model = model = nn.Linear(10, 10)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        self.has_freeze_params = False
 
     def grad_accumulation_steps(self, *args, **kwargs):
         return 1

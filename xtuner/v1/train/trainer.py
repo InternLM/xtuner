@@ -587,8 +587,9 @@ class Trainer:
 
             self._lr_scheduler.step()
             self._maybe_save_hf()
-            self._maybe_save(is_snapshot=False)
-            self._maybe_save(is_snapshot=True)
+            ckpt_saved = self._maybe_save(is_snapshot=False)
+            if not ckpt_saved:
+                _ = self._maybe_save(is_snapshot=True)
 
             time_before_get_data = time.time()
 
@@ -754,7 +755,7 @@ class Trainer:
                 model_cfg=model_config,
                 intra_layer_micro_batch=intra_layer_micro_batch,
             )
-        if model_path is not None and resume_cfg.resume_from is None:
+        if model_path is not None and (model_config.dcp_ignore_frozen_params or resume_cfg.resume_from is None):
             engine.from_hf(hf_path=model_path, strict=strict)
         elif resume_cfg.resume_from is None:
             engine.init_model_weights()
@@ -805,19 +806,19 @@ class Trainer:
         )
         return lr_scheduler
 
-    def _maybe_save(self, is_snapshot: bool = False):
+    def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
         if ckp_interval is None:
-            return
+            return False
 
         if ckp_interval == -1:  # only save at the end of training
             if self._cur_step != self.total_step:
-                return
+                return False
         else:
             if self.cur_step % ckp_interval != 0 and (is_snapshot or self._cur_step != self.total_step):
                 # if is_snapshot, only save at interval
                 # else save at interval or at the end of training
-                return
+                return False
 
         checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step, is_snapshot=is_snapshot)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -901,6 +902,7 @@ class Trainer:
                 f.write(self.meta.model_dump_json(indent=2))
 
         dist.barrier()
+        return True
 
     def _save_dataloader(self, dataloader_path: Path | str):
         _gathered_list = [None for _ in range(self.data_mesh["dp"].size())]
