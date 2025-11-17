@@ -53,7 +53,7 @@ class AcceleratorResourcesConfig(BaseModel):
     accelerator: Annotated[
         AcceleratorType, Parameter(help="Architecture of accelerator to use (e.g., 'GPU', 'NPU').")
     ] = "GPU"
-    num_workers: Annotated[int, Parameter(help="Number of accelerators in the placement group.")] = 1
+    num_workers: Annotated[int, Parameter(help="Number of accelerators in the placement group.")] 
     num_cpus_per_worker: Annotated[float, Parameter(help="Number of CPUs to allocate for the placement group.")] = 12
     cpu_memory_per_worker: Annotated[
         int, Parameter(help="Amount of memory (in bytes) to allocate for the placement group.")
@@ -75,10 +75,10 @@ class AcceleratorResourcesConfig(BaseModel):
         available_memory = available_resources.get("memory", 0)
         available_gpus = available_resources.get("GPU", 0)
 
-        num_workers = kwargs.get("num_workers", self.model_fields["num_workers"].default)
+        num_workers = kwargs.get("num_workers")
         cpus_per_worker = kwargs.get("num_cpus_per_worker", self.model_fields["num_cpus_per_worker"].default)
         memory_per_worker = kwargs.get("cpu_memory_per_worker", self.model_fields["cpu_memory_per_worker"].default)
-        assert num_workers <= available_gpus, (
+        assert num_workers is not None and num_workers <= available_gpus, (
             f"Not enough available GPUS in Ray cluster, available_gpus is {available_gpus} but xtuner needs {num_workers}."
         )
         # TODO: manage single controller's cpu resource to replace "10" here
