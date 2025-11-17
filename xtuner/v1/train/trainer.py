@@ -1348,6 +1348,7 @@ class Trainer:
             optimizer_dir=optimizer_path,
             load_states=self._resume_cfg.load_optimizer_states,
             load_args=self._resume_cfg.load_optimizer_args,
+            has_freeze_params=self._engine.has_freeze_params,
         )
 
         if resume_cfg.load_dataset:

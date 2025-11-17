@@ -136,6 +136,10 @@ class TrainEngine:
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
 
+    @property
+    def has_freeze_params(self) -> bool:
+        return False
+
     def build_model(self) -> BaseModel:
         with torch.device("meta"):
             model = self.model_cfg.build()
@@ -420,6 +424,7 @@ class TrainEngine:
         optimizer_dir: Path | None = None,
         load_states: bool = True,
         load_args: bool = True,
+        has_freeze_params: bool = False,
     ):
         """Load the dcp model from the given directory.
 
@@ -427,7 +432,10 @@ class TrainEngine:
             dcp_dir (str): The directory to load the model from.
         """
         _load_options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
-        _set_options = StateDictOptions(cpu_offload=True, strict=True)
+        if has_freeze_params:
+            _set_options = StateDictOptions(cpu_offload=True, strict=False)
+        else:
+            _set_options = StateDictOptions(cpu_offload=True, strict=True)
         with profile_time_and_memory(f"[Load DCP Model from {model_dir}]"):
             shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
             # inplace state_dict

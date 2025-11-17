@@ -59,6 +59,10 @@ class VisionComposeConfigProtocol(Protocol):
     projector_config: BaseModel
     text_config: TransformerConfig
 
+    freeze_vision: bool = False
+    freeze_projector: bool = False
+    freeze_language: bool = False
+
     def build(self) -> VisionComposeModelProtocol: ...
 
     @property
@@ -80,6 +84,10 @@ class VisionComposeTrainEngine(TrainEngine):
     ) -> None:
         self._processor = None  # only for save
         super().__init__(model_cfg, *args, **kwargs)  # type: ignore
+
+    @property
+    def has_freeze_params(self) -> bool:
+        return self.model_cfg.freeze_vision or self.model_cfg.freeze_projector or self.model_cfg.freeze_language
 
     def build_model(self) -> VisionComposeModelProtocol:  # type: ignore
         with torch.device("meta"):
