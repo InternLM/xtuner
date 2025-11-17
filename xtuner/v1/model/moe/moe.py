@@ -260,7 +260,6 @@ class MoE(BaseModel):
         seq_ctx: list[SequenceContext] | SequenceContext,
         loss_ctx: list[CELossContext] | CELossContext | None,
         return_router_logits: bool = False,
-        return_tokens_per_expert_global: bool = False,
     ):
         # TODO: caoweihan: Recover this assertion after the refactor of LossContext
         if isinstance(seq_ctx, SequenceContext):
@@ -272,7 +271,6 @@ class MoE(BaseModel):
                 seq_ctx=seq_ctx,
                 loss_ctx=loss_ctx,  # type: ignore
                 return_router_logits=return_router_logits,
-                return_tokens_per_expert_global=return_tokens_per_expert_global,
             )
         else:
             assert isinstance(loss_ctx, list) and len(loss_ctx) == len(seq_ctx), (
@@ -285,7 +283,6 @@ class MoE(BaseModel):
                 seq_ctx_list=seq_ctx,
                 loss_ctx_list=loss_ctx,
                 return_router_logits=return_router_logits,
-                return_tokens_per_expert_global=return_tokens_per_expert_global,
             )
 
     def _micro_batch_forward(
@@ -293,7 +290,6 @@ class MoE(BaseModel):
         seq_ctx_list: list[SequenceContext],
         loss_ctx_list: list[CELossContext],
         return_router_logits: bool = False,
-        return_tokens_per_expert_global: bool = False,
     ) -> MoEModelOutputs:
         """Micro-batch forward pass for MoE model.
 
@@ -486,7 +482,6 @@ class MoE(BaseModel):
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext | None,
         return_router_logits: bool = False,
-        return_tokens_per_expert_global: bool = False,
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
