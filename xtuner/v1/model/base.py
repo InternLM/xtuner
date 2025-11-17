@@ -522,6 +522,10 @@ class BaseModel(nn.Module):
                     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
                 )
 
+                # 1. When return_full_key_per_rank is False, we intends to save hf models across ranks,
+                # each rank only saves part of hf keys and tensors
+                # 2. When return_full_key_per_rank is True, we intends to generate full tensors on each
+                # rank for ipc updating weights in RL training.
                 if not return_full_key_per_rank:
                     start = int(current_rank * key_per_rank)
                     end = int(start + key_per_rank)
