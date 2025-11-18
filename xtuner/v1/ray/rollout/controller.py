@@ -331,6 +331,7 @@ class RolloutController:
                 url = response.extra_info["url"]
                 if response.finish_reason == "failed":
                     self.deactivate_worker_by_url(url)
+                response.extra_info.pop("url", None)
             return response
         except asyncio.TimeoutError:
             self.logger.error("Get response from rollout worker timeout and return the failed response.")

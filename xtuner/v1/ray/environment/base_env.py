@@ -1,3 +1,4 @@
+import os
 from abc import ABC, abstractmethod
 from typing import Any, List
 
@@ -70,7 +71,11 @@ class BaseEnvironment(ABC):
 
         from xtuner.v1.ray.rollout.controller import RolloutController
 
-        rollout_controller = ray.remote(RolloutController).remote(rollout_cfg, placement_group)  # type: ignore[attr-defined]
+        rollout_controller = (
+            ray.remote(RolloutController)
+            .options(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
+            .remote(rollout_cfg, placement_group)
+        )  # type: ignore[attr-defined]
         return rollout_controller
 
     def init_judger_controller(self, judger_cfg: Any, placement_group: Any):

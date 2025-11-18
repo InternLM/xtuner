@@ -236,8 +236,8 @@ class DataFlow:
             next_update_threshold = update_step
             while (
                 self.finished_samples_count < self.target_batch_size
-                and self.failed_samples_count < self.target_batch_size
-                and self.skipped_sample_count < self.target_batch_size
+                and self.failed_samples_count < self.target_batch_size * self.config.max_retry_times
+                and self.skipped_sample_count < self.target_batch_size * self.config.max_retry_times
             ):
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
@@ -279,8 +279,10 @@ class DataFlow:
 
         if self.finished_samples_count >= self.target_batch_size:
             self.logger.info("Target batch size reached. Pausing env controller.")
-        if self.failed_samples_count >= self.target_batch_size or self.skipped_sample_count >= self.target_batch_size:
+        if self.failed_samples_count >= self.target_batch_size * self.config.max_retry_times:
             self.logger.info("Max failed samples reached. Pausing env controller.")
+        if self.skipped_sample_count >= self.target_batch_size * self.config.max_retry_times:
+            self.logger.info("Max skipped samples reached. Pausing env controller.")
 
         # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
         # would be queued behind many worker tasks, causing a significant delay.
