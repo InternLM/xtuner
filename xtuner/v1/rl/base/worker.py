@@ -619,7 +619,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 else:
                     saved_list.append(f"layers.{i}.{sub_name}")
                 local_tensor = param._local_tensor if isinstance(param, DTensor) else param
-                local_tensor = local_tensor.bfloat16()
+                # local_tensor = local_tensor.bfloat16()
                 load_spec = language_model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
 
                 if isinstance(model.config, VisionComposeConfigProtocol):
@@ -647,7 +647,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if name in saved_list:
                 continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
-            local_tensor = local_tensor.bfloat16()
+            # local_tensor = local_tensor.bfloat16()
             load_spec = model.load_spec_mapping.get(name)
 
             if isinstance(model.config, VisionComposeConfigProtocol):
