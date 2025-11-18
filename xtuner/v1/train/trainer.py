@@ -662,6 +662,10 @@ class Trainer:
         return self._total_step
 
     @property
+    def total_epoch(self) -> int | None:
+        return self._total_epoch
+
+    @property
     def cur_step(self) -> int:
         """Get the current training step.
 
