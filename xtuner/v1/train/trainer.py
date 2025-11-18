@@ -825,6 +825,15 @@ class Trainer:
         """
         return self._cur_step
 
+    @property
+    def cur_epoch(self) -> int | None:
+        """Get the current training epoch.
+
+        Returns:
+            int | None: Current epoch number or None if not applicable.
+        """
+        return self._cur_epoch
+
     def _init_logger(self, log_dir: Path):
         # Logging system maybe need better design
         logger = get_logger()
