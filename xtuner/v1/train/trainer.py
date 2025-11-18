@@ -41,13 +41,13 @@ from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.profiler.prober_utils import setup_prober_list
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
+    InternalMetrics,
+    InternalMetricsRecorder,
     ParallelConfigException,
     get_logger,
     is_hf_model_path,
     log_format,
     record_git_info,
-    InternalMetricsRecorder,
-    InternalMetrics,
 )
 from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -348,7 +348,9 @@ class Trainer:
         self._hf_interval = hf_interval
         self._internal_metrics_interval = internal_metrics_interval
         if self._internal_metrics_interval is not None:
-            torch._dynamo.config.skip_nnmodule_hook_guards = False # otherwise the hook will be ignored for compiled modules
+            torch._dynamo.config.skip_nnmodule_hook_guards = (
+                False  # otherwise the hook will be ignored for compiled modules
+            )
 
         if tokenizer_path is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -1456,7 +1458,7 @@ class Trainer:
         logger.info(log_str)
 
 
-def _flatten_nested_metrics(metrics: InternalMetrics, sep: str = '/') -> dict:
+def _flatten_nested_metrics(metrics: InternalMetrics, sep: str = "/") -> dict:
     items = []
     for name, sub_metrics in metrics.items():
         if isinstance(sub_metrics, dict):
@@ -1466,5 +1468,7 @@ def _flatten_nested_metrics(metrics: InternalMetrics, sep: str = '/') -> dict:
                 else:
                     raise ValueError(f"Unsupported metric value type: expected float or int, but got {type(v)}")
         else:
-            raise ValueError(f"Unsupported metric type for internal metrics: expected dict, but got {type(sub_metrics)}")
+            raise ValueError(
+                f"Unsupported metric type for internal metrics: expected dict, but got {type(sub_metrics)}"
+            )
     return dict(items)
