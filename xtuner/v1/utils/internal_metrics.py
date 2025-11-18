@@ -1,25 +1,17 @@
 from collections import defaultdict
-from typing import Any
-import numpy as np
 import torch
-from torch import nn
 import torch.distributed as dist
+from torch import nn
 from torch.utils.hooks import RemovableHandle
+from typing_extensions import TypedDict
 
-from xtuner.v1.module import (
-    RMSNorm,
-    MultiHeadAttention,
-    MultiLatentAttention,
-    LMHead
-)
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate, MoEBlock, MoEDecoderLayer
-from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
+from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model import MoE
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.engine.train_engine import TrainEngine
-from xtuner.v1.utils.grad_norm import group_tensors_by_device_mesh_and_placements, cal_total_norm
-
-from typing_extensions import TypedDict
+from xtuner.v1.module import LMHead, MultiHeadAttention, MultiLatentAttention
+from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
+from xtuner.v1.utils.grad_norm import cal_total_norm, group_tensors_by_device_mesh_and_placements
 
 
 class InternalMetrics(TypedDict):
@@ -45,6 +37,7 @@ ATTENTION_CLS = (MultiHeadAttention, MultiLatentAttention)
 ATTN_MAX_LSE: dict[str, torch.Tensor] = {}
 ATTN_MAX_LOGITS: dict[str, torch.Tensor] = {}
 
+
 class InternalMetricsRecorder:
     def __init__(self, engine: TrainEngine):
         self.model = engine.model
@@ -60,8 +53,10 @@ class InternalMetricsRecorder:
             "attn_max_logits": {},
         }
 
+    @torch.no_grad()
     def calculate_module_weight_rms(self, module: nn.Module, layer_name: str, dtype: torch.dtype = torch.float32):
-        all_params = [param for param in module.parameters() if param.requires_grad]
+        """Calculate the RMS of the module's parameters."""
+        all_params = [param.data for param in module.parameters() if param.requires_grad]
         if not all_params:
             return
         grouped_params = group_tensors_by_device_mesh_and_placements(all_params)  # type: ignore[arg-type]
@@ -73,16 +68,14 @@ class InternalMetricsRecorder:
             total_numel += sum(p.numel() for p in params)
         param_l2_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=dtype)
         param_rms = param_l2_norm / total_numel**0.5
-        self.metrics['weight_rms'][layer_name] = param_rms.item()
+        self.metrics["weight_rms"][layer_name] = param_rms.item()
 
     def register_attn_extra_info_hook(self, module: nn.Module, layer_name: str):
-        """
-        Register attention extra info hook as a forward hook
-        """
+        """Register attention extra info hook as a forward hook"""
         def hook(module, input, output):
             extra_info = output[1]
             if extra_info.get("softmax_lse", None) is not None:
-                if layer_name not in ATTN_MAX_LSE: 
+                if layer_name not in ATTN_MAX_LSE:
                     # original shape: [n_head, seq]
                     ATTN_MAX_LSE[layer_name] = extra_info["softmax_lse"].max()
                 else:
@@ -101,6 +94,7 @@ class InternalMetricsRecorder:
 
     @torch.no_grad()
     def get_metrics(self, data_batches: list[ModelItem]):
+        """Run a dummy forward to get metrics."""
         additional_kwargs = {}
         if isinstance(self.model, MoE):
             # for MoE model, add additional kwargs to return necessary stats
@@ -140,7 +134,6 @@ class InternalMetricsRecorder:
                 else:
                     tokens_per_expert_global += output["tokens_per_expert_global"].float()
 
-
             if output.get("router_logits", None) is not None:
                 for layer_name, router_logits in output["router_logits"].items():
                     # [bsz, packed_len, num_experts]
@@ -151,7 +144,9 @@ class InternalMetricsRecorder:
             avg_count_load = tokens_per_expert_global.mean(1)
             max_load_i = torch.amax(tokens_per_expert_global, dim=1)
             maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
-            drop_ratio_all_layers = (tokens_per_expert_global - avg_count_load[:,None]).abs().mean(dim=1) / avg_count_load
+            drop_ratio_all_layers = (tokens_per_expert_global - avg_count_load[:, None]).abs().mean(
+                dim=1
+            ) / avg_count_load
             drop_ratio = drop_ratio_all_layers.mean()
             self.metrics["drop_ratio"].update(
                 {f"layer{idx}": drop_ratio_all_layers[idx].item() for idx in range(drop_ratio_all_layers.shape[0])}

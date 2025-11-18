@@ -1,6 +1,5 @@
 import traceback
 from functools import lru_cache
-from typing import TypedDict
 
 import torch
 import torch.nn as nn
@@ -41,12 +40,6 @@ def get_flex_attention_compiled():
 
 
 flex_attention_compiled = None
-
-
-class AttnOpOutputs(TypedDict):
-    raw_output: torch.Tensor
-    softmax_lse: torch.Tensor | None
-    attn_logits: torch.Tensor | None
 
 
 # Refer to TorchTune
@@ -134,7 +127,7 @@ def create_packing_block_causal_mask(seq_lens: torch.Tensor, window_size=(-1, -1
 
 def eager_attention(
     q, k, v, cu_seqlens_q, softmax_scale, window_size=(-1, -1), dropout_p=0.0, s_aux=None, **kwargs
-) -> AttnOpOutputs:
+) -> tuple[torch.Tensor, dict]:
     # TODO(HHA): Currently, the mask is recalculated each time, which is quite time-consuming.
     # It should be refactored to be calculated only once.
 
@@ -158,7 +151,7 @@ def eager_attention(
     causal_mask = attention_mask[:, :, :, : k.shape[-2]]
     attn_weights = attn_weights + causal_mask
 
-    attn_logits = None
+    extra_info = {}
     if s_aux is not None:
         # This was not in the original implementation and slightly affect results; it prevents overflow in BF16/FP16
         # when training with bsz>1 we clamp max values.
@@ -168,24 +161,20 @@ def eager_attention(
         combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
         probs = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
         scores = probs[..., :-1]  # we drop the sink here
-        attn_logits = combined_logits.detach()
+        extra_info["attn_logits"] = combined_logits.detach()
     else:
         scores = torch.softmax(attn_weights, dim=-1, dtype=attn_weights.dtype)
-        attn_logits = attn_weights.detach()
+        extra_info["attn_logits"] = attn_weights.detach()
 
     attn_scores = nn.functional.dropout(scores, p=dropout_p, training=True)
-    raw_output = torch.matmul(attn_scores, v).transpose(1, 2).contiguous()
-    attn_outputs: AttnOpOutputs = {
-        "raw_output": raw_output,
-        "attn_logits": attn_logits,
-        "softmax_lse": None,
-    }
-    return attn_outputs
+    attn_output = torch.matmul(attn_scores, v)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+    return attn_output, extra_info
 
 
 def flex_attention(
     q, k, v, cu_seqlens_q, softmax_scale=None, window_size=(-1, -1), dropout_p=0.0, s_aux=None, causal=True, **kwargs
-) -> AttnOpOutputs:
+) -> tuple[torch.Tensor, dict]:
     # q, k, v: [b, n_head, seq, head_dim]
     assert dropout_p == 0.0, "Dropout is not supported in flex attention"
 
@@ -202,7 +191,7 @@ def flex_attention(
     mask = create_packing_block_causal_mask(cu_seqlens_q, window_size=window_size, causal=causal)
     enable_gqa = k.size(1) != q.size(1)
 
-    raw_output, softmax_lse = compile_friendly_flex_attention(
+    attention_output, softmax_lse = compile_friendly_flex_attention(
         q,
         k,
         v,
@@ -212,48 +201,37 @@ def flex_attention(
         enable_gqa=enable_gqa,
         return_lse=True,
     )
-    raw_output = raw_output.transpose(1, 2).contiguous()
-    attn_outputs: AttnOpOutputs = {
-        "raw_output": raw_output,
-        "softmax_lse": softmax_lse.detach(),
-        "attn_logits": None,
-    }
-    return attn_outputs
+    attention_output = attention_output.transpose(1, 2).contiguous()
+    extra_info = {"softmax_lse": softmax_lse.detach()}
+    return attention_output, extra_info
 
 
-def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> AttnOpOutputs:
+def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> tuple[torch.Tensor, dict]:
     # q, k, v: [b, n_head, seq , head_dim]
     assert q.size(0) == 1, "Only support batch size 1 for flash attention"
     q = q.transpose(1, 2).squeeze(0)  # [seq, head, dim]
     k = k.transpose(1, 2).squeeze(0)
     v = v.transpose(1, 2).squeeze(0)
 
-    raw_output: torch.Tensor | None = None
-    softmax_lse: torch.Tensor | None = None
+    extra_info = {}
     if s_aux is None:
         if flash_attn_exception is not None:
             traceback.print_exception(flash_attn_exception)
             raise flash_attn_exception
-        fla_outputs = flash_attn_varlen_func(q, k, v, return_attn_probs=True, **kwargs)  # type: ignore
-        if isinstance(fla_outputs, tuple):
-            raw_output = fla_outputs[0]
-            softmax_lse = fla_outputs[1].detach()
+        attention_outputs = flash_attn_varlen_func(q, k, v, return_attn_probs=True, **kwargs)  # type: ignore
+        if isinstance(attention_outputs, tuple):
+            attention_output = attention_outputs[0]
+            extra_info["softmax_lse"] = attention_outputs[1].detach()
         else:  # npu fused attn doesn't support softmax_lse
-            raw_output = fla_outputs
+            attention_output = attention_outputs
     else:
         if flash_sink_attn_exception is not None:
             traceback.print_exception(flash_sink_attn_exception)
             raise flash_sink_attn_exception
         cu_seqlens_q = kwargs["cu_seqlens_q"]
-        fla_outputs = flash_sink_attn_varlen_func(q, k, v, s_aux, cu_seqlens_q, window_size[0])
-        raw_output = fla_outputs[0]
-        softmax_lse = fla_outputs[1].detach()
-    attn_outputs: AttnOpOutputs = {
-        "raw_output": raw_output[None],
-        "softmax_lse": softmax_lse,
-        "attn_logits": None,
-    }
-    return attn_outputs
+        attention_output, softmax_lse = flash_sink_attn_varlen_func(q, k, v, s_aux, cu_seqlens_q, window_size[0])
+        extra_info["softmax_lse"] = softmax_lse.detach()
+    return attention_output[None], extra_info
 
 
 attn_impl_mapping = {
