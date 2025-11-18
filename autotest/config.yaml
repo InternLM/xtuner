@@ -35,6 +35,7 @@ case:
                 envs: 
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
             assert_info:
                 base_metric: qwen3-sft/20251117105949/tracker.jsonl
                 check_metrics:
