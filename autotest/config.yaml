@@ -39,8 +39,8 @@ case:
             assert_info:
                 base_metric: qwen3-sft/20251117105949/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.02
-                    loss/reduced_llm_loss: 0.01
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 50
