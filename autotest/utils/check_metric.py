@@ -53,14 +53,17 @@ def check_result(base_path, cur_path, check_metric):
                 check_flag = False
         else:
             for idx, (old, cur) in enumerate(zip(base_metrics[metric], cur_metrics[metric])):
-                relative_error = abs(old - cur) / abs(old)
+                relative_error = round(abs(old - cur) / abs(old), 2)
                 # update max_error
                 if relative_error > max_error:
                     max_error = relative_error
                     max_error_idx = idx
                 if relative_error > threshold:
+                    baseline_old = f'{old:.6f}'
+                    baseline_cur = f'{cur:.6f}'
+                    
                     fail_metric[metric] = (
-                        f"{metric} relative error bigger than {threshold:.2%} in {idx} steps, baseline: {old:.6f}, now: {cur:.6f}, relative error: {relative_error:.2%}"
+                        f"{metric} relative error bigger than {threshold} in {idx} steps, baseline: {baseline_old}, now: {baseline_cur}, relative error: {relative_error}"
                     )
                     check_flag = False
                     break
