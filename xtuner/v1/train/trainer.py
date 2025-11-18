@@ -121,6 +121,13 @@ class XTunerMeta(BaseModel):
         return None
 
     @property
+    def latest_hf_checkpoint(self) -> str | None:
+        for exp in self.exps:
+            if exp.hf_checkpoint_list:
+                return exp.hf_checkpoint_list[-1]
+        return None
+
+    @property
     def latest_exp(self) -> ExpInfo:
         return self.exps[-1]
 
