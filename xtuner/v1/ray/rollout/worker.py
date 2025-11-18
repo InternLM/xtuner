@@ -71,7 +71,6 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.engine_bundle_idxs: list[int] = []
         self.server_process: Optional[multiprocessing.Process] = None
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="RolloutWorker")
-        self.infer_logger = get_logger(log_dir=config.worker_log_dir, tag="InferEngine")
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
         self.check_flag = True  # only print once
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
@@ -340,7 +339,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         format: str,
         extra_info: dict,
     ) -> RLRolloutResponseItem:
-        uid = extra_info.get("action_id", str(uuid.uuid4()))
+        uid = str(uuid.uuid4())
         response = None
         failed_rollout_response = RLRolloutResponseItem(
             finish_reason="failed",
