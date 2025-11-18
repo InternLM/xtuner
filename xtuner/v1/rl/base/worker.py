@@ -147,6 +147,15 @@ class TrainingWorker(SingleAcceleratorWorker):
         super().__init__(worker_cfg, rank, master_addr, master_port, world_size, accelerator)
         self.config = cast(WorkerConfig, self.config)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
+
+        if self.config.fsdp_config.enable_autocast:
+            from sglang.srt.batch_invariant_ops import enable_batch_invariant_mode, disable_batch_invariant_mode
+            print("FSDPTrainRayActor call enable_batch_invariant_mode for true-on-policy")
+            enable_batch_invariant_mode(
+                # In Qwen3, rope `inv_freq_expanded.float() @ position_ids_expanded.float()` uses bmm
+                # and disabling it will make it aligned
+                enable_bmm=False,
+            )
         self._engine = self._build_engine(worker_cfg)
 
         self._has_ref = False
@@ -268,7 +277,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         self, seq_ctx_list: list[SequenceContext], loss_ctx_input_list: list[RLLossContextInputItem]
     ) -> list[RLLossContextInputItem]:
         for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
-            output = self._engine.forward_only(seq_ctx=seq_ctx)
+            if self.config.fsdp_config.enable_autocast:
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    output = self._engine.forward_only(seq_ctx=seq_ctx)
+            else:
+                output = self._engine.forward_only(seq_ctx=seq_ctx)
             loss_ctx_input.old_logprobs = gather_logprobs(output["logits"], loss_ctx_input.shifted_labels)
         return loss_ctx_input_list
 
@@ -279,7 +292,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device(DEVICE)
         for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
             with torch.no_grad():
-                ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
+                if self.config.fsdp_config.enable_autocast:
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
+                else:
+                    ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
             ref_logprobs = gather_logprobs(ref_output["logits"], loss_ctx_input.shifted_labels)
             loss_ctx_input.ref_logprobs = ref_logprobs
         self._ref_model.to_device("cpu")
@@ -402,7 +419,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 else:
                     min_diff = torch.min(rollout_logprobs - old_logprobs)
                     max_diff = torch.max(rollout_logprobs - old_logprobs)
-                    mean_diff = torch.mean(rollout_logprobs - old_logprobs)
+                    mean_diff = torch.sum(rollout_logprobs - old_logprobs) / len(old_logprobs)
                     if rollout_logprobs.numel() == 1:
                         std_diff = torch.tensor(0.0)
                     else:

@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, List
+import os
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 
@@ -29,6 +30,12 @@ class BaseEnvironment(ABC):
         self.environment = environment
         self.rollout_controller = self.init_rollout_controller(rollout_cfg, rollout_pg)
         self.judger_controller = self.init_judger_controller(judger_cfg, judger_pg)
+
+        self.random_seed = rollout_cfg.random_seed
+        self.enable_logprob_zero_diff = os.environ.get("XTUNER_ENABLE_LOGPROB_ZERO_DIFF", "0") == "1"
+        if self.random_seed is None and self.enable_logprob_zero_diff:
+            print(f'XTUNER_ENABLE_LOGPROB_ZERO_DIFF is enabled, set random_seed to 42 due to random_seed is None')
+            self.random_seed = 42
 
     def init_rollout_controller(self, rollout_cfg: Any, placement_group: Any):
         """Initializes the rollout controller with the appropriate worker

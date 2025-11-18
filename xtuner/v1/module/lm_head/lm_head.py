@@ -33,7 +33,7 @@ class LMHead(nn.Linear):
             b = self.bias
         if loss_ctx is None:
             logits = F.linear(hidden_states, w, b)
-            return None, (logits.float(), {})
+            return None, (logits, {})  # 为了对齐，暂时删除
         else:
             return loss_ctx.forward(hidden_states, w, b)
 

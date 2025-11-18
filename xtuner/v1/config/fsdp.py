@@ -37,6 +37,7 @@ class FSDPConfig(BaseModel):
     hsdp_sharding_size: Annotated[
         Optional[int], Parameter(help="Sharding size for HSDP (Hybrid Sharding Data Parallel)")
     ] = None
+    enable_autocast: Annotated[bool, Parameter(help="Enable autocast for mixed precision training")] = False
 
     def model_post_init(self, __context: Any) -> None:
         if self.hsdp_sharding_size is not None:

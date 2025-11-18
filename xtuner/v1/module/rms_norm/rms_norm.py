@@ -22,13 +22,13 @@ class RMSNorm(nn.Module):
             weight = self.weight
 
         # just for align
-        # input_dtype = hidden_states.dtype
-        # hidden_states = hidden_states.to(torch.float32)
-        # variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        # hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         # return (weight * hidden_states).to(input_dtype)  # gpt_oss
-        # return weight * hidden_states.to(input_dtype)  # Llama
-        return rms_norm(hidden_states, weight, epsilon=self.variance_epsilon)  # xtuner
+        return weight * hidden_states.to(input_dtype)  # Llama
+        # return rms_norm(hidden_states, weight, epsilon=self.variance_epsilon)  # xtuner
 
     def init_weights(self):
         self.weight.data.fill_(1.0)

@@ -262,7 +262,11 @@ class TrainEngine:
                 total_forward_tokens += (num_tokens.sum()) ** 2
 
             if self.intra_layer_micro_batch == 1:
-                output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
+                if self.fsdp_cfg.enable_autocast:
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
+                else:
+                    output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
             else:
                 # For intra_layer_micro_batch > 1, we need to handle the data batches differently.
                 # Here we assume that the model can handle a list of seq_ctx and loss_ctx.

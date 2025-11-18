@@ -104,7 +104,7 @@ class RolloutConfig(BaseModel):
     gpu_memory_utilization: Annotated[
         float, Parameter(group=infer_group, help="GPU memory utilization for the rollout worker.")
     ] = 0.85
-    random_seed: Annotated[int, Parameter(group=infer_group, help="Random seed for the rollout worker.")] = 1024
+    random_seed: Annotated[int | None, Parameter(group=infer_group, help="Random seed for the rollout worker.")] = None
     # distributed config
     rollout_cross_node_comm: Annotated[
         bool,

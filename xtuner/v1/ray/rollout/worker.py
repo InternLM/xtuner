@@ -76,6 +76,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
         if self.rank == 0:
             self.logger.info(f"RolloutConfig:\n{self.config.model_dump_json(indent=2)}")
+        self.enable_logprob_zero_diff = os.environ.get("XTUNER_ENABLE_LOGPROB_ZERO_DIFF", "0") == "1"
 
     def init_dist_port(self):
         """Initialize distributed communication ports.

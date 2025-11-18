@@ -185,9 +185,13 @@ class Dense(BaseModel):
         self.rotary_emb = self.build_rotary_embedding(self.config)
 
         self._maybe_compile_layers()
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
-        )
+        # TODO: 这个代码没有经过严格精度验证
+        if self.fsdp_config.enable_autocast:
+            mp_policy = MixedPrecisionPolicy()
+        else:
+            mp_policy = MixedPrecisionPolicy(
+                param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+            )
         num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
 
         generator = torch.Generator()
@@ -201,8 +205,9 @@ class Dense(BaseModel):
                 layer = checkpoint_wrapper(
                     layer, preserve_rng_state=checkpoint_preserve_rng_state, checkpoint_impl=CheckpointImpl.REENTRANT
                 )
-                # __class__ without self attribute
-                layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
+                if not self.fsdp_config.enable_autocast:
+                    # __class__ without self attribute
+                    layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
             fully_shard(
@@ -252,11 +257,11 @@ class Dense(BaseModel):
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
 
-        for _, module in self.named_modules():
-            if isinstance(module, nn.Embedding):
-                module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
-            elif isinstance(module, RMSNorm):
-                module.forward = types.MethodType(self.patched_rms_norm_forward, module)  # type: ignore
+        # for _, module in self.named_modules():
+        #     if isinstance(module, nn.Embedding):
+        #         module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
+        #     elif isinstance(module, RMSNorm):
+        #         module.forward = types.MethodType(self.patched_rms_norm_forward, module)  # type: ignore
         self._to_empty_meta()
 
         # Make sure it works properly when using fsdp

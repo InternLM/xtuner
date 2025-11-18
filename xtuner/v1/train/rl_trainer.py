@@ -268,6 +268,15 @@ class RLTrainer:
         train_worker_cfg.log_dir = log_dir
         dataflow_config.worker_log_dir = log_dir
         rollout_config.worker_log_dir = log_dir
+
+        if rollout_config.random_seed is None:
+            print(f'rollout_config.random_seed is None, set to {seed}')
+            rollout_config.random_seed = seed
+
+        if os.environ.get("XTUNER_ENABLE_LOGPROB_ZERO_DIFF", "0") == "1":
+            print(f'XTUNER_ENABLE_LOGPROB_ZERO_DIFF is enabled, make sure the logprob diff is zero ！！！')
+            train_worker_cfg.fsdp_cfg.enable_autocast = True
+
         self._enable_evaluate = False
         self._enable_initial_evaluate = False
         if evaluator_config:
