@@ -3,6 +3,7 @@ import unittest
 import ray
 from transformers import AutoTokenizer
 import torch
+import httpx
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
@@ -10,13 +11,73 @@ from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.ray.rollout.controller import RolloutController
-# 导入 Mock Worker
-from xtuner.v1.utils.rl_test_utils import MockTimeoutRolloutWorker, MockRequestErrorRolloutWorker, MockClientErrorRolloutWorker, MockServerErrorRolloutWorker
-
+from xtuner.v1.utils.rl_test_utils import HttpRequestResult, HttpRequestErrorType
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"] 
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 resource_map = {"npu": "NPU", "cuda": "GPU"}
+
+try:
+    from xtuner.v1.ray.rollout import LMDeployWorker
+except ImportError:
+    LMDeployWorker = object  # 或者 Any
+    
+class MockTimeoutRolloutWorker(LMDeployWorker):
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        try:
+            raise httpx.TimeoutException("Mocked timeout error")
+        except Exception as e:
+            error_type = HttpRequestErrorType.from_exception(e)
+            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
+            self.logger.info(f"Caught mocked timeout exception: {e.__class__.__name__}")
+            return result
+
+    def launch_server(self):
+        pass  # Override
+
+class MockRequestErrorRolloutWorker(LMDeployWorker):
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        try:
+            req = httpx.Request("POST", url)
+            raise httpx.RequestError("Mocked httpx request error", request=req)
+        except Exception as e:
+            error_type = HttpRequestErrorType.from_exception(e)
+            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
+            self.logger.info(f"Caught mocked request error exception: {e.__class__.__name__}")
+            return result
+
+    def launch_server(self):
+        pass  # Override
+
+class MockClientErrorRolloutWorker(LMDeployWorker):
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        try:
+            req = httpx.Request("POST", url)
+            res = httpx.Response(400, request=req)
+            raise httpx.HTTPStatusError("Mocked client error", request=req, response=res)
+        except Exception as e:
+            error_type = HttpRequestErrorType.from_exception(e)
+            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
+            self.logger.info(f"Caught mocked client exception: {e.__class__.__name__}")
+            return result
+
+    def launch_server(self):
+        pass  # Override
+
+class MockServerErrorRolloutWorker(LMDeployWorker):
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        try:
+            req = httpx.Request("POST", url)
+            res = httpx.Response(500, request=req)
+            raise httpx.HTTPStatusError("Mocked server error", request=req, response=res)
+        except Exception as e:
+            error_type = HttpRequestErrorType.from_exception(e)
+            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
+            self.logger.info(f"Caught mocked server exception: {e.__class__.__name__}")
+            return result
+
+    def launch_server(self):
+        pass  # Override
 
 @ray.remote
 class MockTimeoutRolloutController(RolloutController):

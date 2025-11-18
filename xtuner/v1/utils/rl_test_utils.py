@@ -1,26 +1,21 @@
 import json
 import multiprocessing
+import os
 import time
 from typing import Any, Dict, List
 
-import httpx
 import requests
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.ray.judger.native import NativeJudger
-from xtuner.v1.ray.rollout import LMDeployWorker
-
-from .httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 
 app = FastAPI()
 
 
 def get_eos_token(model_path: str) -> int | List[int]:
-    import os
-
     from xtuner.v1.utils.logger import get_logger
 
     logger = get_logger()
@@ -34,67 +29,6 @@ def get_eos_token(model_path: str) -> int | List[int]:
         generation_config = json.load(f)
     eos_token_id = generation_config.get("eos_token_id")
     return eos_token_id
-
-
-class MockTimeoutRolloutWorker(LMDeployWorker):
-    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        try:
-            raise httpx.TimeoutException("Mocked timeout error")
-        except Exception as e:
-            error_type = HttpRequestErrorType.from_exception(e)
-            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked timeout exception: {e.__class__.__name__}")
-            return result
-
-    def launch_server(self):
-        pass  # Override
-
-
-class MockRequestErrorRolloutWorker(LMDeployWorker):
-    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        try:
-            req = httpx.Request("POST", url)
-            raise httpx.RequestError("Mocked httpx request error", request=req)
-        except Exception as e:
-            error_type = HttpRequestErrorType.from_exception(e)
-            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked request error exception: {e.__class__.__name__}")
-            return result
-
-    def launch_server(self):
-        pass  # Override
-
-
-class MockClientErrorRolloutWorker(LMDeployWorker):
-    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        try:
-            req = httpx.Request("POST", url)
-            res = httpx.Response(400, request=req)
-            raise httpx.HTTPStatusError("Mocked client error", request=req, response=res)
-        except Exception as e:
-            error_type = HttpRequestErrorType.from_exception(e)
-            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked client exception: {e.__class__.__name__}")
-            return result
-
-    def launch_server(self):
-        pass  # Override
-
-
-class MockServerErrorRolloutWorker(LMDeployWorker):
-    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
-        try:
-            req = httpx.Request("POST", url)
-            res = httpx.Response(500, request=req)
-            raise httpx.HTTPStatusError("Mocked server error", request=req, response=res)
-        except Exception as e:
-            error_type = HttpRequestErrorType.from_exception(e)
-            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
-            self.logger.info(f"Caught mocked server exception: {e.__class__.__name__}")
-            return result
-
-    def launch_server(self):
-        pass  # Override
 
 
 class JudgeRequest(BaseModel):
