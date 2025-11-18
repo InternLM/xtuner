@@ -289,11 +289,7 @@ class RolloutController:
 
         health_statuses = ray.get([actor.check_health.remote() for actor in actors])
 
-        count = 0
         for url, is_healthy in zip(urls, health_statuses):
-            if count == 3:
-                is_healthy = False
-            count += 1
             if not is_healthy:
                 self._deactivate_worker(url)
 
