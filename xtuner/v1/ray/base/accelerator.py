@@ -404,7 +404,6 @@ class AutoAcceleratorWorkers:
         rank_bundle_idx_list = []
         for rank, bundle_idx in enumerate(sorted_bundle_idxs):
             worker = worker_cls.options(
-                max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)),
                 placement_group=pg,
                 placement_group_bundle_index=bundle_idx,
                 **pg_options,
