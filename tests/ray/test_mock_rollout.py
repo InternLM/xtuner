@@ -11,7 +11,7 @@ from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.ray.rollout.controller import RolloutController
-from xtuner.v1.utils.rl_test_utils import HttpRequestResult, HttpRequestErrorType
+from xtuner.v1.utils.httpx_utils import HttpRequestResult, HttpRequestErrorType
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"] 
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
