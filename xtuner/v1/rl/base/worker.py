@@ -148,7 +148,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.config = cast(WorkerConfig, self.config)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
 
-        if self.config.fsdp_config.enable_autocast:
+        if self.config.fsdp_cfg.enable_autocast:
             from sglang.srt.batch_invariant_ops import enable_batch_invariant_mode, disable_batch_invariant_mode
             print("FSDPTrainRayActor call enable_batch_invariant_mode for true-on-policy")
             enable_batch_invariant_mode(
@@ -222,7 +222,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         if isinstance(ref_model_cfg, VisionComposeConfigProtocol):
             assert ref_model_cfg.text_config.float8_cfg is None, "VisionComposeConfigProtocol does not support float8"
             if ref_model_fsdp_cfg is None:
-                ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
+                ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False,
+                                                enable_autocast=self.config.fsdp_cfg.enable_autocast)
             model.language_model.fully_shard(ref_model_fsdp_cfg)  # type: ignore
             model.vision_tower.fully_shard(ref_model_fsdp_cfg)  # type: ignore
             model.multi_modal_projector.fully_shard(ref_model_fsdp_cfg)  # type: ignore
@@ -239,7 +240,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             else:
                 float8_handler = None
             if ref_model_fsdp_cfg is None:
-                ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
+                ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False,
+                                                enable_autocast=self.config.fsdp_cfg.enable_autocast)
             model = model.fully_shard(ref_model_fsdp_cfg, float8_handler)  # type: ignore
 
             model.from_hf(hf_path=load_from)
@@ -277,7 +279,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self, seq_ctx_list: list[SequenceContext], loss_ctx_input_list: list[RLLossContextInputItem]
     ) -> list[RLLossContextInputItem]:
         for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
-            if self.config.fsdp_config.enable_autocast:
+            if self.config.fsdp_cfg.enable_autocast:
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                     output = self._engine.forward_only(seq_ctx=seq_ctx)
             else:
@@ -292,7 +294,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device(DEVICE)
         for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
             with torch.no_grad():
-                if self.config.fsdp_config.enable_autocast:
+                if self.config.fsdp_cfg.enable_autocast:
                     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                         ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
                 else:
