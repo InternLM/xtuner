@@ -14,7 +14,7 @@ on:
         default: 'main'
 
 jobs:
-  unit_test:
+  ete_test:
     if: ${{!cancelled() }}
     runs-on: [h_cluster_ete]
     steps:
