@@ -1,5 +1,5 @@
 base_path:
-    base_output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+    base_output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
     base_baseline_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_baseline
 
 default_config:
