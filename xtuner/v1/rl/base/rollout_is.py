@@ -38,10 +38,9 @@ References:
 
 from typing import Any, Optional, Tuple
 
-import numpy as np
 import torch
-from pydantic import BaseModel, ConfigDict
 import torch.distributed as dist
+from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.utils import convert_packed_to_padded, convert_padded_to_packed, masked_mean, masked_sum
 

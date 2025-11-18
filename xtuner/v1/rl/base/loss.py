@@ -7,9 +7,9 @@ from typing_extensions import Self
 
 from xtuner.v1.loss import BaseLossConfig
 from xtuner.v1.loss.base_loss_ctx import BaseLossContext
-from .rollout_is import RolloutImportanceSampling
-from ..utils import sp_split
 
+from ..utils import sp_split
+from .rollout_is import RolloutImportanceSampling
 
 
 T = TypeVar("T")
