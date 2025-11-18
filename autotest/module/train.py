@@ -15,7 +15,7 @@ class Train:
             chat_template = config.get("parameters", {}).get("chat_template", None)
             work_dir = "/".join(
                 [
-                    config.get("base_path").get("base_output_path"),
+                    config.get("base_output_path"),
                     config.get("run_id"),
                     config.get("case_name"),
                     train_type,
@@ -46,7 +46,7 @@ class Train:
     def validate(config):
         work_dir = config.get("work_dir", None)
         base_path = os.path.join(
-            config.get("base_baseline_path", {}), config.get("assert_info", {}).get("base_metric", None)
+            config.get("base_baseline_path", ""), config.get("assert_info", {}).get("base_metric", None)
         )
         cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/rank0/tracker.jsonl")
         check_metrics = config.get("assert_info", {}).get("check_metrics", {})
