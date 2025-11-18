@@ -27,4 +27,6 @@ jobs:
         run: |
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx 
+          conda env list
+          unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
           pytest autotest/test_all.py -m all -n 1 --run_id ${{ github.run_id }}
