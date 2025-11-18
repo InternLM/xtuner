@@ -1,5 +1,6 @@
-base_output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-base_baseline_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_baseline
+base_path:
+    base_output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+    base_baseline_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_baseline
 
 default_config:
     train: 
@@ -22,7 +23,7 @@ default_config:
                 - COMPASS_DATA_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/llmeval/compass_data_cache
                 - HF_DATASETS_OFFLINE=1
                 - HF_HUB_OFFLINE=1
-            
+
 case: 
     qwen3-sft:
         -
