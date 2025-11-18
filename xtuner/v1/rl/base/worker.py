@@ -472,10 +472,10 @@ class TrainingWorker(SingleAcceleratorWorker):
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,
             )
-            other_log = self._update_other_log(other_log)
+            other_log = self._update_other_log(other_log)  # type: ignore[arg-type]
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
-            log_info = dict()
+            log_info = dict()  # type: ignore[var-annotated]
             log_info.update(loss_log)
             for k, v in other_log.items():
                 if k == "extra_info":
