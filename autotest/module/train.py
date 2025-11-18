@@ -15,8 +15,7 @@ class Train:
             chat_template = config.get("parameters", {}).get("chat_template", None)
             work_dir = "/".join(
                 [
-                    config.get("base_path"),
-                    config.get("base_output_path"),
+                    config.get("base_path").get("base_output_path"),
                     config.get("run_id"),
                     config.get("case_name"),
                     train_type,
