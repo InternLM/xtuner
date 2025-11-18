@@ -1,6 +1,6 @@
 base_path:
-    base_model_path: /mnt/shared-storage-user/models
     base_output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+    base_baseline_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_baseline
 
 default_config:
     train: 
@@ -8,7 +8,7 @@ default_config:
             gpus_per_task: 8
             cpus_per_task: 120
             memory_per_task: 512
-            image: registry.h.pjlab.org.cn/ailab-puyu-puyu_gpu/xtuner:pt28_20250911_6652194
+            image: registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_20251113_22badb0_grouped_router_topk1
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
@@ -29,16 +29,96 @@ case:
         -
             type: sft
             parameters:
-                model: examples/v1/sft_qwen3_tiny.py
+                config: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner-fork/autotest/config/qwen3.py
+                output_path: .
+            resource:
+                envs: 
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+            assert_info:
+                base_metric: qwen3-sft/20251117105949/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.02
+                    loss/reduced_llm_loss: 0.01
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 50
+                    runtime_info/text_tokens: 0
+            timeout: 1200
+
+
+case_bk: 
+    qwen3-sft:
+        -
+            type: sft
+            parameters:
+                model: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner-fork/autotest/config/qwen3.py
                 dataset: tests/resource/openai_sft.jsonl
                 chat_template: qwen3
+                resume: True
+            envs: 
+                - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
             assert_info:
                 base_metric: /mnt/shared-storage-user/caoweihan/qa-caif-cicd/tmp/debugsftdir/20251110023645/logs/exp_tracking/rank0/tracker.jsonl
                 check_metrics:
-                    loss/total_loss: 0.01
-                    lr: 0
-                    runtime_info/e2e_tgs: 500
-                    text_tokens: 0
                     grad_norm: 0.02
+                    loss/reduced_llm_loss: 0.01
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 50
+                    text_tokens: 0
+            timeout: 900
+    qwen3-eval:
+        - 
+            type: eval
+            eval_type: chat
+            datasets: "[*xxx, yyy]"
+            model_path: Qwen/Qwen3-8B
+            baseline: 
+                a: 1.0
+                b: 3.2
+                c: 4.6
+    
+    interns1-sft: # tested
+        -
+            type: sft
+            parameters:
+                config: examples/v1/sft_intern_s1_tiny_config.py
+            assert_cfg:
+                assert_result_path: autotest/baseline/qwen3-sft.json
             timeout: 600
-
+    qwen3-rl:
+        -
+            type: rl
+            parameters:
+                config: examples/v1/rl_qwen3_8B_grpo_tiny.py
+            envs: 
+                - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
+                - WORK_DIR=.
+                - MODEL_PATH=Qwen/Qwen3-8B
+                - DATA_PATH=tests/resource/openai_sft.jsonl
+            timeout: 600
+    qwen3-tiny:
+        -
+            type: pre_train
+            parameters:
+                config: examples/v1/pretrain_qwen3_tiny.py
+                assert_result_path: autotest/baseline/qwen3-tiny-pretrian-0.json
+                dataset: tests/resource/openai_sft.jsonl
+                chat_template: qwen3
+            resource:
+                gpus_per_task: 1
+            timeout: 600
+        - 
+            type: eval
+            eval_type: base
+        - 
+            type: rl
+            config: examples/v1/config/rl_qwen3_8B_grpo.py
+        - 
+            type: sft
+            config: examples/v1/config/sft_qwen3_tiny.py
+        - 
+            type: eval
+            eval_type: chat

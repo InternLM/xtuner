@@ -94,8 +94,6 @@ class ClusterTaskExecutor:
                     print(
                         f"Stop task {job_id} fail, try time {error_time}, exception is: {e}",
                     )
-                    print(time.time())
                     time.sleep(100)
-                    print(time.time())
                 else:
                     raise Exception(f"Stop task {job_id} failed after retry 10 times, exception is: {e}")

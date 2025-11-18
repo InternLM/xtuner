@@ -56,7 +56,6 @@ def exec_step_test(step_config, task_executor, context):
     step_config["command"] = command
 
     # run task
-    print("Execute step config", step_config)
     task_result, task_info = task_executor.execute_task(step_config)
     assert task_result, task_info
 

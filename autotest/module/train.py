@@ -22,10 +22,13 @@ class Train:
                 ]
             )
 
-            command = f"cd xtuner; pwd; torchrun xtuner/v1/train/cli/{train_type}.py"
+            command = (
+                "cd xtuner; pwd; torchrun --nproc-per-node 8 --master_addr=${MASTER_ADDR} --master_port=${MASTER_PORT} --nnodes=${WORLD_SIZE} --node_rank=${RANK} "
+                + f"xtuner/v1/train/cli/{train_type}.py"
+            )
             if config_path:
-                # os.makedirs(work_dir, exist_ok=True)
-                command += f" --config {config_path}; mkdir -p {work_dir}; cp -r 202* {work_dir}"
+                output_path = model_config = config.get("parameters", {}).get("output_path", ".")
+                command += f" --config {config_path}; mkdir -p {work_dir}; mv {output_path}/202* {work_dir}"
             else:
                 if model_config:
                     command += f" --model-cfg {model_config}"
@@ -42,7 +45,9 @@ class Train:
 
     def validate(config):
         work_dir = config.get("work_dir", None)
-        base_path = config.get("assert_info", {}).get("base_metric", None)
+        base_path = os.path.join(
+            config.get("base_baseline_path", {}), config.get("assert_info", {}).get("base_metric", None)
+        )
         cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/rank0/tracker.jsonl")
         check_metrics = config.get("assert_info", {}).get("check_metrics", {})
         return check_result(base_path, cur_path, check_metrics)

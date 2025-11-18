@@ -64,4 +64,5 @@ def check_result(base_path, cur_path, check_metric):
                     break
         if check_flag:
             logger.info(f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step.")
-    assert fail_metric is None, f"Some metric check failed,{fail_metric}"
+    result = not fail_metric
+    return result, f"Some metric check failed,{fail_metric}"
