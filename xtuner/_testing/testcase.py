@@ -1,5 +1,6 @@
 from torch.testing._internal.common_distributed import DistributedTestBase, MultiProcessTestCase, logger, TEST_SKIPS, c10d
 import torch
+import torch.distributed as dist
 import threading
 import sys
 import os
@@ -91,3 +92,7 @@ class DeterministicDDPTestCase(DistributedTestBase):
             raise AssertionError(
                 f"Failed to check relative error of loss, expected: {losses_ref}, got {losses}, Mean diff: {avg_relative_diff}")
 
+    def create_pg(self, device):
+        ret = super().create_pg(device)
+        os.environ["LOCAL_RANK"] = str(dist.get_rank() % torch.cuda.device_count())
+        return ret
