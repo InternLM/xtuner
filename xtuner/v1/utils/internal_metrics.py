@@ -42,6 +42,9 @@ RMS_NORM_MONITOR_MODULES = (
 MOE_MODEL_CLS = (MoE,)
 ATTENTION_CLS = (MultiHeadAttention, MultiLatentAttention)
 
+ATTN_MAX_LSE: dict[str, torch.Tensor] = {}
+ATTN_MAX_LOGITS: dict[str, torch.Tensor] = {}
+
 class InternalMetricsRecorder:
     def __init__(self, engine: TrainEngine):
         self.model = engine.model
@@ -56,8 +59,6 @@ class InternalMetricsRecorder:
             "attn_max_lse": {},
             "attn_max_logits": {},
         }
-        self.attn_max_lse: dict[str, torch.Tensor] = {}
-        self.attn_max_logits: dict[str, torch.Tensor] = {}
 
     def calculate_module_weight_rms(self, module: nn.Module, layer_name: str, dtype: torch.dtype = torch.float32):
         all_params = [param for param in module.parameters() if param.requires_grad]
@@ -81,19 +82,19 @@ class InternalMetricsRecorder:
         def hook(module, input, output):
             extra_info = output[1]
             if extra_info.get("softmax_lse", None) is not None:
-                if layer_name not in self.attn_max_lse:
+                if layer_name not in ATTN_MAX_LSE: 
                     # original shape: [n_head, seq]
-                    self.attn_max_lse[layer_name] = extra_info["softmax_lse"].max()
+                    ATTN_MAX_LSE[layer_name] = extra_info["softmax_lse"].max()
                 else:
-                    prev_lse_max = self.attn_max_lse[layer_name]
-                    self.attn_max_lse[layer_name] = max(prev_lse_max, extra_info["softmax_lse"].max())
+                    prev_lse_max = ATTN_MAX_LSE[layer_name]
+                    ATTN_MAX_LSE[layer_name] = max(prev_lse_max, extra_info["softmax_lse"].max())
             if extra_info.get("attn_logits", None) is not None:
-                if layer_name not in self.attn_max_logits:
+                if layer_name not in ATTN_MAX_LOGITS:
                     # original shape: [b, n_head, seq, seq]
-                    self.attn_max_logits[layer_name] = extra_info["attn_logits"].max()
+                    ATTN_MAX_LOGITS[layer_name] = extra_info["attn_logits"].max()
                 else:
-                    prev_logits_max = self.attn_max_logits[layer_name]
-                    self.attn_max_logits[layer_name] = max(prev_logits_max, extra_info["attn_logits"].max())
+                    prev_logits_max = ATTN_MAX_LOGITS[layer_name]
+                    ATTN_MAX_LOGITS[layer_name] = max(prev_logits_max, extra_info["attn_logits"].max())
 
         hook_handle: RemovableHandle = module.register_forward_hook(hook)
         self.hooks.append(hook_handle)
@@ -105,7 +106,7 @@ class InternalMetricsRecorder:
             # for MoE model, add additional kwargs to return necessary stats
             # additional_kwargs["return_tokens_per_expert_global"] = True
             additional_kwargs["return_router_logits"] = True
-        
+
         # metrics before aggregation
         tokens_per_expert_global = None
         router_logits_max = defaultdict(list)
@@ -176,13 +177,13 @@ class InternalMetricsRecorder:
                 dist.all_reduce(local_router_logits_mean.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
                 self.metrics["router_logits_mean"][layer_name] = local_router_logits_mean.item()
 
-        if self.metrics["attn_max_lse"]:
-            for layer_name, local_attn_max_lse in self.metrics["attn_max_lse"].items():
+        if ATTN_MAX_LSE:
+            for layer_name, local_attn_max_lse in ATTN_MAX_LSE.items():
                 dist.all_reduce(local_attn_max_lse, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_lse"][layer_name] = local_attn_max_lse.item()
 
-        if self.metrics["attn_max_logits"]:
-            for layer_name, local_attn_max_logits in self.metrics["attn_max_logits"].items():
+        if ATTN_MAX_LOGITS:
+            for layer_name, local_attn_max_logits in ATTN_MAX_LOGITS.items():
                 dist.all_reduce(local_attn_max_logits, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_logits"][layer_name] = local_attn_max_logits.item()
 
@@ -197,6 +198,8 @@ class InternalMetricsRecorder:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        ATTN_MAX_LSE.clear()
+        ATTN_MAX_LOGITS.clear()
         for hook in self.hooks:
             hook.remove()
 
