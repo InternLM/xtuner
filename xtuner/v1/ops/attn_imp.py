@@ -33,8 +33,6 @@ except (ImportError, ModuleNotFoundError) as e:
     flash_sink_attn_varlen_func = None  # type: ignore[assignment]
     flash_sink_attn_exception = e
 
-from typing import List
-
 
 def get_flex_attention_compiled():
     torch._dynamo.config.cache_size_limit = 128
@@ -129,7 +127,7 @@ def create_packing_block_causal_mask(seq_lens: torch.Tensor, window_size=(-1, -1
 
 def eager_attention(
     q, k, v, cu_seqlens_q, softmax_scale, window_size=(-1, -1), dropout_p=0.0, s_aux=None, **kwargs
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, dict]:
     # TODO(HHA): Currently, the mask is recalculated each time, which is quite time-consuming.
     # It should be refactored to be calculated only once.
 
@@ -176,7 +174,7 @@ def eager_attention(
 
 def flex_attention(
     q, k, v, cu_seqlens_q, softmax_scale=None, window_size=(-1, -1), dropout_p=0.0, s_aux=None, causal=True, **kwargs
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, dict]:
     # q, k, v: [b, n_head, seq, head_dim]
     assert dropout_p == 0.0, "Dropout is not supported in flex attention"
 
@@ -208,7 +206,7 @@ def flex_attention(
     return attention_output, extra_info
 
 
-def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> torch.Tensor:
+def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> tuple[torch.Tensor, dict]:
     # q, k, v: [b, n_head, seq , head_dim]
     assert q.size(0) == 1, "Only support batch size 1 for flash attention"
     q = q.transpose(1, 2).squeeze(0)  # [seq, head, dim]
@@ -220,11 +218,11 @@ def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> torc
         if flash_attn_exception is not None:
             traceback.print_exception(flash_attn_exception)
             raise flash_attn_exception
-        attention_outputs = flash_attn_varlen_func(q, k, v, return_attn_probs=True, **kwargs) # type: ignore
+        attention_outputs = flash_attn_varlen_func(q, k, v, return_attn_probs=True, **kwargs)  # type: ignore
         if isinstance(attention_outputs, tuple):
             attention_output = attention_outputs[0]
             extra_info["softmax_lse"] = attention_outputs[1].detach()
-        else: # npu fused attn doesn't support softmax_lse
+        else:  # npu fused attn doesn't support softmax_lse
             attention_output = attention_outputs
     else:
         if flash_sink_attn_exception is not None:
