@@ -379,9 +379,9 @@ class MultiHeadAttention(nn.Module):
             kwargs["s_aux"] = sinks
         # [b, n_head, seq, head_dim]
         attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
-            query_states,
-            key_states,
-            value_states,
+            query_states if query_states.dtype == torch.bfloat16 else query_states.to(torch.bfloat16),
+            key_states if key_states.dtype == torch.bfloat16 else key_states.to(torch.bfloat16),
+            value_states if value_states.dtype == torch.bfloat16 else value_states.to(torch.bfloat16),
             cu_seqlens_q=seq_ctx.cu_seq_lens_q,
             cu_seqlens_k=seq_ctx.cu_seq_lens_k,
             max_seqlen_q=seq_ctx.max_length_q,

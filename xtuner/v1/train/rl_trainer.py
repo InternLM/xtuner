@@ -268,6 +268,15 @@ class RLTrainer:
         train_worker_cfg.log_dir = log_dir
         dataflow_config.worker_log_dir = log_dir
         rollout_config.worker_log_dir = log_dir
+
+        if rollout_config.random_seed is None:
+            print(f'rollout_config.random_seed is None, set to {seed}')
+            rollout_config.random_seed = seed
+
+        if os.environ.get("XTUNER_ENABLE_LOGPROB_ZERO_DIFF", "0") == "1":
+            print(f'XTUNER_ENABLE_LOGPROB_ZERO_DIFF is enabled, make sure the logprob diff is zero ！！！')
+            train_worker_cfg.fsdp_cfg.enable_autocast = True
+
         self._enable_evaluate = False
         self._enable_initial_evaluate = False
         if evaluator_config:
@@ -385,7 +394,7 @@ class RLTrainer:
         """
         self.logger.info("Start RL training")
         if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator:
-            ray.get(self._rollout_env_controller.check_active_workers.remote())
+            # ray.get(self._rollout_env_controller.check_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
@@ -395,7 +404,7 @@ class RLTrainer:
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
-                ray.get(self._rollout_env_controller.check_active_workers.remote())
+                # ray.get(self._rollout_env_controller.check_active_workers.remote())
                 data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):

@@ -179,9 +179,14 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.max_running_requests = self.config.rollout_max_batch_size_per_instance
         sglang_server_args.log_level = log_level
         sglang_server_args.log_level_http = log_level_http
-        sglang_server_args.enable_deterministic_inference = enable_deterministic_inference
         sglang_server_args.tp_size = num_gpus_per_engine
         sglang_server_args.ep_size = num_gpus_per_engine
+        sglang_server_args.enable_deterministic_inference = enable_deterministic_inference
+
+        if self.enable_logprob_zero_diff:
+            sglang_server_args.enable_deterministic_inference = True
+            sglang_server_args.rl_on_policy_target = 'fsdp'
+            sglang_server_args.attention_backend = 'fa3'
 
         if grammar_backend is not None:
             sglang_server_args.grammar_backend = grammar_backend
@@ -212,6 +217,7 @@ class SGLangWorker(RolloutWorker):
             "stop": sample_params["stops"],
             "stop_token_ids": sample_params["stop_token_ids"],
             "skip_special_tokens": sample_params["skip_special_tokens"],
+            "sampling_seed": sample_params["sampling_seed"],
         }
         return sglang_sample_params
 

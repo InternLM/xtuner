@@ -10,6 +10,8 @@ def rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
+# 为了对齐推理引擎
+@torch.compile(dynamic=True)
 def apply_rotary_pos_emb_cuda(
     q: torch.Tensor,
     k: torch.Tensor,

@@ -1,7 +1,7 @@
 import asyncio
 import os
 from typing import List
-
+import copy
 import ray
 
 from xtuner.v1.data_proto.rl_data import (
@@ -62,18 +62,26 @@ class SingleTurnEnvironment(BaseEnvironment):
                 and state from the rollout controller.
         """
         if self.rollout_controller:
+            if self.enable_logprob_zero_diff:
+                assert self.random_seed is not None, "XTUNER_ENABLE_LOGPROB_ZERO_DIFF is enabled, random_seed must be set"
+                group_sampling_seeds = [self.random_seed + i for i in range(len(group_data_items))]
+            else:
+                group_sampling_seeds = [self.random_seed for _ in range(len(group_data_items))]
+
             # 在env中对输入的数据进行转换，是为了支持rollout_controller单独作为rollout engine使用，使各个模块进行解耦
             # 每个模块返回独立的data item, 在env中进行更新
-            response_future = [
-                self.rollout_controller.rollout.remote(
-                    prompt=sample.data.messages,
-                    input_ids=sample.data.input_ids,
-                    sample_params=sample_params,
-                    extra_params=extra_params,
-                    extra_info=sample.data.extra_info,
-                )
-                for sample in group_data_items
-            ]
+            response_future = []
+            for i, sample in enumerate(group_data_items):
+                _sample_params = copy.deepcopy(sample_params)
+                _sample_params.sampling_seed = group_sampling_seeds[i]
+                future = self.rollout_controller.rollout.remote(
+                        prompt=sample.data.messages,
+                        input_ids=sample.data.input_ids,
+                        sample_params=_sample_params,
+                        extra_params=extra_params,
+                        extra_info=sample.data.extra_info,
+                    )
+                response_future.append(future)
             try:
                 rollout_responses = await asyncio.wait_for(
                     asyncio.gather(*response_future), timeout=self.rollout_timeout
