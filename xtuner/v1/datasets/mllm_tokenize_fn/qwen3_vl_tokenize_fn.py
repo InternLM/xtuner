@@ -523,7 +523,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
                 if processed_video_length is None:
                     # 如果仅仅存在 origin_video_length 和 origin_fps, 基于这 2 个字段和用户指定的 fps 来采样视频帧,并计算时间戳
-                    assert origin_video_length > self.video_processor.min_frames
                     indices = sample_frames(
                         origin_total_num_frames=origin_video_length,
                         origin_fps=origin_fps,
@@ -534,7 +533,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                     timestamps = calculate_timestamps(indices, origin_fps, merge_size=self.video_processor.merge_size)
                 else:
                     assert processed_fps is not None
-                    assert processed_video_length > self.video_processor.min_frames
                     if frames_timestamp is not None:
                         assert len(frames_timestamp) == processed_video_length, (
                             f"frames_timestamp must have the same length as processed_video_length, "
