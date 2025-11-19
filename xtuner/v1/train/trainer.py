@@ -54,6 +54,7 @@ from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
+
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
