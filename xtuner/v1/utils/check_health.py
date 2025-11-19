@@ -14,7 +14,8 @@ DEVICE = get_device()
 
 
 def health_job(dtype, loop=10):
-    x = torch.rand(128, 128, dtype=dtype, device=DEVICE)
+    # use independent generator to avoid affecting the global generator
+    x = torch.rand(128, 128, generator=torch.Generator(device=DEVICE).manual_seed(12345), dtype=dtype, device=DEVICE)
     dist.broadcast(x, src=0)
 
     y = x
