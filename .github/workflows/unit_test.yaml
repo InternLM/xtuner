@@ -7,6 +7,7 @@ on:
     paths-ignore:
       - "docs/**"
       - "**.md"
+      - "autotest/**"
 env:
   WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
   WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)

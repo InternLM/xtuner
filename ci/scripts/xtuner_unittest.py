@@ -89,6 +89,9 @@ def main():
             print(f"Job {job_schema.job_id} is queuing...")
         elif status == JobStatus.RUNNING:
             print(f"Job {job_schema.job_id} is running...")
+        elif status == JobStatus.STOPPED:
+            print(f"Job {job_schema.job_id} is stopped...")
+            raise RuntimeError(f"Job {job_schema.job_id} failed with status {status}")
         elif status == JobStatus.FAILED:
             print(f"Job {job_schema.job_id} failed!")
             # 等待10秒确保日志完全收集

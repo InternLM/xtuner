@@ -1,4 +1,8 @@
-files: '^xtuner/v1/.*'
+files: >
+  (?x)^(
+    xtuner/v1/.* |
+    autotest/.*
+  )$
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
