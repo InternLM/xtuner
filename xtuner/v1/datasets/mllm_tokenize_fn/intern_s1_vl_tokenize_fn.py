@@ -32,7 +32,9 @@ from .intern_s1_vl_utils import InternS1VLOSSLoader, pil_loader, read_interns1_v
 logger = get_logger()
 
 
-def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[list[int]]):
+def replace_video_token(
+    messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[list[int]]
+):
     current_image_idx = 0
     n_video = len(num_image_token_list)
     n_image = sum([len(num_image_token_list[i]) for i in range(n_video)])
@@ -50,7 +52,10 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                         assert video_cnt == n_video, f"video_cnt: {video_cnt} != n_video: {n_video}"
                         for i in range(video_cnt):
                             special_tokens = "\n".join(
-                                [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(len(num_image_token_list[i]))]
+                                [
+                                    f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}"
+                                    for frame_idx in range(len(num_image_token_list[i]))
+                                ]
                             )
                             text = text.replace(IMAGE_TOKEN_ALIAS, special_tokens)
                             # 每一帧的 image_token 应该是完全一样，因此直接 num_image_token_list[i][0] 就行
@@ -58,9 +63,7 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
                             current_image_idx += len(num_image_token_list[i])
                         c.text = text
-    assert current_image_idx == n_image, (
-        f"VIDEO ERROR: total_image_idx: {current_image_idx} != {n_image}"
-    )
+    assert current_image_idx == n_image, f"VIDEO ERROR: total_image_idx: {current_image_idx} != {n_image}"
 
 
 class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
@@ -327,7 +330,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         # 根据采样的帧数（min_num_frames, max_num_frames+1），计算token数量，实际可能采样不到这么多帧（比如视频一共只有10帧），算出来 num_tokens 可能会偏大
         num_image_tokens_list = []
         for video_path in self._video_path:
-            random_frame_num = generate_random_int_from_dict({'data_item': data_item, 'video_path': video_path}, self.min_num_frames, self.max_num_frames)
+            random_frame_num = generate_random_int_from_dict(
+                {"data_item": data_item, "video_path": video_path}, self.min_num_frames, self.max_num_frames
+            )
             num_image_tokens = [self.num_image_token for _ in random_frame_num]
             num_image_tokens_list.append(num_image_tokens)
         total_image_tokens = sum([sum(num_image_tokens) for num_image_tokens in num_image_tokens_list])
@@ -367,7 +372,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         num_imgs_list = []
         for video_path in self._video_path:
             video_path = os.path.join(media_root, video_path)
-            random_frame_num = generate_random_int_from_dict({'data_item': data_item, 'video_path': video_path}, self.min_num_frames, self.max_num_frames)
+            random_frame_num = generate_random_int_from_dict(
+                {"data_item": data_item, "video_path": video_path}, self.min_num_frames, self.max_num_frames
+            )
 
             if self.oss_loader is not None:
                 image_list = self.oss_loader(
@@ -434,7 +441,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             pixel_values=pixel_values,  # type: ignore
             num_tokens=len(input_ids),
             num_img_tokens=[total_image_tokens],
-            num_imgs=num_imgs_list
+            num_imgs=num_imgs_list,
         )
         return ret
 

@@ -56,16 +56,27 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                             assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
 
                         video_extra_dict = {}
+                        if "origin_video_length" in c["video_url"]:
+                            video_extra_dict["origin_video_length"] = c["video_url"]["origin_video_length"]
+                        if "origin_fps" in c["video_url"]:
+                            video_extra_dict["origin_fps"] = c["video_url"]["origin_fps"]
                         if "processed_video_length" in c["video_url"]:
-                            video_extra_dict["origin_video_length"] = c["video_url"]["processed_video_length"]
+                            video_extra_dict["processed_video_length"] = c["video_url"]["processed_video_length"]
                         if "processed_fps" in c["video_url"]:
-                            video_extra_dict["origin_fps"] = c["video_url"]["processed_fps"]
-                        video_extra_info_list.append(video_extra_dict)
+                            video_extra_dict["processed_fps"] = c["video_url"]["processed_fps"]
+                        if "frames_timestamp" in c["video_url"]:
+                            video_extra_dict["frames_timestamp"] = c["video_url"]["frames_timestamp"]
+                        if len(video_extra_dict) > 0:
+                            video_extra_info_list.append(video_extra_dict)
 
     if len(image_wh_list) > 0:
         assert len(image_wh_list) == len(image_paths), "If image_wh is provided, it should match the number of images."
     if len(video_wh_list) > 0:
         assert len(video_wh_list) == len(video_paths), "If video_wh is provided, it should match the number of videos."
+    if len(video_extra_info_list) > 0:
+        assert len(video_extra_info_list) == len(video_paths), (
+            "If video_extra_info is provided, it should match the number of videos."
+        )
     return (
         image_paths,
         video_paths,

@@ -49,7 +49,7 @@ def numpy_to_tensor(frames):
     return result
 
 
-def read_frames_folder(video_path, num_frames, client=None):
+def read_frames_folder(video_path, num_frames, timestamps=None, client=None):
     oss_read_time = 0
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
@@ -78,10 +78,12 @@ def read_frames_folder(video_path, num_frames, client=None):
     else:
         frame_indices = np.arange(vlen)
     frames = numpy_to_tensor([frames[i] for i in frame_indices])
-    return frames, oss_read_time, vlen, frame_indices
+    if timestamps is not None:
+        timestamps = [timestamps[i] for i in frame_indices]
+    return frames, oss_read_time, vlen, frame_indices, timestamps
 
 
-def read_frames_gif(video_path, num_frames, client=None):
+def read_frames_gif(video_path, num_frames, timestamps=None, client=None):
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
         video_bytes = client.get(video_path)
@@ -103,12 +105,15 @@ def read_frames_gif(video_path, num_frames, client=None):
             frame = Image.fromarray(frame)
             frames.append(frame)
     frames = numpy_to_tensor(frames)
-    return frames, frame_indices
+    if timestamps is not None:
+        timestamps = [timestamps[i] for i in frame_indices]
+    return frames, frame_indices, timestamps
 
 
 def read_frames_decord(
     video_path,
     num_frames,
+    timestamps=None,
     client=None,
 ):
     decord_video_threads = int(os.getenv("XTUNER_DECORD_VIDEO_THREADS", 0))
@@ -130,13 +135,16 @@ def read_frames_decord(
     frames = video_reader.get_batch(frame_indices).asnumpy()  # (T, H, W, C), np.uint8
     video_get_batch_time = time.time() - start_time
     frames = numpy_to_tensor(frames)
-    return frames, oss_read_time, video_get_batch_time, vlen, frame_indices
+    if timestamps is not None:
+        timestamps = [timestamps[i] for i in frame_indices]
+    return frames, oss_read_time, video_get_batch_time, vlen, frame_indices, timestamps
 
 
 # qwen3 vl 一定是均匀采样
 def read_qwen3_vl_video(
     path,
     num_frames,
+    timestamps=None,
     client=None,
     debug=False,
     oss_time_log_thr=10,
@@ -146,9 +154,11 @@ def read_qwen3_vl_video(
     vlen = 0
     video_get_batch_time = 0
     if path.endswith("/"):
-        frames, oss_read_time, vlen, frame_indices = read_frames_folder(path, num_frames, client=client)
+        frames, oss_read_time, vlen, frame_indices, timestamps = read_frames_folder(
+            path, num_frames, timestamps, client=client
+        )
     elif path.endswith(".gif"):
-        frames, frame_indices = read_frames_gif(path, num_frames, client=client)
+        frames, frame_indices, timestamps = read_frames_gif(path, num_frames, timestamps, client=client)
     elif (
         path.endswith(".mp4")
         or path.endswith(".avi")
@@ -160,8 +170,8 @@ def read_qwen3_vl_video(
         or path.endswith(".rmvb")
         or path.endswith(".ts")
     ):
-        frames, oss_read_time, video_get_batch_time, vlen, frame_indices = read_frames_decord(
-            path, num_frames, client=client
+        frames, oss_read_time, video_get_batch_time, vlen, frame_indices, timestamps = read_frames_decord(
+            path, num_frames, timestamps, client=client
         )
     else:
         raise ValueError(f"Unsupported video format: {path}")
@@ -171,7 +181,7 @@ def read_qwen3_vl_video(
             f"[Warning] OSS read video {path} cost {end_time} seconds, "
             f"oss_read_time {oss_read_time}, video_get_batch_time {video_get_batch_time}, vlen {vlen}"
         )
-    return frames, frame_indices
+    return frames, frame_indices, timestamps
 
 
 class Qwen3VLOSSLoader:
@@ -190,7 +200,7 @@ class Qwen3VLOSSLoader:
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
 
-    def __call__(self, path, image_type="image", num_frames=None):
+    def __call__(self, path, image_type="image", num_frames=None, timestamps=None):
         if image_type == "image":
             start_time = time.time()
             img_value_str = self.client.get(path)
@@ -205,6 +215,7 @@ class Qwen3VLOSSLoader:
             return read_qwen3_vl_video(
                 path,
                 num_frames=num_frames,
+                timestamps=timestamps,
                 client=self.client,
                 debug=self.debug,
                 oss_time_log_thr=self.oss_time_log_thr,

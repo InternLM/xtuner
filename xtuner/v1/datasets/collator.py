@@ -25,7 +25,7 @@ def sft_llm_collator(
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
-        # If the token number of the packed sample is larger than the packed_max_lenghth
+        # If the token number of the packed sample is larger than the packed_max_length
         if isinstance(instance, dict):
             instance = [instance]
 
@@ -108,7 +108,7 @@ def intern_s1_vl_sft_collator(
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
-        # If the token number of the packed sample is larger than the packed_max_lenghth
+        # If the token number of the packed sample is larger than the packed_max_length
         if (total_num_tokens := sum(i["num_tokens"] for i in instance)) > pack_max_length:
             logger.warning(
                 f"Found packed sample with {total_num_tokens} tokens, which is larger than the `pack_max_length`"
@@ -196,7 +196,7 @@ def qwen3_vl_sft_collator(
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
-        # If the token number of the packed sample is larger than the packed_max_lenghth
+        # If the token number of the packed sample is larger than the packed_max_length
         if (total_num_tokens := sum(i["num_tokens"] for i in instance)) > pack_max_length:
             logger.warning(
                 f"Found packed sample with {total_num_tokens} tokens, which is larger than the `pack_max_length`"

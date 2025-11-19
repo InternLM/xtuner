@@ -18,7 +18,7 @@ class TextContentItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["text"] = "text"
     text: str
-    conversation_timestamps: Optional[list[float]] = None
+    conversation_timestamps: Optional[list[float] | list[list[float]]] = None
 
     def apply_chat_template(self, chat_template: HybridChatTemplate) -> str:
         return self.text
