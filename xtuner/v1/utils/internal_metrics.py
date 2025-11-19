@@ -1,4 +1,6 @@
+import os
 from collections import defaultdict
+
 import torch
 import torch.distributed as dist
 from torch import nn
@@ -71,7 +73,10 @@ class InternalMetricsRecorder:
         self.metrics["weight_rms"][layer_name] = param_rms.item()
 
     def register_attn_extra_info_hook(self, module: nn.Module):
-        """Register attention extra info hook as a forward hook"""
+        """Register attention extra info hook as a forward hook."""
+        if os.getenv("DISABLE_ATTN_MONITOR_HOOK", "0") == "1":
+            return
+
         def hook(module, input, output):
             extra_info = output[1]
             if extra_info.get("softmax_lse", None) is not None:
