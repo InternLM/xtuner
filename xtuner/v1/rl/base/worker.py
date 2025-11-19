@@ -540,10 +540,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_device_mesh = DeviceMesh(
             "cpu", mesh=engine_mesh_list, mesh_dim_names=("engine_instance", "engine_parallel")
         )
-        self.rollout_url = server_url_dict.get(self.rank, "")
-        if worker_server_urls_status.get(self.rollout_url, False) is False:
-            self.logger.error(f"Rollout server url {self.rollout_url} is not available.")
+        rollout_server_url = server_url_dict.get(self.rank, "")
+        if worker_server_urls_status.get(rollout_server_url, "False") is False:
+            self.logger.error(f"Rollout server url {rollout_server_url} is not available.")
             self.rollout_url = None
+        else:
+            self.rollout_url = rollout_server_url
         self.rollout_cfg_info["tp"] = tp
         self.rollout_cfg_info["ep"] = ep
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
