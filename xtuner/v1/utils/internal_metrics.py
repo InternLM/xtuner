@@ -70,24 +70,24 @@ class InternalMetricsRecorder:
         param_rms = param_l2_norm / total_numel**0.5
         self.metrics["weight_rms"][layer_name] = param_rms.item()
 
-    def register_attn_extra_info_hook(self, module: nn.Module, layer_name: str):
+    def register_attn_extra_info_hook(self, module: nn.Module):
         """Register attention extra info hook as a forward hook"""
         def hook(module, input, output):
             extra_info = output[1]
             if extra_info.get("softmax_lse", None) is not None:
-                if layer_name not in ATTN_MAX_LSE:
+                if module.name not in ATTN_MAX_LSE:
                     # original shape: [n_head, seq]
-                    ATTN_MAX_LSE[layer_name] = extra_info["softmax_lse"].max()
+                    ATTN_MAX_LSE[module.name] = extra_info["softmax_lse"].max()
                 else:
-                    prev_lse_max = ATTN_MAX_LSE[layer_name]
-                    ATTN_MAX_LSE[layer_name] = max(prev_lse_max, extra_info["softmax_lse"].max())
+                    prev_lse_max = ATTN_MAX_LSE[module.name]
+                    ATTN_MAX_LSE[module.name] = max(prev_lse_max, extra_info["softmax_lse"].max())
             if extra_info.get("attn_logits", None) is not None:
-                if layer_name not in ATTN_MAX_LOGITS:
+                if module.name not in ATTN_MAX_LOGITS:
                     # original shape: [b, n_head, seq, seq]
-                    ATTN_MAX_LOGITS[layer_name] = extra_info["attn_logits"].max()
+                    ATTN_MAX_LOGITS[module.name] = extra_info["attn_logits"].max()
                 else:
-                    prev_logits_max = ATTN_MAX_LOGITS[layer_name]
-                    ATTN_MAX_LOGITS[layer_name] = max(prev_logits_max, extra_info["attn_logits"].max())
+                    prev_logits_max = ATTN_MAX_LOGITS[module.name]
+                    ATTN_MAX_LOGITS[module.name] = max(prev_logits_max, extra_info["attn_logits"].max())
 
         hook_handle: RemovableHandle = module.register_forward_hook(hook)
         self.hooks.append(hook_handle)
@@ -187,7 +187,7 @@ class InternalMetricsRecorder:
     def __enter__(self):
         for name, module in self.model.named_modules():
             if isinstance(module, ATTENTION_CLS):
-                self.register_attn_extra_info_hook(module, self._clean_module_name(name))
+                self.register_attn_extra_info_hook(module)
             if isinstance(module, RMS_NORM_MONITOR_MODULES):
                 self.calculate_module_weight_rms(module, self._clean_module_name(name), dtype=torch.float32)
         return self

@@ -214,6 +214,7 @@ class MoEDecoderLayer(nn.Module):
             layer_type=layer_type,
             float8_cfg=float8_cfg,
         )
+        self.self_attn.name = f"layers.{layer_idx}.self_attn"
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.shared_experts: MoEMLP | None
         self.layer_idx = layer_idx

@@ -620,7 +620,10 @@ class Trainer:
             return None
 
         with InternalMetricsRecorder(self._engine) as metrics_recorder:
-            return metrics_recorder.get_metrics(data_batches)
+            logger.info("Start calculating model internal metrics...")
+            metrics: InternalMetrics = metrics_recorder.get_metrics(data_batches)
+            logger.info("Calculating model internal metrics done.")
+            return metrics
 
     @property
     def world_size(self) -> int:
