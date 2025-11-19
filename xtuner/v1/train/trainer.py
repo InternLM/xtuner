@@ -46,12 +46,12 @@ from xtuner.v1.utils import (
     is_hf_model_path,
     log_format,
     record_git_info,
+    InternalMetricsRecorder,
 )
 from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 from .toy_tokenizer import UTF8ByteTokenizer
-
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
@@ -188,6 +188,7 @@ class TrainerConfig(BaseModel):
     prober_list: list[str] = []
     do_clip: bool = True
     grad_norm_dtype: torch.dtype = torch.float32
+    internal_metrics_interval: int | None = None
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -307,6 +308,7 @@ class Trainer:
         do_clip: bool = True,
         grad_norm_dtype: torch.dtype = torch.float32,
         trainer_cfg: TrainerConfig | None = None,
+        internal_metrics_interval: int | None = None,
     ):
         self._do_clip = do_clip
         self._grad_norm_dtype = grad_norm_dtype
@@ -343,6 +345,9 @@ class Trainer:
         self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
+        self._internal_metrics_interval = internal_metrics_interval
+        if self._internal_metrics_interval is not None:
+            torch._dynamo.config.skip_nnmodule_hook_guards = False # otherwise the hook will be ignored for compiled modules
 
         if tokenizer_path is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -501,6 +506,7 @@ class Trainer:
             do_clip=config.do_clip,
             grad_norm_dtype=config.grad_norm_dtype,
             trainer_cfg=config,
+            internal_metrics_interval=config.internal_metrics_interval,
         )
         self.config = config
         return self
@@ -575,6 +581,8 @@ class Trainer:
                 loss_log["maxvio"] = other_log["maxvio"]
             loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
 
+            internal_metrics = self._maybe_check_model_internal_metrics(engine_input)
+
             self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
             self._train_time = time_after_train_step - train_begin
@@ -588,6 +596,7 @@ class Trainer:
                 step_time=step_time,
                 train_time=self._train_time + self._train_time_offset,
                 grad_norm=grad_norm.item(),
+                internal_metrics=internal_metrics,
             )
 
             self._lr_scheduler.step()
@@ -605,6 +614,16 @@ class Trainer:
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
+
+    def _maybe_check_model_internal_metrics(self, data_batches: list[ModelItem]) -> dict[str, float] | None:
+        if self._internal_metrics_interval is None:
+            return None
+
+        if self.cur_step % self._internal_metrics_interval != 0 and self.cur_step != self.total_step:
+            return None
+
+        with InternalMetricsRecorder(self._engine) as metrics_recorder:
+            return metrics_recorder.get_metrics(data_batches)
 
     @property
     def world_size(self) -> int:
@@ -1159,6 +1178,7 @@ class Trainer:
         step_time: float,
         train_time: float,
         grad_norm: float,
+        internal_metrics: dict[str, float] | None = None,
     ):
         """Log the training step information."""
         tgs = step_consumed_tokens / step_time
@@ -1171,11 +1191,17 @@ class Trainer:
         eta_seconds = remaining_tokens / tgs
         eta_hms = str(timedelta(seconds=int(eta_seconds)))
 
+        est_global_batch_tokens = self.data_mesh["dp"].size() * step_consumed_tokens
+
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
         loss_log_str = ", ".join(loss_log_list)
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
+        if internal_metrics is None:
+            internal_metrics = {}
+        else:
+            internal_metrics = _flatten_dict(internal_metrics)
 
         self.logger.info(
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
@@ -1187,8 +1213,13 @@ class Trainer:
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
+            f"est_global_batch_tokens: {est_global_batch_tokens} "
             f"eta: {eta_hms} "
         )
+        if internal_metrics:
+            internal_metrics_log_list = [f"{k}: {v:.8f}" for k, v in internal_metrics.items()]
+            internal_metrics_log_str = ", ".join(internal_metrics_log_list)
+            self.logger.info(f"Step {self.cur_step}/{self.total_step} internal_metrics: {internal_metrics_log_str}")
 
         log_scalars = {
             "lr": lr,
@@ -1197,12 +1228,14 @@ class Trainer:
             "time/train_time": round(train_time, 4),
             "time/eta_seconds": round(eta_seconds, 1),
             "runtime_info/text_tokens": step_consumed_tokens,
+            "runtime_info/est_global_batch_tokens": est_global_batch_tokens,
             "runtime_info/total_consumed_tokens": total_consumed_tokens,
             "runtime_info/tgs": tgs,
             "runtime_info/e2e_tgs": e2e_tgs,
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
+            **internal_metrics,
         }
         log_scalars.update({f"loss/{k}": v for k, v in loss_log.items()})
         self._exp_tracker.add_scalars(tag_scalar_dict=log_scalars, global_step=self.cur_step)
@@ -1424,3 +1457,16 @@ class Trainer:
             log_str += f"{k}: {v}\n"
         log_str += "=================================================="
         logger.info(log_str)
+
+
+def _flatten_dict(d: dict, parent_key: str = '', sep: str = '/') -> dict:
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep=sep).items())
+        elif isinstance(v, torch.Tensor):
+            items.append((new_key, v.item()))
+        else:
+            items.append((new_key, v))
+    return dict(items)

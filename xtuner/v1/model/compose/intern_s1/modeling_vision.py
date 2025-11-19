@@ -102,7 +102,7 @@ class InternS1VisionAttention(nn.Module):
                                    dtype=torch.int32,
                                    device=hidden_states.device)
 
-        attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
+        attn_output, extra_info = self.attn_impl_func(  # type: ignore
             query_states[None].transpose(1, 2),  # [b, n_head, seq, head_dim]
             key_states[None].transpose(1, 2),
             value_states[None].transpose(1, 2),
@@ -118,7 +118,7 @@ class InternS1VisionAttention(nn.Module):
         attn_output = attn_output.reshape(batch_size, seq_len, self.embed_dim)
         output = self.projection_layer(attn_output)
         output = self.projection_dropout(output)
-        return output
+        return output, extra_info
 
 
 class InternS1VisionMLP(nn.Module):
@@ -188,7 +188,7 @@ class InternS1VisionLayer(nn.Module):
 
     @maybe_compile(fullgraph=True)
     def attention_pre_forward(self, hidden_states):
-        attention_output = self.attention(self.layernorm_before(hidden_states))
+        attention_output, _ = self.attention(self.layernorm_before(hidden_states))
         attention_output = self.lambda_1 * attention_output
         return attention_output
 

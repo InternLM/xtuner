@@ -378,7 +378,7 @@ class MultiHeadAttention(nn.Module):
                 sinks = self.sinks
             kwargs["s_aux"] = sinks
         # [b, n_head, seq, head_dim]
-        attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
+        attn_output, extra_info = self.attn_impl_func(  # type: ignore
             query_states,
             key_states,
             value_states,
@@ -404,7 +404,7 @@ class MultiHeadAttention(nn.Module):
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
-        return attn_output
+        return attn_output, extra_info  # type: ignore[return-value]
 
     def build_kv_cache(
         self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None
