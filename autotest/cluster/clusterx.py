@@ -54,7 +54,7 @@ class ClusterTaskExecutor:
             job_schema = self.cluster.run(params)
         except Exception as e:
             traceback.print_exc()
-            raise Exception(f"clusterx job {job_name} start fail, task config is {task_config}, exception is: {e}")
+            raise RuntimeError(f"clusterx job {job_name} start fail, task config is {task_config}, exception is: {e}")
 
         start_time = time.time()
 
