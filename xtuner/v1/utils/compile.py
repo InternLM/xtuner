@@ -70,7 +70,11 @@ class MaybeCompile:
                         func_compile_kwargs = {**compile_kwargs, **target_kwargs}
 
                 # Compile the function
-                self._compiled_funcs[func_id] = torch.compile(original_func, **func_compile_kwargs)
+                self._compiled_funcs[func_id] = torch.compile(
+                    original_func,
+                    options={"guard_filter_fn": torch.compiler.skip_guard_on_globals_unsafe},
+                    **func_compile_kwargs,
+                )
 
             @functools.wraps(func)
             def wrapper(*args, **kwargs):
