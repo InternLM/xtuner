@@ -26,7 +26,7 @@ class RLUIDItem(BaseModel):
     root_id: int = -1
     action_id: int = -1
     observation_id: int = -1
-    version: int = -1
+    version: int = 0
 
 
 class RLDatasetItem(BaseModel):
@@ -68,10 +68,27 @@ class RLRolloutResponseItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     response: Optional[str] = None
     response_ids: Optional[List[int]] = None
-    num_return_tokens: Optional[int] = None
+    num_return_tokens: int = 0
     finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
     logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
+
+    def merge(self, other: "RLRolloutResponseItem") -> None:
+        """Merges another RLRolloutResponseItem into this one for partial
+        rollout."""
+        if not isinstance(other, RLRolloutResponseItem):
+            raise TypeError("Can only merge with another RLRolloutResponseItem instance.")
+
+        if self.response_ids is not None and other.response_ids:
+            self.response_ids.extend(other.response_ids)
+        if self.logprobs is not None and other.logprobs:
+            self.logprobs.extend(other.logprobs)
+        if self.response is not None and other.response:
+            self.response += other.response
+
+        self.num_return_tokens += other.num_return_tokens
+        self.finish_reason = other.finish_reason
+        self.extra_info.update(other.extra_info)
 
 
 class RLJudgerResponseItem(BaseModel):
@@ -124,6 +141,7 @@ class RLExtraDataItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     retry_times: int = 0
+    state: str = ""
     extra_info: Dict[str, Any] = dict()
 
 
@@ -147,28 +165,66 @@ class RLDataFlowItem(BaseModel):
     extra_info: RLExtraDataItem = RLExtraDataItem()
 
 
-def check_dataflow_item(group_data_items):
-    if not group_data_items or len(group_data_items) == 0:
-        return False
+def check_dataflow_item(group_data_items: List[RLDataFlowItem]) -> tuple[bool, str]:
+    """Validates a group of RLDataFlowItem objects based on their state and
+    data integrity.
 
-    # 如果存在abort的状态，相当于跳过检查，下次会重新rollout
-    is_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
-    is_skipped = any(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
-    if is_abort or is_skipped:
-        return True
+    The validation follows a priority order for finish reasons:
+    1. 'abort' or 'skipped': The group is considered valid for retry (returns True).
+    2. 'failed' (rollout or judger): The group is invalid (returns False).
+    3. Data Integrity Checks:
+        - At least one of `response` or `response_ids` must be present.
+        - If `response_ids` is present, `logprobs` must also be present and have the same length.
 
-    no_failures = all(item.env.rollout.finish_reason != "failed" for item in group_data_items)
-    if not no_failures:
-        return False
+    Args:
+        group_data_items: A list of RLDataFlowItem to be checked.
 
-    no_judger_failures = all(item.env.judger.extra_info.get("state", "") != "failed" for item in group_data_items)
-    if not no_judger_failures:
-        return False
+    Returns:
+        A tuple containing:
+        - bool: True if the group is valid or can be retried, False otherwise.
+        - str: A message explaining the validation result.
+    """
+    if not group_data_items:
+        return False, "Input `group_data_items` is empty."
 
-    all_responses_valid = all(item.env.rollout.response for item in group_data_items)
-    all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
+    # 检查 'abort' 和 'skipped' 状态，具有最高优先级
+    has_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
+    if has_abort:
+        return True, "Found 'abort' in rollout finish_reason. The group will be retried."
 
-    return all_responses_valid or all_ids_valid
+    has_skipped = any(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
+    if has_skipped:
+        return True, "Found 'skipped' in rollout finish_reason. The group will be retried."
+
+    # 遍历一次，执行所有剩余的检查
+    for i, item in enumerate(group_data_items):
+        rollout_info = item.env.rollout
+        judger_info = item.env.judger
+
+        # 检查 rollout 失败
+        if rollout_info.finish_reason == "failed":
+            return False, f"Item {i} failed during rollout."
+
+        # 检查 judger 失败
+        if judger_info.extra_info.get("state") == "failed":
+            return False, f"Item {i} failed during judger stage."
+
+        # 检查数据完整性
+        response_valid = bool(rollout_info.response)
+        ids_valid = bool(rollout_info.response_ids)
+        logprobs_valid = bool(rollout_info.logprobs)
+
+        if not response_valid and not ids_valid:
+            return False, f"Item {i} has neither `response` nor `response_ids`."
+
+        if ids_valid and logprobs_valid and len(rollout_info.logprobs) != len(rollout_info.response_ids):  # type: ignore[arg-type]
+            return (
+                False,
+                f"Item {i}: `logprobs` length ({len(rollout_info.logprobs)}) does not match "  # type: ignore[arg-type]
+                f"`response_ids` length ({len(rollout_info.response_ids)}).",  # type: ignore[arg-type]
+            )
+
+    return True, "All items in the group passed validation."
 
 
 def update_dataflow_item(group_data_items, target_key, target_value):
@@ -200,7 +256,12 @@ def update_dataflow_item(group_data_items, target_key, target_value):
         parent_obj = group_data_items[i]
         for key in keys[:-1]:
             parent_obj = getattr(parent_obj, key)
-        setattr(parent_obj, keys[-1], target_value[i])
+
+        if keys[-1] == "rollout":
+            existing_rollout_item = getattr(parent_obj, keys[-1])
+            existing_rollout_item.merge(target_value[i])
+        else:
+            setattr(parent_obj, keys[-1], target_value[i])
 
     return group_data_items
 

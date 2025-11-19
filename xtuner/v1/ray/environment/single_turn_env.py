@@ -85,6 +85,7 @@ class SingleTurnEnvironment(BaseEnvironment):
             for sample in group_data_items:
                 sample.data.extra_info["root_id"] = sample.uid.root_id
                 sample.data.extra_info["action_id"] = sample.uid.action_id
+                sample.data.extra_info["num_return_tokens"] = sample.env.rollout.num_return_tokens
                 fut = self.rollout_controller.rollout.remote(
                     prompt=sample.data.messages,
                     input_ids=sample.data.input_ids,

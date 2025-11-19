@@ -285,6 +285,7 @@ class RLTrainer:
             judger_cfg=judger_config,
             replay_buffer_config=replay_buffer_config,
         )
+        self._dataflow_partial_rollout_step = dataflow_config.partial_rollout_step
         if self._enable_evaluate and evaluator_config:
             self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
             self._eval_step = evaluator_config.evaluate_step
@@ -475,7 +476,7 @@ class RLTrainer:
             is_multimodal = True
 
         for j, group in enumerate(data_groups):
-            if not check_dataflow_item(group):
+            if not check_dataflow_item(group)[0]:
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             if is_multimodal:
@@ -561,12 +562,14 @@ class RLTrainer:
         rewards = []
 
         rollout_response_len_list = []
+        version_dict = {i: 0 for i in range(self._dataflow_partial_rollout_step + 1)}
+
         # NOTE: Since we currently default to token-in token-out, the code for checking whether response_ids have Retokenization Drift is commented out.
         # If you need to debug, you can uncomment it.
         # mismatch_token_ids_count = 0
         # response_len_list = []
         for group in data_groups:
-            if not check_dataflow_item(group):
+            if not check_dataflow_item(group)[0]:
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             for data in group:
@@ -589,6 +592,11 @@ class RLTrainer:
                     response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
                     rollout_response_len_list.append(len(response_ids))
 
+                version = data.uid.version
+                if version not in version_dict:
+                    version_dict[version] = 0
+                version_dict[version] += 1
+
         rewards = torch.tensor(rewards).float()
         rollout_response_lens = None
         if len(rollout_response_len_list) > 0:
@@ -606,6 +614,7 @@ class RLTrainer:
                 "response_len_max": rollout_response_lens.max().item(),
                 "response_len_min": rollout_response_lens.min().item(),
                 "total_len": len(rewards),
+                "versions": version_dict,
                 # "mismatch_token_ids_count": mismatch_token_ids_count,
             }
             json.dump(item, f, ensure_ascii=False, indent=2)
@@ -618,6 +627,7 @@ class RLTrainer:
                         "response_len": rollout_response_len_list[_count],
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
+                        "version": data.uid.version,
                     }
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")

@@ -194,8 +194,10 @@ class Evaluator:
         try:
             # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
             group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
-            if not check_dataflow_item(group_sample):
+            check_result, msg = check_dataflow_item(group_sample)
+            if not check_result and len(group_sample) > 0:
                 group_sample[0].extra_info.retry_times += 1
+                self.logger.info(f"check_dataflow_item failed for {msg} and returning meta for retry.")
                 return group_sample[0]
             self.return_list.append(group_sample[0])
         except Exception as e:
