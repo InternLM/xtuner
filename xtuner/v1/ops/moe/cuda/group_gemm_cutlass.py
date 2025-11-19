@@ -19,7 +19,7 @@ def moe_grouped_gemm(
     b: Tensor,
     batch_sizes: Tensor,
     trans_a: bool = False,
-    trans_b: bool = False,
+    trans_b: bool = True,
 ) -> Tensor:
     return backend.gmm(a, b, batch_sizes, trans_a=trans_a, trans_b=trans_b)
 
@@ -30,7 +30,7 @@ def _(
     b: Tensor,
     batch_sizes: Tensor,
     trans_a: bool = False,
-    trans_b: bool = False,
+    trans_b: bool = True,
 ) -> Tensor:
     if trans_a:
         return torch.empty(

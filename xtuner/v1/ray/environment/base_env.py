@@ -184,3 +184,11 @@ class BaseEnvironment(ABC):
             block (bool): Whether to block until the operation completes.
         """
         return self._call_rollout_func("offload", block)
+
+    def check_active_workers(self, block=True):
+        """Checks the status of active rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
+        return self._call_rollout_func("check_active_workers", block)

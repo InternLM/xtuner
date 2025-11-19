@@ -11,11 +11,12 @@ MODEL_PATH=$3
 DATA_PATH=$4
 EVAL_DATA_PATH=${5:-""}
 
-# 1. 环境配置
-# 系统环境变量
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
 # ray 环境变量
+export MASTER_PORT=6000
+export WORLD_SIZE=$NODE_COUNT
+export RANK=$NODE_RANK
 export RAY_MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 export RAY_RANK=${RANK:-0} # 0 代表主节点, >0 代表工作节点
 export RAY_HEAD_PORT=${RAY_HEAD_PORT:-"6379"}
@@ -29,8 +30,8 @@ export MODEL_PATH=$MODEL_PATH
 export DATA_PATH=$DATA_PATH
 export EVAL_DATA_PATH=$EVAL_DATA_PATH
 export XTUNER_USE_FA3=${XTUNER_USE_FA3:-1}
-export XTUNER_MAX_CONCURRENCY=${XTUNER_MAX_CONCURRENCY:-1024}
 export XTUNER_LOG_LEVEL=${XTUNER_LOG_LEVEL:-"INFO"}
+export PYTHONUNBUFFERED=1
 
 infer_backend_lower=$(echo "$INFER_BACKEND" | tr '[:upper:]' '[:lower:]')
 if [ "$infer_backend_lower" = "sglang" ]; then
@@ -71,11 +72,28 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --disable-usage-stats \
     --num-cpus=$total_cpus
 else
-  sleep 10
+  while true; do
+    if curl --connect-timeout 2 "http://${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT}" >/dev/null 2>&1; then
+      echo "Successfully connected to Ray master at ${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT}"
+      break
+    else
+      echo "Waiting for Ray master at ${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT} to be available..."
+      sleep 2
+    fi
+  done
   ray start --address="$RAY_MASTER_ADDR:$RAY_HEAD_PORT" --block --disable-usage-stats
 fi
 
-sleep 10
+while true; do
+  result=$(ray status | grep GPU | cut -d ' ' -f2 | cut -d '/' -f2)
+  expected_gpu_count=$((node_count * 8))
+  if [ "$result" = "$expected_gpu_count.0" ]; then
+    break
+  else
+    echo "Waiting for GPU count to be $expected_gpu_count, current: $result"
+    sleep 2
+  fi
+done
 
 # 3. start training job
 if [ ! -d "$WORK_DIR" ]; then

@@ -74,9 +74,11 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.75,
+    context_length=max_prompt_length+max_response_length,
     extra_rollout_config={
             "sglang_grammar_backend": 'none',
         }
+    # rollout_max_batch_size_per_instance=16,  # optional
 )
 
 # sampling params
@@ -93,7 +95,7 @@ train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
 eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path) if enable_evaluate else None
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-tokenize_fn_cfg = InternS1VLTokenizeFnConfig(model_cfg=InternS1MiniConfig())
+tokenize_fn_cfg = InternS1VLTokenizeFnConfig(model_cfg=InternS1MiniConfig(), max_length=max_prompt_length)
 train_dataset_cfg = [
     {
             "dataset": DatasetConfig(name="geo3k",
@@ -117,7 +119,7 @@ if enable_evaluate:
                                      sample_ratio=1.0),
             "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length,
                                               tokenize_fn_cfg=tokenize_fn_cfg,
-                                              ignore_mm_process=True),
+                                              ignore_multimodal_info=True),
         }
     ]
 
@@ -135,14 +137,14 @@ dataflow_config = DataFlowConfig(
     prompt_repeat_k=prompt_repeat_k,
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
-    max_concurrent=64,
+    # max_concurrent=64, # optional 
 )
 
 evaluator_cfg = EvaluatorConfig(
     enable_evaluate=enable_evaluate,
     enable_initial_evaluate=enable_initial_evaluate,
     dataset_cfg=eval_dataset_cfg,
-    dataloader_config=dataloader_config,
+    dataloader_cfg=dataloader_config,
     tokenizer=model_path,
     evaluate_step=evaluate_step,
     compute_metric_func=None,

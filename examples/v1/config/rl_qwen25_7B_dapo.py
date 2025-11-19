@@ -28,8 +28,6 @@ data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_evaluate = True if eval_data_path != "" else False
 enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
-# TODO(@duanyanhui): change xtuner_max_concurrency to single rollout engine max concurrency
-max_concurrent = int(os.environ.get("XTUNER_MAX_CONCURRENCY", 512))
 
 # basic settings
 experimental_name = "dapo_math"
@@ -64,8 +62,8 @@ rollout_config = RolloutConfig(
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.8,
     context_length = max_response_length + max_prompt_length,
-    rollout_max_batch_size=max_concurrent,
     prompt_repeat_k=prompt_repeat_k,
+    # rollout_max_batch_size_per_instance=64,  # optional, will be determined automatically if not set
 )
 
 # sampling params
@@ -111,7 +109,7 @@ dataflow_config = DataFlowConfig(
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
     enable_partial_rollout=enbale_partial_rollout,
-    max_concurrent=max_concurrent
+    # max_concurrent=64,  # optional, will be determined automatically if not set
 )
 
 

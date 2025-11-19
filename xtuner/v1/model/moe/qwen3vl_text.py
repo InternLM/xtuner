@@ -129,6 +129,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
             output["hidden_states"] = []
 
         output["router_logits"] = {}
+        output["router_weights"] = {}
 
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds
@@ -152,20 +153,21 @@ class Qwen3VLTextMoE(Qwen3MoE):
                         depth=len(self.layers),
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
                     ):
-                        hidden_states, router_results = decoder_layer(
+                        hidden_states, router_results, router_weights = decoder_layer(
                             hidden_states,
                             position_embeddings=position_embeddings,
                             seq_ctx=seq_ctx,
                         )
 
                 else:
-                    hidden_states, router_results = decoder_layer(
+                    hidden_states, router_results, router_weights = decoder_layer(
                         hidden_states,
                         position_embeddings=position_embeddings,
                         seq_ctx=seq_ctx,
                     )
 
                 output["router_logits"][f"layer{idx}"] = router_results
+                output["router_weights"][f"layer{idx}"] = router_weights
 
             if deepstack_visual_embeds is not None and idx in range(len(deepstack_visual_embeds)):
                 assert visual_pos_masks is not None
@@ -186,11 +188,13 @@ class Qwen3VLTextMoE(Qwen3MoE):
         output["extra_info"] = extra_info
 
         router_logits_list = list(output["router_logits"].values())  # type: ignore
+        router_weights_list = list(output["router_weights"].values())  # type: ignore
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
+        router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
 
         if self.balancing_loss:
             balancing_loss = self.balancing_loss(
-                router_logits=router_logits,
+                router_weights=router_weights,
                 n_routed_experts=self.config.n_routed_experts,
                 num_experts_per_tok=self.config.num_experts_per_tok,
             )

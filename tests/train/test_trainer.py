@@ -38,15 +38,16 @@ class FakeEngine:
         self.grad_norm_calls = 0
         self.optimizer_step_calls = 0
 
-        model = nn.Linear(10, 10)
+        self.model = model = nn.Linear(10, 10)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+        self.has_freeze_params = False
 
     def grad_accumulation_steps(self, *args, **kwargs):
         return 1
 
     def train_step(self, *args, **kwargs):
         self.train_step_calls += 1
-        return {"total_loss": 1.0, "reduced_llm_loss": 0.8}, {"consumed_tokens": 100, "grad_norm": torch.tensor(1.0)}
+        return {"total_loss": 1.0, "reduced_llm_loss": 0.8}, {"consumed_tokens": 100, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5}
 
     def save_hf(self, hf_path):
         self.save_hf_calls.append(hf_path)
@@ -63,7 +64,7 @@ class FakeEngine:
         self.optimizer_step_calls += 1
         return 1.0
 
-    def clip_grad_norm(self):
+    def clip_grad_norm(self, do_clip: bool=True, dtype=torch.float32):
         self.grad_norm_calls += 1
         return torch.tensor(1.0)
 
@@ -155,11 +156,11 @@ class TestTrainerSaveHF(DistributedTestBase):
         exp_dir = self.work_dir / trainer.exp_dir.name
         hf_dirs = [d for d in exp_dir.iterdir() if d.name.startswith("hf-") and d.is_dir()]
 
-        # Should only have 2 directories left due to max_keep=2
-        self.assertEqual(len(hf_dirs), 2)
+        # Should only have 3 directories: hf-9, hf-10, hf-latest left due to max_keep=2
+        self.assertEqual(len(hf_dirs), 3)
 
-        # Should have the last 2 checkpoints: hf-9 and hf-10
-        expected_dirs = {"hf-9", "hf-10"}
+        # Should have the last 2 checkpoints: hf-9 and hf-10, and hf-latest
+        expected_dirs = {"hf-9", "hf-10", "hf-latest"}
         actual_dirs = {d.name for d in hf_dirs}
         self.assertEqual(actual_dirs, expected_dirs)
 

@@ -6,6 +6,7 @@ from typing_extensions import TypedDict
 
 class RouterResults(TypedDict):
     logits: torch.Tensor
+    router_weights: torch.Tensor
     topk_weights: torch.Tensor
     topk_ids: torch.Tensor
     topkens_per_expert: torch.Tensor

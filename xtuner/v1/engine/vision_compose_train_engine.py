@@ -59,6 +59,11 @@ class VisionComposeConfigProtocol(Protocol):
     projector_config: BaseModel
     text_config: TransformerConfig
 
+    freeze_vision: bool = False
+    freeze_projector: bool = False
+    freeze_language: bool = False
+    dcp_ignore_frozen_params: bool = True
+
     def build(self) -> VisionComposeModelProtocol: ...
 
     @property
@@ -170,7 +175,8 @@ class VisionComposeTrainEngine(TrainEngine):
             isinstance(getattr(self.model_cfg.text_config, "router", None), NoAuxRouterConfig)
             and self.model_cfg.text_config.router.router_bias_update_speed > 0
         )
-        if moe_need_update_bias:
+        moe_need_log_maxvio = getattr(self.model_cfg, "router", None) is not None
+        if moe_need_log_maxvio:
             tokens_per_expert_global_for_bias = torch.tensor(0, device=DEVICE)
 
         step_loss = torch.tensor(0.0, device=DEVICE)
@@ -178,6 +184,8 @@ class VisionComposeTrainEngine(TrainEngine):
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
         step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
+        efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
 
         train_engine_extra_info = ModelForwardExtraLogInfo()
         for i in range(0, len(data_batches), intra_layer_micro_batch):
@@ -190,6 +198,10 @@ class VisionComposeTrainEngine(TrainEngine):
                 seq_ctx_list.append(seq_ctx)
                 loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()
+
+                num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
+                efficient_forward_tokens += (num_tokens**2).sum()
+                total_forward_tokens += (num_tokens.sum()) ** 2
 
             # todo: support intra_layer_micro_batch
             output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
@@ -214,7 +226,7 @@ class VisionComposeTrainEngine(TrainEngine):
                 loss = loss + output["z_loss"] / iters_per_step
                 step_z_loss = output["z_loss"] if step_z_loss is None else step_z_loss + output["z_loss"]
 
-            if moe_need_update_bias:
+            if moe_need_log_maxvio:
                 output = cast(MoEModelOutputs, output)
                 assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
                 tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
@@ -223,12 +235,13 @@ class VisionComposeTrainEngine(TrainEngine):
             loss.backward()
             step_loss += loss.detach().clone()
 
-        if moe_need_update_bias:
+        if moe_need_log_maxvio:
             avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
             max_load_i, _ = torch.max(tokens_per_expert_global_for_bias, dim=1)
             maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
             maxvio = maxvio_all_layers.mean()
-            self.model.language_model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
+            if moe_need_update_bias:
+                self.model.language_model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
             other_log["maxvio"] = maxvio.item()
 
         reduced_llm_loss = step_llm_loss
@@ -246,4 +259,5 @@ class VisionComposeTrainEngine(TrainEngine):
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
         other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
+        other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
         return loss_log, other_log

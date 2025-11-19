@@ -58,6 +58,7 @@ class TestRollout(unittest.TestCase):
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
         self.max_prompt_length = 512
+        self.max_response_length = 1024
         self.rollout_cfg = RolloutConfig(
             env="test_rollout",
             model_path=MODEL_PATH,
@@ -69,6 +70,7 @@ class TestRollout(unittest.TestCase):
             gpus_per_node=8, # gpu: 8, npu: 16
             dtype="bfloat16",
             launch_server_method="ray",
+            context_length=self.max_prompt_length + self.max_response_length,
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
@@ -77,7 +79,6 @@ class TestRollout(unittest.TestCase):
         )
         self.dataflow_cfg = DataFlowConfig(
             env="test",
-            max_concurrent=32,
             prompt_repeat_k=2,
             global_batch_size=2,
             enable_partial_rollout=0,
@@ -92,7 +93,6 @@ class TestRollout(unittest.TestCase):
             },
         ]
         self.dataloader_cfg = DataloaderConfig(
-            pack_max_length=self.max_prompt_length,
             collator='fake_collator',
             pack_level='none',
             group_by_length=False,
@@ -115,7 +115,7 @@ class TestRollout(unittest.TestCase):
         ray.shutdown()
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_dataflow_with_failed_response(self):
+    def test_lmdeploy_dataflow_with_failed_request(self):
         failed_dataflow_cfg = DataFlowConfig(
             env="test",
             max_concurrent=1,
@@ -134,8 +134,8 @@ class TestRollout(unittest.TestCase):
                                         self.test_env
                                         )
         sample_params = SampleParams(temperature=2.5)  # invalid temperature to trigger error
-        responses = ray.get(self.test_flow.run.remote(num=1, sample_params=sample_params), timeout=300)
-        self.assertEqual(len(responses[0]), 0)
+        with self.assertRaises(AssertionError):
+            ray.get(self.test_flow.run.remote(num=1, sample_params=sample_params), timeout=300)
   
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_generate(self):

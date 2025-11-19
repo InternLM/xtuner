@@ -16,19 +16,33 @@ from ..utils import CachableTokenizeFunction, replace_image_context_and_collect_
 logger = get_logger()
 
 
+def remove_consecutive_twos(tokens, img_context_id):
+    if not tokens:
+        return tokens
+
+    new_tokens = [tokens[0]]
+    for i in range(1, len(tokens)):
+        if tokens[i] == img_context_id and tokens[i - 1] == img_context_id:
+            continue  # 跳过连续的 img_context_id
+        else:
+            new_tokens.append(tokens[i])
+    return new_tokens
+
+
 class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
     def __init__(
         self,
         tokenizer_fn: CachableTokenizeFunction | None,
         tokenizer: PreTrainedTokenizer,
         max_length: int | None = None,
-        ignore_mm_process: bool = False,
+        ignore_multimodal_info: bool = False,
     ):
         super().__init__(tokenizer)
         self.tokenizer_fn = tokenizer_fn
         self.max_length = max_length
-        self.ignore_mm_process = ignore_mm_process
 
+        self.img_context_id = None
+        self.ignore_multimodal_info = ignore_multimodal_info
         self.model_name = "default"
         if self.tokenizer_fn:
             if isinstance(self.tokenizer_fn, Qwen3VLTokenizeFunction):
@@ -37,6 +51,7 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
                 self.model_name = "intern_s1_vl"
             else:
                 raise ValueError(f"Unsupported tokenizer_fn type: {type(self.tokenizer_fn)}")
+            self.img_context_id = tokenizer.convert_tokens_to_ids(self.tokenizer_fn.chat_template.image_context_token)
 
     def __call__(self, item: dict, **kwargs) -> RLDatasetItem:
         """example:
@@ -70,10 +85,6 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
         else:
             # mllm
             self.tokenizer_fn.state = self.state
-            if self.ignore_mm_process:
-                # 如果是评估模式下，不需要 pixel_values 等计算负担比较大的属性
-                self.tokenizer_fn.state = "cache"
-
             data = self.tokenizer_fn({"messages": messages}, **kwargs)
             data = cast(OmniDataItem, data)
             num_tokens = data["num_tokens"]
@@ -88,8 +99,16 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             if image_data:
                 extra_info["image_data"] = image_data
 
-            raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-            prompt_token_ids = self.tokenizer(raw_prompt, add_special_tokens=False)["input_ids"]
+            # 不能用下面的逻辑得到 rollout 的 prompt_token_ids
+            # 因为 sft tokenizer fn 可能并没有完全和 apply_chat_template 中的 jinja 模块对齐，特别是 system prompt
+            # 为了确保一致，必须要通过 tokenizer_fn 得到 prompt_token_ids
+            # raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            # prompt_token_ids = self.tokenizer(raw_prompt, add_special_tokens=False)["input_ids"]
+            if self.state != "cache":
+                prompt_token_ids = remove_consecutive_twos(data["input_ids"], self.img_context_id)
+            else:
+                prompt_token_ids = [1]  # Just a placeholder
+            raw_prompt = self.tokenizer.decode(prompt_token_ids)  # Just for logging
 
         multimodal_train_info = {}
         extra_info["raw_prompt"] = raw_prompt
@@ -100,7 +119,7 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
         else:
             if self.max_length is not None:
                 assert num_tokens <= self.max_length, f"num_tokens {num_tokens} > max_length {self.max_length}"
-            if not self.ignore_mm_process:
+            if not self.ignore_multimodal_info:
                 if "pixel_values" in data:
                     multimodal_train_info["pixel_values"] = data["pixel_values"]
                 if "image_flags" in data:
@@ -110,11 +129,9 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
                 if "position_ids" in data:
                     multimodal_train_info["position_ids"] = data["position_ids"]  # qwen3-vl
 
-                # 在多模态场景下，训练和 rollout 的 prompt ids 是不一样的
-                # 为了统一训练处理逻辑，额外保存 train_prompt_ids
-                extra_info["train_prompt_ids"] = data["input_ids"]
-            else:
-                assert "pixel_values" not in data, "在评估模式下，不应该有 pixel_values"
+            # 在多模态场景下，训练和 rollout 的 prompt ids 是不一样的
+            # 为了统一训练处理逻辑，额外保存 train_prompt_ids
+            extra_info["train_prompt_ids"] = data["input_ids"]
 
         rl_out_data = {
             "messages": messages,
@@ -136,7 +153,7 @@ class RLTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base RL dataset config for xtuner", extra="forbid")
     tokenize_fn_cfg: BaseModel | None = None
     max_length: int | None = None
-    ignore_mm_process: bool = False
+    ignore_multimodal_info: bool = False  # eval is True
 
     def build(
         self, tokenizer: PreTrainedTokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None, **kwargs
@@ -150,5 +167,8 @@ class RLTokenizeFnConfig(BaseModel):
                 **kwargs,
             )
         return RLTokenizeFn(
-            tokenizer_fn, tokenizer=tokenizer, max_length=self.max_length, ignore_mm_process=self.ignore_mm_process
+            tokenizer_fn,
+            tokenizer=tokenizer,
+            max_length=self.max_length,
+            ignore_multimodal_info=self.ignore_multimodal_info,
         )

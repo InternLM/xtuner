@@ -92,6 +92,8 @@ class InternVLBaseConfig(BaseModel):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
+    hf_save_worker: int = 16
+    dcp_ignore_frozen_params: bool = True
 
     def build(self) -> "InternVLForConditionalGeneration":
         from .modeling_internvl import InternVLForConditionalGeneration

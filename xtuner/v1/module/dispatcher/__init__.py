@@ -8,6 +8,7 @@ import torch.distributed as dist
 
 from xtuner.v1.utils import get_logger
 
+from .agrs import MoEAGRSDispatcher
 from .base import (
     CombineResult,
     DispacherInterface,
@@ -27,7 +28,7 @@ logger = get_logger()
 # TODO: (yehaochen) This interface declaration does not follow the Liskov Substitution Principle.
 # Maybe we should find a better way to handle the dispatchers.
 def build_dispatcher(
-    dispatcher: Literal["deepep", "all2all"] | None,
+    dispatcher: Literal["deepep", "all2all", "agrs"] | None,
     n_routed_experts: int,
     ep_group: dist.ProcessGroup | None = None,
     training_dtype: Literal["bf16", "fp8"] = "bf16",
@@ -66,6 +67,14 @@ def build_dispatcher(
             training_dtype=training_dtype,
             generate_dtype=generate_dtype,
         )  # type: ignore[return-value]
+    elif dispatcher == "agrs":
+        assert ep_group is not None, "MoEAGRSDispatcher requires a non-null process group."
+        return MoEAGRSDispatcher(
+            n_routed_experts=n_routed_experts,
+            process_group=ep_group,
+            training_dtype=training_dtype,
+            generate_dtype=generate_dtype,
+        )  # type: ignore[return-value]
     else:
         raise ValueError(f"Unknown dispatcher name: {dispatcher}, name must be one of 'deepep' or 'all2all'.")
 
@@ -74,6 +83,7 @@ __all__ = [
     "DispacherInterface",
     "NaiveDispatcher",
     "TorchAll2AllDispatcher",
+    "MoEAGRSDispatcher",
     "build_dispatcher",
     "PreDispatchResult",
     "DispatchResult",

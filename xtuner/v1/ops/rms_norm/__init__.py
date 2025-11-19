@@ -30,7 +30,7 @@ def get_rms_norm_fn() -> RMSNormProtocol:
     device = get_device()
     if device in ["cpu", "cuda"]:
         # TODO: control triton rmsnorm by model config rather than env var
-        if os.getenv("XTUNER_USE_NATIVE_RMSNORM", "1") == "0" and device == "gpu":
+        if os.getenv("XTUNER_USE_NATIVE_RMSNORM", "1") == "0" and device == "cuda":
             return _triton_rms_norm
         else:
             return native_rms_norm

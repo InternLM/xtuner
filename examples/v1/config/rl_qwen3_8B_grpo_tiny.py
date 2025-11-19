@@ -55,6 +55,8 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.75,
+    context_length=max_prompt_length+max_response_length,
+    # rollout_max_batch_size_per_instance=1024,  # optional
 )
 
 # sampling params

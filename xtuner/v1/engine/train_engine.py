@@ -3,13 +3,12 @@ import os
 import threading
 from concurrent.futures import wait
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, cast
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from safetensors import safe_open
-from torch.distributed._tensor import DTensor, Replicate, Shard
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -18,10 +17,9 @@ from torch.distributed.checkpoint.state_dict import (
     set_optimizer_state_dict,
 )
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor.placement_types import Placement
+from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
-    _has_foreach_support,
 )
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
@@ -30,7 +28,9 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
+from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
+from xtuner.v1.utils.grad_norm import cal_grad_norm
 
 
 logger = get_logger()
@@ -135,6 +135,15 @@ class TrainEngine:
         self.optimizer = self.build_optimizer(optim_cfg)
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
+        self.has_freeze_params = self.__has_freeze_params()
+
+    def __has_freeze_params(self) -> bool:
+        has_freeze_params = False
+        for param in self.model.parameters(recurse=True):
+            if not param.requires_grad:
+                has_freeze_params = True
+                break
+        return has_freeze_params
 
     def build_model(self) -> BaseModel:
         with torch.device("meta"):
@@ -211,7 +220,9 @@ class TrainEngine:
             isinstance(getattr(self.model_cfg, "router", None), NoAuxRouterConfig)
             and self.model_cfg.router.router_bias_update_speed > 0
         )
-        if moe_need_update_bias:
+        moe_need_log_maxvio = getattr(self.model_cfg, "router", None) is not None
+
+        if moe_need_log_maxvio:
             tokens_per_expert_global_for_bias = torch.zeros(
                 self.model_cfg.num_hidden_layers - self.model_cfg.first_k_dense_replace,
                 self.model_cfg.n_routed_experts,
@@ -230,7 +241,12 @@ class TrainEngine:
             self._count += 1
 
         train_engine_extra_info = ModelForwardExtraLogInfo()
+        micro_batch_iter = 0
+        efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
         for i in range(0, len(data_batches), intra_layer_micro_batch):
+            ProberList.set_micro_batch_iter(micro_batch_iter)
+            micro_batch_iter += 1
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
             loss_ctx_list = []
@@ -240,6 +256,10 @@ class TrainEngine:
                 seq_ctx_list.append(seq_ctx)
                 loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()
+
+                num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
+                efficient_forward_tokens += (num_tokens**2).sum()
+                total_forward_tokens += (num_tokens.sum()) ** 2
 
             if self.intra_layer_micro_batch == 1:
                 output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
@@ -276,20 +296,23 @@ class TrainEngine:
                 else:
                     step_z_loss += z_loss
 
-            if moe_need_update_bias:
+            if moe_need_log_maxvio:
                 assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
                 tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
 
             del output
             loss.backward()
+            # call dump_forward_records after backward to record the recomputed activations
+            ProberList.after_micro_iter_forward()
             step_loss += loss.detach().clone()
 
-        if moe_need_update_bias:
+        if moe_need_log_maxvio:
             avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
             max_load_i, _ = torch.max(tokens_per_expert_global_for_bias, dim=1)
             maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
             maxvio = maxvio_all_layers.mean()
-            self.model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
+            if moe_need_update_bias:
+                self.model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
             other_log["maxvio"] = maxvio.item()
 
         reduced_llm_loss = step_llm_loss
@@ -307,6 +330,7 @@ class TrainEngine:
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
         other_log["consumed_tokens"] = step_consumed_tokens.item()
         other_log["extra_info"] = train_engine_extra_info
+        other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
         return loss_log, other_log
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
@@ -315,75 +339,25 @@ class TrainEngine:
     def init_model_weights(self):
         self.model.init_weights()
 
-    @staticmethod
-    def group_tensors_by_device_mesh_and_placements(tensors: List[torch.Tensor]):
-        grouped_tensors: Dict[Tuple[DeviceMesh, Tuple[Placement, ...]], List[torch.Tensor]] = {}
-        for tensor in tensors:
-            assert isinstance(tensor, DTensor)
-            key = (tensor.device_mesh, tensor.placements)
-            if key in grouped_tensors:
-                grouped_tensors[key].append(tensor)
-            else:
-                grouped_tensors[key] = [tensor]
-        return grouped_tensors
-
-    def cal_total_norm(self, tensors: List[DTensor], norm_type: float = 2.0, foreach: Optional[bool] = None):
-        norm_type = float(norm_type)
-        if len(tensors) == 0:
-            return torch.tensor(0.0)
-
-        device_mesh: DeviceMesh = tensors[0].device_mesh
-        placements = tensors[0].placements
-        device = tensors[0].device
-        norms: Tuple[DTensor, ...]
-        if (foreach is None and _has_foreach_support(tensors, device)) or (  # type: ignore
-            foreach and _device_has_foreach_support(device)
-        ):
-            norms = torch._foreach_norm(tensors, norm_type)  # type: ignore
-        elif foreach:
-            raise RuntimeError(f"foreach=True was passed, but can't use the foreach API on {device.type} tensors")
-        else:
-            norms = tuple(torch.linalg.vector_norm(g, norm_type) for g in tensors)
-
-        local_norm = torch.linalg.vector_norm(
-            torch.stack([norm.to_local() for norm in norms]), norm_type, dtype=torch.float32
-        )
-        if norm_type == 2:
-            local_norm_squared = local_norm**2
-            for i, placement in enumerate(placements):
-                if isinstance(placement, Shard):
-                    # When using ep + fsdp, the placement corresponding to fsdp mesh is _StridedShard
-                    # isinstance(_StridedShard, Shard) is True
-                    dist.all_reduce(local_norm_squared, group=device_mesh.get_group(i))
-                elif isinstance(placement, Replicate):
-                    pass
-                else:
-                    raise ValueError(f"Unsupported placement type {placement} in clip_grad_norm")
-            global_norm = local_norm_squared**0.5
-        else:
-            raise NotImplementedError
-        return global_norm
-
-    def clip_grad_norm(self):
+    @_no_grad
+    def clip_grad_norm(self, do_clip: bool = True, dtype=torch.float32):
+        ProberList.before_clip_grad_norm(self.model)
         self.model.scale_and_reduce_grad()
         params = self.model.trainable_parameters()
         grads = [p.grad for _, p in params if p.grad is not None]
-        grouped_grads = self.group_tensors_by_device_mesh_and_placements(grads)
-        total_norms = []
-        for grads in grouped_grads.values():
-            total_norm = self.cal_total_norm(grads, norm_type=2.0, foreach=True)
-            total_norms.append(total_norm)
-        grad_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=torch.float32)
-        clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
-        clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
-        for grads in grouped_grads.values():
-            device = grads[0].device
-            if _device_has_foreach_support(device):
-                torch._foreach_mul_(grads, clip_coef_clamped.to(device))
-            else:
-                clip_coef_clamped_device = clip_coef_clamped.to(device)
-                for g in grads:
-                    g.mul_(clip_coef_clamped_device)
+        grad_norm, grouped_grads = cal_grad_norm(grads, dtype=dtype)
+        if do_clip:
+            clip_coef = self.optim_cfg.max_grad_norm / (grad_norm + 1e-6)
+            clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
+            for grads in grouped_grads.values():
+                device = grads[0].device
+                if _device_has_foreach_support(device):
+                    torch._foreach_mul_(grads, clip_coef_clamped.to(device))
+                else:
+                    clip_coef_clamped_device = clip_coef_clamped.to(device)
+                    for g in grads:
+                        g.mul_(clip_coef_clamped_device)
+        ProberList.after_clip_grad_norm(self.model, grad_norm)
         return grad_norm
 
     def step_optimizer(self, grad_norm):
@@ -433,7 +407,7 @@ class TrainEngine:
             if optimizer_dir is not None:
                 optimizer_dir.mkdir(parents=True, exist_ok=True)
 
-        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
+        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params)
         with profile_time_and_memory(f"[DCP Checkpoint to {model_dir}]"):
             model_state = get_model_state_dict(self.model, options=_options)
             dcp.save(
@@ -449,14 +423,25 @@ class TrainEngine:
                     checkpoint_id=optimizer_dir,
                 )
 
-    def load_dcp(self, model_dir: Path, optimizer_dir: Path | None = None):
+    def load_dcp(
+        self,
+        model_dir: Path,
+        optimizer_dir: Path | None = None,
+        load_states: bool = True,
+        load_args: bool = True,
+    ):
         """Load the dcp model from the given directory.
 
         Args:
             dcp_dir (str): The directory to load the model from.
         """
-        _load_options = StateDictOptions(cpu_offload=True, ignore_frozen_params=True)
-        _set_options = StateDictOptions(cpu_offload=True, strict=True)
+        _load_options = StateDictOptions(
+            cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params
+        )
+        if self.has_freeze_params:
+            _set_options = StateDictOptions(cpu_offload=True, strict=False)
+        else:
+            _set_options = StateDictOptions(cpu_offload=True, strict=True)
         with profile_time_and_memory(f"[Load DCP Model from {model_dir}]"):
             shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
             # inplace state_dict
@@ -475,6 +460,26 @@ class TrainEngine:
                     state_dict=shard_optimizer_state_dict,
                     checkpoint_id=optimizer_dir,
                 )
+                if not load_states:
+                    logger.info("Not loading optimizer states")
+                    shard_optimizer_state_dict["state"] = {}
+                if not load_args:
+                    logger.info("Not loading arg defaults")
+                    param_groups = self.optimizer.state_dict()["param_groups"]
+                    # Now we only support one param_group. If we want to support different lr for different parameters,
+                    # we may use multiple param_groups like:
+                    # [{'params': ['net1.weight', 'net2.weight'], 'lr': 0.001}, {'params': ['net3.weight'], 'lr': 0.002}]
+                    # Then we need change the code here
+                    assert len(param_groups) == 1, "Only one param_group is supported now"
+                    init_defaults = param_groups[0]
+                    init_defaults.pop("params")
+                    for param_group in cast(List[Dict[str, Any]], shard_optimizer_state_dict["param_groups"]):
+                        # param_group is like: {'params': ['net1.weight', 'net2.weight'], 'lr': 0.001, 'betas': (0.9, 0.999), 'eps': 1e-08, 'weight_decay': 0.01}
+                        default_keys = list(filter(lambda x: x != "params", param_group.keys()))
+                        for key in default_keys:
+                            param_group.pop(key)
+                        param_group.update(init_defaults)  # lr, betas, eps, etc.
+
                 set_optimizer_state_dict(
                     self.model,
                     self.optimizer,

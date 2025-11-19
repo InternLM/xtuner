@@ -18,7 +18,7 @@ from cyclopts import Parameter
 from mmengine import load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
@@ -37,6 +37,8 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
+from xtuner.v1.profiler.prober import ProberList
+from xtuner.v1.profiler.prober_utils import setup_prober_list
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
     ParallelConfigException,
@@ -78,6 +80,7 @@ class ExpInfo(BaseModel):
     exp_dir: str
     hf_checkpoint_list: list[str] = []
     checkpoint_list: list[str] = []
+    snap_checkpoint_list: list[str] = []
     cur_step: int = 0
     cur_epoch: int = 0
     consumed_tokens: int = 0
@@ -85,9 +88,25 @@ class ExpInfo(BaseModel):
 
     @property
     def latest_checkpoint(self) -> str | None:
+        # compare checkpoint_list and snap_checkpoint_list, return the latest checkpoint
+        latest_ckp = None
         if self.checkpoint_list:
-            return self.checkpoint_list[-1]
-        return None
+            latest_ckp = self.checkpoint_list[-1]
+        if self.snap_checkpoint_list:
+            snap_ckp = self.snap_checkpoint_list[-1]
+            latest_ckp = self._get_latest_checkpoint(latest_ckp, snap_ckp)
+        return latest_ckp
+
+    def _get_latest_checkpoint(self, ckp1: str | None, ckp2: str | None) -> str | None:
+        if ckp1 is None:
+            return ckp2
+        if ckp2 is None:
+            return ckp1
+        # compare the timestamp of ckp1 and ckp2, return the latest one
+        # ckp path is like: checkpoints/epoch-1-step-20 or checkpoints/snapshot-epoch-3-step-50
+        step1 = int(ckp1.split("-")[-1])
+        step2 = int(ckp2.split("-")[-1])
+        return ckp1 if step1 > step2 else ckp2
 
 
 class XTunerMeta(BaseModel):
@@ -117,7 +136,8 @@ class ResumeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     resume_from: str | Path | None = None
     auto_resume: bool = False
-    load_optimizer: bool = True
+    load_optimizer_states: bool = True
+    load_optimizer_args: bool = True
     load_dataset: bool = True
     load_scheduler: bool = True
 
@@ -151,6 +171,7 @@ class TrainerConfig(BaseModel):
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
+    snapshot_interval: int | None = None
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
@@ -162,6 +183,9 @@ class TrainerConfig(BaseModel):
     dist_backend: str | None = None
     debug: bool = False
     debug_skip_save: bool = False
+    prober_list: list[str] = []
+    do_clip: bool = True
+    grad_norm_dtype: torch.dtype = torch.float32
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -170,6 +194,22 @@ class TrainerConfig(BaseModel):
         elif self.work_dir is None:
             self.work_dir = Path.cwd()
         return self
+
+    @field_serializer("grad_norm_dtype")
+    def serialize_dtype(self, value: torch.dtype) -> str:
+        return str(value)
+
+    @field_validator("grad_norm_dtype", mode="before")
+    @classmethod
+    def deserialize_dtype(cls, value: str) -> torch.dtype:
+        if "bfloat16" in value:
+            return torch.bfloat16
+        elif "float32" in value:
+            return torch.float32
+        elif "float64" in value:
+            return torch.float64
+        else:
+            raise ValueError()
 
 
 class Trainer:
@@ -248,6 +288,7 @@ class Trainer:
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
+        snapshot_interval: int | None = None,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
@@ -259,8 +300,13 @@ class Trainer:
         debug: bool = False,
         backend: str | None = None,
         debug_skip_save: bool = False,
+        prober_list: list[str] = [],
+        do_clip: bool = True,
+        grad_norm_dtype: torch.dtype = torch.float32,
         trainer_cfg: TrainerConfig | None = None,
     ):
+        self._do_clip = do_clip
+        self._grad_norm_dtype = grad_norm_dtype
         self._dataloader_config = dataloader_cfg
 
         self._total_step = total_step
@@ -290,6 +336,7 @@ class Trainer:
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
+        self._snapshot_interval = snapshot_interval
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
 
@@ -314,6 +361,7 @@ class Trainer:
         self._train_time_offset = 0
 
         self._init_dist(backend)
+        self._try_bind_numa()
         self._set_deterministic()
         self._set_random_seed(seed)
         self._setup_env()
@@ -376,7 +424,8 @@ class Trainer:
             strict=strict_load,
             intra_layer_micro_batch=intra_layer_micro_batch,
         )
-        self._lr_scheduler = self.build_lr_scheduler(lr_cfg)
+        self._lr_cfg = lr_cfg
+        self._lr_scheduler = self.build_lr_scheduler(lr_cfg, self.total_step)
 
         if loss_cfg is None:
             loss_cfg = CELossConfig()
@@ -393,9 +442,12 @@ class Trainer:
         if debug_skip_save:
             self._hf_interval = None
             self._checkpoint_interval = None
+            self._snapshot_interval = None
 
         if self._resume_cfg.resume_from is not None:
             self._resume()
+
+        setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
 
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
@@ -428,6 +480,7 @@ class Trainer:
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
+            snapshot_interval=config.snapshot_interval,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
@@ -439,6 +492,9 @@ class Trainer:
             backend=config.dist_backend,
             debug=config.debug,
             debug_skip_save=config.debug_skip_save,
+            prober_list=config.prober_list,
+            do_clip=config.do_clip,
+            grad_norm_dtype=config.grad_norm_dtype,
             trainer_cfg=config,
         )
         self.config = config
@@ -453,6 +509,7 @@ class Trainer:
         train_begin = time.time()
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
+            ProberList.set_step(self._cur_step + 1)
             DEVICE_MODULE.reset_peak_memory_stats()
 
             time_before_train_step = time.time()
@@ -494,9 +551,10 @@ class Trainer:
             with self._maybe_profiling():
                 loss_log, other_log = self._engine.train_step(engine_input)
 
-            grad_norm = self._engine.clip_grad_norm()
+            grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
             self._engine.step_optimizer(grad_norm)
             time_after_train_step = time.time()
+            ProberList.after_step()
             step_time = time_after_train_step - time_before_train_step
             step_consumed_tokens = other_log["consumed_tokens"]
 
@@ -507,6 +565,10 @@ class Trainer:
                 extra_info_updated = ModelForwardExtraLogInfo(extra_info)
                 extra_info_dict = extra_info_updated.get()
             loss_log.update(extra_info_dict)
+
+            if "maxvio" in other_log:
+                loss_log["maxvio"] = other_log["maxvio"]
+            loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
 
             self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
@@ -525,7 +587,9 @@ class Trainer:
 
             self._lr_scheduler.step()
             self._maybe_save_hf()
-            self._maybe_save()
+            ckpt_saved = self._maybe_save(is_snapshot=False)
+            if not ckpt_saved:
+                _ = self._maybe_save(is_snapshot=True)
 
             time_before_get_data = time.time()
 
@@ -534,6 +598,7 @@ class Trainer:
 
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
+        self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
     @property
     def world_size(self) -> int:
@@ -690,7 +755,7 @@ class Trainer:
                 model_cfg=model_config,
                 intra_layer_micro_batch=intra_layer_micro_batch,
             )
-        if model_path is not None and resume_cfg.resume_from is None:
+        if model_path is not None and (model_config.dcp_ignore_frozen_params or resume_cfg.resume_from is None):
             engine.from_hf(hf_path=model_path, strict=strict)
         elif resume_cfg.resume_from is None:
             engine.init_model_weights()
@@ -699,7 +764,7 @@ class Trainer:
             engine.model.set_hf(model_path)
         return engine
 
-    def build_lr_scheduler(self, lr_cfg: LRConfig) -> torch.optim.lr_scheduler.LRScheduler:
+    def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:
         """Build the learning rate scheduler.
 
         Args:
@@ -708,8 +773,10 @@ class Trainer:
         Returns:
             torch.optim.lr_scheduler.LRScheduler: Configured learning rate scheduler.
         """
-        total_step = self.total_step
-        warmup_steps = int(lr_cfg.warmup_ratio * total_step)
+        if lr_cfg.warmup_ratio < 1:
+            warmup_steps = int(lr_cfg.warmup_ratio * scheduler_step)
+        else:
+            warmup_steps = int(lr_cfg.warmup_ratio)
 
         def warmup_fn(x):
             return x / warmup_steps if x < warmup_steps else 1
@@ -722,11 +789,11 @@ class Trainer:
                 self._engine.optimizer,
                 start_factor=1.0,
                 end_factor=lr_cfg.lr_min / self._engine.optimizer.defaults["lr"],
-                total_iters=total_step - warmup_steps,
+                total_iters=scheduler_step - warmup_steps,
             )
         elif lr_cfg.lr_type == "cosine":
             scheduler = CosineAnnealingLR(
-                self._engine.optimizer, T_max=total_step - warmup_steps, eta_min=lr_cfg.lr_min
+                self._engine.optimizer, T_max=scheduler_step - warmup_steps, eta_min=lr_cfg.lr_min
             )
         elif lr_cfg.lr_type == "constant":
             scheduler = LambdaLR(self._engine.optimizer, lambda x: 1.0)
@@ -739,39 +806,50 @@ class Trainer:
         )
         return lr_scheduler
 
-    def _maybe_save(self):
-        if self._checkpoint_interval is None:
-            return
+    def _maybe_save(self, is_snapshot: bool = False) -> bool:
+        ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
+        if ckp_interval is None:
+            return False
 
-        if self._checkpoint_interval == -1:
+        if ckp_interval == -1:  # only save at the end of training
             if self._cur_step != self.total_step:
-                return
+                return False
+        else:
+            if self.cur_step % ckp_interval != 0 and (is_snapshot or self._cur_step != self.total_step):
+                # if is_snapshot, only save at interval
+                # else save at interval or at the end of training
+                return False
 
-        elif self.cur_step % self._checkpoint_interval != 0 and self._cur_step != self.total_step:
-            return
-
-        checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step)
+        checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step, is_snapshot=is_snapshot)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
         meta_path = self.work_dir / self._META_PATH
 
-        optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR if self._resume_cfg.load_optimizer else None
+        optimizer_path = (
+            checkpoint_path / self._SAVE_OPTIMIZER_DIR
+            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
+            else None
+        )
         model_path = checkpoint_path / self._SAVE_MODEL_DIR
         dataloader_path = checkpoint_path / self._SAVE_DATALOADER_DIR
         scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
 
+        # Save model and optimizer
         self._engine.save_dcp(
             model_dir=model_path,
             optimizer_dir=optimizer_path,
         )
 
+        # Save dataloader
         self._save_dataloader(dataloader_path)
 
+        # Save scheduler
         if self.rank == 0:
             lr_scheduler_state = self._lr_scheduler.state_dict()
             torch.save(lr_scheduler_state, scheduler_path)
 
+        # Save trainer config
         if self._trainer_cfg is not None and self.rank == 0:
             # TODO: Maybe we need a better way to serialize and deserialize config, rather than using pickle
             config_path = checkpoint_path / "trainer_config.json"
@@ -783,14 +861,8 @@ class Trainer:
                 pickle.dump(self._trainer_cfg, f)
 
         dist.barrier()
-        current_exp = self.meta.latest_exp
-        current_exp.checkpoint_list.append(str(checkpoint_path))
-        current_exp.cur_step = self.cur_step
-        current_exp.cur_epoch = self._cur_epoch
-        current_exp.consumed_samples = self._consumed_samples
-        current_exp.consumed_tokens = int(self._consumed_tokens)
-        current_exp.history[-1]["end"] = self.cur_step
 
+        # Save train state
         if self.rank == 0:
             with train_state_path.open("w") as f:
                 f.write(
@@ -805,19 +877,32 @@ class Trainer:
                     )
                 )
 
-        if self._checkpoint_maxkeep > 0 and len(current_exp.checkpoint_list) > self._checkpoint_maxkeep:
-            deleted_checkpoints = current_exp.checkpoint_list[: -self._checkpoint_maxkeep]
-            current_exp.checkpoint_list = current_exp.checkpoint_list[-self._checkpoint_maxkeep :]
-            for ckp_dir in deleted_checkpoints:
-                if self.rank == 0 and Path(ckp_dir).exists():
-                    rmtree(ckp_dir)
+        # Update meta
+        current_exp = self.meta.latest_exp
+        ckp_list = current_exp.checkpoint_list if not is_snapshot else current_exp.snap_checkpoint_list
+        ckp_list.append(str(checkpoint_path))
+        current_exp.cur_step = self.cur_step
+        current_exp.cur_epoch = self._cur_epoch
+        current_exp.consumed_samples = self._consumed_samples
+        current_exp.consumed_tokens = int(self._consumed_tokens)
+        current_exp.history[-1]["end"] = self.cur_step
 
-        # Must save meta after deleting checkpoints to ensure the checkpoint_list is updated in the meta file
+        # Delete checkpoints and update meta's checkpoint_list
+        ckp_maxkeep = self._checkpoint_maxkeep if not is_snapshot else 1
+        if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
+            ckp_pop_num = len(ckp_list) - ckp_maxkeep
+            for _ in range(ckp_pop_num):
+                deleted_ckp = ckp_list.pop(0)
+                if self.rank == 0 and Path(deleted_ckp).exists():
+                    rmtree(deleted_ckp)
+
+        # Save meta, must after deleting checkpoints to ensure the checkpoint_list is updated in the meta file
         if self.rank == 0:
             with meta_path.open("w") as f:
                 f.write(self.meta.model_dump_json(indent=2))
 
         dist.barrier()
+        return True
 
     def _save_dataloader(self, dataloader_path: Path | str):
         _gathered_list = [None for _ in range(self.data_mesh["dp"].size())]
@@ -871,6 +956,7 @@ class Trainer:
     def _data_iter(self):
         data_iter = iter(self._dataloader)
         while self._cur_step < self.total_step:
+            # dist.breakpoint(skip=14)
             try:
                 data = next(data_iter)
                 self._consumed_samples += len(data)
@@ -881,16 +967,56 @@ class Trainer:
                 data = next(data_iter)
             yield data
 
-    def _get_checkpoint_path(self, epoch: int, step: int) -> Path:
-        return self.checkpoint_dir / f"epoch-{epoch}-step-{step}"
+    def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
+        prefix = "snapshot-" if is_snapshot else "ckpt-"
+        # TODO: epoch在不同rank间可能不一致，在这个问题下使用 epoch 会出错, 待解决。
+        #       先使用 step 作为 checkpoint 的命名。
+        # return self.checkpoint_dir / f"{prefix}epoch-{epoch}-step-{step}"
+        return self.checkpoint_dir / f"{prefix}step-{step}"
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
+            logger.info("Setting deterministic algorithms")
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             torch.use_deterministic_algorithms(True, warn_only=True)
 
     def _set_random_seed(self, seed: int):
         set_random_seed(seed)
+
+    def _try_bind_numa(self):
+        if str(DEVICE) != "cuda":
+            logger.info("Current device is not cuda, skip numa binding.")
+            return
+
+        try:
+            import numa
+            from numa import memory, schedule
+
+            numa_node_num = numa.info.get_max_node() + 1
+            total_GPU_per_node = DEVICE_MODULE.device_count()
+
+            # return while total_GPU_per_node is larger than numa_node_num or is not divisible by numa_node_num
+            if total_GPU_per_node <= numa_node_num:
+                return
+            if total_GPU_per_node % numa_node_num != 0:
+                return
+            # return while the number of processes is smaller than one node GPUs num
+            if self.world_size < total_GPU_per_node:
+                return
+
+            local_rank = self.rank % total_GPU_per_node
+            # compute numa id for each locak rank
+            per_numa = total_GPU_per_node // numa_node_num
+            numa_id = local_rank // per_numa
+
+            # bind numa node
+            schedule.run_on_nodes(numa_id)
+            memory.set_membind_nodes(numa_id)
+        except Exception:
+            logger.info(f"Rank: {self.rank} failed to bind process to numa node.")
+            return  # try_bind_numa should not raise exception
+        else:
+            logger.info(f"Rank: {self.rank} success bind process to numa node: {numa_id}")
 
     def _init_dist(self, backend: str | None = None):
         if backend is None:
@@ -1034,12 +1160,13 @@ class Trainer:
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
 
         self.logger.info(
-            f"Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
+            f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
+            f"total_consumed_tokens: {total_consumed_tokens} "
             f"{loss_log_str} "
+            f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"grad_norm: {grad_norm:.8f} "
             f"tgs: {tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
             f"eta: {eta_hms} "
@@ -1052,11 +1179,12 @@ class Trainer:
             "time/train_time": round(train_time, 4),
             "time/eta_seconds": round(eta_seconds, 1),
             "runtime_info/text_tokens": step_consumed_tokens,
+            "runtime_info/total_consumed_tokens": total_consumed_tokens,
             "runtime_info/tgs": tgs,
             "runtime_info/e2e_tgs": e2e_tgs,
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
-            "grad_norm": round(grad_norm, 3),
+            "grad_norm": grad_norm,
         }
         log_scalars.update({f"loss/{k}": v for k, v in loss_log.items()})
         self._exp_tracker.add_scalars(tag_scalar_dict=log_scalars, global_step=self.cur_step)
@@ -1073,6 +1201,7 @@ class Trainer:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
+        latest_hf_link = self.exp_dir / "hf-latest"
 
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
@@ -1086,6 +1215,10 @@ class Trainer:
         self._engine.save_hf(str(save_hf_path))
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
+        # 将 latest_hf_link 指向 save_hf_path
+        if self.rank == 0:
+            latest_hf_link.unlink(missing_ok=True)
+            latest_hf_link.symlink_to(save_hf_path.absolute(), target_is_directory=True)
 
         meta_path = self.work_dir / self._META_PATH
 
@@ -1156,20 +1289,23 @@ class Trainer:
 
         assert isinstance(pad_token_id, int), f"pad_token_id should be an integer, but got {pad_token_id}"
 
-        if isinstance(model_cfg, VisionComposeConfigProtocol):
-            if model_cfg.text_config.pad_token_id != pad_token_id:
-                logger.warning(
-                    f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "
-                    f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
-                )
-                model_cfg.text_config.pad_token_id = pad_token_id
+        # Model's pad_token_id only affects the embedding module which acts specially for pad token.
+        # Model's pad_token_id may be different from tokenizer's pad_token_id.
+        # Note: Qwen3 Model's pad_token_id is None, which is different from Qwen tokenizer's pad_token_id.
+        # if isinstance(model_cfg, VisionComposeConfigProtocol):
+        #     if model_cfg.text_config.pad_token_id != pad_token_id:
+        #         logger.warning(
+        #             f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "
+        #             f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
+        #         )
+        #         model_cfg.text_config.pad_token_id = pad_token_id
 
-        elif model_cfg.pad_token_id != pad_token_id:
-            logger.warning(
-                f"Model pad_token_id {model_cfg.pad_token_id} is different from tokenizer pad_token_id "
-                f"{pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
-            )
-            model_cfg.pad_token_id = pad_token_id
+        # elif model_cfg.pad_token_id != pad_token_id:
+        #     logger.warning(
+        #         f"Model pad_token_id {model_cfg.pad_token_id} is different from tokenizer pad_token_id "
+        #         f"{pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
+        #     )
+        #     model_cfg.pad_token_id = pad_token_id
 
         if dataloader_cfg.pad_token_id is None:
             dataloader_cfg.pad_token_id = pad_token_id
@@ -1190,28 +1326,29 @@ class Trainer:
         resume_cfg = self._resume_cfg
 
         if (resume_from := resume_cfg.resume_from) is None:
+            logger.info("No checkpoint to resume from.")
             return
 
         if isinstance(resume_from, str):
             resume_from = Path(resume_from)
+        logger.info(f"Resume from checkpoint: {resume_from}")
 
         if not resume_from.exists():
             raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
 
         model_path = resume_from / self._SAVE_MODEL_DIR
-        optimizer_path = resume_from / self._SAVE_OPTIMIZER_DIR if self._resume_cfg.load_optimizer else None
+        optimizer_path = (
+            resume_from / self._SAVE_OPTIMIZER_DIR
+            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
+            else None
+        )
 
         self._engine.load_dcp(
             model_dir=model_path,
             optimizer_dir=optimizer_path,
+            load_states=self._resume_cfg.load_optimizer_states,
+            load_args=self._resume_cfg.load_optimizer_args,
         )
-
-        if resume_cfg.load_scheduler:
-            scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
-            if not scheduler_path.exists():
-                raise FileNotFoundError(f"Scheduler path {scheduler_path} does not exist.")
-            lr_scheduler_state = torch.load(scheduler_path, map_location=DEVICE)
-            self._lr_scheduler.load_state_dict(lr_scheduler_state)
 
         if resume_cfg.load_dataset:
             dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
@@ -1227,6 +1364,17 @@ class Trainer:
         self._consumed_samples = train_state["consumed_samples"]
         self._consumed_tokens = train_state["consumed_tokens"]
         self._train_time_offset = train_state["train_time_offset"]
+
+        if resume_cfg.load_scheduler:
+            scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
+            if not scheduler_path.exists():
+                raise FileNotFoundError(f"Scheduler path {scheduler_path} does not exist.")
+            lr_scheduler_state = torch.load(scheduler_path, map_location=DEVICE)
+            self._lr_scheduler.load_state_dict(lr_scheduler_state)
+        else:
+            assert self.total_step > self._cur_step
+            scheduler_step = self.total_step - self._cur_step
+            self._lr_scheduler = self.build_lr_scheduler(self._lr_cfg, scheduler_step)
 
     def _resume_dataloader(self, dataloader_path: Path):
         if not dataloader_path.exists():
@@ -1249,6 +1397,9 @@ class Trainer:
             "XTUNER_DISPATCHER_DEBUG": os.getenv("XTUNER_DISPATCHER_DEBUG"),
             "XTUNER_ROUTER_DEBUG": os.getenv("XTUNER_ROUTER_DEBUG"),
             "XTUNER_DECORD_VIDEO_THREADS": os.getenv("XTUNER_DECORD_VIDEO_THREADS"),
+            "XTUNER_USE_CUTLASS_GROUP_GEMM": os.getenv("XTUNER_USE_CUTLASS_GROUP_GEMM"),
+            "GROUPED_GEMM_USE_CUTLASS": os.getenv("GROUPED_GEMM_USE_CUTLASS"),
+            "XTUNER_USE_NATIVE_RMSNORM": os.getenv("XTUNER_USE_NATIVE_RMSNORM"),
         }
 
         for k, v in env.items():
