@@ -73,19 +73,24 @@ class RLRolloutResponseItem(BaseModel):
     logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
 
-    def merge(self, other: "RLRolloutResponseItem") -> None:
-        """Merges another RLRolloutResponseItem into this one for partial
+    def update(self, other: "RLRolloutResponseItem") -> None:
+        """Updates another RLRolloutResponseItem into this one for partial
         rollout."""
         if not isinstance(other, RLRolloutResponseItem):
-            raise TypeError("Can only merge with another RLRolloutResponseItem instance.")
+            raise TypeError("Can only update with another RLRolloutResponseItem instance.")
 
         if self.response_ids is not None and other.response_ids:
             self.response_ids.extend(other.response_ids)
+        else:
+            self.response_ids = other.response_ids
         if self.logprobs is not None and other.logprobs:
             self.logprobs.extend(other.logprobs)
+        else:
+            self.logprobs = other.logprobs
         if self.response is not None and other.response:
             self.response += other.response
-
+        else:
+            self.response = other.response
         self.num_return_tokens += other.num_return_tokens
         self.finish_reason = other.finish_reason
         self.extra_info.update(other.extra_info)
@@ -259,7 +264,7 @@ def update_dataflow_item(group_data_items, target_key, target_value):
 
         if keys[-1] == "rollout":
             existing_rollout_item = getattr(parent_obj, keys[-1])
-            existing_rollout_item.merge(target_value[i])
+            existing_rollout_item.update(target_value[i])
         else:
             setattr(parent_obj, keys[-1], target_value[i])
 

@@ -555,7 +555,7 @@ class ReplayBuffer:
         self.config = config
         self.storage = ReplayBufferStorage(config.worker_log_dir)
         self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
-        if isinstance(self.tokenizer, str):
+        if isinstance(self.config.tokenizer, str):
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer, trust_remote_code=True)
         else:
             self.tokenizer = config.tokenizer
