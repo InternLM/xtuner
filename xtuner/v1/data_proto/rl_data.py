@@ -208,11 +208,11 @@ def check_dataflow_item(group_data_items: List[RLDataFlowItem]) -> tuple[bool, s
 
         # 检查 rollout 失败
         if rollout_info.finish_reason == "failed":
-            return False, f"Item {i} failed during rollout."
+            return False, "Exist failed rollout response."
 
         # 检查 judger 失败
         if judger_info.extra_info.get("state") == "failed":
-            return False, f"Item {i} failed during judger stage."
+            return False, "Exist failed judger response."
 
         # 检查数据完整性
         response_valid = bool(rollout_info.response)
@@ -220,12 +220,12 @@ def check_dataflow_item(group_data_items: List[RLDataFlowItem]) -> tuple[bool, s
         logprobs_valid = bool(rollout_info.logprobs)
 
         if not response_valid and not ids_valid:
-            return False, f"Item {i} has neither `response` nor `response_ids`."
+            return False, "DataItem has neither `response` nor `response_ids`."
 
         if ids_valid and logprobs_valid and len(rollout_info.logprobs) != len(rollout_info.response_ids):  # type: ignore[arg-type]
             return (
                 False,
-                f"Item {i}: `logprobs` length ({len(rollout_info.logprobs)}) does not match "  # type: ignore[arg-type]
+                f"`logprobs` length ({len(rollout_info.logprobs)}) does not match "  # type: ignore[arg-type]
                 f"`response_ids` length ({len(rollout_info.response_ids)}).",  # type: ignore[arg-type]
             )
 

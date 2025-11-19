@@ -15,7 +15,7 @@ from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger
 
-from .replay_buffer import ReplayBuffer, ReplayBufferConfig
+from .replay_buffer import ReplayBuffer, ReplayBufferConfig, ReplayState
 
 
 class DataFlowConfig(BaseModel):
@@ -214,38 +214,39 @@ class DataFlow:
             self.logger.debug(
                 f"[ROLLOUT] Get 1 sample and dataflow have sent {self.send_samples_count} to rollout_controller"
             )
-            assert group_data_items is not None and len(group_data_items) > 0, "Sampled group data items is empty."
         else:
             group_data_items = group_samples_for_retry
             for data_item in group_samples_for_retry:
                 data_item.extra_info.retry_times += 1
 
+        assert group_data_items is not None and len(group_data_items) > 0, "Sampled group data items is empty."
+        action_id = group_data_items[0].uid.action_id
+
         # step 2: env generate
         group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
             group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
         )
-        check_result, msg = check_dataflow_item(group_data_items)
-        if not check_result:
-            self.logger.warning(
-                f"Dataflow item check failed because {msg} for {group_data_items[0].uid.action_id} response {group_data_items[0].env.rollout}. Returning meta for retry."
-            )
-            return group_data_items
-        if any(item.env.rollout.finish_reason == "skipped" for item in group_data_items):
-            self.logger.warning(
-                f"Bad request for {group_data_items[0].uid.action_id} response. Skipping this request."
-            )
-            self.logger.debug(f"Worker task skipped successfully for {group_data_items[0].uid.action_id}.")
+
+        # Step 3: Determine the sample's state and act accordingly.
+        state, reason = self._determine_replay_state(group_data_items)
+        self.logger.debug(f"Determined replay state for {action_id}: {state.name}, Reason: {reason}")
+        if state == ReplayState.COMPLETED:
+            group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
+            if len(group_data_items) > 0:
+                await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
+            self.logger.debug(f"Worker task completed successfully for {action_id}.")
+            return
+        elif state == ReplayState.SKIPPED:
+            self.logger.warning(f"Bad request for {action_id} response. Skipping this request.")
             self.skipped_sample_count += 1
             return
-
-        # step 3: filter
-        filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
-
-        # step 4: add to replay buffer
-        if len(filtered_group_data_items) > 0:
-            await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
-
-        self.logger.debug(f"Worker task completed successfully for {group_data_items[0].uid.action_id}.")
+        elif state == ReplayState.FAILED:
+            self.logger.warning(f"Returning sample {action_id} for retry. Reason: {reason}")
+            return group_data_items
+        elif state == ReplayState.INTERRUPTED:
+            await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
+            self.logger.debug(f"Adding interrupted sample {action_id} to interrupted storage. Reason: {reason}")
+            return
 
     async def concurrent_task_runner(self):
         """Orchestrates the concurrent execution of worker tasks to generate a
@@ -339,17 +340,6 @@ class DataFlow:
             self.unfinished_samples_count = ray.get(self.replay_buffer.get_interrupted_samples.remote())
             self.logging_replaybuffer_state()
 
-    async def _send_abort_request(self, client, url, timeout):
-        worker_url = f"{url}/abort_request"
-        try:
-            response = await client.post(worker_url, json={"abort_all": True}, timeout=timeout)
-            response.raise_for_status()
-            self.logger.debug(f"Successfully sent abort request to {url}")
-            return url, True
-        except Exception as e:
-            self.logger.error(f"Failed to send abort request to {url}: {e}")
-            return url, False
-
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
         if not self.worker_url_list:
@@ -422,3 +412,30 @@ class DataFlow:
 
     def clear_replaybuffer(self):
         return ray.get(self.replay_buffer.clear.remote())
+
+    async def _send_abort_request(self, client, url, timeout):
+        worker_url = f"{url}/abort_request"
+        try:
+            response = await client.post(worker_url, json={"abort_all": True}, timeout=timeout)
+            response.raise_for_status()
+            self.logger.debug(f"Successfully sent abort request to {url}")
+            return url, True
+        except Exception as e:
+            self.logger.error(f"Failed to send abort request to {url}: {e}")
+            return url, False
+
+    def _determine_replay_state(self, group_data_items: List[RLDataFlowItem]) -> tuple[ReplayState, str]:
+        """Determines the processing strategy for a group of rollout samples
+        based on their state."""
+        # TODO(@duanyanhui): remove this function when send one request instead of group requests.
+        if not group_data_items or len(group_data_items) == 0:
+            return ReplayState.SKIPPED, "Empty group data items"
+
+        finish_reasons = {item.env.rollout.finish_reason for item in group_data_items}
+        if "skipped" in finish_reasons:
+            return ReplayState.SKIPPED, "Request was skipped (e.g., bad request)"
+        if "abort" in finish_reasons:
+            return ReplayState.INTERRUPTED, "Rollout was aborted, adding to interrupted storage"
+        if "failed" in finish_reasons or check_dataflow_item(group_data_items)[0] is False:
+            return ReplayState.FAILED, "Rollout failed, needs retry"
+        return ReplayState.COMPLETED, "Rollout completed normally"
