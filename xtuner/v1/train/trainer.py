@@ -813,6 +813,8 @@ class Trainer:
         return lr_scheduler
 
     def _maybe_check_health(self):
+        if self._check_health_interval is None:
+            return
         if (
             (self._check_health_interval is not None and self.cur_step % self._check_health_interval == 0)
             or (self._checkpoint_interval is not None and self.cur_step % self._checkpoint_interval == 0)
