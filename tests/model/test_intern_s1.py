@@ -151,7 +151,6 @@ class TestInternS1(DeterministicDDPTestCase):
             [256 * num_patches]
         )
         input_ids = torch.tensor(ret["input_ids"])[None].cuda()
-        image_flags = torch.tensor([1] * num_patches, dtype=torch.long).cuda()
         pixel_values = pixel_values.to(device="cuda", dtype=torch.bfloat16)
 
         with torch.no_grad():

@@ -111,7 +111,6 @@ def get_train_seq_ctx(
             seq_ctx.position_ids = position_ids  # type: ignore[assignment]
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
-        seq_ctx.image_flags = multimodal_train_info.get("image_flags")
     return seq_ctx
 
 

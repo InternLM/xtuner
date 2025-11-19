@@ -32,9 +32,10 @@ from .intern_s1_vl_utils import InternS1VLOSSLoader, pil_loader, read_interns1_v
 logger = get_logger()
 
 
-def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[int]):
+def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplate, num_image_token_list: list[list[int]]):
     current_image_idx = 0
-    n_frames = len(num_image_token_list)
+    n_video = len(num_image_token_list)
+    n_image = sum([len(num_image_token_list[i]) for i in range(n_video)])
     for msg in messages.messages:
         if msg.role == "pretrain":
             assert len(messages.messages) == 1, "pretrain message should only have one message"
@@ -44,22 +45,21 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                 for c in content:
                     if c.type == "text":
                         text = c.text
-                        # assert "<VIDEO_CONTEXT>" in text
                         text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
                         video_cnt = text.count(IMAGE_TOKEN_ALIAS)
-                        assert video_cnt == 1, "Only one <VIDEO_CONTEXT> is supported for video."
-                        for _ in range(video_cnt):
+                        assert video_cnt == n_video, f"video_cnt: {video_cnt} != n_video: {n_video}"
+                        for i in range(video_cnt):
                             special_tokens = "\n".join(
-                                [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(n_frames)]
+                                [f"Frame-{frame_idx + 1}: {IMAGE_TOKEN_ALIAS}" for frame_idx in range(len(num_image_token_list[i]))]
                             )
                             text = text.replace(IMAGE_TOKEN_ALIAS, special_tokens)
-                            image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"  # type: ignore
+                            # 每一帧的 image_token 应该是完全一样，因此直接 num_image_token_list[i][0] 就行
+                            image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[i][0]}{chat_template.image_end_token}"  # type: ignore
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
-                            current_image_idx += n_frames
+                            current_image_idx += 1
                         c.text = text
-    # if current_image_idx < num_image, it means <image> placeholder is less than num_image
-    assert current_image_idx == len(num_image_token_list), (
-        f"ERROR: current_image_idx: {current_image_idx} != num_image: {len(num_image_token_list)}"
+    assert current_image_idx == n_image, (
+        f"VIDEO ERROR: total_image_idx: {current_image_idx} != {n_image}"
     )
 
 
@@ -179,12 +179,9 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
-            pixel_values=torch.randn(1, 3, self.image_size, self.image_size),
-            image_flags=torch.tensor([0] * 1, dtype=torch.long),
             num_tokens=len(input_ids),
             num_img_tokens=[0],
             num_imgs=[0],
-            num_patches=[1],
         )
         return ret
 
@@ -282,7 +279,6 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         transform = self._get_transform()
         pixel_values_list = [transform(image) for image in images]
         pixel_values = torch.stack(pixel_values_list)
-        num_patches = pixel_values.size(0)
 
         # Preprocess the conversations and generate the return dictionary
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
@@ -320,27 +316,26 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             input_ids=input_ids,
             labels=labels,
             pixel_values=pixel_values,
-            image_flags=torch.tensor([1] * num_patches, dtype=torch.long),
             num_tokens=len(input_ids),
             num_img_tokens=num_image_tokens,
             num_imgs=[len(self._image_path)],
-            num_patches=[num_patches],
         )
         return ret
 
     def calc_num_tokens_video_get_item(self, data_item) -> CacheItem:
-        # TODO: 目前只支持一个视频
-        assert len(self._video_path) == 1, "Only one video is supported for now."
         # 根据 data_item 生成一个确定性的随机整数
-        random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
-        # 根据采样的帧数（min_num_frames, max_num_frames+1），计算token数量，实际可能采样不到这么多帧（比如视频一共只有10帧），算出来num_tokens可能会偏大
-        n_frames = random_frame_num
-        num_tiles = [1] * n_frames
-        num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
+        # 根据采样的帧数（min_num_frames, max_num_frames+1），计算token数量，实际可能采样不到这么多帧（比如视频一共只有10帧），算出来 num_tokens 可能会偏大
+        num_image_tokens_list = []
+        for video_path in self._video_path:
+            random_frame_num = generate_random_int_from_dict({'data_item': data_item, 'video_path': video_path}, self.min_num_frames, self.max_num_frames)
+            num_image_tokens = [self.num_image_token for _ in random_frame_num]
+            num_image_tokens_list.append(num_image_tokens)
+        total_image_tokens = sum([sum(num_image_tokens) for num_image_tokens in num_image_tokens_list])
+
         messages = ChatMessages(messages=data_item["messages"])
 
         try:
-            replace_video_token(messages, self.chat_template, num_image_tokens)
+            replace_video_token(messages, self.chat_template, num_image_tokens_list)
             tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
             input_ids = tokenized["input_ids"]
@@ -355,7 +350,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                     input_ids = input_ids + [self.eos_token_id]
 
             input_ids, _ = self._truncated_input_and_labels(input_ids)
-            assert (torch.tensor(input_ids) == self.video_context_token_id).sum() == sum(num_image_tokens), (
+            assert (torch.tensor(input_ids) == self.video_context_token_id).sum() == total_image_tokens, (
                 "ERROR: video tokens are truncated"
             )
             return {"num_tokens": len(input_ids)}
@@ -367,40 +362,45 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             return {"num_tokens": 0}
 
     def video_get_item(self, data_item: dict, media_root: str = "") -> InternS1DataItem:
-        assert len(self._video_path) == 1, "Only one video is supported for now."
-        video_path = os.path.join(media_root, self._video_path[0])
+        num_image_tokens_list = []
+        pixel_values_list = []
+        num_imgs_list = []
+        for video_path in self._video_path:
+            video_path = os.path.join(media_root, video_path)
+            random_frame_num = generate_random_int_from_dict({'data_item': data_item, 'video_path': video_path}, self.min_num_frames, self.max_num_frames)
 
-        # 根据 data_item 生成一个确定性的随机整数
-        random_frame_num = generate_random_int_from_dict(data_item, self.min_num_frames, self.max_num_frames)
+            if self.oss_loader is not None:
+                image_list = self.oss_loader(
+                    video_path,
+                    image_type="video",
+                    max_num_frames=self.max_num_frames,
+                    min_num_frames=self.min_num_frames,
+                    sample="rand",
+                    clip=data_item.get("clip", None),
+                    random_frame_num=random_frame_num,
+                )
+            else:
+                image_list = read_interns1_vl_video(
+                    video_path,
+                    max_num_frames=self.max_num_frames,
+                    min_num_frames=self.min_num_frames,
+                    sample="rand",
+                    clip=data_item.get("clip", None),
+                    random_frame_num=random_frame_num,
+                )
 
-        if self.oss_loader is not None:
-            image_list = self.oss_loader(
-                video_path,
-                image_type="video",
-                max_num_frames=self.max_num_frames,
-                min_num_frames=self.min_num_frames,
-                sample="rand",
-                clip=data_item.get("clip", None),
-                random_frame_num=random_frame_num,
-            )
-        else:
-            image_list = read_interns1_vl_video(
-                video_path,
-                max_num_frames=self.max_num_frames,
-                min_num_frames=self.min_num_frames,
-                sample="rand",
-                clip=data_item.get("clip", None),
-                random_frame_num=random_frame_num,
-            )
+            transform = self._get_transform()
+            pixel_values = [transform(image) for image in image_list]
+            pixel_values = torch.stack(pixel_values)  # type: ignore
+            num_patches = pixel_values.size(0)  # type: ignore
+            num_image_tokens = [self.num_image_token] * num_patches
+            num_image_tokens_list.append(num_image_tokens)
+            pixel_values_list.append(pixel_values)
+            num_imgs_list.append(len(image_list))
 
-        transform = self._get_transform()
-        pixel_values = [transform(image) for image in image_list]
-        pixel_values = torch.stack(pixel_values)  # type: ignore
-        num_patches = pixel_values.size(0)  # type: ignore
-        num_image_tokens = [self.num_image_token] * num_patches
-
+        total_image_tokens = sum([sum(num_image_tokens) for num_image_tokens in num_image_tokens_list])
         messages = ChatMessages(messages=data_item["messages"])
-        replace_video_token(messages, self.chat_template, num_image_tokens)
+        replace_video_token(messages, self.chat_template, num_image_tokens_list)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
@@ -422,19 +422,19 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             labels = np_labels.tolist()
 
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
-        assert (torch.tensor(input_ids) == self.video_context_token_id).sum() == sum(num_image_tokens), (
+        assert (torch.tensor(input_ids) == self.video_context_token_id).sum() == total_image_tokens, (
             "ERROR: video tokens are truncated"
         )
+
+        pixel_values = torch.cat(pixel_values_list, dim=0)  # type: ignore
 
         ret = InternS1DataItem(
             input_ids=input_ids,
             labels=labels,
             pixel_values=pixel_values,  # type: ignore
-            image_flags=torch.tensor([1] * num_patches, dtype=torch.long),
             num_tokens=len(input_ids),
-            num_img_tokens=num_image_tokens,
-            num_imgs=[len(image_list)],
-            num_patches=[num_patches],
+            num_img_tokens=[total_image_tokens],
+            num_imgs=num_imgs_list
         )
         return ret
 

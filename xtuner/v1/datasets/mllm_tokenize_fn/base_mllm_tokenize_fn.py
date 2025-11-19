@@ -45,14 +45,15 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                     if c["type"] == "video_url":
                         video_paths.append(c["video_url"]["url"])
 
-                        video_wh = c["video_url"]["image_wh"]
-                        if isinstance(video_wh[0], (list, tuple)):
-                            assert len(video_wh) == 1, (
-                                f"Only one video size is supported for each video. but got {video_wh}"
-                            )
-                            video_wh = video_wh[0]
-                        video_wh_list.append(video_wh)
-                        assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
+                        video_wh = c["video_url"].get("image_wh")
+                        if video_wh is not None:
+                            if isinstance(video_wh[0], (list, tuple)):
+                                assert len(video_wh) == 1, (
+                                    f"Only one video size is supported for each video. but got {video_wh}"
+                                )
+                                video_wh = video_wh[0]
+                            video_wh_list.append(video_wh)
+                            assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
 
                         video_extra_dict = {}
                         if "processed_video_length" in c["video_url"]:
@@ -63,6 +64,8 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
 
     if len(image_wh_list) > 0:
         assert len(image_wh_list) == len(image_paths), "If image_wh is provided, it should match the number of images."
+    if len(video_wh_list) > 0:
+        assert len(video_wh_list) == len(video_paths), "If video_wh is provided, it should match the number of videos."
     return (
         image_paths,
         video_paths,
