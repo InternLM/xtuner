@@ -338,8 +338,9 @@ class ReplayBufferStorage:
         """
         check_result, msg = check_dataflow_item(grouped_dataitem)
         if not check_result:
+            log_action_id = grouped_dataitem[0].uid.action_id if len(grouped_dataitem) > 0 else "None"
             self.logger.warning(
-                f"Dataflow item check failed because {msg} for {grouped_dataitem[0].uid.action_id} response. Skipping adding to replay buffer."
+                f"Dataflow item check failed because {msg} for {log_action_id} response. Skipping adding to replay buffer."
             )
             return
 

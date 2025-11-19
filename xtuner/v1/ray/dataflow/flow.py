@@ -242,7 +242,8 @@ class DataFlow:
         filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
 
         # step 4: add to replay buffer
-        await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
+        if len(filtered_group_data_items) > 0:
+            await self.replay_buffer.add.remote(filtered_group_data_items)  # type: ignore[attr-defined]
 
         self.logger.debug(f"Worker task completed successfully for {group_data_items[0].uid.action_id}.")
 
