@@ -28,7 +28,7 @@ fsdp_cfg = FSDPConfig(
 dataset_config = [
     {
         "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-        "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
+        "tokenize_fn": FTDPTokenizeFnConfig(max_length=16384),
     },
 ]
 
