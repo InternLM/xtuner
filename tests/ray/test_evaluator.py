@@ -107,6 +107,7 @@ class TestEvaluator(unittest.TestCase):
         custom_evaluator = Evaluator.remote(custom_evaluator_cfg, self.test_env)
         custom_correctness = ray.get(custom_evaluator.run.remote())
         self.assertEqual(correctness['accuracy'], custom_correctness['custom_accuracy'])
+        ray.get(self.test_env.shutdown.remote())
         
 if __name__ == '__main__':
     unittest.main()

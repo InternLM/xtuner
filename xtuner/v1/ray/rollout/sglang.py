@@ -128,9 +128,6 @@ class SGLangWorker(RolloutWorker):
     def continue_generation(self):
         return self._make_request("continue_generation")
 
-    def shutdown(self):
-        pass
-
     def reset_prefix_cache(self):
         self.flush_cache()
         return self._make_request("release_memory_occupation")
