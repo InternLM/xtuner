@@ -4,6 +4,7 @@ on:
     branches:
       - "main"
       - "refactor"
+      - "dev"
     paths-ignore:
       - "docs/**"
       - "**.md"
