@@ -121,15 +121,27 @@ class TestMLLMTokenizeFn(TestCase):
 
                 ret = self.tokenize_fn(raw_data, media_root=VIDEO_ROOT)
                 input_ids_xtuner = ret['input_ids']
+                pixel_values = ret['pixel_values']
+                assert pixel_values.size(0) == 10
 
                 input_str = self.tokenize_fn.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
                 input_str = input_str.replace('<IMG_CONTEXT>', '')
                 input_str = input_str.replace('<img></img>', '<IMG_CONTEXT>')
-                expected_str = "<|im_start|>user\nFrame-1: <IMG_CONTEXT>\nFrame-2: <IMG_CONTEXT>\nFrame-3: " \
-                               "<IMG_CONTEXT>\nFrame-4: " \
-                               "<IMG_CONTEXT>\n请描述下视频内容？<|im_end|>\n<|im_start|>assistant\n一男一女在打网球<|im_end|>\n" \
-                               "<|im_start|>user\n请简要解释下网球<|im_end|>\n<|im_start|>assistant\n" \
-                               "网球是一项运动，运动员使用球拍将球击打过网进入对方场地。目标是通过让球落入对方场地且对方无法回击来得分。网球可以单人对战（单打）或双人组队对战（双打）。<|im_end|>"
+
+                expected_str = "<|im_start|>user\n" \
+                               "Frame-1: <IMG_CONTEXT>\n" \
+                               "Frame-2: <IMG_CONTEXT>\n" \
+                               "Frame-3: <IMG_CONTEXT>\n" \
+                               "Frame-4: <IMG_CONTEXT>\n" \
+                               "Frame-5: <IMG_CONTEXT>\n" \
+                               "Frame-1: <IMG_CONTEXT>\n" \
+                               "Frame-2: <IMG_CONTEXT>\n" \
+                               "Frame-3: <IMG_CONTEXT>\n" \
+                               "Frame-4: <IMG_CONTEXT>\n" \
+                               "Frame-5: <IMG_CONTEXT>\n" \
+                               "两个视频中都在做什么？<|im_end|>\n" \
+                               "<|im_start|>assistant\n" \
+                               "打网球<|im_end|>"
                 assert input_str.strip() == expected_str.strip()
 
     def test_intern_vl_sft_pure_text(self):
@@ -206,4 +218,3 @@ class TestMLLMTokenizeFn(TestCase):
                 ret = self.tokenize_fn(raw_data, media_root=VIDEO_ROOT)
                 labels_xtuner = torch.tensor(ret['labels'])
                 self.assertTrue((labels_xtuner == self.tokenize_fn.video_context_token_id).sum() == 0)
-

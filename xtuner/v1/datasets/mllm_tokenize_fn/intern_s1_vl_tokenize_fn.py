@@ -56,7 +56,7 @@ def replace_video_token(messages: ChatMessages, chat_template: HybridChatTemplat
                             # 每一帧的 image_token 应该是完全一样，因此直接 num_image_token_list[i][0] 就行
                             image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[i][0]}{chat_template.image_end_token}"  # type: ignore
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
-                            current_image_idx += 1
+                            current_image_idx += len(num_image_token_list[i])
                         c.text = text
     assert current_image_idx == n_image, (
         f"VIDEO ERROR: total_image_idx: {current_image_idx} != {n_image}"
