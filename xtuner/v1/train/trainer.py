@@ -499,7 +499,10 @@ class Trainer:
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
         self._internal_metrics_interval = internal_metrics_interval
-        if self._internal_metrics_interval is not None:
+        if self._internal_metrics_interval:
+            assert self._internal_metrics_interval > 0, (
+                "internal_metrics_interval must be greater than zero (or set to `None`)"
+            )
             torch._dynamo.config.skip_nnmodule_hook_guards = (
                 False  # otherwise the hook will be ignored for compiled modules
             )
@@ -620,6 +623,9 @@ class Trainer:
         self.hooks_config = self._setup_hooks(hooks_config=hooks_config)
 
         setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
+
+        if self._internal_metrics_interval:
+            self.metrics_recorder = InternalMetricsRecorder(self._engine)
 
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
@@ -790,6 +796,8 @@ class Trainer:
 
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
+        if self._internal_metrics_interval:
+            self.metrics_recorder.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
     def _maybe_check_model_internal_metrics(self, data_batches: list[ModelItem]) -> InternalMetrics | None:
@@ -799,8 +807,10 @@ class Trainer:
         if self.cur_step % self._internal_metrics_interval != 0 and self.cur_step != self.total_step:
             return None
 
-        with InternalMetricsRecorder(self._engine) as metrics_recorder:
-            return metrics_recorder.get_metrics(data_batches)
+        logger.info("Start calculating model internal metrics...")
+        metrics: InternalMetrics = self.metrics_recorder.get_metrics(data_batches)
+        logger.info("Calculating model internal metrics done.")
+        return metrics
 
     @property
     def world_size(self) -> int:
