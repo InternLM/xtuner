@@ -426,6 +426,9 @@ class RLTrainer:
             with timer("saving and sync_weight", step_timer_dict):
                 ray.get(self._train_controller.offload.remote(target="optimizer"))
                 self._maybe_save_hf()
+                bind_train_rollout(
+                    train_controller=self._train_controller, env_controller=self._rollout_env_controller
+                )
                 ray.get(self._rollout_env_controller.onload_weights.remote())
                 ray.get(self._train_controller.update_weights.remote())
                 self.logger.info("Model weights synchronized successfully.")

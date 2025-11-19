@@ -69,7 +69,7 @@ class RLRolloutResponseItem(BaseModel):
     response: Optional[str] = None
     response_ids: Optional[List[int]] = None
     num_return_tokens: Optional[int] = None
-    finish_reason: Optional[str] = None
+    finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
     logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
 
@@ -153,7 +153,8 @@ def check_dataflow_item(group_data_items):
 
     # 如果存在abort的状态，相当于跳过检查，下次会重新rollout
     is_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
-    if is_abort:
+    is_skipped = any(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
+    if is_abort or is_skipped:
         return True
 
     no_failures = all(item.env.rollout.finish_reason != "failed" for item in group_data_items)

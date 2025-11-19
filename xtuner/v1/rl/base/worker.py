@@ -527,7 +527,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._engine.put_optimizer_to_device(DEVICE)
 
     def update_rollout_info(
-        self, engine_mesh_list: DeviceMeshRaw, server_url_dict: ServiceUrlMap, rollout_config: RolloutConfig
+        self,
+        engine_mesh_list: DeviceMeshRaw,
+        server_url_dict: ServiceUrlMap,
+        rollout_config: RolloutConfig,
+        worker_server_urls_status: Dict[str, bool],
     ):
         """Update the rollout information for the training worker."""
         tp = rollout_config.tensor_parallel_size
@@ -536,7 +540,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_device_mesh = DeviceMesh(
             "cpu", mesh=engine_mesh_list, mesh_dim_names=("engine_instance", "engine_parallel")
         )
-        self.rollout_url = server_url_dict.get(self.rank, "")
+        rollout_server_url = server_url_dict.get(self.rank, "")
+        if worker_server_urls_status.get(rollout_server_url, "False") is False:
+            self.logger.error(f"Rollout server url {rollout_server_url} is not available.")
+            self.rollout_url = None
+        else:
+            self.rollout_url = rollout_server_url
         self.rollout_cfg_info["tp"] = tp
         self.rollout_cfg_info["ep"] = ep
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
@@ -858,7 +867,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         cpu_mesh = self.rollout_device_mesh["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()
-
+        if self.rollout_url is None:
+            self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
+            return
         if self.rollout_cfg_info["backend"] == "pytorch":
             # TODO(chenchiyu): remove lmdeploy related code
             from lmdeploy.utils import serialize_state_dict
@@ -989,7 +1000,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
                 if use_flattened_tensor_bucket:
                     data["load_format"] = "flattened_bucket"
-
                 response = requests.post(
                     f"{self.rollout_url}/{self.endpoints['update_weights']}", headers=headers, json=data
                 )

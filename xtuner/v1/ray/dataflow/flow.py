@@ -115,6 +115,7 @@ class DataFlow:
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
+        self.skipped_sample_count = 0
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
@@ -192,6 +193,13 @@ class DataFlow:
                 f"Dataflow item check failed for {group_data_items[0].uid.action_id} response. Returning meta for retry."
             )
             return group_data_items
+        if any(item.env.rollout.finish_reason == "skipped" for item in group_data_items):
+            self.logger.warning(
+                f"Bad request for {group_data_items[0].uid.action_id} response. Skipping this request."
+            )
+            self.logger.debug(f"Worker task skipped successfully for {group_data_items[0].uid.action_id}.")
+            self.skipped_sample_count += 1
+            return
 
         # step 3: filter
         filtered_group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
@@ -228,7 +236,8 @@ class DataFlow:
             next_update_threshold = update_step
             while (
                 self.finished_samples_count < self.target_batch_size
-                and self.failed_samples_count < self.target_batch_size
+                and self.failed_samples_count < self.target_batch_size * self.config.max_retry_times
+                and self.skipped_sample_count < self.target_batch_size * self.config.max_retry_times
             ):
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
@@ -253,14 +262,14 @@ class DataFlow:
                         if result[0].extra_info.retry_times < self.config.max_retry_times:
                             # If the retry count is less than max_retry_times, retry the task
                             self.logger.info(
-                                f"Retrying task for {result[0].data}. Retry count: {result[0].extra_info.retry_times}"
+                                f"Retrying task for {result[0].uid.action_id}. Retry count: {result[0].extra_info.retry_times}"
                             )
                             retry_task = create_task(self.worker_task(group_samples_for_retry=result))
                             pending_tasks.add(retry_task)
                         else:
                             self.failed_samples_count += 1
                             self.logger.error(
-                                f"Max retry reached for {result[0].data}. Not retrying. Current failed count: {self.failed_samples_count}"
+                                f"Max retry reached for {result[0].uid.action_id}. Not retrying. Current failed count: {self.failed_samples_count}"
                             )
                 self.finished_samples_count = ray.get(self.replay_buffer.get_finished_samples.remote())
                 waiting_tasks = pending_tasks
@@ -270,8 +279,10 @@ class DataFlow:
 
         if self.finished_samples_count >= self.target_batch_size:
             self.logger.info("Target batch size reached. Pausing env controller.")
-        if self.failed_samples_count >= self.target_batch_size:
+        if self.failed_samples_count >= self.target_batch_size * self.config.max_retry_times:
             self.logger.info("Max failed samples reached. Pausing env controller.")
+        if self.skipped_sample_count >= self.target_batch_size * self.config.max_retry_times:
+            self.logger.info("Max skipped samples reached. Pausing env controller.")
 
         # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
         # would be queued behind many worker tasks, causing a significant delay.
@@ -344,6 +355,7 @@ class DataFlow:
         self.finished_samples_count = 0
         self.unfinished_samples_count = 0
         self.failed_samples_count = 0
+        self.skipped_sample_count = 0
         self.target_batch_size = num if num and num > 0 else self.config.global_batch_size
         self.logger.info(f"Start generate dataflow and target batch size set to {self.target_batch_size}.")
         self.sample_params = sample_params if sample_params else self.config.sample_params

@@ -198,6 +198,13 @@ class RolloutConfig(BaseModel):
             help='Extra configuration for different rollout worker. vllm parameters will start with prefix "vllm", etc.',
         ),
     ] = {}
+    max_retry_per_worker: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="Maximum number of retries per rollout worker before deactivation.",
+        ),
+    ] = None
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
     def model_post_init(self, __context: Any) -> None:
@@ -258,6 +265,9 @@ class RolloutConfig(BaseModel):
                 self.rollout_max_batch_size_per_instance = 512
             else:
                 self.rollout_max_batch_size_per_instance = 128
+
+        if self.max_retry_per_worker is None:
+            self.max_retry_per_worker = self.rollout_max_batch_size_per_instance
 
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
