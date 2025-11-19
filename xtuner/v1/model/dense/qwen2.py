@@ -30,6 +30,7 @@ class Qwen2Dense(Dense):
 
 class Qwen2DenseConfig(TransformerConfig):
     use_sliding_window: bool = False
+    bos_token_id: int
 
     def build(self) -> Qwen2Dense:
         return Qwen2Dense(self)
@@ -44,7 +45,6 @@ class Qwen2DenseConfig(TransformerConfig):
         assert isinstance(hf_config, HFConfig)
 
         config = cls(
-            hf_config=hf_config,
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
             pad_token_id=getattr(hf_config, "pad_token_id"),

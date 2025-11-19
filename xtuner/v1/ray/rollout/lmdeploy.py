@@ -124,6 +124,13 @@ class LMDeployWorker(RolloutWorker):
         else:
             payload["messages"] = prompt
 
+        if "num_return_tokens" in extra_params:
+            max_return_tokens = sample_params["max_tokens"] - extra_params["num_return_tokens"]
+            sample_params["max_tokens"] = max_return_tokens
+            self.logger.info(
+                f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_params['num_return_tokens']}"
+            )
+
         if self.enable_return_routed_experts:
             extra_params["return_routed_experts"] = True
 

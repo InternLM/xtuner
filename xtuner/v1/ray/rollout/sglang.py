@@ -67,16 +67,28 @@ class SGLangWorker(RolloutWorker):
                 text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
                 prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
                 payload["input_ids"] = prompt_token_ids
+            if "num_return_tokens" in extra_params:
+                max_return_tokens = sglang_sample_params["max_tokens"] - extra_params["num_return_tokens"]
+                sglang_sample_params["max_tokens"] = max_return_tokens
+                self.logger.info(
+                    f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_params['num_return_tokens']}"
+                )
             payload["sampling_params"] = sglang_sample_params
         else:
             payload["messages"] = prompt
             payload.update(sglang_sample_params)
             # note: chat completions 接口需要传入 max_tokens 和 min_tokens 参数
-            payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
+            if "num_return_tokens" in extra_params:
+                max_return_tokens = sglang_sample_params["max_new_tokens"] - extra_params["num_return_tokens"]
+                payload["max_tokens"] = max_return_tokens
+                self.logger.info(
+                    f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_params['num_return_tokens']}"
+                )
+            else:
+                payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
             payload["min_tokens"] = sglang_sample_params["min_new_tokens"]
             payload.pop("max_new_tokens", None)
             payload.pop("min_new_tokens", None)
-
         return await self._safe_post_request(url, headers, payload)
 
     def _make_request(self, endpoint: str, payload=None):
