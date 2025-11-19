@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -28,6 +30,18 @@ def check_health(loop=10):
     world_size = dist.get_world_size()
 
     dtype = torch.bfloat16
+    rtol = 1.6e-2
+    atol = 1e-5
+    # from torch.testing.assert_close:
+    # +---------------------------+------------+----------+
+    # | ``dtype``                 | ``rtol``   | ``atol`` |
+    # +===========================+============+==========+
+    # | :attr:`~torch.float16`    | ``1e-3``   | ``1e-5`` |
+    # +---------------------------+------------+----------+
+    # | :attr:`~torch.bfloat16`   | ``1.6e-2`` | ``1e-5`` |
+    # +---------------------------+------------+----------+
+    # | :attr:`~torch.float32`    | ``1.3e-6`` | ``1e-5`` |
+    # +---------------------------+------------+----------+
 
     y = health_job(dtype, loop)
 
@@ -37,7 +51,7 @@ def check_health(loop=10):
     gather_check = torch.tensor(1, dtype=torch.int32, device=DEVICE)
     if rank == 0:
         for i in range(world_size):
-            if not torch.allclose(y, y_list[i]):
+            if not torch.allclose(y, y_list[i], rtol=rtol, atol=atol):
                 gather_check = torch.tensor(0, dtype=torch.int32, device=DEVICE)
                 break
     dist.all_reduce(gather_check, op=dist.ReduceOp.MIN)
@@ -47,7 +61,7 @@ def check_health(loop=10):
     dist.all_reduce(z, op=dist.ReduceOp.AVG)
     all_reduce_check = (
         torch.tensor(1, dtype=torch.int32, device=DEVICE)
-        if torch.allclose(y, z)
+        if torch.allclose(y, z, rtol=rtol, atol=atol)
         else torch.tensor(0, dtype=torch.int32, device=DEVICE)
     )
     dist.all_reduce(all_reduce_check, op=dist.ReduceOp.MIN)
@@ -55,13 +69,16 @@ def check_health(loop=10):
     if gather_check.item() == 1 and all_reduce_check.item() == 1:
         return True
 
-    if rank == 0:
+    if rank == 0:  # log
         logger.error(
-            f"Health check failed: gather_check={gather_check.item()}, all_reduce_check={all_reduce_check.item()}"
+            f"Health check failed: gather_check={gather_check.item()}, all_reduce_check={all_reduce_check.item()}. rtol={rtol}, atol={atol}."
         )
-        gather_str = ""
-        for i, yi in enumerate(y_list):
-            gather_str += f"[rank {i}]: {yi.item()}, "
-        logger.error(f"gather_list: {gather_str}")
+        logger.error(f"All reduce check info: y: {y.item()}, z: {z.item()}")
+
+        y2rank = defaultdict(list)
+        for ranki, yi in enumerate(y_list):
+            y2rank[yi.item()].append(ranki)
+        for yi, ranks in y2rank.items():
+            logger.error(f"Gather check info: rank {sorted(ranks)}: {yi}")
 
     return False

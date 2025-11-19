@@ -13,7 +13,7 @@ DEVICE = get_device()
 
 
 def fake_health_job(dtype, loop=10):
-    if dist.get_rank() == 0:
+    if dist.get_rank() == 1:
         print(f"rank {dist.get_rank()} world size {dist.get_world_size()} return 0.0")
         return torch.tensor(0.0, dtype=dtype, device=DEVICE)
     else:

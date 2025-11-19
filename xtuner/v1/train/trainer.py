@@ -820,6 +820,7 @@ class Trainer:
         ):
             if not check_health():
                 raise RuntimeError("Health check failed, exit training")
+            logger.info(f"Health check passed at step {self.cur_step}")
 
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
