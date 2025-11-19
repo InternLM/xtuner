@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.nn import functional as F
+from typing_extensions import overload
 
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
@@ -197,6 +198,7 @@ class MultiLatentAttention(nn.Module):
         layer_idx: int = 0,
     ):
         super().__init__()
+        self.name = f"layers.{layer_idx}.self_attn"
         self.head_dim = head_dim
         self.hidden_size = hidden_size
         self.kv_lora_rank = kv_lora_rank
@@ -422,7 +424,7 @@ class MultiLatentAttention(nn.Module):
             block_offsets=seq_ctx.block_table,
         )  # type: ignore[assignment]
 
-        attn_output, extra_info = flash_attn_varlen_func(  # type: ignore
+        attn_output = flash_attn_varlen_func(  # type: ignore
             query_states.squeeze(0),
             key_states.squeeze(0),
             value_states.squeeze(0),
@@ -601,7 +603,7 @@ class MultiLatentAttention(nn.Module):
         assert key_states.size(0) == 1
         assert value_states.size(0) == 1
 
-        raw_output: torch.Tensor | None = None
+        raw_output: torch.Tensor
         softmax_lse: torch.Tensor | None = None
 
         fla_outputs = flash_attn_varlen_func(
@@ -625,7 +627,6 @@ class MultiLatentAttention(nn.Module):
         else:  # npu fused attn doesn't support softmax_lse
             raw_output = fla_outputs
 
-        raw_output = cast(torch.Tensor, raw_output)
         if self.q_head_dim != self.v_head_dim:
             raw_output = raw_output[:, :, : self.v_head_dim]
 
@@ -665,3 +666,13 @@ class MultiLatentAttention(nn.Module):
         cache_v = torch.zeros(num_blocks, block_size, num_heads, head_dim, dtype=dtype, device="cuda")
 
         return cache_k, cache_v
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+    ) -> AttnOutputs: ...
+
+    __call__ = nn.Module.__call__

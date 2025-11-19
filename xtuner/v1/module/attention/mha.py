@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import Annotated, Literal, cast
+from typing import Annotated, Callable, Literal, cast
 
 import torch
 from cyclopts import Parameter
@@ -8,6 +8,7 @@ from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
 from torch import nn
 from torch.distributed.tensor import DTensor
+from typing_extensions import overload
 
 from transformers.models.llama.modeling_llama import repeat_kv
 from xtuner.v1.config import GenerateConfig
@@ -131,6 +132,7 @@ class MultiHeadAttention(nn.Module):
         layer_idx: int = 0,
     ):
         super().__init__()
+        self.name = f"layers.{layer_idx}.self_attn"
         self.head_dim = head_dim
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
@@ -186,7 +188,7 @@ class MultiHeadAttention(nn.Module):
 
         self.apply_rotary_emb = get_apply_rotary_emb()  # type: ignore
 
-        self.attn_impl_func = attn_impl_mapping[attn_impl]
+        self.attn_impl_func: Callable[..., AttnOpOutputs] = attn_impl_mapping[attn_impl]  # type: ignore[assignment]
 
     def prefilling(
         self,
@@ -379,7 +381,7 @@ class MultiHeadAttention(nn.Module):
                 sinks = self.sinks
             kwargs["s_aux"] = sinks
         # [b, n_head, seq, head_dim]
-        attn_op_outputs: AttnOpOutputs = self.attn_impl_func(  # type: ignore
+        attn_op_outputs = self.attn_impl_func(
             query_states,
             key_states,
             value_states,
@@ -437,3 +439,13 @@ class MultiHeadAttention(nn.Module):
         cache_v = torch.zeros(num_blocks, block_size, num_heads, head_dim, dtype=dtype, device="cuda")
 
         return cache_k, cache_v
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+    ) -> AttnOutputs: ...
+
+    __call__ = nn.Module.__call__

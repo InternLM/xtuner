@@ -554,7 +554,7 @@ class MoEDecoderLayer(nn.Module):
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
             )
-            hidden_states = cast(torch.Tensor, attn_outputs["projected_output"])
+            hidden_states = attn_outputs["projected_output"]
         elif state == ForwardState.PREFILLING:
             assert past_key_values is not None, "past_key_values should be provided in pre-filling state"
             hidden_states = self.self_attn.prefilling(

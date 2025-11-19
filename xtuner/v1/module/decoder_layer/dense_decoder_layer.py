@@ -1,4 +1,4 @@
-from typing import Literal, cast
+from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -90,7 +90,7 @@ class DenseDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
         )
-        hidden_states = cast(torch.Tensor, attn_outputs["projected_output"])
+        hidden_states = attn_outputs["projected_output"]
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -140,11 +140,11 @@ class DenseDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states = self.self_attn(
+        hidden_states = self.self_attn.decoding(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
-            state=ForwardState.DECODING,
+            state=ForwardState.DECODING,  # type: ignore   # TODO: Fix outdated interface
         )
         hidden_states = residual + hidden_states
 
