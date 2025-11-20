@@ -177,7 +177,7 @@ class BaseModel(nn.Module):
     fsdp_config: FSDPConfig | None = None
     config: TransformerConfig
 
-    SAFETENSOR_SIZE = 1024**3 * 4  # 4GB
+    SAFETENSOR_SIZE = 1024**3 * 20
     FSDP_SHARD_DIM = 0
 
     def __init__(self):
@@ -515,12 +515,17 @@ class BaseModel(nn.Module):
                     all_hf_keys = hf_keys
 
                 current_rank = dist.get_rank()
-                fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
-                key_per_rank = len(all_hf_keys) / len(fused_save_ranks)
-                assert key_per_rank.is_integer(), (
-                    f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
-                    f"size of `fused_save_ranks` {len(fused_save_ranks)}"
-                )
+
+                expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
+                hardcode_fused_save_ranks = list(range(min((dist.get_world_size(), 16))))
+
+                key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
+                # assert key_per_rank.is_integer(), (
+                #     f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
+                #     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
+                # )
+                if not key_per_rank.is_integer():
+                    key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
 
                 # 1. When return_full_key_per_rank is False, we intends to save hf models across ranks,
                 # each rank only saves part of hf keys and tensors
