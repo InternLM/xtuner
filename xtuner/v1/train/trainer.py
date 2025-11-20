@@ -47,17 +47,11 @@ from xtuner.v1.utils import (
     get_logger,
     is_hf_model_path,
     log_format,
-    profile_time_and_memory,
     record_git_info,
 )
 from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
-from xtuner.v1.utils.internal_metrics import (
-    InternalMetrics,
-    InternalMetricsConfig,
-    InternalMetricsRecorder,
-    flatten_internal_metrics_for_logs,
-)
+from xtuner.v1.utils.internal_metrics import InternalMetrics, InternalMetricsRecorder
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -504,6 +498,11 @@ class Trainer:
         self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
+        self._internal_metrics_interval = internal_metrics_interval
+        if self._internal_metrics_interval is not None:
+            torch._dynamo.config.skip_nnmodule_hook_guards = (
+                False  # otherwise the hook will be ignored for compiled modules
+            )
 
         if tokenizer_path is not None:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -622,8 +621,6 @@ class Trainer:
 
         setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
 
-        self._metrics_recorder = self._maybe_init_model_metrics_recorder(internal_metrics_cfg)
-
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
         """Create a Trainer instance from a TrainerConfig.
@@ -675,7 +672,7 @@ class Trainer:
             grad_norm_dtype=config.grad_norm_dtype,
             hooks_config=config.hooks_config,
             trainer_cfg=config,
-            internal_metrics_cfg=config.internal_metrics_cfg,
+            internal_metrics_interval=config.internal_metrics_interval,
         )
         self.config = config
         return self
@@ -761,7 +758,7 @@ class Trainer:
                 loss_log["maxvio"] = other_log["maxvio"]
             loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
 
-            internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
+            internal_metrics = self._maybe_check_model_internal_metrics(engine_input)
 
             self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
@@ -793,41 +790,20 @@ class Trainer:
 
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
-        if self._metrics_recorder:
-            self._metrics_recorder.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
-    def _maybe_init_model_metrics_recorder(
-        self,
-        internal_metrics_cfg: InternalMetricsConfig | None,
-    ) -> InternalMetricsRecorder | None:
-        if internal_metrics_cfg and internal_metrics_cfg.internal_metrics_interval:
-            self._internal_metrics_interval = internal_metrics_cfg.internal_metrics_interval
-            assert self._internal_metrics_interval > 0, (
-                "internal_metrics_interval must be greater than zero (or set to `None`)"
-            )
-            torch._dynamo.config.skip_nnmodule_hook_guards = (
-                False  # otherwise the hook will be ignored for compiled modules
-            )
-            return InternalMetricsRecorder(internal_metrics_cfg, self._engine)
-
-        else:
-            return None
-
-    def _maybe_pop_model_internal_metrics(self, data_batches: list[ModelItem]) -> InternalMetrics | None:
-        if not self._metrics_recorder:
-            return None
-
+    def _maybe_check_model_internal_metrics(self, data_batches: list[ModelItem]) -> InternalMetrics | None:
         if self._internal_metrics_interval is None:
             return None
 
         if self.cur_step % self._internal_metrics_interval != 0 and self.cur_step != self.total_step:
             return None
 
-        with profile_time_and_memory("[Check Model Internal Metrics]"):
-            metrics = self._metrics_recorder.pop_metrics(data_batches)
-
-        return metrics
+        with InternalMetricsRecorder(self._engine) as metrics_recorder:
+            logger.info("Start calculating model internal metrics...")
+            metrics: InternalMetrics = metrics_recorder.get_metrics(data_batches)
+            logger.info("Calculating model internal metrics done.")
+            return metrics
 
     @property
     def world_size(self) -> int:
@@ -1406,7 +1382,7 @@ class Trainer:
         step_time: float,
         train_time: float,
         grad_norm: float,
-        internal_metrics: InternalMetrics | None = None,
+        internal_metrics: dict[str, float] | None = None,
     ):
         """Log the training step information."""
         tgs = step_consumed_tokens / step_time
@@ -1426,14 +1402,13 @@ class Trainer:
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
-
-        flattened_internal_metrics = {}
-        if internal_metrics:
-            flattened_internal_metrics = flatten_internal_metrics_for_logs(internal_metrics)
+        if internal_metrics is None:
+            internal_metrics = {}
+        else:
+            internal_metrics = _flatten_nested_metrics(internal_metrics)  # type: ignore[arg-type]  #TODO: @nil0x9, resolve mypy error
 
         self.logger.info(
-            f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
-            f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
+            f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
             f"total_consumed_tokens: {total_consumed_tokens} "
             f"{loss_log_str} "
@@ -1460,7 +1435,7 @@ class Trainer:
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
-            **flattened_internal_metrics,
+            **internal_metrics,
         }
         log_scalars.update({f"loss/{k}": v for k, v in loss_log.items()})
         self._exp_tracker.add_scalars(tag_scalar_dict=log_scalars, global_step=self.cur_step)
@@ -1715,3 +1690,19 @@ class Trainer:
             log_str += f"{k}: {v}\n"
         log_str += "=================================================="
         logger.info(log_str)
+
+
+def _flatten_nested_metrics(metrics: InternalMetrics, sep: str = "/") -> dict:
+    items = []
+    for name, sub_metrics in metrics.items():
+        if isinstance(sub_metrics, dict):
+            for k, v in sub_metrics.items():
+                if isinstance(v, (float, int)):
+                    items.append((f"{name}{sep}{k}", v))
+                else:
+                    raise ValueError(f"Unsupported metric value type: expected float or int, but got {type(v)}")
+        else:
+            raise ValueError(
+                f"Unsupported metric type for internal metrics: expected dict, but got {type(sub_metrics)}"
+            )
+    return dict(items)
