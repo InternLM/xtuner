@@ -247,6 +247,7 @@ def preprocess_intern_s1(
 
 def add_video_root(messages, video_root):
     for msg in messages:
-        for content in msg['content']:
-            if content['type'] == 'video':
-                content['path'] = video_root + content['path']
+        if 'content' in msg:
+            for content in msg['content']:
+                if 'type' in content and content['type'] == 'video':
+                    content['path'] = video_root + content['path']

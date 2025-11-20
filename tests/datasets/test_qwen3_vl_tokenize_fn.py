@@ -206,7 +206,7 @@ class TestMLLMTokenizeFn(TestCase):
 
                 # to hf openai format
                 messages = hf_raw_data['messages']
-                add_video_root(messages)
+                add_video_root(messages, VIDEO_ROOT)
                 ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
                                                          return_dict=True, return_tensors="pt")
                 input_ids_hf = ret['input_ids'][0]
