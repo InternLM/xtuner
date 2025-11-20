@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
@@ -72,6 +72,7 @@ class RLRolloutResponseItem(BaseModel):
     finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
     logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
+    state: Literal["init", "completed", "interrupted", "skipped", "failed"] = "init"
 
 
 class RLJudgerResponseItem(BaseModel):
@@ -147,28 +148,31 @@ class RLDataFlowItem(BaseModel):
     extra_info: RLExtraDataItem = RLExtraDataItem()
 
 
-def check_dataflow_item(group_data_items):
-    if not group_data_items or len(group_data_items) == 0:
+def check_valid_rollout_item(group_data_items: List[RLRolloutResponseItem]) -> bool:
+    for item in group_data_items:
+        response_valid = bool(item.response)
+        ids_valid = bool(item.response_ids)
+        logprobs_valid = bool(item.logprobs)
+        if not response_valid and not ids_valid:
+            return False
+        if ids_valid and logprobs_valid and len(item.logprobs) != len(item.response_ids):  # type: ignore[arg-type]
+            return False
+    return True
+
+
+def check_valid_dataflow_item(group_data_items: List[RLDataFlowItem], is_training: bool = False) -> bool:
+    rollout_vaild = check_valid_rollout_item(group_data_items=[item.env.rollout for item in group_data_items])
+    if not rollout_vaild:
         return False
 
-    # 如果存在abort的状态，相当于跳过检查，下次会重新rollout
-    is_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
-    is_skipped = any(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
-    if is_abort or is_skipped:
-        return True
-
-    no_failures = all(item.env.rollout.finish_reason != "failed" for item in group_data_items)
-    if not no_failures:
+    is_abort = any(item.env.rollout.state == "abort" for item in group_data_items)
+    if is_training and is_abort:
         return False
-
-    no_judger_failures = all(item.env.judger.extra_info.get("state", "") != "failed" for item in group_data_items)
-    if not no_judger_failures:
+    is_skipped = any(item.env.rollout.state == "skipped" for item in group_data_items)
+    is_failed = any(item.env.rollout.state == "failed" for item in group_data_items)
+    if is_skipped or is_failed:
         return False
-
-    all_responses_valid = all(item.env.rollout.response for item in group_data_items)
-    all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
-
-    return all_responses_valid or all_ids_valid
+    return True
 
 
 def update_dataflow_item(group_data_items, target_key, target_value):
