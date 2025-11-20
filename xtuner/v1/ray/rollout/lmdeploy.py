@@ -246,6 +246,7 @@ class LMDeployWorker(RolloutWorker):
                 device_type=accelerator_to_device_type[self.accelerator],
                 logprobs_mode="raw_logprobs",
                 session_len=self.config.context_length,
+                model_format="fp8" if self.config.enable_float8 else None,
                 **extra_engine_config,
             )
             if backend == "pytorch"
@@ -255,6 +256,7 @@ class LMDeployWorker(RolloutWorker):
                 devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
                 empty_init=self.config.skip_load_weights,
                 session_len=self.config.context_length,
+                model_format="fp8" if self.config.enable_float8 else None,
             )
         )
         if backend == "pytorch" and self.accelerator == "NPU":
