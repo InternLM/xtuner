@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams, check_dataflow_item
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
@@ -150,7 +150,6 @@ class Evaluator:
         assert isinstance(self.dataloader, Sized)
 
         self.env_controller = env_controller
-        self.failed_samples_count = 0
         self.return_list: List[RLDataFlowItem] = []
         if self.config.eval_sample_ratio > 0:
             self.eval_batch_size = int(len(self.dataloader) * self.config.eval_sample_ratio)
@@ -191,19 +190,8 @@ class Evaluator:
             RLDataFlowItem or None: The sample with retry information if it
                 failed, or None if it succeeded or failed without a sample.
         """
-        try:
-            # note: In the evaluator, we convert the input sample to a list to adapt to the input format of single_turn_env
-            group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
-            check_result, msg = check_dataflow_item(group_sample)
-            if not check_result and len(group_sample) > 0:
-                group_sample[0].extra_info.retry_times += 1
-                self.logger.info(f"check_dataflow_item failed for {msg} and returning meta for retry.")
-                return group_sample[0]
-            self.return_list.append(group_sample[0])
-        except Exception as e:
-            self.logger.error(f"Worker task failed with exception: {e}. Returning meta for retry.")
-            sample.extra_info.retry_times += 1
-            return sample
+        group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
+        self.return_list.append(group_sample[0])
 
     async def concurrent_eval_task_runner(self):
         """Runs evaluation tasks concurrently to generate a batch of samples.
@@ -220,7 +208,7 @@ class Evaluator:
         with tqdm(total=self.eval_batch_size, desc="Rollout for eval samples") as pbar:
             update_step = max(1, int(self.eval_batch_size * 0.1))
             next_update_threshold = update_step
-            while len(self.return_list) < self.eval_batch_size and self.failed_samples_count < self.eval_batch_size:
+            while len(self.return_list) < self.eval_batch_size:
                 if len(self.return_list) >= next_update_threshold:
                     pbar.n = len(self.return_list)
                     pbar.refresh()
@@ -241,35 +229,13 @@ class Evaluator:
                 if len(waiting_tasks) == 0:
                     break
 
-                done_tasks, pending_tasks = await asyncio.wait(
-                    waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in done_tasks:
-                    result = task.result()
-                    if result is not None:
-                        if result.extra_info.retry_times < self.config.max_retry_times:
-                            # If the retry count is less than max_retry_times, retry the task
-                            retry_task = create_task(self.eval_worker_task(result))
-                            pending_tasks.add(retry_task)
-                        else:
-                            self.logger.error(f"Max retry reached for {result.uid.action_id}. Not retrying.")
-                            self.failed_samples_count += 1
-
+                _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
                 waiting_tasks = pending_tasks
 
             pbar.n = len(self.return_list)
             pbar.refresh()
 
-        if self.failed_samples_count == self.eval_batch_size:
-            self.logger.warning(
-                f"{self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
-            )
-        else:
-            self.logger.info(
-                f"Target batch size reached, and {self.failed_samples_count} samples failed and were skipped. Pausing rollout controller."
-            )
-        ray.get(self.env_controller.pause.remote())
-
+        self.logger.info("Target batch size reached and pausing rollout controller.")
         if waiting_tasks:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 

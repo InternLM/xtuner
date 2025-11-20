@@ -19,7 +19,7 @@ from xtuner.v1.data_proto.rl_data import (
     RLEnvDataItem,
     RLExtraDataItem,
     RLUIDItem,
-    check_dataflow_item,
+    check_valid_dataflow_item,
 )
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
@@ -44,17 +44,6 @@ class ReplayState(str, Enum):
             if state.value == state_str:
                 return state
         raise ValueError(f"Unknown ReplayState string: {state_str}")
-
-    @staticmethod
-    def from_finish_reason(finish_reason: str) -> "ReplayState":
-        if finish_reason == "abort":
-            return ReplayState.INTERRUPTED
-        elif finish_reason == "failed":
-            return ReplayState.FAILED
-        elif finish_reason == "completed":
-            return ReplayState.COMPLETED
-        else:
-            raise ValueError(f"Unknown finish_reason: {finish_reason}")
 
 
 @dataclass
@@ -86,6 +75,23 @@ class ReplayMeta:
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
 
+def determine_group_state(group_data_items: List[RLDataFlowItem]) -> str:
+    """Determines the processing strategy for a group of rollout samples based
+    on their state."""
+    # TODO(@duanyanhui): remove this function when send one request instead of group requests.
+    if not group_data_items or len(group_data_items) == 0:
+        return "skipped"
+    group_states = {item.env.rollout.state for item in group_data_items}
+    if "skipped" in group_states or "failed" in group_states:
+        return "skipped"
+    elif "interrupted" in group_states:
+        return "interrupted"
+    elif all(state == "completed" for state in group_states):
+        return "completed"
+    else:
+        raise ValueError(f"Unknown group states: {group_states}")
+
+
 def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> ReplayMeta:
     # TODO: 单独管理每一条query，而不是一组query，提高效率
     assert len(grouped_dataitem) > 0
@@ -108,13 +114,11 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
 
     version = max(observation_versions)
 
-    rollout_finish_reason = "completed"
-    if any(item.env.rollout.finish_reason == "failed" for item in grouped_dataitem):
-        rollout_finish_reason = "failed"
-    elif any(item.env.rollout.finish_reason == "abort" for item in grouped_dataitem):
-        rollout_finish_reason = "abort"
+    group_state = determine_group_state(grouped_dataitem)
+    
 
-    replay_state = ReplayState.from_finish_reason(rollout_finish_reason)
+    replay_state = ReplayState.from_str(group_state)
+    logger.debug(f"determined group_state: {group_state}, replay_state: {replay_state}")
     replay_meta = ReplayMeta(
         env=env_str,
         root_id=root_id,
@@ -320,25 +324,21 @@ class ReplayBufferStorage:
             grouped_dataitem (List[RLDataFlowItem]): A list of data items
                 belonging to the same group.
         """
-        check_result, msg = check_dataflow_item(grouped_dataitem)
-        if not check_result:
-            log_action_id = grouped_dataitem[0].uid.action_id if len(grouped_dataitem) > 0 else "None"
-            self.logger.warning(
-                f"Dataflow item check failed because {msg} for {log_action_id} response. Skipping adding to replay buffer."
-            )
+        if (
+            grouped_dataitem is None
+            or len(grouped_dataitem) == 0
+            or check_valid_dataflow_item(grouped_dataitem) is False
+        ):
             return
-
+        
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
-
         root_id = replay_meta.root_id
         action_id = replay_meta.action_id
 
         # 1. 跟prompt相关的action_id记录
         if root_id in self._root2actions:
             replay_meta.version += 1
-            self.logger.debug(
-                f"Existing root_id: {root_id} found. Incrementing version to {replay_meta.version}. Sample data: {grouped_dataitem[0].data}, response: {grouped_dataitem[0].env.rollout}"
-            )
+            self.logger.debug(f"Existing root_id: {root_id} found. Incrementing version to {replay_meta.version}.")
             self._root2actions[root_id].append(action_id)
         else:
             self._root2actions[root_id] = [action_id]

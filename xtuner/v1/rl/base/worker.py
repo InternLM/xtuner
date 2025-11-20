@@ -407,14 +407,15 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         logger_msg = f"Rollout {rollout_idx}: "
 
+        sum_entropy = cast(torch.Tensor, sum_entropy)
+        dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
+        avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+        logger_msg += f" avg generation entropy: {avg_gen_entropy:.4f}"
+
         if len(all_rollout_is_metrics) > 0:
             rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
             logger_msg += f"\n\nrollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
 
-        sum_entropy = cast(torch.Tensor, sum_entropy)
-        dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
-        avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-        logger_msg += f"\n\navg generation entropy: {avg_gen_entropy:.4f}"
         self.logger.info(logger_msg)
 
         if self._has_ref:

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
@@ -72,6 +72,7 @@ class RLRolloutResponseItem(BaseModel):
     finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
     logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
+    state: Literal["init", "completed", "interrupted", "skipped", "failed"] = "init"
 
     def update(self, other: "RLRolloutResponseItem") -> None:
         """Updates another RLRolloutResponseItem into this one for partial
@@ -94,6 +95,7 @@ class RLRolloutResponseItem(BaseModel):
         self.num_return_tokens += other.num_return_tokens
         self.finish_reason = other.finish_reason
         self.extra_info.update(other.extra_info)
+        self.state = other.state
 
 
 class RLJudgerResponseItem(BaseModel):
@@ -170,7 +172,7 @@ class RLDataFlowItem(BaseModel):
     extra_info: RLExtraDataItem = RLExtraDataItem()
 
 
-def check_dataflow_item(group_data_items: List[RLDataFlowItem]) -> tuple[bool, str]:
+def check_valid_dataflow_item(group_data_items: List[RLDataFlowItem]) -> bool:
     """Validates a group of RLDataFlowItem objects based on their state and
     data integrity.
 
@@ -189,47 +191,18 @@ def check_dataflow_item(group_data_items: List[RLDataFlowItem]) -> tuple[bool, s
         - bool: True if the group is valid or can be retried, False otherwise.
         - str: A message explaining the validation result.
     """
-    if not group_data_items:
-        return False, "Input `group_data_items` is empty."
-
-    # 检查 'abort' 和 'skipped' 状态，具有最高优先级
-    has_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
-    if has_abort:
-        return True, "Found 'abort' in rollout finish_reason. The group will be retried."
-
-    has_skipped = any(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
-    if has_skipped:
-        return True, "Found 'skipped' in rollout finish_reason. The group will be retried."
-
-    # 遍历一次，执行所有剩余的检查
-    for i, item in enumerate(group_data_items):
+    for item in group_data_items:
         rollout_info = item.env.rollout
-        judger_info = item.env.judger
-
-        # 检查 rollout 失败
-        if rollout_info.finish_reason == "failed":
-            return False, "Exist failed rollout response."
-
-        # 检查 judger 失败
-        if judger_info.extra_info.get("state") == "failed":
-            return False, "Exist failed judger response."
-
-        # 检查数据完整性
         response_valid = bool(rollout_info.response)
         ids_valid = bool(rollout_info.response_ids)
         logprobs_valid = bool(rollout_info.logprobs)
-
+        if item.env.rollout.state in ["skipped", "failed"]:
+            return False
         if not response_valid and not ids_valid:
-            return False, "DataItem has neither `response` nor `response_ids`."
-
+            return False
         if ids_valid and logprobs_valid and len(rollout_info.logprobs) != len(rollout_info.response_ids):  # type: ignore[arg-type]
-            return (
-                False,
-                f"`logprobs` length ({len(rollout_info.logprobs)}) does not match "  # type: ignore[arg-type]
-                f"`response_ids` length ({len(rollout_info.response_ids)}).",  # type: ignore[arg-type]
-            )
-
-    return True, "All items in the group passed validation."
+            return False
+    return True
 
 
 def update_dataflow_item(group_data_items, target_key, target_value):

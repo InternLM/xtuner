@@ -26,7 +26,7 @@ from .worker import RolloutWorker
 @dataclass
 class WorkerInfo:
     """A data class to hold all state information for a single worker."""
-    
+
     actor: RolloutWorker
     rank: int = -1
     is_active: bool = True
@@ -174,7 +174,7 @@ class RolloutController:
     def _get_active_worker_to_url_map(self):
         """Get a mapping of active workers to their server URLs."""
         return {info.actor: url for url, info in self.workers_info.items()}
-    
+
     def _is_port_in_use(self, host: str, port: int) -> bool:
         """Check if a port is in use on the given host."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -376,25 +376,18 @@ class RolloutController:
         if self.workers_info[server_url].running_count % 100 == 0:
             self.logger.info(f"rank {self.workers_info[server_url].rank} worker info: {self.workers_info[server_url]}")
         try:
-            response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout)
+            response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout * 2)
             self.workers_info[server_url].running_count -= 1
             self.workers_info[server_url].success_count += 1
-            if response.extra_info and "url" in response.extra_info:
-                url = response.extra_info["url"]
-                if response.finish_reason == "failed":
-                    self.deactivate_worker_by_url(url)
-                response.extra_info.pop("url", None)
+            if response.state == "failed":
+                self.deactivate_worker_by_url(server_url)
             return response
         except asyncio.TimeoutError:
             self.workers_info[server_url].running_count -= 1
             self.workers_info[server_url].failure_count += 1
-            self.deactivate_worker_by_url(server_url)
-            self.logger.error(f"Get response from rollout worker {worker} timeout and return the failed response.")
-            failed_response = RLRolloutResponseItem(
-                response="",
-                finish_reason="failed",
-            )
-            return failed_response
+            # self.deactivate_worker_by_url(server_url) # do not deactivate on timeout, only on skipped state
+            self.logger.error(f"Get response from rollout worker {worker} timeout and return skip this sample.")
+            return RLRolloutResponseItem(state="skipped")
 
     def start_api_server(self, host: str = "0.0.0.0", port: int = 8000):
         """Starts the API server to expose the rollout functionality."""
