@@ -297,6 +297,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 headers=headers,
                 json=payload,
             )
+            self.logger.debug(f"Sending request to {url}")
             r = await self.client.send(req)
             r.raise_for_status()
             return HttpRequestResult(response=r)
@@ -430,20 +431,20 @@ class RolloutWorker(SingleAcceleratorWorker):
         response = response.json()
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
             # generate API response
-            last_logprobs = []
+            last_logprobs: list[float] = []
             try:
                 extra_info = {}
                 finish_reason = response["meta_info"]["finish_reason"]["type"]
-                if finish_reason == "abort":
-                    return RLRolloutResponseItem(
-                        finish_reason="abort",
-                    )
                 if "output_token_logprobs" in response["meta_info"]:
-                    last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
-                    last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
-                    assert len(last_token_ids) <= sample_params["max_tokens"], (
-                        f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
-                    )
+                    if response["meta_info"]["output_token_logprobs"] is None:
+                        last_token_ids = []
+                        last_logprobs = []
+                    else:
+                        last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
+                        last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
+                        assert len(last_token_ids) <= sample_params["max_tokens"], (
+                            f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
+                        )
                 else:
                     num_return_tokens = response["meta_info"].get("completion_tokens", 0)
                     last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []

@@ -434,8 +434,9 @@ class DataFlow:
         finish_reasons = {item.env.rollout.finish_reason for item in group_data_items}
         if "skipped" in finish_reasons:
             return ReplayState.SKIPPED, "Request was skipped (e.g., bad request)"
-        if "abort" in finish_reasons:
-            return ReplayState.INTERRUPTED, "Rollout was aborted, adding to interrupted storage"
         if "failed" in finish_reasons or check_dataflow_item(group_data_items)[0] is False:
             return ReplayState.FAILED, "Rollout failed, needs retry"
+        
+        if "abort" in finish_reasons:
+            return ReplayState.INTERRUPTED, "Rollout was aborted, adding to interrupted storage"
         return ReplayState.COMPLETED, "Rollout completed normally"
