@@ -414,7 +414,11 @@ class BaseModel(nn.Module):
         return gathered_tensor_list_new, name_list_new
 
     def _get_shard_hf_param(
-        self, params: list[tuple[torch.Tensor, LoadSpec]], dtype: torch.dtype = torch.bfloat16
+        self,
+        params: list[tuple[torch.Tensor, LoadSpec]],
+        dtype: torch.dtype,
+        device="cpu",
+        bucket_size=None,
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
@@ -442,9 +446,11 @@ class BaseModel(nn.Module):
                 self.param_to_safetensor(safetensor, name)
                 for safetensor, name in zip(unsharded_tensor_list, name_list)
             ]
-            unsharded_tensor_list = [t.cpu() for t in unsharded_tensor_list]
+            unsharded_tensor_list = [t.to(device) for t in unsharded_tensor_list]
             return unsharded_tensor_list
 
+        if bucket_size is None:
+            bucket_size = self.SAFETENSOR_SIZE
         safetensor_size = 0
         tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
         name_list: list[str] = []
@@ -453,7 +459,7 @@ class BaseModel(nn.Module):
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.to(dtype=dtype)
             tensor_size = self._get_tensor_size(param, dtype)
-            if safetensor_size + tensor_size > self.SAFETENSOR_SIZE and tensor_list:
+            if safetensor_size + tensor_size > bucket_size and tensor_list:
                 hf_params = _get_hf_params(tensor_list)
 
                 yield name_list, hf_params
@@ -475,6 +481,7 @@ class BaseModel(nn.Module):
         dtype: torch.dtype,
         device="cpu",
         bucket_size=None,
+        return_full_key_per_rank: bool = False,
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
@@ -515,8 +522,16 @@ class BaseModel(nn.Module):
                     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
                 )
 
-                start = int(current_rank * key_per_rank)
-                end = int(start + key_per_rank)
+                # 1. When return_full_key_per_rank is False, we intends to save hf models across ranks,
+                # each rank only saves part of hf keys and tensors
+                # 2. When return_full_key_per_rank is True, we intends to generate full tensors on each
+                # rank for ipc updating weights in RL training.
+                if not return_full_key_per_rank:
+                    start = int(current_rank * key_per_rank)
+                    end = int(start + key_per_rank)
+                else:
+                    start = 0
+                    end = len(all_hf_keys)
 
                 _hf_key_list = all_hf_keys[start:end]
 
