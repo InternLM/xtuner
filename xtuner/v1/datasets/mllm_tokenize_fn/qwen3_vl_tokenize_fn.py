@@ -187,7 +187,8 @@ def replace_video_token(
                             text = text.replace(IMAGE_TOKEN_ALIAS, video_placeholder)
                             # 在一个 video 中，每一帧的 image_token 应该是完全一样，因此直接 num_image_token_list[i][0] 就行
                             image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[i][0]}{chat_template.image_end_token}"  # type: ignore
-                            text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens)
+                            for frame_idx in range(n_frames):
+                                text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
                             current_image_idx += len(num_image_token_list[i])
                         c.text = text
     assert current_image_idx == n_image, f"VIDEO ERROR: total_image_idx: {current_image_idx} != {n_image}"
@@ -600,7 +601,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 # 提前确保一定可以被 merge_size 整除
                 if num_frames % self.video_processor.merge_size != 0:
                     num_frames += self.video_processor.merge_size - num_frames % self.video_processor.merge_size
-                num_frames_indices_list.append(num_frames)  # 特殊情况
+                num_frames_indices_list.append(int(num_frames))  # 特殊情况
         if len(timestamps_list) > 0:
             assert len(num_frames_indices_list) == len(timestamps_list), (
                 "num_frames_list and timestamps_list should have the same length"
@@ -618,7 +619,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                     "num_frames must be divisible by merge_size"
                 )
             else:
-                assert isinstance(num_frames_indices, int), "num_frames_indices must be int"
+                assert isinstance(num_frames_indices, int), f"num_frames_indices must be int {type(num_frames_indices)}"
                 assert num_frames_indices % self.video_processor.merge_size == 0, (
                     "num_frames must be divisible by merge_size"
                 )
