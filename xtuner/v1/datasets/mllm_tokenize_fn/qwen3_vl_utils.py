@@ -5,8 +5,6 @@ import re
 import time
 from typing import Literal
 
-import cv2
-import imageio
 import numpy as np
 import torch
 from PIL import Image
@@ -49,7 +47,7 @@ def numpy_to_tensor(frames):
     return result
 
 
-def read_frames_folder(video_path, num_frames, timestamps=None, client=None):
+def read_frames_folder(video_path, frames_indices, timestamps=None, client=None):
     oss_read_time = 0
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
@@ -72,47 +70,38 @@ def read_frames_folder(video_path, num_frames, timestamps=None, client=None):
             frames.append(frame)
     vlen = len(frames)
 
-    if vlen > num_frames:
-        # 均匀采样
-        frame_indices = np.linspace(0, vlen - 1, num_frames).round().astype(int)
+    if isinstance(frames_indices, list):
+        assert timestamps is not None, "timestamps should be provided when frames_indices is a list"
+        assert len(frames_indices) == len(timestamps) * 2, "frames_indices and timestamps should have the same length"
+        # 如果外面提供了，则用 index 进行采样，但是如果采样错误，则改为随机均匀采样。这种情况要注意，实际上是不合理的，说明数据存储有问题
+        try:
+            frames = numpy_to_tensor([frames[i] for i in frames_indices])
+        except Exception as e:
+            print(
+                f"！！！Warning: Error sample frames from {video_path} of index {frames_indices}: {e}. Rand {len(frames_indices)} frames."
+            )
+            timestamps = None  # 防止错误，强制清空
+            if vlen > len(frames_indices):
+                # 均匀采样
+                frames_indices = np.linspace(0, vlen - 1, len(frames_indices)).round().astype(int)
+            else:
+                frames_indices = np.arange(vlen)
+            frames = numpy_to_tensor([frames[i] for i in frames_indices])
     else:
-        frame_indices = np.arange(vlen)
-    frames = numpy_to_tensor([frames[i] for i in frame_indices])
-    if timestamps is not None:
-        timestamps = [timestamps[i] for i in frame_indices]
-    return frames, oss_read_time, vlen, frame_indices, timestamps
-
-
-def read_frames_gif(video_path, num_frames, timestamps=None, client=None):
-    if "s3://" in video_path:
-        assert client is not None, "client should be provided for s3 backend"
-        video_bytes = client.get(video_path)
-        gif = imageio.get_reader(io.BytesIO(video_bytes))
-    else:
-        gif = imageio.get_reader(video_path)
-    vlen = len(gif)
-
-    if vlen > num_frames:
-        # 均匀采样
-        frame_indices = np.linspace(0, vlen - 1, num_frames).round().astype(int)
-    else:
-        frame_indices = np.arange(vlen)
-
-    frames = []
-    for index, frame in enumerate(gif):
-        if index in frame_indices:
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB).astype(np.uint8)
-            frame = Image.fromarray(frame)
-            frames.append(frame)
-    frames = numpy_to_tensor(frames)
-    if timestamps is not None:
-        timestamps = [timestamps[i] for i in frame_indices]
-    return frames, frame_indices, timestamps
+        # 如果外面没有提供 frame index，则随机均匀采样，并且时间戳清空
+        assert timestamps is None, "timestamps should be None when frames_indices is an int"
+        if vlen > frames_indices:  # 此时 frames_indices=num_frames
+            # 均匀采样
+            frames_indices = np.linspace(0, vlen - 1, frames_indices).round().astype(int)
+        else:
+            frames_indices = np.arange(vlen)
+        frames = numpy_to_tensor([frames[i] for i in frames_indices])
+    return frames, oss_read_time, vlen, frames_indices, timestamps
 
 
 def read_frames_decord(
     video_path,
-    num_frames,
+    frames_indices,
     timestamps=None,
     client=None,
 ):
@@ -129,36 +118,47 @@ def read_frames_decord(
         video_reader = VideoReader(video_path, num_threads=decord_video_threads)
         start_time = time.time()
     vlen = len(video_reader)
-    fps = video_reader.get_avg_fps()
 
-    frame_indices = np.linspace(0, vlen - 1, num_frames).round().astype(int)
-    frames = video_reader.get_batch(frame_indices).asnumpy()  # (T, H, W, C), np.uint8
+    if isinstance(frames_indices, list):
+        assert timestamps is not None, "timestamps should be provided when frames_indices is a list"
+        assert len(frames_indices) == len(timestamps) * 2, "frames_indices and timestamps should have the same length"
+        # 如果外面提供了，则用 index 进行采样，但是如果采样错误，则改为随机均匀采样。这种情况要注意，实际上是不合理的，说明数据存储有问题
+        try:
+            frames = video_reader.get_batch(frames_indices).asnumpy()  # (T, H, W, C), np.uint8
+        except Exception as e:
+            print(
+                f"！！！Warning: Error sample frames from {video_path} of index {frames_indices}: {e}. Rand {len(frames_indices)} frames."
+            )
+            timestamps = None  # 防止错误，强制清空
+            frames_indices = np.linspace(0, vlen - 1, len(frames_indices)).round().astype(int)
+            frames = video_reader.get_batch(frames_indices).asnumpy()  # (T, H, W, C), np.uint8
+    else:
+        # 如果外面没有提供 frame index，则随机均匀采样，并且时间戳清空
+        assert timestamps is None, "timestamps should be None when frames_indices is an int"
+        frames_indices = np.linspace(0, vlen - 1, frames_indices).round().astype(int)
+        frames = video_reader.get_batch(frames_indices).asnumpy()  # (T, H, W, C), np.uint8
     video_get_batch_time = time.time() - start_time
     frames = numpy_to_tensor(frames)
-    if timestamps is not None:
-        timestamps = [timestamps[i] for i in frame_indices]
-    return frames, oss_read_time, video_get_batch_time, vlen, frame_indices, timestamps
+    return frames, oss_read_time, video_get_batch_time, vlen, frames_indices, timestamps
 
 
 # qwen3 vl 一定是均匀采样
 def read_qwen3_vl_video(
     path,
-    num_frames,
+    frames_indices,
     timestamps=None,
     client=None,
     debug=False,
     oss_time_log_thr=10,
 ):
     start_time = time.time()
-    oss_read_time = 0
-    vlen = 0
     video_get_batch_time = 0
     if path.endswith("/"):
         frames, oss_read_time, vlen, frame_indices, timestamps = read_frames_folder(
-            path, num_frames, timestamps, client=client
+            path, frames_indices, timestamps, client=client
         )
     elif path.endswith(".gif"):
-        frames, frame_indices, timestamps = read_frames_gif(path, num_frames, timestamps, client=client)
+        raise NotImplementedError("gif format is not supported")
     elif (
         path.endswith(".mp4")
         or path.endswith(".avi")
@@ -171,7 +171,7 @@ def read_qwen3_vl_video(
         or path.endswith(".ts")
     ):
         frames, oss_read_time, video_get_batch_time, vlen, frame_indices, timestamps = read_frames_decord(
-            path, num_frames, timestamps, client=client
+            path, frames_indices, timestamps, client=client
         )
     else:
         raise ValueError(f"Unsupported video format: {path}")
@@ -200,7 +200,7 @@ class Qwen3VLOSSLoader:
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
 
-    def __call__(self, path, image_type="image", num_frames=None, timestamps=None):
+    def __call__(self, path, image_type="image", frames_indices=None, timestamps=None):
         if image_type == "image":
             start_time = time.time()
             img_value_str = self.client.get(path)
@@ -214,7 +214,7 @@ class Qwen3VLOSSLoader:
         elif image_type == "video":
             return read_qwen3_vl_video(
                 path,
-                num_frames=num_frames,
+                frames_indices=frames_indices,
                 timestamps=timestamps,
                 client=self.client,
                 debug=self.debug,

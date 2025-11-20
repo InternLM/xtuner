@@ -180,8 +180,9 @@ def replace_video_token(
                             video_placeholder = ""
                             for frame_idx in range(n_frames):
                                 if len(timestamps_list) > 0:
-                                    curr_time = timestamps_list[i][frame_idx]
-                                    video_placeholder += f"<{curr_time:.1f} seconds>"
+                                    if timestamps_list[i] is not None:
+                                        curr_time = timestamps_list[i][frame_idx]
+                                        video_placeholder += f"<{curr_time:.1f} seconds>"
                                 video_placeholder += IMAGE_TOKEN_ALIAS
                             text = text.replace(IMAGE_TOKEN_ALIAS, video_placeholder)
                             # 在一个 video 中，每一帧的 image_token 应该是完全一样，因此直接 num_image_token_list[i][0] 就行
@@ -503,7 +504,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
         5. 除了上述外，如果还额外存在 conversation_timestamps，则将这个内容直接追加到每个 <VIDEO_CONTEXT> 后面
         """
-        num_frames_list = []
+        num_frames_indices_list = []
         origin_fps_list = []
         timestamps_list = []
         if len(self._video_extra_info_list) > 0:
@@ -585,9 +586,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                                 timestamps=frames_timestamp,
                             )
                 timestamps_list.append(timestamps)
-                num_frames_list.append(len(indices))
+                num_frames_indices_list.append(indices)
 
-        if len(num_frames_list) == 0:
+        if len(num_frames_indices_list) == 0:
             # 如果 self._video_extra_info_list 啥都没有,则完全随机采样
             # 根据采样的帧数（min_num_frames, max_num_frames+1），计算token数量，实际可能采样不到这么多帧（比如视频一共只有10帧），算出来num_tokens可能会偏大
             for video_path in self._video_path:
@@ -596,28 +597,44 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                     self.video_processor.min_frames,
                     self.rand_video_max_frames,
                 )
-                num_frames_list.append(num_frames)
+                # 提前确保一定可以被 merge_size 整除
+                if num_frames % self.video_processor.merge_size != 0:
+                    num_frames += self.video_processor.merge_size - num_frames % self.video_processor.merge_size
+                num_frames_indices_list.append(num_frames)  # 特殊情况
         if len(timestamps_list) > 0:
-            assert len(num_frames_list) == len(timestamps_list), (
+            assert len(num_frames_indices_list) == len(timestamps_list), (
                 "num_frames_list and timestamps_list should have the same length"
             )
-            for num_frames, timestamps in zip(num_frames_list, timestamps_list):
-                assert num_frames == len(timestamps) * 2
+            for num_frames_indices, timestamps in zip(num_frames_indices_list, timestamps_list):
+                assert len(num_frames_indices) == len(timestamps) * 2
 
         if len(origin_fps_list) > 0:
-            assert len(origin_fps_list) == len(num_frames_list), (
-                "origin_fps_list and num_frames_list should have the same length"
+            assert len(origin_fps_list) == len(num_frames_indices_list), (
+                "origin_fps_list and num_frames_indices_list should have the same length"
             )
-        return num_frames_list, origin_fps_list, timestamps_list
+        for num_frames_indices in num_frames_indices_list:
+            if isinstance(num_frames_indices, list):
+                assert len(num_frames_indices) % self.video_processor.merge_size == 0, (
+                    "num_frames must be divisible by merge_size"
+                )
+            else:
+                assert isinstance(num_frames_indices, int), "num_frames_indices must be int"
+                assert num_frames_indices % self.video_processor.merge_size == 0, (
+                    "num_frames must be divisible by merge_size"
+                )
+        return num_frames_indices_list, origin_fps_list, timestamps_list
 
     def calc_num_tokens_video_get_item(self, data_item: dict) -> CacheItem:
         assert len(self._video_wh_list) >= 1, "video wh list must be non-empty"
-        num_frames_list, _, timestamps_list = self.calc_frame_info(data_item)
+        frames_indices_list, _, timestamps_list = self.calc_frame_info(data_item)
         num_image_token_list = []
         total_sum_media_grid_thw = 0
         for i, wh in enumerate(self._video_wh_list):
             height, width = wh
-            num_frames = num_frames_list[i]
+            if isinstance(frames_indices_list[i], int):
+                num_frames = frames_indices_list[i]
+            else:
+                num_frames = len(frames_indices_list[i])
             # 图片宽高比可能不符合 qwen3vl 要求
             try:
                 resized_height, resized_width = video_smart_resize(
@@ -633,11 +650,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 print(f"ERROR of {self._video_wh_list}: {e}, data_name: {self.data_name}")
                 return {"num_tokens": 0}  # type: ignore
 
-            # 如果 num_frames 不是 temporal_patch_size 的整数倍，需要确保可以整除
-            if num_frames % self.video_processor.temporal_patch_size != 0:
-                # 这个代码实际上只有在 temporal_patch_size=2 才是对的，不修复的原因是： hf 里面是这么写的，没法随便改，否则会出现 cache 问题
-                # 但是幸好，temporal_patch_size 就是等于 2
-                num_frames += self.video_processor.temporal_patch_size - 1
+            assert num_frames % self.video_processor.merge_size == 0, "num_frames must be divisible by merge_size"
 
             grid_t = num_frames // self.video_processor.temporal_patch_size
             grid_h, grid_w = (
@@ -690,43 +703,42 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         total_sum_media_grid_thw = 0
         grid_thw_list = []
 
-        num_frames_list, origin_fps_list, timestamps_list = self.calc_frame_info(data_item)
+        frames_indices_list, origin_fps_list, timestamps_list = self.calc_frame_info(data_item)
 
         for i, video_path in enumerate(self._video_path):
-            num_frames = num_frames_list[i]
+            frames_indices = frames_indices_list[i]
             timestamps = None
             if len(timestamps_list) > 0:
                 timestamps = timestamps_list[i]
 
             video_path = os.path.join(media_root, video_path)
 
-            # 上面计算的 num_frames 是理论值，需要根据实际读取的数进行更新
             if self.oss_loader is not None:
                 image_list, frame_indices, timestamps = self.oss_loader(
-                    video_path, image_type="video", num_frames=num_frames, timestamps=timestamps
+                    video_path, image_type="video", frames_indices=frames_indices, timestamps=timestamps
                 )
             else:
                 image_list, frame_indices, timestamps = read_qwen3_vl_video(
-                    video_path, num_frames=num_frames, timestamps=timestamps
+                    video_path, frames_indices=frames_indices, timestamps=timestamps
                 )
 
-            if timestamps is not None:
-                assert len(timestamps) == len(image_list) == len(frame_indices)
+            assert len(image_list) % self.video_processor.merge_size == 0, "num_frames must be divisible by merge_size"
+            assert len(frame_indices) % self.video_processor.merge_size == 0, (
+                "num_frames must be divisible by merge_size"
+            )
+            # timestamps 可能本身不是 0，但是因为数据错误，返回可能变成 0
+            if len(timestamps_list) > 0:
+                if timestamps is not None:
+                    assert len(timestamps) * 2 == len(image_list) == len(frame_indices)
+                assert len(frame_indices) % self.video_processor.merge_size == 0, (
+                    "num_frames must be divisible by merge_size"
+                )
+                timestamps_list[i] = timestamps  # 记得要重新更新
 
             video_data = torch.stack(image_list)  # num_patch,3,h,w
             num_frames = len(image_list)
 
-            if len(origin_fps_list) > 0:
-                origin_fps = origin_fps_list[i]
-                # 如果 timestamps 无法被整除，则会追加, 官方代码写的有不少问题
-                timestamps = calculate_timestamps(
-                    frame_indices, origin_fps, merge_size=self.video_processor.merge_size, timestamps=timestamps
-                )
-
-            if len(timestamps_list) > 0:
-                timestamps_list[i] = timestamps  # 记得要重新更新
-
-            # 如果视频长度无法被整除，也会追加
+            # 前面保证了一定可以被 merge_size 整除，因此内部一定不会额外 padding
             video_result = self.video_processor._preprocess(
                 [video_data],
                 size=self.size,

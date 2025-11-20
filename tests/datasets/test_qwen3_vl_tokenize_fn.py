@@ -125,7 +125,13 @@ class TestMLLMTokenizeFn(TestCase):
             for i, line in enumerate(f):
                 raw_data = json.loads(line)
                 self.tokenize_fn(raw_data)
-                num_frames_list, origin_fps_list, timestamps_list = self.tokenize_fn.calc_frame_info(raw_data)
+                frames_indices_list, origin_fps_list, timestamps_list = self.tokenize_fn.calc_frame_info(raw_data)
+                num_frames_list = []
+                for frames_indices in frames_indices_list:
+                    if isinstance(frames_indices, int):
+                        num_frames_list.append(frames_indices)
+                    else:
+                        num_frames_list.append(len(frames_indices))
                 if i == 0:
                     # case: 如果不存在 origin_fps ，则会基于预设的 rand_video_max_frames 参数随机采样
                     assert len(origin_fps_list) == len(timestamps_list) == 0
