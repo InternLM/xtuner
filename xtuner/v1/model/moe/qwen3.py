@@ -119,7 +119,7 @@ class Qwen3MoEConfig(MoEConfig):
             num_experts=self.n_routed_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             norm_topk_prob=self.router.norm_topk_prob,
-            dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16,  # TODO: update all outdated hf `dtype` kwarg @jayhenry
         )
 
 
