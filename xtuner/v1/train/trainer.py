@@ -41,8 +41,6 @@ from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.profiler.prober_utils import setup_prober_list
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
-    InternalMetrics,
-    InternalMetricsRecorder,
     ParallelConfigException,
     get_logger,
     is_hf_model_path,
@@ -51,6 +49,7 @@ from xtuner.v1.utils import (
 )
 from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.internal_metrics import InternalMetrics, InternalMetricsRecorder
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
