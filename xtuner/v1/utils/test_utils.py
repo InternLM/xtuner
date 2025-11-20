@@ -243,3 +243,10 @@ def preprocess_intern_s1(
         input_ids=cast(List[int], input_ids.tolist()),
         labels=cast(List[int], targets.tolist()),
     )
+
+
+def add_video_root(messages, video_root):
+    for msg in messages:
+        for content in msg['content']:
+            if content['type'] == 'video':
+                content['path'] = video_root + content['path']

@@ -5,6 +5,8 @@ from transformers import AutoTokenizer, AutoProcessor
 import json
 import torch
 import parametrize
+from xtuner.v1.utils.test_utils import add_video_root
+
 
 QWEN3_VL_PATH = os.environ["QWEN3_VL_MOE_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
@@ -183,12 +185,19 @@ class TestMLLMTokenizeFn(TestCase):
 
     def test_qwen3_vl_sft_video(self):
         data_path = 'tests/resource/mllm_sft_video_example_data.jsonl'
+        hf_data_path = 'tests/resource/mllm_sft_video_hf_example_data.jsonl'
+        hf_raw_datas = []
+        with open(hf_data_path) as f:
+            for line in f:
+                hf_raw_datas.append(json.loads(line))
+
         total_index = [1, 4, 5]
         with open(data_path) as f:
             for i, line in enumerate(f):
                 if i not in total_index:
                     continue
                 raw_data = json.loads(line)
+                hf_raw_data = hf_raw_datas[i]
 
                 ret = self.tokenize_fn(raw_data, media_root=VIDEO_ROOT)
                 input_ids_xtuner = ret['input_ids']
@@ -196,15 +205,8 @@ class TestMLLMTokenizeFn(TestCase):
                 image_grid_thw_xtuner: torch.Tensor = ret['image_grid_thw']
 
                 # to hf openai format
-                messages = raw_data['messages']
-                messages[0]['content'][0]['type'] = 'video'
-                messages[0]['content'][0]['path'] = VIDEO_ROOT + messages[0]['content'][0]['video_url']['url']
-                messages[0]['content'][1]['text'] = messages[0]['content'][1]['text'].replace('<VIDEO_CONTEXT>', '')
-                del messages[0]['content'][0]['video_url']
-                for msg in messages:
-                    if not isinstance(msg['content'], list):
-                        msg['content'] = [{"type": "text", "text": msg['content']}]
-
+                messages = hf_raw_data['messages']
+                add_video_root(messages)
                 ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
                                                          return_dict=True, return_tensors="pt")
                 input_ids_hf = ret['input_ids'][0]

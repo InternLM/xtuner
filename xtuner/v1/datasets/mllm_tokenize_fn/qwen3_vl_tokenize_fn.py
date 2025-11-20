@@ -783,7 +783,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
             num_image_tokens_list.append([frame_seqlen] * grid_thw[0][0])
-            pixel_values_list.append(image_tensor)
             num_imgs_list.append(num_frames)
             total_sum_media_grid_thw += sum_media_grid_thw
 
