@@ -100,6 +100,7 @@ def sample_frames(
     if num_frames is None:
         num_frames = int(total_num_frames / origin_fps * fps)
         num_frames = min(max(num_frames, min_frames), max_frames, total_num_frames)
+    num_frames = max(num_frames, min_frames)  # 额外保证
 
     indices = np.linspace(0, total_num_frames - 1, num_frames).round().astype(int)
 
@@ -123,7 +124,7 @@ def calculate_timestamps(
     # @JJJYmmm frames are merged by self.merge_size, \
     # so we need to average the timestamps between the first/last frame within the temporal patch
     timestamps = [(timestamps[i] + timestamps[i + merge_size - 1]) / 2 for i in range(0, len(timestamps), merge_size)]
-    return timestamps
+    return indices, timestamps
 
 
 def replace_video_token(
@@ -530,7 +531,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                         min_frames=self.video_processor.min_frames,
                         max_frames=self.video_processor.max_frames,
                     )
-                    timestamps = calculate_timestamps(indices, origin_fps, merge_size=self.video_processor.merge_size)
+                    indices, timestamps = calculate_timestamps(
+                        indices, origin_fps, merge_size=self.video_processor.merge_size
+                    )
                 else:
                     assert processed_fps is not None
                     if frames_timestamp is not None:
@@ -540,17 +543,17 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                         )
 
                     if processed_fps % self.video_processor.fps == 0:
-                        # 如果 processed_fps 是 fps 的整数倍, 则允许降采样重算 fps 值,并进行重新均匀采样
+                        # 如果 processed_fps 是 fps 的整数倍, 则允许再次进行降采样
                         indices = sample_frames(
                             origin_total_num_frames=processed_video_length,
                             origin_fps=processed_fps,
-                            fps=processed_fps // self.video_processor.fps,
+                            fps=self.video_processor.fps,
                             min_frames=self.video_processor.min_frames,
                             max_frames=self.video_processor.max_frames,
                         )
                         if frames_timestamp is not None:
                             frames_timestamp = [frames_timestamp[i] for i in indices]
-                        timestamps = calculate_timestamps(
+                        indices, timestamps = calculate_timestamps(
                             indices,
                             processed_fps,
                             merge_size=self.video_processor.merge_size,
@@ -566,7 +569,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                             )
                             if frames_timestamp is not None:
                                 frames_timestamp = [frames_timestamp[i] for i in indices]
-                            timestamps = calculate_timestamps(
+                            indices, timestamps = calculate_timestamps(
                                 indices,
                                 processed_fps,
                                 merge_size=self.video_processor.merge_size,
@@ -575,13 +578,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                         else:
                             # 如果处理后的视频长度不超过 rand_video_max_frames，则直接全部使用，并基于这些信息算出每一帧的时间戳，追加到 <VIDEO_CONTEXT> 前面
                             indices = list(range(processed_video_length))
-                            timestamps = calculate_timestamps(
+                            indices, timestamps = calculate_timestamps(
                                 indices,
                                 processed_fps,
                                 merge_size=self.video_processor.merge_size,
                                 timestamps=frames_timestamp,
                             )
                 timestamps_list.append(timestamps)
+                num_frames_list.append(len(indices))
 
         if len(num_frames_list) == 0:
             # 如果 self._video_extra_info_list 啥都没有,则完全随机采样
@@ -597,6 +601,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             assert len(num_frames_list) == len(timestamps_list), (
                 "num_frames_list and timestamps_list should have the same length"
             )
+            for num_frames, timestamps in zip(num_frames_list, timestamps_list):
+                assert num_frames == len(timestamps) * 2
+
         if len(origin_fps_list) > 0:
             assert len(origin_fps_list) == len(num_frames_list), (
                 "origin_fps_list and num_frames_list should have the same length"
