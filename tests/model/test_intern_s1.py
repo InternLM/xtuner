@@ -183,7 +183,6 @@ class TestInternS1(DeterministicDDPTestCase):
             sp_mesh = data_mesh["sp"]
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        seq_ctx.image_flags = image_flags
         seq_ctx.pixel_values = pixel_values
         seq_ctx.to('cuda')
         loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
