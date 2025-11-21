@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
 from typing import cast
-
+import psutil
 import numpy as np
 import ray
 import torch
@@ -17,7 +17,7 @@ from ray.actor import ActorClass
 from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import check_dataflow_item
+from xtuner.v1.data_proto.rl_data import check_valid_dataflow_item
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -285,6 +285,7 @@ class RLTrainer:
             judger_cfg=judger_config,
             replay_buffer_config=replay_buffer_config,
         )
+        self._dataflow_partial_rollout_step = dataflow_config.partial_rollout_step
         if self._enable_evaluate and evaluator_config:
             self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
             self._eval_step = evaluator_config.evaluate_step
@@ -397,13 +398,14 @@ class RLTrainer:
             with timer("generation", step_timer_dict):
                 ray.get(self._rollout_env_controller.check_active_workers.remote())
                 data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
+            self._log_memory_usage(rollout_idx, stage="generation")
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):
                 ray.get(self._rollout_env_controller.offload.remote())
                 trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
                 self._save_trajectories(data_groups, trajectory_save_path)
                 self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
-
+            self._log_memory_usage(rollout_idx, stage="offload_and_dump")
             # 3. Onload training models and prepare data
             with timer("onload_and_prepare_data", step_timer_dict):
                 ray.get(self._train_controller.onload.remote(target="all"))
@@ -413,7 +415,7 @@ class RLTrainer:
                 )
                 self.logger.info(f"Prepared {len(data_batches)} training data batches")
                 self._log_data_info(rollout_idx, data_info)
-
+            self._log_memory_usage(rollout_idx, stage="onload_and_prepare_data")
             # 4. Training Step
             with timer("training", step_timer_dict):
                 ray.get(
@@ -421,7 +423,7 @@ class RLTrainer:
                         data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
                     )
                 )
-
+            self._log_memory_usage(rollout_idx, stage="training")
             # 5. Saving and sync weights
             with timer("saving and sync_weight", step_timer_dict):
                 ray.get(self._train_controller.offload.remote(target="optimizer"))
@@ -434,7 +436,7 @@ class RLTrainer:
                 self.logger.info("Model weights synchronized successfully.")
                 ray.get(self._train_controller.offload.remote(target="model"))
                 ray.get(self._rollout_env_controller.onload_kvcache.remote())
-
+            self._log_memory_usage(rollout_idx, stage="saving and sync_weight")
             timer_log_str = f"Rollout {rollout_idx} training finished and timing listed: \n"
             timer_log_str += timer_logger(step_timer_dict)
 
@@ -446,6 +448,7 @@ class RLTrainer:
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
                 self._save_trajectories(eval_data_groups, trajectory_save_path)
                 self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
+            self._log_memory_usage(rollout_idx, stage="evaluation")
             self._cur_step += 1
 
     def _log_data_info(self, rollout_idx: int, data_info: dict):
@@ -458,6 +461,32 @@ class RLTrainer:
                 log_lines.append(f"  - {key:<20}: {value}")
         self.logger.info("\n".join(log_lines))
 
+    def _log_memory_usage(self, rollout_idx: int, stage: str):
+        """Logs CPU and GPU memory usage at a given stage."""
+        if get_rank() != 0:
+            return
+
+        log_msg = f"Rollout {rollout_idx} memory usage after stage: '{stage}'"
+
+        # CPU Memory
+        cpu_mem = psutil.virtual_memory()
+        log_msg += (
+            f"\n  - CPU Memory: Used {cpu_mem.used / (1024**3):.2f} GB / "
+            f"Total {cpu_mem.total / (1024**3):.2f} GB ({cpu_mem.percent}%)"
+        )
+
+        # GPU Memory
+        if torch.cuda.is_available():
+            log_msg += "\n  - GPU Memory:"
+            for i in range(torch.cuda.device_count()):
+                free_mem, total_mem = torch.cuda.mem_get_info(i)
+                used_mem = total_mem - free_mem
+                log_msg += (
+                    f"\n    - Rank {i}: Used {used_mem / (1024**3):.2f} GB / "
+                    f"Total {total_mem / (1024**3):.2f} GB ({(used_mem / total_mem) * 100:.2f}%)"
+                )
+        self.logger.info(log_msg)
+        
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
     def _prepare_train_data(self, data_groups, pack_max_length, multimodal_train_infos=None):
@@ -475,7 +504,7 @@ class RLTrainer:
             is_multimodal = True
 
         for j, group in enumerate(data_groups):
-            if not check_dataflow_item(group):
+            if not check_valid_dataflow_item(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             if is_multimodal:
@@ -561,12 +590,14 @@ class RLTrainer:
         rewards = []
 
         rollout_response_len_list = []
+        version_dict = {i: 0 for i in range(self._dataflow_partial_rollout_step + 1)}
+
         # NOTE: Since we currently default to token-in token-out, the code for checking whether response_ids have Retokenization Drift is commented out.
         # If you need to debug, you can uncomment it.
         # mismatch_token_ids_count = 0
         # response_len_list = []
         for group in data_groups:
-            if not check_dataflow_item(group):
+            if not check_valid_dataflow_item(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             for data in group:
@@ -589,6 +620,11 @@ class RLTrainer:
                     response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
                     rollout_response_len_list.append(len(response_ids))
 
+                version = data.uid.version
+                if version not in version_dict:
+                    version_dict[version] = 0
+                version_dict[version] += 1
+
         rewards = torch.tensor(rewards).float()
         rollout_response_lens = None
         if len(rollout_response_len_list) > 0:
@@ -606,6 +642,7 @@ class RLTrainer:
                 "response_len_max": rollout_response_lens.max().item(),
                 "response_len_min": rollout_response_lens.min().item(),
                 "total_len": len(rewards),
+                "versions": version_dict,
                 # "mismatch_token_ids_count": mismatch_token_ids_count,
             }
             json.dump(item, f, ensure_ascii=False, indent=2)
@@ -618,6 +655,8 @@ class RLTrainer:
                         "response_len": rollout_response_len_list[_count],
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
+                        "version": data.uid.version,
+                        "finish_reason": data.env.rollout.finish_reason,
                     }
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
