@@ -7,6 +7,10 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+from xtuner.v1.utils import get_logger
+
+
+logger = get_logger()
 
 
 class RopeScalingConfig(BaseModel):
@@ -45,6 +49,8 @@ class RotaryEmbeddingProtocol(Protocol):
         ...
 
     def __call__(self, x: torch.Tensor, position_ids: torch.LongTensor) -> tuple[torch.Tensor, torch.Tensor]: ...
+
+    def to(self, device: torch.device) -> "RotaryEmbeddingProtocol": ...
 
 
 class RotaryEmbedding(nn.Module):
@@ -100,6 +106,7 @@ class RotaryEmbedding(nn.Module):
         device_type = x.device.type
         device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
+            # TODO: remove to(x.device) because from_hf has already moved the rotary_emb module to the correct device
             freqs = (inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()).transpose(
                 1, 2
             )  # [B, S, H/2]
@@ -133,18 +140,30 @@ class FourierEmbedding(RotaryEmbedding):
         self.fope_sep_head = rope_scaling_cfg.fope_sep_heads
         self.fope_init_factor = rope_scaling_cfg.fope_init_factor
         if self.num_inv_freq is not None:
-            assert (self.inv_freq > (2.0 * torch.pi / config.max_position_embeddings)).all() or (self.inv_freq.shape[-1] == self.num_inv_freq), "FoPE is wrongly initialized."
+            assert (self.inv_freq > (2.0 * torch.pi / config.max_position_embeddings)).all() or (
+                self.inv_freq.shape[-1] == self.num_inv_freq
+            ), "FoPE is wrongly initialized."
 
         self.head_dim = getattr(self.config, "head_dim", None) or config.hidden_size // config.num_attention_heads
         self.input_dim = self.inv_freq.shape[-1]
         self.output_dim = self.inv_freq.shape[-1]
 
+        # TODO: 验证 hf 加载模型时，sin_coef和cos_coef 可以从 others.safetensors 被正确加载
+        # TODO: sin_coef和cos_coef 改为 buffer? 不会被保存
         if self.fope_sep_head:
-            self.sin_coef = nn.Parameter(torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim), requires_grad=False).to(self.inv_freq.device)
-            self.cos_coef = nn.Parameter(torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim), requires_grad=False).to(self.inv_freq.device)
+            self.sin_coef = nn.Parameter(
+                torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim), requires_grad=False
+            ).to(self.inv_freq.device)
+            self.cos_coef = nn.Parameter(
+                torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim), requires_grad=False
+            ).to(self.inv_freq.device)
         else:
-            self.sin_coef = nn.Parameter(torch.randn(self.input_dim, self.output_dim), requires_grad=False).to(self.inv_freq.device)
-            self.cos_coef = nn.Parameter(torch.randn(self.input_dim, self.output_dim), requires_grad=False).to(self.inv_freq.device)
+            self.sin_coef = nn.Parameter(torch.randn(self.input_dim, self.output_dim), requires_grad=False).to(
+                self.inv_freq.device
+            )
+            self.cos_coef = nn.Parameter(torch.randn(self.input_dim, self.output_dim), requires_grad=False).to(
+                self.inv_freq.device
+            )
 
         # TODO: 如何保证不同rank上sin_coef和cos_coef的初始化是相同的？需要设置generator?
         torch.nn.init.xavier_normal_(self.sin_coef, gain=self.fope_init_factor)
@@ -159,14 +178,14 @@ class FourierEmbedding(RotaryEmbedding):
 
     def get_step_eye(self, _param):
         import math
-        
+
         _step_eye = torch.zeros_like(_param)
-        
+
         step = math.ceil(self.input_dim / self.output_dim)
         for i in range(self.output_dim):
-            if i*step < self.input_dim:
-                _step_eye[..., i*step, i] = 1.0
-        
+            if i * step < self.input_dim:
+                _step_eye[..., i * step, i] = 1.0
+
         return _step_eye
 
     @torch.no_grad()
@@ -194,12 +213,13 @@ class FourierEmbedding(RotaryEmbedding):
                 sin = torch.einsum("bhtD, hDd -> bhtd", pos_sin, self.sin_coef.float())
                 cos = torch.einsum("bhtD, hDd -> bhtd", pos_cos, self.cos_coef.float())
             else:
+                # torch.distributed.breakpoint()
                 sin = torch.einsum("btD, Dd -> btd", pos_sin, self.sin_coef.float())
                 cos = torch.einsum("btD, Dd -> btd", pos_cos, self.cos_coef.float())
 
             sin = F.pad(input=sin, pad=(0, self.head_dim // 2 - sin.size(-1)), mode="constant", value=1)
             cos = F.pad(input=cos, pad=(0, self.head_dim // 2 - cos.size(-1)), mode="constant", value=1)
-            
+
             sin = torch.cat((sin, sin), dim=-1)
             cos = torch.cat((cos, cos), dim=-1)
 
@@ -260,6 +280,7 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
 
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):  # Force float32
+            # TODO: remove to(x.device) because from_hf has already moved the rotary_emb module to the correct device
             freqs = (inv_freq_expanded.float().to(x.device) @ position_ids_expanded.float()).transpose(2, 3)
             freqs = self.apply_interleaved_mrope(freqs, self.mrope_section)
             emb = torch.cat((freqs, freqs), dim=-1)
@@ -285,8 +306,14 @@ def get_rope_embedding(config, device=None) -> RotaryEmbeddingProtocol:
     if rope_scaling_cfg is not None:
         if rope_scaling_cfg.type == "qwen3_vl":
             return Qwen3VLTextRotaryEmbedding(config, device=device)
-        use_fope = rope_scaling_cfg.fope_init_factor is not None or rope_scaling_cfg.fope_sep_heads is not None or rope_scaling_cfg.num_inv_freq is not None
+
+        use_fope = (
+            rope_scaling_cfg.fope_init_factor is not None
+            or rope_scaling_cfg.fope_sep_heads is not None
+            or rope_scaling_cfg.num_inv_freq is not None
+        )
         if use_fope:
+            logger.info("Using FoPE rotary embedding.")
             return FourierEmbedding(config, device=device)
-    else:
-        return RotaryEmbedding(config, device=device)
+
+    return RotaryEmbedding(config, device=device)

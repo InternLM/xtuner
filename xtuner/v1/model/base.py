@@ -79,7 +79,7 @@ class TransformerConfig(PydanticBaseModel):
     @computed_field
     def num_attention_heads(self) -> int:
         return self.attention.num_attention_heads
-    
+
     @computed_field
     def num_key_value_heads(self) -> int:
         return self.attention.num_key_value_heads
@@ -200,7 +200,9 @@ class BaseModel(nn.Module):
             hf_path = str(hf_path)
 
         hf_loader = HFCheckpointLoader(hf_path)
+        # dist.breakpoint()
         loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
+        # dist.breakpoint()
         return loaded_keys, unloaded_keys, missing_keys
 
     def scale_and_reduce_grad(self):
@@ -937,7 +939,9 @@ class BaseModel(nn.Module):
     ) -> list[str]:  # return missing key
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
         hf_key = load_spec.hf_keys[0]
-
+        # TODO: 加载 sin_coef
+        # if 'sin_coef' in hf_key:
+        #     torch.distributed.breakpoint()
         if self._is_loaded_param_fp8(hf_key, checkpoint_loader):
             if not _is_float8_available():
                 raise RuntimeError(
@@ -946,6 +950,8 @@ class BaseModel(nn.Module):
             loaded_tensor = self._load_fp8(hf_key, checkpoint_loader)
         else:
             loaded_tensor = checkpoint_loader.load(hf_key)
+        # if 'sin_coef' in hf_key:
+        #     torch.distributed.breakpoint()
         if loaded_tensor is None:
             return [hf_key]
 
@@ -968,6 +974,8 @@ class BaseModel(nn.Module):
         self.safetensors_to_params(
             [loaded_tensor], local_tensor, param_name=load_spec.name, start=start, end=end, dim=load_spec.dim
         )
+        # if 'sin_coef' in hf_key:
+        #     torch.distributed.breakpoint()
         return []
 
     def _load_fused_hf_param(

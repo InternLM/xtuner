@@ -2,6 +2,11 @@ from typing import Protocol, Tuple
 
 import torch
 
+from xtuner.v1.utils import get_logger
+
+
+logger = get_logger()
+
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
@@ -68,9 +73,11 @@ def apply_rotary_pos_emb_sep_cuda(q, k, cos, sin, position_ids=None, unsqueeze_d
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """This is the equivalent of torch.repeat_interleave(x, dim=1,
+    repeats=n_rep).
+
+    The hidden states go from (batch, num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen,
+    head_dim)
     """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
@@ -115,6 +122,7 @@ def get_apply_rotary_emb(fope_sep_head: bool | None = None) -> ApplyRotaryEmbPro
         return apply_rotary_pos_emb_npu
     else:
         if fope_sep_head:
+            logger.info("Using FoPE with fope_sep_head")
             return apply_rotary_pos_emb_sep_cuda
         else:
             return apply_rotary_pos_emb_cuda
