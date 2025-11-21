@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import types
 from pathlib import Path
 from typing import cast
 

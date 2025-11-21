@@ -21,6 +21,7 @@ QWEN3_VL_MOE_PATH = os.environ["QWEN3_VL_MOE_PATH"]
 QWEN3_VL_DENSE_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
+
 class TestQwen3VL(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,tol",
@@ -37,7 +38,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
             attn_implementation="flash_attention_2",
             device_map="cuda"
         ).eval()
-        # patch_hf_rms_norm(hf_model)
+        patch_hf_rms_norm(hf_model)
 
         rank = dist.get_rank()
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
@@ -108,10 +109,8 @@ class TestQwen3VL(DeterministicDDPTestCase):
         rank = dist.get_rank()
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
         image_str = '<|vision_start|><|image_pad|><|vision_end|>'
-        input_ids = tokenizer(image_str + "吃葡萄不吐葡萄皮" * 20, return_tensors="pt").input_ids.to("cuda")
+        input_ids = tokenizer(image_str + "吃葡萄不吐葡萄皮" * 20 + str(rank), return_tensors="pt").input_ids.to("cuda")
         pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
-        # TODO: 不合理，为啥一定要每个 rank 数据完全一样才能通过 CI ?
-        dist.broadcast(pixel_values, src=0)
 
         image_grid_thw = torch.tensor([[1, 2, 2]], device='cuda')
 
@@ -193,23 +192,40 @@ class TestQwen3VL(DeterministicDDPTestCase):
         patch_hf_rms_norm(hf_model)
 
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
-        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_DENSE_PATH, rand_video_max_frames=14, add_vision_id=True).build(tokenizer)
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_DENSE_PATH, rand_video_max_frames=14,
+                                              add_vision_id=True).build(tokenizer)
 
-        raw_data = {"id": 9, "messages": [{"role": "user", "content": [{"type": "video_url", "video_url": {"url": "tennis_frames_4fps/", "image_wh": [1280, 720], "origin_video_length": 182,"origin_fps": 30.0,"processed_video_length": 23,"processed_fps": 4}}, {"type": "video_url", "video_url": {"url": "tennis_frames_2fps/", "image_wh": [1280, 720], "origin_video_length": 182,"origin_fps": 30.0,"processed_video_length": 13,"processed_fps": 2}},{"type": "text", "text": "<VIDEO_CONTEXT><VIDEO_CONTEXT>两个视频中都在做什么？"}]}, {"role": "assistant", "content": "打网球"}]}
+        raw_data = {"id": 9, "messages": [{"role": "user", "content": [{"type": "video_url",
+                                                                        "video_url": {"url": "tennis_frames_4fps/",
+                                                                                      "image_wh": [1280, 720],
+                                                                                      "origin_video_length": 182,
+                                                                                      "origin_fps": 30.0,
+                                                                                      "processed_video_length": 23,
+                                                                                      "processed_fps": 4}},
+                                                                       {"type": "video_url",
+                                                                        "video_url": {"url": "tennis_frames_2fps/",
+                                                                                      "image_wh": [1280, 720],
+                                                                                      "origin_video_length": 182,
+                                                                                      "origin_fps": 30.0,
+                                                                                      "processed_video_length": 13,
+                                                                                      "processed_fps": 2}},
+                                                                       {"type": "text",
+                                                                        "text": "<VIDEO_CONTEXT><VIDEO_CONTEXT>两个视频中都在做什么？"}]},
+                                          {"role": "assistant", "content": "打网球"}]}
 
         tokenized_data = tokenize_fn(raw_data, media_root=VIDEO_ROOT)
-        input_ids = tokenized_data['input_ids']
-        labels = tokenized_data['labels']
-        pixel_values = tokenized_data['pixel_values']
-        image_grid_thw = tokenized_data['image_grid_thw']
-        position_ids = tokenized_data['position_ids']
+        input_ids = torch.tensor(tokenized_data['input_ids'])[None].cuda()
+        labels = torch.tensor(tokenized_data['labels'])[None].cuda()
+        pixel_values = tokenized_data['pixel_values'].cuda()
+        image_grid_thw = tokenized_data['image_grid_thw'].cuda()
+        position_ids = tokenized_data['position_ids'].cuda()
 
         with torch.no_grad():
             output = hf_model(
                 input_ids=input_ids,
                 labels=labels,
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
+                pixel_values_videos=pixel_values,
+                video_grid_thw=image_grid_thw,
                 position_ids=position_ids,
             )
         expected_loss = output.loss
@@ -363,23 +379,35 @@ class TestQwen3VL(DeterministicDDPTestCase):
             attn_implementation="flash_attention_2",
             device_map="cuda"
         ).eval()
-        # patch_hf_rms_norm(hf_model)
+        patch_hf_rms_norm(hf_model)
 
-        rank = dist.get_rank()
         tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
-        image_str = '<|vision_start|><|image_pad|><|vision_end|>'
-        input_ids = tokenizer(image_str + "吃葡萄不吐葡萄皮" * 20, return_tensors="pt").input_ids.to("cuda")
-        pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
-        # TODO: 不合理，为啥一定要每个 rank 数据完全一样才能通过 CI ?
-        dist.broadcast(pixel_values, src=0)
-        image_grid_thw = torch.tensor([[1, 2, 2]], device='cuda')
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_DENSE_PATH, add_vision_id=True).build(tokenizer)
+
+        raw_data = {"id": 3, "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {
+            "url": "tests/resource/mscoco_twocat_000000039769.jpg", "image_wh": [640, 480]}}, {"type": "image_url",
+                                                                                               "image_url": {
+                                                                                                   "url": "tests/resource/mscoco_dog_000000319154.jpg",
+                                                                                                   "image_wh": [375,
+                                                                                                                500]}},
+                                                                       {"type": "text",
+                                                                        "text": "<IMG_CONTEXT>\n<IMG_CONTEXT>\n请描述下第二幅图片中的狗是什么颜色？"}]},
+                                          {"role": "assistant", "content": "图片中的狗是棕色的。"}]}
+
+        tokenized_data = tokenize_fn(raw_data)
+        input_ids = torch.tensor(tokenized_data['input_ids'])[None].cuda()
+        labels = torch.tensor(tokenized_data['labels'])[None].cuda()
+        pixel_values = tokenized_data['pixel_values'].cuda()
+        image_grid_thw = tokenized_data['image_grid_thw'].cuda()
+        position_ids = tokenized_data['position_ids'].cuda()
 
         with torch.no_grad():
             output = hf_model(
                 input_ids=input_ids,
-                labels=input_ids.clone(),
+                labels=labels,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                position_ids=position_ids,
             )
         expected_loss = output.loss
 
@@ -407,10 +435,14 @@ class TestQwen3VL(DeterministicDDPTestCase):
         qwen3vl_model.eval()
 
         shift_input_ids = input_ids[:, :-1]
-        shifted_labels = input_ids[:, 1:]
+        shifted_labels = labels[:, 1:]
+        position_ids = position_ids[..., :-1]
+
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.pixel_values = pixel_values
+        seq_ctx.position_ids = position_ids
+
         seq_ctx.to('cuda')
         loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
         loss_ctx_input = loss_ctx_input.to('cuda')
