@@ -1,7 +1,7 @@
 import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
+import time
 import httpx
 import ray
 from cyclopts import Parameter
@@ -283,9 +283,21 @@ class DataFlow:
         # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
         # would be queued behind many worker tasks, causing a significant delay.
         if self.enable_partial_rollout:
-            self.logger.info("Target batch size reached. Pausing env controller.")
             await self.pause()
+            cleanup_start_time = time.monotonic()
+            cleanup_timeout = 10 * 60  # 10 minutes in seconds
             while len(waiting_tasks) > 0:
+                elapsed_time = time.monotonic() - cleanup_start_time
+                if elapsed_time > cleanup_timeout:
+                    self.logger.warning(
+                        f"Cleanup timeout of {cleanup_timeout}s reached. "
+                        f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
+                    )
+                    for task in waiting_tasks:
+                        task.cancel()
+                    # Wait for cancellations to complete
+                    await asyncio.gather(*waiting_tasks, return_exceptions=True)
+                    break  # Exit the cleanup loop
                 done_tasks, pending_tasks = await asyncio.wait(
                     waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
                 )

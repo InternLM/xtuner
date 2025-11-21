@@ -289,7 +289,14 @@ class RolloutController:
         """
         active_workers = [(url, info) for url, info in self.workers_info.items() if info.is_active]
         if not active_workers:
-            return
+            self.logger.critical("All rollout workers are inactive. Attempting to restart all inference engines.")
+            try:
+                self.engine_mesh_list, self.server_url_dict = self.init_workers()
+                self.router.update_active_workers(self._get_worker_status_for_router())
+                self.logger.info("Successfully re-initialized all rollout workers.")
+            except Exception as e:
+                self.logger.error(f"Failed to restart rollout workers: {e}", exc_info=True)
+                raise RuntimeError("Failed to recover rollout workers after all of them went down.") from e
 
         urls, infos = zip(*active_workers)
         actors = [info.actor for info in infos]

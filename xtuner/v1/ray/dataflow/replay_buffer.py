@@ -387,28 +387,22 @@ class ReplayBufferStorage:
         """
         samples = []
         multimodal_train_infos = []
-        if self.get_completed_samples() < global_batch_size:
-            self.logger.error("Not enough finished samples in replay buffer")
-            return [], []
-        else:
-            self.logger.info(
-                f"Retrieving global_batch_size {global_batch_size} from replay buffer, len of self.returned: {self.get_completed_samples()}"
-            )
-            for _ in range(global_batch_size):
-                action_id = self._pop_highest_version_action(self._completed_actions)
-                replay_meta = self._actions[action_id]  # type: ignore[index]
-                group_samples = mapping_replaymeta_to_dataitem(replay_meta)
-                multimodal_train_info = None
-                # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
-                for data_item in group_samples:
-                    if hasattr(data_item.data, "multimodal_train_info"):
-                        multimodal_train_info = data_item.data.multimodal_train_info
-                        del data_item.data.multimodal_train_info
-                samples.append(group_samples)
-                if multimodal_train_info is not None:
-                    multimodal_train_infos.append(multimodal_train_info)
-            return samples, multimodal_train_infos
-
+        target_batch_size = min(global_batch_size, len(self._completed_actions))
+        for _ in range(global_batch_size):
+            action_id = self._pop_highest_version_action(self._completed_actions)
+            replay_meta = self._actions[action_id]  # type: ignore[index]
+            group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+            multimodal_train_info = None
+            # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
+            for data_item in group_samples:
+                if hasattr(data_item.data, "multimodal_train_info"):
+                    multimodal_train_info = data_item.data.multimodal_train_info
+                    del data_item.data.multimodal_train_info
+            samples.append(group_samples)
+            if multimodal_train_info is not None:
+                multimodal_train_infos.append(multimodal_train_info)
+        return samples, multimodal_train_infos
+    
     def refresh_completed_states_on_step(self, sample_from_expired_states, partial_rollout_step):
         if sample_from_expired_states:
             for bucket in self._completed_actions:
