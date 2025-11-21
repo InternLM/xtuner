@@ -305,7 +305,7 @@ class TestMLLMTokenizeFn(TestCase):
                 self.assertEqual(input_xtuner_str.strip(), ground_truth_str.strip())
                 self.assertTrue((labels_xtuner == self.tokenize_fn.img_context_token_id).sum() == 0)
 
-    def test_intern_vl_pretrain_video(self):
+    def test_qwen3_vl_pretrain_video(self):
         data_path = 'tests/resource/mllm_pretrain_video_example_data.jsonl'
         total_step = 6
         with open(data_path, encoding='utf-8') as f:
