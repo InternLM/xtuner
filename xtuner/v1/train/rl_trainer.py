@@ -17,7 +17,7 @@ from ray.actor import ActorClass
 from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import check_dataflow_item
+from xtuner.v1.data_proto.rl_data import check_valid_dataflow_item
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -475,7 +475,7 @@ class RLTrainer:
             is_multimodal = True
 
         for j, group in enumerate(data_groups):
-            if not check_dataflow_item(group):
+            if not check_valid_dataflow_item(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             if is_multimodal:
@@ -566,7 +566,7 @@ class RLTrainer:
         # mismatch_token_ids_count = 0
         # response_len_list = []
         for group in data_groups:
-            if not check_dataflow_item(group):
+            if not check_valid_dataflow_item(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             for data in group:
@@ -618,6 +618,7 @@ class RLTrainer:
                         "response_len": rollout_response_len_list[_count],
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
+                        "finish_reason": data.env.rollout.finish_reason,
                     }
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
