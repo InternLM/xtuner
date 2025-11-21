@@ -251,8 +251,19 @@ def qwen3_vl_sft_collator(
         for data in instance:
             num_img_tokens.extend(data["num_img_tokens"])
 
-        pixel_values = torch.cat([i["pixel_values"] for i in instance if "pixel_values" in i], dim=0)
-        image_grid_thw = torch.cat([i["image_grid_thw"] for i in instance if "image_grid_thw" in i], dim=0)
+        pixel_values: list | torch.Tensor | None
+        pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
+        if pixel_values:
+            pixel_values = torch.cat(pixel_values, dim=0)
+        else:
+            pixel_values = None
+
+        image_grid_thw: list | torch.Tensor | None
+        image_grid_thw = [i["image_grid_thw"] for i in instance if "image_grid_thw" in i]
+        if image_grid_thw:
+            image_grid_thw = torch.cat(image_grid_thw, dim=0)
+        else:
+            image_grid_thw = None
 
         seq_ctx = SequenceContext(
             input_ids=input_ids,  # type: ignore
