@@ -67,12 +67,12 @@ class Qwen3VLTextDense(Qwen3Dense):
                 seq_ctx,
             )
 
-            if deepstack_visual_embeds is not None and idx in range(len(deepstack_visual_embeds)):
+            if deepstack_visual_embeds is not None and int(idx) in range(len(deepstack_visual_embeds)):
                 assert visual_pos_masks is not None
                 hidden_states = self._deepstack_process(
                     hidden_states,
                     visual_pos_masks,
-                    deepstack_visual_embeds[idx],
+                    deepstack_visual_embeds[int(idx)],
                 )
 
             if self.config.return_hidden_states:

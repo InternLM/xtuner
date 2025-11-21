@@ -122,8 +122,6 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             if not self.ignore_multimodal_info:
                 if "pixel_values" in data:
                     multimodal_train_info["pixel_values"] = data["pixel_values"]
-                if "image_flags" in data:
-                    multimodal_train_info["image_flags"] = data["image_flags"]  # intern-s1 or intern-vl
                 if "image_grid_thw" in data:
                     multimodal_train_info["image_grid_thw"] = data["image_grid_thw"]  # qwen3-vl
                 if "position_ids" in data:

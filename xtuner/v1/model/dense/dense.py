@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import types
 from pathlib import Path
 from typing import cast
 
@@ -252,11 +251,6 @@ class Dense(BaseModel):
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
 
-        for _, module in self.named_modules():
-            if isinstance(module, nn.Embedding):
-                module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
-            elif isinstance(module, RMSNorm):
-                module.forward = types.MethodType(self.patched_rms_norm_forward, module)  # type: ignore
         self._to_empty_meta()
 
         # Make sure it works properly when using fsdp

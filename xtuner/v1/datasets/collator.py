@@ -25,7 +25,7 @@ def sft_llm_collator(
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
-        # If the token number of the packed sample is larger than the packed_max_lenghth
+        # If the token number of the packed sample is larger than the packed_max_length
         if isinstance(instance, dict):
             instance = [instance]
 
@@ -108,7 +108,7 @@ def intern_s1_vl_sft_collator(
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
-        # If the token number of the packed sample is larger than the packed_max_lenghth
+        # If the token number of the packed sample is larger than the packed_max_length
         if (total_num_tokens := sum(i["num_tokens"] for i in instance)) > pack_max_length:
             logger.warning(
                 f"Found packed sample with {total_num_tokens} tokens, which is larger than the `pack_max_length`"
@@ -168,21 +168,6 @@ def intern_s1_vl_sft_collator(
         else:
             pixel_values = None
 
-        image_flags: list | torch.LongTensor | None
-        image_flags = [i["image_flags"] for i in instance if "image_flags" in i]
-
-        if image_flags:
-            image_flags = torch.cat(image_flags, dim=0)  # type: ignore
-        else:
-            image_flags = None
-
-        if image_flags is not None or pixel_values is not None:
-            assert isinstance(image_flags, torch.Tensor)
-            assert isinstance(pixel_values, torch.Tensor)
-            assert len(image_flags) == len(pixel_values), (
-                f"image_flags length {len(image_flags)} != instance length {len(pixel_values)}"
-            )
-
         seq_ctx = SequenceContext(
             input_ids=input_ids,  # type: ignore
             cu_seq_lens_q=cu_seq_lens,  # type: ignore
@@ -191,7 +176,6 @@ def intern_s1_vl_sft_collator(
             max_length_k=max(num_tokens),
             num_padding=pad_len,
             pixel_values=pixel_values,  # type: ignore
-            image_flags=image_flags,
             num_img_tokens=num_img_tokens,
         )
         ret.append(
@@ -212,7 +196,7 @@ def qwen3_vl_sft_collator(
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
-        # If the token number of the packed sample is larger than the packed_max_lenghth
+        # If the token number of the packed sample is larger than the packed_max_length
         if (total_num_tokens := sum(i["num_tokens"] for i in instance)) > pack_max_length:
             logger.warning(
                 f"Found packed sample with {total_num_tokens} tokens, which is larger than the `pack_max_length`"
@@ -267,8 +251,19 @@ def qwen3_vl_sft_collator(
         for data in instance:
             num_img_tokens.extend(data["num_img_tokens"])
 
-        pixel_values = torch.cat([i["pixel_values"] for i in instance if "pixel_values" in i], dim=0)
-        image_grid_thw = torch.cat([i["image_grid_thw"] for i in instance if "image_grid_thw" in i], dim=0)
+        pixel_values: list | torch.Tensor | None
+        pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
+        if pixel_values:
+            pixel_values = torch.cat(pixel_values, dim=0)
+        else:
+            pixel_values = None
+
+        image_grid_thw: list | torch.Tensor | None
+        image_grid_thw = [i["image_grid_thw"] for i in instance if "image_grid_thw" in i]
+        if image_grid_thw:
+            image_grid_thw = torch.cat(image_grid_thw, dim=0)
+        else:
+            image_grid_thw = None
 
         seq_ctx = SequenceContext(
             input_ids=input_ids,  # type: ignore
