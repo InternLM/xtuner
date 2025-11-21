@@ -864,7 +864,9 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
 
     # When handling multiple images or multiple videos,
     # it's helpful to add labels to the images and videos for better reference.
-    add_vision_id: bool = False
+    # 注意这个逻辑和 hf 官方不是完全一致。 hf 官方只要开启这个 flag 就一定追加，不管是单个图片还是单个视频
+    # xtuner 中做了优化，开启该 flag 且存在多图或者多视频才会追加
+    add_vision_id: bool = True
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
