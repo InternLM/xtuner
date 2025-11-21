@@ -20,7 +20,7 @@ from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
-from .train_engine import TrainEngine
+from .train_engine import LossLog, OtherLog, TrainEngine
 
 
 logger = get_logger()
@@ -146,7 +146,7 @@ class VisionComposeTrainEngine(TrainEngine):
         if self._processor is not None:
             self._processor.save_pretrained(hf_dir)
 
-    def train_step(self, data_batches: List[ModelItem]):
+    def train_step(self, data_batches: List[ModelItem]) -> tuple[LossLog, OtherLog]:
         """Perform a training step with the given data batches and mesh.
 
         Args:
@@ -159,8 +159,8 @@ class VisionComposeTrainEngine(TrainEngine):
         if self.projector_float8_handler is not None and self.projector_float8_handler.enabled:
             self.projector_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.multi_modal_projector)
 
-        loss_log = {}
-        other_log = {}
+        loss_log: LossLog = {}  # type: ignore[typeddict-item]
+        other_log: OtherLog = {}  # type: ignore[typeddict-item]
         intra_layer_micro_batch = self.intra_layer_micro_batch
         assert len(data_batches) % intra_layer_micro_batch == 0, (
             f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"

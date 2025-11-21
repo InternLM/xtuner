@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, cast
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+from pydantic import ConfigDict
 from safetensors import safe_open
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -21,6 +22,7 @@ from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
 )
+from typing_extensions import NotRequired, TypedDict
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -38,6 +40,22 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 threading_lock = threading.Lock()
+
+
+class LossLog(TypedDict):
+    __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
+    total_loss: float
+    reduced_llm_loss: float
+    reduced_balancing_loss: NotRequired[float]
+    reduced_z_loss: NotRequired[float]
+
+
+class OtherLog(TypedDict):
+    __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
+    maxvio: NotRequired[float]
+    consumed_tokens: float
+    extra_info: ModelForwardExtraLogInfo
+    efficient_attn_ratio: float
 
 
 class CPUThreadTaskCoordinator:
@@ -199,7 +217,7 @@ class TrainEngine:
         intra_layer_micro_batch = self.intra_layer_micro_batch
         return data_batches_len // intra_layer_micro_batch
 
-    def train_step(self, data_batches: list[ModelItem]):
+    def train_step(self, data_batches: list[ModelItem]) -> tuple[LossLog, OtherLog]:
         """Perform a training step with the given data batches and mesh.
 
         Args:
@@ -208,8 +226,8 @@ class TrainEngine:
         if self.float8_handler is not None and self.float8_handler.enabled:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
 
-        loss_log = {}
-        other_log: Dict[str, Any] = {}
+        loss_log: LossLog = {}  # type: ignore[typeddict-item]
+        other_log: OtherLog = {}  # type: ignore[typeddict-item]
         intra_layer_micro_batch = self.intra_layer_micro_batch
         assert len(data_batches) % intra_layer_micro_batch == 0, (
             f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
