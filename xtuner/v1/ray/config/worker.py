@@ -191,13 +191,6 @@ class RolloutConfig(BaseModel):
             help="Context length for the rollout worker.",
         ),
     ] = None
-    enable_float8: Annotated[
-        bool,
-        Parameter(
-            group=infer_group,
-            help="Whether to enable float8 quantization for the rollout worker.",
-        ),
-    ] = False
     extra_rollout_config: Annotated[
         dict,
         Parameter(

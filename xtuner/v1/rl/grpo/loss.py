@@ -103,8 +103,6 @@ class GRPOLossContext(BaseLossContext[RLLossContextInputItem]):
             # compute loss weight
             policy_loss_weight = torch.ones_like(shifted_labels, dtype=torch.float32) / global_grad_tokens
             policy_loss_weight[shifted_labels == loss_cfg.ignore_idx] = 0.0
-            if item.is_weights is not None:
-                policy_loss_weight = policy_loss_weight * item.is_weights
             if loss_cfg.use_kl_loss:
                 assert item.ref_logprobs is not None, "ref_logprobs can not be None when use_kl_loss=True"
                 ref_logprobs = item.ref_logprobs
