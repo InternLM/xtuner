@@ -1,19 +1,21 @@
 import os
 from collections import defaultdict
+
 import torch
 import torch.distributed as dist
+from mmengine.dist import get_rank, get_world_size
 from torch import nn
 from torch.utils.hooks import RemovableHandle
 from typing_extensions import TypedDict
-from mmengine.dist import get_rank, get_world_size
+
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model import MoE
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.module import LMHead, MultiHeadAttention, MultiLatentAttention, MHAConfig, MLAConfig
+from xtuner.v1.module import LMHead, MHAConfig, MLAConfig, MultiHeadAttention, MultiLatentAttention
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
-from xtuner.v1.utils.grad_norm import cal_total_norm, group_tensors_by_device_mesh_and_placements
 from xtuner.v1.utils.device import get_device
+from xtuner.v1.utils.grad_norm import cal_total_norm, group_tensors_by_device_mesh_and_placements
 
 
 class InternalMetrics(TypedDict):
@@ -38,8 +40,11 @@ SMALL_VAL = -1e9
 MOE_MODEL_CLS = (MoE,)
 ATTENTION_CLS = (MultiHeadAttention, MultiLatentAttention)
 
-ATTN_MAX_LSE: dict[str, torch.Tensor] | None = None
-ATTN_MAX_LOGITS: dict[str, torch.Tensor] | None = None
+# In our prev tests, registering these stats dicts could lead to unexpected recompile behavior.
+# We want to avoid accessing class members in hooks here, thus the global vars.
+# TODO: This could be optimized in torch2.8 @nil0x9
+ATTN_MAX_LSE: dict[str, torch.Tensor] = {}
+ATTN_MAX_LOGITS: dict[str, torch.Tensor] = {}
 
 
 class InternalMetricsRecorder:
@@ -58,25 +63,24 @@ class InternalMetricsRecorder:
         }
         attn_cfg: MHAConfig | MLAConfig = self.model.config.attention
         self._attn_monitor_type: str | None = None
-        if isinstance(attn_cfg, MLAConfig):
-            attn_impl = "flash_attention"
-        else:
-            attn_impl = attn_cfg.attn_impl
-        if attn_impl == "eager_attention":
-            # We typically won't use eager attn, but implement it here anway
+        if os.getenv("DISABLE_ATTN_MONITOR_HOOK", "0") == "0":
+            if isinstance(attn_cfg, MLAConfig):
+                attn_impl = "flash_attention"
+            else:
+                attn_impl = attn_cfg.attn_impl
             global ATTN_MAX_LOGITS
-            ATTN_MAX_LOGITS = {}
-            self._attn_monitor_type = "attn_logits"
-        elif not (get_device() == "npu" and attn_impl == "flash_attention"):
             global ATTN_MAX_LSE
-            ATTN_MAX_LSE = {}
-            self._attn_monitor_type = "softmax_lse"
-        for name, module in self.model.named_modules():
-            if isinstance(module, ATTENTION_CLS):
-                if self._attn_monitor_type == "attn_logits":
-                    ATTN_MAX_LOGITS[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
-                elif self._attn_monitor_type == "softmax_lse":
-                    ATTN_MAX_LSE[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
+            if attn_impl == "eager_attention":
+                # We typically won't use eager attn, but implement it here anyway
+                self._attn_monitor_type = "attn_logits"
+            elif not (get_device() == "npu" and attn_impl == "flash_attention"):
+                self._attn_monitor_type = "softmax_lse"
+            for name, module in self.model.named_modules():
+                if isinstance(module, ATTENTION_CLS):
+                    if self._attn_monitor_type == "attn_logits":
+                        ATTN_MAX_LOGITS[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
+                    elif self._attn_monitor_type == "softmax_lse":
+                        ATTN_MAX_LSE[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
         self._closed = False
 
     @torch.no_grad()
@@ -105,21 +109,16 @@ class InternalMetricsRecorder:
 
         def hook(module, input, output):
             extra_info = output[1]
-            if extra_info.get("softmax_lse", None) is not None:
-                ATTN_MAX_LSE[module.name] = torch.max(
-                    ATTN_MAX_LSE[module.name],
-                    extra_info["softmax_lse"].max()
-                )
-            if extra_info.get("attn_logits", None) is not None:
-                ATTN_MAX_LOGITS[module.name] = max(
-                    ATTN_MAX_LOGITS[module.name],
-                    extra_info["attn_logits"].max()
-                )
+            if extra_info.get("softmax_lse") is not None:
+                ATTN_MAX_LSE[module.name] = torch.max(ATTN_MAX_LSE[module.name], extra_info["softmax_lse"].max())
+            if extra_info.get("attn_logits") is not None:
+                ATTN_MAX_LOGITS[module.name] = max(ATTN_MAX_LOGITS[module.name], extra_info["attn_logits"].max())
+
         hook_handle: RemovableHandle = module.register_forward_hook(hook)
         self.hooks.append(hook_handle)
 
     @torch.no_grad()
-    def get_metrics(self, data_batches: list[ModelItem]):
+    def pop_metrics(self, data_batches: list[ModelItem]):
         """Run a dummy forward to get metrics."""
         self._check_closed()
         for name, module in self.model.named_modules():
@@ -159,7 +158,7 @@ class InternalMetricsRecorder:
                     **additional_kwargs,
                 )
 
-            if output.get("tokens_per_expert_global", None) is not None:
+            if output.get("tokens_per_expert_global") is not None:
                 # At this point, tokens_per_expert_global is already all-reduced into current rank.
                 # [num_layers, num_experts]
                 if tokens_per_expert_global is None:
@@ -167,7 +166,7 @@ class InternalMetricsRecorder:
                 else:
                     tokens_per_expert_global += output["tokens_per_expert_global"].float()
 
-            if output.get("router_logits", None) is not None:
+            if output.get("router_logits") is not None:
                 for layer_name, router_logits in output["router_logits"].items():
                     # [bsz, packed_len, num_experts]
                     router_logits_max[layer_name].append(router_logits.max())
@@ -260,4 +259,3 @@ class InternalMetricsRecorder:
         if "._orig_mod" in name:
             name = name.replace("._orig_mod", "")
         return name
-
