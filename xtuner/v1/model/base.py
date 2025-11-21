@@ -769,7 +769,7 @@ class BaseModel(nn.Module):
 
             safetensor_index += 1
             safetensor_name = f"model-{safetensor_index:04d}-fused-save_rank{save_rank}.safetensors"
-            weight_map.update({name: safetensor_name for name in name_list})
+            weight_map.update(dict.fromkeys(name_list, safetensor_name))
             assert save_executor is not None, "Internal Error, save_executor should not be None"
             future = save_executor.submit(
                 _save_file,

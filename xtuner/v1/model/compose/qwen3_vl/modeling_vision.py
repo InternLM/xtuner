@@ -177,7 +177,7 @@ class Qwen3VLVisionLayer(nn.Module):
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             position_embeddings=position_embeddings
-        )[0]
+        )["projected_output"]
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
 

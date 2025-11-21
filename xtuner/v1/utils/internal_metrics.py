@@ -101,18 +101,17 @@ class InternalMetricsRecorder:
         param_rms = param_l2_norm / total_numel**0.5
         self.metrics["weight_rms"][layer_name] = param_rms.item()
 
-    def register_attn_extra_info_hook(self, module: nn.Module):
-        """Register attention extra info hook as a forward hook."""
+    def register_attn_output_hook(self, module: nn.Module):
+        """Register attention output hook as a forward hook."""
         self._check_closed()
         if os.getenv("DISABLE_ATTN_MONITOR_HOOK", "0") == "1":
             return
 
         def hook(module, input, output):
-            extra_info = output[1]
-            if extra_info.get("softmax_lse") is not None:
-                ATTN_MAX_LSE[module.name] = torch.max(ATTN_MAX_LSE[module.name], extra_info["softmax_lse"].max())
-            if extra_info.get("attn_logits") is not None:
-                ATTN_MAX_LOGITS[module.name] = max(ATTN_MAX_LOGITS[module.name], extra_info["attn_logits"].max())
+            if output.get("softmax_lse") is not None:
+                ATTN_MAX_LSE[module.name] = torch.max(ATTN_MAX_LSE[module.name], output["softmax_lse"].max())
+            if output.get("attn_logits") is not None:
+                ATTN_MAX_LOGITS[module.name] = max(ATTN_MAX_LOGITS[module.name], output["attn_logits"].max())
 
         hook_handle: RemovableHandle = module.register_forward_hook(hook)
         self.hooks.append(hook_handle)
@@ -123,7 +122,7 @@ class InternalMetricsRecorder:
         self._check_closed()
         for name, module in self.model.named_modules():
             if isinstance(module, ATTENTION_CLS):
-                self.register_attn_extra_info_hook(module)
+                self.register_attn_output_hook(module)
             if isinstance(module, RMS_NORM_MONITOR_MODULES):
                 self.calculate_module_weight_rms(module, self._clean_module_name(name), dtype=torch.float32)
 

@@ -14,12 +14,13 @@ from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.ops import attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
+from xtuner.v1.ops import AttnOpOutputs, attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger
 
 from ..linear.linear import build_linear
 from ..rms_norm import RMSNorm
+from .attn_outputs import AttnOutputs
 from .kv_cache import fill_paged_kv_cache
 
 
@@ -302,7 +303,7 @@ class MultiHeadAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
+    ) -> AttnOutputs:
         """Forward pass for the Multi-Head Attention module.
 
         This method dispatches to specific forward implementations based on the
@@ -379,7 +380,7 @@ class MultiHeadAttention(nn.Module):
                 sinks = self.sinks
             kwargs["s_aux"] = sinks
         # [b, n_head, seq, head_dim]
-        attn_output, extra_info = self.attn_impl_func(  # type: ignore
+        attn_op_outputs: AttnOpOutputs = self.attn_impl_func(  # type: ignore
             query_states,
             key_states,
             value_states,
@@ -395,17 +396,22 @@ class MultiHeadAttention(nn.Module):
             **kwargs,
         )
 
+        raw_output = attn_op_outputs["raw_output"]
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
-            attn_output = ulysses_all_to_all(
-                attn_output,
+            raw_output = ulysses_all_to_all(
+                raw_output,
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
 
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output, extra_info  # type: ignore[return-value]
+        raw_output = raw_output.reshape(*input_shape, -1).contiguous()
+        projected_output = self.o_proj(raw_output)
+        attn_outputs: AttnOutputs = {
+            "projected_output": projected_output,
+            **attn_op_outputs,
+        }
+        return attn_outputs
 
     def build_kv_cache(
         self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None
