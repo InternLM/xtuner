@@ -130,6 +130,7 @@ class MultiHeadAttention(nn.Module):
         layer_idx: int = 0,
     ):
         super().__init__()
+        self.name = f"layers.{layer_idx}.self_attn"
         self.head_dim = head_dim
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
@@ -431,3 +432,11 @@ class MultiHeadAttention(nn.Module):
         cache_v = torch.zeros(num_blocks, block_size, num_heads, head_dim, dtype=dtype, device="cuda")
 
         return cache_k, cache_v
+
+    @property
+    def name(self):
+        return self._name
+
+    @name.setter
+    def name(self, value: str):
+        self._name = value
