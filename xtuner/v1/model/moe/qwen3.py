@@ -5,6 +5,7 @@ import torch
 from typing_extensions import Self
 
 from transformers.models.qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
+from xtuner.v1.model.base import RopeScalingConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
@@ -67,6 +68,25 @@ class Qwen3MoEConfig(MoEConfig):
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
             rope_theta=hf_config.rope_theta,
+            rope_scaling_cfg=RopeScalingConfig(
+                type=hf_config.rope_scaling.get("type", "default"),
+                max_position_embeddings=hf_config.rope_scaling.get("max_position_embeddings"),
+                original_max_position_embeddings=hf_config.rope_scaling.get("original_max_position_embeddings"),
+                fope_init_factor=hf_config.rope_scaling.get("fope_init_factor"),
+                fope_sep_heads=hf_config.rope_scaling.get("fope_sep_heads"),
+                num_inv_freq=hf_config.rope_scaling.get("num_inv_freq"),
+                factor=hf_config.rope_scaling.get("factor", 1.0),
+                beta_fast=hf_config.rope_scaling.get("beta_fast"),
+                beta_slow=hf_config.rope_scaling.get("beta_slow"),
+                short_factor=hf_config.rope_scaling.get("short_factor"),
+                long_factor=hf_config.rope_scaling.get("long_factor"),
+                low_freq_factor=hf_config.rope_scaling.get("low_freq_factor"),
+                high_freq_factor=hf_config.rope_scaling.get("high_freq_factor"),
+                mscale=hf_config.rope_scaling.get("mscale"),
+                mscale_all_dim=hf_config.rope_scaling.get("mscale_all_dim"),
+            )
+            if hf_config.rope_scaling is not None
+            else None,
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
@@ -109,6 +129,7 @@ class Qwen3MoEConfig(MoEConfig):
             moe_intermediate_size=self.moe_intermediate_size,
             rms_norm_eps=self.rms_norm_eps,
             rope_theta=self.rope_theta,
+            rope_scaling=self.rope_scaling_cfg.model_dump() if self.rope_scaling_cfg is not None else None,
             hidden_act=self.hidden_act,
             num_attention_heads=self.attention.num_attention_heads,
             num_key_value_heads=self.attention.num_key_value_heads,

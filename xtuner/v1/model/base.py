@@ -79,6 +79,10 @@ class TransformerConfig(PydanticBaseModel):
     @computed_field
     def num_attention_heads(self) -> int:
         return self.attention.num_attention_heads
+    
+    @computed_field
+    def num_key_value_heads(self) -> int:
+        return self.attention.num_key_value_heads
 
     @computed_field
     def head_dim(self) -> int:
