@@ -386,6 +386,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             mask = loss_ctx_input.shifted_labels != -100
             if not mask.any():  # all padding tokens, skip
                 continue
+            assert loss_ctx_input.old_logprobs is not None, "old_logprobs is None"
+            assert mask is not None, "mask is None"
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
             sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
 
@@ -407,14 +409,16 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         logger_msg = f"Rollout {rollout_idx}: "
 
+        if len(all_rollout_is_metrics) > 0:
+            rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
+            logger_msg += f"\n\nrollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
+
+        assert sum_entropy is not None, "sum_entropy is None"
         sum_entropy = cast(torch.Tensor, sum_entropy)
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
         avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
         logger_msg += f" avg generation entropy: {avg_gen_entropy:.4f}"
 
-        if len(all_rollout_is_metrics) > 0:
-            rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
-            logger_msg += f"\n\nrollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
 
         self.logger.info(logger_msg)
 

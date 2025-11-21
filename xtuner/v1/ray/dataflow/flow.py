@@ -1,7 +1,8 @@
 import asyncio
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import time
+
 import httpx
 import ray
 from cyclopts import Parameter
@@ -263,6 +264,7 @@ class DataFlow:
                     pbar.n = self.finished_samples_count
                     pbar.refresh()
                     next_update_threshold += update_step
+                    self.logger.info(f"waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}")
                 while len(waiting_tasks) < self.config.max_concurrent:
                     # In async mode, we keep spawning. In sync mode, we stop if we have enough tasks in flight.
                     if (
