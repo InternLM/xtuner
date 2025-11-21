@@ -115,14 +115,13 @@ class TestMLLMTokenizeFn(TestCase):
         data_path = 'tests/resource/mllm_sft_video_example_data.jsonl'
         with open(data_path, encoding='utf-8') as f:
             for i, line in enumerate(f):
-                if i != 6:
+                if i != 7:
                     continue
                 raw_data = json.loads(line)
-
                 ret = self.tokenize_fn(raw_data, media_root=VIDEO_ROOT)
                 input_ids_xtuner = ret['input_ids']
                 pixel_values = ret['pixel_values']
-                assert pixel_values.size(0) == 10
+                assert pixel_values.size(0) == 15
 
                 input_str = self.tokenize_fn.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
                 input_str = input_str.replace('<IMG_CONTEXT>', '')
@@ -132,13 +131,18 @@ class TestMLLMTokenizeFn(TestCase):
                                "Frame-1: <IMG_CONTEXT>\n" \
                                "Frame-2: <IMG_CONTEXT>\n" \
                                "Frame-3: <IMG_CONTEXT>\n" \
-                               "Frame-4: <IMG_CONTEXT>\n" \
-                               "Frame-5: <IMG_CONTEXT>\n" \
+                               "Frame-4: <IMG_CONTEXT>" \
                                "Frame-1: <IMG_CONTEXT>\n" \
                                "Frame-2: <IMG_CONTEXT>\n" \
                                "Frame-3: <IMG_CONTEXT>\n" \
                                "Frame-4: <IMG_CONTEXT>\n" \
                                "Frame-5: <IMG_CONTEXT>\n" \
+                               "Frame-6: <IMG_CONTEXT>\n" \
+                               "Frame-7: <IMG_CONTEXT>\n" \
+                               "Frame-8: <IMG_CONTEXT>\n" \
+                               "Frame-9: <IMG_CONTEXT>\n" \
+                               "Frame-10: <IMG_CONTEXT>\n" \
+                               "Frame-11: <IMG_CONTEXT>" \
                                "两个视频中都在做什么？<|im_end|>\n" \
                                "<|im_start|>assistant\n" \
                                "打网球<|im_end|>"
