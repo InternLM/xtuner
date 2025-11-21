@@ -170,25 +170,25 @@ def replace_video_token(
                             # 标记每个视频
                             text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
                             for i in range(video_cnt):
-                                video_index = f"Video {i}: "
+                                video_index = f"Video {i + 1}: "
                                 text = text.replace(IMAGE_TOKEN_ALIAS, f"{video_index}<VIDEO_CONTEXT>", 1)
 
                         text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
                         video_cnt = text.count(IMAGE_TOKEN_ALIAS)
                         for i in range(video_cnt):
                             n_frames = len(num_image_token_list[i])
+
+                            # 在一个 video 中，每一帧的 image_token 应该是完全一样，因此直接 num_image_token_list[i][0] 就行
+                            image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[i][0]}{chat_template.image_end_token}"  # type: ignore
                             video_placeholder = ""
                             for frame_idx in range(n_frames):
                                 if len(timestamps_list) > 0:
                                     if timestamps_list[i] is not None:
                                         curr_time = timestamps_list[i][frame_idx]
-                                        video_placeholder += f"<{curr_time:.1f} seconds>"
-                                video_placeholder += IMAGE_TOKEN_ALIAS
-                            text = text.replace(IMAGE_TOKEN_ALIAS, video_placeholder)
-                            # 在一个 video 中，每一帧的 image_token 应该是完全一样，因此直接 num_image_token_list[i][0] 就行
-                            image_tokens = f"{chat_template.image_start_token}{chat_template.video_context_token * num_image_token_list[i][0]}{chat_template.image_end_token}"  # type: ignore
-                            for frame_idx in range(n_frames):
-                                text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
+                                        video_placeholder += f"<{curr_time:.1f} seconds>{image_tokens}"
+                                else:
+                                    video_placeholder += f"{image_tokens}"
+                            text = text.replace(IMAGE_TOKEN_ALIAS, video_placeholder, 1)
                             current_image_idx += len(num_image_token_list[i])
                         c.text = text
     assert current_image_idx == n_image, f"VIDEO ERROR: total_image_idx: {current_image_idx} != {n_image}"
@@ -619,7 +619,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                     "num_frames must be divisible by merge_size"
                 )
             else:
-                assert isinstance(num_frames_indices, int), f"num_frames_indices must be int {type(num_frames_indices)}"
+                assert isinstance(num_frames_indices, int), (
+                    f"num_frames_indices must be int {type(num_frames_indices)}"
+                )
                 assert num_frames_indices % self.video_processor.merge_size == 0, (
                     "num_frames must be divisible by merge_size"
                 )
@@ -862,7 +864,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
 
     # When handling multiple images or multiple videos,
     # it's helpful to add labels to the images and videos for better reference.
-    add_vision_id: bool = True
+    add_vision_id: bool = False
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs

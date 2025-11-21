@@ -1,3 +1,4 @@
+import os
 from typing import Dict, List, cast
 
 import numpy as np
@@ -6,6 +7,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
 import transformers
+from xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils import sort_frames
 
 
 # from liger-kernel
@@ -247,7 +249,14 @@ def preprocess_intern_s1(
 
 def add_video_root(messages, video_root):
     for msg in messages:
-        if 'content' in msg:
-            for content in msg['content']:
-                if 'type' in content and content['type'] == 'video':
-                    content['path'] = video_root + content['path']
+        if "content" in msg:
+            for content in msg["content"]:
+                if "type" in content and content["type"] == "video":
+                    if content["path"].endswith("/"):
+                        image_list = sort_frames(list(os.listdir(video_root + content["path"])))
+                        new_image_list = []
+                        for image in image_list:
+                            new_image_list.append(video_root + content["path"] + image)
+                        content["path"] = new_image_list
+                    else:
+                        content["path"] = video_root + content["path"]

@@ -60,14 +60,14 @@ def read_frames_folder(video_path, frames_indices, timestamps=None, client=None)
             image_byte = client.get(image)
             oss_read_time += time.time() - start_time
             frame = Image.open(io.BytesIO(image_byte))
-            frames.append(frame)
+            frames.append(np.array(frame))
     else:
         image_list = sort_frames(list(os.listdir(video_path)))
         frames = []
         for image in image_list:
             fp = os.path.join(video_path, image)
             frame = Image.open(fp).convert("RGB")
-            frames.append(frame)
+            frames.append(np.array(frame))
     vlen = len(frames)
 
     if isinstance(frames_indices, list):

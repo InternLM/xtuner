@@ -7,7 +7,6 @@ import torch
 import parametrize
 from xtuner.v1.utils.test_utils import add_video_root
 
-
 QWEN3_VL_PATH = os.environ["QWEN3_VL_MOE_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
@@ -183,7 +182,11 @@ class TestMLLMTokenizeFn(TestCase):
                     assert origin_fps_list == [20]
                     assert timestamps_list == [[0.25, 1.5]]
 
-    def test_qwen3_vl_sft_video(self):
+    @parametrize.parametrize("add_vision_id", [(True,), (False,)])
+    def test_qwen3_vl_sft_video(self, add_vision_id):
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH, rand_video_max_frames=14,
+                                              add_vision_id=add_vision_id).build(
+            self.tokenizer)
         data_path = 'tests/resource/mllm_sft_video_example_data.jsonl'
         hf_data_path = 'tests/resource/mllm_sft_video_hf_example_data.jsonl'
         hf_raw_datas = []
@@ -191,7 +194,7 @@ class TestMLLMTokenizeFn(TestCase):
             for line in f:
                 hf_raw_datas.append(json.loads(line))
 
-        total_index = [1, 4, 5]
+        total_index = [1,4,5,6,7,8,9]
         with open(data_path) as f:
             for i, line in enumerate(f):
                 if i not in total_index:
@@ -199,7 +202,17 @@ class TestMLLMTokenizeFn(TestCase):
                 raw_data = json.loads(line)
                 hf_raw_data = hf_raw_datas[i]
 
-                ret = self.tokenize_fn(raw_data, media_root=VIDEO_ROOT)
+                if i in [7]:
+                    # transformers 当输入视频文件夹时候，无法支持采样，有多少视频就读多少视频
+                    do_sample_frames = False
+                    tokenize_fn.video_processor.fps = 3
+                    tokenize_fn.rand_video_max_frames = 24  # 设置为大于采样后视频，防止进行采样
+                else:
+                    do_sample_frames = True
+                    tokenize_fn.video_processor.fps = 2
+                    tokenize_fn.rand_video_max_frames = 14
+
+                ret = tokenize_fn(raw_data, media_root=VIDEO_ROOT)
                 input_ids_xtuner = ret['input_ids']
                 pixel_values_xtuner: torch.Tensor = ret['pixel_values']
                 image_grid_thw_xtuner: torch.Tensor = ret['image_grid_thw']
@@ -207,21 +220,45 @@ class TestMLLMTokenizeFn(TestCase):
                 # to hf openai format
                 messages = hf_raw_data['messages']
                 add_video_root(messages, VIDEO_ROOT)
-                ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
-                                                         return_dict=True, return_tensors="pt")
-                input_ids_hf = ret['input_ids'][0]
-                pixel_values_hf = ret['pixel_values_videos']
-                image_grid_thw_hf = ret['video_grid_thw']
+
+                # 如果只有1个视频，则 add_vision_id 不生效
+                if len(tokenize_fn._video_path) <= 1:
+                    add_vision_id_ = False
+                else:
+                    add_vision_id_ = add_vision_id
+
+                if i not in [8, 9]:
+                    ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
+                                                             do_sample_frames=do_sample_frames,
+                                                             return_dict=True, add_vision_id=add_vision_id_,
+                                                             return_tensors="pt")
+                    input_ids_hf = ret['input_ids'][0]
+                    pixel_values_hf = ret['pixel_values_videos']
+                    image_grid_thw_hf = ret['video_grid_thw']
+
+                text = self.tokenize_fn.tokenizer.decode(input_ids_xtuner)
+
                 if i == 1:
                     # 不应该包括 seconds> 内容
-                    text = self.tokenize_fn.tokenizer.decode(input_ids_xtuner)
                     self.assertTrue('seconds>' not in text)
                 else:
-                    self.assertEqual(input_ids_xtuner, input_ids_hf.tolist())
-                    text = self.tokenize_fn.tokenizer.decode(input_ids_xtuner)
-                    self.assertTrue('seconds>' in text)
-                    self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
-                    self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))
+                    if i == 8:
+                        # 测试能整除下均匀采样
+                        self.assertEqual(pixel_values_xtuner.size(), (45760, 1536))
+                        self.assertEqual(text.count('seconds>'), 13)
+                    elif i == 9:
+                        # 测试无法整除且超过最大帧数情况下，均匀采样
+                        self.assertEqual(pixel_values_xtuner.size(), (24640, 1536))
+                        self.assertEqual(text.count('seconds>'), 7)
+                        print(pixel_values_xtuner.size(), image_grid_thw_xtuner, text.count('seconds>'), 'xxx')
+                    else:
+                        if i == 7:
+                            self.assertEqual(len(input_ids_xtuner), len(input_ids_hf))
+                        else:
+                            self.assertEqual(input_ids_xtuner, input_ids_hf.tolist())
+                        self.assertTrue('seconds>' in text)
+                        self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
+                        self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))
 
     def test_qwen3_vl_pretrain_pure_text(self):
         data_path = 'tests/resource/pretrain_example_data.jsonl'
