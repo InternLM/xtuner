@@ -178,7 +178,7 @@ class TransformerConfig(XTunerBaseModelConfig):
         """HuggingFace configuration."""
         return None
 
-    def save_hf(self, hf_path: str | Path):
+    def save_hf(self, hf_path: str | Path, dtype: torch.dtype = torch.bfloat16):
         """Save the configuration to a HuggingFace-compatible format.
 
         Args:
@@ -188,7 +188,20 @@ class TransformerConfig(XTunerBaseModelConfig):
         if self.hf_config is None:
             raise NotImplementedError("The `hf_config` property must be implemented to save in HuggingFace format.")
 
-        self.hf_config.save_pretrained(hf_path)
+        if dtype not in {torch.bfloat16, torch.float8_e4m3fn}:
+            raise NotImplementedError(f"Saving dtype {dtype} is not supported yet.")
+
+        hf_config = self.hf_config
+        if dtype is torch.float8_e4m3fn:
+            hf_config.quantization_config = {
+                "activation_scheme": "dynamic",
+                "fmt": "e4m3",
+                "quant_method": "fp8",
+                "scale_fmt": "ue8m0",
+                "weight_block_size": [128, 128],
+            }
+
+        hf_config.save_pretrained(hf_path)
 
 
 class ModelOutputs(TypedDict):
@@ -919,7 +932,7 @@ class BaseModel(nn.Module):
                 raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
 
             if self.config.hf_config is not None:
-                self.config.save_hf(hf_dir)
+                self.config.save_hf(hf_dir, dtype=save_dtype)
             else:  # if self._hf_path is not None:
                 for file in cast(Path, self._hf_path).iterdir():
                     if file.suffix != ".safetensors":
