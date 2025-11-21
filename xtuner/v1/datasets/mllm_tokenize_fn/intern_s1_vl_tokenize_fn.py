@@ -333,7 +333,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             random_frame_num = generate_random_int_from_dict(
                 {"data_item": data_item, "video_path": video_path}, self.min_num_frames, self.max_num_frames
             )
-            num_image_tokens = [self.num_image_token for _ in random_frame_num]
+            num_image_tokens = [self.num_image_token for _ in range(random_frame_num)]
             num_image_tokens_list.append(num_image_tokens)
         total_image_tokens = sum([sum(num_image_tokens) for num_image_tokens in num_image_tokens_list])
 

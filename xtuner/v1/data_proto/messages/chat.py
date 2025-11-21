@@ -50,6 +50,7 @@ class VideoURL(BaseModel):
     origin_fps: Optional[float] = None
     processed_video_length: Optional[int] = None
     processed_fps: Optional[float] = None
+    video_length: Optional[int] = None  # deprecated
 
 
 class VideoContentItem(BaseModel):
