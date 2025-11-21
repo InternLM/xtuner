@@ -68,7 +68,7 @@ class HFCheckpointLoader:
             self.use_safetensors = False
         elif "model.safetensors" in os.listdir(self.model_path):
             with safe_open(os.path.join(self.model_path, "model.safetensors"), framework="pt") as f:
-                self.weight_map = {k: "model.safetensors" for k in f.keys()}
+                self.weight_map = dict.fromkeys(f.keys(), "model.safetensors")
             self.use_safetensors = True
         else:
             raise FileNotFoundError

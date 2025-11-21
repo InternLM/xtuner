@@ -237,7 +237,7 @@ class RolloutController:
         )
         self._update_active_workers_and_urls()
         self.worker_server_urls = list(self.worker_server_urls_map.values())
-        self.active_rollout_workers_status = {worker: True for worker in self.active_rollout_workers}
+        self.active_rollout_workers_status = dict.fromkeys(self.active_rollout_workers, True)
         return engine_mesh_list, self.worker_server_urls_map
 
     def check_active_workers(self):

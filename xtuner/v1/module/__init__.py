@@ -1,4 +1,5 @@
 from .attention import (
+    AttnOutputs,
     MHAConfig,
     MLAConfig,
     MultiHeadAttention,
@@ -25,6 +26,7 @@ __all__ = [
     "MultiLatentAttention",
     "MHAConfig",
     "MLAConfig",
+    "AttnOutputs",
     "RopeScalingConfig",
     "RotaryEmbedding",
     "TorchAll2AllDispatcher",
