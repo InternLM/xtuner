@@ -371,10 +371,10 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         pixel_values_list = []
         num_imgs_list = []
         for video_path in self._video_path:
-            video_path = os.path.join(media_root, video_path)
             random_frame_num = generate_random_int_from_dict(
                 {"data_item": data_item, "video_path": video_path}, self.min_num_frames, self.max_num_frames
             )
+            video_path = os.path.join(media_root, video_path)
 
             if self.oss_loader is not None:
                 image_list = self.oss_loader(
