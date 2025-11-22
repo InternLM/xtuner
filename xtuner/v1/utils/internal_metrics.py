@@ -1,9 +1,9 @@
-import os
 from collections import defaultdict
 
 import torch
 import torch.distributed as dist
 from mmengine.dist import get_rank, get_world_size
+from pydantic import BaseModel, ConfigDict, model_validator
 from torch import nn
 from torch.utils.hooks import RemovableHandle
 from typing_extensions import TypedDict
@@ -16,16 +16,6 @@ from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.grad_norm import cal_total_norm, group_tensors_by_device_mesh_and_placements
-
-
-class InternalMetrics(TypedDict):
-    weight_rms: dict[str, float]
-    maxvio: dict[str, float]
-    drop_ratio: dict[str, float]
-    router_logits_max: dict[str, float]
-    router_logits_mean: dict[str, float]
-    attn_max_lse: dict[str, float]
-    attn_max_logits: dict[str, float]
 
 
 RMS_NORM_MONITOR_MODULES = (
@@ -47,41 +37,83 @@ ATTN_MAX_LSE: dict[str, torch.Tensor] = {}
 ATTN_MAX_LOGITS: dict[str, torch.Tensor] = {}
 
 
+class InternalMetrics(TypedDict, total=False):
+    weight_rms: dict[str, float]
+    maxvio: dict[str, float]
+    drop_ratio: dict[str, float]
+    router_logits_max: dict[str, float]
+    router_logits_mean: dict[str, float]
+    attn_max_lse: dict[str, float]
+    attn_max_logits: dict[str, float]
+
+
+class InternalMetricsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    internal_metrics_interval: int | None = None
+    monitor_weights_rms_norm: bool = True
+    monitor_attn_logits_stats: bool = True
+    monitor_moe_router_logits_stats: bool | None = None  # only applies to MoE models
+    monitor_moe_load_balance_stats: bool | None = None
+
+    @model_validator(mode="after")
+    def post_init(self):
+        monitoring_fields = [
+            self.monitor_weights_rms_norm,
+            self.monitor_attn_logits_stats,
+            self.monitor_moe_router_logits_stats,
+            self.monitor_moe_load_balance_stats,
+        ]
+
+        if all(field is False or field is None for field in monitoring_fields):
+            self.internal_metrics_interval = None
+
+        return self
+
+
 class InternalMetricsRecorder:
-    def __init__(self, engine: TrainEngine):
+    def __init__(self, internal_metrics_cfg: InternalMetricsConfig, engine: TrainEngine):
+        self.internal_metrics_cfg = internal_metrics_cfg
         self.model = engine.model
         self.intra_layer_micro_batch = engine.intra_layer_micro_batch
         self.hooks: list[RemovableHandle] = []
-        self.metrics: InternalMetrics = {
-            "weight_rms": {},
-            "maxvio": {},
-            "drop_ratio": {},
-            "router_logits_max": {},
-            "router_logits_mean": {},
-            "attn_max_lse": {},
-            "attn_max_logits": {},
-        }
-        attn_cfg: MHAConfig | MLAConfig = self.model.config.attention
         self._attn_monitor_type: str | None = None
-        if os.getenv("DISABLE_ATTN_MONITOR_HOOK", "0") == "0":
+        self.metrics = self._init_metrics_dict()
+        self._closed = False
+
+    def _init_metrics_dict(self) -> InternalMetrics:
+        metrics: InternalMetrics = {}
+        if self.internal_metrics_cfg.monitor_weights_rms_norm:
+            metrics["weight_rms"] = {}
+        if self.internal_metrics_cfg.monitor_attn_logits_stats:
+            attn_cfg: MHAConfig | MLAConfig = self.model.config.attention
             if isinstance(attn_cfg, MLAConfig):
                 attn_impl = "flash_attention"
             else:
                 attn_impl = attn_cfg.attn_impl
-            global ATTN_MAX_LOGITS
-            global ATTN_MAX_LSE
             if attn_impl == "eager_attention":
                 # We typically won't use eager attn, but implement it here anyway
                 self._attn_monitor_type = "attn_logits"
+                metrics["attn_max_logits"] = {}
             elif not (get_device() == "npu" and attn_impl == "flash_attention"):
                 self._attn_monitor_type = "softmax_lse"
+                metrics["attn_max_lse"] = {}
             for name, module in self.model.named_modules():
                 if isinstance(module, ATTENTION_CLS):
                     if self._attn_monitor_type == "attn_logits":
                         ATTN_MAX_LOGITS[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
                     elif self._attn_monitor_type == "softmax_lse":
                         ATTN_MAX_LSE[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
-        self._closed = False
+
+        if isinstance(self.model, MoE):
+            if self.internal_metrics_cfg.monitor_moe_router_logits_stats:
+                metrics["router_logits_max"] = {}
+                metrics["router_logits_mean"] = {}
+
+            if self.internal_metrics_cfg.monitor_moe_load_balance_stats:
+                metrics["maxvio"] = {}
+                metrics["drop_ratio"] = {}
+
+        return metrics
 
     @torch.no_grad()
     def calculate_module_weight_rms(self, module: nn.Module, layer_name: str, dtype: torch.dtype = torch.float32):
@@ -104,8 +136,6 @@ class InternalMetricsRecorder:
     def register_attn_output_hook(self, module: nn.Module):
         """Register attention output hook as a forward hook."""
         self._check_closed()
-        if os.getenv("DISABLE_ATTN_MONITOR_HOOK", "0") == "1":
-            return
 
         def hook(module, input, output):
             if output.get("softmax_lse") is not None:
@@ -121,15 +151,14 @@ class InternalMetricsRecorder:
         """Run a dummy forward to get metrics."""
         self._check_closed()
         for name, module in self.model.named_modules():
-            if isinstance(module, ATTENTION_CLS):
+            if self.internal_metrics_cfg.monitor_attn_logits_stats and isinstance(module, ATTENTION_CLS):
                 self.register_attn_output_hook(module)
-            if isinstance(module, RMS_NORM_MONITOR_MODULES):
+            if self.internal_metrics_cfg.monitor_weights_rms_norm and isinstance(module, RMS_NORM_MONITOR_MODULES):
                 self.calculate_module_weight_rms(module, self._clean_module_name(name), dtype=torch.float32)
 
         additional_kwargs = {}
-        if isinstance(self.model, MoE):
+        if self.internal_metrics_cfg.monitor_moe_router_logits_stats and isinstance(self.model, MoE):
             # for MoE model, add additional kwargs to return necessary stats
-            # additional_kwargs["return_tokens_per_expert_global"] = True
             additional_kwargs["return_router_logits"] = True
 
         # metrics before aggregation
@@ -138,38 +167,45 @@ class InternalMetricsRecorder:
         router_logits_mean = defaultdict(list)
 
         # do dummy forward to get metrics
-        for i in range(0, len(data_batches), self.intra_layer_micro_batch):
-            data_batch = data_batches[i : i + self.intra_layer_micro_batch]
-            seq_ctx_list = []
-            loss_ctx_list = []
-            for data in data_batch:
-                seq_ctx = data["seq_ctx"]
-                loss_ctx = data["loss_ctx"]
-                seq_ctx_list.append(seq_ctx)
-                loss_ctx_list.append(loss_ctx)
-            if self.intra_layer_micro_batch == 1:
-                output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0], **additional_kwargs)
-            else:
-                # although we dont need loss at this point, we still need loss_ctx for micro-batch forward
-                output = self.model(
-                    seq_ctx=seq_ctx_list,
-                    loss_ctx=loss_ctx_list,
-                    **additional_kwargs,
-                )
-
-            if output.get("tokens_per_expert_global") is not None:
-                # At this point, tokens_per_expert_global is already all-reduced into current rank.
-                # [num_layers, num_experts]
-                if tokens_per_expert_global is None:
-                    tokens_per_expert_global = output["tokens_per_expert_global"].float()
+        if self.need_dummy_forward:
+            for i in range(0, len(data_batches), self.intra_layer_micro_batch):
+                data_batch = data_batches[i : i + self.intra_layer_micro_batch]
+                seq_ctx_list = []
+                loss_ctx_list = []
+                for data in data_batch:
+                    seq_ctx = data["seq_ctx"]
+                    loss_ctx = data["loss_ctx"]
+                    seq_ctx_list.append(seq_ctx)
+                    loss_ctx_list.append(loss_ctx)
+                if self.intra_layer_micro_batch == 1:
+                    output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0], **additional_kwargs)
                 else:
-                    tokens_per_expert_global += output["tokens_per_expert_global"].float()
+                    # although we dont need loss at this point, we still need loss_ctx for micro-batch forward
+                    output = self.model(
+                        seq_ctx=seq_ctx_list,
+                        loss_ctx=loss_ctx_list,
+                        **additional_kwargs,
+                    )
 
-            if output.get("router_logits") is not None:
-                for layer_name, router_logits in output["router_logits"].items():
-                    # [bsz, packed_len, num_experts]
-                    router_logits_max[layer_name].append(router_logits.max())
-                    router_logits_mean[layer_name].append(router_logits.mean())
+                if (
+                    self.internal_metrics_cfg.monitor_moe_load_balance_stats
+                    and output.get("tokens_per_expert_global") is not None
+                ):
+                    # At this point, tokens_per_expert_global is already all-reduced into current rank.
+                    # [num_layers, num_experts]
+                    if tokens_per_expert_global is None:
+                        tokens_per_expert_global = output["tokens_per_expert_global"].float()
+                    else:
+                        tokens_per_expert_global += output["tokens_per_expert_global"].float()
+
+                if (
+                    self.internal_metrics_cfg.monitor_moe_router_logits_stats
+                    and output.get("router_logits") is not None
+                ):
+                    for layer_name, router_logits in output["router_logits"].items():
+                        # [bsz, packed_len, num_experts]
+                        router_logits_max[layer_name].append(router_logits.max())
+                        router_logits_mean[layer_name].append(router_logits.mean())
 
         if tokens_per_expert_global is not None:
             avg_count_load = tokens_per_expert_global.mean(1)
@@ -213,8 +249,8 @@ class InternalMetricsRecorder:
                 dist.all_reduce(local_attn_max_logits, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_logits"][layer_name] = local_attn_max_logits.item()
 
-        self._reset_attn_max_lse_or_logits(ATTN_MAX_LSE)
-        self._reset_attn_max_lse_or_logits(ATTN_MAX_LOGITS)
+        self._maybe_reset_attn_max_lse_or_logits(ATTN_MAX_LSE)
+        self._maybe_reset_attn_max_lse_or_logits(ATTN_MAX_LOGITS)
 
         for hook in self.hooks:
             hook.remove()
@@ -243,7 +279,7 @@ class InternalMetricsRecorder:
     def __del__(self):
         self.close()
 
-    def _reset_attn_max_lse_or_logits(self, target: dict[str, torch.Tensor]):
+    def _maybe_reset_attn_max_lse_or_logits(self, target: dict[str, torch.Tensor]):
         if not target:
             return
         for v in target.values():
@@ -258,3 +294,31 @@ class InternalMetricsRecorder:
         if "._orig_mod" in name:
             name = name.replace("._orig_mod", "")
         return name
+
+    @property
+    def need_dummy_forward(self) -> bool:
+        internal_metrics_cfg = self.internal_metrics_cfg
+        if (
+            internal_metrics_cfg.monitor_attn_logits_stats
+            or internal_metrics_cfg.monitor_moe_router_logits_stats
+            or internal_metrics_cfg.monitor_moe_load_balance_stats
+        ):
+            return True
+        else:
+            return False
+
+
+def flatten_internal_metrics_for_logs(metrics: InternalMetrics, sep: str = "/") -> dict:
+    items = []
+    for name, sub_metrics in metrics.items():
+        if isinstance(sub_metrics, dict):
+            for k, v in sub_metrics.items():
+                if isinstance(v, (float, int)):
+                    items.append((f"{name}{sep}{k}", v))
+                else:
+                    raise ValueError(f"Unsupported metric value type: expected float or int, but got {type(v)}")
+        else:
+            raise ValueError(
+                f"Unsupported metric type for internal metrics: expected dict, but got {type(sub_metrics)}"
+            )
+    return dict(items)

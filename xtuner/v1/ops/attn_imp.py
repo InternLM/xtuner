@@ -43,7 +43,7 @@ def get_flex_attention_compiled():
 flex_attention_compiled = None
 
 
-class AttnOpOutputs(TypedDict):
+class AttnOpOutputs(TypedDict, total=False):
     raw_output: torch.Tensor
     softmax_lse: torch.Tensor | None
     attn_logits: torch.Tensor | None
@@ -178,7 +178,6 @@ def eager_attention(
     attn_outputs: AttnOpOutputs = {
         "raw_output": raw_output,
         "attn_logits": attn_logits,
-        "softmax_lse": None,
     }
     return attn_outputs
 
@@ -216,7 +215,6 @@ def flex_attention(
     attn_outputs: AttnOpOutputs = {
         "raw_output": raw_output,
         "softmax_lse": softmax_lse.detach(),
-        "attn_logits": None,
     }
     return attn_outputs
 
@@ -251,7 +249,6 @@ def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> Attn
     attn_outputs: AttnOpOutputs = {
         "raw_output": raw_output[None],
         "softmax_lse": softmax_lse,
-        "attn_logits": None,
     }
     return attn_outputs
 
