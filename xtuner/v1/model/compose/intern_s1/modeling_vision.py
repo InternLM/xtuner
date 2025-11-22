@@ -188,9 +188,10 @@ class InternS1VisionLayer(nn.Module):
 
     @maybe_compile(fullgraph=True)
     def attention_pre_forward(self, hidden_states):
-        attention_output, _ = self.attention(self.layernorm_before(hidden_states))
-        attention_output = self.lambda_1 * attention_output
-        return attention_output
+        attn_outputs = self.attention(self.layernorm_before(hidden_states))
+        attn_final_output = attn_outputs["projected_output"]
+        attn_final_output = self.lambda_1 * attn_final_output
+        return attn_final_output
 
     @maybe_compile(fullgraph=True)
     def attention_post_forward(self, hidden_states):

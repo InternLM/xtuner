@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 import torch.nn as nn
@@ -6,7 +6,7 @@ import torch.nn as nn
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
-from xtuner.v1.module import MHAConfig, MLAConfig, RMSNorm
+from xtuner.v1.module import AttnOutputs, MHAConfig, MLAConfig, RMSNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
@@ -62,7 +62,6 @@ class DenseDecoderLayer(nn.Module):
             generate_config=generate_config,
             float8_cfg=float8_cfg,
         )
-        self.self_attn.name = f"layers.{layer_idx}.self_attn"  # type: ignore[assignment]
         self.mlp = DenseMLP(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
@@ -85,11 +84,12 @@ class DenseDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states, _ = self.self_attn(
+        attn_outputs: AttnOutputs = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
         )
+        hidden_states = cast(torch.Tensor, attn_outputs["projected_output"])
         hidden_states = residual + hidden_states
 
         # Fully Connected

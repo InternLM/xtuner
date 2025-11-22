@@ -3,6 +3,7 @@ from collections import defaultdict
 
 import torch
 import torch.distributed as dist
+from mmengine.dist import get_rank, get_world_size
 from torch import nn
 from torch.utils.hooks import RemovableHandle
 from typing_extensions import TypedDict
@@ -10,9 +11,10 @@ from typing_extensions import TypedDict
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model import MoE
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.module import LMHead, MultiHeadAttention, MultiLatentAttention
+from xtuner.v1.module import LMHead, MHAConfig, MLAConfig, MultiHeadAttention, MultiLatentAttention
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
+from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.grad_norm import cal_total_norm, group_tensors_by_device_mesh_and_placements
 
 
@@ -33,9 +35,14 @@ RMS_NORM_MONITOR_MODULES = (
     LMHead,
 )
 
+SMALL_VAL = -1e9
+
 MOE_MODEL_CLS = (MoE,)
 ATTENTION_CLS = (MultiHeadAttention, MultiLatentAttention)
 
+# In our prev tests, registering these stats dicts could lead to unexpected recompile behavior.
+# We want to avoid accessing class members in hooks here, thus the global vars.
+# TODO: This could be optimized in torch2.8 @nil0x9
 ATTN_MAX_LSE: dict[str, torch.Tensor] = {}
 ATTN_MAX_LOGITS: dict[str, torch.Tensor] = {}
 
@@ -54,10 +61,32 @@ class InternalMetricsRecorder:
             "attn_max_lse": {},
             "attn_max_logits": {},
         }
+        attn_cfg: MHAConfig | MLAConfig = self.model.config.attention
+        self._attn_monitor_type: str | None = None
+        if os.getenv("DISABLE_ATTN_MONITOR_HOOK", "0") == "0":
+            if isinstance(attn_cfg, MLAConfig):
+                attn_impl = "flash_attention"
+            else:
+                attn_impl = attn_cfg.attn_impl
+            global ATTN_MAX_LOGITS
+            global ATTN_MAX_LSE
+            if attn_impl == "eager_attention":
+                # We typically won't use eager attn, but implement it here anyway
+                self._attn_monitor_type = "attn_logits"
+            elif not (get_device() == "npu" and attn_impl == "flash_attention"):
+                self._attn_monitor_type = "softmax_lse"
+            for name, module in self.model.named_modules():
+                if isinstance(module, ATTENTION_CLS):
+                    if self._attn_monitor_type == "attn_logits":
+                        ATTN_MAX_LOGITS[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
+                    elif self._attn_monitor_type == "softmax_lse":
+                        ATTN_MAX_LSE[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
+        self._closed = False
 
     @torch.no_grad()
     def calculate_module_weight_rms(self, module: nn.Module, layer_name: str, dtype: torch.dtype = torch.float32):
         """Calculate the RMS of the module's parameters."""
+        self._check_closed()
         all_params = [param.data for param in module.parameters() if param.requires_grad]
         if not all_params:
             return
@@ -72,34 +101,31 @@ class InternalMetricsRecorder:
         param_rms = param_l2_norm / total_numel**0.5
         self.metrics["weight_rms"][layer_name] = param_rms.item()
 
-    def register_attn_extra_info_hook(self, module: nn.Module):
-        """Register attention extra info hook as a forward hook."""
+    def register_attn_output_hook(self, module: nn.Module):
+        """Register attention output hook as a forward hook."""
+        self._check_closed()
         if os.getenv("DISABLE_ATTN_MONITOR_HOOK", "0") == "1":
             return
 
         def hook(module, input, output):
-            extra_info = output[1]
-            if extra_info.get("softmax_lse", None) is not None:
-                if module.name not in ATTN_MAX_LSE:
-                    # original shape: [n_head, seq]
-                    ATTN_MAX_LSE[module.name] = extra_info["softmax_lse"].max()
-                else:
-                    prev_lse_max = ATTN_MAX_LSE[module.name]
-                    ATTN_MAX_LSE[module.name] = max(prev_lse_max, extra_info["softmax_lse"].max())
-            if extra_info.get("attn_logits", None) is not None:
-                if module.name not in ATTN_MAX_LOGITS:
-                    # original shape: [b, n_head, seq, seq]
-                    ATTN_MAX_LOGITS[module.name] = extra_info["attn_logits"].max()
-                else:
-                    prev_logits_max = ATTN_MAX_LOGITS[module.name]
-                    ATTN_MAX_LOGITS[module.name] = max(prev_logits_max, extra_info["attn_logits"].max())
+            if output.get("softmax_lse") is not None:
+                ATTN_MAX_LSE[module.name] = torch.max(ATTN_MAX_LSE[module.name], output["softmax_lse"].max())
+            if output.get("attn_logits") is not None:
+                ATTN_MAX_LOGITS[module.name] = max(ATTN_MAX_LOGITS[module.name], output["attn_logits"].max())
 
         hook_handle: RemovableHandle = module.register_forward_hook(hook)
         self.hooks.append(hook_handle)
 
     @torch.no_grad()
-    def get_metrics(self, data_batches: list[ModelItem]):
+    def pop_metrics(self, data_batches: list[ModelItem]):
         """Run a dummy forward to get metrics."""
+        self._check_closed()
+        for name, module in self.model.named_modules():
+            if isinstance(module, ATTENTION_CLS):
+                self.register_attn_output_hook(module)
+            if isinstance(module, RMS_NORM_MONITOR_MODULES):
+                self.calculate_module_weight_rms(module, self._clean_module_name(name), dtype=torch.float32)
+
         additional_kwargs = {}
         if isinstance(self.model, MoE):
             # for MoE model, add additional kwargs to return necessary stats
@@ -131,7 +157,7 @@ class InternalMetricsRecorder:
                     **additional_kwargs,
                 )
 
-            if output.get("tokens_per_expert_global", None) is not None:
+            if output.get("tokens_per_expert_global") is not None:
                 # At this point, tokens_per_expert_global is already all-reduced into current rank.
                 # [num_layers, num_experts]
                 if tokens_per_expert_global is None:
@@ -139,7 +165,7 @@ class InternalMetricsRecorder:
                 else:
                     tokens_per_expert_global += output["tokens_per_expert_global"].float()
 
-            if output.get("router_logits", None) is not None:
+            if output.get("router_logits") is not None:
                 for layer_name, router_logits in output["router_logits"].items():
                     # [bsz, packed_len, num_experts]
                     router_logits_max[layer_name].append(router_logits.max())
@@ -174,34 +200,57 @@ class InternalMetricsRecorder:
             for layer_name, router_logits_list in router_logits_mean.items():
                 # [bsz/intra_layer_micro_batch, ]
                 local_router_logits_mean = torch.mean(torch.stack(router_logits_list))
-                dist.all_reduce(local_router_logits_mean.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
+                dist.all_reduce(local_router_logits_mean.div_(get_world_size()), op=dist.ReduceOp.SUM)
                 self.metrics["router_logits_mean"][layer_name] = local_router_logits_mean.item()
 
-        if ATTN_MAX_LSE:
+        if self._attn_monitor_type == "softmax_lse":
             for layer_name, local_attn_max_lse in ATTN_MAX_LSE.items():
                 dist.all_reduce(local_attn_max_lse, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_lse"][layer_name] = local_attn_max_lse.item()
 
-        if ATTN_MAX_LOGITS:
+        if self._attn_monitor_type == "attn_logits":
             for layer_name, local_attn_max_logits in ATTN_MAX_LOGITS.items():
                 dist.all_reduce(local_attn_max_logits, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_logits"][layer_name] = local_attn_max_logits.item()
 
+        self._reset_attn_max_lse_or_logits(ATTN_MAX_LSE)
+        self._reset_attn_max_lse_or_logits(ATTN_MAX_LOGITS)
+
+        for hook in self.hooks:
+            hook.remove()
+
         return self.metrics
 
+    def close(self):
+        if not self._closed:
+            del self.metrics
+            global ATTN_MAX_LSE
+            global ATTN_MAX_LOGITS
+            ATTN_MAX_LSE = None
+            ATTN_MAX_LOGITS = None
+            self._closed = True
+
     def __enter__(self):
-        for name, module in self.model.named_modules():
-            if isinstance(module, ATTENTION_CLS):
-                self.register_attn_extra_info_hook(module)
-            if isinstance(module, RMS_NORM_MONITOR_MODULES):
-                self.calculate_module_weight_rms(module, self._clean_module_name(name), dtype=torch.float32)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        ATTN_MAX_LSE.clear()
-        ATTN_MAX_LOGITS.clear()
-        for hook in self.hooks:
-            hook.remove()
+        self.close()
+
+    def _check_closed(self):
+        if self._closed:
+            raise RuntimeError("`InternalMetricsRecorder` is closed and cannot be used")
+
+    def __del__(self):
+        self.close()
+
+    def _reset_attn_max_lse_or_logits(self, target: dict[str, torch.Tensor]):
+        if not target:
+            return
+        for v in target.values():
+            if isinstance(v, torch.Tensor):
+                v.fill_(SMALL_VAL)
+            else:
+                raise TypeError("Only Tensor type is allowed!")
 
     def _clean_module_name(self, name: str) -> str:
         if "._checkpoint_wrapped_module" in name:
