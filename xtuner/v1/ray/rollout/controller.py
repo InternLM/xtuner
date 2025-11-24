@@ -33,7 +33,7 @@ class WorkerInfo:
     failure_count: int = 0
     running_count: int = 0
     success_count: int = 0
-
+    skipped_count: int = 0
 
 class SessionRouter:
     def __init__(
@@ -280,6 +280,16 @@ class RolloutController:
         ray.get(worker_info.actor.offload.remote())  # type: ignore[attr-defined]
         ray.get(worker_info.actor.shutdown.remote())  # type: ignore[attr-defined]
 
+        if all(not info.is_active for info in self.workers_info.values()):
+            self.logger.critical("All rollout workers are inactive. Attempting to restart all inference engines.")
+            try:
+                self.engine_mesh_list, self.server_url_dict = self.init_workers()
+                self.router.update_active_workers(self._get_worker_status_for_router())
+                self.logger.info("Successfully re-initialized all rollout workers.")
+            except Exception as e:
+                self.logger.error(f"Failed to restart rollout workers: {e}", exc_info=True)
+                raise RuntimeError("Failed to recover rollout workers after all of them went down.") from e
+            
     def check_active_workers(self):
         """Check the health of all active rollout workers.
 
@@ -312,12 +322,12 @@ class RolloutController:
         maximum retry count."""
         worker_info = self.workers_info.get(url)
         if not worker_info or not worker_info.is_active:
+            self.logger.warning(f"Rollout worker {url} is already inactive.")
             return
 
         worker_info.failure_count += 1
         if (
-            self.config.max_retry_per_worker is not None
-            and worker_info.failure_count < self.config.max_retry_per_worker
+            worker_info.failure_count < self.config.max_retry_per_worker
         ):
             self.logger.warning(
                 f"Rollout worker {url} failed {worker_info.failure_count} times, but not deactivated yet."
@@ -389,7 +399,8 @@ class RolloutController:
             response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout * 2)
             self.workers_info[server_url].running_count -= 1
             self.workers_info[server_url].success_count += 1
-            if response.state == "failed":
+            if response.state == "failed" or response.state == "skipped":
+                self.logger.info(f"Rollout worker {worker} returned state {response.state}. Deactivating worker.")
                 self.deactivate_worker_by_url(server_url)
             return response
         except asyncio.TimeoutError:

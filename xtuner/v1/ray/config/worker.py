@@ -211,7 +211,7 @@ class RolloutConfig(BaseModel):
             group=infer_group,
             help="Maximum number of retries per sample before marking it as failed.",
         ),
-    ] = 3
+    ] = 1
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
     def model_post_init(self, __context: Any) -> None:

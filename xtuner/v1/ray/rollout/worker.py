@@ -357,18 +357,21 @@ class RolloutWorker(SingleAcceleratorWorker):
                 )
 
             # Case 3: A retryable error occurred, and we still have retries left
-            elif http_result.is_retryable and cur_retry_times < self.config.max_retry_per_sample:
-                cur_retry_times += 1
-                self.logger.warning(
-                    f"Retrying rollout request {uid} to {http_result.url} due to {http_result.error_type}. "
-                    f"Retry {cur_retry_times}/{self.config.max_retry_per_sample}."
-                )
-                await asyncio.sleep(0.1)
-                continue
+            ## 可能是这里循环有问题，先注释掉！！！因为controller的状态判断进不去
+            # elif http_result.is_retryable and cur_retry_times < self.config.max_retry_per_sample:
+            #     cur_retry_times += 1
+            #     self.logger.warning(
+            #         f"Retrying rollout request {uid} to {http_result.url} due to {http_result.error_type}. "
+            #         f"Retry {cur_retry_times}/{self.config.max_retry_per_sample}."
+            #     )
+            #     await asyncio.sleep(0.1)
+            #     continue
 
             elif http_result.is_retryable or http_result.is_client_error:
+                self.logger.warning(f"rollout request {uid} to {http_result.url} was skipped")
                 return RLRolloutResponseItem(state="skipped")
             elif http_result.is_server_error:
+                self.logger.warning(f"rollout request {uid} to {http_result.url} failed")
                 return RLRolloutResponseItem(state="failed")
             else:
                 raise RuntimeError(

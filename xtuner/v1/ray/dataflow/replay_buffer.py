@@ -540,8 +540,7 @@ class ReplayBufferStorage:
 
         # update env for expired samples
         for sample in group_samples:
-            if sample.data.num_tokens and sample.data.input_ids:
-                sample.data.input_ids = sample.data.input_ids[: sample.data.num_tokens]
+            sample.data.input_ids = sample.data.input_ids[: sample.data.num_tokens]
             sample.env = RLEnvDataItem()
             sample.uid.version = 0
             sample.extra_info.state = str(ReplayState.INIT)
@@ -571,8 +570,8 @@ class ReplayBufferStorage:
                     )
                 else:
                     sample.data.input_ids.extend(sample.env.rollout.response_ids)
-            elif sample.env.rollout.response:
-                sample.data.input_ids.extend(tokenizer.encode(sample.env.rollout.response, add_special_tokens=False))
+            # elif sample.env.rollout.response:
+            #     sample.data.input_ids.extend(tokenizer.encode(sample.env.rollout.response, add_special_tokens=False))
         self.logger.debug(
             f"Sampling interrupted action_id: {action_id} from replay buffer, remain interrupted samples: {len(self._interrupted_actions)}"
         )
@@ -651,8 +650,10 @@ class ReplayBuffer:
             A list of sampled data items.
         """
         if sample_from_expired_storage and self.get_expired_samples() > 0:
+            self.sample_from_expired_count += 1
             return self.storage.sample_from_expired_storage()
         elif enable_partial_rollout > 0 and self.get_interrupted_samples() > 0:
+            self.sample_from_interrupted_count += 1
             return self.storage.sample_from_interrupted_storage(self.tokenizer)
         else:
             self.sample_from_dataloader_count += 1

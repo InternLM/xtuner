@@ -540,7 +540,7 @@ class RLTrainer:
                 advantages_list.extend([advantages[i]] * len(response_ids))
 
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
-                assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
+                assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}, input_ids: {len(input_ids)}, response_ids: {len(response_ids)}"
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
