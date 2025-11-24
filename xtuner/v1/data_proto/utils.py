@@ -173,10 +173,10 @@ def masked_sum(
         unpack_sequence: Whether to unpack the sequence.
     """
     if unpack_sequence:
-        input = convert_packed_to_padded(input, num_tokens, padding_value=0, padding_side="right")
-        mask = convert_packed_to_padded(mask, num_tokens, padding_value=0, padding_side="right")
+        input = convert_packed_to_padded(input, num_tokens, padding_value=0, padding_side="right")  # type: ignore
+        mask = convert_packed_to_padded(mask, num_tokens, padding_value=0, padding_side="right")  # type: ignore
     valid_values = torch.where(mask.bool(), input, 0.0)
-    return (valid_values * mask).sum(axis=axis)
+    return (valid_values * mask).sum(axis=axis)  # type: ignore
 
 
 def masked_mean(
@@ -195,4 +195,4 @@ def masked_mean(
         unpack_sequence: Whether to unpack the sequence.
     """
     sum = masked_sum(input, mask, axis=axis, num_tokens=num_tokens, unpack_sequence=unpack_sequence)
-    return sum / (mask.sum(axis=axis) + 1e-8)
+    return sum / (mask.sum(axis=axis) + 1e-8)  # type: ignore
