@@ -171,6 +171,7 @@ class FourierEmbedding(RotaryEmbedding):
                 self.inv_freq.shape[-1] == self.num_inv_freq
             ), "FoPE is wrongly initialized."
 
+        # zero out under-trained frequencies
         inv_freq = _compute_fope_parameters(self.num_inv_freq, self.inv_freq, config.max_position_embeddings)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -181,30 +182,33 @@ class FourierEmbedding(RotaryEmbedding):
         # TODO: 验证 hf 加载模型时，sin_coef和cos_coef 可以从 others.safetensors 被正确加载
         # TODO: sin_coef和cos_coef 改为 buffer? 会不会被保存到 safetensors?
         if self.fope_sep_head:
-            self.sin_coef = nn.Parameter(
-                torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim), requires_grad=False
+            sin_coef = (
+                torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim)
             ).to(self.inv_freq.device)
-            self.cos_coef = nn.Parameter(
-                torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim), requires_grad=False
+            cos_coef = (
+                torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim)
             ).to(self.inv_freq.device)
         else:
-            self.sin_coef = nn.Parameter(torch.randn(self.input_dim, self.output_dim), requires_grad=False).to(
+            sin_coef = torch.randn(self.input_dim, self.output_dim).to(
                 self.inv_freq.device
             )
-            self.cos_coef = nn.Parameter(torch.randn(self.input_dim, self.output_dim), requires_grad=False).to(
+            cos_coef = torch.randn(self.input_dim, self.output_dim).to(
                 self.inv_freq.device
             )
 
         # TODO: 如何保证不同rank上sin_coef和cos_coef的初始化是相同的？需要设置generator?
-        torch.nn.init.xavier_normal_(self.sin_coef, gain=self.fope_init_factor)
-        torch.nn.init.xavier_normal_(self.cos_coef, gain=self.fope_init_factor)
+        torch.nn.init.xavier_normal_(sin_coef, gain=self.fope_init_factor)
+        torch.nn.init.xavier_normal_(cos_coef, gain=self.fope_init_factor)
 
         if self.input_dim == self.output_dim:
-            self.sin_coef += torch.eye(self.input_dim, device=self.sin_coef.device)
-            self.cos_coef += torch.eye(self.input_dim, device=self.cos_coef.device)
+            sin_coef += torch.eye(self.input_dim, device=sin_coef.device)
+            cos_coef += torch.eye(self.input_dim, device=cos_coef.device)
         else:
-            self.sin_coef += self.get_step_eye(self.sin_coef)
-            self.cos_coef += self.get_step_eye(self.cos_coef)
+            sin_coef += self.get_step_eye(sin_coef)
+            cos_coef += self.get_step_eye(cos_coef)
+        
+        self.register_buffer("sin_coef", sin_coef, persistent=True)
+        self.register_buffer("cos_coef", cos_coef, persistent=True)
 
     def get_step_eye(self, _param):
         import math
