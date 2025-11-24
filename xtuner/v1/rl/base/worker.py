@@ -384,10 +384,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         all_rollout_is_metrics = []
         for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
-            if not mask.any():  # all padding tokens, skip
-                continue
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
             sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
+
+            if not mask.any():  # all padding tokens, skip
+                continue
 
             if len(rollout_logprobs_list) > 0:
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
