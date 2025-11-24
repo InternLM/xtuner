@@ -195,7 +195,12 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]
         except RuntimeError as e:
-            raise RuntimeError(f"RuntimeError: {e} of {self.data_name}")
+            if self.state == "cache":
+                print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")
+                ret = CacheItem(num_tokens=0)
+                return ret
+            else:
+                raise RuntimeError(f"!!!! RuntimeError: {e} of {self.data_name}")
         if len(self._image_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
