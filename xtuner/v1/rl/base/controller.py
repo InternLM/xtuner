@@ -5,6 +5,7 @@ import ray
 import torch
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol
 
 from .worker import TrainingWorker
 
@@ -60,7 +61,7 @@ class TrainingController:
         return pack_infos
 
     # TODO(hha): 这个逻辑不够通用，和模型绑定了
-    def _packing(self, data_batches, pack_max_length, model_cfg):
+    def _packing(self, data_batches, pack_max_length, language_cfg):
         pack_infos = self._get_pack_infos(
             data_batches,
             [data["seq_ctx"].input_ids.numel() for data in data_batches],
@@ -74,10 +75,11 @@ class TrainingController:
 
         has_rollout_routed_experts = False
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
+            assert language_cfg is not None
             has_rollout_routed_experts = True
-            n_routed_experts = model_cfg.n_routed_experts
-            num_experts_per_tok = model_cfg.num_experts_per_tok
-            num_hidden_layers = model_cfg.num_hidden_layers
+            n_routed_experts = language_cfg.n_routed_experts
+            num_experts_per_tok = language_cfg.num_experts_per_tok
+            num_hidden_layers = language_cfg.num_hidden_layers
 
         for pack_info in pack_infos:
             indices = pack_info["indices"]
@@ -166,15 +168,18 @@ class TrainingController:
 
     def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int):
         has_rollout_routed_experts = False
-        model_cfg = None
+        language_cfg = None
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
             model_cfg = ray.get(self.workers[0].get_model_cfg.remote())  # type: ignore[attr-defined]
             has_rollout_routed_experts = True
-            n_routed_experts = model_cfg.n_routed_experts
-            num_experts_per_tok = model_cfg.num_experts_per_tok
-            num_hidden_layers = model_cfg.num_hidden_layers
+            language_cfg = model_cfg
+            if isinstance(model_cfg, VisionComposeConfigProtocol):
+                language_cfg = model_cfg.text_config
+            n_routed_experts = language_cfg.n_routed_experts
+            num_experts_per_tok = language_cfg.num_experts_per_tok
+            num_hidden_layers = language_cfg.num_hidden_layers
 
-        packed_data_batches = self._packing(data_batches, pack_max_length, model_cfg)
+        packed_data_batches = self._packing(data_batches, pack_max_length, language_cfg)
         # packed_data_batches = self._grouped_by_max_length(packed_data_batches)
 
         # TODO(hha): 这个逻辑不够通用，和模型绑定了
@@ -225,9 +230,11 @@ class TrainingController:
 
             if has_rollout_routed_experts:
                 pad_rand_index = torch.randint(
-                    low=0, high=n_routed_experts, size=(pack_max_length, num_hidden_layers, num_experts_per_tok)
+                    low=0,
+                    high=n_routed_experts,
+                    size=(1, 1, 1),  # add dummy data, true data will be initialized in train worker.fit
                 )
-                pad_seq_ctx.rollout_routed_experts = ray.put(pad_rand_index)
+                pad_seq_ctx.rollout_routed_experts = pad_rand_index
 
             pad_rollout_logprobs = None
             if "rollout_logprobs" in packed_data_batches[0] and packed_data_batches[0]["rollout_logprobs"] is not None:

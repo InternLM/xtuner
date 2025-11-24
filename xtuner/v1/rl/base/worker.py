@@ -303,6 +303,17 @@ class TrainingWorker(SingleAcceleratorWorker):
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         loss_cfg = self.config.loss_cfg
+
+        language_cfg = (
+            self.config.model_cfg.text_config
+            if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
+            else self.config.model_cfg
+        )
+        pack_max_length = self.config.pack_max_length
+        n_routed_experts = language_cfg.n_routed_experts
+        num_experts_per_tok = language_cfg.num_experts_per_tok
+        num_hidden_layers = language_cfg.num_hidden_layers
+
         num_batches = len(data_batches)
         iters_per_step = math.ceil(num_batches / self._optimizer_steps)
         if num_batches < self._optimizer_steps:
@@ -331,10 +342,9 @@ class TrainingWorker(SingleAcceleratorWorker):
                     # list[n,l,e]
                     if not isinstance(rollout_routed_experts[0], torch.Tensor):
                         rollout_routed_experts_refs = rollout_routed_experts
-                        rollout_routed_experts = [ray.get(routed_experts) for routed_experts in rollout_routed_experts]
+                        rollout_routed_experts = ray.get(rollout_routed_experts_refs)
                         # free obj store explicitly
-                        for ref in rollout_routed_experts_refs:
-                            ray._private.internal_api.free(ref)
+                        ray._private.internal_api.free(rollout_routed_experts_refs)
                         if not isinstance(rollout_routed_experts[0], torch.Tensor):
                             rollout_routed_experts = [
                                 torch.as_tensor(routed_experts, dtype=torch.long)
@@ -342,8 +352,17 @@ class TrainingWorker(SingleAcceleratorWorker):
                             ]
                     seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts, dim=0)  # max_len,l,e
                 else:
-                    rollout_routed_experts = ray.get(rollout_routed_experts)
-                    seq_ctx.rollout_routed_experts = rollout_routed_experts
+                    if isinstance(rollout_routed_experts, torch.Tensor):
+                        # convert dummy padding experts to real size
+                        rollout_routed_experts_tensor = torch.randint(
+                            low=0,
+                            high=n_routed_experts,
+                            size=(pack_max_length, num_hidden_layers, num_experts_per_tok),
+                        )
+                    else:
+                        rollout_routed_experts_tensor = ray.get(rollout_routed_experts)
+                        ray._private.internal_api.free(rollout_routed_experts)
+                    seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
 
                 assert seq_ctx.input_ids is not None, "input_ids is None"
                 assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
