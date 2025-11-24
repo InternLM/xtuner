@@ -87,7 +87,9 @@ class SingleTurnEnvironment(BaseEnvironment):
                 sample.data.extra_info["action_id"] = sample.uid.action_id
                 if sample.env.rollout.num_return_tokens > 0:
                     sample.data.extra_info["num_return_tokens"] = sample.env.rollout.num_return_tokens
-                    self.logger.info(f"Set num_return_tokens: {sample.env.rollout.num_return_tokens} for sample {sample.uid}.")
+                    self.logger.debug(
+                        f"Set num_return_tokens: {sample.env.rollout.num_return_tokens} for sample {sample.uid}."
+                    )
                 fut = self.rollout_controller.rollout.remote(
                     prompt=sample.data.messages,
                     input_ids=sample.data.input_ids,

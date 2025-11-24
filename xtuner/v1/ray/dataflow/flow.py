@@ -312,10 +312,13 @@ class DataFlow:
 
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
+        rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
+        self.worker_url_list = list(rollout_info["server_url_dict"].values())
+
         if not self.worker_url_list:
             self.logger.info("No active rollout workers to pause.")
             return
-
+    
         async with httpx.AsyncClient() as client:
             tasks = [self._send_abort_request(client, url, timeout=timeout) for url in self.worker_url_list]
             results = await asyncio.gather(*tasks)

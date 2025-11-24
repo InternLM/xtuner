@@ -5,8 +5,9 @@ from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
 from typing import cast
-import psutil
+
 import numpy as np
+import psutil
 import ray
 import torch
 from mmengine import load
@@ -486,7 +487,7 @@ class RLTrainer:
                     f"Total {total_mem / (1024**3):.2f} GB ({(used_mem / total_mem) * 100:.2f}%)"
                 )
         self.logger.info(log_msg)
-        
+
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
     def _prepare_train_data(self, data_groups, pack_max_length, multimodal_train_infos=None):
@@ -540,7 +541,9 @@ class RLTrainer:
                 advantages_list.extend([advantages[i]] * len(response_ids))
 
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
-                assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}, input_ids: {len(input_ids)}, response_ids: {len(response_ids)}"
+                assert len(input_ids) <= pack_max_length, (
+                    f"{len(input_ids)} vs {pack_max_length}, input_ids: {len(input_ids)}, response_ids: {len(response_ids)}"
+                )
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 

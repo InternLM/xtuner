@@ -115,7 +115,6 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     version = max(observation_versions)
 
     group_state = determine_group_state(grouped_dataitem)
-    
 
     replay_state = ReplayState.from_str(group_state)
     logger.debug(f"determined group_state: {group_state}, replay_state: {replay_state}")
@@ -330,7 +329,7 @@ class ReplayBufferStorage:
             or check_valid_dataflow_item(grouped_dataitem) is False
         ):
             return
-        
+
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
         root_id = replay_meta.root_id
         action_id = replay_meta.action_id
@@ -402,7 +401,7 @@ class ReplayBufferStorage:
             if multimodal_train_info is not None:
                 multimodal_train_infos.append(multimodal_train_info)
         return samples, multimodal_train_infos
-    
+
     def refresh_completed_states_on_step(self, sample_from_expired_states, partial_rollout_step):
         if sample_from_expired_states:
             for bucket in self._completed_actions:
@@ -545,7 +544,7 @@ class ReplayBufferStorage:
             sample.uid.version = 0
             sample.extra_info.state = str(ReplayState.INIT)
 
-        self.logger.debug(
+        self.logger.info(
             f"Sampling expired action_id: {action_id} from replay buffer, remain expired samples: {len(self._expired_actions)}"
         )
         return group_samples
@@ -572,7 +571,7 @@ class ReplayBufferStorage:
                     sample.data.input_ids.extend(sample.env.rollout.response_ids)
             # elif sample.env.rollout.response:
             #     sample.data.input_ids.extend(tokenizer.encode(sample.env.rollout.response, add_special_tokens=False))
-        self.logger.debug(
+        self.logger.info(
             f"Sampling interrupted action_id: {action_id} from replay buffer, remain interrupted samples: {len(self._interrupted_actions)}"
         )
         return group_samples
