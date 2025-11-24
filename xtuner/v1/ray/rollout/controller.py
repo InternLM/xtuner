@@ -298,6 +298,7 @@ class RolloutController:
 
         for url, is_healthy in zip(urls, health_statuses):
             if not is_healthy:
+                self.logger.warning(f"Rollout worker {url} is unhealthy.")
                 self._deactivate_worker(url)
 
     def deactivate_worker_by_url(self, url: str):
@@ -381,6 +382,7 @@ class RolloutController:
             if response.state == "failed" or response.state == "skipped":
                 selected_worker_info.failure_count += 1
                 selected_worker_info.success_count -= 1
+                self.logger.error(f"Get failed/skipped response from rollout worker {worker}, deactivate it.")
                 self.deactivate_worker_by_url(server_url)
             return response
         except asyncio.TimeoutError:
