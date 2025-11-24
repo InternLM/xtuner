@@ -122,7 +122,7 @@ def get_apply_rotary_emb(fope_sep_head: bool | None = None) -> ApplyRotaryEmbPro
         return apply_rotary_pos_emb_npu
     else:
         if fope_sep_head:
-            logger.info("Using FoPE with fope_sep_head")
+            logger.debug("Using FoPE with fope_sep_head")
             return apply_rotary_pos_emb_sep_cuda
         else:
             return apply_rotary_pos_emb_cuda

@@ -183,7 +183,7 @@ class MultiHeadAttention(nn.Module):
         if layer_type == "sliding_attention":
             self.window_size = (sliding_window, sliding_window)
 
-        fope_sep_head = rope_scaling_cfg.fope_sep_heads if rope_scaling_cfg is not None else None
+        fope_sep_head = rope_scaling_cfg.fope_sep_head if rope_scaling_cfg is not None else None
         self.apply_rotary_emb = get_apply_rotary_emb(fope_sep_head)  # type: ignore
 
         self.attn_impl_func = attn_impl_mapping[attn_impl]

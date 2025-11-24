@@ -40,6 +40,9 @@ class Qwen3MoE(MoE):
 
         elif key.startswith("norm."):
             return [key.replace("norm.", "model.norm.")]
+        elif key.startswith("rotary_emb."):  
+            # FoPE has model.rotary_emb.sin_coef and model.rotary_emb.cos_coef in the safetensors
+            return [key.replace("rotary_emb.", "model.rotary_emb.")]
         else:
             return [key]
 
@@ -72,20 +75,10 @@ class Qwen3MoEConfig(MoEConfig):
             rope_theta=hf_config.rope_theta,
             rope_scaling_cfg=RopeScalingConfig(
                 type=hf_config.rope_scaling.get("type", "default"),
-                max_position_embeddings=hf_config.rope_scaling.get("max_position_embeddings"),
-                original_max_position_embeddings=hf_config.rope_scaling.get("original_max_position_embeddings"),
+                # fope specific parameters
                 fope_init_factor=hf_config.rope_scaling.get("fope_init_factor"),
-                fope_sep_heads=hf_config.rope_scaling.get("fope_sep_heads"),
+                fope_sep_head=hf_config.rope_scaling.get("fope_sep_head"),
                 num_inv_freq=hf_config.rope_scaling.get("num_inv_freq"),
-                factor=hf_config.rope_scaling.get("factor", 1.0),
-                beta_fast=hf_config.rope_scaling.get("beta_fast"),
-                beta_slow=hf_config.rope_scaling.get("beta_slow"),
-                short_factor=hf_config.rope_scaling.get("short_factor"),
-                long_factor=hf_config.rope_scaling.get("long_factor"),
-                low_freq_factor=hf_config.rope_scaling.get("low_freq_factor"),
-                high_freq_factor=hf_config.rope_scaling.get("high_freq_factor"),
-                mscale=hf_config.rope_scaling.get("mscale"),
-                mscale_all_dim=hf_config.rope_scaling.get("mscale_all_dim"),
             )
             if hf_config.rope_scaling is not None
             else None,

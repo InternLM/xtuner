@@ -9,6 +9,9 @@ from typing_extensions import overload
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from xtuner.v1.utils import get_logger
 
+from xtuner.v1.utils.device import get_device
+
+DEVICE = get_device()
 
 logger = get_logger()
 
@@ -25,7 +28,7 @@ class RopeScalingConfig(BaseModel):
 
     # For FoPE
     fope_init_factor: float | None = None
-    fope_sep_heads: bool | None = None
+    fope_sep_head: bool | None = None
     num_inv_freq: int | None = None
 
     # For inference
@@ -128,28 +131,55 @@ class RotaryEmbedding(nn.Module):
     __call__ = nn.Module.__call__
 
 
+def _compute_fope_parameters(
+    num_inv_freq: int | None, inv_freq: torch.Tensor, max_position_embeddings: int
+) -> torch.Tensor:
+
+    if inv_freq.device.type == "meta":
+        return inv_freq
+    
+    logger.debug(f"At inv_freq.device.type: {inv_freq.device.type}, _compute_fope_parameters ")
+    assert (inv_freq[:-1] > inv_freq[1:]).all(), "Expected inv_freq to be in decreasing order"
+    
+    inv_freq_idx_selected = torch.ones_like(inv_freq, dtype=torch.bool)
+    if num_inv_freq is not None:
+        num_inv_freq = num_inv_freq
+        inv_freq_idx_selected[num_inv_freq:] = False
+    else:
+        inv_freq_idx_selected = inv_freq > (2.0 * torch.pi / max_position_embeddings)
+        # num_inv_freq = inv_freq_idx_selected.sum().item()
+
+    inv_freq = inv_freq[inv_freq_idx_selected]
+
+    return inv_freq
+
+
 class FourierEmbedding(RotaryEmbedding):
     def __init__(self, config, device=None):
         from xtuner.v1.model.base import TransformerConfig
 
         config = cast(TransformerConfig, config)
         super().__init__(config, device)
+
         rope_scaling_cfg = config.rope_scaling_cfg
         assert rope_scaling_cfg is not None
         self.num_inv_freq = rope_scaling_cfg.num_inv_freq
-        self.fope_sep_head = rope_scaling_cfg.fope_sep_heads
+        self.fope_sep_head = rope_scaling_cfg.fope_sep_head
         self.fope_init_factor = rope_scaling_cfg.fope_init_factor
         if self.num_inv_freq is not None:
             assert (self.inv_freq > (2.0 * torch.pi / config.max_position_embeddings)).all() or (
                 self.inv_freq.shape[-1] == self.num_inv_freq
             ), "FoPE is wrongly initialized."
 
+        inv_freq = _compute_fope_parameters(self.num_inv_freq, self.inv_freq, config.max_position_embeddings)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
         self.head_dim = getattr(self.config, "head_dim", None) or config.hidden_size // config.num_attention_heads
         self.input_dim = self.inv_freq.shape[-1]
         self.output_dim = self.inv_freq.shape[-1]
 
         # TODO: 验证 hf 加载模型时，sin_coef和cos_coef 可以从 others.safetensors 被正确加载
-        # TODO: sin_coef和cos_coef 改为 buffer? 不会被保存
+        # TODO: sin_coef和cos_coef 改为 buffer? 会不会被保存到 safetensors?
         if self.fope_sep_head:
             self.sin_coef = nn.Parameter(
                 torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim), requires_grad=False
@@ -309,7 +339,7 @@ def get_rope_embedding(config, device=None) -> RotaryEmbeddingProtocol:
 
         use_fope = (
             rope_scaling_cfg.fope_init_factor is not None
-            or rope_scaling_cfg.fope_sep_heads is not None
+            or rope_scaling_cfg.fope_sep_head is not None
             or rope_scaling_cfg.num_inv_freq is not None
         )
         if use_fope:
