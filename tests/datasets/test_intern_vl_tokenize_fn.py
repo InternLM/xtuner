@@ -133,7 +133,7 @@ class TestMLLMTokenizeFn(TestCase):
                                 "请简要解释下网球<|im_end|>\n" \
                                 "<|im_start|>assistant\n" \
                                 "网球是一项运动，运动员使用球拍将球击打过网进入对方场地。目标是通过让球落入对方场地且对方无法回击来得分。网球可以单人对战（单打）或双人组队对战（双打）。<|im_end|>"
-                assert input_str.strip() == expected_str.strip()
+                self.assertEqual(input_str.strip(), expected_str.strip())
 
     def test_intern_vl_sft_multi_video(self):
         data_path = 'tests/resource/mllm_sft_video_example_data.jsonl'
@@ -174,7 +174,7 @@ class TestMLLMTokenizeFn(TestCase):
                                "两个视频中都在做什么？<|im_end|>\n" \
                                "<|im_start|>assistant\n" \
                                "打网球<|im_end|>"
-                assert input_str.strip() == expected_str.strip()
+                self.assertEqual(input_str.strip(), expected_str.strip())
 
     def test_intern_vl_sft_pure_text(self):
         data_path = 'tests/resource/mllm_sft_text_example_data.jsonl'
@@ -197,7 +197,7 @@ class TestMLLMTokenizeFn(TestCase):
                 ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
                                                          return_dict=True)
                 input_ids_hf = ret['input_ids'][0]
-                assert input_ids_xtuner == input_ids_hf
+                self.assertEqual(input_ids_xtuner, input_ids_hf)
 
     def test_intern_vl_pretrain_pure_text(self):
         data_path = 'tests/resource/pretrain_example_data.jsonl'
