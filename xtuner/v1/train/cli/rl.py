@@ -22,10 +22,13 @@ def main(
     config: Annotated[Path, Parameter(group=Group("config-path", sort_key=0))],
 ):
     if not ray.is_initialized():
-        master_addr = os.getenv("RAY_MASTER_ADDR", "127.0.0.1")
-        client_port = os.getenv("RAY_CLIENT_PORT", "10001")
-        ray_head_address = f"ray://{master_addr}:{client_port}"
-        ray.init(address=ray_head_address)
+        if os.environ.get("RAY_MASTER_ADDR"):
+            master_addr = os.getenv("RAY_MASTER_ADDR", "127.0.0.1")
+            client_port = os.getenv("RAY_CLIENT_PORT", "10001")
+            ray_head_address = f"ray://{master_addr}:{client_port}"
+            ray.init(address=ray_head_address)
+        else:
+            ray.init(num_cpus=128)
     trainer_cfg = Config.fromfile(config)["trainer"]
     trainer = RLTrainer.from_config(trainer_cfg)
     trainer.fit()

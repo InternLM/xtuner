@@ -28,8 +28,11 @@ class WorkerInfo:
     """A data class to hold all state information for a single worker."""
 
     actor: RolloutWorker
+    rank: int = -1
     is_active: bool = True
     failure_count: int = 0
+    running_count: int = 0
+    success_count: int = 0
 
 
 class SessionRouter:
@@ -120,7 +123,6 @@ class RolloutController:
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
         self.num_workers = 0
         self.workers_info: Dict[str, WorkerInfo] = {}  # url -> WorkerInfo
-        self.worker_server_urls: List[str] = []
         self.active_rollout_workers: List[RolloutWorker] = []
         self.tokenizer = AutoTokenizer.from_pretrained(infer_config.tokenizer_path, trust_remote_code=True)
         self.workers, self.rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
@@ -168,6 +170,10 @@ class RolloutController:
                 "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM"
                 " or XTUNER_USE_SGLANG environment variable."
             )
+
+    def _get_active_worker_to_url_map(self):
+        """Get a mapping of active workers to their server URLs."""
+        return {info.actor: url for url, info in self.workers_info.items()}
 
     def _is_port_in_use(self, host: str, port: int) -> bool:
         """Check if a port is in use on the given host."""
@@ -252,10 +258,11 @@ class RolloutController:
         active_rollout_workers, worker_server_urls_map = self._update_active_workers_and_urls_map(
             active_rollout_workers, worker_server_urls_map
         )
-        self.workers_info = {
-            url: WorkerInfo(actor=worker)
-            for url, worker in zip(worker_server_urls_map.values(), active_rollout_workers)
-        }
+        self.workers_info = {}
+        for i in range(len(active_rollout_workers)):
+            rank = list(worker_server_urls_map.keys())[i]
+            url = worker_server_urls_map[rank]
+            self.workers_info[url] = WorkerInfo(rank=rank, actor=active_rollout_workers[i])
         self.logger.info(f"Rollout worker server URLs: {list(self.workers_info.keys())}")
         return engine_mesh_list, worker_server_urls_map
 
@@ -264,6 +271,7 @@ class RolloutController:
         and shut it down."""
         worker_info = self.workers_info.get(url)
         if not worker_info or not worker_info.is_active:
+            self._restart_inactive_workers()
             return
 
         self.logger.warning(f"Deactivating rollout worker {worker_info.actor} with URL {url} due to failures.")
@@ -282,6 +290,7 @@ class RolloutController:
         """
         active_workers = [(url, info) for url, info in self.workers_info.items() if info.is_active]
         if not active_workers:
+            self._restart_inactive_workers()
             return
 
         urls, infos = zip(*active_workers)
@@ -291,6 +300,7 @@ class RolloutController:
 
         for url, is_healthy in zip(urls, health_statuses):
             if not is_healthy:
+                self.logger.warning(f"Rollout worker {url} is unhealthy.")
                 self._deactivate_worker(url)
 
     def deactivate_worker_by_url(self, url: str):
@@ -311,6 +321,16 @@ class RolloutController:
             return
 
         self._deactivate_worker(url)
+
+    def _restart_inactive_workers(self):
+        self.logger.critical("All rollout workers are inactive. Attempting to restart all inference engines.")
+        try:
+            self.engine_mesh_list, self.server_url_dict = self.init_workers()
+            self.router.update_active_workers(self._get_worker_status_for_router())
+            self.logger.info("Successfully re-initialized all rollout workers.")
+        except Exception as e:
+            self.logger.error(f"Failed to restart rollout workers: {e}", exc_info=True)
+            raise RuntimeError("Failed to recover rollout workers after all of them went down.") from e
 
     async def rollout(
         self,
@@ -353,6 +373,9 @@ class RolloutController:
             self.logger.info(f"Rollout with sample params: {self.sample_params}, extra params: {self.extra_params}")
             self.print_params_flag = False
         assert prompt is not None or input_ids is not None, "Either prompt or input_ids must be provided."
+        active_worker_to_url_map = self._get_active_worker_to_url_map()
+        server_url = active_worker_to_url_map.get(worker)
+        self.workers_info[server_url].running_count += 1
         response_ref = worker.rollout.remote(  # type: ignore[attr-defined]
             prompt=prompt,
             input_ids=input_ids,
@@ -364,20 +387,37 @@ class RolloutController:
             extra_info=extra_info,
         )
         try:
-            response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout)
-            if response.extra_info and "url" in response.extra_info:
-                url = response.extra_info["url"]
-                if response.finish_reason == "failed":
-                    self.deactivate_worker_by_url(url)
-                response.extra_info.pop("url", None)
+            selected_worker_info = self.workers_info[server_url]
+            response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout * 2)
+            selected_worker_info.running_count -= 1
+            selected_worker_info.success_count += 1
+            if response.state == "failed" or response.state == "skipped":
+                selected_worker_info.failure_count += 1
+                selected_worker_info.success_count -= 1
+                self.logger.error(f"Get failed/skipped response from rollout worker {worker}, deactivate it.")
+                self.deactivate_worker_by_url(server_url)
             return response
         except asyncio.TimeoutError:
-            self.logger.error("Get response from rollout worker timeout and return the failed response.")
-            failed_response = RLRolloutResponseItem(
-                response="",
-                finish_reason="failed",
+            selected_worker_info.running_count -= 1
+            selected_worker_info.failure_count += 1
+            self.logger.error(f"Get response from rollout worker {worker} timeout and return skip this sample.")
+            return RLRolloutResponseItem(state="skipped")
+
+    def get_rollout_stats(self) -> str:
+        """Get statistics about the rollout workers.
+
+        Returns:
+            str: A formatted string containing statistics about each rollout
+        """
+        log_parts = ["Rollout Worker Stats:"]
+        for url, info in self.workers_info.items():
+            log_parts.append(
+                f"  - URL: {url} | Rank: {info.rank} | Active: {info.is_active} | "
+                f"Running: {info.running_count} | Success: {info.success_count} | "
+                f"Failures: {info.failure_count}"
             )
-            return failed_response
+        log_msg = "\n".join(log_parts)
+        return log_msg
 
     def start_api_server(self, host: str = "0.0.0.0", port: int = 8000):
         """Starts the API server to expose the rollout functionality."""
