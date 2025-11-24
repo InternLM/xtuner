@@ -303,17 +303,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         loss_cfg = self.config.loss_cfg
-
-        language_cfg = (
-            self.config.model_cfg.text_config
-            if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
-            else self.config.model_cfg
-        )
-        pack_max_length = self.config.pack_max_length
-        n_routed_experts = language_cfg.n_routed_experts
-        num_experts_per_tok = language_cfg.num_experts_per_tok
-        num_hidden_layers = language_cfg.num_hidden_layers
-
         num_batches = len(data_batches)
         iters_per_step = math.ceil(num_batches / self._optimizer_steps)
         if num_batches < self._optimizer_steps:
@@ -354,10 +343,19 @@ class TrainingWorker(SingleAcceleratorWorker):
                 else:
                     if isinstance(rollout_routed_experts, torch.Tensor):
                         # convert dummy padding experts to real size
+                        language_cfg = (
+                            self.config.model_cfg.text_config
+                            if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
+                            else self.config.model_cfg
+                        )
                         rollout_routed_experts_tensor = torch.randint(
                             low=0,
-                            high=n_routed_experts,
-                            size=(pack_max_length, num_hidden_layers, num_experts_per_tok),
+                            high=language_cfg.n_routed_experts,
+                            size=(
+                                self.config.pack_max_length,
+                                language_cfg.num_hidden_layers,
+                                language_cfg.num_experts_per_tok,
+                            ),
                         )
                     else:
                         rollout_routed_experts_tensor = ray.get(rollout_routed_experts)
