@@ -92,6 +92,14 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
+
+        self.language_model.embed_tokens.set_modules_to_forward_prefetch(   # type: ignore
+            [self.vision_tower.blocks[0]])
+        self.vision_tower.blocks[-1].set_modules_to_forward_prefetch(   # type: ignore
+            [self.multi_modal_projector])
+        self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
+        self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
+
         self._to_empty_meta()
         return self
 
