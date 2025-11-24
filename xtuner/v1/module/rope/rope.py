@@ -8,8 +8,8 @@ from typing_extensions import overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from xtuner.v1.utils import get_logger
-
 from xtuner.v1.utils.device import get_device
+
 
 DEVICE = get_device()
 
@@ -134,13 +134,12 @@ class RotaryEmbedding(nn.Module):
 def _compute_fope_parameters(
     num_inv_freq: int | None, inv_freq: torch.Tensor, max_position_embeddings: int
 ) -> torch.Tensor:
-
     if inv_freq.device.type == "meta":
         return inv_freq
-    
+
     logger.debug(f"At inv_freq.device.type: {inv_freq.device.type}, _compute_fope_parameters ")
     assert (inv_freq[:-1] > inv_freq[1:]).all(), "Expected inv_freq to be in decreasing order"
-    
+
     inv_freq_idx_selected = torch.ones_like(inv_freq, dtype=torch.bool)
     if num_inv_freq is not None:
         num_inv_freq = num_inv_freq
@@ -182,19 +181,15 @@ class FourierEmbedding(RotaryEmbedding):
         # TODO: 验证 hf 加载模型时，sin_coef和cos_coef 可以从 others.safetensors 被正确加载
         # TODO: sin_coef和cos_coef 改为 buffer? 会不会被保存到 safetensors?
         if self.fope_sep_head:
-            sin_coef = (
-                torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim)
-            ).to(self.inv_freq.device)
-            cos_coef = (
-                torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim)
-            ).to(self.inv_freq.device)
+            sin_coef = torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim).to(
+                self.inv_freq.device
+            )
+            cos_coef = torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim).to(
+                self.inv_freq.device
+            )
         else:
-            sin_coef = torch.randn(self.input_dim, self.output_dim).to(
-                self.inv_freq.device
-            )
-            cos_coef = torch.randn(self.input_dim, self.output_dim).to(
-                self.inv_freq.device
-            )
+            sin_coef = torch.randn(self.input_dim, self.output_dim).to(self.inv_freq.device)
+            cos_coef = torch.randn(self.input_dim, self.output_dim).to(self.inv_freq.device)
 
         # TODO: 如何保证不同rank上sin_coef和cos_coef的初始化是相同的？需要设置generator?
         torch.nn.init.xavier_normal_(sin_coef, gain=self.fope_init_factor)
@@ -206,7 +201,7 @@ class FourierEmbedding(RotaryEmbedding):
         else:
             sin_coef += self.get_step_eye(sin_coef)
             cos_coef += self.get_step_eye(cos_coef)
-        
+
         self.register_buffer("sin_coef", sin_coef, persistent=True)
         self.register_buffer("cos_coef", cos_coef, persistent=True)
 

@@ -252,7 +252,7 @@ class ProberList:
             return hidden_states
 
         return wrapped_forward
-    
+
     @classmethod
     def wrap_rotary_emb_forward(cls, forward: Callable, name: str):
         @functools.wraps(forward)
@@ -263,6 +263,7 @@ class ProberList:
             cos, sin = outputs
             ProberList.after_rotary_emb(name, cos, sin)
             return outputs
+
         return wrapped_forward
 
     @classmethod
@@ -614,7 +615,7 @@ class AccProber(BaseProber):
     @classmethod
     def after_embed_tokens(cls, name: str, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[{name}][after]hidden_states")
-    
+
     @classmethod
     def before_rotary_emb(cls, name: str, x: torch.Tensor, position_ids: torch.Tensor):
         cls.record_tensor(x, f"[{name}][before]x")

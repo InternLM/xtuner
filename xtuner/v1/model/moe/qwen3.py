@@ -40,7 +40,7 @@ class Qwen3MoE(MoE):
 
         elif key.startswith("norm."):
             return [key.replace("norm.", "model.norm.")]
-        elif key.startswith("rotary_emb."):  
+        elif key.startswith("rotary_emb."):
             # FoPE has model.rotary_emb.sin_coef and model.rotary_emb.cos_coef in the safetensors
             return [key.replace("rotary_emb.", "model.rotary_emb.")]
         else:

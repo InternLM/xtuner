@@ -10,7 +10,7 @@ from xtuner.v1.module.attention.mha import MultiHeadAttention
 from xtuner.v1.module.attention.mla import MultiLatentAttention
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate
 from xtuner.v1.module.rms_norm.rms_norm import RMSNorm
-from xtuner.v1.module.rope.rope import RotaryEmbedding, Qwen3VLTextRotaryEmbedding, FourierEmbedding
+from xtuner.v1.module.rope.rope import FourierEmbedding, Qwen3VLTextRotaryEmbedding, RotaryEmbedding
 from xtuner.v1.profiler.prober import ProberList
 
 
