@@ -3,6 +3,7 @@ import io
 import os
 import re
 import time
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -128,6 +129,8 @@ def read_frames_decord(
         # 如果外面提供了，则用 index 进行采样，但是如果采样错误，则改为随机均匀采样。这种情况要注意，实际上是不合理的，说明数据存储有问题
         try:
             frames = video_reader.get_batch(frames_indices).asnumpy()  # (T, H, W, C), np.uint8
+        except KeyboardInterrupt as e:
+            raise e
         except Exception as e:
             print(
                 f"！！！Warning: Error sample frames from {video_path} of index {frames_indices}: {e}. Rand {len(frames_indices)} frames."
@@ -156,7 +159,7 @@ def read_qwen3_vl_video(
 ):
     start_time = time.time()
     video_get_batch_time = 0
-    if path.endswith("/"):
+    if Path(path).is_dir():
         frames, oss_read_time, vlen, frame_indices, timestamps = read_frames_folder(
             path, frames_indices, timestamps, client=client
         )

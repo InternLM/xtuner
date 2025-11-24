@@ -163,14 +163,14 @@ def replace_image_context_and_collect_media_data(
     return image_paths, video_paths
 
 
-def dict_to_sorted_string(input_dict):
+def dict_to_sorted_string(input_dict: dict[str, Any]) -> str:
     """Convert a potentially nested dictionary into a sorted string
     representation."""
 
     def process_value(value):
         if isinstance(value, dict):
             return dict_to_sorted_string(value)
-        elif isinstance(value, list):
+        elif isinstance(value, (list, tuple)):
             return [process_value(v) for v in value]
         return value
 
@@ -178,7 +178,7 @@ def dict_to_sorted_string(input_dict):
     return str(sorted_items)
 
 
-def generate_random_int_from_dict(input_dict, min_num, max_num):
+def generate_random_int_from_dict(input_dict: dict[str, Any], min_num: int, max_num: int):
     """Generate a deterministic random integer based on a nested dictionary
     (using stable hashing)"""
     dict_string = dict_to_sorted_string(input_dict)

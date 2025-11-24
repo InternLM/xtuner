@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Dict, List, cast
 
 import numpy as np
@@ -247,16 +248,22 @@ def preprocess_intern_s1(
     )
 
 
-def add_video_root(messages, video_root):
+def add_video_root(messages: list[dict], video_root: Path):
     for msg in messages:
-        if "content" in msg:
-            for content in msg["content"]:
-                if "type" in content and content["type"] == "video":
-                    if content["path"].endswith("/"):
-                        image_list = sort_frames(list(os.listdir(video_root + content["path"])))
-                        new_image_list = []
-                        for image in image_list:
-                            new_image_list.append(video_root + content["path"] + image)
-                        content["path"] = new_image_list
-                    else:
-                        content["path"] = video_root + content["path"]
+        if "content" not in msg:
+            continue
+        content_list = msg["content"]
+        if not isinstance(content_list, list):
+            raise TypeError("content should be a list of dict")
+        for content in content_list:
+            if "type" not in content or content["type"] != "video":
+                continue
+            content_path = content["path"]
+            if Path(content_path).is_dir():
+                image_list = sort_frames(list(os.listdir(video_root / content_path)))
+                new_image_list = []
+                for image in image_list:
+                    new_image_list.append(video_root / content_path / image)
+                content["path"] = new_image_list
+            else:
+                content["path"] = video_root / content_path

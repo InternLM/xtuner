@@ -4,6 +4,7 @@ import os
 import random
 import re
 import time
+from pathlib import Path
 from typing import Literal
 
 import cv2
@@ -48,6 +49,8 @@ def get_frame_indices(num_frames, vlen, sample="rand", fix_start=None, input_fps
         if sample == "rand":
             try:
                 frame_indices = [random.choice(range(x[0], x[1])) for x in ranges]
+            except KeyboardInterrupt as e:
+                raise e
             except Exception:
                 frame_indices = np.random.permutation(vlen)[:acc_samples]
                 frame_indices.sort()
@@ -210,7 +213,7 @@ def read_interns1_vl_video(
     oss_read_time = 0
     vlen = 0
     video_get_batch_time = 0
-    if path.endswith("/"):
+    if Path(path).is_dir():
         frames, oss_read_time, vlen = read_frames_folder(
             path,
             num_frames=max_num_frames,
