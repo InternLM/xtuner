@@ -248,7 +248,8 @@ def preprocess_intern_s1(
     )
 
 
-def add_video_root(messages: list[dict], video_root: Path):
+def add_video_root(messages: list[dict], video_root: Path | str):
+    video_root = Path(video_root)
     for msg in messages:
         if "content" not in msg:
             continue
@@ -258,12 +259,12 @@ def add_video_root(messages: list[dict], video_root: Path):
         for content in content_list:
             if "type" not in content or content["type"] != "video":
                 continue
-            content_path = content["path"]
+            content_path = video_root / content["path"]
             if Path(content_path).is_dir():
-                image_list = sort_frames(list(os.listdir(video_root / content_path)))
+                image_list = sort_frames(list(os.listdir(content_path)))
                 new_image_list = []
                 for image in image_list:
-                    new_image_list.append(video_root / content_path / image)
+                    new_image_list.append(str(content_path / image))
                 content["path"] = new_image_list
             else:
-                content["path"] = video_root / content_path
+                content["path"] = str(content_path)
