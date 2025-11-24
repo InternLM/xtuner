@@ -239,6 +239,8 @@ class Evaluator:
         if waiting_tasks:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 
+        self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))  # type: ignore[attr-defined]
+
     async def run(self, return_samples=False):
         """Run the full evaluation process.
 
