@@ -146,7 +146,8 @@ class MoE(BaseModel):
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
 
         self.layers = self.build_layers(config)
-        self.rotary_emb = self.build_rotary_embedding(config)
+        with torch.device(DEVICE):
+            self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
 
         self.fp32_layers = [self.rotary_emb]
@@ -641,9 +642,13 @@ class MoE(BaseModel):
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
         # This is used for training without FSDP.
-        self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
+        # TODO: remove this because init with actual device already, Check it
+        # 对于FoPE, rotary_emb参数，如sin_coef，在之前full_shard已经被切分，但是这里重新构建，会让sin_coef又变回切分前。导致问题，如 load时尺寸不一致等。
+        # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
 
+        # logger.debug(f"before load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
+        # logger.debug(f"after load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
 
         return loaded_keys, unloaded_keys, missing_keys
 
@@ -691,7 +696,10 @@ class MoE(BaseModel):
         if self.ep_mesh.size() > 1:
             self._replicate_other_params(self)
 
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # 虽然 __init__ 中已经构建了 rotary_emb，但是是在 meta device 中构建的，这里需要在真实 device 上重新构建，
+        # 来计算 inv_freq 等系数
+        # TODO: remove this because init with actual device already, Check it
+        # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
