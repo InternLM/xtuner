@@ -47,56 +47,59 @@ def numpy_to_tensor(frames):
     return result
 
 
+def calc_frame_index_for_folder(image_list, frames_indices, timestamps, video_path):
+    if isinstance(frames_indices, list):
+        assert timestamps is not None, "timestamps should be provided when frames_indices is a list"
+        assert len(frames_indices) == len(timestamps) * 2, "frames_indices and timestamps should have the same length"
+        # 如果外面提供了，则用 index 进行采样，但是如果采样错误，则改为随机均匀采样。这种情况要注意，实际上是不合理的，说明数据存储有问题
+        try:
+            _ = [image_list[i] for i in frames_indices]
+        except Exception as e:
+            print(
+                f"！！！Warning: Error sample frames from {video_path} of index {frames_indices}: {e}. Rand {len(frames_indices)} frames."
+            )
+            timestamps = None  # 防止错误，强制清空
+            if len(image_list) > len(frames_indices):
+                # 均匀采样
+                frames_indices = np.linspace(0, len(image_list) - 1, len(frames_indices)).round().astype(int)
+            else:
+                frames_indices = np.arange(len(image_list))
+    else:
+        # 如果外面没有提供 frame index，则随机均匀采样，并且时间戳清空
+        assert timestamps is None, "timestamps should be None when frames_indices is an int"
+        if len(image_list) > frames_indices:  # 此时 frames_indices=num_frames
+            # 均匀采样
+            frames_indices = np.linspace(0, len(image_list) - 1, frames_indices).round().astype(int)
+        else:
+            frames_indices = np.arange(len(image_list))
+    return frames_indices
+
+
 def read_frames_folder(video_path, frames_indices, timestamps=None, client=None):
     oss_read_time = 0
     if "s3://" in video_path:
         assert client is not None, "client should be provided for s3 backend"
         image_list = sort_frames(client.list(video_path))
         image_list = [os.path.join(video_path.split(image.split("/")[0])[0], image) for image in image_list]
-        frames = []
-
-        for image in image_list:
-            start_time = time.time()
-            image_byte = client.get(image)
-            oss_read_time += time.time() - start_time
-            frame = Image.open(io.BytesIO(image_byte))
-            frames.append(np.array(frame))
     else:
         image_list = sort_frames(list(os.listdir(video_path)))
-        frames = []
-        for image in image_list:
-            fp = os.path.join(video_path, image)
-            frame = Image.open(fp).convert("RGB")
-            frames.append(np.array(frame))
-    vlen = len(frames)
 
-    if isinstance(frames_indices, list):
-        assert timestamps is not None, "timestamps should be provided when frames_indices is a list"
-        assert len(frames_indices) == len(timestamps) * 2, "frames_indices and timestamps should have the same length"
-        # 如果外面提供了，则用 index 进行采样，但是如果采样错误，则改为随机均匀采样。这种情况要注意，实际上是不合理的，说明数据存储有问题
-        try:
-            frames = numpy_to_tensor([frames[i] for i in frames_indices])
-        except Exception as e:
-            print(
-                f"！！！Warning: Error sample frames from {video_path} of index {frames_indices}: {e}. Rand {len(frames_indices)} frames."
-            )
-            timestamps = None  # 防止错误，强制清空
-            if vlen > len(frames_indices):
-                # 均匀采样
-                frames_indices = np.linspace(0, vlen - 1, len(frames_indices)).round().astype(int)
-            else:
-                frames_indices = np.arange(vlen)
-            frames = numpy_to_tensor([frames[i] for i in frames_indices])
-    else:
-        # 如果外面没有提供 frame index，则随机均匀采样，并且时间戳清空
-        assert timestamps is None, "timestamps should be None when frames_indices is an int"
-        if vlen > frames_indices:  # 此时 frames_indices=num_frames
-            # 均匀采样
-            frames_indices = np.linspace(0, vlen - 1, frames_indices).round().astype(int)
+    frames_indices = calc_frame_index_for_folder(image_list, frames_indices, timestamps, video_path)
+    frame_list = []
+    for frame_index in frames_indices:
+        if "s3://" in video_path:
+            start_time = time.time()
+            image_byte = client.get(image_list[frame_index])
+            oss_read_time += time.time() - start_time
+            frame = Image.open(io.BytesIO(image_byte))
+            frame_list.append(np.array(frame))
         else:
-            frames_indices = np.arange(vlen)
-        frames = numpy_to_tensor([frames[i] for i in frames_indices])
-    return frames, oss_read_time, vlen, frames_indices, timestamps
+            fp = os.path.join(video_path, image_list[frame_index])
+            frame = Image.open(fp).convert("RGB")
+            frame_list.append(np.array(frame))
+
+    frames = numpy_to_tensor(frame_list)
+    return frames, oss_read_time, len(frames), frames_indices, timestamps
 
 
 def read_frames_decord(

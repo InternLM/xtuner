@@ -93,22 +93,9 @@ def read_frames_folder(
         assert client is not None, "client should be provided for s3 backend"
         image_list = sort_frames(client.list(video_path))
         image_list = [os.path.join(video_path.split(image.split("/")[0])[0], image) for image in image_list]
-        frames = []
-
-        for image in image_list:
-            start_time = time.time()
-            image_byte = client.get(image)
-            oss_read_time += time.time() - start_time
-            frame = Image.open(io.BytesIO(image_byte))
-            frames.append(frame)
     else:
         image_list = sort_frames(list(os.listdir(video_path)))
-        frames = []
-        for image in image_list:
-            fp = os.path.join(video_path, image)
-            frame = Image.open(fp).convert("RGB")
-            frames.append(frame)
-    vlen = len(frames)
+    vlen = len(image_list)
 
     if random_frame_num is None:
         t_num_frames = np.random.randint(min_num_frames, num_frames + 1)
@@ -117,8 +104,23 @@ def read_frames_folder(
 
     if vlen > t_num_frames:
         frame_indices = get_frame_indices(t_num_frames, vlen, sample=sample, fix_start=fix_start)
-        frames = [frames[i] for i in frame_indices]
-    return frames, oss_read_time, vlen
+    else:
+        frame_indices = list(range(vlen))
+
+    frame_list = []
+    for frame_index in frame_indices:
+        if "s3://" in video_path:
+            start_time = time.time()
+            image_byte = client.get(image_list[frame_index])
+            oss_read_time += time.time() - start_time
+            frame = Image.open(io.BytesIO(image_byte))
+            frame_list.append(frame)
+        else:
+            fp = os.path.join(video_path, image_list[frame_index])
+            frame = Image.open(fp).convert("RGB")
+            frame_list.append(frame)
+
+    return frame_list, oss_read_time, len(frame_list)
 
 
 def read_frames_gif(
