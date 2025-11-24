@@ -636,8 +636,15 @@ class BaseModel(nn.Module):
         tensor_list: list[torch.Tensor] = []
         load_spec_list: list[LoadSpec] = []
         name_list: list[str] = []
+        buffer_tensor_list: list[torch.Tensor] = []
+        buffer_name_list: list[str] = []
 
         for param, load_spec in params:
+            if not isinstance(param, DTensor):  
+                # in case, param is a buffer of module, FSDP will not shard it, so it's not a DTensor
+                buffer_tensor_list.append(param)
+                buffer_name_list.append(load_spec.hf_keys[0])
+                continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
             tensor_size = self._get_tensor_size(param, dtype)
@@ -679,6 +686,9 @@ class BaseModel(nn.Module):
                 gathered_tensor_list, name_list = self._to_float8(gathered_tensor_list, name_list, tensor_list, dtype)
             gathered_tensor_list = [t.to(device=device) for t in gathered_tensor_list]
             yield name_list, gathered_tensor_list
+        
+        if buffer_tensor_list:
+            yield buffer_name_list, buffer_tensor_list
 
     def _clean_param_name(self, name: str) -> str:
         if "._checkpoint_wrapped_module." in name:
