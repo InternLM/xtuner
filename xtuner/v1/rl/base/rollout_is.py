@@ -518,6 +518,13 @@ def compute_mismatch_metrics(
         ppl_ratio = torch.exp(log_ppl_diff).mean()  # mean(exp(log_ppl_diff)) = mean(ppl_ratio_i)
         metrics["mismatch_ppl_ratio"] = ppl_ratio.detach().item()
 
+        # 2f. Abs diff: Mean absolute log-probability difference
+        # This measures |log π_rollout - log π_training| averaged over tokens.
+        # Unlike KL-based metrics which penalize asymmetric discrepancies,
+        # abs-diff directly quantifies disagreement magnitude between the two
+        # policies without directionality.
+        metrics["mismatch_logprob_abs_diff"] = masked_mean(log_ratio.abs(), response_mask).detach().item()
+
     return metrics
 
 
