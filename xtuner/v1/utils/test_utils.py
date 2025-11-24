@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 from typing import Dict, List, cast
 
@@ -261,7 +260,7 @@ def add_video_root(messages: list[dict], video_root: Path | str):
                 continue
             content_path = video_root / content["path"]
             if Path(content_path).is_dir():
-                image_list = sort_frames(list(os.listdir(content_path)))
+                image_list = sort_frames(list(content_path.glob("*.jpg")))
                 new_image_list = []
                 for image in image_list:
                     new_image_list.append(str(content_path / image))

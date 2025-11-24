@@ -170,8 +170,10 @@ def dict_to_sorted_string(input_dict: dict[str, Any]) -> str:
     def process_value(value):
         if isinstance(value, dict):
             return dict_to_sorted_string(value)
-        elif isinstance(value, (list, tuple)):
+        elif isinstance(value, list):
             return [process_value(v) for v in value]
+        elif isinstance(value, tuple):
+            return tuple(process_value(v) for v in value)
         return value
 
     sorted_items = sorted((k, process_value(v)) for k, v in input_dict.items())
