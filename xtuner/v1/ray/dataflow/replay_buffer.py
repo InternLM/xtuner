@@ -77,7 +77,7 @@ def determine_group_state(group_data_items: List[RLDataFlowItem]) -> str:
     """Determines the processing strategy for a group of rollout samples based
     on their state."""
     # TODO(@duanyanhui): remove this function when send one request instead of group requests.
-    if not group_data_items or len(group_data_items) == 0:
+    if not group_data_items:
         return "skipped"
     group_states = {item.env.rollout.state for item in group_data_items}
     if "skipped" in group_states or "failed" in group_states:

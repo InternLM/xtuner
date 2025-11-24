@@ -160,13 +160,10 @@ class DataFlow:
 
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
-        self.sample_from_expired_storage = (
-            ray.get(self.replay_buffer.get_expired_samples.remote()) >= self.target_batch_size
-        )
         logger_msg = (
             f"DataFlow internal states reset for new run: target_batch_size={self.target_batch_size}, "
-            f"sample_params: {self.config.sample_params}, extra_params: {self.config.extra_params}, "
-            f"sample_from_expired_storage={self.sample_from_expired_storage}, enable_partial_rollout={self.enable_partial_rollout}."
+            f"sample_params: {self.sample_params}, extra_params: {self.extra_params}, "
+            f"enable_partial_rollout={self.enable_partial_rollout}."
         )
         self.logger.info(logger_msg)
 
@@ -194,13 +191,12 @@ class DataFlow:
         """
         # step 1: sample
         # TODO(@duanyanhui): More fine-grained control over group data generation:
-        # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency
-        # Resend only the failed prompts in a group when retrying worker_task to avoid wasted computation resources."
+        # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency.
         group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
-            self.env, self.enable_partial_rollout, self.config.prompt_repeat_k, self.sample_from_expired_storage
+            self.env, self.enable_partial_rollout, self.config.prompt_repeat_k
         )
         assert len(group_data_items) > 0, "Sampled empty group data items from replay buffer."
-        action_id = group_data_items[0].meta.action_id
+        action_id = group_data_items[0].uid.action_id
         # step 2: env generate
         group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
             group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
@@ -264,7 +260,7 @@ class DataFlow:
                     waiting_tasks.add(task)
 
                 _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
-                self.finished_samples_count = ray.get(self.replay_buffer.get_completed_samples.remote())
+                self.finished_samples_count = ray.get(self.replay_buffer.get_finished_samples.remote())
                 waiting_tasks = pending_tasks
 
             pbar.n = self.finished_samples_count
@@ -285,6 +281,7 @@ class DataFlow:
             self.logger.info("All worker tasks have completed after pausing env controller.")
 
         self.logging_replaybuffer_state()
+        self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))  # type: ignore[attr-defined]
 
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""

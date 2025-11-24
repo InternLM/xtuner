@@ -332,7 +332,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             endpoint_url = f"{self.server_url}/{self.endpoints['v1/chat/completions']}"
 
         while True:
-            await asyncio.sleep(0.1)
             http_result = await self._create_request(
                 endpoint_url,
                 openai_prompts,
@@ -348,8 +347,16 @@ class RolloutWorker(SingleAcceleratorWorker):
                 response = await self._handle_non_stream_response(
                     uid, sample_params, extra_params, http_result.response
                 )
-                if check_valid_rollout_item(response):
-                    continue
+                if not check_valid_rollout_item([response]):
+                    cur_retry_times += 1
+                    if cur_retry_times < self.config.max_retry_per_sample:
+                        self.logger.warning(
+                            f"Invalid rollout response for request {uid}, retrying {cur_retry_times}/{self.config.max_retry_per_sample}."
+                        )
+                        await asyncio.sleep(0.1)
+                        continue
+                    else:
+                        return RLRolloutResponseItem(state="skipped")
                 return response
 
             # Case 2: A fatal, non-retryable error occurred
@@ -368,7 +375,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                 await asyncio.sleep(0.1)
                 continue
 
-            elif http_result.is_retryable or http_result.is_client_error:
+            elif http_result.is_retryable and cur_retry_times >= self.config.max_retry_per_sample:
+                return RLRolloutResponseItem(state="skipped")
+            elif http_result.is_client_error:
                 return RLRolloutResponseItem(state="skipped")
             elif http_result.is_server_error:
                 return RLRolloutResponseItem(state="failed")

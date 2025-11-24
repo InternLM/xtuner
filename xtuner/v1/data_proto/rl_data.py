@@ -161,11 +161,11 @@ def check_valid_rollout_item(group_data_items: List[RLRolloutResponseItem]) -> b
 
 
 def check_valid_dataflow_item(group_data_items: List[RLDataFlowItem], is_training: bool = False) -> bool:
-    rollout_vaild = check_valid_rollout_item(group_data_items=[item.env.rollout for item in group_data_items])
-    if not rollout_vaild:
+    rollout_valid = check_valid_rollout_item(group_data_items=[item.env.rollout for item in group_data_items])
+    if not rollout_valid:
         return False
 
-    is_abort = any(item.env.rollout.state == "abort" for item in group_data_items)
+    is_abort = any(item.env.rollout.state == "interrupted" for item in group_data_items)
     if is_training and is_abort:
         return False
     is_skipped = any(item.env.rollout.state == "skipped" for item in group_data_items)

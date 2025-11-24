@@ -373,23 +373,37 @@ class RolloutController:
             format=format,
             extra_info=extra_info,
         )
-        if self.workers_info[server_url].running_count % 100 == 0:
-            log_msg = ""
-            for _, info in self.workers_info.items():
-                log_msg += f"rank {info.rank} worker info: {info}"
-            self.logger.info(log_msg)
         try:
+            selected_worker_info = self.workers_info[server_url]
             response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout * 2)
-            self.workers_info[server_url].running_count -= 1
-            self.workers_info[server_url].success_count += 1
-            if response.state == "failed":
+            selected_worker_info.running_count -= 1
+            selected_worker_info.success_count += 1
+            if response.state == "failed" or response.state == "skipped":
+                selected_worker_info.failure_count += 1
+                selected_worker_info.success_count -= 1
                 self.deactivate_worker_by_url(server_url)
             return response
         except asyncio.TimeoutError:
-            self.workers_info[server_url].running_count -= 1
-            self.workers_info[server_url].failure_count += 1
+            selected_worker_info.running_count -= 1
+            selected_worker_info.failure_count += 1
             self.logger.error(f"Get response from rollout worker {worker} timeout and return skip this sample.")
             return RLRolloutResponseItem(state="skipped")
+
+    def get_rollout_stats(self) -> str:
+        """Get statistics about the rollout workers.
+
+        Returns:
+            str: A formatted string containing statistics about each rollout
+        """
+        log_parts = ["Rollout Worker Stats:"]
+        for url, info in self.workers_info.items():
+            log_parts.append(
+                f"  - URL: {url} | Rank: {info.rank} | Active: {info.is_active} | "
+                f"Running: {info.running_count} | Success: {info.success_count} | "
+                f"Failures: {info.failure_count}"
+            )
+        log_msg = "\n".join(log_parts)
+        return log_msg
 
     def start_api_server(self, host: str = "0.0.0.0", port: int = 8000):
         """Starts the API server to expose the rollout functionality."""

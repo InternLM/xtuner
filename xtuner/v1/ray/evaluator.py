@@ -235,7 +235,7 @@ class Evaluator:
             pbar.n = len(self.return_list)
             pbar.refresh()
 
-        self.logger.info("Target batch size reached and pausing rollout controller.")
+        self.logger.info("Target batch size reached.")
         if waiting_tasks:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 
