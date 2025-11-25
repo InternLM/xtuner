@@ -386,7 +386,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
-            rollout_entropy = (cast(torch.Tensor, loss_ctx_input.rollout_logprobs) * mask).sum()
+            rollout_entropy = -(cast(torch.Tensor, loss_ctx_input.rollout_logprobs) * mask).sum()
             sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
             sum_rollout_entropy = (
                 rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
