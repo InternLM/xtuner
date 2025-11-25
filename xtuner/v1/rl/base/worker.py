@@ -382,6 +382,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"rollout_logprobs_list {len(rollout_logprobs_list)} vs loss_ctx_input_list {len(loss_ctx_input_list)}"
             )
 
+        all_diffs = []
         all_rollout_is_metrics = []
         for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
@@ -396,6 +397,26 @@ class TrainingWorker(SingleAcceleratorWorker):
                 continue
 
             if len(rollout_logprobs_list) > 0:
+                # calculate rollout logprobs and old logprobs difference
+                rollout_logprobs = loss_ctx_input.rollout_logprobs[mask]  # type: ignore[index]
+                old_logprobs = loss_ctx_input.old_logprobs[mask]  # type: ignore[index]
+
+                assert len(rollout_logprobs.size()) == 1, (
+                    f"len(rollout_logprobs.size()): {len(rollout_logprobs.size())}"
+                )
+                assert rollout_logprobs.shape == old_logprobs.shape, (
+                    f"rollout_logprobs {rollout_logprobs.shape} vs old_logprobs {old_logprobs.shape}"
+                )
+                min_diff = torch.min(rollout_logprobs - old_logprobs)
+                max_diff = torch.max(rollout_logprobs - old_logprobs)
+                mean_diff = torch.mean(rollout_logprobs - old_logprobs)
+                if rollout_logprobs.numel() == 1:
+                    std_diff = torch.tensor(0.0)
+                else:
+                    std_diff = torch.std(rollout_logprobs - old_logprobs)
+                all_diffs.append((min_diff, max_diff, mean_diff, std_diff))
+
+                # calculate rollout importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
 
@@ -413,18 +434,40 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         logger_msg = f"Rollout {rollout_idx}: "
 
-        if len(all_rollout_is_metrics) > 0:
-            rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
-            logger_msg += f"\n\nrollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
-
         sum_entropy = cast(torch.Tensor, sum_entropy)
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
         avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-        logger_msg += f"\n\navg generation entropy: {avg_gen_entropy:.4f}"
+        logger_msg += f" avg generation entropy: {avg_gen_entropy:.4f}, "
         sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
         dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
         avg_gen_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-        logger_msg += f"\n\navg rollout generation entropy: {avg_gen_entropy:.4f}"
+        logger_msg += f"avg rollout generation entropy: {avg_gen_entropy:.4f}"
+
+        rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
+        if len(rollout_is_metrics) > 0:
+            tis_logger_msg = f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
+        else:
+            tis_logger_msg = ""
+
+        if len(rollout_logprobs_list) > 0:
+            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs]).to(
+                dtype=torch.float32
+            )  # n, 4
+            min_diff_val = torch.min(all_diffs_tensor[:, 0]).item()
+            max_diff_val = torch.max(all_diffs_tensor[:, 1]).item()
+            mean_diff_val = torch.mean(all_diffs_tensor[:, 2]).item()
+            if all_diffs_tensor[:, 3].numel() <= 1:
+                std_diff_val = 0.0
+            else:
+                std_diff_val = torch.std(all_diffs_tensor[:, 3]).item()
+            logprob_logger_msg = f" logprobs diff min {float(min_diff_val):.4f}, max {float(max_diff_val):.4f}, mean {float(mean_diff_val):.4f}, std {float(std_diff_val):.4f}, "
+        else:
+            logprob_logger_msg = ""
+
+        if tis_logger_msg:
+            logger_msg += tis_logger_msg
+        else:
+            logger_msg += logprob_logger_msg
 
         self.logger.info(logger_msg)
 
