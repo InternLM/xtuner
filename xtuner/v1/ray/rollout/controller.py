@@ -283,7 +283,7 @@ class RolloutController:
         if all(not info.is_active for info in self.workers_info.values()):
             self.logger.critical("All rollout workers are inactive. Attempting to restart all inference engines.")
             try:
-                self.engine_mesh_list, self.server_url_dict = self.init_workers()
+                self.engine_mesh_list, self.worker_server_urls_map = self.init_workers()
                 self.router.update_active_workers(self._get_worker_status_for_router())
                 self.logger.info("Successfully re-initialized all rollout workers.")
             except Exception as e:
@@ -301,7 +301,7 @@ class RolloutController:
         if not active_workers:
             self.logger.critical("All rollout workers are inactive. Attempting to restart all inference engines.")
             try:
-                self.engine_mesh_list, self.server_url_dict = self.init_workers()
+                self.engine_mesh_list, self.worker_server_urls_map = self.init_workers()
                 self.router.update_active_workers(self._get_worker_status_for_router())
                 self.logger.info("Successfully re-initialized all rollout workers.")
             except Exception as e:
