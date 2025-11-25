@@ -179,8 +179,6 @@ class FourierEmbedding(RotaryEmbedding):
         self.input_dim = self.inv_freq.shape[-1]
         self.output_dim = self.inv_freq.shape[-1]
 
-        # TODO: 验证 hf 加载模型时，sin_coef和cos_coef 可以从 others.safetensors 被正确加载
-        # TODO: sin_coef和cos_coef 改为 buffer? 会不会被保存到 safetensors?
         if self.fope_sep_head:
             sin_coef = torch.randn(self.config.num_key_value_heads, self.input_dim, self.output_dim).to(
                 self.inv_freq.device
@@ -189,12 +187,14 @@ class FourierEmbedding(RotaryEmbedding):
                 self.inv_freq.device
             )
         else:
-            sin_coef = torch.randn(self.input_dim, self.output_dim).to(self.inv_freq.device)
-            cos_coef = torch.randn(self.input_dim, self.output_dim).to(self.inv_freq.device)
+            sin_coef = torch.randn(self.input_dim, self.output_dim, generator=generator).to(self.inv_freq.device)
+            cos_coef = torch.randn(self.input_dim, self.output_dim, generator=generator).to(self.inv_freq.device)
 
-        # TODO: 如何保证不同rank上sin_coef和cos_coef的初始化是相同的？需要设置generator?
-        torch.nn.init.xavier_normal_(sin_coef, gain=self.fope_init_factor)
-        torch.nn.init.xavier_normal_(cos_coef, gain=self.fope_init_factor)
+        # use same generator to initialize sin_coef and cos_coef, so each rank will get the same sin_coef and cos_coef
+        generator = torch.Generator(device=self.inv_freq.device)
+        generator.manual_seed(123)
+        torch.nn.init.xavier_normal_(sin_coef, gain=self.fope_init_factor, generator=generator)
+        torch.nn.init.xavier_normal_(cos_coef, gain=self.fope_init_factor, generator=generator)
 
         if self.input_dim == self.output_dim:
             sin_coef += torch.eye(self.input_dim, device=sin_coef.device)
