@@ -19,7 +19,7 @@ from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.model import get_model_config_from_hf
 
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
-MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
+MODEL_PATH = os.environ["QWEN3_MOE_PATH"]
 
 class TestUpdateWeight(unittest.TestCase):
     def setUp(self):
@@ -36,8 +36,8 @@ class TestUpdateWeight(unittest.TestCase):
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator="GPU",
-            num_workers=2,
-            num_cpus_per_worker=16,
+            num_workers=4,
+            num_cpus_per_worker=12,
             cpu_memory_per_worker=16 * 1024 ** 3,  # 16 GB
         )
         self.rollout_cfg = RolloutConfig(
@@ -46,12 +46,13 @@ class TestUpdateWeight(unittest.TestCase):
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
             rollout_cross_node_comm=False,
-            tensor_parallel_size=2,
+            tensor_parallel_size=4,
             expert_parallel_size=1,
             gpus_per_node=8, # gpu: 8, npu: 16
             dtype="bfloat16",
             skip_load_weights=True,
             context_length=256,
+            gpu_memory_utilization=0.5,
         )
 
         # training config
