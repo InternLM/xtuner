@@ -1,7 +1,6 @@
 import itertools
 from collections import defaultdict
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
@@ -18,7 +17,8 @@ from xtuner.v1.data_proto.rl_data import (
     RLDatasetItem,
     RLExtraDataItem,
     RLUIDItem,
-    check_valid_dataflow_item,
+    RolloutState,
+    is_valid_for_replaybuffer,
 )
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
@@ -26,23 +26,6 @@ from xtuner.v1.utils import get_logger
 
 
 logger = get_logger()
-
-
-class ReplayState(str, Enum):
-    INIT = "init"
-    COMPLETED = "completed"
-    INTERRUPTED = "interrupted"
-    FAILED = "failed"
-    ARCHIVED = "archived"
-    EXPIRED = "expired"  # only in replay buffer
-    SKIPPED = "skipped"  # only in dataflow
-
-    @staticmethod
-    def from_str(state_str: str) -> "ReplayState":
-        for state in ReplayState:
-            if state.value == state_str:
-                return state
-        raise ValueError(f"Unknown ReplayState string: {state_str}")
 
 
 @dataclass
@@ -73,19 +56,19 @@ class ReplayMeta:
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
 
-def determine_group_state(group_data_items: List[RLDataFlowItem]) -> str:
+def determine_group_state(group_data_items: List[RLDataFlowItem]) -> RolloutState:
     """Determines the processing strategy for a group of rollout samples based
     on their state."""
     # TODO(@duanyanhui): remove this function when send one request instead of group requests.
     if not group_data_items:
-        return "skipped"
+        return RolloutState.SKIPPED
     group_states = {item.env.rollout.state for item in group_data_items}
-    if "skipped" in group_states or "failed" in group_states:
-        return "skipped"
-    elif "interrupted" in group_states:
-        return "interrupted"
-    elif all(state == "completed" for state in group_states):
-        return "completed"
+    if RolloutState.SKIPPED in group_states or RolloutState.FAILED in group_states:
+        return RolloutState.SKIPPED
+    elif RolloutState.INTERRUPTED in group_states:
+        return RolloutState.INTERRUPTED
+    elif all(state == RolloutState.COMPLETED for state in group_states):
+        return RolloutState.COMPLETED
     else:
         raise ValueError(f"Unknown group states: {group_states}")
 
@@ -110,8 +93,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         group_states.append(item.env.rollout.finish_reason)
 
     group_state = determine_group_state(grouped_dataitem)
-    replay_state = ReplayState.from_str(group_state)
-    logger.debug(f"determined group_state: {group_state}, replay_state: {replay_state}")
+    logger.debug(f"determined group_state: {group_state}, replay_state: {group_state}")
     replay_meta = ReplayMeta(
         env=env_str,
         root_id=root_id,
@@ -120,7 +102,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         observation_ids=observation_ids,
         observation_refs=observation_refs,
         observation_versions=observation_versions,
-        state=replay_state,
+        state=group_state,
         extra_info={},
     )
     return replay_meta
@@ -337,7 +319,7 @@ class ReplayBufferStorage:
         if (
             grouped_dataitem is None
             or len(grouped_dataitem) == 0
-            or check_valid_dataflow_item(grouped_dataitem) is False
+            or is_valid_for_replaybuffer(grouped_dataitem) is False
         ):
             return
 
@@ -346,9 +328,9 @@ class ReplayBufferStorage:
         action_id = replay_meta.action_id
         state = replay_meta.state
 
-        if state == ReplayState.INTERRUPTED:
+        if state == RolloutState.INTERRUPTED:
             self._paused.append(action_id)
-        elif state == ReplayState.COMPLETED:
+        elif state == RolloutState.COMPLETED:
             self._returned.append(action_id)
         self.logger.debug(
             f"Adding action_id: {action_id} with state: {state} to ReplayBufferStorage. Paused count: {len(self._paused)}, Returned count: {len(self._returned)}"

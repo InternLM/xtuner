@@ -1,13 +1,35 @@
-from typing import Any, Dict, List, Literal, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Annotated
 
+from xtuner.v1.utils import StrEnum
 
 # ====================================
 # ====== DataFlow 数据流 ==============
 # ====================================
+from xtuner.v1.utils.logger import get_logger
+
+
+logger = get_logger()
+
+
+class RolloutState(StrEnum):
+    INIT = "init"
+    COMPLETED = "completed"
+    INTERRUPTED = "interrupted"
+    FAILED = "failed"
+    ARCHIVED = "archived"
+    EXPIRED = "expired"  # only in replay buffer
+    SKIPPED = "skipped"  # only in dataflow
+
+    @staticmethod
+    def from_str(state_str: str) -> "RolloutState":
+        for state in RolloutState:
+            if state.value == state_str:
+                return state
+        raise ValueError(f"Unknown ReplayState string: {state_str}")
 
 
 class RLUIDItem(BaseModel):
@@ -72,7 +94,7 @@ class RLRolloutResponseItem(BaseModel):
     finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
     logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
-    state: Literal["init", "completed", "interrupted", "skipped", "failed"] = "init"
+    state: RolloutState = RolloutState.INIT
 
 
 class RLJudgerResponseItem(BaseModel):
@@ -148,30 +170,69 @@ class RLDataFlowItem(BaseModel):
     extra_info: RLExtraDataItem = RLExtraDataItem()
 
 
-def check_valid_rollout_item(group_data_items: List[RLRolloutResponseItem]) -> bool:
-    for item in group_data_items:
-        response_valid = bool(item.response)
-        ids_valid = bool(item.response_ids)
-        logprobs_valid = bool(item.logprobs)
-        if not response_valid and not ids_valid:
-            return False
-        if ids_valid and logprobs_valid and len(item.logprobs) != len(item.response_ids):  # type: ignore[arg-type]
-            return False
+def is_valid_for_replaybuffer(group_data_items: List[RLDataFlowItem]) -> bool:
+    """Checks if a group of data items is valid for insertion into the replay
+    buffer.
+
+    Args:
+        group_data_items: A list of RLDataFlowItem objects.
+
+    Returns:
+        True if the group is valid, False otherwise.
+
+    NOTE: Why this check is needed:
+    - For system fault tolerance, this check is performed at rollout / dataflow
+    time, but we still do it here to ensure replay buffer data integrity.
+    - 'skipped' or 'failed' states indicate that the rollout process did not
+      complete successfully or was intentionally bypassed.
+    - 'interrupted' states may still contain useful data for the replay buffer,
+      as the rollout was started but not finished.
+    - 'completed' states are valid and should be included in the replay buffer.
+    """
+    is_skipped = any(item.env.rollout.state == RolloutState.SKIPPED for item in group_data_items)
+    is_failed = any(item.env.rollout.state == RolloutState.FAILED for item in group_data_items)
+    if is_skipped or is_failed:
+        logger.warning("Invalid dataflow group found during replay buffer insertion: rollout state is skipped/failed.")
+        return False
     return True
 
 
-def check_valid_dataflow_item(group_data_items: List[RLDataFlowItem], is_training: bool = False) -> bool:
-    rollout_valid = check_valid_rollout_item(group_data_items=[item.env.rollout for item in group_data_items])
-    if not rollout_valid:
-        return False
+def is_valid_for_training(group_data_items: List[RLDataFlowItem]) -> bool:
+    """Checks if a group of data items is valid for a training step.
 
-    is_abort = any(item.env.rollout.state == "interrupted" for item in group_data_items)
-    if is_training and is_abort:
+    Args:
+        group_data_items: A list of RLDataFlowItem objects.
+
+    Returns:
+        True if the group is valid, False otherwise.
+
+    NOTE: Why this check is needed:
+    - For system fault tolerance, this check is performed at rollout / dataflow
+      time, but we still do it here to ensure training data integrity.
+    - 'skipped'/'failed': These items are fundamentally broken or incomplete and
+      should not be used for training.
+    - 'interrupted': These items represent rollouts that were stopped
+      prematurely. Using such partial data could lead the model to learn
+      undesirable behaviors (e.g., stopping generation too early).
+    - Empty response/response_ids: The model's generated response is the core
+      of the training data for RL algorithms like PPO. If the response is
+      missing, there is nothing to compute rewards on or to train the model with.
+    """
+    is_abort = any(item.env.rollout.state == RolloutState.INTERRUPTED for item in group_data_items)
+    is_skipped = any(item.env.rollout.state == RolloutState.SKIPPED for item in group_data_items)
+    is_failed = any(item.env.rollout.state == RolloutState.FAILED for item in group_data_items)
+    if is_skipped or is_failed or is_abort:
+        logger.warning("Invalid dataflow group found during training: rollout state is skipped/failed/interrupted.")
         return False
-    is_skipped = any(item.env.rollout.state == "skipped" for item in group_data_items)
-    is_failed = any(item.env.rollout.state == "failed" for item in group_data_items)
-    if is_skipped or is_failed:
-        return False
+    for item in group_data_items:
+        rollout_info = item.env.rollout
+        response_valid = True if rollout_info.response is not None and len(rollout_info.response) > 0 else False
+        ids_valid = True if rollout_info.response_ids is not None and len(rollout_info.response_ids) > 0 else False
+        if not response_valid and not ids_valid:
+            logger.warning(
+                "Invalid dataflow item found during training: no response or response_ids and skip this item."
+            )
+            return False
     return True
 
 

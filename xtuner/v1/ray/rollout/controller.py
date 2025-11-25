@@ -280,7 +280,7 @@ class RolloutController:
         ray.get(worker_info.actor.offload.remote())  # type: ignore[attr-defined]
         ray.get(worker_info.actor.shutdown.remote())  # type: ignore[attr-defined]
 
-    def check_active_workers(self):
+    def update_active_workers(self):
         """Check the health of all active rollout workers.
 
         Returns:
