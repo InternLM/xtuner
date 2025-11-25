@@ -247,6 +247,7 @@ class LMDeployWorker(RolloutWorker):
                 logprobs_mode="raw_logprobs",
                 session_len=self.config.context_length,
                 model_format="fp8" if self.config.enable_float8 else None,
+                cache_max_entry_count=self.config.gpu_memory_utilization,
                 **extra_engine_config,
             )
             if backend == "pytorch"
@@ -257,6 +258,7 @@ class LMDeployWorker(RolloutWorker):
                 empty_init=self.config.skip_load_weights,
                 session_len=self.config.context_length,
                 model_format="fp8" if self.config.enable_float8 else None,
+                cache_max_entry_count=self.config.gpu_memory_utilization,
             )
         )
         if backend == "pytorch" and self.accelerator == "NPU":

@@ -3,6 +3,9 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch, Mock
 import pickle
+import shutil
+import weakref
+from pydantic import TypeAdapter
 
 import torch
 import torch.distributed as dist
@@ -18,11 +21,13 @@ from xtuner.v1.model.compose.internvl import (
     InternVL3P5Dense8BConfig,
     InternVL3P5MoE30BA3Config,
 )
-from xtuner.v1.train.trainer import Trainer, ResumeConfig
+from xtuner.v1.train.trainer import HooksConfig, Trainer, ResumeConfig, HookStage
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.train.trainer import TrainerConfig
+from xtuner.v1.engine.train_engine import LossLog, OtherLog
 from xtuner.v1.loss import CELossConfig
+from xtuner._testing import DeterministicDDPTestCase
 from unittest import TestCase
 
 from xtuner.v1.utils.device import get_device
@@ -441,3 +446,169 @@ class TestTrainerConfig(TestCase):
         trainer_cfg.model_dump_json()
         trainer_cfg.model_dump()
         pickle.dumps(trainer_cfg)
+
+
+class CheckpointHookPickle:
+    def __init__(self) -> None:
+        self.count = 0
+
+    def __call__(self, checkpoint, step, epoch, total_step, total_epoch):
+        self.count += 1
+
+
+class TestHooksConfig(DeterministicDDPTestCase):
+    TOTAL_STEP = 10
+    CHECKPOINT_INTERVAL = 5
+    SNAPSHOT_INTERVAL = 2
+    HF_INTERVAL = 10
+    ERROR_MESG_PREFIX="[HooksConfig Test Failed]: "
+
+    def _build_trainer(self, hooks_config: HooksConfig):
+        model_cfg = Qwen3MoE30BA3Config(num_hidden_layers=2, hidden_size=1024, moe_intermediate_size=384)
+        dataset_config = [
+            {
+                "dataset": DatasetConfig(name="alpaca", anno_path=os.environ["ALPACA_PATH"], sample_ratio=1.0),
+                "tokenize_fn": OpenaiTokenizeFunctionConfig(
+                    max_length=100, chat_template="qwen3"
+                ),
+                # "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
+            },
+        ]
+        dataloader_config = DataloaderConfig(pack_max_length=100)
+
+        optim_cfg = AdamWConfig(lr=0.1, weight_decay=0.1)
+        lr_cfg = LRConfig(lr_type="cosine", lr_min=0.001, warmup_ratio=0.03)
+
+        work_dir = tempfile.TemporaryDirectory().name
+        if dist.get_rank() == 0:
+            work_dir_list = [work_dir]
+        else:
+            work_dir_list = [None]
+        dist.broadcast_object_list(work_dir_list, src=0)
+        work_dir = work_dir_list[0]
+
+        trainer_cfg = TrainerConfig(
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            dataset_cfg=dataset_config,
+            dataloader_cfg=dataloader_config,
+            lr_cfg=lr_cfg,
+            loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),
+            global_batch_size=self.world_size,
+            sp_size=1,
+            total_step=self.TOTAL_STEP,
+            seed=42,
+            checkpoint_interval=self.CHECKPOINT_INTERVAL,
+            snapshot_interval=self.SNAPSHOT_INTERVAL,
+            hf_interval=self.HF_INTERVAL,
+            tokenizer_path=os.environ["QWEN3_MOE_PATH"],
+            work_dir=work_dir,
+            hooks_config=hooks_config,
+        )
+        return Trainer.from_config(trainer_cfg)
+
+    def _cleanup_trainer(self, trainer: Trainer):
+        if dist.get_rank() == 0:
+            shutil.rmtree(trainer.work_dir, ignore_errors=True)
+        dist.barrier()
+
+    def test_hooks_config(self):
+        self.create_pg(DEVICE)
+        checkpoint_function_call_times = 0
+        train_step_function_call_times = 0
+        losslog_adapater = TypeAdapter(LossLog)
+        otherlog_adapter = TypeAdapter(OtherLog)
+
+        def checkpoint_hook(checkpoint, step, epoch, total_step, total_epoch):
+            nonlocal checkpoint_function_call_times
+            checkpoint_function_call_times += 1
+
+        def train_step_hook(loss_log, other_log, step, epoch, total_step, total_epoch):
+            nonlocal train_step_function_call_times
+            train_step_function_call_times += 1
+
+
+        class CheckpointHook:
+            def __init__(self) -> None:
+                self.count = 0
+
+            def __call__(self, checkpoint, step, epoch, total_step, total_epoch):
+                self.count += 1
+
+        class TrainStepHook:
+            def connect_trainer(self, trainer: Trainer):
+                self.trainer = weakref.ref(trainer)
+
+            def __init__(self) -> None:
+                self.count = 0
+
+            def __call__(self, loss_log, other_log, step, epoch, total_step, total_epoch):
+                losslog_adapater.validate_python(loss_log)
+                otherlog_adapter.validate_python(other_log)
+
+                assert self.trainer().cur_step == step
+                assert self.trainer().cur_epoch == epoch
+                assert self.trainer().total_step == total_step
+                assert self.trainer().total_epoch == total_epoch
+
+                self.count += 1
+
+        hooks_config = HooksConfig(
+            after_save_dcp=[checkpoint_hook, CheckpointHook()],
+            after_train_step=[train_step_hook, TrainStepHook()],
+            after_save_hf=CheckpointHook(),
+            after_save_snapshot=CheckpointHook(),
+        )
+        trainer = self._build_trainer(hooks_config)
+        trainer.fit()
+
+        self.assertEqual(
+            checkpoint_function_call_times,
+            2,
+            self.ERROR_MESG_PREFIX + "Checkpoint hook not called expected times",
+        )
+        self.assertEqual(
+            train_step_function_call_times,
+            10,
+            self.ERROR_MESG_PREFIX + "Train step hook not called expected times",
+        )
+        self.assertEqual(
+            hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)[1].count,
+            10,
+            self.ERROR_MESG_PREFIX + "Train step hook not called expected times",
+        )
+        self.assertEqual(
+            hooks_config.get_hooks(HookStage.AFTER_SAVE_DCP)[1].count,
+            2,
+            self.ERROR_MESG_PREFIX + "Checkpoint hook not called expected times",
+        )
+        self.assertEqual(
+            hooks_config.get_hooks(HookStage.AFTER_SAVE_HF)[0].count,
+            1,
+            self.ERROR_MESG_PREFIX + "HF checkpoint hook not called expected times",
+        )
+        # The last snapshot will not be saved fod dcp has been saved.
+        self.assertEqual(
+            hooks_config.get_hooks(HookStage.AFTER_SAVE_SNAPSHOT)[0].count,
+            4,
+            self.ERROR_MESG_PREFIX + "Snapshot hook not called expected times",
+        )
+        self._cleanup_trainer(trainer)
+
+    def test_serialize_hooks_config(self):
+        self.create_pg(DEVICE)
+        class CheckpointHook:
+            def __init__(self) -> None:
+                self.count = 0
+
+            def __call__(self, checkpoint, step, epoch, total_step, total_epoch):
+                self.count += 1
+
+        hooks_config = HooksConfig(
+            after_train_step=CheckpointHook(),
+            after_save_dcp=CheckpointHookPickle(),
+        )
+        dumped = pickle.dumps(hooks_config)
+        loaded = pickle.loads(dumped)
+        assert len(loaded.get_hooks(HookStage.AFTER_TRAIN_STEP)) == 0  # <local> object cannot be serialized
+        assert len(loaded.get_hooks(HookStage.AFTER_SAVE_DCP)) == 1

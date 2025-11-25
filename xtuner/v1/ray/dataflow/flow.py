@@ -236,8 +236,8 @@ class DataFlow:
             next_update_threshold = update_step
             while (
                 self.finished_samples_count < self.target_batch_size
-                and self.failed_samples_count < self.target_batch_size * self.config.max_retry_times
-                and self.skipped_sample_count < self.target_batch_size * self.config.max_retry_times
+                and self.failed_samples_count < self.target_batch_size * max(self.config.max_retry_times, 1)
+                and self.skipped_sample_count < self.target_batch_size * max(self.config.max_retry_times, 1)
             ):
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count

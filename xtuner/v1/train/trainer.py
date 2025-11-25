@@ -1,5 +1,6 @@
 import contextlib
 import gc
+import inspect
 import json
 import os
 import pickle
@@ -9,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from shutil import rmtree
-from typing import Annotated, Literal, Sized, cast
+from typing import Annotated, Callable, Literal, Protocol, Sequence, Sized, cast, overload, runtime_checkable
 
 import torch
 import torch.distributed as dist
@@ -18,7 +19,7 @@ from cyclopts import Parameter
 from mmengine import load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_serializer, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
@@ -29,7 +30,7 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
-from xtuner.v1.engine import TrainEngine
+from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
@@ -42,6 +43,7 @@ from xtuner.v1.profiler.prober_utils import setup_prober_list
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
     ParallelConfigException,
+    StrEnum,
     get_logger,
     is_hf_model_path,
     log_format,
@@ -121,6 +123,13 @@ class XTunerMeta(BaseModel):
         return None
 
     @property
+    def latest_hf_checkpoint(self) -> str | None:
+        for exp in self.exps:
+            if exp.hf_checkpoint_list:
+                return exp.hf_checkpoint_list[-1]
+        return None
+
+    @property
     def latest_exp(self) -> ExpInfo:
         return self.exps[-1]
 
@@ -140,6 +149,132 @@ class ResumeConfig(BaseModel):
     load_optimizer_args: bool = True
     load_dataset: bool = True
     load_scheduler: bool = True
+
+
+@runtime_checkable
+class CheckpointHookBase(Protocol):
+    def __call__(
+        self,
+        checkpoint: Path,
+        step: int,
+        epoch: int | None,
+        total_step: int,
+        total_epoch: int | None,
+    ) -> None: ...
+
+
+@runtime_checkable
+class CheckpointHook(CheckpointHookBase, Protocol):
+    def connect_trainer(self, trainer: "Trainer"): ...
+
+
+@runtime_checkable
+class TrainStepHookBase(Protocol):
+    def __call__(
+        self,
+        loss_log: LossLog,
+        other_log: OtherLog,
+        step: int,
+        epoch: int | None,
+        total_step: int,
+        total_epoch: int | None,
+    ) -> None: ...
+
+
+@runtime_checkable
+class TrainStepHook(TrainStepHookBase, Protocol):
+    def connect_trainer(self, trainer: "Trainer"): ...
+
+
+TrainStepHookProtocol = TrainStepHookBase | TrainStepHook
+CheckpointHookProtocol = CheckpointHookBase | CheckpointHook
+HookProtocol = TrainStepHookProtocol | CheckpointHookProtocol
+
+
+class HookStage(StrEnum):
+    AFTER_SAVE_DCP = "after_save_dcp"
+    AFTER_SAVE_HF = "after_save_hf"
+    AFTER_SAVE_SNAPSHOT = "after_save_snapshot"
+    AFTER_TRAIN_STEP = "after_train_step"
+
+
+class HooksConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+    after_save_dcp: list[CheckpointHookProtocol] | CheckpointHookProtocol | None = None
+    after_save_hf: list[CheckpointHookProtocol] | CheckpointHookProtocol | None = None
+    after_save_snapshot: list[CheckpointHookProtocol] | CheckpointHookProtocol | None = None
+    after_train_step: list[TrainStepHookBase] | TrainStepHookBase | None = None
+
+    @field_validator("after_train_step", "after_save_dcp", "after_save_hf", "after_save_snapshot", mode="after")
+    @classmethod
+    def _validate_hooks(
+        cls,
+        value: list[HookProtocol] | HookProtocol | None,
+    ) -> list[Callable] | None:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            value = [value]
+        return value
+
+    def _get_hook_name(self, hook: HookProtocol) -> str:
+        if inspect.isfunction(hook):
+            return hook.__name__
+        else:
+            return hook.__class__.__name__
+
+    @model_serializer
+    def serialize_hooks(self) -> dict[str, list[str] | None]:
+        def serialize_hook_list(hook_list: Sequence[HookProtocol]) -> list[str]:
+            return [self._get_hook_name(hook) for hook in hook_list]
+
+        return {
+            "after_save_dcp": serialize_hook_list(self.get_hooks(HookStage.AFTER_SAVE_DCP)),
+            "after_save_hf": serialize_hook_list(self.get_hooks(HookStage.AFTER_SAVE_HF)),
+            "after_save_snapshot": serialize_hook_list(self.get_hooks(HookStage.AFTER_SAVE_SNAPSHOT)),
+            "after_train_step": serialize_hook_list(self.get_hooks(HookStage.AFTER_TRAIN_STEP)),
+        }
+
+    @overload
+    def get_hooks(self, stage: Literal[HookStage.AFTER_TRAIN_STEP]) -> list[TrainStepHookProtocol]: ...
+
+    @overload
+    def get_hooks(
+        self,
+        stage: Literal[HookStage.AFTER_SAVE_DCP, HookStage.AFTER_SAVE_HF, HookStage.AFTER_SAVE_SNAPSHOT],
+    ) -> list[CheckpointHookProtocol]: ...
+
+    @overload
+    def get_hooks(self, stage: HookStage) -> list[HookProtocol]: ...
+
+    def get_hooks(
+        self,
+        stage: HookStage,
+    ) -> list:
+        hooks = getattr(self, stage)
+        if hooks is None:
+            return []
+        if not isinstance(hooks, list):
+            hooks = [hooks]
+        return hooks
+
+    def __getstate__(self):
+        state = {}
+        for k, v in self.__dict__.items():
+            try:
+                pickle.dumps(v)
+            # Some <local> function could raise AttributeError
+            except (pickle.PicklingError, AttributeError):
+                state[k] = f"<unpicklable: {type(v)}>"
+            else:
+                state[k] = v
+        return state
+
+    def __setstate__(self, state):
+        valid_state = {
+            k: None if isinstance(v, str) and v.startswith("<unpicklable:") else v for k, v in state.items()
+        }
+        self.__dict__.update(valid_state)
 
 
 class TrainerConfig(BaseModel):
@@ -186,6 +321,7 @@ class TrainerConfig(BaseModel):
     prober_list: list[str] = []
     do_clip: bool = True
     grad_norm_dtype: torch.dtype = torch.float32
+    hooks_config: HooksConfig = HooksConfig()
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -304,6 +440,7 @@ class Trainer:
         do_clip: bool = True,
         grad_norm_dtype: torch.dtype = torch.float32,
         trainer_cfg: TrainerConfig | None = None,
+        hooks_config: HooksConfig = HooksConfig(),
     ):
         self._do_clip = do_clip
         self._grad_norm_dtype = grad_norm_dtype
@@ -447,6 +584,8 @@ class Trainer:
         if self._resume_cfg.resume_from is not None:
             self._resume()
 
+        self.hooks_config = self._setup_hooks(hooks_config=hooks_config)
+
         setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
 
     @classmethod
@@ -495,6 +634,7 @@ class Trainer:
             prober_list=config.prober_list,
             do_clip=config.do_clip,
             grad_norm_dtype=config.grad_norm_dtype,
+            hooks_config=config.hooks_config,
             trainer_cfg=config,
         )
         self.config = config
@@ -550,6 +690,17 @@ class Trainer:
 
             with self._maybe_profiling():
                 loss_log, other_log = self._engine.train_step(engine_input)
+
+            hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
+            for hook in hooks:
+                hook(
+                    loss_log=loss_log,
+                    other_log=other_log,
+                    step=self.cur_step,
+                    epoch=self._cur_epoch,
+                    total_step=self.total_step,
+                    total_epoch=self.total_epoch,
+                )
 
             grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
             self._engine.step_optimizer(grad_norm)
@@ -662,6 +813,10 @@ class Trainer:
         return self._total_step
 
     @property
+    def total_epoch(self) -> int | None:
+        return self._total_epoch
+
+    @property
     def cur_step(self) -> int:
         """Get the current training step.
 
@@ -669,6 +824,15 @@ class Trainer:
             int: Current step number.
         """
         return self._cur_step
+
+    @property
+    def cur_epoch(self) -> int | None:
+        """Get the current training epoch.
+
+        Returns:
+            int | None: Current epoch number or None if not applicable.
+        """
+        return self._cur_epoch
 
     def _init_logger(self, log_dir: Path):
         # Logging system maybe need better design
@@ -902,6 +1066,21 @@ class Trainer:
                 f.write(self.meta.model_dump_json(indent=2))
 
         dist.barrier()
+
+        if is_snapshot:
+            hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_SNAPSHOT)
+        else:
+            hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_DCP)
+
+        for hook in hooks:
+            hook(
+                checkpoint=checkpoint_path,
+                step=self.cur_step,
+                epoch=self._cur_epoch,
+                total_step=self.total_step,
+                total_epoch=self.total_epoch,
+            )
+
         return True
 
     def _save_dataloader(self, dataloader_path: Path | str):
@@ -1226,6 +1405,16 @@ class Trainer:
             with meta_path.open("w") as f:
                 f.write(self.meta.model_dump_json(indent=2))
 
+        hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_HF)
+        for hook in hooks:
+            hook(
+                checkpoint=save_hf_path,
+                step=self.cur_step,
+                epoch=self._cur_epoch,
+                total_step=self.total_step,
+                total_epoch=self.total_epoch,
+            )
+
     def _register_debug_hook(self):
         """Register a debug hook function to be called at the end of each
         training step."""
@@ -1381,6 +1570,14 @@ class Trainer:
             raise FileNotFoundError(f"Dataloader path {dataloader_path} does not exist.")
         dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
         self._dataloader.load_state_dict(dataloader_state)
+
+    def _setup_hooks(self, hooks_config: HooksConfig) -> HooksConfig:
+        for stage in HookStage:
+            hooks = hooks_config.get_hooks(stage)
+            for hook in hooks:
+                if isinstance(hook, (TrainStepHook, CheckpointHook)):
+                    hook.connect_trainer(self)
+        return hooks_config
 
     def _setup_env(self):
         gc.disable()
