@@ -124,6 +124,13 @@ class LMDeployWorker(RolloutWorker):
         else:
             payload["messages"] = prompt
 
+        if "num_return_tokens" in extra_info:
+            max_return_tokens = sample_params["max_tokens"] - extra_info["num_return_tokens"]
+            sample_params["max_tokens"] = max_return_tokens
+            self.logger.info(
+                f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_info['num_return_tokens']}"
+            )
+
         if self.enable_return_routed_experts:
             extra_params["return_routed_experts"] = True
 
@@ -226,7 +233,7 @@ class LMDeployWorker(RolloutWorker):
         tp_size = self.config.tensor_parallel_size
         dp_size = ep_size = self.config.expert_parallel_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
-        lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "CRITICAL")
+        lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "WARNING")
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "CRITICAL")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "CRITICAL")
 

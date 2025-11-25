@@ -85,6 +85,11 @@ class SingleTurnEnvironment(BaseEnvironment):
             for sample in group_data_items:
                 sample.data.extra_info["root_id"] = sample.uid.root_id
                 sample.data.extra_info["action_id"] = sample.uid.action_id
+                if sample.env.rollout.num_return_tokens > 0:
+                    sample.data.extra_info["num_return_tokens"] = sample.env.rollout.num_return_tokens
+                    self.logger.info(
+                        f"Set num_return_tokens: {sample.env.rollout.num_return_tokens} for sample {sample.uid}."
+                    )
                 fut = self.rollout_controller.rollout.remote(
                     prompt=sample.data.messages,
                     input_ids=sample.data.input_ids,
@@ -95,17 +100,17 @@ class SingleTurnEnvironment(BaseEnvironment):
                 response_future.append(fut)
             try:
                 rollout_responses = await asyncio.wait_for(
-                    asyncio.gather(*response_future), timeout=self.rollout_timeout
+                    asyncio.gather(*response_future), timeout=self.rollout_timeout * 2
                 )
             except asyncio.TimeoutError:
                 self.logger.error("Get rollout controller response timeout and return the failed response.")
-                rollout_responses = [
-                    RLRolloutResponseItem(
-                        finish_reason="failed",
-                    )
-                    for _ in group_data_items
-                ]
+                rollout_responses = [RLRolloutResponseItem(state="skipped") for _ in group_data_items]
             group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_responses)
+            # for idx, data in enumerate(updated_group_data_items):
+            #     if data.env.rollout.response_ids and len(data.env.rollout.response_ids) > 32768:
+            #         raise ValueError(
+            #             f"生成长度超过限制，生成长度 {len(data.env.rollout.response_ids)}，限制 32768, 这一次的生成长度为：{len(rollout_responses[idx].response_ids)}, 原来的生成长度为：{len(group_data_items[idx].env.rollout.response_ids)}"
+            #         )
         return group_data_items
 
     async def run(
@@ -127,13 +132,11 @@ class SingleTurnEnvironment(BaseEnvironment):
             The format of the return value matches the format of the input `data`.
         """
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
-        skip_judger = any(
-            item.env.rollout.finish_reason in ["failed", "skipped", "abort"] for item in group_data_items
-        )
-        if self.judger_controller and not skip_judger:
+        continue_judger = all(item.env.rollout.state == "completed" for item in group_data_items)
+        if self.judger_controller and continue_judger:
             try:
                 judger_responses: List[RLJudgerResponseItem] = await asyncio.wait_for(
-                    self.judger_controller.run.remote(group_data_items), timeout=self.judger_timeout
+                    self.judger_controller.run.remote(group_data_items), timeout=self.judger_timeout * 2 
                 )
             except asyncio.TimeoutError:
                 self.logger.error("Get judger controller response timeout and return the failed response.")
