@@ -20,8 +20,6 @@ from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE
 from xtuner.v1.float8.float8_handler import Float8Handler
 from torch.distributed.device_mesh import DeviceMesh
-import torch.distributed.nn.functional as distF
-from xtuner.v1.rl.utils import sp_split
 
 logger = get_logger()
 
@@ -173,12 +171,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         image_embeds, deepstack_image_embeds = self.multi_modal_projector(image_embeds, deepstack_image_embeds)
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            image_embeds = distF.all_gather(image_embeds, group=sequence_parallel_mesh.get_group())
-            image_embeds = image_embeds[:pixel_values.size(0)]
-            deepstack_image_embeds = [distF.all_gather(deepstack_image_embed, group=sequence_parallel_mesh.get_group())
-                                      for deepstack_image_embed in deepstack_image_embeds]
-            deepstack_image_embeds = [deepstack_image_embed[:pixel_values.size(0)]
-                                      for deepstack_image_embed in deepstack_image_embeds]
+            raise NotImplementedError()
 
         split_sizes = (grid_thw.prod(-1) // self.vision_tower.spatial_merge_size ** 2).tolist()
         image_embeds = torch.split(image_embeds, split_sizes)
@@ -246,14 +239,6 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
             deepstack_visual_embeds = None
             visual_pos_masks = None
-
-        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
-            inputs_embeds = sp_split(inputs_embeds, sequence_parallel_mesh, 0, 0)
-            if visual_pos_masks is not None:
-                visual_pos_masks = sp_split(visual_pos_masks, sequence_parallel_mesh, 0, 0)
-            if deepstack_visual_embeds is not None:
-                deepstack_visual_embeds = [sp_split(deepstack_visual_embed, sequence_parallel_mesh, 0, 0)
-                                           for deepstack_visual_embed in deepstack_visual_embeds]
 
         # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
         lang_seq_ctx = SequenceContext(input_ids=None,

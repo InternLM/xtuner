@@ -169,9 +169,10 @@ class SequenceContext:
             sp_num_padding = max(0, min(sp_input_ids.shape[1], end - num_non_padding))
 
             if self.position_ids is not None:
-                pad_input_ids = pad_to_multiple_of(self.position_ids, 0, multiple_of, 1)
+                pad_position_ids = pad_to_multiple_of(self.position_ids, 0, multiple_of, -1)
                 position_ids = cast(
-                    torch.LongTensor, split_for_sequence_parallel(pad_input_ids, dim=1, sp_mesh=sequence_parallel_mesh)
+                    torch.LongTensor,
+                    split_for_sequence_parallel(pad_position_ids, dim=-1, sp_mesh=sequence_parallel_mesh),
                 )
                 self.position_ids = position_ids
 

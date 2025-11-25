@@ -158,7 +158,6 @@ class TestQwen3VL(DeterministicDDPTestCase):
         qwen3vl_model.to('cpu')
         torch.cuda.empty_cache()
         loss = output["loss"]
-        print(loss, expected_loss, 'xxxxx')
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
     @parametrize.parametrize(
@@ -241,9 +240,9 @@ class TestQwen3VL(DeterministicDDPTestCase):
         qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
         qwen3vl_model.eval()
         qwen3vl_model.to('cpu')
-        # self._test_all(hf_model, qwen3vl_model, 'text', device, sp_size, tol)
+        self._test_all(hf_model, qwen3vl_model, 'text', device, sp_size, tol)
         self._test_all(hf_model, qwen3vl_model, 'image', device, sp_size, tol)
-        # self._test_all(hf_model, qwen3vl_model, 'video', device, sp_size, tol)
+        self._test_all(hf_model, qwen3vl_model, 'video', device, sp_size, tol)
 
     @parametrize.parametrize(
         "device,tp_size",

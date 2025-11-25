@@ -480,6 +480,7 @@ class Qwen3VLVisionModel(BaseModel):
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
             hidden_states = sp_split(hidden_states, sequence_parallel_mesh, 0, 0)
             pos_embeds = sp_split(pos_embeds, sequence_parallel_mesh, 0, 0)
+            rotary_pos_emb = sp_split(rotary_pos_emb, sequence_parallel_mesh, 0, 0)
 
         hidden_states = self.patch_embed(hidden_states)
         hidden_states = hidden_states + pos_embeds
