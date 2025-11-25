@@ -3,6 +3,7 @@ import copy
 import json
 import ray
 import unittest
+import tempfile
 import numpy as np
 from uuid import uuid4
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
@@ -115,6 +116,8 @@ class TestJudgerController(unittest.TestCase):
             cpu_memory_per_worker=16 * 1024 ** 3,  # 16 GB
         )
         cls.pg = AutoAcceleratorWorkers.build_placement_group(resources_cfg)
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.worker_log_dir = os.path.join(cls.temp_dir.name, "work_dirs")
 
     @classmethod
     def tearDownClass(cls):
@@ -125,7 +128,8 @@ class TestJudgerController(unittest.TestCase):
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
         judger_cfg = JudgerConfig(
-            reward_judger_configs=[gsm8k_judger_config]
+            reward_judger_configs=[gsm8k_judger_config],
+            worker_log_dir=self.__class__.worker_log_dir
         )
         judger_controller = JudgerController.remote(judger_cfg)
         # 返回的形式为：RLJudgerResponseItem(uid=112750990920317762694895938380669501546, reward={'openai/gsm8k': 1}, extra_info={})
@@ -154,7 +158,8 @@ class TestJudgerController(unittest.TestCase):
 
         )
         judger_cfg = JudgerConfig(
-            reward_judger_configs=[dapo_judger_config]
+            reward_judger_configs=[dapo_judger_config],
+            worker_log_dir=self.__class__.worker_log_dir
         )
         judger_controller = JudgerController.remote(judger_cfg)
         judger_data, save_reward = construct_new_judger_data(DAPO_DATA_PATH)
@@ -166,7 +171,8 @@ class TestJudgerController(unittest.TestCase):
         from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
         geo_judger_config = GEO3KJudgerConfig()
         judger_cfg = JudgerConfig(
-            reward_judger_configs=[geo_judger_config]
+            reward_judger_configs=[geo_judger_config],
+            worker_log_dir=self.__class__.worker_log_dir
         )
         judger_controller = JudgerController.remote(judger_cfg)
         judger_data, save_reward = construct_new_judger_data(GEO_ROLLOUT_DATA_PATH, judger_name="hiyouga/geometry3k")
@@ -185,6 +191,7 @@ class TestJudgerController(unittest.TestCase):
                 gsm8k_judger_config_2
             ],
             enable_weighted_judgers=True,
+            worker_log_dir=self.__class__.worker_log_dir,
         )
         judger_controller = JudgerController.remote(judger_cfg)
         res3 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_SOURCE))
@@ -195,7 +202,8 @@ class TestJudgerController(unittest.TestCase):
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
         judger_cfg = JudgerConfig(
-            reward_judger_configs=[gsm8k_judger_config]
+            reward_judger_configs=[gsm8k_judger_config],
+            worker_log_dir=self.__class__.worker_log_dir
         )
         judger_controller = JudgerController.remote(judger_cfg)
         judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)
@@ -212,7 +220,8 @@ class TestJudgerController(unittest.TestCase):
         try:
             remote_judger_config = GSM8KRemoteJudgerConfig(judger_name="openai/gsm8k", remote_url=server.url)
             judger_cfg = JudgerConfig(
-                reward_judger_configs=[remote_judger_config]
+                reward_judger_configs=[remote_judger_config],
+                worker_log_dir=self.__class__.worker_log_dir
             )
             judger_controller = JudgerController.remote(judger_cfg)
             judger_data = construct_judger_data(VERL_ROLLOUT_DATA_PATH)

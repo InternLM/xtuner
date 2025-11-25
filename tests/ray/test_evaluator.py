@@ -1,6 +1,7 @@
 import os
 import unittest
 import ray
+import tempfile
 from transformers import AutoTokenizer
 
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -20,12 +21,14 @@ class TestEvaluator(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # RL默认使用FA3
         os.environ["XTUNER_USE_FA3"] = "1"
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.worker_log_dir = os.path.join(cls.temp_dir.name, "work_dirs")
 
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
+        cls.temp_dir.cleanup()
 
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
@@ -43,11 +46,13 @@ class TestEvaluator(unittest.TestCase):
             tokenizer_path=MODEL_PATH,
             tensor_parallel_size=8,
             context_length=self.max_prompt_length + self.max_response_length,
+            worker_log_dir=self.__class__.worker_log_dir
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
         self.judger_cfg = JudgerConfig(
-            reward_judger_configs=[gsm8k_judger_config]
+            reward_judger_configs=[gsm8k_judger_config],
+            worker_log_dir=self.__class__.worker_log_dir
         )
         self.eval_dataset_cfg = [
             {
@@ -80,7 +85,7 @@ class TestEvaluator(unittest.TestCase):
         
     def tearDown(self):
         ray.shutdown()
-
+        
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_evaluator(self):
         def custom_compute_metric(samples):
@@ -92,7 +97,8 @@ class TestEvaluator(unittest.TestCase):
             max_concurrent=1,
             eval_sample_ratio=0.004,  # generate 5 samples
             compute_metric_func=None,
-            sample_params=self.sample_params
+            sample_params=self.sample_params,
+            worker_log_dir=self.__class__.worker_log_dir
         )
         evaluator = Evaluator.remote(evaluator_cfg, self.test_env)
         correctness = ray.get(evaluator.run.remote())
@@ -102,7 +108,8 @@ class TestEvaluator(unittest.TestCase):
             max_concurrent=1,
             eval_sample_ratio=0.004,  # generate 5 samples
             compute_metric_func=custom_compute_metric,
-            sample_params=self.sample_params
+            sample_params=self.sample_params,
+            worker_log_dir=self.__class__.worker_log_dir
         )
         custom_evaluator = Evaluator.remote(custom_evaluator_cfg, self.test_env)
         custom_correctness = ray.get(custom_evaluator.run.remote())

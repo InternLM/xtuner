@@ -5,7 +5,7 @@ import tempfile
 import ray
 import torch
 from transformers import AutoTokenizer
-
+import tempfile
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
@@ -28,27 +28,19 @@ resource_map = {
     "npu": "NPU",
     "cuda": "GPU",
 }
-
-def prepare(fn):
-    @wraps(fn)
-    def wrapper(self, *args, **kwargs):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        ret = fn(self, *args, **kwargs)
-        self.temp_dir.cleanup()
-        return ret
-
-    return wrapper
-
 class TestRollout(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
         # RL默认使用FA3
         os.environ["XTUNER_USE_FA3"] = "1"
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.worker_log_dir = os.path.join(cls.temp_dir.name, "work_dirs")
 
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
+        cls.temp_dir.cleanup()
 
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
@@ -71,18 +63,21 @@ class TestRollout(unittest.TestCase):
             dtype="bfloat16",
             launch_server_method="ray",
             context_length=self.max_prompt_length + self.max_response_length,
+            worker_log_dir=self.__class__.worker_log_dir,
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
         self.judger_cfg = JudgerConfig(
-            reward_judger_configs=[gsm8k_judger_config]
+            reward_judger_configs=[gsm8k_judger_config],
+            worker_log_dir=self.__class__.worker_log_dir,
         )
         self.dataflow_cfg = DataFlowConfig(
             env="test",
             prompt_repeat_k=2,
             global_batch_size=2,
             enable_partial_rollout=0,
-            max_retry_times=1
+            max_retry_times=1,
+            worker_log_dir=self.__class__.worker_log_dir,
         )
         self.train_dataset_cfg = [
             {
@@ -102,6 +97,7 @@ class TestRollout(unittest.TestCase):
             dataset_cfg=self.train_dataset_cfg,
             dataloader_cfg=self.dataloader_cfg,
             tokenizer=self.tokenizer,
+            worker_log_dir=self.__class__.worker_log_dir,
         )
 
     def setUp(self):
@@ -113,7 +109,7 @@ class TestRollout(unittest.TestCase):
 
     def tearDown(self):
         ray.shutdown()
-
+        self.temp_dir.cleanup()
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_generate(self):
@@ -144,7 +140,6 @@ class TestRollout(unittest.TestCase):
         ray.get(self.test_env.shutdown.remote(), timeout=300)
     
     @unittest.skip("skip lmdeploy async dataflow after lmdeploy support abort_request")
-    @prepare
     def test_lmdeploy_async_dataflow(self):
         self.dataflow_cfg.enable_partial_rollout = 1
         self.test_env = SingleTurnEnvironment.remote(
@@ -224,7 +219,6 @@ class TestRollout(unittest.TestCase):
         print("responses: ", responses)
     
     @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "lmdeploy backend is not enabled")
-    @prepare
     def test_sglang_async_dataflow(self):
         self.dataflow_cfg.enable_partial_rollout = 1
         self.rollout_cfg.launch_server_method="multiprocessing"

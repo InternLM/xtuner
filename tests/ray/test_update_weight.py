@@ -1,6 +1,6 @@
 import os
 import unittest
-
+import tempfile
 import ray
 
 from xtuner.v1.ray.base import AutoAcceleratorWorkers
@@ -22,8 +22,18 @@ TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 
 class TestUpdateWeight(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls) -> None:
         os.environ["XTUNER_USE_FA3"] = "1"
+        cls.temp_dir = tempfile.TemporaryDirectory()
+        cls.worker_log_dir = os.path.join(cls.temp_dir.name, "work_dirs")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        del os.environ["XTUNER_USE_FA3"]
+        cls.temp_dir.cleanup()
+
+    def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
         self.model_path = MODEL_PATH
         self.init_config()
@@ -31,7 +41,6 @@ class TestUpdateWeight(unittest.TestCase):
 
     def tearDown(self):
         ray.shutdown()
-        del os.environ["XTUNER_USE_FA3"]
 
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
@@ -52,6 +61,7 @@ class TestUpdateWeight(unittest.TestCase):
             dtype="bfloat16",
             skip_load_weights=True,
             context_length=256,
+            worker_log_dir=self.worker_log_dir,
         )
 
         # training config
