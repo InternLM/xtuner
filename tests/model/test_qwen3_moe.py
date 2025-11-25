@@ -16,10 +16,12 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
+from xtuner.v1.model import get_model_config_from_hf, Qwen3MoEConfig
 
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
+QWEN3_MOE_FOPE_PATH = os.environ["QWEN3_MOE_FOPE_PATH"]
 
 
 class TestQwen3MoE(DeterministicDDPTestCase):
@@ -339,7 +341,90 @@ class TestQwen3MoE(DeterministicDDPTestCase):
 
                 self.assertListEqual(safetensor_keys, model_index_keys)
         dist.barrier()
+    
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size",
+        [
+            ("cuda", None, 1),
+            ("cuda", "all2all", 4),
+            ("cuda", "all2all", 8),
+        ],
+    )
+    def test_save_hf_fope(self, device, dispatcher, ep_size):
+        self.create_pg(device)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            load_from = Path(QWEN3_MOE_FOPE_PATH)
+            # 1. create 
+            qwen_model_fope = create_model_from_hf(load_from, dispatcher, ep_size)
+            # 2. operate 
+            syncdir = [tmpdir]
+            dist.broadcast_object_list(syncdir, src=0)
+            tmpdir = Path(syncdir[0])
+            qwen_model_fope.save_hf(tmpdir)
+            # 3. check
+            origin_index_path = load_from / "model.safetensors.index.json"
+            saved_index_path = tmpdir / "model.safetensors.index.json"
+
+            if dist.get_rank() == 0:
+                with open(origin_index_path, "r") as f:
+                    origin_index = json.load(f)
+                with open(saved_index_path, "r") as f:
+                    saved_index = json.load(f)
+                # check rotary_emb.sin_coef and rotary_emb.cos_coef are saved
+                assert 'model.rotary_emb.sin_coef' in saved_index["weight_map"]
+                assert 'model.rotary_emb.cos_coef' in saved_index["weight_map"]
+
+                # check all saved tensors equal to the origin tensors
+                assert len(origin_index["weight_map"]) == len(saved_index["weight_map"])
+                cache_save_fh = {}
+                for key in origin_index["weight_map"].keys():
+                    origin_safetensor_name = origin_index["weight_map"][key]
+                    saved_safetensor_name = saved_index["weight_map"][key]
+
+                    origin_sf_fh_name = str(load_from / origin_safetensor_name)
+                    expected_sf_fh_name = str(tmpdir / saved_safetensor_name)
+
+                    if origin_safetensor_name not in cache_save_fh:
+                        cache_save_fh[origin_safetensor_name] = safe_open(origin_sf_fh_name, framework="pt")
+                    if saved_safetensor_name not in cache_save_fh:
+                        cache_save_fh[saved_safetensor_name] = safe_open(expected_sf_fh_name, framework="pt")
+
+                    origin_fh = cache_save_fh[origin_safetensor_name]
+                    saved_fh = cache_save_fh[saved_safetensor_name]
+
+                    origin_tensor = origin_fh.get_tensor(key)
+                    saved_tensor = saved_fh.get_tensor(key)
+                    self.assertTrue(torch.equal(origin_tensor, saved_tensor), f"tensor {key} is not equal")
+
+                # check the tensors saved in *.safetensors match the tensors in model_index.json
+                safetensor_keys = []
+                for safetensor_path in tmpdir.glob("*.safetensors"):
+                    fh = cache_save_fh[safetensor_path.name]
+                    safetensor_keys.extend(fh.keys())
+                    safetensor_keys.sort()
+                model_index_keys = list(saved_index["weight_map"].keys())
+                model_index_keys.sort()
+
+                self.assertListEqual(safetensor_keys, model_index_keys)
+            
+            dist.barrier()
 
     @property
     def world_size(self) -> int:
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
+
+
+def create_model_from_hf(load_from: Path, dispatcher: str, ep_size: int):
+    with torch.device("meta"):
+        cfg : Qwen3MoEConfig = get_model_config_from_hf(load_from)
+        cfg.dispatcher = dispatcher
+        cfg.ep_size = ep_size
+        qwen_model = cfg.build()
+
+    fsdp_config = FSDPConfig(
+        ep_size=ep_size,
+        cpu_offload=False,
+    )
+    qwen_model.fully_shard(fsdp_config=fsdp_config)
+    qwen_model.from_hf(load_from)
+    return qwen_model

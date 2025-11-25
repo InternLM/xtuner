@@ -56,6 +56,7 @@ class Qwen3MoEConfig(MoEConfig):
     @classmethod
     def from_hf(cls, hf_path: str | Path) -> Self:
         # TODO: model_type is qwen3_moe_fope, but the config is set to qwen3_moe
+        # TODO: patch fope config validate function
         hf_config = HFQwen3MoeConfig.from_pretrained(hf_path)
 
         assert isinstance(hf_config, HFQwen3MoeConfig)

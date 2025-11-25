@@ -526,7 +526,6 @@ class BaseModel(nn.Module):
                 if not key_per_rank.is_integer():
                     key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
 
-
                 start = int(current_rank * key_per_rank)
                 end = int(start + key_per_rank)
 
@@ -839,6 +838,7 @@ class BaseModel(nn.Module):
         weight_map = reduce(lambda x, y: x | y, weight_map_list)
 
         if not dist.is_initialized() or dist.get_rank() == 0:
+            # TODO: save custom `modeling_py`s, such as FoPE
             if self.config.hf_config is not None:
                 self.config.save_hf(hf_dir)
             elif self._hf_path is not None:
@@ -984,8 +984,6 @@ class BaseModel(nn.Module):
         self.safetensors_to_params(
             [loaded_tensor], local_tensor, param_name=load_spec.name, start=start, end=end, dim=load_spec.dim
         )
-        # if 'sin_coef' in hf_key:
-        #     torch.distributed.breakpoint()
         return []
 
     def _load_fused_hf_param(

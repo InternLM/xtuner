@@ -171,6 +171,7 @@ class FourierEmbedding(RotaryEmbedding):
             ), "FoPE is wrongly initialized."
 
         # zero out under-trained frequencies
+        # TODO: 单测
         inv_freq = _compute_fope_parameters(self.num_inv_freq, self.inv_freq, config.max_position_embeddings)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
