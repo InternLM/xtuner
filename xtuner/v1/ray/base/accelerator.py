@@ -76,24 +76,22 @@ class AcceleratorResourcesConfig(BaseModel):
         available_memory = available_resources.get("memory", 0)
         if self.accelerator == "GPU":
             available_gpus = available_resources.get("GPU", 0)
-            assert num_workers <= available_gpus, (
-                f"Not enough available GPUS in Ray cluster, available_gpus is {available_gpus} but xtuner needs {num_workers}."
+            assert self.num_workers <= available_gpus, (
+                f"Not enough available GPUS in Ray cluster, {available_gpus} less than {self.num_workers}."
             )
-        num_workers = kwargs.get("num_workers")
-        cpus_per_worker = kwargs.get("num_cpus_per_worker", self.model_fields["num_cpus_per_worker"].default)
-        memory_per_worker = kwargs.get("cpu_memory_per_worker", self.model_fields["cpu_memory_per_worker"].default)
-        
+        else:  # NPU
+            available_npus = available_resources.get("NPU", 0)
+            assert self.num_workers <= available_npus, (
+                f"Not enough available NPUS in Ray cluster, {available_npus} less than {self.num_workers}."
+            )
         # TODO: manage single controller's cpu resource to replace "10" here
-        assert (cpus_per_worker * num_workers) + 10 <= available_cpus, (
-            f"Not enough available CPUs in Ray cluster, available_cpus is {available_cpus} but xtuner needs {cpus_per_worker * num_workers + 10}."
+        needed_cpu = self.num_cpus_per_worker * self.num_workers + 10
+        assert needed_cpu <= available_cpus, (
+            f"Not enough available CPUs in Ray cluster, {available_cpus} less than {needed_cpu}."
         )
-        assert memory_per_worker * num_workers + 10 * 1024**3 <= available_memory, (
-            f"Not enough available memory in Ray cluster, available_memory is {available_memory} but xtuner needs {memory_per_worker * num_workers}."
-        )
-
         needed_memory = self.cpu_memory_per_worker * self.num_workers + 10 * 1024**3
         assert needed_memory <= available_memory, (
-            f"Not enough available memory in Ray cluster, available_memory is {available_memory} but xtuner needs {needed_memory}."
+            f"Not enough available memory in Ray cluster, {available_memory} less than {needed_memory}."
         )
 
     @classmethod
