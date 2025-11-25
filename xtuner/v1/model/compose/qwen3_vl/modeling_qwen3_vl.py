@@ -9,6 +9,7 @@ from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
     fully_shard,
+    FSDPModule,
 )
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.utils import get_logger
@@ -96,10 +97,11 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
 
-        self.language_model.embed_tokens.set_modules_to_forward_prefetch(   # type: ignore
-            [self.vision_tower.blocks[0]])
-        self.vision_tower.blocks[-1].set_modules_to_forward_prefetch(   # type: ignore
-            [self.multi_modal_projector])
+        if isinstance(self.vision_tower.blocks[0], FSDPModule):
+            self.language_model.embed_tokens.set_modules_to_forward_prefetch(  # type: ignore
+                [self.vision_tower.blocks[0]])
+            self.vision_tower.blocks[-1].set_modules_to_forward_prefetch(  # type: ignore
+                [self.multi_modal_projector])
         self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
         self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
 
