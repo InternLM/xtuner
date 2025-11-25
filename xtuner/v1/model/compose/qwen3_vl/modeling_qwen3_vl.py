@@ -18,6 +18,9 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE
 from xtuner.v1.float8.float8_handler import Float8Handler
+from torch.distributed.device_mesh import DeviceMesh
+import torch.distributed.nn.functional as distF
+from xtuner.v1.rl.utils import sp_split
 
 logger = get_logger()
 
@@ -146,20 +149,34 @@ class Qwen3VLForConditionalGeneration(BaseModel):
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()
 
-    def get_visual_features(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor):
+    def get_visual_features(self,
+                            pixel_values: torch.Tensor,
+                            grid_thw: torch.Tensor,
+                            sequence_parallel_mesh: DeviceMesh | None = None):
         """Encodes images into continuous embeddings that can be forwarded to
         the language model. The deepstack visual features are also returned.
 
         Args:
-            pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, image_size, image_size)`):
+            pixel_values (`torch.FloatTensor` of shape `(n, h)`):
                 The tensors corresponding to the input images.
             grid_thw (`torch.LongTensor` of shape `(num_images, 3)`):
                 The temporal, height and width of feature shape of each image in LLM.
+            sequence_parallel_mesh (`DeviceMesh`, *optional*):
+                The mesh to use for sequence parallelism.
         """
-        image_embeds, deepstack_image_embeds = self.vision_tower(pixel_values, grid_thw=grid_thw)
-
+        image_embeds, deepstack_image_embeds = self.vision_tower(pixel_values,
+                                                                 grid_thw=grid_thw,
+                                                                 sequence_parallel_mesh=sequence_parallel_mesh)
         # merge
         image_embeds, deepstack_image_embeds = self.multi_modal_projector(image_embeds, deepstack_image_embeds)
+
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            image_embeds = distF.all_gather(image_embeds, group=sequence_parallel_mesh.get_group())
+            image_embeds = image_embeds[:pixel_values.size(0)]
+            deepstack_image_embeds = [distF.all_gather(deepstack_image_embed, group=sequence_parallel_mesh.get_group())
+                                      for deepstack_image_embed in deepstack_image_embeds]
+            deepstack_image_embeds = [deepstack_image_embed[:pixel_values.size(0)]
+                                      for deepstack_image_embed in deepstack_image_embeds]
 
         split_sizes = (grid_thw.prod(-1) // self.vision_tower.spatial_merge_size ** 2).tolist()
         image_embeds = torch.split(image_embeds, split_sizes)
@@ -203,7 +220,9 @@ class Qwen3VLForConditionalGeneration(BaseModel):
 
         if pixel_values is not None:
             assert image_grid_thw is not None
-            viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values, image_grid_thw)
+            viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values,
+                                                                              image_grid_thw,
+                                                                              sequence_parallel_mesh)
             viusal_embeds = torch.cat(viusal_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             assert input_ids is not None
             visual_pos_masks = self.get_placeholder_mask(
@@ -211,12 +230,13 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             )
             try:
                 inputs_embeds = inputs_embeds.masked_scatter(visual_pos_masks, viusal_embeds)
+                visual_pos_masks = visual_pos_masks[..., 0]
             except RuntimeError as e:
                 print(f"!!!Warning: {e}, but continue anyway!!!!")
                 inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
-            visual_pos_masks = visual_pos_masks[..., 0]
+                deepstack_visual_embeds = None
+                visual_pos_masks = None
         else:
-            # 构建假数据，考虑到 moe 特性，最好不要构建全 0 数据
             pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
             image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
             viusal_embeds, _ = self.get_visual_features(pixel_values_dump, image_grid_thw)
@@ -224,6 +244,14 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
             deepstack_visual_embeds = None
             visual_pos_masks = None
+
+        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
+            inputs_embeds = sp_split(inputs_embeds, sequence_parallel_mesh, 0, 0)
+            if visual_pos_masks is not None:
+                visual_pos_masks = sp_split(visual_pos_masks, sequence_parallel_mesh, 0, 0)
+            if deepstack_visual_embeds is not None:
+                deepstack_visual_embeds = [sp_split(deepstack_visual_embed, sequence_parallel_mesh, 0, 0)
+                                           for deepstack_visual_embed in deepstack_visual_embeds]
 
         # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
         lang_seq_ctx = SequenceContext(input_ids=None,
