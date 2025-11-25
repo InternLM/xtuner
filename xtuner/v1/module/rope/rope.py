@@ -187,8 +187,8 @@ class FourierEmbedding(RotaryEmbedding):
                 self.inv_freq.device
             )
         else:
-            sin_coef = torch.randn(self.input_dim, self.output_dim, generator=generator).to(self.inv_freq.device)
-            cos_coef = torch.randn(self.input_dim, self.output_dim, generator=generator).to(self.inv_freq.device)
+            sin_coef = torch.randn(self.input_dim, self.output_dim).to(self.inv_freq.device)
+            cos_coef = torch.randn(self.input_dim, self.output_dim).to(self.inv_freq.device)
 
         # use same generator to initialize sin_coef and cos_coef, so each rank will get the same sin_coef and cos_coef
         generator = torch.Generator(device=self.inv_freq.device)

@@ -838,10 +838,11 @@ class BaseModel(nn.Module):
         weight_map = reduce(lambda x, y: x | y, weight_map_list)
 
         if not dist.is_initialized() or dist.get_rank() == 0:
-            # TODO: save custom `modeling_py`s, such as FoPE
-            if self.config.hf_config is not None:
-                self.config.save_hf(hf_dir)
-            elif self._hf_path is not None:
+            if self.config.hf_config is None and self._hf_path is None:
+                raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
+
+            # For FoPE, save custom python files such as `modeling_rope_utils.py`
+            if self._hf_path is not None:
                 for file in cast(Path, self._hf_path).iterdir():
                     if file.suffix != ".safetensors":
                         # Copy the model config and tokenizer files to the save path
@@ -851,8 +852,9 @@ class BaseModel(nn.Module):
                         else:
                             copytree(file, target_path)
 
-            else:
-                raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
+            # overwrite `config.json` and `model.safetensors.index.json`
+            if self.config.hf_config is not None:
+                self.config.save_hf(hf_dir)
 
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 index = {"weight_map": weight_map, "metadata": {}}

@@ -47,6 +47,7 @@ class Dense(BaseModel):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
         self.layers = self.build_layers(config)
+        # TODO: with torch.device(DEVICE)
         self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
 
@@ -144,6 +145,7 @@ class Dense(BaseModel):
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
+        # TODO: remove this line below when with torch.device(DEVICE) in __init__()
         self.rotary_emb = self.build_rotary_embedding(self.config)
         return loaded_keys, unloaded_keys, missing_keys
 
@@ -182,6 +184,7 @@ class Dense(BaseModel):
             for param in self.parameters():
                 param.requires_grad = False
 
+        # TODO: remove this line below when with torch.device(DEVICE) in __init__()
         self.rotary_emb = self.build_rotary_embedding(self.config)
 
         self._maybe_compile_layers()

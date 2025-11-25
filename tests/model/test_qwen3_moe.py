@@ -404,8 +404,23 @@ class TestQwen3MoE(DeterministicDDPTestCase):
                     safetensor_keys.sort()
                 model_index_keys = list(saved_index["weight_map"].keys())
                 model_index_keys.sort()
-
                 self.assertListEqual(safetensor_keys, model_index_keys)
+
+                # check the python files are saved
+                origin_python_files = sorted([file.name for file in load_from.glob("*.py") ])
+                saved_python_files = sorted([file.name for file in tmpdir.glob("*.py") ])
+                print(f"saved_python_files: {saved_python_files}")
+                self.assertListEqual(origin_python_files, saved_python_files)
+
+            dist.barrier()
+
+            # 5. 2nd operate: load from saved hf
+            qwen_model_fope2 = create_model_from_hf(tmpdir, dispatcher, ep_size)
+            # 6. check
+            sin_coef, cos_coef = qwen_model_fope.rotary_emb.sin_coef, qwen_model_fope.rotary_emb.cos_coef
+            sin_coef2, cos_coef2 = qwen_model_fope2.rotary_emb.sin_coef, qwen_model_fope2.rotary_emb.cos_coef
+            assert torch.equal(sin_coef, sin_coef2)
+            assert torch.equal(cos_coef, cos_coef2)
             
             dist.barrier()
 
