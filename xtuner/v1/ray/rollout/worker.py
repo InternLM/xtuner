@@ -333,16 +333,24 @@ class RolloutWorker(SingleAcceleratorWorker):
             endpoint_url = f"{self.server_url}/{self.endpoints['v1/chat/completions']}"
 
         while True:
-            http_result = await self._create_request(
-                endpoint_url,
-                openai_prompts,
-                input_ids,
-                openai_tools,
-                tool_choice,
-                sample_params=sample_params,
-                extra_params=extra_params,
-                extra_info=extra_info,
-            )
+            if extra_info.get("num_return_tokens", None) is not None and (sample_params["max_tokens"] - extra_info["num_return_tokens"]) == 0:
+                return RLRolloutResponseItem(
+                    response="",
+                    response_ids=[],
+                    num_return_tokens=0,
+                    finish_reason="length",
+                )
+            else:
+                http_result = await self._create_request(
+                    endpoint_url,
+                    openai_prompts,
+                    input_ids,
+                    openai_tools,
+                    tool_choice,
+                    sample_params=sample_params,
+                    extra_params=extra_params,
+                    extra_info=extra_info,
+                )
             # Case 1: Request was successful
             if http_result.response is not None:  # 推理完成：completed状态：finish_reason为abort/stop/length, 退出
                 response = await self._handle_non_stream_response(

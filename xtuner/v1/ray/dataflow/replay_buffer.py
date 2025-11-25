@@ -336,8 +336,9 @@ class ReplayBufferStorage:
 
         # 1. 跟prompt相关的action_id记录
         if root_id in self._root2actions:
+            # TODO: version 更新需要 根据是否update_weights来判断，需要考虑到非共卡的情况
             replay_meta.version += 1
-            self.logger.debug(f"Existing root_id: {root_id} found. Incrementing version to {replay_meta.version}.")
+            self.logger.info(f"Existing root_id: {root_id} found. Incrementing version to {replay_meta.version}.")
             self._root2actions[root_id].append(action_id)
         else:
             self._root2actions[root_id] = [action_id]
@@ -346,14 +347,14 @@ class ReplayBufferStorage:
         # 2. 根据rollout状态加到finished, abort, abort_over_version队列中；Partial rollout is handled based on whether finish_reason is "abort".
         if replay_meta.state == ReplayState.INTERRUPTED and replay_meta.version < partial_rollout_step:
             self._interrupted_actions[replay_meta.version].append(action_id)
-            self.logger.debug(
+            self.logger.info(
                 f"Add aborted sample with root_id: {root_id}, action_id: {action_id} to _interrupted_actions."
             )
         elif replay_meta.state == ReplayState.INTERRUPTED and replay_meta.version >= partial_rollout_step:
             self._expired_actions.append(action_id)
             replay_meta.version = 0
             replay_meta.state = ReplayState.EXPIRED
-            self.logger.debug(
+            self.logger.info(
                 f"Action_id: {action_id} has exceeded partial_rollout_step {partial_rollout_step}. Add this sample with root_id: {root_id} to _expired_actions list."
             )
         elif replay_meta.state == ReplayState.COMPLETED:
@@ -386,8 +387,9 @@ class ReplayBufferStorage:
         """
         samples = []
         multimodal_train_infos = []
-        target_batch_size = min(global_batch_size, len(self._completed_actions))
-        for _ in range(global_batch_size):
+        target_batch_size = min(global_batch_size, self.get_completed_samples())
+        self.logger.info(f"Retrieving {target_batch_size} completed samples from the replay buffer.")
+        for _ in range(target_batch_size):
             action_id = self._pop_highest_version_action(self._completed_actions)
             replay_meta = self._actions[action_id]  # type: ignore[index]
             group_samples = mapping_replaymeta_to_dataitem(replay_meta)
@@ -563,16 +565,17 @@ class ReplayBufferStorage:
             sample.uid.version = replay_meta.version
             sample.extra_info.state = str(ReplayState.INIT)
             if sample.env.rollout.response_ids and sample.data.input_ids:
+                # TODO： response_ids 累加 
                 if "train_prompt_ids" in sample.data.extra_info:
                     sample.data.input_ids = (
                         sample.data.extra_info["train_prompt_ids"] + sample.env.rollout.response_ids
                     )
                 else:
                     sample.data.input_ids.extend(sample.env.rollout.response_ids)
-            # elif sample.env.rollout.response:
-            #     sample.data.input_ids.extend(tokenizer.encode(sample.env.rollout.response, add_special_tokens=False))
+            elif sample.env.rollout.response:
+                sample.data.input_ids.extend(tokenizer.encode(sample.env.rollout.response, add_special_tokens=False))
         self.logger.info(
-            f"Sampling interrupted action_id: {action_id} from replay buffer, remain interrupted samples: {len(self._interrupted_actions)}"
+            f"Sampling interrupted action_id: {action_id} from replay buffer, remain interrupted samples: {self.get_interrupted_samples()}"
         )
         return group_samples
 

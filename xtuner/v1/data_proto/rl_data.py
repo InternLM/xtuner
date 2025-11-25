@@ -3,7 +3,9 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Annotated
+from xtuner.v1.utils.logger import get_logger   
 
+logger = get_logger()
 
 # ====================================
 # ====== DataFlow 数据流 ==============
@@ -84,10 +86,12 @@ class RLRolloutResponseItem(BaseModel):
             self.response_ids.extend(other.response_ids)
         else:
             self.response_ids = other.response_ids
+
         if self.logprobs is not None and other.logprobs:
             self.logprobs.extend(other.logprobs)
         else:
             self.logprobs = other.logprobs
+            
         if self.response is not None and other.response:
             self.response += other.response
         else:
@@ -197,10 +201,13 @@ def check_valid_dataflow_item(group_data_items: List[RLDataFlowItem]) -> bool:
         ids_valid = bool(rollout_info.response_ids)
         logprobs_valid = bool(rollout_info.logprobs)
         if item.env.rollout.state in ["skipped", "failed"]:
+            logger.info(f"Invalid dataflow item found: rollout state is {item.env.rollout.state}. UID: {item.uid}")
             return False
-        if not response_valid and not ids_valid:
+        if not response_valid and not ids_valid and item.env.rollout.state != "interrupted":
+            logger.info(f"Invalid dataflow item found: no response or response_ids. UID:{item.data.uid} with rollout response {item.env.rollout}")
             return False
         if ids_valid and logprobs_valid and len(rollout_info.logprobs) != len(rollout_info.response_ids):  # type: ignore[arg-type]
+            logger.info(f"Invalid dataflow item found: logprobs and response_ids length mismatch. UID: {item.uid}")
             return False
     return True
 

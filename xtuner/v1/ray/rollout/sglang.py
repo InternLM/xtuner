@@ -78,11 +78,11 @@ class SGLangWorker(RolloutWorker):
             payload["messages"] = prompt
             payload.update(sglang_sample_params)
             # note: chat completions 接口需要传入 max_tokens 和 min_tokens 参数
-            if "num_return_tokens" in extra_params:
-                max_return_tokens = sglang_sample_params["max_new_tokens"] - extra_params["num_return_tokens"]
+            if "num_return_tokens" in extra_info:
+                max_return_tokens = sglang_sample_params["max_new_tokens"] - extra_info["num_return_tokens"]
                 payload["max_tokens"] = max_return_tokens
                 self.logger.info(
-                    f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_params['num_return_tokens']}"
+                    f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_info['num_return_tokens']}"
                 )
             else:
                 payload["max_tokens"] = sglang_sample_params["max_new_tokens"]

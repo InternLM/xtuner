@@ -212,3 +212,11 @@ class BaseEnvironment(ABC):
             block (bool): Whether to block until the operation completes.
         """
         return self._call_rollout_func("check_active_workers", block)
+
+    def get_rollout_stats(self, block=True):
+        """Gets statistics from the rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
+        return self._call_rollout_func("get_rollout_stats", block)

@@ -87,7 +87,7 @@ class SingleTurnEnvironment(BaseEnvironment):
                 sample.data.extra_info["action_id"] = sample.uid.action_id
                 if sample.env.rollout.num_return_tokens > 0:
                     sample.data.extra_info["num_return_tokens"] = sample.env.rollout.num_return_tokens
-                    self.logger.debug(
+                    self.logger.info(
                         f"Set num_return_tokens: {sample.env.rollout.num_return_tokens} for sample {sample.uid}."
                     )
                 fut = self.rollout_controller.rollout.remote(
@@ -136,7 +136,7 @@ class SingleTurnEnvironment(BaseEnvironment):
         if self.judger_controller and continue_judger:
             try:
                 judger_responses: List[RLJudgerResponseItem] = await asyncio.wait_for(
-                    self.judger_controller.run.remote(group_data_items), timeout=self.judger_timeout
+                    self.judger_controller.run.remote(group_data_items), timeout=self.judger_timeout * 2 
                 )
             except asyncio.TimeoutError:
                 self.logger.error("Get judger controller response timeout and return the failed response.")

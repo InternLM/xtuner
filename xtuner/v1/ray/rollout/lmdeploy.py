@@ -127,7 +127,7 @@ class LMDeployWorker(RolloutWorker):
         if "num_return_tokens" in extra_info:
             max_return_tokens = sample_params["max_tokens"] - extra_info["num_return_tokens"]
             sample_params["max_tokens"] = max_return_tokens
-            self.logger.debug(
+            self.logger.info(
                 f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_info['num_return_tokens']}"
             )
 

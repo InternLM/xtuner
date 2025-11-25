@@ -122,6 +122,7 @@ class DataFlow:
         self.finished_samples_count = 0
         self.failed_samples_count = 0
         self.skipped_sample_count = 0
+        self.filtered_sample_count = 0
         self.sample_from_expired_storage = False
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
@@ -161,6 +162,7 @@ class DataFlow:
         self.finished_samples_count = 0
         self.failed_samples_count = 0
         self.skipped_sample_count = 0
+        self.filtered_sample_count = 0
         self.logger.info(
             f"global_batch_size: {global_batch_size}, sample_params: {sample_params}, extra_params: {extra_params}"
         )
@@ -224,6 +226,8 @@ class DataFlow:
             group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
             if len(group_data_items) > 0:
                 await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
+            else:
+                self.filtered_sample_count += 1
             self.logger.debug(f"Worker task completed successfully for {action_id}.")
         elif group_state == "interrupted":
             await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
@@ -289,17 +293,17 @@ class DataFlow:
             cleanup_start_time = time.monotonic()
             cleanup_timeout = 10 * 60  # 10 minutes in seconds
             while len(waiting_tasks) > 0:
-                elapsed_time = time.monotonic() - cleanup_start_time
-                if elapsed_time > cleanup_timeout:
-                    self.logger.warning(
-                        f"Cleanup timeout of {cleanup_timeout}s reached. "
-                        f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
-                    )
-                    for task in waiting_tasks:
-                        task.cancel()
-                    # Wait for cancellations to complete
-                    await asyncio.gather(*waiting_tasks, return_exceptions=True)
-                    break  # Exit the cleanup loop
+                # elapsed_time = time.monotonic() - cleanup_start_time
+                # if elapsed_time > cleanup_timeout:
+                #     self.logger.warning(
+                #         f"Cleanup timeout of {cleanup_timeout}s reached. "
+                #         f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
+                #     )
+                #     for task in waiting_tasks:
+                #         task.cancel()
+                #     # Wait for cancellations to complete
+                #     await asyncio.gather(*waiting_tasks, return_exceptions=True)
+                #     break  # Exit the cleanup loop
                 done_tasks, pending_tasks = await asyncio.wait(
                     waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -309,7 +313,8 @@ class DataFlow:
             self.logger.info("All worker tasks have completed after pausing env controller.")
 
         self.logging_replaybuffer_state()
-
+        self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))
+        
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
         rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
@@ -378,6 +383,7 @@ class DataFlow:
         status = self.get_replaybuffer_status()
         logging_msg = logging_msg if logging_msg else ""
         logging_msg += f"ReplayBuffer Status: {status}"
+        logging_msg += f", Filtered samples count: {self.filtered_sample_count}"
         self.logger.info(logging_msg)
 
     def get_replaybuffer_status(self):
