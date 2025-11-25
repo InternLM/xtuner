@@ -386,11 +386,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
-            rollout_entropy = -(cast(torch.Tensor, loss_ctx_input.rollout_logprobs) * mask).sum()
             sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
-            sum_rollout_entropy = (
-                rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
-            )
+            if loss_ctx_input.rollout_logprobs is not None:
+                rollout_entropy = -(cast(torch.Tensor, loss_ctx_input.rollout_logprobs) * mask).sum()
+                sum_rollout_entropy = (
+                    rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
+                )
 
             if not mask.any():  # all padding tokens, skip
                 continue
@@ -421,10 +422,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
         avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
         logger_msg += f"\n\navg generation entropy: {avg_gen_entropy:.4f}"
-        sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
-        dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
-        avg_gen_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-        logger_msg += f"\n\navg rollout generation entropy: {avg_gen_entropy:.4f}"
+
+        if sum_rollout_entropy is not None:
+            sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
+            dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
+            avg_gen_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+            logger_msg += f"\n\navg rollout generation entropy: {avg_gen_entropy:.4f}"
 
         self.logger.info(logger_msg)
 
