@@ -169,7 +169,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
                 output["router_logits"][f"layer{idx}"] = router_results
                 output["router_weights"][f"layer{idx}"] = router_weights
 
-            if deepstack_visual_embeds is not None and (idx := int(idx) in range(len(deepstack_visual_embeds))):
+            if deepstack_visual_embeds is not None and ((idx := int(idx)) in range(len(deepstack_visual_embeds))):
                 assert visual_pos_masks is not None
                 hidden_states = self._deepstack_process(hidden_states, visual_pos_masks, deepstack_visual_embeds[idx])
 

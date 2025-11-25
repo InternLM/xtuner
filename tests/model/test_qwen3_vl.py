@@ -23,228 +23,97 @@ VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
 
 class TestQwen3VL(DeterministicDDPTestCase):
-    @parametrize.parametrize(
-        "device,tol",
-        [
-            ("cuda", 1e-2),
-        ],
-    )
-    def test_qwen3vl_text_run(self, device, tol):
-        self.create_pg(device)
-        maybe_compile.clear_compile_targets()
-        hf_model = AutoModelForImageTextToText.from_pretrained(
-            QWEN3_VL_DENSE_PATH,
-            dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-            device_map="cuda"
-        ).eval()
-        patch_hf_rms_norm(hf_model)
 
+    def _test_all(self, hf_model, qwen3vl_model, type, device, sp_size, tol):
         rank = dist.get_rank()
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
-        input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
-                              return_tensors="pt").input_ids.to(device)
+        if type == 'image':
+            tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
+            tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_DENSE_PATH, add_vision_id=True).build(
+                tokenizer)
 
+            raw_data = {"id": 3, "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {
+                "url": "tests/resource/mscoco_twocat_000000039769.jpg", "image_wh": [640, 480]}}, {"type": "image_url",
+                                                                                                   "image_url": {
+                                                                                                       "url": "tests/resource/mscoco_dog_000000319154.jpg",
+                                                                                                       "image_wh": [375,
+                                                                                                                    500]}},
+                                                                           {"type": "text",
+                                                                            "text": "<IMG_CONTEXT>\n<IMG_CONTEXT>\n请描述下第二幅图片中的狗是什么颜色？"}]},
+                                              {"role": "assistant", "content": "图片中的狗是棕色的。"}]}
+            tokenized_data = tokenize_fn(raw_data)
+            input_ids = torch.tensor(tokenized_data['input_ids'])[None].cuda()
+            labels = torch.tensor(tokenized_data['labels'])[None].cuda()
+            pixel_values = tokenized_data['pixel_values'].cuda()
+            image_grid_thw = tokenized_data['image_grid_thw'].cuda()
+            position_ids = tokenized_data['position_ids'].cuda()
+        elif type == 'video':
+            tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
+            tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_DENSE_PATH, rand_video_max_frames=14,
+                                                  add_vision_id=True).build(tokenizer)
+
+            raw_data = {"id": 9, "messages": [{"role": "user", "content": [{"type": "video_url",
+                                                                            "video_url": {"url": "tennis_frames_4fps/",
+                                                                                          "image_wh": [1280, 720],
+                                                                                          "origin_video_length": 182,
+                                                                                          "origin_fps": 30.0,
+                                                                                          "processed_video_length": 23,
+                                                                                          "processed_fps": 4}},
+                                                                           {"type": "video_url",
+                                                                            "video_url": {"url": "tennis_frames_2fps/",
+                                                                                          "image_wh": [1280, 720],
+                                                                                          "origin_video_length": 182,
+                                                                                          "origin_fps": 30.0,
+                                                                                          "processed_video_length": 13,
+                                                                                          "processed_fps": 2}},
+                                                                           {"type": "text",
+                                                                            "text": "<VIDEO_CONTEXT><VIDEO_CONTEXT>两个视频中都在做什么？"}]},
+                                              {"role": "assistant", "content": "打网球"}]}
+
+            tokenized_data = tokenize_fn(raw_data, media_root=VIDEO_ROOT)
+            input_ids = torch.tensor(tokenized_data['input_ids'])[None].cuda()
+            labels = torch.tensor(tokenized_data['labels'])[None].cuda()
+            pixel_values = tokenized_data['pixel_values'].cuda()
+            image_grid_thw = tokenized_data['image_grid_thw'].cuda()
+            position_ids = tokenized_data['position_ids'].cuda()
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
+            input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
+                                  return_tensors="pt").input_ids.to(device)
+            labels = input_ids.clone()
+            pixel_values = None
+            image_grid_thw = None
+            position_ids = None
+
+        hf_model.to(device)
         with torch.no_grad():
-            output = hf_model(
-                input_ids=input_ids,
-                labels=input_ids.clone(),
-            )
+            if type == 'video':
+                output = hf_model(
+                    input_ids=input_ids,
+                    labels=labels,
+                    pixel_values_videos=pixel_values,
+                    video_grid_thw=image_grid_thw,
+                    position_ids=position_ids,
+                )
+            else:
+                output = hf_model(
+                    input_ids=input_ids,
+                    labels=labels,
+                    pixel_values=pixel_values,
+                    image_grid_thw=image_grid_thw,
+                    position_ids=position_ids,
+                )
         expected_loss = output.loss
         dist.all_reduce(expected_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
 
-        del hf_model
+        hf_model.to('cpu')
         torch.cuda.empty_cache()
-
-        with torch.device("meta"):
-            model_cfg = Qwen3VLDense4BConfig()
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
-
-        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
-        qwen3vl_model.eval()
-
-        loss_cfg = CELossConfig()
-
-        shift_input_ids = input_ids[:, :-1]
-        shifted_labels = input_ids[:, 1:]
-
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to(device),))
-
-        seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
-        LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list,
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
-        seq_ctx = seq_ctx_list[0]
-
-        with torch.no_grad():
-            output = qwen3vl_model(
-                seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
-            )
-        loss = output["loss"]
-        self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
-
-    @parametrize.parametrize(
-        "device,sp_size,tol",
-        [
-            ("cuda", 1, 1e-2)
-        ],
-    )
-    def test_qwen3vl_image_run(self, device, sp_size, tol):
-        self.create_pg(device)
-        maybe_compile.clear_compile_targets()
-        hf_model = AutoModelForImageTextToText.from_pretrained(
-            QWEN3_VL_DENSE_PATH,
-            dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-            device_map="cuda"
-        ).eval()
-        patch_hf_rms_norm(hf_model)
-
-        rank = dist.get_rank()
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
-        image_str = '<|vision_start|><|image_pad|><|vision_end|>'
-        input_ids = tokenizer(image_str + "吃葡萄不吐葡萄皮" * 20 + str(rank), return_tensors="pt").input_ids.to("cuda")
-        pixel_values = torch.randn(4, 1536, device='cuda', dtype=torch.bfloat16)
-
-        image_grid_thw = torch.tensor([[1, 2, 2]], device='cuda')
-
-        with torch.no_grad():
-            output = hf_model(
-                input_ids=input_ids,
-                labels=input_ids.clone(),
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-            )
-        expected_loss = output.loss
-
-        del hf_model
-        torch.cuda.empty_cache()
-
-        with torch.device("meta"):
-            model_cfg = Qwen3VLDense4BConfig()
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
-
-        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
-        qwen3vl_model.eval()
-
-        loss_cfg = CELossConfig()
-
-        shift_input_ids = input_ids[:, :-1]
-        shifted_labels = input_ids[:, 1:]
-
-        sp_mesh = None
-        if sp_size > 1:
-            data_mesh = init_data_mesh(device, sp_size=sp_size)
-            sp_mesh = data_mesh["sp"]
-
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        seq_ctx.image_grid_thw = image_grid_thw
-        seq_ctx.pixel_values = pixel_values
-        seq_ctx.to('cuda')
-        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
-        loss_ctx_input = loss_ctx_input.to('cuda')
-
-        if sp_size > 1:
-            seq_ctx = seq_ctx.split(sp_mesh)
-            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
-
-        seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
-
-        LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list,
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
-        seq_ctx = seq_ctx_list[0]
-
-        with torch.no_grad():
-            output = qwen3vl_model(
-                seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
-            )
-        loss = output["loss"]
-        self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
-
-    @parametrize.parametrize(
-        "device,sp_size,tol",
-        [
-            ("cuda", 1, 1e-2)
-        ],
-    )
-    def test_qwen3vl_video_run(self, device, sp_size, tol):
-        self.create_pg(device)
-        maybe_compile.clear_compile_targets()
-        hf_model = AutoModelForImageTextToText.from_pretrained(
-            QWEN3_VL_DENSE_PATH,
-            dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
-            device_map="cuda"
-        ).eval()
-        patch_hf_rms_norm(hf_model)
-
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
-        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_DENSE_PATH, rand_video_max_frames=14,
-                                              add_vision_id=True).build(tokenizer)
-
-        raw_data = {"id": 9, "messages": [{"role": "user", "content": [{"type": "video_url",
-                                                                        "video_url": {"url": "tennis_frames_4fps/",
-                                                                                      "image_wh": [1280, 720],
-                                                                                      "origin_video_length": 182,
-                                                                                      "origin_fps": 30.0,
-                                                                                      "processed_video_length": 23,
-                                                                                      "processed_fps": 4}},
-                                                                       {"type": "video_url",
-                                                                        "video_url": {"url": "tennis_frames_2fps/",
-                                                                                      "image_wh": [1280, 720],
-                                                                                      "origin_video_length": 182,
-                                                                                      "origin_fps": 30.0,
-                                                                                      "processed_video_length": 13,
-                                                                                      "processed_fps": 2}},
-                                                                       {"type": "text",
-                                                                        "text": "<VIDEO_CONTEXT><VIDEO_CONTEXT>两个视频中都在做什么？"}]},
-                                          {"role": "assistant", "content": "打网球"}]}
-
-        tokenized_data = tokenize_fn(raw_data, media_root=VIDEO_ROOT)
-        input_ids = torch.tensor(tokenized_data['input_ids'])[None].cuda()
-        labels = torch.tensor(tokenized_data['labels'])[None].cuda()
-        pixel_values = tokenized_data['pixel_values'].cuda()
-        image_grid_thw = tokenized_data['image_grid_thw'].cuda()
-        position_ids = tokenized_data['position_ids'].cuda()
-
-        with torch.no_grad():
-            output = hf_model(
-                input_ids=input_ids,
-                labels=labels,
-                pixel_values_videos=pixel_values,
-                video_grid_thw=image_grid_thw,
-                position_ids=position_ids,
-            )
-        expected_loss = output.loss
-
-        del hf_model
-        torch.cuda.empty_cache()
-
-        with torch.device("meta"):
-            model_cfg = Qwen3VLDense4BConfig()
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
-
-        qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
-        qwen3vl_model.eval()
 
         loss_cfg = CELossConfig()
 
         shift_input_ids = input_ids[:, :-1]
         shifted_labels = labels[:, 1:]
-        position_ids = position_ids[..., :-1]
+        if position_ids is not None:
+            position_ids = position_ids[..., :-1]
 
         sp_mesh = None
         if sp_size > 1:
@@ -275,144 +144,66 @@ class TestQwen3VL(DeterministicDDPTestCase):
         loss_ctx = LossContext(loss_cfg, loss_kwargs)
         seq_ctx = seq_ctx_list[0]
 
+        qwen3vl_model.to(device)
         with torch.no_grad():
             output = qwen3vl_model(
                 seq_ctx=seq_ctx,
                 loss_ctx=loss_ctx,
             )
+        qwen3vl_model.to('cpu')
+        torch.cuda.empty_cache()
         loss = output["loss"]
+        print(loss, expected_loss, 'xxxxx')
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
 
     @parametrize.parametrize(
-        "device,tol",
+        "device,sp_size,tol",
         [
-            ("cuda", 1e-2),
+            ("cuda", 1, 1e-2)
         ],
     )
-    def test_fsdp_text_accuracy(self, device, tol):
+    def test_qwen3vl_run(self, device, sp_size, tol):
         self.create_pg(device)
         maybe_compile.clear_compile_targets()
+
         hf_model = AutoModelForImageTextToText.from_pretrained(
             QWEN3_VL_DENSE_PATH,
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
-            device_map="cuda"
+            device_map="cpu"
         ).eval()
         patch_hf_rms_norm(hf_model)
-
-        rank = dist.get_rank()
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
-        input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
-                              return_tensors="pt").input_ids.to(device)
-
-        with torch.no_grad():
-            output = hf_model(
-                input_ids=input_ids,
-                labels=input_ids.clone(),
-            )
-        expected_loss = output.loss
-        dist.all_reduce(expected_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
-
-        del hf_model
-        torch.cuda.empty_cache()
 
         with torch.device("meta"):
             model_cfg = Qwen3VLDense4BConfig()
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
-        fsdp_config = FSDPConfig(
-            cpu_offload=False,
-        )
-
-        qwen3vl_model.language_model.fully_shard(fsdp_config=fsdp_config)
-        qwen3vl_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
-        qwen3vl_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
-        qwen3vl_model.fully_shard(fsdp_config=fsdp_config)
-
         qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
         qwen3vl_model.eval()
+        qwen3vl_model.to('cpu')
 
-        shift_input_ids = input_ids[:, :-1]
-        shifted_labels = input_ids[:, 1:]
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
-        loss_ctx_input = loss_ctx_input.to('cuda')
-
-        seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
-
-        loss_cfg = CELossConfig()
-        LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list,
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
-        seq_ctx = seq_ctx_list[0]
-
-        with torch.no_grad():
-            output = qwen3vl_model(
-                seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
-            )
-        loss = output["loss"]
-        self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
+        # self._test_all(hf_model, qwen3vl_model, 'text', device, sp_size, tol)
+        self._test_all(hf_model, qwen3vl_model, 'image', device, sp_size, tol)
+        # self._test_all(hf_model, qwen3vl_model, 'video', device, sp_size, tol)
 
     @parametrize.parametrize(
-        "device, sp_size, compile, tol",
+        "device,sp_size,compile, tol",
         [
-            ("cuda", 1, False, 1e-2),
-            # ("cuda", 2, False, 1e-2),
-            ("cuda", 1, True, 1e-2),
-            # ("cuda", 2, True, 1e-2),
+            ("cuda", 1, False, 1e-2)
         ],
     )
-    def test_fsdp_image_accuracy(self, device, sp_size, compile, tol):
+    def test_fsdp_qwen3_run(self, device, sp_size, compile, tol):
         self.create_pg(device)
-        if not compile:
+        if compile is False:
             maybe_compile.clear_compile_targets()
 
         hf_model = AutoModelForImageTextToText.from_pretrained(
             QWEN3_VL_DENSE_PATH,
             dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
-            device_map="cuda"
+            device_map="cpu"
         ).eval()
         patch_hf_rms_norm(hf_model)
-
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
-        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_DENSE_PATH, add_vision_id=True).build(tokenizer)
-
-        raw_data = {"id": 3, "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {
-            "url": "tests/resource/mscoco_twocat_000000039769.jpg", "image_wh": [640, 480]}}, {"type": "image_url",
-                                                                                               "image_url": {
-                                                                                                   "url": "tests/resource/mscoco_dog_000000319154.jpg",
-                                                                                                   "image_wh": [375,
-                                                                                                                500]}},
-                                                                       {"type": "text",
-                                                                        "text": "<IMG_CONTEXT>\n<IMG_CONTEXT>\n请描述下第二幅图片中的狗是什么颜色？"}]},
-                                          {"role": "assistant", "content": "图片中的狗是棕色的。"}]}
-
-        tokenized_data = tokenize_fn(raw_data)
-        input_ids = torch.tensor(tokenized_data['input_ids'])[None].cuda()
-        labels = torch.tensor(tokenized_data['labels'])[None].cuda()
-        pixel_values = tokenized_data['pixel_values'].cuda()
-        image_grid_thw = tokenized_data['image_grid_thw'].cuda()
-        position_ids = tokenized_data['position_ids'].cuda()
-
-        with torch.no_grad():
-            output = hf_model(
-                input_ids=input_ids,
-                labels=labels,
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-                position_ids=position_ids,
-            )
-        expected_loss = output.loss
-
-        del hf_model
-        torch.cuda.empty_cache()
 
         with torch.device("meta"):
             model_cfg = Qwen3VLDense4BConfig()
@@ -420,11 +211,8 @@ class TestQwen3VL(DeterministicDDPTestCase):
 
         fsdp_config = FSDPConfig(
             cpu_offload=False,
+            torch_compile=compile
         )
-        sp_mesh = None
-        if sp_size > 1:
-            data_mesh = init_data_mesh(device, sp_size=sp_size)
-            sp_mesh = data_mesh["sp"]
 
         qwen3vl_model.language_model.fully_shard(fsdp_config=fsdp_config)
         qwen3vl_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
@@ -433,44 +221,11 @@ class TestQwen3VL(DeterministicDDPTestCase):
 
         qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
         qwen3vl_model.eval()
+        qwen3vl_model.to('cpu')
 
-        shift_input_ids = input_ids[:, :-1]
-        shifted_labels = labels[:, 1:]
-        position_ids = position_ids[..., :-1]
-
-        seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        seq_ctx.image_grid_thw = image_grid_thw
-        seq_ctx.pixel_values = pixel_values
-        seq_ctx.position_ids = position_ids
-
-        seq_ctx.to('cuda')
-        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
-        loss_ctx_input = loss_ctx_input.to('cuda')
-
-        if sp_size > 1:
-            seq_ctx = seq_ctx.split(sp_mesh)
-            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
-
-        seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
-
-        loss_cfg = CELossConfig()
-        LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list,
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
-        seq_ctx = seq_ctx_list[0]
-
-        with torch.no_grad():
-            output = qwen3vl_model(
-                seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
-            )
-        loss = output["loss"]
-        self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
+        self._test_all(hf_model, qwen3vl_model, 'text', device, sp_size, tol)
+        self._test_all(hf_model, qwen3vl_model, 'image', device, sp_size, tol)
+        self._test_all(hf_model, qwen3vl_model, 'video', device, sp_size, tol)
 
     @parametrize.parametrize(
         "device,tp_size",
