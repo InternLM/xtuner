@@ -508,13 +508,18 @@ class BaseModel(nn.Module):
                     all_hf_keys = hf_keys
 
                 current_rank = dist.get_rank()
-                # fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
-                fused_save_ranks = list(range(16))
-                key_per_rank = len(all_hf_keys) / len(fused_save_ranks)
-                assert key_per_rank.is_integer(), (
-                    f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
-                    f"size of `fused_save_ranks` {len(fused_save_ranks)}"
-                )
+
+                expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
+                hardcode_fused_save_ranks = list(range(min((dist.get_world_size(), 16))))
+
+                key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
+                # assert key_per_rank.is_integer(), (
+                #     f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
+                #     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
+                # )
+                if not key_per_rank.is_integer():
+                    key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
+
 
                 start = int(current_rank * key_per_rank)
                 end = int(start + key_per_rank)
