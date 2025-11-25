@@ -6,7 +6,7 @@ import time
 import traceback
 import uuid
 from abc import abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import httpx
 import ray
@@ -21,6 +21,7 @@ from xtuner.v1.ray import find_master_addr_and_port
 from xtuner.v1.ray.base import AutoAcceleratorWorkers, SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult, set_rollout_response_status
 
 
 class RolloutWorker(SingleAcceleratorWorker):
@@ -60,6 +61,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
         # http_concurrency is calculated based on the max batch size per engine and the total number of engines
+        assert config.rollout_max_batch_size_per_instance, (
+            "rollout_max_batch_size_per_instance must be set in RolloutConfig"
+        )
         http_concurrency = config.rollout_max_batch_size_per_instance * config.allow_over_concurrency_ratio
         limits = httpx.Limits(max_connections=http_concurrency, max_keepalive_connections=100)
         self.client = httpx.AsyncClient(limits=limits, timeout=self.config.rollout_timeout)
@@ -285,9 +289,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                     )
             self.check_flag = False
 
-    async def _safe_post_request(self, url, headers, payload) -> Tuple[Optional[httpx.Response], bool, Optional[str]]:
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
         try:
-            # new_url = self.server_url[-2] + str(int(self.server_url[-1]) + 1) + "'"
             req = self.client.build_request(
                 "POST",
                 url,
@@ -296,34 +299,11 @@ class RolloutWorker(SingleAcceleratorWorker):
             )
             r = await self.client.send(req)
             r.raise_for_status()
-            return r, True, None
-        # NOTE(@duanyanhui): 目前只有TimeoutException时，第二个返回值为True ，即continue_rollout=True，不影响主程序正常运行
-        # 其他错误都认为是请求失败，会通过assert进行报错，并且根据错误类型返回不同的error msg.
-        except httpx.TimeoutException as e:
-            error_msg = f"create_request error: Request to {url} timed out: {e}"
-            self.logger.warning(error_msg)
-            return None, True, None
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 400:
-                log_payload = copy.deepcopy(payload)
-                if "input_ids" in log_payload and log_payload["input_ids"] is not None:
-                    log_payload["input_ids"] = str(log_payload["input_ids"])
-                error_msg = (
-                    f"Bad Request (400) Error for {url} with payload {log_payload}. Server response: {e.response.text}"
-                )
-                return None, False, error_msg
-            else:
-                error_msg = f"HTTP error occurred for {url}: {e.response.status_code} - {e.response.text}"
-                return None, False, error_msg
-        except httpx.RequestError as e:
-            log_payload = copy.deepcopy(payload)
-            if "input_ids" in log_payload and log_payload["input_ids"] is not None:
-                log_payload["input_ids"] = str(log_payload["input_ids"])
-            error_msg = f"Request Error occurred while requesting {payload} to {url}: {e}"
-            return None, False, error_msg
+            return HttpRequestResult(response=r)
         except Exception as e:
-            error_msg = f"Unexpected Error occurred: {e} with traceback: \n {traceback.format_exc()}"
-            return None, False, error_msg
+            error_type = HttpRequestErrorType.from_exception(e)
+            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
+            return result
 
     async def rollout_task(
         self,
@@ -336,44 +316,34 @@ class RolloutWorker(SingleAcceleratorWorker):
         format: str,
         extra_info: dict,
     ) -> RLRolloutResponseItem:
-        uid = str(uuid.uuid4())
+        uid = extra_info.get("action_id", str(uuid.uuid4()))
         response = None
-        failed_rollout_response = RLRolloutResponseItem(
-            finish_reason="failed",
-        )
+        failed_rollout_response = RLRolloutResponseItem(finish_reason="failed")
         self._check_infer_engine_version("return_token_ids" in extra_params and extra_params["return_token_ids"])
 
         if format == "openai":
             openai_prompts, openai_tools = prompts, tools
         else:
             openai_prompts, openai_tools = self._adapt_input_to_openai_spec(prompts, tools, tool_choice)
+
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-            response, continue_rollout, error_msg = await self._create_request(
-                f"{self.server_url}/{self.endpoints['generate']}",
-                openai_prompts,
-                input_ids,
-                openai_tools,
-                tool_choice,
-                sample_params=sample_params,
-                extra_params=extra_params,
-                extra_info=extra_info,
-            )
+            endpoint_url = f"{self.server_url}/{self.endpoints['generate']}"
         else:
-            assert prompts is not None, "prompts should not be None when you call v1/chat/completions API"
-            response, continue_rollout, error_msg = await self._create_request(
-                f"{self.server_url}/{self.endpoints['v1/chat/completions']}",
-                openai_prompts,
-                None,
-                openai_tools,
-                tool_choice,
-                sample_params=sample_params,
-                extra_params=extra_params,
-                extra_info=extra_info,
-            )
-        assert continue_rollout, (
-            f"Unhandled error occurred during rollout request creation, You should check infer engine or input params. \n Error message: {error_msg}"
+            endpoint_url = f"{self.server_url}/{self.endpoints['v1/chat/completions']}"
+
+        http_result = await self._create_request(
+            endpoint_url,
+            openai_prompts,
+            input_ids,
+            openai_tools,
+            tool_choice,
+            sample_params=sample_params,
+            extra_params=extra_params,
+            extra_info=extra_info,
         )
-        if response:
+
+        if http_result.response is not None:
+            response = http_result.response
             try:
                 rollout_response = (
                     await self._handle_stream_response(uid, sample_params, extra_params, response)
@@ -385,8 +355,13 @@ class RolloutWorker(SingleAcceleratorWorker):
                     await response.aclose()
             return rollout_response
         else:
-            self.logger.warning(f"Retrying rollout for {uid} due to httpx timeout")
-            return failed_rollout_response
+            if http_result.is_unknown_error:
+                raise RuntimeError(
+                    f"Unexpected error during rollout request {uid} to {http_result.url}: {http_result.exception}"
+                )
+            else:
+                set_rollout_response_status(http_result, failed_rollout_response, self.server_url)
+                return failed_rollout_response
 
     async def _handle_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
         last_trajectory = ""

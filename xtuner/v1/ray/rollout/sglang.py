@@ -1,7 +1,6 @@
 import os
 from typing import Any, Dict, List, Union
 
-import ray
 import requests
 from urllib3.exceptions import NewConnectionError
 
@@ -11,7 +10,6 @@ from xtuner.v1.ray.config import RolloutConfig
 from .worker import RolloutWorker
 
 
-@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
 class SGLangWorker(RolloutWorker):
     def __init__(
         self,
@@ -130,9 +128,6 @@ class SGLangWorker(RolloutWorker):
     def continue_generation(self):
         return self._make_request("continue_generation")
 
-    def shutdown(self):
-        pass
-
     def reset_prefix_cache(self):
         self.flush_cache()
         return self._make_request("release_memory_occupation")
@@ -163,8 +158,7 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.port = self.server_port
         sglang_server_args.nccl_port = self.nccl_port
         sglang_server_args.dist_init_addr = self.dist_init_addr
-        base_gpu_id_interval = min(num_gpus_per_engine, self.config.gpus_per_node)
-        sglang_server_args.base_gpu_id = (self.rank * base_gpu_id_interval) % self.config.gpus_per_node
+        sglang_server_args.base_gpu_id = self.rank % self.config.gpus_per_node
         sglang_server_args.gpu_id_step = 1
         sglang_server_args.nnodes = max(1, num_gpus_per_engine // self.config.gpus_per_node)
         sglang_server_args.skip_server_warmup = True
@@ -180,8 +174,13 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.log_level = log_level
         sglang_server_args.log_level_http = log_level_http
         sglang_server_args.enable_deterministic_inference = enable_deterministic_inference
-        sglang_server_args.tp_size = num_gpus_per_engine
-        sglang_server_args.ep_size = num_gpus_per_engine
+
+        if self.config.expert_parallel_size > 1:
+            sglang_server_args.tp_size = num_gpus_per_engine
+            sglang_server_args.ep_size = num_gpus_per_engine
+        else:
+            sglang_server_args.tp_size = self.config.tensor_parallel_size
+            sglang_server_args.ep_size = self.config.expert_parallel_size
 
         if grammar_backend is not None:
             sglang_server_args.grammar_backend = grammar_backend

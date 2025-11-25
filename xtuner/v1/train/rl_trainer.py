@@ -109,9 +109,9 @@ def get_train_seq_ctx(
             )
             position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
             seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+            assert position_ids.size(-1) == input_ids.size(-1)
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
-        seq_ctx.image_flags = multimodal_train_info.get("image_flags")
     return seq_ctx
 
 
@@ -426,6 +426,9 @@ class RLTrainer:
             with timer("saving and sync_weight", step_timer_dict):
                 ray.get(self._train_controller.offload.remote(target="optimizer"))
                 self._maybe_save_hf()
+                bind_train_rollout(
+                    train_controller=self._train_controller, env_controller=self._rollout_env_controller
+                )
                 ray.get(self._rollout_env_controller.onload_weights.remote())
                 ray.get(self._train_controller.update_weights.remote())
                 self.logger.info("Model weights synchronized successfully.")
@@ -520,7 +523,7 @@ class RLTrainer:
                 else:
                     rollout_logprobs = None
 
-                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids))
+                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids) - 1)
                 data_dict = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels,

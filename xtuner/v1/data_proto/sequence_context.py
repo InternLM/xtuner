@@ -37,8 +37,6 @@ class SequenceContext:
     device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None
 
-    # Intern-S1
-    image_flags: torch.LongTensor | None
     # Qwen3VL
     image_grid_thw: torch.Tensor | None
     deepstack_visual_embeds: list[torch.Tensor] | None
@@ -63,8 +61,6 @@ class SequenceContext:
         block_table: torch.Tensor | None = None,
         device: str | torch.device = "cpu",  # TODO: 这个地方有点乱，到处是 device
         position_ids: torch.LongTensor | None = None,
-        # Intern-S1
-        image_flags: torch.LongTensor | None = None,
         # Qwen3VL
         image_grid_thw: torch.Tensor | None = None,
         deepstack_visual_embeds: list[torch.Tensor] | None = None,
@@ -95,7 +91,6 @@ class SequenceContext:
         self.block_table = block_table
         self.device = device
         self.position_ids = position_ids
-        self.image_flags = image_flags
         self.image_grid_thw = image_grid_thw
         self.deepstack_visual_embeds = deepstack_visual_embeds
         self.visual_pos_masks = visual_pos_masks
@@ -184,7 +179,6 @@ class SequenceContext:
                 device=sp_input_ids.device,
                 sequence_parallel_mesh=sequence_parallel_mesh,
                 # TODO: 没有 copy 方法比较难受,容易漏掉变量
-                image_flags=self.image_flags,
                 pixel_values=self.pixel_values,
                 image_grid_thw=self.image_grid_thw,
                 inputs_embeds=self.inputs_embeds,
@@ -211,7 +205,6 @@ class SequenceContext:
 
         image_grid_thw = []
         position_ids = []
-        image_flags = []
         rollout_routed_experts = []
 
         for seq_ctx in sequence_context_list:
@@ -238,8 +231,6 @@ class SequenceContext:
                 pixel_values.append(seq_ctx.pixel_values)
             if seq_ctx.image_grid_thw is not None:
                 image_grid_thw.append(seq_ctx.image_grid_thw)
-            if seq_ctx.image_flags is not None:
-                image_flags.append(seq_ctx.image_flags)
             if seq_ctx.rollout_routed_experts is not None:
                 rollout_routed_experts.append(seq_ctx.rollout_routed_experts)
             position_ids.append(seq_ctx.position_ids)
@@ -263,7 +254,6 @@ class SequenceContext:
             pixel_values=pixel_values,  # type: ignore
             image_grid_thw=torch.cat(image_grid_thw, dim=0) if image_grid_thw else None,  # type: ignore
             position_ids=torch.cat(position_ids, dim=-1) if position_ids else None,  # type: ignore
-            image_flags=torch.cat(image_flags, dim=0) if image_flags else None,  # type: ignore
             rollout_routed_experts=rollout_routed_experts if len(rollout_routed_experts) > 0 else None,  # type: ignore
         )
 
@@ -347,9 +337,6 @@ class SequenceContext:
 
         if self.block_table is not None and hasattr(self.block_table, "to"):
             self.block_table = self.block_table.to(device)  # type: ignore
-
-        if self.image_flags is not None and hasattr(self.image_flags, "to"):
-            self.image_flags = self.image_flags.to(device)  # type: ignore
 
         if self.pixel_values is not None and hasattr(self.pixel_values, "to"):
             self.pixel_values = self.pixel_values.to(device)  # type: ignore

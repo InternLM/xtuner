@@ -109,7 +109,7 @@ class TestUpdateWeight(unittest.TestCase):
         sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
 
         # init rollout_update
-        rollout_controller = RolloutController.remote(
+        rollout_controller = ray.remote(RolloutController).remote(
             self.rollout_cfg,
             self.pg,
         )
@@ -129,7 +129,7 @@ class TestUpdateWeight(unittest.TestCase):
 
         # init rollout_ref
         self.rollout_cfg.skip_load_weights = False
-        rollout_controller_ref = RolloutController.remote(
+        rollout_controller_ref = ray.remote(RolloutController).remote(
             self.rollout_cfg,
             self.pg,
         )

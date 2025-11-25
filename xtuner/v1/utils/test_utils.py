@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Dict, List, cast
 
 import numpy as np
@@ -6,6 +7,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 
 import transformers
+from xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils import sort_frames
 
 
 # from liger-kernel
@@ -243,3 +245,25 @@ def preprocess_intern_s1(
         input_ids=cast(List[int], input_ids.tolist()),
         labels=cast(List[int], targets.tolist()),
     )
+
+
+def add_video_root(messages: list[dict], video_root: Path | str):
+    video_root = Path(video_root)
+    for msg in messages:
+        if "content" not in msg:
+            continue
+        content_list = msg["content"]
+        if not isinstance(content_list, list):
+            raise TypeError("content should be a list of dict")
+        for content in content_list:
+            if "type" not in content or content["type"] != "video":
+                continue
+            content_path = video_root / content["path"]
+            if Path(content_path).is_dir():
+                image_list = sort_frames(list(content_path.glob("*.jpg")))
+                new_image_list = []
+                for image in image_list:
+                    new_image_list.append(str(content_path / image))
+                content["path"] = new_image_list
+            else:
+                content["path"] = str(content_path)

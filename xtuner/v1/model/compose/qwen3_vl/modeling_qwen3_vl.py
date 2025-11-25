@@ -92,6 +92,14 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
+
+        self.language_model.embed_tokens.set_modules_to_forward_prefetch(   # type: ignore
+            [self.vision_tower.blocks[0]])
+        self.vision_tower.blocks[-1].set_modules_to_forward_prefetch(   # type: ignore
+            [self.multi_modal_projector])
+        self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
+        self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
+
         self._to_empty_meta()
         return self
 
@@ -206,6 +214,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             except RuntimeError as e:
                 print(f"!!!Warning: {e}, but continue anyway!!!!")
                 inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
+            visual_pos_masks = visual_pos_masks[..., 0]
         else:
             # 构建假数据，考虑到 moe 特性，最好不要构建全 0 数据
             pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
