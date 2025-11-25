@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
+import numpy as np
 import xxhash
 from PIL import Image
 from typing_extensions import TypedDict
@@ -160,3 +161,33 @@ def replace_image_context_and_collect_media_data(
                             c["text"] = _c.replace("<IMG_CONTEXT>", "")
 
     return image_paths, video_paths
+
+
+def dict_to_sorted_string(input_dict: dict[str, Any]) -> str:
+    """Convert a potentially nested dictionary into a sorted string
+    representation."""
+
+    def process_value(value):
+        if isinstance(value, dict):
+            return dict_to_sorted_string(value)
+        elif isinstance(value, list):
+            return [process_value(v) for v in value]
+        elif isinstance(value, tuple):
+            return tuple(process_value(v) for v in value)
+        return value
+
+    sorted_items = sorted((k, process_value(v)) for k, v in input_dict.items())
+    return str(sorted_items)
+
+
+def generate_random_int_from_dict(input_dict: dict[str, Any], min_num: int, max_num: int):
+    """Generate a deterministic random integer based on a nested dictionary
+    (using stable hashing)"""
+    dict_string = dict_to_sorted_string(input_dict)
+    input_bytes = dict_string.encode("utf-8")
+
+    hash_hex = hashlib.md5(input_bytes).hexdigest()
+    hash_int = int(hash_hex, 16)
+
+    rng = np.random.default_rng(hash_int)
+    return rng.integers(min_num, max_num + 1)

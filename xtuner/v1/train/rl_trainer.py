@@ -110,9 +110,9 @@ def get_train_seq_ctx(
             )
             position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
             seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+            assert position_ids.size(-1) == input_ids.size(-1)
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
-        seq_ctx.image_flags = multimodal_train_info.get("image_flags")
     return seq_ctx
 
 
@@ -619,7 +619,7 @@ class RLTrainer:
                 else:
                     rollout_logprobs = None
 
-                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids))
+                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids) - 1)
                 data_dict = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels,

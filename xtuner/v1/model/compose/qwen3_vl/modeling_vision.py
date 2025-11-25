@@ -287,13 +287,17 @@ class Qwen3VLVisionModel(BaseModel):
         self.rotary_pos_emb = self.build_rotary_embedding(self.config)
         self._maybe_compile_layers()
 
+        checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         recompute_ratio = 1.0
         num_recompute_layers = int(len(self.blocks) * recompute_ratio)
         for layer_idx in tqdm(list(range(len(self.blocks))), desc="[Vision Fully Shard]"):
             layer = self.blocks[layer_idx]
 
             if layer_idx < num_recompute_layers:
-                layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+                layer = checkpoint_wrapper(layer,
+                                           preserve_rng_state=checkpoint_preserve_rng_state,
+                                           checkpoint_impl=CheckpointImpl.REENTRANT)
+            # layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
 
             self.blocks[layer_idx] = layer
 
