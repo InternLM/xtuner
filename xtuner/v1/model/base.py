@@ -520,7 +520,6 @@ class BaseModel(nn.Module):
                 if not key_per_rank.is_integer():
                     key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
 
-
                 start = int(current_rank * key_per_rank)
                 end = int(start + key_per_rank)
 
