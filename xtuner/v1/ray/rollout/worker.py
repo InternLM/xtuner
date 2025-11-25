@@ -339,6 +339,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     response_ids=[],
                     num_return_tokens=0,
                     finish_reason="length",
+                    state="completed",
                 )
             else:
                 http_result = await self._create_request(
