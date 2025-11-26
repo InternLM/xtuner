@@ -51,6 +51,10 @@ def run_all_cases(config, case_name, task_executor) -> None:
 
 
 def exec_step_test(step_config, task_executor, context):
+    # pre action
+    command, step_config = handler.pre_action(step_config.get("type"), step_config)
+    step_config["command"] = command
+
     # get cmd
     command, step_config = handler.get_cmd(step_config.get("type"), step_config)
     step_config["command"] = command
@@ -61,4 +65,8 @@ def exec_step_test(step_config, task_executor, context):
 
     # verify task result
     result, info = handler.validate(step_config.get("type"), step_config)
+    assert result, info
+
+    # post action
+    result, info = handler.post_action(step_config.get("type"), step_config)
     assert result, info

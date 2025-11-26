@@ -28,7 +28,7 @@ class Train:
             )
             if config_path:
                 output_path = model_config = config.get("parameters", {}).get("output_path", ".")
-                command += f" --config {config_path}; mkdir -p {work_dir}; mv {output_path}/202* {work_dir}"
+                command += f" --config {config_path}; mkdir -p {work_dir}; mv {output_path}/. {work_dir}"
             else:
                 if model_config:
                     command += f" --model-cfg {model_config}"
@@ -51,6 +51,12 @@ class Train:
         cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/rank0/tracker.jsonl")
         check_metrics = config.get("assert_info", {}).get("check_metrics", {})
         return check_result(base_path, cur_path, check_metrics)
+    
+    def pre_action(config=None):
+        return True, config
+
+    def post_action(config=None):
+        return True, config
 
 
 def get_latest_subdir(work_dir):

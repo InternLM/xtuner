@@ -4,3 +4,9 @@ class Eval:
 
     def validate(config=None):
         return True, "eval validate executed"
+    
+    def pre_action(config=None):
+        return True, config
+
+    def post_action(config=None):
+        return True, config
