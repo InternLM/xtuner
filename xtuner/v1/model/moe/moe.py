@@ -640,8 +640,9 @@ class MoE(BaseModel):
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
         # This is used for training without FSDP.
-        # TODO: remove this because init with actual device already, Check it
-        # 对于FoPE, rotary_emb参数，如sin_coef，在之前full_shard已经被切分，但是这里重新构建，会让sin_coef又变回切分前。导致问题，如 load时尺寸不一致等。
+        # remove this because init with actual device already
+        # For FoPE, the rotary_emb parameters (such as sin_coef) were already sharded by full_shard previously. 
+        # However, rebuilding them here would revert sin_coef back to its pre-sharded state, causing issues like dimension mismatches during loading.
         # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
 
         # logger.debug(f"before load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
@@ -694,9 +695,9 @@ class MoE(BaseModel):
         if self.ep_mesh.size() > 1:
             self._replicate_other_params(self)
 
-        # 虽然 __init__ 中已经构建了 rotary_emb，但是是在 meta device 中构建的，这里需要在真实 device 上重新构建，
-        # 来计算 inv_freq 等系数
-        # TODO: remove this because init with actual device already, Check it
+        # Although rotary_emb was already constructed in __init__, it was built on the meta device. 
+        # Here we need to rebuild it on the actual device to calculate coefficients like inv_freq.
+        # xTODO: remove this because init with actual device already, Check it
         # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
 
         mp_policy = MixedPrecisionPolicy(

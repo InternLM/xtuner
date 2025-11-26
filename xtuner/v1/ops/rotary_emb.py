@@ -49,7 +49,14 @@ def apply_rotary_pos_emb_cuda(
     return q_embed, k_embed
 
 
-def apply_rotary_pos_emb_sep_cuda(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+def apply_rotary_pos_emb_sep_cuda(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    position_ids: torch.Tensor | None = None,
+    unsqueeze_dim: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -113,7 +120,7 @@ class ApplyRotaryEmbProtocol(Protocol):
     ) -> Tuple[torch.Tensor, torch.Tensor]: ...
 
 
-def get_apply_rotary_emb(fope_sep_head: bool | None = None) -> ApplyRotaryEmbProtocol:
+def get_apply_rotary_emb(fope_sep_head: bool | None = False) -> ApplyRotaryEmbProtocol:
     from xtuner.v1.utils.device import get_device
 
     device = get_device()

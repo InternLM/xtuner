@@ -1,4 +1,4 @@
-from typing import Literal, Protocol, cast
+from typing import Literal, Protocol, Self, cast
 
 import torch
 import torch.nn as nn
@@ -57,7 +57,7 @@ class RotaryEmbeddingProtocol(Protocol):
 
     def __call__(self, x: torch.Tensor, position_ids: torch.LongTensor) -> tuple[torch.Tensor, torch.Tensor]: ...
 
-    def to(self, device: torch.device) -> "RotaryEmbeddingProtocol": ...
+    def to(self, device: torch.device) -> Self: ...
 
 
 class RotaryEmbedding(nn.Module):
