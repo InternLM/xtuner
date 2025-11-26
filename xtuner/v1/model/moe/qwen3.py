@@ -55,8 +55,6 @@ class Qwen3MoEConfig(MoEConfig):
 
     @classmethod
     def from_hf(cls, hf_path: str | Path) -> Self:
-        # TODO: model_type is qwen3_moe_fope, but the config is set to qwen3_moe
-        # TODO: patch fope config validate function
         hf_config = HFQwen3MoeConfig.from_pretrained(hf_path)
 
         assert isinstance(hf_config, HFQwen3MoeConfig)
@@ -72,7 +70,7 @@ class Qwen3MoEConfig(MoEConfig):
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
-            model_type=hf_config.model_type,  # FoPE's model_type is qwen3_moe_fope
+            model_type=hf_config.model_type,
             rope_theta=hf_config.rope_theta,
             rope_scaling_cfg=RopeScalingConfig(
                 type=hf_config.rope_scaling.get("type", "default"),
@@ -83,6 +81,7 @@ class Qwen3MoEConfig(MoEConfig):
             )
             if hf_config.rope_scaling is not None
             else None,
+            auto_map=getattr(hf_config, "auto_map"),
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
@@ -111,6 +110,9 @@ class Qwen3MoEConfig(MoEConfig):
     def hf_config(self) -> HFQwen3MoeConfig:
         """HuggingFace configuration."""
         assert isinstance(self.router, GreedyRouterConfig), "Only support saving GreedyRouter to HF Qwen3MoE format."
+        kwargs = {}
+        if self.auto_map is not None:
+            kwargs["auto_map"] = self.auto_map
         return HFQwen3MoeConfig(
             architectures=["Qwen3MoeForCausalLM"],
             vocab_size=self.vocab_size,
@@ -124,7 +126,7 @@ class Qwen3MoEConfig(MoEConfig):
             intermediate_size=self.intermediate_size,
             moe_intermediate_size=self.moe_intermediate_size,
             rms_norm_eps=self.rms_norm_eps,
-            model_type=self.model_type,  # FoPE's model_type is qwen3_moe_fope
+            model_type=self.model_type,
             rope_theta=self.rope_theta,
             rope_scaling=self.rope_scaling_cfg.model_dump() if self.rope_scaling_cfg is not None else None,
             hidden_act=self.hidden_act,
@@ -138,6 +140,7 @@ class Qwen3MoEConfig(MoEConfig):
             num_experts_per_tok=self.num_experts_per_tok,
             norm_topk_prob=self.router.norm_topk_prob,
             torch_dtype=torch.bfloat16,  # TODO: update all outdated hf `dtype` kwarg @jayhenry
+            **kwargs,
         )
 
 

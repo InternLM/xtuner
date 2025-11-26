@@ -32,7 +32,7 @@ class RopeScalingConfig(BaseModel):
     num_inv_freq: int | None = None
 
     # For inference
-    factor: float = 1.0
+    factor: float | None = None
     beta_fast: float | None = None
     beta_slow: float | None = None
     short_factor: list[float] | None = None

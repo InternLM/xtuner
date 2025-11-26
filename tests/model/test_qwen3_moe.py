@@ -362,10 +362,22 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             tmpdir = Path(syncdir[0])
             qwen_model_fope.save_hf(tmpdir)
             # 3. check
-            origin_index_path = load_from / "model.safetensors.index.json"
-            saved_index_path = tmpdir / "model.safetensors.index.json"
-
             if dist.get_rank() == 0:
+                # check config.json is same as the origin config.json
+                origin_config_path = load_from / "config.json"
+                saved_config_path = tmpdir / "config.json"
+                with open(origin_config_path, "r") as f:
+                    origin_config = json.load(f)
+                with open(saved_config_path, "r") as f:
+                    saved_config = json.load(f)
+                
+                assert check_dict_equal(origin_config, saved_config)
+                print(f"origin_config: {origin_config}")
+                print(f"saved_config: {saved_config}")
+
+                # safetensors
+                origin_index_path = load_from / "model.safetensors.index.json"
+                saved_index_path = tmpdir / "model.safetensors.index.json"
                 with open(origin_index_path, "r") as f:
                     origin_index = json.load(f)
                 with open(saved_index_path, "r") as f:
@@ -443,3 +455,34 @@ def create_model_from_hf(load_from: Path, dispatcher: str, ep_size: int):
     qwen_model.fully_shard(fsdp_config=fsdp_config)
     qwen_model.from_hf(load_from)
     return qwen_model
+
+def check_dict_equal(dict1: dict, dict2: dict) -> bool:
+    # for config["transformers_version"]
+    if "transformers_version" in dict1: dict1.pop("transformers_version")
+    if "transformers_version" in dict2: dict2.pop("transformers_version")
+
+    # for config["dtype"]
+    if "torch_dtype" in dict1: dict1["dtype"] = dict1.pop("torch_dtype")
+    if "torch_dtype" in dict2: dict2["dtype"] = dict2.pop("torch_dtype")
+
+    # for config["rope_scaling"]["type"]
+    if "rope_type" in dict1: dict1["type"] = dict1.pop("rope_type")
+    if "rope_type" in dict2: dict2["type"] = dict2.pop("rope_type")
+
+    for key, value in dict2.items():
+        if key not in dict1 and value is not None:
+            print(f"[ERROR] key {key} not in dict1 with non-none value: {value}")
+            return False
+    for key, value in dict1.items():
+        if value is None: continue
+        if key not in dict2:
+            print(f"[ERROR] key {key} not in dict2")
+            return False
+        if isinstance(dict1[key], dict):
+            if not check_dict_equal(dict1[key], dict2[key]):
+                return False
+        elif dict1[key] != dict2[key]:
+            print(f"[ERROR] key {key} value is not equal")
+            return False
+    return True
+
