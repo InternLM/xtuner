@@ -32,15 +32,11 @@ class TestRollout(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # RL默认使用FA3
         os.environ["XTUNER_USE_FA3"] = "1"
-        cls.temp_dir = tempfile.TemporaryDirectory()
-        cls.worker_log_dir = os.path.join(cls.temp_dir.name, "work_dirs")
 
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
-        cls.temp_dir.cleanup()
 
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
@@ -63,13 +59,13 @@ class TestRollout(unittest.TestCase):
             dtype="bfloat16",
             launch_server_method="ray",
             context_length=self.max_prompt_length + self.max_response_length,
-            worker_log_dir=self.__class__.worker_log_dir,
+            worker_log_dir=self.worker_log_dir,
         )
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
         self.judger_cfg = JudgerConfig(
             reward_judger_configs=[gsm8k_judger_config],
-            worker_log_dir=self.__class__.worker_log_dir,
+            worker_log_dir=self.worker_log_dir,
         )
         self.dataflow_cfg = DataFlowConfig(
             env="test",
@@ -77,7 +73,7 @@ class TestRollout(unittest.TestCase):
             global_batch_size=2,
             enable_partial_rollout=0,
             max_retry_times=1,
-            worker_log_dir=self.__class__.worker_log_dir,
+            worker_log_dir=self.worker_log_dir,
         )
         self.train_dataset_cfg = [
             {
@@ -97,13 +93,15 @@ class TestRollout(unittest.TestCase):
             dataset_cfg=self.train_dataset_cfg,
             dataloader_cfg=self.dataloader_cfg,
             tokenizer=self.tokenizer,
-            worker_log_dir=self.__class__.worker_log_dir,
+            worker_log_dir=self.worker_log_dir,
         )
 
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
         self.data_path = TRAIN_DATA_PATH
         self.model_path = MODEL_PATH
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
         self.init_config()
         self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
 

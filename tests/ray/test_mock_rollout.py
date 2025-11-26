@@ -43,14 +43,11 @@ class TestMockRollout(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         os.environ["XTUNER_USE_FA3"] = "1"
-        cls.temp_dir = tempfile.TemporaryDirectory()
-        cls.worker_log_dir = os.path.join(cls.temp_dir.name, "work_dirs")
+
 
     @classmethod
     def tearDownClass(cls):
         del os.environ["XTUNER_USE_FA3"]
-        ray.shutdown()
-        cls.temp_dir.cleanup()
 
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
@@ -59,7 +56,9 @@ class TestMockRollout(unittest.TestCase):
         self.max_response_length = 128
         self.max_concurrent = 3
         self.max_retry_times = 3
-
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
+        
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator=resource_map[torch.accelerator.current_accelerator().type],
             num_workers=8,
@@ -76,7 +75,7 @@ class TestMockRollout(unittest.TestCase):
             tensor_parallel_size=1,
             context_length=self.max_prompt_length + self.max_response_length,
             max_retry_per_worker=2,
-            worker_log_dir=self.__class__.worker_log_dir 
+            worker_log_dir=self.worker_log_dir
         )
         tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
@@ -84,7 +83,7 @@ class TestMockRollout(unittest.TestCase):
             max_concurrent=self.max_concurrent,
             global_batch_size=self.global_batch_size,
             max_retry_times=self.max_retry_times,
-            worker_log_dir=self.__class__.worker_log_dir   
+            worker_log_dir=self.worker_log_dir  
         )
         train_dataset_cfg = [{
             "dataset": DatasetConfig(name="mock_data", anno_path=TRAIN_DATA_PATH),
@@ -99,11 +98,12 @@ class TestMockRollout(unittest.TestCase):
             dataset_cfg=train_dataset_cfg,
             dataloader_cfg=dataloader_cfg,
             tokenizer=tokenizer,
-            worker_log_dir=self.__class__.worker_log_dir 
+            worker_log_dir=self.worker_log_dir
         )
 
     def tearDown(self):
         ray.shutdown()
+        self.temp_dir.cleanup()
 
     def _run_mock_test(self, mock_controller_cls, error_name: str):
         rollout_controller = mock_controller_cls.remote(self.rollout_cfg, self.pg)

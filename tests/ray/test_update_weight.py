@@ -25,22 +25,22 @@ class TestUpdateWeight(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ["XTUNER_USE_FA3"] = "1"
-        cls.temp_dir = tempfile.TemporaryDirectory()
-        cls.worker_log_dir = os.path.join(cls.temp_dir.name, "work_dirs")
 
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
-        cls.temp_dir.cleanup()
 
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
         self.model_path = MODEL_PATH
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
         self.init_config()
         self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
 
     def tearDown(self):
         ray.shutdown()
+        self.temp_dir.cleanup()
 
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
