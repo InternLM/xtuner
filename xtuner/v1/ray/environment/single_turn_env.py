@@ -58,6 +58,10 @@ class SingleTurnEnvironment(BaseEnvironment):
             self.logger.info("!!! Enable `return routed experts` in rollout controller. !!!")
         self.rollout_timeout = rollout_cfg.rollout_timeout if rollout_cfg else 1200.0
         self.judger_timeout = judger_cfg.judger_timeout if judger_cfg else 1200.0
+        # The timeout for the environment to wait for the rollout controller's response.
+        # This should be longer than the controller's internal timeout (`rollout_timeout`)
+        # to account for potential queuing delays and other overheads.
+        self.timeout_multiplier = 2.0
 
     async def generate(
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
@@ -95,7 +99,7 @@ class SingleTurnEnvironment(BaseEnvironment):
                 response_future.append(fut)
             try:
                 rollout_responses = await asyncio.wait_for(
-                    asyncio.gather(*response_future), timeout=self.rollout_timeout * 2
+                    asyncio.gather(*response_future), timeout=self.rollout_timeout * self.timeout_multiplier
                 )
             except asyncio.TimeoutError:
                 self.logger.error("Get rollout controller response timeout and return the failed response.")
@@ -126,7 +130,8 @@ class SingleTurnEnvironment(BaseEnvironment):
         if self.judger_controller and continue_judger:
             try:
                 judger_responses: List[RLJudgerResponseItem] = await asyncio.wait_for(
-                    self.judger_controller.run.remote(group_data_items), timeout=self.judger_timeout
+                    self.judger_controller.run.remote(group_data_items),
+                    timeout=self.judger_timeout * self.timeout_multiplier,
                 )
             except asyncio.TimeoutError:
                 self.logger.error("Get judger controller response timeout and return the failed response.")
