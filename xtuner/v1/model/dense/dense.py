@@ -47,8 +47,7 @@ class Dense(BaseModel):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
         self.layers = self.build_layers(config)
-        with torch.device(DEVICE):
-            self.rotary_emb = self.build_rotary_embedding(config)
+        self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
 
         # Make sure it works properly when not using fsdp
@@ -123,7 +122,8 @@ class Dense(BaseModel):
         return layers
 
     def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
-        return get_rope_embedding(config=config)
+        with torch.device(DEVICE):
+            return get_rope_embedding(config=config)
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore

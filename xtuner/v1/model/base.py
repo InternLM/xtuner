@@ -75,7 +75,6 @@ class TransformerConfig(PydanticBaseModel):
     rope_scaling_cfg: RopeScalingConfig | None = None
     hf_save_worker: Annotated[int, Parameter(group="model")] = 16
     dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
-    auto_map: dict[str, str] | None = None
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -840,8 +839,9 @@ class BaseModel(nn.Module):
             if self.config.hf_config is None and self._hf_path is None:
                 raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
 
-            # For FoPE, save custom python files such as `modeling_rope_utils.py`
-            if self._hf_path is not None:
+            if self.config.hf_config is not None:
+                self.config.save_hf(hf_dir)
+            else:  # if self._hf_path is not None:
                 for file in cast(Path, self._hf_path).iterdir():
                     if file.suffix != ".safetensors":
                         # Copy the model config and tokenizer files to the save path
@@ -851,10 +851,7 @@ class BaseModel(nn.Module):
                         else:
                             copytree(file, target_path)
 
-            # overwrite `config.json` and `model.safetensors.index.json`
-            if self.config.hf_config is not None:
-                self.config.save_hf(hf_dir)
-
+            # write or overwrite `model.safetensors.index.json`
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 index = {"weight_map": weight_map, "metadata": {}}
                 json.dump(index, f, indent=2, ensure_ascii=False)

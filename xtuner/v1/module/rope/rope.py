@@ -3,7 +3,7 @@ from typing import Literal, Protocol, cast
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, computed_field
 from typing_extensions import overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
@@ -26,11 +26,6 @@ class RopeScalingConfig(BaseModel):
     # For Qwen3VL
     mrope_section: list[int] | None = None  # e.g. [24, 20, 20]
 
-    # For FoPE
-    fope_init_factor: float | None = None
-    fope_sep_head: bool | None = None
-    num_inv_freq: int | None = None
-
     # For inference
     factor: float | None = None
     beta_fast: float | None = None
@@ -41,6 +36,15 @@ class RopeScalingConfig(BaseModel):
     high_freq_factor: float | None = None
     mscale: float | None = None
     mscale_all_dim: float | None = None
+
+    # For FoPE
+    fope_init_factor: float | None = None
+    fope_sep_head: bool | None = None
+    num_inv_freq: int | None = None
+
+    @computed_field
+    def use_fope(self) -> bool:
+        return self.fope_init_factor is not None or self.fope_sep_head is not None or self.num_inv_freq is not None
 
 
 class RotaryEmbeddingProtocol(Protocol):
@@ -171,7 +175,6 @@ class FourierEmbedding(RotaryEmbedding):
             ), "FoPE is wrongly initialized."
 
         # zero out under-trained frequencies
-        # TODO: 单测
         inv_freq = _compute_fope_parameters(self.num_inv_freq, self.inv_freq, config.max_position_embeddings)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -332,17 +335,11 @@ def get_rope_embedding(config, device=None) -> RotaryEmbeddingProtocol:
     config = cast(TransformerConfig, config)
     rope_scaling_cfg = config.rope_scaling_cfg
 
-    if rope_scaling_cfg is not None:
-        if rope_scaling_cfg.type == "qwen3_vl":
-            return Qwen3VLTextRotaryEmbedding(config, device=device)
+    if rope_scaling_cfg is not None and rope_scaling_cfg.type == "qwen3_vl":
+        return Qwen3VLTextRotaryEmbedding(config, device=device)
 
-        use_fope = (
-            rope_scaling_cfg.fope_init_factor is not None
-            or rope_scaling_cfg.fope_sep_head is not None
-            or rope_scaling_cfg.num_inv_freq is not None
-        )
-        if use_fope:
-            logger.info("Using FoPE rotary embedding.")
-            return FourierEmbedding(config, device=device)
+    if rope_scaling_cfg is not None and rope_scaling_cfg.use_fope:
+        logger.info("Using FoPE rotary embedding.")
+        return FourierEmbedding(config, device=device)
 
     return RotaryEmbedding(config, device=device)

@@ -146,8 +146,7 @@ class MoE(BaseModel):
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
 
         self.layers = self.build_layers(config)
-        with torch.device(DEVICE):
-            self.rotary_emb = self.build_rotary_embedding(config)
+        self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
 
         self.fp32_layers = [self.rotary_emb]
@@ -633,7 +632,8 @@ class MoE(BaseModel):
         return layers
 
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbeddingProtocol:
-        return get_rope_embedding(config=config)
+        with torch.device(DEVICE):
+            return get_rope_embedding(config=config)
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:

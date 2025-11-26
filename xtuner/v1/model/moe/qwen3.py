@@ -4,6 +4,8 @@ from pathlib import Path
 import torch
 from typing_extensions import Self
 
+from transformers.configuration_utils import PretrainedConfig
+from transformers.models.auto import AutoConfig
 from transformers.models.qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
 from xtuner.v1.model.base import RopeScalingConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
@@ -72,16 +74,6 @@ class Qwen3MoEConfig(MoEConfig):
             rms_norm_eps=hf_config.rms_norm_eps,
             model_type=hf_config.model_type,
             rope_theta=hf_config.rope_theta,
-            rope_scaling_cfg=RopeScalingConfig(
-                type=hf_config.rope_scaling.get("type", "default"),
-                # fope specific parameters
-                fope_init_factor=hf_config.rope_scaling.get("fope_init_factor"),
-                fope_sep_head=hf_config.rope_scaling.get("fope_sep_head"),
-                num_inv_freq=hf_config.rope_scaling.get("num_inv_freq"),
-            )
-            if hf_config.rope_scaling is not None
-            else None,
-            auto_map=getattr(hf_config, "auto_map"),
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
@@ -110,9 +102,6 @@ class Qwen3MoEConfig(MoEConfig):
     def hf_config(self) -> HFQwen3MoeConfig:
         """HuggingFace configuration."""
         assert isinstance(self.router, GreedyRouterConfig), "Only support saving GreedyRouter to HF Qwen3MoE format."
-        kwargs = {}
-        if self.auto_map is not None:
-            kwargs["auto_map"] = self.auto_map
         return HFQwen3MoeConfig(
             architectures=["Qwen3MoeForCausalLM"],
             vocab_size=self.vocab_size,
@@ -140,7 +129,6 @@ class Qwen3MoEConfig(MoEConfig):
             num_experts_per_tok=self.num_experts_per_tok,
             norm_topk_prob=self.router.norm_topk_prob,
             torch_dtype=torch.bfloat16,  # TODO: update all outdated hf `dtype` kwarg @jayhenry
-            **kwargs,
         )
 
 
@@ -209,3 +197,61 @@ class Qwen3MoE235BA22Config(Qwen3MoEConfig):
     )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
+
+
+class Qwen3MoEFoPEConfig(Qwen3MoEConfig):
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        hf_config = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+
+        assert isinstance(hf_config, PretrainedConfig) and hf_config.model_type == "qwen3_moe_fope"
+
+        config = cls(
+            vocab_size=hf_config.vocab_size,
+            max_position_embeddings=hf_config.max_position_embeddings,
+            pad_token_id=getattr(hf_config, "pad_token_id"),
+            bos_token_id=hf_config.bos_token_id,
+            eos_token_id=hf_config.eos_token_id,
+            num_hidden_layers=hf_config.num_hidden_layers,
+            max_window_layers=getattr(hf_config, "max_window_layers"),
+            hidden_size=hf_config.hidden_size,
+            intermediate_size=hf_config.intermediate_size,
+            rms_norm_eps=hf_config.rms_norm_eps,
+            model_type=hf_config.model_type,
+            rope_theta=hf_config.rope_theta,
+            rope_scaling_cfg=RopeScalingConfig(
+                type=hf_config.rope_scaling.get("type", "default"),
+                # fope specific parameters
+                fope_init_factor=hf_config.rope_scaling.get("fope_init_factor"),
+                fope_sep_head=hf_config.rope_scaling.get("fope_sep_head"),
+                num_inv_freq=hf_config.rope_scaling.get("num_inv_freq"),
+            )
+            if hf_config.rope_scaling is not None
+            else None,
+            hidden_act=hf_config.hidden_act,
+            attention=MHAConfig(
+                num_attention_heads=hf_config.num_attention_heads,
+                num_key_value_heads=hf_config.num_key_value_heads,
+                head_dim=hf_config.head_dim,
+                sliding_window=hf_config.sliding_window,
+                qk_norm=True,
+            ),
+            use_sliding_window=hf_config.use_sliding_window,
+            tie_word_embeddings=hf_config.tie_word_embeddings,
+            n_routed_experts=hf_config.num_experts,
+            n_shared_experts=0,
+            num_experts_per_tok=hf_config.num_experts_per_tok,
+            moe_intermediate_size=hf_config.moe_intermediate_size,
+            router=GreedyRouterConfig(
+                scoring_func="softmax",
+                norm_topk_prob=hf_config.norm_topk_prob,
+                router_scaling_factor=1.0,
+            ),
+            balancing_loss_cfg=BalancingLossConfig(),
+        )
+
+        return config
+
+    @property
+    def hf_config(self) -> None:
+        return None
