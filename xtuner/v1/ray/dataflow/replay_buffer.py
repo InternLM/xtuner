@@ -52,7 +52,7 @@ class ReplayMeta:
     observation_ids: List[int] = field(default_factory=list)  # observation IDs for different versions
     observation_refs: List[ObjectRef] = field(default_factory=list)
     observation_versions: List[int] = field(default_factory=list)  # reserved for async rollout
-    state: str = ""  # overall state, e.g., for partial rollout
+    state: RolloutState = RolloutState.INIT
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -388,7 +388,7 @@ class ReplayBufferStorage:
             for action_id in target_finished_list:
                 replay_meta = self._actions[action_id]
                 # todo: add an unified state management
-                replay_meta.state = "history"
+                replay_meta.state = RolloutState.ARCHIVED
                 group_samples = mapping_replaymeta_to_dataitem(self._actions[action_id])
                 multimodal_train_info = None
                 # TODO: 是否需要额外返回不重复的 multimodal_train_infos？

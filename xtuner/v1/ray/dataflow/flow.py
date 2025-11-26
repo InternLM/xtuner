@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RolloutState
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
@@ -111,9 +111,7 @@ class DataFlow:
         replay_buffer_cfg.worker_log_dir = self.config.worker_log_dir
         self.replay_buffer = ReplayBuffer.remote(replay_buffer_cfg)  # type: ignore[attr-defined]
         self.env_controller = environment
-        self.send_samples_count = 0
         self.finished_samples_count = 0
-        self.failed_samples_count = 0
         self.skipped_sample_count = 0
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
@@ -149,9 +147,7 @@ class DataFlow:
         extra_params: Optional[Dict] = None,
     ):
         """Resets all internal state variables of DataFlow."""
-        self.send_samples_count = 0
         self.finished_samples_count = 0
-        self.failed_samples_count = 0
         self.skipped_sample_count = 0
         if global_batch_size and global_batch_size > 0:
             self.target_batch_size = global_batch_size
@@ -205,15 +201,15 @@ class DataFlow:
         # Step 3: Determine the sample's state and act accordingly.
         group_state = determine_group_state(group_data_items)
         self.logger.debug(f"Determined replay state for {action_id}: {group_state}")
-        if group_state == "completed":
+        if group_state == RolloutState.COMPLETED:
             group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
             if len(group_data_items) > 0:
                 await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
             self.logger.debug(f"Worker task completed successfully for {action_id}.")
-        elif group_state == "interrupted":
+        elif group_state == RolloutState.INTERRUPTED:
             await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
             self.logger.debug(f"Adding interrupted sample {action_id} to interrupted storage")
-        elif group_state == "skipped":
+        elif group_state == RolloutState.SKIPPED:
             self.skipped_sample_count += 1
             self.logger.info(f"Total skipped samples count: {self.skipped_sample_count}")
         else:
@@ -244,10 +240,7 @@ class DataFlow:
         with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
             update_step = max(1, int(self.target_batch_size * 0.01))
             next_update_threshold = update_step
-            while (
-                self.finished_samples_count < self.target_batch_size
-                and self.skipped_sample_count < self.target_batch_size
-            ):
+            while self.finished_samples_count < self.target_batch_size:
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
                     pbar.refresh()
@@ -269,20 +262,16 @@ class DataFlow:
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
-        if self.finished_samples_count >= self.target_batch_size:
-            self.logger.info(
-                f"Target batch size {self.target_batch_size} reached with {self.finished_samples_count} finished samples."
-            )
-        else:
-            self.logger.info(
-                f"Stopping data generation as skipped samples {self.skipped_sample_count} reached target batch size {self.target_batch_size}."
-            )
-        # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
-        # would be queued behind many worker tasks, causing a significant delay.
+        self.logger.info(
+            f"Target batch size {self.target_batch_size} reached with {self.finished_samples_count} finished samples."
+        )
+
         if self.enable_partial_rollout:
             self.logger.info("Start pausing env controller.")
             await self.pause()
             while len(waiting_tasks) > 0:
+                # NOTE: Keep sending pause requests because the inference engine only marks currently running requests as aborted.
+                # When a waiting request starts running, it still needs another pause request to be marked as aborted.
                 done_tasks, pending_tasks = await asyncio.wait(
                     waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
                 )

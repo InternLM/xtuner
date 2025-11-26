@@ -377,18 +377,16 @@ class RolloutController:
         try:
             selected_worker_info = self.workers_info[server_url]
             response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout * 2)
-            selected_worker_info.running_count -= 1
             selected_worker_info.success_count += 1
             if response.state == "failed" or response.state == "skipped":
                 selected_worker_info.failure_count += 1
-                selected_worker_info.success_count -= 1
                 self.logger.error(f"Get failed/skipped response from rollout worker {worker}, deactivate it.")
                 self.deactivate_worker_by_url(server_url)
             return response
         except asyncio.TimeoutError:
-            selected_worker_info.running_count -= 1
             selected_worker_info.failure_count += 1
             self.logger.error(f"Get response from rollout worker {worker} timeout and return skip this sample.")
+            self.deactivate_worker_by_url(server_url)
             return RLRolloutResponseItem(state="skipped")
 
     def get_rollout_stats(self) -> str:
