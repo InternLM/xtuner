@@ -207,7 +207,6 @@ class TrainEngine:
         """
         if self.float8_handler is not None and self.float8_handler.enabled:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
-
         loss_log = {}
         other_log: Dict[str, Any] = {}
         intra_layer_micro_batch = self.intra_layer_micro_batch

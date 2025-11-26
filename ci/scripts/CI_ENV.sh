@@ -12,6 +12,7 @@ export VERL_ROLLOUT_DATA_PATH=${CI_SHARE_DATA}/verl-rollout-step0.jsonl
 export QWEN3_PATH=${CI_SHARE_MODEL}/Qwen3-8B
 export QWEN3_VL_PATH=${CI_SHARE_MODEL}/Qwen2.5-VL-3B-Instruct
 export QWEN3_MOE_PATH=${CI_SHARE_MODEL}/Qwen3-30B-A3B
+export QWEN3_MOE_FOPE_PATH=${CI_SHARE_MODEL}/Qwen3_30B_fope_g0.1_sephead
 export INTERNS1_DENSE_PATH=${CI_SHARE_MODEL}/intern-s1-mini
 export ROLLOUT_MODEL_PATH=${CI_SHARE_MODEL}/Qwen3-8B
 export ALPACA_PATH=${CI_SHARE_DATA}/alpaca
