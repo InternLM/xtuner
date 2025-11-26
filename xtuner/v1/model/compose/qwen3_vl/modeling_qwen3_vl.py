@@ -126,9 +126,9 @@ class Qwen3VLForConditionalGeneration(BaseModel):
 
     # llm 中的 param_to_safetensor 不会被触发，只能重写
     def param_to_safetensor(
-        self,
-        safetensor: torch.Tensor,
-        hf_param_name: str,
+            self,
+            safetensor: torch.Tensor,
+            hf_param_name: str,
     ):
         assert isinstance(hf_param_name, str)
         if isinstance(self.language_model, Qwen3VLTextMoE):
@@ -137,7 +137,8 @@ class Qwen3VLForConditionalGeneration(BaseModel):
                 # hf: num_experts, hidden_size, 2 * expert_dim
                 num_experts = self.language_model.config.n_routed_experts
                 hidden_size = safetensor.size(1)
-                safetensor = safetensor.reshape(num_experts, -1, hidden_size)  # num_experts, 2 * expert_dim, hidden_size
+                safetensor = safetensor.reshape(num_experts, -1,
+                                                hidden_size)  # num_experts, 2 * expert_dim, hidden_size
                 safetensor = safetensor.transpose(1, 2).contiguous()  # num_experts, hidden_size, 2 * expert_dim
             elif "down_proj" in hf_param_name:
                 # xtuner: num_experts * hidden_size, expert_dim
@@ -175,10 +176,12 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         return image_embeds, deepstack_image_embeds
 
     def get_placeholder_mask(
-        self,
-        input_ids: torch.Tensor,
-        visual_features: torch.Tensor,
-        sequence_parallel_mesh: DeviceMesh | None = None
+            self,
+            input_ids: torch.Tensor,
+            visual_features: torch.Tensor,
+            deepstack_visual_embeds: list[torch.Tensor],
+            origin_pixel_len: int,
+            sequence_parallel_mesh: DeviceMesh | None = None
     ):
         """Obtains multimodal placeholder mask from `input_ids` or
         `inputs_embeds`, and checks that the placeholder token count is equal
@@ -187,12 +190,23 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         If the lengths are different, an error is raised.
         """
         # input_ids 是切分后的，为了严格校验可以 all-gather
+        assert origin_pixel_len % 4 == 0, f"origin_pixel_len must be divisible by 4, but got {origin_pixel_len}"
         if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
-            input_ids_list = dist.all_gather(input_ids, group=sequence_parallel_mesh.get_group())
-            input_ids = torch.cat(input_ids_list, dim=1)
+            input_ids_list = [torch.empty_like(input_ids) for _ in range(sequence_parallel_mesh.size())]
+            dist.all_gather(input_ids_list, input_ids, group=sequence_parallel_mesh.get_group())
+            input_ids = torch.cat(input_ids_list, dim=1)  # type: ignore
 
             visual_features_list = distF.all_gather(visual_features, group=sequence_parallel_mesh.get_group())
-            visual_features = torch.cat(visual_features_list, dim=0)
+            visual_features = torch.cat(visual_features_list, dim=0)[:origin_pixel_len // 4]
+
+            deepstack_image_embeds_list = []
+            for deepstack_image_embed in deepstack_visual_embeds:
+                deepstack_image_embed_ = distF.all_gather(deepstack_image_embed,
+                                                          group=sequence_parallel_mesh.get_group())
+                deepstack_image_embed = torch.cat(deepstack_image_embed_, dim=0)
+                deepstack_image_embed = deepstack_image_embed[:origin_pixel_len// 4]
+                deepstack_image_embeds_list.append(deepstack_image_embed)
+            deepstack_visual_embeds = deepstack_image_embeds_list
 
         special_image_mask = input_ids == self.config.image_token_id
         special_video_mask = input_ids == self.config.video_token_id
@@ -207,6 +221,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
 
         # 基于 sp 规则重新切分 special_visual_mask
         if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
+            assert special_visual_mask.size(0) == 1
             # special_visual_mask 必然能被 sp整除，所以不需要考虑 pad
             special_visual_mask_per_rank = split_for_sequence_parallel(
                 special_visual_mask,
@@ -215,17 +230,17 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             )
             n_visual_tokens_per_rank = special_visual_mask_per_rank.sum()
             sp_rank = sequence_parallel_mesh.get_local_rank()
-            if sp_rank == 0:
-                start_index = 0
-                end_index = n_visual_tokens_per_rank
-            else:
-                start_index = special_visual_mask[:, :(special_visual_mask.shape[1] // sequence_parallel_mesh.size()) * sp_rank].sum()
-                end_index = start_index + n_visual_tokens_per_rank
+            start_index = special_visual_mask[:, :(special_visual_mask.shape[1] // sequence_parallel_mesh.size()) * sp_rank].sum()
+            end_index = start_index + n_visual_tokens_per_rank
+            visual_features = visual_features[start_index:end_index]
+            assert n_visual_tokens_per_rank == visual_features.shape[0]
+            special_visual_mask = special_visual_mask_per_rank
 
-            special_visual_mask = special_visual_mask_per_rank[:, start_index:end_index]
-            visual_features = visual_features[special_visual_mask]
+            for i, deepstack_visual_embed in enumerate(deepstack_visual_embeds):
+                deepstack_visual_embeds[i] = deepstack_visual_embed[start_index:end_index]
+                assert n_visual_tokens_per_rank == deepstack_visual_embeds[i].shape[0]
 
-        return special_visual_mask, visual_features
+        return special_visual_mask, visual_features, deepstack_visual_embeds
 
     def forward(
             self,
@@ -248,13 +263,14 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             try:
                 # 为了简化代码，以及方便 language_model 里面的 deepstack_visual_embeds 处理
                 # 在开启 sp 逻辑下，仅仅 all-gather visual_embeds，然后基于切割后的 input_ids 重新非均匀切分 visual_embeds
-                special_visual_mask, visual_features = self.get_placeholder_mask(
+                visual_pos_masks, visual_features, deepstack_visual_embeds = self.get_placeholder_mask(
                     input_ids,
                     visual_features=visual_embeds,
-                    sequence_parallel_mesh=sequence_parallel_mesh
+                    deepstack_visual_embeds=deepstack_visual_embeds,
+                    sequence_parallel_mesh=sequence_parallel_mesh,
+                    origin_pixel_len = pixel_values.size(0)
                 )
-                inputs_embeds = inputs_embeds.masked_scatter(special_visual_mask, visual_features)
-                visual_pos_masks = special_visual_mask[..., 0]
+                inputs_embeds[visual_pos_masks] = inputs_embeds[visual_pos_masks] * 0.0 + visual_features
             except RuntimeError as e:
                 print(f"!!!Warning: {e}, but continue anyway!!!!")
                 inputs_embeds = inputs_embeds + visual_embeds.sum() * 0.0
