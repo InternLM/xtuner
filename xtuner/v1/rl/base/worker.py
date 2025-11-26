@@ -331,10 +331,9 @@ class TrainingWorker(SingleAcceleratorWorker):
                     # list[n,l,e]
                     if not isinstance(rollout_routed_experts[0], torch.Tensor):
                         rollout_routed_experts_refs = rollout_routed_experts
-                        rollout_routed_experts = [ray.get(routed_experts) for routed_experts in rollout_routed_experts]
+                        rollout_routed_experts = ray.get(rollout_routed_experts_refs)
                         # free obj store explicitly
-                        for ref in rollout_routed_experts_refs:
-                            ray._private.internal_api.free(ref)
+                        ray._private.internal_api.free(rollout_routed_experts_refs)
                         if not isinstance(rollout_routed_experts[0], torch.Tensor):
                             rollout_routed_experts = [
                                 torch.as_tensor(routed_experts, dtype=torch.long)
@@ -342,8 +341,25 @@ class TrainingWorker(SingleAcceleratorWorker):
                             ]
                     seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts, dim=0)  # max_len,l,e
                 else:
-                    rollout_routed_experts = ray.get(rollout_routed_experts)
-                    seq_ctx.rollout_routed_experts = rollout_routed_experts
+                    assert isinstance(rollout_routed_experts, torch.Tensor), (
+                        f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
+                    )
+                    # convert dummy padding experts to real size
+                    language_cfg = (
+                        self.config.model_cfg.text_config
+                        if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
+                        else self.config.model_cfg
+                    )
+                    rollout_routed_experts_tensor = torch.randint(
+                        low=0,
+                        high=language_cfg.n_routed_experts,
+                        size=(
+                            self.config.pack_max_length,
+                            language_cfg.num_hidden_layers,
+                            language_cfg.num_experts_per_tok,
+                        ),
+                    )
+                    seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
 
                 assert seq_ctx.input_ids is not None, "input_ids is None"
                 assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
