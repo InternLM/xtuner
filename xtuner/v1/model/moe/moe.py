@@ -641,7 +641,7 @@ class MoE(BaseModel):
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
         # This is used for training without FSDP.
         # remove this because init with actual device already
-        # For FoPE, the rotary_emb parameters (such as sin_coef) were already sharded by full_shard previously. 
+        # For FoPE, the rotary_emb parameters (such as sin_coef) were already sharded by full_shard previously.
         # However, rebuilding them here would revert sin_coef back to its pre-sharded state, causing issues like dimension mismatches during loading.
         # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
 
@@ -695,7 +695,7 @@ class MoE(BaseModel):
         if self.ep_mesh.size() > 1:
             self._replicate_other_params(self)
 
-        # Although rotary_emb was already constructed in __init__, it was built on the meta device. 
+        # Although rotary_emb was already constructed in __init__, it was built on the meta device.
         # Here we need to rebuild it on the actual device to calculate coefficients like inv_freq.
         # xTODO: remove this because init with actual device already, Check it
         # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)

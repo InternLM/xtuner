@@ -1,10 +1,10 @@
-from typing import Literal, Protocol, Self, cast
+from typing import Literal, Protocol, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from pydantic import BaseModel, ConfigDict, computed_field
-from typing_extensions import overload
+from typing_extensions import Self, overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from xtuner.v1.utils import get_logger
