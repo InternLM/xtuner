@@ -632,14 +632,23 @@ class MoE(BaseModel):
         return layers
 
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbeddingProtocol:
-        return get_rope_embedding(config=config)
+        with torch.device(DEVICE):
+            return get_rope_embedding(config=config)
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
-        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # This is used for training without FSDP.
+        # remove this because init with actual device already
+        # For FoPE, the rotary_emb parameters (such as sin_coef) were already sharded by full_shard previously.
+        # However, rebuilding them here would revert sin_coef back to its pre-sharded state, causing issues like dimension mismatches during loading.
+        # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
+
+        # logger.debug(f"before load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
+        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
+        # logger.debug(f"after load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
+
         return loaded_keys, unloaded_keys, missing_keys
 
     @override
@@ -686,7 +695,10 @@ class MoE(BaseModel):
         if self.ep_mesh.size() > 1:
             self._replicate_other_params(self)
 
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # Although rotary_emb was already constructed in __init__, it was built on the meta device.
+        # Here we need to rebuild it on the actual device to calculate coefficients like inv_freq.
+        # xTODO: remove this because init with actual device already, Check it
+        # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
