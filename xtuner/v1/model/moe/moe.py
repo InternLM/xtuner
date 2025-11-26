@@ -469,9 +469,9 @@ class MoE(BaseModel):
             for layer_name in layer_names:
                 layer_router_logits_list: list[torch.Tensor] = []
                 for micro_batch_idx in range(len(seq_ctx_list)):
-                    layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].clone().detach())
+                    layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].detach())
                 router_logits = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
-                router_logits_dict["router_logits"] = router_logits
+                router_logits_dict[layer_name] = router_logits
 
             output["router_logits"] = router_logits_dict
 
