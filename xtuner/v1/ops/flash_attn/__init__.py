@@ -1,5 +1,3 @@
-import torch
-
 from .protocol import FlashAttnVarlenProtocol, cpu_flash_varlen_attn
 
 
@@ -20,8 +18,16 @@ def get_flash_attn_varlen() -> FlashAttnVarlenProtocol:
         import os
 
         if os.environ.get("XTUNER_USE_FA3", "0") == "1":
+            try:
+                from flash_attn_interface import flash_attn_3_cuda
+            except ImportError as e:
+                raise ImportError(f"Import FlashAttention 3 failed {e}, Please install it manually.")
             from .gpu import gpu_flash_varlen_attn_v3 as flash_attn_varlen_func
         else:
+            try:
+                from flash_attn.flash_attn_interface import flash_attn_gpu
+            except ImportError as e:
+                print(f"Import FlashAttention 2 failed {e}, Please install it manually.")
             from .gpu import flash_attn_varlen_func_v2 as flash_attn_varlen_func  # type: ignore
 
         return flash_attn_varlen_func
@@ -29,8 +35,4 @@ def get_flash_attn_varlen() -> FlashAttnVarlenProtocol:
         raise RuntimeError
 
 
-# TODO: Enhance the optional requirement for flash attention
-try:
-    flash_attn_varlen_func = get_flash_attn_varlen()
-except ImportError:
-    flash_attn_varlen_func = None  # type: ignore[assignment]
+flash_attn_varlen_func = get_flash_attn_varlen()
