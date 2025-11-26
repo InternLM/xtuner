@@ -372,8 +372,7 @@ class ReplayBufferStorage:
                         multimodal_train_info = data_item.data.multimodal_train_info
                         del data_item.data.multimodal_train_info
                 samples.append(group_samples)
-                if multimodal_train_info is not None:
-                    multimodal_train_infos.append(multimodal_train_info)
+                multimodal_train_infos.append(multimodal_train_info)
             self._returned = remain_finished_list
 
             return samples, multimodal_train_infos
