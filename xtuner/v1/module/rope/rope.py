@@ -243,7 +243,6 @@ class FourierEmbedding(RotaryEmbedding):
                 sin = torch.einsum("bhtD, hDd -> bhtd", pos_sin, self.sin_coef.float())
                 cos = torch.einsum("bhtD, hDd -> bhtd", pos_cos, self.cos_coef.float())
             else:
-                # torch.distributed.breakpoint()
                 sin = torch.einsum("btD, Dd -> btd", pos_sin, self.sin_coef.float())
                 cos = torch.einsum("btD, Dd -> btd", pos_cos, self.cos_coef.float())
 

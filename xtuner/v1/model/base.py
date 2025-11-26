@@ -201,9 +201,7 @@ class BaseModel(nn.Module):
             hf_path = str(hf_path)
 
         hf_loader = HFCheckpointLoader(hf_path)
-        # dist.breakpoint()
         loaded_keys, unloaded_keys, missing_keys = self._load_params(hf_loader, strict=strict)
-        # dist.breakpoint()
         return loaded_keys, unloaded_keys, missing_keys
 
     def scale_and_reduce_grad(self):
@@ -952,9 +950,6 @@ class BaseModel(nn.Module):
     ) -> list[str]:  # return missing key
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
         hf_key = load_spec.hf_keys[0]
-        # TODO: 加载 sin_coef
-        # if 'sin_coef' in hf_key:
-        #     torch.distributed.breakpoint()
         if self._is_loaded_param_fp8(hf_key, checkpoint_loader):
             if not _is_float8_available():
                 raise RuntimeError(
@@ -963,8 +958,6 @@ class BaseModel(nn.Module):
             loaded_tensor = self._load_fp8(hf_key, checkpoint_loader)
         else:
             loaded_tensor = checkpoint_loader.load(hf_key)
-        # if 'sin_coef' in hf_key:
-        #     torch.distributed.breakpoint()
         if loaded_tensor is None:
             return [hf_key]
 
@@ -1045,7 +1038,6 @@ class BaseModel(nn.Module):
             start = None
             end = None
 
-        # dist.breakpoint(1)
         missing_keys: list[str] = []
         _loaded_tensor: list[torch.Tensor] = []
         for hf_key in hf_keys:

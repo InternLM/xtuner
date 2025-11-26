@@ -436,7 +436,6 @@ class Trainer:
             strict=strict_load,
             intra_layer_micro_batch=intra_layer_micro_batch,
         )
-        # torch.distributed.breakpoint()
         self._lr_cfg = lr_cfg
         self._lr_scheduler = self.build_lr_scheduler(lr_cfg, self.total_step)
 
@@ -794,7 +793,6 @@ class Trainer:
 
         if model_path is not None:
             engine.model.set_hf(model_path)
-        # dist.breakpoint()
         return engine
 
     def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:

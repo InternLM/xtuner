@@ -494,9 +494,7 @@ class MoE(BaseModel):
 
         # create position embeddings to be shared across the decoder layers
         assert position_ids is not None
-        # dist.breakpoint()
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        # dist.breakpoint()
 
         output: dict = {}  # type: ignore
         if self.config.return_hidden_states:

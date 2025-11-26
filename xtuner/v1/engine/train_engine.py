@@ -207,7 +207,6 @@ class TrainEngine:
         """
         if self.float8_handler is not None and self.float8_handler.enabled:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
-        # dist.breakpoint()
         loss_log = {}
         other_log: Dict[str, Any] = {}
         intra_layer_micro_batch = self.intra_layer_micro_batch
@@ -262,7 +261,6 @@ class TrainEngine:
                 total_forward_tokens += (num_tokens.sum()) ** 2
 
             if self.intra_layer_micro_batch == 1:
-                # dist.breakpoint()
                 output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
             else:
                 # For intra_layer_micro_batch > 1, we need to handle the data batches differently.
