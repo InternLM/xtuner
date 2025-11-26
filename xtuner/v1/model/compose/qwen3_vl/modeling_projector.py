@@ -26,7 +26,8 @@ class Qwen3VLVisionPatchMerger(nn.Module):
 
     def __init__(self, config: Qwen3VLProjectorConfig, use_postshuffle_norm=False) -> None:
         super().__init__()
-        self.hidden_size = config.vision_hidden_size * (config.spatial_merge_size ** 2)
+        self.factor = config.spatial_merge_size ** 2
+        self.hidden_size = config.vision_hidden_size * self.factor
         self.use_postshuffle_norm = use_postshuffle_norm
         self.norm = nn.LayerNorm(self.hidden_size if self.use_postshuffle_norm else config.vision_hidden_size, eps=1e-6)
         self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
@@ -34,6 +35,9 @@ class Qwen3VLVisionPatchMerger(nn.Module):
         self.linear_fc2 = nn.Linear(self.hidden_size, config.text_hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # TODO: sp 这个地方无解了。
+        # 如果尝试修改 dataset 参数使其满足要求，那么数据输出就改变了，结果必然对不上，不能这么改
+        # 只能靠 TP 了
         x = self.norm(x.view(-1, self.hidden_size) if self.use_postshuffle_norm else x).view(-1, self.hidden_size)
         x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
         return x

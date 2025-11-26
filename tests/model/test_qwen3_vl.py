@@ -29,6 +29,9 @@ VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
 class TestQwen3VL(DeterministicDDPTestCase):
 
+    # 在没有 sp 情况下，可以实现和 hf loss 完全一致
+    # 在开启 sp 后，纯文本的 loss 会差 0.01，非常不合理。其余模态 loss 完全对齐
+    # TODO(hha) 可能是一个隐患，后续要排查
     def _test_all(self, hf_model, qwen3vl_model, type, device, sp_size, tol):
         if type == 'image':
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
