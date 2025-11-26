@@ -46,7 +46,7 @@ from xtuner.v1.data_proto.utils import convert_packed_to_padded, convert_padded_
 
 
 class RolloutImportanceSampling(BaseModel):
-    model_config = ConfigDict(title="RolloutImportanceSamplingConfig", extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(title="RolloutImportanceSamplingConfig", extra="forbid", arbitrary_types_allowed=True)
     rollout_is_level: str = "token"
     rollout_is_mode: str = "truncate"
     rollout_is_threshold: Optional[Tuple[float, float]] = None

@@ -8,9 +8,9 @@ import torch.distributed.nn.functional as distF
 
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.ops.comm import split_for_sequence_parallel
 from xtuner.v1.utils import get_logger, get_padding_length, get_device
 from xtuner.v1.model import BaseModel
+from xtuner.v1.rl.utils import sp_split
 
 from .modeling_vision import InternS1VisionModel, init_world_mesh
 from .modeling_projector import InternS1MultiModalProjector
@@ -248,15 +248,15 @@ class InternS1ForConditionalGeneration(BaseModel):
                 inputs_embeds[selected] = inputs_embeds[selected] * 0.0 + vit_embeds.sum() * 0
 
             inputs_embeds = inputs_embeds.reshape(B, N, C)
+
+            if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
+                inputs_embeds = sp_split(inputs_embeds, sequence_parallel_mesh, 1, 0)
         else:
             fake_pixel_values = torch.randn(1, 3, self.image_size, self.image_size,
                                             device=inputs_embeds.device,
                                             dtype=inputs_embeds.dtype)
             vit_embeds = self.extract_feature(fake_pixel_values)
             inputs_embeds = inputs_embeds + vit_embeds.sum() * 0
-
-        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
-            inputs_embeds = split_for_sequence_parallel(inputs_embeds, dim=1, sp_mesh=sequence_parallel_mesh)
 
         # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
         lang_seq_ctx = SequenceContext(input_ids=None,
