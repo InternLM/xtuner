@@ -201,7 +201,8 @@ class Dense(BaseModel):
                     layer, preserve_rng_state=checkpoint_preserve_rng_state, checkpoint_impl=CheckpointImpl.REENTRANT
                 )
                 # __class__ without self attribute
-                layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
+
+            layer.forward = maybe_compile(layer.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
             fully_shard(
