@@ -334,7 +334,7 @@ class ReplayBufferStorage:
         for attr in attrs_to_clear:
             getattr(self, attr).clear()
 
-    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any]]]:
+    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any] | None]]:
         """Retrieves a batch of finished sample groups from the buffer.
 
         Args:

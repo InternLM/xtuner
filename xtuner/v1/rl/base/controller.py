@@ -175,9 +175,6 @@ class TrainingController:
             language_cfg = model_cfg
             if isinstance(model_cfg, VisionComposeConfigProtocol):
                 language_cfg = model_cfg.text_config
-            n_routed_experts = language_cfg.n_routed_experts
-            num_experts_per_tok = language_cfg.num_experts_per_tok
-            num_hidden_layers = language_cfg.num_hidden_layers
 
         packed_data_batches = self._packing(data_batches, pack_max_length, language_cfg)
         # packed_data_batches = self._grouped_by_max_length(packed_data_batches)
@@ -231,7 +228,7 @@ class TrainingController:
             if has_rollout_routed_experts:
                 pad_rand_index = torch.randint(
                     low=0,
-                    high=n_routed_experts,
+                    high=1,
                     size=(1, 1, 1),  # add dummy data, true data will be initialized in train worker.fit
                 )
                 pad_seq_ctx.rollout_routed_experts = pad_rand_index
