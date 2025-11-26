@@ -81,6 +81,10 @@ class TransformerConfig(PydanticBaseModel):
         return self.attention.num_attention_heads
 
     @computed_field
+    def num_key_value_heads(self) -> int:
+        return self.attention.num_key_value_heads
+
+    @computed_field
     def head_dim(self) -> int:
         return self.attention.head_dim
 
@@ -644,8 +648,15 @@ class BaseModel(nn.Module):
         tensor_list: list[torch.Tensor] = []
         load_spec_list: list[LoadSpec] = []
         name_list: list[str] = []
+        buffer_tensor_list: list[torch.Tensor] = []
+        buffer_name_list: list[str] = []
 
         for param, load_spec in params:
+            if not isinstance(param, DTensor):
+                # in case, param is a buffer of module, FSDP will not shard it, so it's not a DTensor
+                buffer_tensor_list.append(param)
+                buffer_name_list.append(load_spec.hf_keys[0])
+                continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
             tensor_size = self._get_tensor_size(param, dtype)
@@ -687,6 +698,9 @@ class BaseModel(nn.Module):
                 gathered_tensor_list, name_list = self._to_float8(gathered_tensor_list, name_list, tensor_list, dtype)
             gathered_tensor_list = [t.to(device=device) for t in gathered_tensor_list]
             yield name_list, gathered_tensor_list
+
+        if buffer_tensor_list:
+            yield buffer_name_list, buffer_tensor_list
 
     def _clean_param_name(self, name: str) -> str:
         if "._checkpoint_wrapped_module." in name:
@@ -837,9 +851,12 @@ class BaseModel(nn.Module):
         weight_map = reduce(lambda x, y: x | y, weight_map_list)
 
         if not dist.is_initialized() or dist.get_rank() == 0:
+            if self.config.hf_config is None and self._hf_path is None:
+                raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
+
             if self.config.hf_config is not None:
                 self.config.save_hf(hf_dir)
-            elif self._hf_path is not None:
+            else:  # if self._hf_path is not None:
                 for file in cast(Path, self._hf_path).iterdir():
                     if file.suffix != ".safetensors":
                         # Copy the model config and tokenizer files to the save path
@@ -849,9 +866,7 @@ class BaseModel(nn.Module):
                         else:
                             copytree(file, target_path)
 
-            else:
-                raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
-
+            # write or overwrite `model.safetensors.index.json`
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 index = {"weight_map": weight_map, "metadata": {}}
                 json.dump(index, f, indent=2, ensure_ascii=False)
@@ -947,7 +962,6 @@ class BaseModel(nn.Module):
     ) -> list[str]:  # return missing key
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
         hf_key = load_spec.hf_keys[0]
-
         if self._is_loaded_param_fp8(hf_key, checkpoint_loader):
             if not _is_float8_available():
                 raise RuntimeError(
@@ -1036,7 +1050,6 @@ class BaseModel(nn.Module):
             start = None
             end = None
 
-        # dist.breakpoint(1)
         missing_keys: list[str] = []
         _loaded_tensor: list[torch.Tensor] = []
         for hf_key in hf_keys:

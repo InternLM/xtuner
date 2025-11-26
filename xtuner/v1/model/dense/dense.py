@@ -121,7 +121,8 @@ class Dense(BaseModel):
         return layers
 
     def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
-        return get_rope_embedding(config=config)
+        with torch.device(DEVICE):
+            return get_rope_embedding(config=config)
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
@@ -143,7 +144,8 @@ class Dense(BaseModel):
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # xTODO: remove this line below when with torch.device(DEVICE) in __init__()
+        # self.rotary_emb = self.build_rotary_embedding(self.config)
         return loaded_keys, unloaded_keys, missing_keys
 
     @override
@@ -181,7 +183,8 @@ class Dense(BaseModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # xTODO: remove this line below when with torch.device(DEVICE) in __init__()
+        # self.rotary_emb = self.build_rotary_embedding(self.config)
 
         self._maybe_compile_layers()
         mp_policy = MixedPrecisionPolicy(

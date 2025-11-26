@@ -1477,10 +1477,10 @@ class Trainer:
                     rmtree(hf_dir)
 
         self._engine.save_hf(str(save_hf_path))
-        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-            self.tokenizer.save_pretrained(str(save_hf_path))
-        # 将 latest_hf_link 指向 save_hf_path
         if self.rank == 0:
+            if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+                self.tokenizer.save_pretrained(str(save_hf_path))
+            # 将 latest_hf_link 指向 save_hf_path
             latest_hf_link.unlink(missing_ok=True)
             latest_hf_link.symlink_to(save_hf_path.absolute(), target_is_directory=True)
 
