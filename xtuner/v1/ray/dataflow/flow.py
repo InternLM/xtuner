@@ -240,7 +240,10 @@ class DataFlow:
         with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
             update_step = max(1, int(self.target_batch_size * 0.01))
             next_update_threshold = update_step
-            while self.finished_samples_count < self.target_batch_size:
+            while (
+                self.finished_samples_count < self.target_batch_size
+                and self.skipped_sample_count < self.target_batch_size * self.target_batch_size
+            ):
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
                     pbar.refresh()
@@ -262,9 +265,14 @@ class DataFlow:
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
-        self.logger.info(
-            f"Target batch size {self.target_batch_size} reached with {self.finished_samples_count} finished samples."
-        )
+        if self.finished_samples_count >= self.target_batch_size:
+            self.logger.info(
+                f"Target batch size {self.target_batch_size} reached with {self.finished_samples_count} finished samples."
+            )
+        else:
+            self.logger.info(
+                f"Stopping data generation as skipped samples {self.skipped_sample_count} reached target batch size {self.target_batch_size}."
+            )
 
         if self.enable_partial_rollout:
             self.logger.info("Start pausing env controller.")
