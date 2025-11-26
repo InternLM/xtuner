@@ -30,23 +30,27 @@ class TestQwen3MoE(DeterministicDDPTestCase):
         self.temp_dir.cleanup()
 
     @parametrize.parametrize(
-        "device,dispatcher,ep_size,compile,tol,loss_class",
+        "device,dispatcher,ep_size,compile,tol,loss_mode, model_type",
         [
-            # ("cuda", "deepep", 8, False, 1e-2, "cross_entropy"),
-            ("cuda", "all2all", 8, False, 1e-2, "cross_entropy"),
-            ("cuda", None, 1, False, 1e-2, "cross_entropy"),
-            # ("cuda", "deepep", 8, True, 4e-2, "cross_entropy"),  # TODO: This test is flaky, need to fix it
-            ("cuda", None, 1, False, 1e-2, "chunk_cross_entropy"),
+            # ("cuda", "deepep", 8, False, 1e-2, "eager", "qwen3_moe"),
+            ("cuda", "all2all", 8, False, 1e-2, "eager", "qwen3_moe"),
+            ("cuda", None, 1, False, 1e-2, "eager", "qwen3_moe"),
+            # ("cuda", "deepep", 8, True, 4e-2, "eager", "qwen3_moe"),  # TODO: This test is flaky, need to fix it
+            ("cuda", None, 1, False, 1e-2, "chunk", "qwen3_moe"),
+            ("cuda", None, 1, False, 1e-2, "chunk", "qwen3_moe_fope"),
+            ("cuda", "all2all", 8, False, 1e-2, "eager", "qwen3_moe_fope"),
         ],
     )
-    def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol, loss_class):
+    def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol, loss_mode, model_type):
+        assert model_type in ["qwen3_moe", "qwen3_moe_fope"]
         os.environ["TRITON_CACHE_DIR"] = str(Path(self.temp_dir.name) / "triton_cache")
         self.create_pg(device)
         if not compile:
             maybe_compile.clear_compile_targets()
 
+        hf_model_path = QWEN3_MOE_PATH if model_type == "qwen3_moe" else QWEN3_MOE_FOPE_PATH
         hf_model = AutoModelForCausalLM.from_pretrained(
-            QWEN3_MOE_PATH,
+            hf_model_path,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
             device_map="cuda"
@@ -60,7 +64,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             "就像老树拥抱归巢的鸟儿，内存管理应该给予每个对象足够的安全感",
         ]
         expected_losses = []
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
         for text in text_list:
             input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
             with torch.no_grad():
@@ -75,11 +79,12 @@ class TestQwen3MoE(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = Qwen3MoE30BA3Config()
+            # cfg = Qwen3MoE30BA3Config()
+            cfg = get_model_config_from_hf(hf_model_path)
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
             qwen_model = cfg.build().to(torch.bfloat16)
-        qwen_model.from_hf(QWEN3_MOE_PATH)
+        qwen_model.from_hf(hf_model_path)
 
         losses = []
 
@@ -88,7 +93,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             shift_input_ids = input_ids[:, :-1]
             shifted_labels = input_ids[:, 1:]
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-            loss_cfg = CELossConfig()
+            loss_cfg = CELossConfig(mode=loss_mode)
             seq_ctx_list = [seq_ctx]
             loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
             LossContext = loss_cfg.loss_ctx_cls
@@ -110,19 +115,23 @@ class TestQwen3MoE(DeterministicDDPTestCase):
         self._check_loss_curve( losses=torch.tensor(losses), losses_ref=torch.tensor(expected_losses), sim_tol=tol, rtol=tol,)
 
     @parametrize.parametrize(
-        "device,dispatcher,ep_size",
+        "device,dispatcher,ep_size,model_type",
         [
-            ("cuda", "all2all", 4),
-            ("cuda", "all2all", 8),
-            ("cuda", None, 1),
+            ("cuda", "all2all", 4, "qwen3_moe"),
+            ("cuda", "all2all", 8, "qwen3_moe"),
+            ("cuda", None, 1, "qwen3_moe"),
+            ("cuda", None, 1, "qwen3_moe_fope"),
+            ("cuda", "all2all", 4, "qwen3_moe_fope"),
         ],
     )
-    def test_fsdp_accuracy(self, device, dispatcher, ep_size):
+    def test_fsdp_accuracy(self, device, dispatcher, ep_size, model_type):
+        assert model_type in ["qwen3_moe", "qwen3_moe_fope"]
         self.create_pg(device)
         maybe_compile.clear_compile_targets()
 
+        hf_model_path = QWEN3_MOE_PATH if model_type == "qwen3_moe" else QWEN3_MOE_FOPE_PATH
         hf_model = AutoModelForCausalLM.from_pretrained(
-            QWEN3_MOE_PATH,
+            hf_model_path,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
             device_map="cuda"
@@ -136,7 +145,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             "就像老树拥抱归巢的鸟儿，内存管理应该给予每个对象足够的安全感",
         ]
         expected_losses = []
-        tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
         for text in text_list:
             input_ids = tokenizer(text, return_tensors="pt").input_ids.to("cuda")
             with torch.no_grad():
@@ -151,7 +160,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = Qwen3MoE30BA3Config()
+            cfg = get_model_config_from_hf(hf_model_path)
             cfg.ep_size = ep_size
             cfg.dispatcher = dispatcher
             qwen_model = cfg.build().to(torch.bfloat16)
@@ -161,7 +170,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             cpu_offload=False,
         )
         qwen_model.fully_shard(fsdp_config=fsdp_config)
-        qwen_model.from_hf(QWEN3_MOE_PATH)
+        qwen_model.from_hf(hf_model_path)
 
         losses = []
 
