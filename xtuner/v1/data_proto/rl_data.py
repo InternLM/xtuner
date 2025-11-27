@@ -82,18 +82,29 @@ class RLRolloutResponseItem(BaseModel):
         if not isinstance(other, RLRolloutResponseItem):
             raise TypeError("Can only update with another RLRolloutResponseItem instance.")
 
-        if self.response_ids is not None and other.response_ids:
-            self.response_ids.extend(other.response_ids)
+        if self.response_ids is not None:
+            init_response_len = len(self.response_ids)
+            if other.response_ids is not None:
+                self.response_ids.extend(other.response_ids)
+                logger.info(f"Updated response_ids from {init_response_len} to {len(self.response_ids)}")
+            else:
+                self.response_ids = self.response_ids
         else:
             self.response_ids = other.response_ids
 
-        if self.logprobs is not None and other.logprobs:
-            self.logprobs.extend(other.logprobs)
+        if self.logprobs is not None:
+            if other.logprobs is not None:
+                self.logprobs.extend(other.logprobs)
+            else:
+                self.logprobs = self.logprobs
         else:
             self.logprobs = other.logprobs
             
-        if self.response is not None and other.response:
-            self.response += other.response
+        if self.response is not None:
+            if other.response is not None:
+                self.response + other.response
+            else:
+                self.response = self.response
         else:
             self.response = other.response
         self.num_return_tokens += other.num_return_tokens
@@ -197,14 +208,14 @@ def check_valid_dataflow_item(group_data_items: List[RLDataFlowItem]) -> bool:
     """
     for item in group_data_items:
         rollout_info = item.env.rollout
-        response_valid = bool(rollout_info.response)
-        ids_valid = bool(rollout_info.response_ids)
-        logprobs_valid = bool(rollout_info.logprobs)
+        response_valid = True if rollout_info.response is not None and len(rollout_info.response) > 0 else False
+        ids_valid = True if rollout_info.response_ids is not None and len(rollout_info.response_ids) > 0 else False
+        logprobs_valid = True if rollout_info.logprobs is not None and len(rollout_info.logprobs) > 0 else False
         if item.env.rollout.state in ["skipped", "failed"]:
             logger.info(f"Invalid dataflow item found: rollout state is {item.env.rollout.state}. UID: {item.uid}")
             return False
         if not response_valid and not ids_valid and item.env.rollout.state != "interrupted":
-            logger.info(f"Invalid dataflow item found: no response or response_ids. UID:{item.data.uid} with rollout response {item.env.rollout}")
+            logger.info(f"Invalid dataflow item found: no response or response_ids. UID:{item.uid.action_id} with rollout response {item.env.rollout}")
             return False
         if ids_valid and logprobs_valid and len(rollout_info.logprobs) != len(rollout_info.response_ids):  # type: ignore[arg-type]
             logger.info(f"Invalid dataflow item found: logprobs and response_ids length mismatch. UID: {item.uid}")

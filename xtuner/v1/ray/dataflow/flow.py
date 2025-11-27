@@ -221,7 +221,7 @@ class DataFlow:
 
         # Step 3: Determine the sample's state and act accordingly.
         group_state = determine_group_state(group_data_items)
-        self.logger.debug(f"Determined replay state for {action_id}: {group_state}")
+        self.logger.info(f"Determined replay state for {action_id}: {group_state}")
         if group_state == "completed":
             group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
             if len(group_data_items) > 0:
@@ -260,6 +260,7 @@ class DataFlow:
             before completing.
         """
         waiting_tasks = set()
+        start_time = time.monotonic()
         with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
             update_step = max(1, int(self.target_batch_size * 0.01))
             next_update_threshold = update_step
@@ -286,8 +287,12 @@ class DataFlow:
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
+        elapsed_time = time.monotonic() - start_time
+        self.logger.info(f"Sample collection finished. Time taken: {elapsed_time:.2f} seconds.")
+
         # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
         # would be queued behind many worker tasks, causing a significant delay.
+        start_time = time.monotonic()
         if self.enable_partial_rollout:
             await self.pause()
             cleanup_start_time = time.monotonic()
@@ -311,21 +316,26 @@ class DataFlow:
                     await self.pause()
                 waiting_tasks = pending_tasks
             self.logger.info("All worker tasks have completed after pausing env controller.")
-
+        elapsed_time = time.monotonic() - start_time
+        self.logger.info(f"Pause generation. Time taken: {elapsed_time:.2f} seconds.")
         self.logging_replaybuffer_state()
         self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))
         
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
-        rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
-        self.worker_url_list = list(rollout_info["server_url_dict"].values())
-
+        self.logger.info("Sending abort requests to all rollout workers.")
+        # rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
+        # self.worker_url_list = list(rollout_info["server_url_dict"].values())
+        self.logger.info("get self.worker_url_list from env_controller: ", self.worker_url_list)
         if not self.worker_url_list:
             self.logger.info("No active rollout workers to pause.")
             return
     
         async with httpx.AsyncClient() as client:
-            tasks = [self._send_abort_request(client, url, timeout=timeout) for url in self.worker_url_list]
+            tasks = []
+            for url in self.worker_url_list:
+                self.logger.info(f"Sending abort request to worker at {url}")
+                tasks.append(self._send_abort_request(client, url, timeout=timeout))
             results = await asyncio.gather(*tasks)
 
         failed_workers = [url for url, success in results if not success]
@@ -337,7 +347,7 @@ class DataFlow:
                 f"Failed: {len(failed_workers)}. Failed workers: {failed_workers}"
             )
         else:
-            self.logger.debug(f"All {succeeded_count} abort requests sent successfully.")
+            self.logger.info(f"All {succeeded_count} abort requests sent successfully.")
 
     async def run(
         self,
@@ -397,7 +407,7 @@ class DataFlow:
         try:
             response = await client.post(worker_url, json={"abort_all": True}, timeout=timeout)
             response.raise_for_status()
-            self.logger.debug(f"Successfully sent abort request to {url}")
+            self.logger.info(f"Successfully sent abort request to {url}")
             return url, True
         except Exception as e:
             self.logger.error(f"Failed to send abort request to {url}: {e}")

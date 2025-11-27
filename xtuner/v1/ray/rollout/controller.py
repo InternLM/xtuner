@@ -390,11 +390,6 @@ class RolloutController:
             format=format,
             extra_info=extra_info,
         )
-        # if self.workers_info[server_url].running_count % 100 == 0:
-        #     log_msg = ""
-        #     for _, info in self.workers_info.items():
-        #         log_msg += f"rank {info.rank} worker info: {info}"
-        #     self.logger.info(log_msg)
         try:
             response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout * 2)
             self.workers_info[server_url].success_count += 1

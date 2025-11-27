@@ -127,11 +127,12 @@ class LMDeployWorker(RolloutWorker):
         if "num_return_tokens" in extra_info:
             max_return_tokens = sample_params["max_tokens"] - extra_info["num_return_tokens"]
             sample_params["max_tokens"] = max_return_tokens
+            init_input_len = len(input_ids) if input_ids else 0
+            payload["input_ids"] += extra_info["response_ids"]
             self.logger.info(
-                f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_info['num_return_tokens']}"
+                f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_info['num_return_tokens']}, init input_len: {init_input_len} and payload input len {len(payload['input_ids'])}."
             )
-
-        if self.enable_return_routed_experts:
+        if self.enable_return_routed_experts:   
             extra_params["return_routed_experts"] = True
 
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)

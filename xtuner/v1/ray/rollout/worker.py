@@ -1,4 +1,3 @@
-import asyncio
 import copy
 import json
 import multiprocessing
@@ -333,7 +332,13 @@ class RolloutWorker(SingleAcceleratorWorker):
             endpoint_url = f"{self.server_url}/{self.endpoints['v1/chat/completions']}"
 
         while True:
-            if extra_info.get("num_return_tokens", None) is not None and (sample_params["max_tokens"] - extra_info["num_return_tokens"]) == 0:
+            if (
+                extra_info.get("num_return_tokens", None) is not None
+                and (sample_params["max_tokens"] - extra_info["num_return_tokens"]) == 0
+            ):  
+                self.logger.info(
+                    f"rollout request {uid} reached max tokens {sample_params['max_tokens']}, returning length finish_reason"
+                )
                 return RLRolloutResponseItem(
                     response="",
                     response_ids=[],
@@ -484,6 +489,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                         routed_experts = ray.put(routed_experts)
                     extra_info = {"routed_experts": routed_experts}
 
+                if finish_reason != "abort" and len(last_token_ids) == 0:
+                    self.logger.error(f"rollout request {uid} returned zero tokens with finish_reason {finish_reason}")
+                    
                 rollout_response = RLRolloutResponseItem(
                     response=response["text"],
                     response_ids=last_token_ids if len(last_token_ids) > 0 else None,

@@ -117,7 +117,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     group_state = determine_group_state(grouped_dataitem)
 
     replay_state = ReplayState.from_str(group_state)
-    logger.debug(f"determined group_state: {group_state}, replay_state: {replay_state}")
+    logger.info(f"determined group_state: {group_state}, replay_state: {replay_state}, version: {version}")
     replay_meta = ReplayMeta(
         env=env_str,
         root_id=root_id,
@@ -337,18 +337,19 @@ class ReplayBufferStorage:
         # 1. 跟prompt相关的action_id记录
         if root_id in self._root2actions:
             # TODO: version 更新需要 根据是否update_weights来判断，需要考虑到非共卡的情况
-            replay_meta.version += 1
-            self.logger.info(f"Existing root_id: {root_id} found. Incrementing version to {replay_meta.version}.")
+            replay_meta.version += 1 if partial_rollout_step > 0 else 0
+            self.logger.info(f"Existing root_id: {root_id} with action_id {action_id} found. Incrementing version to {replay_meta.version}.")
             self._root2actions[root_id].append(action_id)
         else:
             self._root2actions[root_id] = [action_id]
+
         self._actions[action_id] = replay_meta
 
         # 2. 根据rollout状态加到finished, abort, abort_over_version队列中；Partial rollout is handled based on whether finish_reason is "abort".
-        if replay_meta.state == ReplayState.INTERRUPTED and replay_meta.version < partial_rollout_step:
+        if replay_meta.state == ReplayState.INTERRUPTED and (replay_meta.version < partial_rollout_step or partial_rollout_step == 0):
             self._interrupted_actions[replay_meta.version].append(action_id)
             self.logger.info(
-                f"Add aborted sample with root_id: {root_id}, action_id: {action_id} to _interrupted_actions."
+                f"Add aborted sample with action_id: {action_id} version: {replay_meta.version} to _interrupted_actions."
             )
         elif replay_meta.state == ReplayState.INTERRUPTED and replay_meta.version >= partial_rollout_step:
             self._expired_actions.append(action_id)
@@ -359,7 +360,7 @@ class ReplayBufferStorage:
             )
         elif replay_meta.state == ReplayState.COMPLETED:
             self._completed_actions[replay_meta.version].append(action_id)
-            self.logger.debug(f"Add sample with root_id: {root_id}, action_id: {action_id} to finished_actions.")
+            self.logger.info(f"Add sample with root_id: {root_id}, action_id: {action_id} to finished_actions.")
         elif replay_meta.state == ReplayState.FAILED:
             assert False, "Currently, failed samples are not supported in the replay buffer."
 
@@ -541,7 +542,7 @@ class ReplayBufferStorage:
 
         # update env for expired samples
         for sample in group_samples:
-            sample.data.input_ids = sample.data.input_ids[: sample.data.num_tokens]
+            # sample.data.input_ids = sample.data.input_ids[: sample.data.num_tokens]
             sample.env = RLEnvDataItem()
             sample.uid.version = 0
             sample.extra_info.state = str(ReplayState.INIT)
@@ -560,20 +561,20 @@ class ReplayBufferStorage:
         # update env for interrupted samples
         for sample in group_samples:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
-            sample.data.input_ids = sample.data.input_ids[: sample.data.num_tokens]
+            # sample.data.input_ids = sample.data.input_ids[: sample.data.num_tokens]
             sample.uid.action_id = int(uuid4().int)
             sample.uid.version = replay_meta.version
             sample.extra_info.state = str(ReplayState.INIT)
-            if sample.env.rollout.response_ids and sample.data.input_ids:
-                # TODO： response_ids 累加 
-                if "train_prompt_ids" in sample.data.extra_info:
-                    sample.data.input_ids = (
-                        sample.data.extra_info["train_prompt_ids"] + sample.env.rollout.response_ids
-                    )
-                else:
-                    sample.data.input_ids.extend(sample.env.rollout.response_ids)
-            elif sample.env.rollout.response:
-                sample.data.input_ids.extend(tokenizer.encode(sample.env.rollout.response, add_special_tokens=False))
+            # if sample.env.rollout.response_ids and sample.data.input_ids:
+            #     # TODO： response_ids 累加 
+            #     if "train_prompt_ids" in sample.data.extra_info:
+            #         sample.data.input_ids = (
+            #             sample.data.extra_info["train_prompt_ids"] + sample.env.rollout.response_ids
+            #         )
+            #     else:
+            #         sample.data.input_ids.extend(sample.env.rollout.response_ids)
+            # elif sample.env.rollout.response:
+            #     sample.data.input_ids.extend(tokenizer.encode(sample.env.rollout.response, add_special_tokens=False))
         self.logger.info(
             f"Sampling interrupted action_id: {action_id} from replay buffer, remain interrupted samples: {self.get_interrupted_samples()}"
         )
