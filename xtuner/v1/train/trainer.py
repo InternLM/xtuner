@@ -259,7 +259,7 @@ class Trainer:
         total_epoch (int | None): Number of training epochs.
         resume_cfg (ResumeConfig | None): Configuration for resuming training.
         auto_resume (bool): Whether to automatically resume training. Defaults to False.
-        load_checkpoint_cfg (LoadCheckpointConfig | None): Configuration for loading checkpoints.
+        load_checkpoint_cfg (LoadCheckpointConfig): Configuration for loading checkpoints.
         strict_load (bool): Whether to strictly load model weights.
         checkpoint_interval (int | None): Interval for saving checkpoints.
         checkpoint_maxkeep (int | None): Maximum number of checkpoints to keep.
@@ -478,7 +478,7 @@ class Trainer:
             self._snapshot_interval = None
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
-            self._resume()
+            self._load_checkpoint()
 
         setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
 
@@ -1426,7 +1426,7 @@ class Trainer:
             load_checkpoint_cfg.load_scheduler = True
         return load_checkpoint_cfg
 
-    def _resume(self):
+    def _load_checkpoint(self):
         load_checkpoint_cfg: LoadCheckpointConfig = self._load_checkpoint_cfg
 
         if (resume_from := load_checkpoint_cfg.checkpoint_path) is None:

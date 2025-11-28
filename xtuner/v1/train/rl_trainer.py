@@ -66,7 +66,7 @@ class RLTrainerConfig(BaseModel):
     total_epochs: int
     resume_config: ResumeConfig | None = None
     auto_resume: bool = False
-    load_checkpoint_cfg: LoadCheckpointConfig | None = None
+    load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
     strict_load: bool = True
     hf_interval: int | None = None
     hf_max_keep: int | None = None
@@ -160,7 +160,7 @@ class RLTrainer:
         resume_config (ResumeConfig | None): Configuration for resuming training from
             a previous checkpoint. Defaults to None.
         auto_resume (bool): Whether to automatically resume training. Defaults to False.
-        load_checkpoint_cfg (LoadCheckpointConfig | None): Configuration for loading checkpoints.
+        load_checkpoint_cfg (LoadCheckpointConfig): Configuration for loading checkpoints.
         strict_load (bool): Whether to strictly enforce checkpoint loading compatibility.
             Defaults to True.
         hf_interval (int | None): Interval (in epochs) for saving HuggingFace format
@@ -209,7 +209,7 @@ class RLTrainer:
         total_epochs: int,
         resume_config: ResumeConfig | None = None,  # TODO: Removed in version 1.1.0
         auto_resume: bool = False,
-        load_checkpoint_cfg: LoadCheckpointConfig | None = None,
+        load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig(),
         strict_load: bool = True,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
