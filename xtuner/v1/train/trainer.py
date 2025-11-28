@@ -150,6 +150,15 @@ class ResumeConfig(BaseModel):
     load_scheduler: bool = True
 
 
+class LoadCheckpointConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    checkpoint_path: str | Path | None = None
+    load_optimizer_states: bool = True
+    load_optimizer_args: bool = True
+    load_dataset: bool = True
+    load_scheduler: bool = True
+
+
 class TrainerConfig(BaseModel):
     model_config = ConfigDict(
         title="Trainer config",
@@ -174,7 +183,9 @@ class TrainerConfig(BaseModel):
     sp_size: int = 1
     total_step: int | None = None
     total_epoch: int | None = None
-    resume_cfg: ResumeConfig | None = None
+    resume_cfg: ResumeConfig | None = None  # TODO: Removed in version 1.1.0
+    auto_resume: bool = False
+    load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
     strict_load: bool = True
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
@@ -247,6 +258,8 @@ class Trainer:
         total_step (int | None): Total training steps.
         total_epoch (int | None): Number of training epochs.
         resume_cfg (ResumeConfig | None): Configuration for resuming training.
+        auto_resume (bool): Whether to automatically resume training. Defaults to False.
+        load_checkpoint_cfg (LoadCheckpointConfig): Configuration for loading checkpoints.
         strict_load (bool): Whether to strictly load model weights.
         checkpoint_interval (int | None): Interval for saving checkpoints.
         checkpoint_maxkeep (int | None): Maximum number of checkpoints to keep.
@@ -293,7 +306,9 @@ class Trainer:
         sp_size: int = 1,
         total_step: int | None = None,
         total_epoch: int | None = None,
-        resume_cfg: ResumeConfig | None = ResumeConfig(),
+        resume_cfg: ResumeConfig | None = ResumeConfig(),  # TODO: Removed in version 1.1.0
+        auto_resume: bool = False,
+        load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig(),
         strict_load: bool = True,
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
@@ -383,9 +398,14 @@ class Trainer:
             resume_cfg = ResumeConfig()
 
         self._work_dir = self._resolve_work_dir(work_dir)
-        self._meta = self._init_xtuner_meta(self.work_dir, auto_resume=resume_cfg.auto_resume)
+        logger.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
+        self._auto_resume = auto_resume
+        self._auto_resume = self._resolve_deprecated_resume_cfg(
+            resume_cfg, self._auto_resume
+        )  # TODO: Removed in version 1.1.0
+        self._meta = self._init_xtuner_meta(self.work_dir, auto_resume=self._auto_resume)
         self._log_dir = self._resolve_log_dir(log_dir)
-        self._resume_cfg = self._resolve_resume_cfg(resume_cfg)
+        self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(self._auto_resume, load_checkpoint_cfg)
 
         self.logger, log_dir = self._init_logger(self._log_dir)
         self._exp_tracker = self._init_tracker(
@@ -405,6 +425,7 @@ class Trainer:
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
+            logger.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
             # For backward compatibility, reserve the dataset_cfg interface, remove it later
             if dataloader_cfg.dataset_config_list is not None:
                 logger.warning("Outside dataset_cfg will override inner dataset_config_list")
@@ -433,7 +454,7 @@ class Trainer:
             model_config=model_cfg,
             optim_config=optim_cfg,
             fsdp_config=fsdp_cfg,
-            resume_cfg=resume_cfg,
+            load_checkpoint_path=self._load_checkpoint_cfg.checkpoint_path,
             strict=strict_load,
             intra_layer_micro_batch=intra_layer_micro_batch,
         )
@@ -457,8 +478,8 @@ class Trainer:
             self._checkpoint_interval = None
             self._snapshot_interval = None
 
-        if self._resume_cfg.resume_from is not None:
-            self._resume()
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            self._load_checkpoint()
 
         setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
 
@@ -491,6 +512,8 @@ class Trainer:
             total_step=config.total_step,
             total_epoch=config.total_epoch,
             resume_cfg=config.resume_cfg,
+            auto_resume=config.auto_resume,
+            load_checkpoint_cfg=config.load_checkpoint_cfg,
             strict_load=config.strict_load,
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
@@ -778,7 +801,7 @@ class Trainer:
         model_config: TransformerConfig | VisionComposeConfigProtocol,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
-        resume_cfg: ResumeConfig,
+        load_checkpoint_path: str | Path | None,
         intra_layer_micro_batch: int = 1,
         strict: bool = True,
     ):
@@ -810,9 +833,9 @@ class Trainer:
                 model_cfg=model_config,
                 intra_layer_micro_batch=intra_layer_micro_batch,
             )
-        if model_path is not None and (model_config.dcp_ignore_frozen_params or resume_cfg.resume_from is None):
+        if model_path is not None and (model_config.dcp_ignore_frozen_params or load_checkpoint_path is None):
             engine.from_hf(hf_path=model_path, strict=strict)
-        elif resume_cfg.resume_from is None:
+        elif load_checkpoint_path is None:
             engine.init_model_weights()
 
         if model_path is not None:
@@ -892,11 +915,7 @@ class Trainer:
 
         meta_path = self.work_dir / self._META_PATH
 
-        optimizer_path = (
-            checkpoint_path / self._SAVE_OPTIMIZER_DIR
-            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
-            else None
-        )
+        optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR
         model_path = checkpoint_path / self._SAVE_MODEL_DIR
         dataloader_path = checkpoint_path / self._SAVE_DATALOADER_DIR
         scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
@@ -1394,16 +1413,29 @@ class Trainer:
             )
             dataloader_cfg.pad_token_id = pad_token_id
 
-    def _resolve_resume_cfg(self, resume_cfg: ResumeConfig):
+    def _resolve_deprecated_resume_cfg(self, resume_cfg: ResumeConfig, auto_resume: bool) -> bool:
+        if resume_cfg.auto_resume:
+            return True
+        return auto_resume
+
+    def _resolve_load_checkpoint_cfg(
+        self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
+    ) -> LoadCheckpointConfig:
+        # auto_resume优先级高，如果有latest ckp，则说明走auto_resume逻辑
+        # 此时，覆盖load checkpoint path，并且加载optimizer states, optimizer args, dataset, scheduler
         latest_checkpoint = self.meta.latest_exp.latest_checkpoint
-        if latest_checkpoint is not None and resume_cfg.auto_resume:
-            resume_cfg.resume_from = Path(latest_checkpoint)
-        return resume_cfg
+        if latest_checkpoint is not None and auto_resume:
+            load_checkpoint_cfg.checkpoint_path = Path(latest_checkpoint)
+            load_checkpoint_cfg.load_optimizer_states = True
+            load_checkpoint_cfg.load_optimizer_args = True
+            load_checkpoint_cfg.load_dataset = True
+            load_checkpoint_cfg.load_scheduler = True
+        return load_checkpoint_cfg
 
-    def _resume(self):
-        resume_cfg = self._resume_cfg
+    def _load_checkpoint(self):
+        load_checkpoint_cfg: LoadCheckpointConfig = self._load_checkpoint_cfg
 
-        if (resume_from := resume_cfg.resume_from) is None:
+        if (resume_from := load_checkpoint_cfg.checkpoint_path) is None:
             logger.info("No checkpoint to resume from.")
             return
 
@@ -1417,18 +1449,18 @@ class Trainer:
         model_path = resume_from / self._SAVE_MODEL_DIR
         optimizer_path = (
             resume_from / self._SAVE_OPTIMIZER_DIR
-            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
+            if load_checkpoint_cfg.load_optimizer_states or load_checkpoint_cfg.load_optimizer_args
             else None
         )
 
         self._engine.load_dcp(
             model_dir=model_path,
             optimizer_dir=optimizer_path,
-            load_states=self._resume_cfg.load_optimizer_states,
-            load_args=self._resume_cfg.load_optimizer_args,
+            load_states=load_checkpoint_cfg.load_optimizer_states,
+            load_args=load_checkpoint_cfg.load_optimizer_args,
         )
 
-        if resume_cfg.load_dataset:
+        if load_checkpoint_cfg.load_dataset:
             dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
             self._resume_dataloader(dataloader_path)
 
@@ -1443,7 +1475,7 @@ class Trainer:
         self._consumed_tokens = train_state["consumed_tokens"]
         self._train_time_offset = train_state["train_time_offset"]
 
-        if resume_cfg.load_scheduler:
+        if load_checkpoint_cfg.load_scheduler:
             scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
             if not scheduler_path.exists():
                 raise FileNotFoundError(f"Scheduler path {scheduler_path} does not exist.")
