@@ -1580,12 +1580,14 @@ class Trainer:
         return hooks_config
 
     def _setup_env(self):
-        gc.disable()
+        if os.getenv("XTUNER_GC_ENABLE") == "0":
+            gc.disable()
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
         log_str = "\n============XTuner Training Environment============\n"
         env = {
             "XTUNER_DETERMINISTIC": os.getenv("XTUNER_DETERMINISTIC"),
+            "XTUNER_GC_ENABLE": os.getenv("XTUNER_GC_ENABLE"),
             "XTUNER_FILE_OPEN_CONCURRENCY": os.getenv("XTUNER_FILE_OPEN_CONCURRENCY"),
             "XTUNER_TOKENIZE_CHUNK_SIZE": os.getenv("XTUNER_TOKENIZE_CHUNK_SIZE"),
             "XTUNER_TOKENIZE_WORKERS": os.getenv("XTUNER_TOKENIZE_WORKERS"),
