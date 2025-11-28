@@ -212,6 +212,13 @@ class RolloutConfig(BaseModel):
             help="Maximum number of retries per rollout worker before deactivation.",
         ),
     ] = None
+    max_retry_per_sample: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Maximum number of retries per sample before marking it as failed.",
+        ),
+    ] = 1
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
     def model_post_init(self, __context: Any) -> None:
