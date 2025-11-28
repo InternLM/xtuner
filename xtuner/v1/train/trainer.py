@@ -400,8 +400,9 @@ class Trainer:
         self._work_dir = self._resolve_work_dir(work_dir)
         logger.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
         self._auto_resume = auto_resume
-        if resume_cfg.auto_resume:
-            self._auto_resume = True
+        self._auto_resume = self._resolve_deprecated_resume_cfg(
+            resume_cfg, self._auto_resume
+        )  # TODO: Removed in version 1.1.0
         self._meta = self._init_xtuner_meta(self.work_dir, auto_resume=self._auto_resume)
         self._log_dir = self._resolve_log_dir(log_dir)
         self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(self._auto_resume, load_checkpoint_cfg)
@@ -1411,6 +1412,11 @@ class Trainer:
                 f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
             )
             dataloader_cfg.pad_token_id = pad_token_id
+
+    def _resolve_deprecated_resume_cfg(self, resume_cfg: ResumeConfig, auto_resume: bool) -> bool:
+        if resume_cfg.auto_resume:
+            return True
+        return auto_resume
 
     def _resolve_load_checkpoint_cfg(
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
