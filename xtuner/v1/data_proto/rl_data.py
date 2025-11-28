@@ -3,7 +3,9 @@ from typing import Any, Dict, List, Literal, Optional, TypedDict
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Annotated
-from xtuner.v1.utils.logger import get_logger   
+
+from xtuner.v1.utils.logger import get_logger
+
 
 logger = get_logger()
 
@@ -82,32 +84,41 @@ class RLRolloutResponseItem(BaseModel):
         if not isinstance(other, RLRolloutResponseItem):
             raise TypeError("Can only update with another RLRolloutResponseItem instance.")
 
+        logger.info("call update RLRolloutResponseItem function")
+        init_response_ids_len = 0
         if self.response_ids is not None:
-            init_response_len = len(self.response_ids)
+            init_response_ids_len = len(self.response_ids)
             if other.response_ids is not None:
                 self.response_ids.extend(other.response_ids)
-                logger.info(f"Updated response_ids from {init_response_len} to {len(self.response_ids)}")
             else:
                 self.response_ids = self.response_ids
         else:
             self.response_ids = other.response_ids
 
+        init_logprobs_len = 0
         if self.logprobs is not None:
+            init_logprobs_len = len(self.logprobs)
             if other.logprobs is not None:
                 self.logprobs.extend(other.logprobs)
             else:
                 self.logprobs = self.logprobs
         else:
             self.logprobs = other.logprobs
-            
+
+        init_response_len = 0
         if self.response is not None:
-            if other.response is not None:
-                self.response + other.response
+            init_response_len = len(self.response)
+            if other.response is not None and len(other.response) > 0:
+                self.response += other.response
             else:
                 self.response = self.response
         else:
             self.response = other.response
-        self.num_return_tokens += other.num_return_tokens
+
+        logger.info(
+            f"Updated response_ids from {init_response_ids_len} to {len(self.response_ids)}, logprobs from {init_logprobs_len} to {len(self.logprobs)}. response from {init_response_len} to {len(self.response)}."
+        )
+        self.num_return_tokens = len(self.response_ids)
         self.finish_reason = other.finish_reason
         self.extra_info.update(other.extra_info)
         self.state = other.state
@@ -215,7 +226,9 @@ def check_valid_dataflow_item(group_data_items: List[RLDataFlowItem]) -> bool:
             logger.info(f"Invalid dataflow item found: rollout state is {item.env.rollout.state}. UID: {item.uid}")
             return False
         if not response_valid and not ids_valid and item.env.rollout.state != "interrupted":
-            logger.info(f"Invalid dataflow item found: no response or response_ids. UID:{item.uid.action_id} with rollout response {item.env.rollout}")
+            logger.info(
+                f"Invalid dataflow item found: no response or response_ids. UID:{item.uid.action_id} with rollout response {item.env.rollout}"
+            )
             return False
         if ids_valid and logprobs_valid and len(rollout_info.logprobs) != len(rollout_info.response_ids):  # type: ignore[arg-type]
             logger.info(f"Invalid dataflow item found: logprobs and response_ids length mismatch. UID: {item.uid}")

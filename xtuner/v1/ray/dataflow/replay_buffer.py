@@ -1,4 +1,5 @@
 import itertools
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
@@ -266,6 +267,7 @@ class DatasetSampler:
         Returns:
             List[RLDataFlowItem]: A list of sampled data items.
         """
+        start_time = time.monotonic()
         root_id = uuid4().int
         action_id = uuid4().int
         group_data_item: List[RLDataFlowItem] = [RLDataFlowItem() for _ in range(prompt_repeat_k)]
@@ -290,6 +292,8 @@ class DatasetSampler:
             data_item.data = RLDatasetItem(**data)
             data_item.extra_info = RLExtraDataItem(state=str(ReplayState.INIT), retry_times=0)
         # self.logger.debug(f"Sample from dataloader with data: {data_item}")
+        elapsed_time = time.monotonic() - start_time
+        self.logger.debug(f"Sample each sample from dataloader cost: {elapsed_time:.2f} seconds.")
         return group_data_item
 
     def resume(self, num: int) -> None:
@@ -323,6 +327,7 @@ class ReplayBufferStorage:
             grouped_dataitem (List[RLDataFlowItem]): A list of data items
                 belonging to the same group.
         """
+        start_time = time.monotonic()
         if (
             grouped_dataitem is None
             or len(grouped_dataitem) == 0
@@ -338,7 +343,9 @@ class ReplayBufferStorage:
         if root_id in self._root2actions:
             # TODO: version 更新需要 根据是否update_weights来判断，需要考虑到非共卡的情况
             replay_meta.version += 1 if partial_rollout_step > 0 else 0
-            self.logger.info(f"Existing root_id: {root_id} with action_id {action_id} found. Incrementing version to {replay_meta.version}.")
+            self.logger.info(
+                f"Existing root_id: {root_id} with action_id {action_id} found. Incrementing version to {replay_meta.version}."
+            )
             self._root2actions[root_id].append(action_id)
         else:
             self._root2actions[root_id] = [action_id]
@@ -346,7 +353,9 @@ class ReplayBufferStorage:
         self._actions[action_id] = replay_meta
 
         # 2. 根据rollout状态加到finished, abort, abort_over_version队列中；Partial rollout is handled based on whether finish_reason is "abort".
-        if replay_meta.state == ReplayState.INTERRUPTED and (replay_meta.version < partial_rollout_step or partial_rollout_step == 0):
+        if replay_meta.state == ReplayState.INTERRUPTED and (
+            replay_meta.version < partial_rollout_step or partial_rollout_step == 0
+        ):
             self._interrupted_actions[replay_meta.version].append(action_id)
             self.logger.info(
                 f"Add aborted sample with action_id: {action_id} version: {replay_meta.version} to _interrupted_actions."
@@ -370,6 +379,8 @@ class ReplayBufferStorage:
             self._observations[observation_id] = replay_meta
             self._observations2states[observation_id] = replay_meta.state
             self._states[str(replay_meta.state)].append(observation_id)
+        elapsed_time = time.monotonic() - start_time
+        self.logger.debug(f"Replay Buffer add each sample cost: {elapsed_time:.2f} seconds.")
 
     def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any]]]:
         """Retrieves a batch of finished sample groups from the buffer.
@@ -534,6 +545,7 @@ class ReplayBufferStorage:
         return sum(len(bucket) for bucket in self._interrupted_actions)
 
     def sample_from_expired_storage(self) -> List[RLDataFlowItem]:
+        start_time = time.monotonic()
         assert len(self._expired_actions) > 0
         action_id = self._expired_actions.pop()
         replay_meta = self._actions[action_id]
@@ -550,9 +562,12 @@ class ReplayBufferStorage:
         self.logger.info(
             f"Sampling expired action_id: {action_id} from replay buffer, remain expired samples: {len(self._expired_actions)}"
         )
+        elapsed_time = time.monotonic() - start_time
+        self.logger.debug(f"Sample each sample from expired storage cost: {elapsed_time:.2f} seconds.")
         return group_samples
 
     def sample_from_interrupted_storage(self, tokenizer) -> List[RLDataFlowItem]:
+        start_time = time.monotonic()
         assert self.get_interrupted_samples() > 0
         action_id = self._pop_highest_version_action(self._interrupted_actions)
         replay_meta = self._actions[action_id]  # type: ignore[index]
@@ -566,7 +581,7 @@ class ReplayBufferStorage:
             sample.uid.version = replay_meta.version
             sample.extra_info.state = str(ReplayState.INIT)
             # if sample.env.rollout.response_ids and sample.data.input_ids:
-            #     # TODO： response_ids 累加 
+            #     # TODO： response_ids 累加
             #     if "train_prompt_ids" in sample.data.extra_info:
             #         sample.data.input_ids = (
             #             sample.data.extra_info["train_prompt_ids"] + sample.env.rollout.response_ids
@@ -578,6 +593,8 @@ class ReplayBufferStorage:
         self.logger.info(
             f"Sampling interrupted action_id: {action_id} from replay buffer, remain interrupted samples: {self.get_interrupted_samples()}"
         )
+        elapsed_time = time.monotonic() - start_time
+        self.logger.debug(f"Sample each sample from interrupted storage cost: {elapsed_time:.2f} seconds.")
         return group_samples
 
     def _pop_highest_version_action(self, buckets: List[List[int]]) -> Optional[int]:

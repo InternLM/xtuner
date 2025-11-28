@@ -535,9 +535,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         tp = rollout_config.tensor_parallel_size
         ep = rollout_config.expert_parallel_size
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
-        self.rollout_device_mesh = DeviceMesh(
-            "cpu", mesh=engine_mesh_list, mesh_dim_names=("engine_instance", "engine_parallel")
-        )
+        if self.rollout_device_mesh is None:
+            self.logger.info("Initializing rollout device mesh with engine_mesh_list")
+            self.rollout_device_mesh = DeviceMesh(
+                "cpu", mesh=engine_mesh_list, mesh_dim_names=("engine_instance", "engine_parallel")
+            )
         rollout_server_url = server_url_dict.get(self.rank, "")
         if worker_server_urls_status.get(rollout_server_url, "False") is False:
             self.logger.error(f"Rollout server url {rollout_server_url} is not available.")

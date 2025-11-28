@@ -317,6 +317,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         format: str,
         extra_info: dict,
     ) -> RLRolloutResponseItem:
+        start_time = time.perf_counter()
         uid = extra_info.get("action_id", str(uuid.uuid4()))
         response = None
         cur_retry_times = 0
@@ -335,13 +336,13 @@ class RolloutWorker(SingleAcceleratorWorker):
             if (
                 extra_info.get("num_return_tokens", None) is not None
                 and (sample_params["max_tokens"] - extra_info["num_return_tokens"]) == 0
-            ):  
+            ):
                 self.logger.info(
                     f"rollout request {uid} reached max tokens {sample_params['max_tokens']}, returning length finish_reason"
                 )
                 return RLRolloutResponseItem(
-                    response="",
-                    response_ids=[],
+                    response=None,
+                    response_ids=None,
                     num_return_tokens=0,
                     finish_reason="length",
                     state="completed",
@@ -361,6 +362,10 @@ class RolloutWorker(SingleAcceleratorWorker):
             if http_result.response is not None:  # 推理完成：completed状态：finish_reason为abort/stop/length, 退出
                 response = await self._handle_non_stream_response(
                     uid, sample_params, extra_params, http_result.response
+                )
+                end_time = time.perf_counter()
+                self.logger.info(
+                    f"rollout request completed in {end_time - start_time:.2f}s, tokens/s: {response.num_return_tokens / (end_time - start_time):.2f}"
                 )
                 return response
 
@@ -491,9 +496,9 @@ class RolloutWorker(SingleAcceleratorWorker):
 
                 if finish_reason != "abort" and len(last_token_ids) == 0:
                     self.logger.error(f"rollout request {uid} returned zero tokens with finish_reason {finish_reason}")
-                    
+
                 rollout_response = RLRolloutResponseItem(
-                    response=response["text"],
+                    response=response["text"] if len(response["text"]) > 0 else None,
                     response_ids=last_token_ids if len(last_token_ids) > 0 else None,
                     num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else 0,
                     finish_reason=finish_reason,

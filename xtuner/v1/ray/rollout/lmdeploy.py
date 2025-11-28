@@ -132,7 +132,7 @@ class LMDeployWorker(RolloutWorker):
             self.logger.info(
                 f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_info['num_return_tokens']}, init input_len: {init_input_len} and payload input len {len(payload['input_ids'])}."
             )
-        if self.enable_return_routed_experts:   
+        if self.enable_return_routed_experts:
             extra_params["return_routed_experts"] = True
 
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
