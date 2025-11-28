@@ -200,14 +200,12 @@ class LoraModel(nn.Module):
 
     @torch.no_grad()
     def merge_lora(self):
-        """对全模型所有 LoraLinear 执行 merge."""
         for module in self.base_model.modules():
             if isinstance(module, LoraLinear):
                 module.merge_lora()
 
     @torch.no_grad()
     def unmerge_lora(self):
-        """对全模型所有 LoraLinear 执行 unmerge."""
         for module in self.base_model.modules():
             if isinstance(module, LoraLinear):
                 module.unmerge_lora()
@@ -244,6 +242,10 @@ class LoraModel(nn.Module):
 
     def scale_and_reduce_grad(self):
         self.base_model.scale_and_reduce_grad()
+
+    def set_hf(self, hf_path: str | Path):
+        self.lora_config.base_model_name_or_path = str(hf_path)
+        self.base_model.set_hf(hf_path)
 
     def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16):
         with profile_time_and_memory(f"[Saving HF to {hf_dir} cost]"):
@@ -283,9 +285,8 @@ class LoraModel(nn.Module):
 
             if modules_to_save:
                 for mod in modules_to_save:
-                    if name == mod or name.startswith(mod + "."):
+                    if mod in name:
                         lora_param[name] = param
-                        break
 
         tensor_list: list[torch.Tensor] = []
         load_spec_list: list[LoadSpec] = []
@@ -295,13 +296,13 @@ class LoraModel(nn.Module):
             local_tensor = local_tensor.bfloat16()
             base_name = name[11:]  # remove "base_model." prefix
             if "lora_A." in name or "lora_B." in name:
-                base_name = base_name.replace("lora_A.", "base_layer.").replace("lora_B.", "base_layer.")
                 load_spec = self.base_model.load_spec_mapping.get(base_name)
-                hf_name = "base_model." + load_spec.hf_keys[0][:-6] + "lora_" + name.split("lora_")[-1]
+                base_layer_name = base_name.replace("lora_A.", "base_layer.").replace("lora_B.", "base_layer.")
+                base_layer_load_spec = self.base_model.load_spec_mapping.get(base_layer_name)
+                hf_name = "base_model." + base_layer_load_spec.hf_keys[0][:-6] + "lora_" + name.split("lora_")[-1]
             else:
                 load_spec = self.base_model.load_spec_mapping.get(base_name)
                 hf_name = "base_model." + load_spec.hf_keys[0]
-
             tensor_list.append(local_tensor)
             name_list.append(hf_name)
             load_spec_list.append(load_spec)
@@ -343,5 +344,5 @@ class LoraModel(nn.Module):
 
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         # TODO: load lora weight
-        loaded_keys, unloaded_keys, missing_keys = self.base_model.from_hf(hf_path, strict)
+        loaded_keys, unloaded_keys, missing_keys = self.base_model.from_hf(hf_path, strict=False)
         return loaded_keys, unloaded_keys, missing_keys
