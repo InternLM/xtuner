@@ -27,6 +27,7 @@ from typing_extensions import NotRequired, TypedDict
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.model.adapter.lora import LoraConfig
 from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
@@ -145,10 +146,12 @@ class TrainEngine:
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,
+        adapter_cfg: LoraConfig | None = None,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
         self.fsdp_cfg = fsdp_cfg
+        self.adapter_cfg = adapter_cfg
         self.model = self.build_model()
         self.optimizer = self.build_optimizer(optim_cfg)
         self.intra_layer_micro_batch = intra_layer_micro_batch
@@ -166,6 +169,8 @@ class TrainEngine:
     def build_model(self) -> BaseModel:
         with torch.device("meta"):
             model = self.model_cfg.build()
+            if self.adapter_cfg:
+                model = self.adapter_cfg.build(model)
 
         self.float8_handler = None
         if self.model_cfg.float8_cfg is not None and self.model_cfg.float8_cfg.enable_float8:

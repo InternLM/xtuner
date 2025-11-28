@@ -34,6 +34,7 @@ from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
+from xtuner.v1.model.adapter.lora import LoraConfig
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
@@ -295,6 +296,7 @@ class TrainerConfig(BaseModel):
     lr_cfg: LRConfig
     loss_cfg: CELossConfig = CELossConfig()
     fsdp_cfg: FSDPConfig | None = None
+    adapter_cfg: LoraConfig | None = None
     global_batch_size: int | None
     work_dir: Path | str | None = None
     log_dir: Path | str | None = None
@@ -408,6 +410,7 @@ class Trainer:
         model_cfg: TransformerConfig | VisionComposeConfigProtocol,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig | None = FSDPConfig(),
+        adapter_cfg: LoraConfig | None = None,
         dataset_cfg: DatasetConfigList | None = None,  # TODO: Removed in version 1.1.0
         dataloader_cfg: DataloaderConfig,
         loss_cfg: CELossConfig | None = CELossConfig(),
@@ -557,6 +560,7 @@ class Trainer:
             model_config=model_cfg,
             optim_config=optim_cfg,
             fsdp_config=fsdp_cfg,
+            adapter_config=adapter_cfg,
             resume_cfg=resume_cfg,
             strict=strict_load,
             intra_layer_micro_batch=intra_layer_micro_batch,
@@ -603,6 +607,7 @@ class Trainer:
             model_cfg=config.model_cfg,
             optim_cfg=config.optim_cfg,
             fsdp_cfg=config.fsdp_cfg,
+            adapter_cfg=config.adapter_cfg,
             dataset_cfg=config.dataset_cfg,
             dataloader_cfg=config.dataloader_cfg,
             loss_cfg=config.loss_cfg,
@@ -887,6 +892,7 @@ class Trainer:
         model_config: TransformerConfig | VisionComposeConfigProtocol,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
+        adapter_config: LoraConfig,
         resume_cfg: ResumeConfig,
         intra_layer_micro_batch: int = 1,
         strict: bool = True,
@@ -910,6 +916,7 @@ class Trainer:
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
                 model_cfg=model_config,
+                adapter_cfg=adapter_config,
                 intra_layer_micro_batch=intra_layer_micro_batch,
             )
         else:
@@ -917,6 +924,7 @@ class Trainer:
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
                 model_cfg=model_config,
+                adapter_cfg=adapter_config,
                 intra_layer_micro_batch=intra_layer_micro_batch,
             )
         if model_path is not None and (model_config.dcp_ignore_frozen_params or resume_cfg.resume_from is None):
