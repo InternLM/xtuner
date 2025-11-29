@@ -49,6 +49,7 @@ from xtuner.v1.utils import (
     log_format,
     record_git_info,
 )
+from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 from .toy_tokenizer import UTF8ByteTokenizer
@@ -307,6 +308,7 @@ class TrainerConfig(BaseModel):
     checkpoint_maxkeep: int | None = -1
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     snapshot_interval: int | None = None
+    check_health_interval: int | None = None
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
@@ -425,6 +427,7 @@ class Trainer:
         checkpoint_maxkeep: int | None = -1,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         snapshot_interval: int | None = None,
+        check_health_interval: int | None = None,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
@@ -474,6 +477,7 @@ class Trainer:
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
         self._snapshot_interval = snapshot_interval
+        self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
 
@@ -620,6 +624,7 @@ class Trainer:
             checkpoint_maxkeep=config.checkpoint_maxkeep,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             snapshot_interval=config.snapshot_interval,
+            check_health_interval=config.check_health_interval,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
@@ -737,6 +742,7 @@ class Trainer:
             )
 
             self._lr_scheduler.step()
+            self._maybe_check_health()
             self._maybe_save_hf()
             ckpt_saved = self._maybe_save(is_snapshot=False)
             if not ckpt_saved:
@@ -969,6 +975,18 @@ class Trainer:
             milestones=[warmup_steps],
         )
         return lr_scheduler
+
+    def _maybe_check_health(self):
+        if self._check_health_interval is None:
+            return
+        if (
+            (self._check_health_interval is not None and self.cur_step % self._check_health_interval == 0)
+            or (self._checkpoint_interval is not None and self.cur_step % self._checkpoint_interval == 0)
+            or (self._snapshot_interval is not None and self.cur_step % self._snapshot_interval == 0)
+        ):
+            if not check_health():
+                raise RuntimeError("Health check failed, exit training")
+            logger.info(f"Health check passed at step {self.cur_step}")
 
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
