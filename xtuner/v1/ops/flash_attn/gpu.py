@@ -5,12 +5,7 @@ import torch
 
 try:
     from flash_attn.flash_attn_interface import flash_attn_gpu, round_multiple
-    from flash_attn_interface import flash_attn_3_cuda, maybe_contiguous
-except ImportError:
-    pass
-
-try:
-    from flash_attn.flash_attn_interface import flash_attn_gpu, round_multiple
+    from flash_attn.flash_attn_interface import maybe_contiguous as maybe_contiguous_v3
 
     @torch.library.custom_op("flash_attn::_flash_attn_varlen_forward_v3", mutates_args=(), device_types="cuda")
     def _flash_attn_varlen_forward_v3(
@@ -180,9 +175,9 @@ try:
             # modified from https://github.com/Dao-AILab/flash-attention/blob/afc97c60f799e470886c154e3473df938f8fa93d/hopper/flash_attn_interface.py#L369
             if softmax_scale is None:
                 softmax_scale = q.shape[-1] ** (-0.5)
-            q, k = (maybe_contiguous(x) for x in (q, k))
+            q, k = (maybe_contiguous_v3(x) for x in (q, k))
             v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
-            cu_seqlens_q, cu_seqlens_k = (maybe_contiguous(x) for x in (cu_seqlens_q, cu_seqlens_k))
+            cu_seqlens_q, cu_seqlens_k = (maybe_contiguous_v3(x) for x in (cu_seqlens_q, cu_seqlens_k))
             out, softmax_lse = _flash_attn_varlen_forward_v3(
                 q,
                 k,
@@ -215,7 +210,7 @@ try:
             # torch.compile(fullgraph=True) can't handle dynamic tensor stride checks
             # since it needs to create a fully static computation graph.
             dout = dout.contiguous()
-            out = maybe_contiguous(out)
+            out = maybe_contiguous_v3(out)
             _flash_attn_varlen_backward_v3(
                 dout,
                 q,
@@ -283,7 +278,8 @@ except ImportError:
 
 
 try:
-    from flash_attn_interface import flash_attn_3_cuda, maybe_contiguous
+    from flash_attn_interface import flash_attn_3_cuda
+    from flash_attn_interface import maybe_contiguous as maybe_contiguous_v2
 
     def flash_attn_varlen_func_v2(
         q,
@@ -501,7 +497,7 @@ try:
         seqused_k: Optional[torch.Tensor] = None,
         zero_tensors: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        q, k, v = (maybe_contiguous(x) for x in (q, k, v))
+        q, k, v = (maybe_contiguous_v2(x) for x in (q, k, v))
         out, softmax_lse, S_dmask, rng_state = flash_attn_gpu.varlen_fwd(
             q,
             k,
@@ -551,7 +547,7 @@ try:
         seqused_k: Optional[torch.Tensor] = None,
         zero_tensors: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        q, k, v = (maybe_contiguous(x) for x in (q, k, v))
+        q, k, v = (maybe_contiguous_v2(x) for x in (q, k, v))
         batch_size = cu_seqlens_q.numel() - 1
         total_q, num_heads, _ = q.shape
 
@@ -599,7 +595,7 @@ try:
         zero_tensors: bool = False,
     ) -> torch.Tensor:
         # dq, dk, dv are allocated by us so they should already be contiguous
-        dout, q, k, v, out = (maybe_contiguous(x) for x in (dout, q, k, v, out))
+        dout, q, k, v, out = (maybe_contiguous_v2(x) for x in (dout, q, k, v, out))
         (
             dq,
             dk,
@@ -659,7 +655,7 @@ try:
         rng_state: Optional[torch.Tensor] = None,
         zero_tensors: bool = False,
     ) -> torch.Tensor:
-        dout, q, k, v, out = (maybe_contiguous(x) for x in (dout, q, k, v, out))
+        dout, q, k, v, out = (maybe_contiguous_v2(x) for x in (dout, q, k, v, out))
         batch_size = cu_seqlens_q.numel() - 1
         total_q, num_heads, _ = q.shape
 

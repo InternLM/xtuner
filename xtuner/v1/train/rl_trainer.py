@@ -298,7 +298,18 @@ class RLTrainer:
             * total_epochs
         )
         bind_train_rollout(train_controller=self._train_controller, env_controller=self._rollout_env_controller)
-        ray.get(self._train_controller.offload.remote(target="all"))
+        # update weights if rollout_config.skip_load_weights == True
+        if rollout_config.skip_load_weights:
+            self.logger.info("Rollout workers skip load weights, update weights from train workers.")
+            ray.get(self._train_controller.offload.remote(target="optimizer"))
+            ray.get(self._rollout_env_controller.offload.remote())
+            ray.get(self._rollout_env_controller.onload_weights.remote())
+            ray.get(self._train_controller.update_weights.remote())
+            ray.get(self._train_controller.offload.remote(target="model"))
+            ray.get(self._rollout_env_controller.onload_kvcache.remote())
+            self.logger.info("Rollout workers has updated weights from train workers.")
+        else:
+            ray.get(self._train_controller.offload.remote(target="all"))
 
         self._train_worker_cfg = train_worker_cfg
 
