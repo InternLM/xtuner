@@ -16,7 +16,7 @@ from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops import flash_attn_varlen_func
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
-from ..linear.linear import build_linear
+from ..linear import build_linear
 from ..rms_norm import RMSNorm
 
 
