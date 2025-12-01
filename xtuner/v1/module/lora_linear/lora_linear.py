@@ -51,9 +51,7 @@ class LoraLinear(nn.Module):
             return self.base_layer(x)
 
         original_out = self.base_layer(x)
-        lora_intermediate = self.lora_A(x)
-        lora_intermediate = self.lora_dropout(lora_intermediate)
-        lora_out = self.lora_B(lora_intermediate) * self.scale
+        lora_out = self.lora_B(self.lora_A(self.lora_dropout(x))) * self.scale
         return original_out + lora_out
 
     @torch.no_grad()

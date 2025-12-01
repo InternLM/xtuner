@@ -139,7 +139,7 @@ def compute_rollout_importance_weights(
             metrics: Dict of IS and mismatch metrics, all scalars with "mismatch/" prefix
     """
     if rollout_is_threshold is None:
-        return None, response_mask, {}
+        return None, response_mask, compute_mismatch_metrics(old_log_prob, rollout_log_prob, response_mask)
 
     assert rollout_is_mode in ["truncate", "mask", "both"], (
         f"Invalid rollout_is_mode: {rollout_is_mode}. Must be 'truncate', 'mask', or 'both'."

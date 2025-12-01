@@ -11,6 +11,8 @@ from pydantic import BaseModel as PydanticBaseModel
 from torch.distributed.tensor import DTensor
 
 from xtuner.v1.model.base import _save_file
+from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
+from xtuner.v1.module.lora_linear.lora_grouped_linear import LoraGroupedLinear
 from xtuner.v1.module.lora_linear.lora_linear import LoraLinear
 from xtuner.v1.utils import get_device, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.utils.load_spec import LoadSpec
@@ -84,10 +86,12 @@ def wrap_to_hf_key_list(obj):
     orig = getattr(obj, "to_hf_key_list")
 
     @functools.wraps(orig)
-    def new_to_hf_key_list(*args, **kwargs):
-        out = orig(*args, **kwargs)
-        if ".base_layer." in out[0]:
-            out[0] = out[0].replace(".base_layer.", ".")
+    def new_to_hf_key_list(key: str):
+        if "base_layer." in key:
+            key = key.replace("base_layer.", "")
+        out = orig(key)
+        # if ".base_layer." in out[0]:
+        #     out[0] = out[0].replace(".base_layer.", ".")
         return out
 
     setattr(obj, "to_hf_key_list", new_to_hf_key_list)
@@ -99,6 +103,14 @@ class LoraModel(nn.Module):
         self.base_model = model
         self.lora_config = lora_config
 
+        # apply lora to base model
+        self._apply_lora()
+
+        # 5. 修改hf的key mapping
+        wrap_to_hf_key_list(self.base_model)
+        self.base_model._init_load_spec()
+
+    def _apply_lora(self):
         # 1. 冻结整个原模型
         for p in self.base_model.parameters():
             p.requires_grad = False
@@ -111,10 +123,6 @@ class LoraModel(nn.Module):
 
         # 4. 按 modules_to_save 让特定模块参数仍然可训练（例如 lm_head）
         self._apply_modules_to_save()
-
-        # 5. 修改hf的key mapping
-        wrap_to_hf_key_list(self.base_model)
-        self.base_model._init_load_spec()
 
     # def __getattr__(self, name):
     #     try:
@@ -144,8 +152,17 @@ class LoraModel(nn.Module):
                 # 避免重复 wrap
                 continue
 
-            if isinstance(child, nn.Linear) and self._match_target(full_name):
+            if self._match_target(full_name) and isinstance(child, nn.Linear):
                 lora_layer = LoraLinear(
+                    base_layer=child,
+                    rank=self.lora_config.r,
+                    alpha=self.lora_config.lora_alpha,
+                    lora_dropout=self.lora_config.lora_dropout,
+                    init_lora_weights=self.lora_config.init_lora_weights,
+                )
+                setattr(module, name, lora_layer)
+            elif self._match_target(full_name) and isinstance(child, GroupedLinear):
+                lora_layer = LoraGroupedLinear(
                     base_layer=child,
                     rank=self.lora_config.r,
                     alpha=self.lora_config.lora_alpha,
@@ -345,4 +362,10 @@ class LoraModel(nn.Module):
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         # TODO: load lora weight
         loaded_keys, unloaded_keys, missing_keys = self.base_model.from_hf(hf_path, strict=False)
+        for unloaded_key in unloaded_keys:
+            assert "lora_A." in unloaded_key or "lora_B." in unloaded_key, (
+                f"unloaded key {unloaded_key} is not a lora key"
+            )
+        for missing_key in missing_keys:
+            assert "lora_A." in missing_key or "lora_B." in missing_key, f"missing key {missing_key} is not a lora key"
         return loaded_keys, unloaded_keys, missing_keys
