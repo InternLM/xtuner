@@ -1175,8 +1175,12 @@ class BaseModel(nn.Module):
 
         # Concatenate the tensors along the FSDP shard dim
         for tensors, size in zip(_fsdp_unsharded_tensor_list, origin_fsdp_size):
-            # special case for partition of tensors are contiguous
-            fused_tensor = self.fuse_contiguous_chunks_without_alloc(tensors)
+            # Tn the case of one big tensor in tensor_list, the partition of tensors are contiguous.
+            # Therefore the cat and index_select operation can be omitted,
+            # and use _fuse_contiguous_chunks_without_alloc instead to reduce device peak memory.
+            # e.g. When a fused MoE weight exceeds bucket_size given, len(tensor_list) would be 1.
+            # and fused_tensor is not None reducing peak device memory.
+            fused_tensor = self._fuse_contiguous_chunks_without_alloc(tensors)
             if fused_tensor is not None and fused_tensor.shape[self.FSDP_SHARD_DIM] == size:
                 fsdp_unsharded_tensor_list.append(fused_tensor)
                 continue
@@ -1200,13 +1204,13 @@ class BaseModel(nn.Module):
         return fsdp_unsharded_tensor_list
 
     @staticmethod
-    def fuse_contiguous_chunks_without_alloc(tensors: list[torch.Tensor]) -> torch.Tensor | None:
+    def _fuse_contiguous_chunks_without_alloc(tensors: list[torch.Tensor]) -> torch.Tensor | None:
         """Fuse contiguous chunks without extra memory allocation.
 
         Return None if not possible.
         """
         if not tensors:
-            return None
+            raise ValueError("tensors should not be empty")
         base = tensors[0]
         storage = base.untyped_storage()
         dtype = base.dtype
@@ -1218,12 +1222,9 @@ class BaseModel(nn.Module):
 
         chunks = []
         for t in tensors:
-            if (
-                t.untyped_storage().data_ptr() != storage.data_ptr()
-                or t.dtype != dtype
-                or t.device != device
-                or t.stride()[1:] != inner_stride
-            ):
+            # we should check both storage and stride to ensure contiguity
+            # regardless of the implementation of foreach_all_gather
+            if t.untyped_storage().data_ptr() != storage.data_ptr() or t.stride()[1:] != inner_stride:
                 return None
             chunks.append((t.storage_offset(), t.shape[0], t))
         chunks.sort(key=lambda x: x[0])
