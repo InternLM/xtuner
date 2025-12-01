@@ -102,6 +102,7 @@ class TestTrainerSaveHF(DistributedTestBase):
         return ret
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
+    @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
     @prepare
     def test_save_hf_interval(self):
         """Test save_hf is called at correct intervals during training."""
@@ -121,7 +122,6 @@ class TestTrainerSaveHF(DistributedTestBase):
         dataloader_cfg = DataloaderConfig()
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
 
-        Trainer.build_engine = Mock(return_value=FakeEngine())
         trainer = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -174,6 +174,7 @@ class TestTrainerSaveHF(DistributedTestBase):
             self.assertEqual(config_file.read_text(), '{"model_type": "fake_model"}')
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
+    @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
     @prepare
     def test_save_checkpoint_interval(self):
         self.create_pg(DEVICE)
@@ -193,7 +194,6 @@ class TestTrainerSaveHF(DistributedTestBase):
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
 
         # 1. Only save checkpoint at last step
-        Trainer.build_engine = Mock(return_value=FakeEngine())
         trainer = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -248,6 +248,7 @@ class TestTrainerSaveHF(DistributedTestBase):
             assert os.path.exists(checkpoint)
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
+    @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
     @prepare
     def test_resume(self):
         self.create_pg(DEVICE)
@@ -267,7 +268,6 @@ class TestTrainerSaveHF(DistributedTestBase):
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
 
         # 1. Only save checkpoint at last step
-        Trainer.build_engine = Mock(return_value=FakeEngine())
         trainer = Trainer(
             load_from=str(self.fake_hf_model_dir),
             model_cfg=model_cfg,
@@ -439,6 +439,7 @@ class TestTrainerConfig(TestCase):
         pickle.dumps(trainer_cfg)
 
 
+@patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
 def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
     # 0. prepare environment
     os.environ["LOCAL_RANK"] = "0"
@@ -450,6 +451,7 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
     alpaca_path = os.environ["ALPACA_PATH"]
     tokenizer_path = os.environ["QWEN3_MOE_PATH"]
 
+    work_dir0 = tmp_path / "work_dir0"
     work_dir = tmp_path / "work_dir"
     fake_hf_model_dir = tmp_path / "fake_hf_model"
     fake_hf_model_dir.mkdir()
@@ -468,21 +470,7 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
     dataloader_cfg = DataloaderConfig(dataset_config_list=dataset_cfg)
     lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
 
-    Trainer.build_engine = Mock(return_value=FakeEngine())
-    Trainer._resume = Mock()
-
-    # 1. create: first train with auto_resume and load_checkpoint_cfg
-    auto_resume = True
-    load_checkpoint_cfg = LoadCheckpointConfig(
-        checkpoint_path=work_dir / "other_checkpoint",
-        load_optimizer_states=True,
-        load_optimizer_args=True,
-        load_dataset=False,
-        load_scheduler=False,
-    )
-
-    # 2. operate
-    trainer = Trainer(
+    trainer0 = Trainer(
         load_from=fake_hf_model_dir,
         model_cfg=model_cfg,
         optim_cfg=optim_cfg,
@@ -490,59 +478,94 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
         lr_cfg=lr_cfg,
         tokenizer_path=tokenizer_path,
         global_batch_size=2,
-        total_step=10,
         checkpoint_interval=5,
-        work_dir=work_dir,
-        auto_resume=auto_resume,
-        load_checkpoint_cfg=load_checkpoint_cfg,
+        total_step=10,
+        work_dir=work_dir0,
+    )
+    trainer0.fit()
+    # saved two checkpoints at step 5 and 10
+    print(f"trainer0.meta.latest_exp.checkpoint_list: {trainer0.meta.latest_exp.checkpoint_list}")
+    assert len(trainer0.meta.latest_exp.checkpoint_list) == 2
+
+    # 1. create: first train with auto_resume and load_checkpoint_cfg from trainer0's checkpoint
+    checkpoint_path = Path(trainer0.meta.latest_exp.checkpoint_list[-1])
+    auto_resume = True
+    load_checkpoint_cfg = LoadCheckpointConfig(
+        checkpoint_path=checkpoint_path,
+        load_optimizer_states=True,
+        load_optimizer_args=True,
+        load_dataset=False,
+        load_scheduler=False,
     )
 
-    # 3. check: auto_resume does not overwrite load_checkpoint_cfg at first time
-    assert trainer._load_checkpoint_cfg.load_dataset is False
-    assert trainer._load_checkpoint_cfg.load_scheduler is False
+    # 2. operate
+    from xtuner.v1.datasets.dataloader import Dataloader
+    from torch.optim.lr_scheduler import SequentialLR
+    with (patch.object(Dataloader, 'load_state_dict') as mock_data_load_state_dict,
+          patch.object(FakeEngine, 'load_dcp') as mock_load_dcp,
+          patch.object(SequentialLR, 'load_state_dict') as mock_lr_load_state_dict):
+        trainer = Trainer(
+            load_from=fake_hf_model_dir,
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=tokenizer_path,
+            global_batch_size=2,
+            total_step=20,
+            checkpoint_interval=5,
+            work_dir=work_dir,
+            auto_resume=auto_resume,
+            load_checkpoint_cfg=load_checkpoint_cfg,
+        )
 
-    del trainer
+        # 3. check: auto_resume does not overwrite load_checkpoint_cfg at first time
+        mock_data_load_state_dict.assert_not_called()
+        mock_lr_load_state_dict.assert_not_called()
+        mock_load_dcp.assert_called_once_with(
+            model_dir=checkpoint_path/Trainer._SAVE_MODEL_DIR,
+            optimizer_dir=checkpoint_path/Trainer._SAVE_OPTIMIZER_DIR,
+            load_states=True,
+            load_args=True,
+        )
+        # assert trainer._load_checkpoint_cfg.load_dataset is False
+        # assert trainer._load_checkpoint_cfg.load_scheduler is False
+        trainer.fit()
 
     # 4. 2nd create: resume train with auto_resume and load_checkpoint_cfg
-    exp_dir = work_dir / "fake_exp_dir"
-    latest_checkpoint = exp_dir / "step-5"
-    resume_meta = XTunerMeta(
-        exps=[
-            ExpInfo(
-                checkpoint_list=[str(latest_checkpoint)],
-                exp_dir=str(exp_dir),
-                history=[
-                    dict(
-                        begin=0,
-                        timestamp="20251126202933",
-                        git_info=dict(commit="dae707", staged="", unstaged=""),
-                        end=5,
-                    ),
-                ],
-            ),
-        ],
-    )
-    Trainer._init_xtuner_meta = Mock(return_value=resume_meta)
-    trainer2 = Trainer(
-        load_from=str(fake_hf_model_dir),
-        model_cfg=model_cfg,
-        optim_cfg=optim_cfg,
-        dataloader_cfg=dataloader_cfg,
-        lr_cfg=lr_cfg,
-        tokenizer_path=tokenizer_path,
-        global_batch_size=2,
-        total_step=10,
-        checkpoint_interval=5,
-        work_dir=work_dir,
-        auto_resume=auto_resume,
-        load_checkpoint_cfg=load_checkpoint_cfg,
-    )
+    with (patch.object(Dataloader, 'load_state_dict') as mock_data_load_state_dict,
+          patch.object(FakeEngine, 'load_dcp') as mock_load_dcp,
+          patch.object(SequentialLR, 'load_state_dict') as mock_lr_load_state_dict):
+        latest_checkpoint = Path(trainer.meta.latest_exp.checkpoint_list[-1])
+        trainer2 = Trainer(
+            load_from=fake_hf_model_dir,
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=tokenizer_path,
+            global_batch_size=2,
+            total_step=30,
+            checkpoint_interval=5,
+            work_dir=work_dir,
+            auto_resume=auto_resume,
+            load_checkpoint_cfg=load_checkpoint_cfg,
+        )
 
-    # 5. check: auto_resume overrides load_checkpoint_cfg when resume train
-    assert trainer2._load_checkpoint_cfg.checkpoint_path == latest_checkpoint
-    assert trainer2._load_checkpoint_cfg.load_dataset is True
-    assert trainer2._load_checkpoint_cfg.load_scheduler is True
-    assert trainer2._load_checkpoint_cfg.load_optimizer_states is True
-    assert trainer2._load_checkpoint_cfg.load_optimizer_args is True
+        # 5. check: auto_resume overrides load_checkpoint_cfg when resume train
+        assert str(trainer2._load_checkpoint_cfg.checkpoint_path) == str(latest_checkpoint)
+        print(f"mock_data_load_state_dict.call_count: {mock_data_load_state_dict.call_count}")
+        mock_data_load_state_dict.assert_called_once()
+        mock_lr_load_state_dict.assert_called_once()
+        mock_load_dcp.assert_called_once_with(
+            model_dir=latest_checkpoint/Trainer._SAVE_MODEL_DIR,
+            optimizer_dir=latest_checkpoint/Trainer._SAVE_OPTIMIZER_DIR,
+            load_states=True,
+            load_args=True,
+        )
+        # assert trainer2._load_checkpoint_cfg.load_dataset is True
+        # assert trainer2._load_checkpoint_cfg.load_scheduler is True
+        # assert trainer2._load_checkpoint_cfg.load_optimizer_states is True
+        # assert trainer2._load_checkpoint_cfg.load_optimizer_args is True
 
     dist.destroy_process_group()
