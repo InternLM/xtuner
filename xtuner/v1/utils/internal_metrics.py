@@ -2,7 +2,7 @@ from collections import defaultdict
 
 import torch
 import torch.distributed as dist
-from mmengine.dist import get_rank, get_world_size
+from mmengine.dist import get_world_size
 from pydantic import BaseModel, ConfigDict, model_validator
 from torch import nn
 from torch.utils.hooks import RemovableHandle
@@ -16,6 +16,9 @@ from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.grad_norm import cal_total_norm, group_tensors_by_device_mesh_and_placements
+
+
+DEVICE = get_device()
 
 
 RMS_NORM_MONITOR_MODULES = (
@@ -94,15 +97,15 @@ class InternalMetricsRecorder:
                 # We typically won't use eager attn, but implement it here anyway
                 self._attn_monitor_type = "attn_logits"
                 metrics["attn_max_logits"] = {}
-            elif not (get_device() == "npu" and attn_impl == "flash_attention"):
+            elif not (DEVICE == "npu" and attn_impl == "flash_attention"):
                 self._attn_monitor_type = "softmax_lse"
                 metrics["attn_max_lse"] = {}
             for name, module in self.model.named_modules():
                 if isinstance(module, ATTENTION_CLS):
                     if self._attn_monitor_type == "attn_logits":
-                        ATTN_MAX_LOGITS[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
+                        ATTN_MAX_LOGITS[module.name] = torch.tensor(SMALL_VAL).to(DEVICE)
                     elif self._attn_monitor_type == "softmax_lse":
-                        ATTN_MAX_LSE[module.name] = torch.tensor(SMALL_VAL).to(get_rank())
+                        ATTN_MAX_LSE[module.name] = torch.tensor(SMALL_VAL).to(DEVICE)
 
         if isinstance(self.model, MoE):
             if self.internal_metrics_cfg.monitor_moe_router_logits_stats:
