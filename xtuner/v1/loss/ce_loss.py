@@ -135,6 +135,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
 
                 if sp_mesh is not None:
                     loss_weight = sp_split(loss_weight, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
+                    shifted_labels = sp_split(shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
 
             loss_weight[shifted_labels == loss_cfg.ignore_idx] = 0.0
             if torch.isnan(loss_weight).any() or torch.isinf(loss_weight).any():

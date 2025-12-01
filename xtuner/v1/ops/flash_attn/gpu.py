@@ -4,8 +4,8 @@ import torch
 
 
 try:
-    from flash_attn.flash_attn_interface import flash_attn_gpu, round_multiple
-    from flash_attn.flash_attn_interface import maybe_contiguous as maybe_contiguous_v3
+    from flash_attn_interface import flash_attn_3_cuda
+    from flash_attn_interface import maybe_contiguous as maybe_contiguous_v3
 
     @torch.library.custom_op("flash_attn::_flash_attn_varlen_forward_v3", mutates_args=(), device_types="cuda")
     def _flash_attn_varlen_forward_v3(
@@ -278,8 +278,8 @@ except ImportError:
 
 
 try:
-    from flash_attn_interface import flash_attn_3_cuda
-    from flash_attn_interface import maybe_contiguous as maybe_contiguous_v2
+    from flash_attn.flash_attn_interface import flash_attn_gpu, round_multiple
+    from flash_attn.flash_attn_interface import maybe_contiguous as maybe_contiguous_v2
 
     def flash_attn_varlen_func_v2(
         q,
