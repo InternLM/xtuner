@@ -426,14 +426,19 @@ class TrainingWorker(SingleAcceleratorWorker):
                 if rollout_logprobs.numel() == 0:  # pad 情况下是空的
                     continue
 
-                min_diff = torch.min(rollout_logprobs - old_logprobs)
-                max_diff = torch.max(rollout_logprobs - old_logprobs)
-                mean_diff = torch.mean(rollout_logprobs - old_logprobs)
+                diff = rollout_logprobs - old_logprobs
+                abs_diff = torch.abs(rollout_logprobs - old_logprobs)
+                min_diff = torch.min(diff)
+                max_diff = torch.max(diff)
+                mean_abs_diff = torch.mean(abs_diff)
+                mean_diff = torch.mean(diff)
                 if rollout_logprobs.numel() == 1:
                     std_diff = torch.tensor(0.0)
+                    std_abs_diff = torch.tensor(0.0)
                 else:
-                    std_diff = torch.std(rollout_logprobs - old_logprobs)
-                all_diffs.append((min_diff, max_diff, mean_diff, std_diff))
+                    std_diff = torch.std(diff)
+                    std_abs_diff = torch.std(abs_diff)
+                all_diffs.append((min_diff, max_diff, mean_diff, mean_abs_diff, std_diff, std_abs_diff))
 
             if not mask.any():  # all padding tokens, skip
                 self.logger.warning(f"Skip batch {i} as all tokens are padding.")
@@ -469,15 +474,18 @@ class TrainingWorker(SingleAcceleratorWorker):
         if len(rollout_logprobs_list) > 0:
             all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs]).to(
                 dtype=torch.float32
-            )  # n, 4
+            )  # n, 6
             min_diff_val = torch.min(all_diffs_tensor[:, 0]).item()
             max_diff_val = torch.max(all_diffs_tensor[:, 1]).item()
             mean_diff_val = torch.mean(all_diffs_tensor[:, 2]).item()
-            if all_diffs_tensor[:, 3].numel() <= 1:
+            mean_abs_diff_val = torch.mean(all_diffs_tensor[:, 3]).item()
+            if all_diffs_tensor[:, 4].numel() <= 1:
                 std_diff_val = 0.0
+                std_abs_diff_val = 0.0
             else:
-                std_diff_val = torch.std(all_diffs_tensor[:, 3]).item()
-            logprob_logger_msg = f"\nlogprobs diff min {float(min_diff_val):.4f}, max {float(max_diff_val):.4f}, mean {float(mean_diff_val):.4f}, std {float(std_diff_val):.4f}, "
+                std_diff_val = torch.std(all_diffs_tensor[:, 4]).item()
+                std_abs_diff_val = torch.std(all_diffs_tensor[:, 5]).item()
+            logprob_logger_msg = f"\nlogprobs diff min {float(min_diff_val):.4f}, max {float(max_diff_val):.4f}, mean {float(mean_diff_val):.4f}, std {float(std_diff_val):.4f}, abs_mean {float(mean_abs_diff_val):.4f}, abs_std {float(std_abs_diff_val):.4f}"
 
         entropy_logger_msg = ""
         sum_entropy = cast(torch.Tensor, sum_entropy)
