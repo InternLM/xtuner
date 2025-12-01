@@ -259,6 +259,8 @@ class TestQwen3VL(DeterministicDDPTestCase):
         ],
     )
     def test_save_hf(self, device, tp_size):
+        timeout = os.environ.get('DISTRIBUTED_TESTS_DEFAULT_TIMEOUT')
+        os.environ['DISTRIBUTED_TESTS_DEFAULT_TIMEOUT'] = "500"
         self.create_pg(device)
         with torch.device("meta"):
             model_cfg = Qwen3VLMoE30BA3Config()
@@ -322,6 +324,8 @@ class TestQwen3VL(DeterministicDDPTestCase):
 
                 self.assertListEqual(safetensor_keys, model_index_keys)
         dist.barrier()
+        if timeout is not None:
+            os.environ['DISTRIBUTED_TESTS_DEFAULT_TIMEOUT'] = timeout
 
     @property
     def world_size(self) -> int:
