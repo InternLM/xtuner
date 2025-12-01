@@ -83,9 +83,14 @@ class TestQwen3VL(DeterministicDDPTestCase):
             image_grid_thw = tokenized_data['image_grid_thw'].cuda()
             position_ids = tokenized_data['position_ids'].cuda()
         else:
+            rank = dist.get_rank()
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
-            input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+1 等于多少？",
-                                  return_tensors="pt").input_ids.to(device)
+            if sp_size == 1:
+                input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+1 等于多少？",
+                                      return_tensors="pt").input_ids.to(device)
+            else:
+                input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
+                                      return_tensors="pt").input_ids.to(device)
             labels = input_ids.clone()
             pixel_values = None
             image_grid_thw = None
@@ -197,7 +202,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
 
     # TODO: sp+ compile
     @parametrize.parametrize(
-        "device,sp_size,compile, tol",
+        "device,sp_size,compile,tol",
         [
             ("cuda", 1, False, 1e-2),
             ("cuda", 2, False, 1e-2),

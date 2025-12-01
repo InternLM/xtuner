@@ -188,7 +188,8 @@ class Qwen3VLForConditionalGeneration(BaseModel):
 
         If the lengths are different, an error is raised.
         """
-        assert origin_pixel_len % 4 == 0, f"origin_pixel_len must be divisible by 4, but got {origin_pixel_len}"
+        assert origin_pixel_len % 4 == 0, f"origin_pixel_len must be divisible by 4, but got {origin_pixel_len}. " \
+                                          f"Please check dataset setting."
         if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
             input_ids_list = [torch.empty_like(input_ids) for _ in range(sequence_parallel_mesh.size())]
             dist.all_gather(input_ids_list, input_ids, group=sequence_parallel_mesh.get_group())

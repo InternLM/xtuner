@@ -480,7 +480,7 @@ class Qwen3VLVisionModel(BaseModel):
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
             # To ensure that the sequence length after sp split is divisible by 4,
             # we require that the sequence length before sp split is also divisible by 4.
-            assert max_seqlen % 4 == 0, f"max_seqlen {max_seqlen} must be divisible by 4"
+            assert max_seqlen % 4 == 0, f"max_seqlen {max_seqlen} must be divisible by 4. Please check dataset setting."
             div_num = sequence_parallel_mesh.size() * 4
             hidden_states = pad_to_multiple_of(hidden_states, 0, div_num, 0)
             hidden_states = split_for_sequence_parallel(hidden_states, dim=0, sp_mesh=sequence_parallel_mesh)
