@@ -339,7 +339,7 @@ class Qwen3VLVisionModel(BaseModel):
                 layer = checkpoint_wrapper(layer,
                                            preserve_rng_state=checkpoint_preserve_rng_state,
                                            checkpoint_impl=CheckpointImpl.REENTRANT)
-            # layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
+            layer.forward = maybe_compile(layer.forward, fullgraph=True)
 
             self.blocks[layer_idx] = layer
 
