@@ -629,16 +629,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             if model.fsdp_config.ep_size > 1:
                 ep_mesh: DeviceMesh = model.ep_mesh
                 ep_group = ep_mesh.get_group()
-                ep_rank = dist.get_rank(group=ep_group)
+                global_rank = dist.get_rank()
                 for src_global_rank in dist.get_process_group_ranks(ep_group):
                     broadcast_state_dict = dict()
                     for key, tensor in state_dict.items():
-                        obj_to_broadcast = [key, tensor.to("meta")] if ep_rank == src_global_rank else [None, None]
+                        obj_to_broadcast = [key, tensor.to("meta")] if global_rank == src_global_rank else [None, None]
                         dist.broadcast_object_list(obj_to_broadcast, src=src_global_rank, group=ep_group)
                         real_key, meta_tensor = obj_to_broadcast
                         buffer = (
                             state_dict[real_key]
-                            if ep_rank == src_global_rank
+                            if global_rank == src_global_rank
                             else torch.empty_like(meta_tensor, device=DEVICE)
                         )
                         dist.broadcast(buffer, src=src_global_rank, group=ep_group)
