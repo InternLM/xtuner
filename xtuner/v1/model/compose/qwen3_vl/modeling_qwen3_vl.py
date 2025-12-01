@@ -126,9 +126,9 @@ class Qwen3VLForConditionalGeneration(BaseModel):
 
     # llm 中的 param_to_safetensor 不会被触发，只能重写
     def param_to_safetensor(
-            self,
-            safetensor: torch.Tensor,
-            hf_param_name: str,
+        self,
+        safetensor: torch.Tensor,
+        hf_param_name: str,
     ):
         assert isinstance(hf_param_name, str)
         if isinstance(self.language_model, Qwen3VLTextMoE):
@@ -137,8 +137,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
                 # hf: num_experts, hidden_size, 2 * expert_dim
                 num_experts = self.language_model.config.n_routed_experts
                 hidden_size = safetensor.size(1)
-                safetensor = safetensor.reshape(num_experts, -1,
-                                                hidden_size)  # num_experts, 2 * expert_dim, hidden_size
+                safetensor = safetensor.reshape(num_experts, -1, hidden_size)  # num_experts, 2 * expert_dim, hidden_size
                 safetensor = safetensor.transpose(1, 2).contiguous()  # num_experts, hidden_size, 2 * expert_dim
             elif "down_proj" in hf_param_name:
                 # xtuner: num_experts * hidden_size, expert_dim
@@ -176,12 +175,12 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         return image_embeds, deepstack_image_embeds
 
     def get_placeholder_mask(
-            self,
-            input_ids: torch.Tensor,
-            visual_features: torch.Tensor,
-            deepstack_visual_embeds: list[torch.Tensor],
-            origin_pixel_len: int,
-            sequence_parallel_mesh: DeviceMesh | None = None
+        self,
+        input_ids: torch.Tensor,
+        visual_features: torch.Tensor,
+        deepstack_visual_embeds: list[torch.Tensor],
+        origin_pixel_len: int,
+        sequence_parallel_mesh: DeviceMesh | None = None,
     ):
         """Obtains multimodal placeholder mask from `input_ids` or
         `inputs_embeds`, and checks that the placeholder token count is equal
@@ -189,7 +188,6 @@ class Qwen3VLForConditionalGeneration(BaseModel):
 
         If the lengths are different, an error is raised.
         """
-        # input_ids 是切分后的，为了严格校验可以 all-gather
         assert origin_pixel_len % 4 == 0, f"origin_pixel_len must be divisible by 4, but got {origin_pixel_len}"
         if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
             input_ids_list = [torch.empty_like(input_ids) for _ in range(sequence_parallel_mesh.size())]
@@ -219,10 +217,9 @@ class Qwen3VLForConditionalGeneration(BaseModel):
                 f"Visual features and image|video tokens do not match: tokens: {n_visual_tokens}, features {visual_features.shape[0]}"
             )
 
-        # 基于 sp 规则重新切分 special_visual_mask
         if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
             assert special_visual_mask.size(0) == 1
-            # special_visual_mask 必然能被 sp整除，所以不需要考虑 pad
+            # special_visual_mask must be divisible by sp size
             special_visual_mask_per_rank = split_for_sequence_parallel(
                 special_visual_mask,
                 dim=1,
@@ -261,8 +258,9 @@ class Qwen3VLForConditionalGeneration(BaseModel):
                                                                               image_grid_thw,
                                                                               sequence_parallel_mesh)
             try:
-                # 为了简化代码，以及方便 language_model 里面的 deepstack_visual_embeds 处理
-                # 在开启 sp 逻辑下，仅仅 all-gather visual_embeds，然后基于切割后的 input_ids 重新非均匀切分 visual_embeds
+                # To simplify and facilitate the processing of deepstack_visual_embeds inside language_model,
+                # we all-gather visual_embeds, and then split them based on the input_ids,
+                # then non-uniformly split them based on the input_ids
                 visual_pos_masks, visual_features, deepstack_visual_embeds = self.get_placeholder_mask(
                     input_ids,
                     visual_features=visual_embeds,

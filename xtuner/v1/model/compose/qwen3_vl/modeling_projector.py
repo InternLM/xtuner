@@ -35,9 +35,6 @@ class Qwen3VLVisionPatchMerger(nn.Module):
         self.linear_fc2 = nn.Linear(self.hidden_size, config.text_hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # TODO: sp 这个地方无解了。
-        # 如果尝试修改 dataset 参数使其满足要求，那么数据输出就改变了，结果必然对不上，不能这么改
-        # 只能靠 TP 了
         x = self.norm(x.view(-1, self.hidden_size) if self.use_postshuffle_norm else x).view(-1, self.hidden_size)
         x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
         return x
