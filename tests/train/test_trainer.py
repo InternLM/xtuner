@@ -26,6 +26,8 @@ from xtuner.v1.loss import CELossConfig
 from unittest import TestCase
 from xtuner.v1.train.trainer import XTunerMeta, ExpInfo, ExpHistory, GitInfo
 from xtuner.v1.utils.device import get_device
+from xtuner.v1.datasets.dataloader import Dataloader
+from torch.optim.lr_scheduler import SequentialLR
 
 
 DEVICE = get_device()
@@ -499,8 +501,6 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
     )
 
     # 2. operate
-    from xtuner.v1.datasets.dataloader import Dataloader
-    from torch.optim.lr_scheduler import SequentialLR
     with (patch.object(Dataloader, 'load_state_dict') as mock_data_load_state_dict,
           patch.object(FakeEngine, 'load_dcp') as mock_load_dcp,
           patch.object(SequentialLR, 'load_state_dict') as mock_lr_load_state_dict):
