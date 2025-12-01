@@ -383,6 +383,7 @@ class Trainer:
         self._seed = seed
 
         self._consumed_tokens = 0
+        self._exp_consumed_tokens = 0
         self._consumed_samples = 0
 
         self._train_time = 0
@@ -614,16 +615,19 @@ class Trainer:
 
             self._cur_step += 1
             self._consumed_tokens += step_consumed_tokens
+            self._exp_consumed_tokens += step_consumed_tokens
             self._train_time = time_after_train_step - train_begin
 
             # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
             self._log_step(
                 loss_log=loss_log,
                 step_consumed_tokens=step_consumed_tokens,
+                exp_consumed_tokens=self._exp_consumed_tokens,
                 total_consumed_tokens=self._consumed_tokens,
                 data_time=data_time,
                 step_time=step_time,
-                train_time=self._train_time + self._train_time_offset,
+                train_time=self._train_time,
+                train_time_offset=self._train_time_offset,
                 grad_norm=grad_norm.item(),
                 internal_metrics=internal_metrics,
             )
@@ -1222,16 +1226,20 @@ class Trainer:
         self,
         loss_log: dict,
         step_consumed_tokens: int,
+        exp_consumed_tokens: int,
         total_consumed_tokens: int,
         data_time: float,
         step_time: float,
         train_time: float,
+        train_time_offset: float,
         grad_norm: float,
         internal_metrics: InternalMetrics | None = None,
     ):
         """Log the training step information."""
+        e2e_train_time = train_time + train_time_offset
         tgs = step_consumed_tokens / step_time
-        e2e_tgs = total_consumed_tokens / train_time
+        e2e_tgs = total_consumed_tokens / e2e_train_time
+        exp_tgs = exp_consumed_tokens / train_time
         lr = self._lr_scheduler.get_last_lr()[0]
 
         remaining_steps = self.total_step - self.cur_step
@@ -1262,6 +1270,7 @@ class Trainer:
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {tgs:.1f} "
+            f"exp_tgs: {exp_tgs: .1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
             f"est_global_batch_tokens: {est_global_batch_tokens} "
             f"eta: {eta_hms} "
@@ -1277,6 +1286,7 @@ class Trainer:
             "runtime_info/est_global_batch_tokens": est_global_batch_tokens,
             "runtime_info/total_consumed_tokens": total_consumed_tokens,
             "runtime_info/tgs": tgs,
+            "runtime_info/exp_tgs": exp_tgs,
             "runtime_info/e2e_tgs": e2e_tgs,
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
