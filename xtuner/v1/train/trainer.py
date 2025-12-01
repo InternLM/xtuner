@@ -1580,7 +1580,7 @@ class Trainer:
         return hooks_config
 
     def _setup_env(self):
-        if os.getenv("XTUNER_GC_ENABLE") == "0":
+        if os.getenv("XTUNER_GC_ENABLE", '0') == "0":
             gc.disable()
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
