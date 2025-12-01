@@ -478,12 +478,15 @@ class Qwen3VLVisionModel(BaseModel):
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            # 为了确保 merge 模块可以的序列长度可以被 4 整除，此处要求 sp 切分后，序列长度依然要被 4 整除
+            # To ensure that the sequence length after sp split is divisible by 4,
+            # we require that the sequence length before sp split is also divisible by 4.
             assert max_seqlen % 4 == 0, f"max_seqlen {max_seqlen} must be divisible by 4"
-            div_num = sequence_parallel_mesh.size()*4
-            max_seqlen = pad_to_multiple_of(max_seqlen, 0, div_num, 0)
+            div_num = sequence_parallel_mesh.size() * 4
+            hidden_states = pad_to_multiple_of(hidden_states, 0, div_num, 0)
             hidden_states = split_for_sequence_parallel(hidden_states, dim=0, sp_mesh=sequence_parallel_mesh)
+            pos_embeds = pad_to_multiple_of(pos_embeds, 0, div_num, 0)
             pos_embeds = split_for_sequence_parallel(pos_embeds, dim=0, sp_mesh=sequence_parallel_mesh)
+            rotary_pos_emb = pad_to_multiple_of(rotary_pos_emb, 0, div_num, 0)
             rotary_pos_emb = split_for_sequence_parallel(rotary_pos_emb, dim=0, sp_mesh=sequence_parallel_mesh)
 
         hidden_states = self.patch_embed(hidden_states)

@@ -167,7 +167,8 @@ class TestQwen3VL(DeterministicDDPTestCase):
         "device,sp_size,tol",
         [
             ("cuda", 1, 1e-2),
-            ("cuda", 2, 1e-2)
+            ("cuda", 2, 1e-2),
+            ("cuda", 8, 1e-2)  # important
         ],
     )
     def test_qwen3vl_run(self, device, sp_size, tol):
@@ -194,11 +195,13 @@ class TestQwen3VL(DeterministicDDPTestCase):
         self._test_all(hf_model, qwen3vl_model, 'image', device, sp_size, tol)
         self._test_all(hf_model, qwen3vl_model, 'video', device, sp_size, tol)
 
+    # TODO: sp+ compile
     @parametrize.parametrize(
         "device,sp_size,compile, tol",
         [
             ("cuda", 1, False, 1e-2),
-            ("cuda", 2, False, 1e-2)
+            ("cuda", 2, False, 1e-2),
+            ("cuda", 8, False, 1e-2)  # important
         ],
     )
     def test_fsdp_qwen3_run(self, device, sp_size, compile, tol):
