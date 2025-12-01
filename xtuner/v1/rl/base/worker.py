@@ -412,9 +412,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                     rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
                 )
 
-            if not mask.any():  # all padding tokens, skip
-                continue
-
             if len(rollout_logprobs_list) > 0:
                 # calculate logprob diff
                 rollout_logprobs = rollout_logprobs_list[i][mask]  # type: ignore[index]
@@ -441,6 +438,11 @@ class TrainingWorker(SingleAcceleratorWorker):
                         std_diff = torch.std(rollout_logprobs - old_logprobs)
                 all_diffs.append((min_diff, max_diff, mean_diff, std_diff))
 
+            if not mask.any():  # all padding tokens, skip
+                self.logger.warning(f"Skip batch {i} as all tokens are padding.")
+                continue
+
+            if len(rollout_logprobs_list) > 0:
                 # calculate importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
@@ -458,7 +460,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                 all_rollout_is_metrics.append(rollout_is_metrics)
 
         logger_msg = f"Rollout {rollout_idx}: "
-
         tis_logger_msg = ""
         if len(all_rollout_is_metrics) > 0:
             rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
