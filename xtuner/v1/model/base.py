@@ -180,9 +180,9 @@ class BaseModel(nn.Module):
     SAFETENSOR_SIZE = 1024**3 * 4  # 4GB
     FSDP_SHARD_DIM = 0
 
-    def __init__(self):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
-        self._hf_path = None
+        self.config = config
 
         self._hf_path: Path | None = None
 

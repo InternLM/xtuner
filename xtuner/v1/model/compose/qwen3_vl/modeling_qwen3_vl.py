@@ -31,7 +31,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
     config: Qwen3VLBaseConfig
 
     def __init__(self, config: Qwen3VLBaseConfig):
-        super().__init__()
+        super().__init__(config)  # type: ignore[arg-type]
         self.config = config
 
         self.vision_tower = Qwen3VLVisionModel(config.vision_config)
