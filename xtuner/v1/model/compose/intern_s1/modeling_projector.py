@@ -37,7 +37,7 @@ class InternS1MultiModalProjector(BaseModel):
         self._hf_prefix = "model.multi_modal_projector."
         self._init_load_spec()
 
-    @maybe_compile(fullgraph=True)
+    # @maybe_compile
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.layer_norm(image_features)
         hidden_states = self.linear_1(hidden_states)
