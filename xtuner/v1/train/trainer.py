@@ -56,6 +56,7 @@ from xtuner.v1.utils.internal_metrics import (
     InternalMetricsRecorder,
     flatten_internal_metrics_for_logs,
 )
+from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -368,12 +369,6 @@ class Trainer:
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
 
-        if tokenizer_path is not None:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        else:
-            self.tokenizer = UTF8ByteTokenizer()
-            logger.info(f"Using toy tokenizer: {self.tokenizer}!")
-
         if fsdp_cfg is None:
             fsdp_cfg = FSDPConfig()
         self._fsdp_config = fsdp_cfg
@@ -390,25 +385,34 @@ class Trainer:
         self._train_time_offset = 0
 
         self._init_dist(backend)
-        self._try_bind_numa()
-        self._set_deterministic()
-        self._set_random_seed(seed)
-        self._setup_env()
-
         if resume_cfg is None:
             resume_cfg = ResumeConfig()
 
         self._work_dir = self._resolve_work_dir(work_dir)
-        logger.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
         self._auto_resume = auto_resume
         self._auto_resume = self._resolve_deprecated_resume_cfg(
             resume_cfg, self._auto_resume
         )  # TODO: Removed in version 1.1.0
         self._meta = self._init_xtuner_meta(self.work_dir, auto_resume=self._auto_resume)
-        self._log_dir = self._resolve_log_dir(log_dir)
+        self._log_dir = self._resolve_log_dir(log_dir)  # depends on exp_dir(work_dir and meta)
+        self.logger, log_dir = self._init_logger(self._log_dir)  # depends on log_dir and init_dist(get_rank)
+
+        # After init logger
+        logger.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
+
+        self._try_bind_numa()
+        self._set_deterministic()
+        self._set_random_seed(seed)
+        self._setup_env()
+
+        if tokenizer_path is not None:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        else:
+            self.tokenizer = UTF8ByteTokenizer()
+            logger.info(f"Using toy tokenizer: {self.tokenizer}!")
+
         self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(self._auto_resume, load_checkpoint_cfg)
 
-        self.logger, log_dir = self._init_logger(self._log_dir)
         self._exp_tracker = self._init_tracker(
             exp_tracker, self._log_dir / f"{self._EXP_TRACKING_PATH}/rank{self.rank}"
         )
@@ -1504,6 +1508,7 @@ class Trainer:
 
     def _setup_env(self):
         gc.disable()
+        monkey_patch_hf_modules_cache()
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
         log_str = "\n============XTuner Training Environment============\n"
