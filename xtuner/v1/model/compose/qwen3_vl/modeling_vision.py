@@ -56,7 +56,7 @@ class Qwen3VLVisionMLP(nn.Module):
 
 class Qwen3VLVisionPatchEmbed(nn.Module):
     def __init__(self, config: Qwen3VLVisionConfig) -> None:
-        super().__init__()
+        super().__init__(config)
         self.patch_size = config.patch_size
         self.temporal_patch_size = config.temporal_patch_size
         self.in_channels = config.in_channels
