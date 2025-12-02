@@ -1,10 +1,12 @@
 import os
 import json
 
+import inspect
 import parametrize
 import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig
 import tempfile
 from pathlib import Path
 from safetensors import safe_open
@@ -17,6 +19,7 @@ from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
 from xtuner.v1.model import get_model_config_from_hf, Qwen3MoEConfig
+from xtuner.v1.utils.misc import HF_PATCH_MODULES_CACHE_PREFIX
 
 
 # Qwen3 30B A3
@@ -350,6 +353,18 @@ class TestQwen3MoE(DeterministicDDPTestCase):
 
                 self.assertListEqual(safetensor_keys, model_index_keys)
         dist.barrier()
+    
+    def test_fope_auto_config_with_remote_code(self):
+        self.create_pg('cuda')
+
+        fope_hf_path = QWEN3_MOE_FOPE_PATH
+        cfg = AutoConfig.from_pretrained(fope_hf_path, trust_remote_code=True)
+        cfg_class = type(cfg)
+        cfg_class_file = inspect.getfile(cfg_class)
+        assert HF_PATCH_MODULES_CACHE_PREFIX in cfg_class_file
+
+        dist.destroy_process_group()
+
     
     @parametrize.parametrize(
         "device,dispatcher,ep_size",
