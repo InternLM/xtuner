@@ -53,7 +53,7 @@ class Qwen3VLProjector(BaseModel):
     config: Qwen3VLProjectorConfig
 
     def __init__(self, config: Qwen3VLProjectorConfig) -> None:
-        super().__init__()
+        super().__init__(config)  # type: ignore[arg-type]
         self.merger = Qwen3VLVisionPatchMerger(config, use_postshuffle_norm=False)
         self.deepstack_visual_indexes = config.deepstack_visual_indexes
         self.deepstack_merger_list = nn.ModuleList(
@@ -69,7 +69,7 @@ class Qwen3VLProjector(BaseModel):
         self._hf_prefix = "model.visual."
         self._init_load_spec()
 
-    @maybe_compile(fullgraph=True)
+    # @maybe_compile
     def forward(self, hidden_states: torch.Tensor, deepstack_feature_lists: list[torch.Tensor]) -> tuple[torch.Tensor, list[torch.Tensor]]:
         hidden_states = self.merger(hidden_states)
         deepstack_projected_features = []
