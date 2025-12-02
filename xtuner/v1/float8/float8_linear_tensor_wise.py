@@ -13,7 +13,7 @@ from xtuner.v1.float8.fsdp_utils import WeightWithDynamicTensorWiseFloat8CastTen
 from xtuner.v1.utils import maybe_compile
 
 
-@maybe_compile(fullgraph=True)
+@maybe_compile
 def per_tensor_fp8_quant(
     tensor: torch.Tensor,
     float8_dtype=torch.float8_e4m3fn,

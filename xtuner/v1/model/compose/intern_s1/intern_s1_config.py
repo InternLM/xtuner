@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import Self
 
 from xtuner.v1.float8 import Float8Config
+from xtuner.v1.model.base import CompileTarget
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
@@ -48,6 +49,7 @@ class InternS1VisionConfig(BaseModel):
     use_mean_pooling: bool = True
     float8_cfg: Optional["Float8Config"] = None
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
+    compile_cfg: None = None  # InternS1BaseConfig will control how to compile
 
     def model_post_init(self, _):
         if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
@@ -70,6 +72,7 @@ class InternS1ProjectorConfig(BaseModel):
     downsample_ratio: float = 0.5
     hidden_act: str = "gelu"
     float8_cfg: Optional["Float8Config"] = None
+    compile_cfg: None = None  # InternS1BaseConfig will control how to compile
 
     def build(self):
         from .modeling_projector import InternS1MultiModalProjector
@@ -98,6 +101,9 @@ class InternS1BaseConfig(BaseModel):
     freeze_language: bool = False
     hf_save_worker: int = 16
     dcp_ignore_frozen_params: bool = True
+    compile_cfg: list[str | CompileTarget] | None | bool = (
+        None  # None means use default compile option, False means disable compile
+    )
 
     def build(self) -> "InternS1ForConditionalGeneration":
         from .modeling_intern_s1 import InternS1ForConditionalGeneration
