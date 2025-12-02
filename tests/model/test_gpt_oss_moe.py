@@ -43,8 +43,6 @@ class TestGptOss(DeterministicDDPTestCase):
     def test_gpt_oss_run(self, device, dispatcher, ep_size, compile, tol, loss_class):
         os.environ["TRITON_CACHE_DIR"] = str(Path(self.temp_dir.name) / "triton_cache")
         self.create_pg(device)
-        if not compile:
-            maybe_compile.clear_compile_targets()
 
         hf_config = AutoConfig.from_pretrained(GPT_OSS_MINI_PATH)
         hf_config.rope_scaling = None
@@ -71,7 +69,7 @@ class TestGptOss(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = GptOss21BA3P6Config()
+            cfg = GptOss21BA3P6Config(compile_cfg=False)
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
             gpt_oss_model = cfg.build().to(torch.bfloat16)
@@ -108,7 +106,6 @@ class TestGptOss(DeterministicDDPTestCase):
     )
     def test_fsdp_accuracy(self, device, dispatcher, ep_size):
         self.create_pg(device)
-        maybe_compile.clear_compile_targets()
 
         hf_config = AutoConfig.from_pretrained(GPT_OSS_MINI_PATH)
         hf_config.rope_scaling = None
@@ -134,7 +131,7 @@ class TestGptOss(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = GptOss21BA3P6Config()
+            cfg = GptOss21BA3P6Config(compile_cfg=False)
             cfg.ep_size = ep_size
             cfg.dispatcher = dispatcher
             gpt_oss_model = cfg.build().to(torch.bfloat16)

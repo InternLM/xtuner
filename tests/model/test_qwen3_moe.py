@@ -40,8 +40,6 @@ class TestQwen3MoE(DeterministicDDPTestCase):
     def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol, loss_class):
         os.environ["TRITON_CACHE_DIR"] = str(Path(self.temp_dir.name) / "triton_cache")
         self.create_pg(device)
-        if not compile:
-            maybe_compile.clear_compile_targets()
 
         hf_model = AutoModelForCausalLM.from_pretrained(
             QWEN3_MOE_PATH,
@@ -74,6 +72,8 @@ class TestQwen3MoE(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             cfg = Qwen3MoE30BA3Config()
+            if not compile:
+                cfg.compile_cfg = False
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
             qwen_model = cfg.build().to(torch.bfloat16)
@@ -117,7 +117,6 @@ class TestQwen3MoE(DeterministicDDPTestCase):
     )
     def test_fsdp_accuracy(self, device, dispatcher, ep_size):
         self.create_pg(device)
-        maybe_compile.clear_compile_targets()
 
         hf_model = AutoModelForCausalLM.from_pretrained(
             QWEN3_MOE_PATH,
@@ -149,7 +148,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = Qwen3MoE30BA3Config()
+            cfg = Qwen3MoE30BA3Config(compile_cfg=False)
             cfg.ep_size = ep_size
             cfg.dispatcher = dispatcher
             qwen_model = cfg.build().to(torch.bfloat16)
