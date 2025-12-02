@@ -10,7 +10,6 @@ from xtuner.v1.module import MHAConfig, MLAConfig, RMSNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
-from xtuner.v1.utils.compile import maybe_compile
 
 from ..linear.linear import build_linear
 
