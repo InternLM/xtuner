@@ -52,8 +52,7 @@ class InternS1ForConditionalGeneration(BaseModel):
     config: InternS1BaseConfig
 
     def __init__(self, config: InternS1BaseConfig):
-        super().__init__()
-        self.config = config
+        super().__init__(config)  # type: ignore[arg-type]
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
 
