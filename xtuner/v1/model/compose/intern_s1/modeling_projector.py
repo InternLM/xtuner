@@ -26,7 +26,7 @@ class InternS1MultiModalProjector(BaseModel):
     config: InternS1ProjectorConfig
 
     def __init__(self, config: InternS1ProjectorConfig):
-        super().__init__()
+        super().__init__(config)  # type: ignore[arg-type]
         self.layer_norm = nn.LayerNorm(config.vision_hidden_size * int(1 / config.downsample_ratio) ** 2)
         self.linear_1 = nn.Linear(
             config.vision_hidden_size * int(1 / config.downsample_ratio) ** 2, config.text_hidden_size
