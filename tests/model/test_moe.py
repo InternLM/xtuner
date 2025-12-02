@@ -15,7 +15,6 @@ import parametrize
 class TestMoE:
     @parametrize.parametrize("dtype,device", [(torch.bfloat16, "cuda")])
     def test_moe_config(self, dtype, device):
-        maybe_compile.clear_compile_targets()
         router_config = NoAuxRouterConfig(
             scoring_func="sigmoid",
             router_scaling_factor=1.0,
@@ -48,6 +47,7 @@ class TestMoE:
             hidden_factor=1.0,
             moe_intermediate_size=512,  # TODO: Restriction of triton grouped gemm, should be optimizer
             router=router_config,
+            compile_cfg=False,
         )
         model = MoE(config=config).to(dtype).to(device)
         model.cuda()
