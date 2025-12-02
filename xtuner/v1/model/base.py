@@ -219,9 +219,9 @@ class BaseModel(nn.Module):
         self.config = config
 
         self._hf_path: Path | None = None  # type: ignore
-        
+
         if hasattr(self.config, "compile_cfg"):
-            # TODO: The config protocol in `BaseModel` now is weird, we need to update the config protocol 
+            # TODO: The config protocol in `BaseModel` now is weird, we need to update the config protocol
             # to make sure VL model config can be compatible with `resolve_compile_cfg`
             self._compile_cfg = self._resolve_comile_cfg(self.config.compile_cfg)
         else:
