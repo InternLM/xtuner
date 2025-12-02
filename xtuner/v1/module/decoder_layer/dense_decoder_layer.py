@@ -72,7 +72,6 @@ class DenseDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
-    # @maybe_compile
     def forward(
         self,
         hidden_states: torch.Tensor,
