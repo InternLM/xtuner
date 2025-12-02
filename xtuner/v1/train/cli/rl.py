@@ -10,16 +10,11 @@ from cyclopts.group import Group
 from xtuner.v1.train.rl_trainer import RLTrainer
 from xtuner.v1.utils import Config
 import threading
-
+from xtuner.v1.utils.track_rl_mem import monitor_actor_memory
 
 app = App(
     help="XTuner's entry point for fine-tuning and training, launched using configuration files or arguments.",
 )
-
-
-def monitor_actor_memory(work_dir, interval: int = 60):
-    # 执行 python 脚本
-    os.system(f"python ci/scripts/track_rl_mem.py --work_dir {work_dir} --interval {interval}")
 
 
 @app.default()
