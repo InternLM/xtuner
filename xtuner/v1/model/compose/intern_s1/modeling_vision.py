@@ -384,8 +384,8 @@ class InternS1VisionModel(BaseModel):
                 layer = checkpoint_wrapper(layer,
                                            preserve_rng_state=checkpoint_preserve_rng_state,
                                            checkpoint_impl=CheckpointImpl.REENTRANT)
-                if self.config.drop_path_rate == 0.0:
-                    layer.forward = maybe_compile(layer.forward, fullgraph=True)
+                if self.config.drop_path_rate == 0.0 and self.compile_cfg:
+                    layer.forward = torch.compile(layer.forward, fullgraph=True)
 
             self.encoder.layer[layer_idx] = layer
 

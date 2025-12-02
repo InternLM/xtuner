@@ -326,7 +326,6 @@ class Qwen3VLVisionModel(BaseModel):
                 param.requires_grad = False
 
         self.rotary_pos_emb = self.build_rotary_embedding(self.config)
-        self._maybe_compile_layers()
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         recompute_ratio = 1.0
@@ -338,7 +337,8 @@ class Qwen3VLVisionModel(BaseModel):
                 layer = checkpoint_wrapper(layer,
                                            preserve_rng_state=checkpoint_preserve_rng_state,
                                            checkpoint_impl=CheckpointImpl.REENTRANT)
-            layer.forward = maybe_compile(layer.forward, fullgraph=True)
+            if self.compile_cfg:
+                layer.forward = torch.compile(layer.forward, fullgraph=True)
 
             self.blocks[layer_idx] = layer
 
