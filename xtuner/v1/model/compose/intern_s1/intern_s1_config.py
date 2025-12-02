@@ -49,7 +49,6 @@ class InternS1VisionConfig(BaseModel):
     use_mean_pooling: bool = True
     float8_cfg: Optional["Float8Config"] = None
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
-    compile_cfg: None = None  # InternS1BaseConfig will control how to compile
 
     def model_post_init(self, _):
         if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
@@ -72,7 +71,6 @@ class InternS1ProjectorConfig(BaseModel):
     downsample_ratio: float = 0.5
     hidden_act: str = "gelu"
     float8_cfg: Optional["Float8Config"] = None
-    compile_cfg: None = None  # InternS1BaseConfig will control how to compile
 
     def build(self):
         from .modeling_projector import InternS1MultiModalProjector
