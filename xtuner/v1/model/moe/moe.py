@@ -130,7 +130,7 @@ class MoE(BaseModel):
     ep_mesh: DeviceMesh | None = None
 
     def __init__(self, config: MoEConfig):
-        super().__init__()
+        super().__init__(config)
         if config.ep_size is not None and config.ep_size > 1:
             world_size = dist.get_world_size()
             self.ep_mesh = init_device_mesh(
@@ -140,7 +140,6 @@ class MoE(BaseModel):
             )["ep"]
         else:
             self.ep_mesh = None
-        self.config = config
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
