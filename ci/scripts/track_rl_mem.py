@@ -5,6 +5,7 @@ import psutil
 import json
 from xtuner.v1._writer import TensorboardWriter
 import pynvml
+import argparse
 
 
 def monitor_actor_memory(work_dir, interval: int = 60):
@@ -126,10 +127,17 @@ def monitor_actor_memory(work_dir, interval: int = 60):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='RL MEMORY MONITOR')
+    parser.add_argument('--work_dir', type=str, default='dense_8b')
+    parser.add_argument('--interval', type=int, default=60)
+    args = parser.parse_args()
+    work_dir = args.work_dir
+    interval = args.interval
+
     while True:
         try:
             ray.init(address="auto")
-            time.sleep(30)
+            time.sleep(interval)
             break
         except KeyboardInterrupt:
             print("\n监控已停止")
@@ -137,4 +145,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"连接 Ray 集群失败, 等等")
 
-    monitor_actor_memory(work_dir='dense_8b', interval=30)
+    monitor_actor_memory(work_dir=work_dir, interval=interval)

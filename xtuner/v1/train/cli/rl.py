@@ -9,11 +9,17 @@ from cyclopts.group import Group
 
 from xtuner.v1.train.rl_trainer import RLTrainer
 from xtuner.v1.utils import Config
+import threading
 
 
 app = App(
     help="XTuner's entry point for fine-tuning and training, launched using configuration files or arguments.",
 )
+
+
+def monitor_actor_memory(work_dir, interval: int = 60):
+    # 执行 python 脚本
+    os.system(f"python ci/scripts/track_rl_mem.py --work_dir {work_dir} --interval {interval}")
 
 
 @app.default()
@@ -29,6 +35,12 @@ def main(
             ray.init(address=ray_head_address)
         else:
             ray.init(num_cpus=128)
+
+    if os.getenv('XTUNER_RL_MEM_DIR'):
+        track_thread = threading.Thread(target=monitor_actor_memory, args=(os.getenv('XTUNER_RL_MEM_DIR'),))
+        track_thread.daemon = True
+        track_thread.start()
+
     trainer_cfg = Config.fromfile(config)["trainer"]
     trainer = RLTrainer.from_config(trainer_cfg)
     trainer.fit()
