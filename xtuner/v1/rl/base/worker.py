@@ -313,6 +313,14 @@ class TrainingWorker(SingleAcceleratorWorker):
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_input_list: list[RLLossContextInputItem] = []
         rollout_logprobs_list: list[torch.Tensor | None] = []
+        # convert dummy padding experts to real size
+
+        language_cfg = (
+            self.config.model_cfg.text_config
+            if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
+            else self.config.model_cfg
+        )
+
         for data in data_batches:
             seq_ctx = data["seq_ctx"]
             pixel_values = seq_ctx.pixel_values
@@ -329,26 +337,30 @@ class TrainingWorker(SingleAcceleratorWorker):
             if rollout_routed_experts is not None:
                 if isinstance(rollout_routed_experts, list):
                     # list[n,l,e]
-                    if not isinstance(rollout_routed_experts[0], torch.Tensor):
-                        rollout_routed_experts_refs = rollout_routed_experts
-                        rollout_routed_experts = ray.get(rollout_routed_experts_refs)
-                        # free obj store explicitly
-                        ray._private.internal_api.free(rollout_routed_experts_refs)
-                        if not isinstance(rollout_routed_experts[0], torch.Tensor):
-                            rollout_routed_experts = [
-                                torch.as_tensor(routed_experts, dtype=torch.long)
-                                for routed_experts in rollout_routed_experts
-                            ]
-                    seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts, dim=0)  # max_len,l,e
+                    out_rollout_routed_expert = []
+                    for rollout_routed_expert in rollout_routed_experts:
+                        if isinstance(rollout_routed_expert, torch.Tensor):
+                            rollout_routed_experts_tensor = torch.randint(
+                                low=0,
+                                high=language_cfg.n_routed_experts,
+                                size=(
+                                    rollout_routed_expert.size(0),
+                                    language_cfg.num_hidden_layers,
+                                    language_cfg.num_experts_per_tok,
+                                ),
+                            )
+                            out_rollout_routed_expert.append(rollout_routed_experts_tensor)
+                        else:
+                            rollout_routed_expert_refs = rollout_routed_expert
+                            rollout_routed_expert = ray.get(rollout_routed_expert_refs)
+                            # free obj store explicitly
+                            ray._private.internal_api.free(rollout_routed_expert_refs)
+                            out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
+
+                    seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
                 else:
                     assert isinstance(rollout_routed_experts, torch.Tensor), (
                         f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
-                    )
-                    # convert dummy padding experts to real size
-                    language_cfg = (
-                        self.config.model_cfg.text_config
-                        if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
-                        else self.config.model_cfg
                     )
                     rollout_routed_experts_tensor = torch.randint(
                         low=0,

@@ -62,6 +62,7 @@ rollout_config = RolloutConfig(
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.8,
     context_length = max_response_length + max_prompt_length,
+    rollout_max_batch_size_per_instance=512,
     enable_return_routed_experts=True if enable_return_routed_experts == "1" else False,
 )
 

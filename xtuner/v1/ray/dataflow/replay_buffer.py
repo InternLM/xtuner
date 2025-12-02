@@ -90,6 +90,8 @@ def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowIt
         replay_meta.observation_ids, replay_meta.observation_refs, replay_meta.observation_versions
     ):
         env_data = ray.get(obs_ref)
+        ray._private.internal_api.free(obs_ref)
+
         item = RLDataFlowItem(
             uid=RLUIDItem(env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=version),
             data=data_ref,

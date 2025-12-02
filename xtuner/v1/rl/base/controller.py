@@ -120,9 +120,9 @@ class TrainingController:
 
                 if has_rollout_routed_experts:
                     pad_rand_index = torch.randint(
-                        low=0, high=n_routed_experts, size=(pad_len, num_hidden_layers, num_experts_per_tok)
+                        low=0, high=n_routed_experts, size=(pad_len, 1, 1)
                     )
-                    pad_seq_ctx.rollout_routed_experts = ray.put(pad_rand_index)
+                    pad_seq_ctx.rollout_routed_experts = pad_rand_index
 
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
