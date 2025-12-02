@@ -74,7 +74,7 @@ case:
         -
             type: sft
             pre_action:
-                command: 'python ./autotest/utils/debugk.py'
+                command: 'python ./autotest/utils/update_meta.py'
             parameters:
                 config: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_ci_config/qwen3_moe_30BA3_ep8_resume.py
                 output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
