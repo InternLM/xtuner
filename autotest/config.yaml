@@ -57,7 +57,6 @@ case:
                 num_nodes: 2
                 cpus_per_task: 80
                 envs:
-                    - GITHUB_RUN_ID=120106
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
@@ -82,7 +81,6 @@ case:
                 num_nodes: 2
                 cpus_per_task: 80
                 envs:
-                    - GITHUB_RUN_ID=120106
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
