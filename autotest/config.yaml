@@ -47,3 +47,74 @@ case:
                     runtime_info/text_tokens: 0
             timeout: 1200
 
+    qwen3-sft-ep8:
+        -
+            type: sft
+            parameters:
+                config: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_ci_config/qwen3_moe_30BA3_ep8.py
+                output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - GITHUB_RUN_ID=120106
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-ep8/cec3a8d2/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 50
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+        -
+            type: sft
+            pre_action:
+                command: 'python ./autotest/utils/debugk.py'
+            parameters:
+                config: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_ci_config/qwen3_moe_30BA3_ep8_resume.py
+                output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 2
+                cpus_per_task: 80
+                envs:
+                    - GITHUB_RUN_ID=120106
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-ep8/cec3a8d2_resume/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 50
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-sft-tp2:
+        -
+            type: sft
+            parameters:
+                config: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_ci_config/qwen3_moe_30BA3_tp2.py
+                output_path: .
+            resource:
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-tp2/cec3a8d2/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 50
+                    runtime_info/text_tokens: 0
+            timeout: 10800
