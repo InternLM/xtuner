@@ -7,7 +7,15 @@ from .exception_helper import ParallelConfigException
 from .init_weight import default_init_weights, init_params
 from .loader import HFCheckpointLoader
 from .logger import get_logger, log_format
-from .misc import XTUNER_DETERMINISTIC, SharedMemory, get_padding_length, is_hf_model_path, record_git_info
+from .misc import (
+    XTUNER_DETERMINISTIC,
+    FunctionEnum,
+    SharedMemory,
+    get_function_type,
+    get_padding_length,
+    is_hf_model_path,
+    record_git_info,
+)
 from .pad import pad_to_max_length, pad_to_multiple_of
 from .profile import profile_time_and_memory, timer, timer_logger
 from .state import ForwardState
@@ -22,8 +30,10 @@ __all__ = [
     "SharedMemory",
     "StrEnum",
     "ForwardState",
+    "FunctionEnum",
     "HFCheckpointLoader",
     "get_padding_length",
+    "get_function_type",
     "pad_to_multiple_of",
     "pad_to_max_length",
     "get_device",
