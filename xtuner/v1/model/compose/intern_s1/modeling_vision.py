@@ -186,13 +186,11 @@ class InternS1VisionLayer(nn.Module):
             raise RuntimeError(f"{missing} is not initialized")
         return initialized_params
 
-    # @maybe_compile
     def attention_pre_forward(self, hidden_states):
         attention_output = self.attention(self.layernorm_before(hidden_states))
         attention_output = self.lambda_1 * attention_output
         return attention_output
 
-    # @maybe_compile
     def attention_post_forward(self, hidden_states):
         layer_output = self.layernorm_after(hidden_states)
         layer_output = self.mlp(layer_output)
