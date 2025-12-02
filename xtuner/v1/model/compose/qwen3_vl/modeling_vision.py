@@ -204,7 +204,7 @@ class Qwen3VLVisionLayer(nn.Module):
         self.attn = Qwen3VLVisionAttention(config=config)
         self.mlp = Qwen3VLVisionMLP(config=config)
 
-    @maybe_compile(fullgraph=True)
+    # @maybe_compile
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -228,8 +228,7 @@ class Qwen3VLVisionModel(BaseModel):
     config: Qwen3VLVisionConfig
 
     def __init__(self, config: Qwen3VLVisionConfig) -> None:
-        super().__init__()
-        self.config = config
+        super().__init__(config)  # type: ignore[arg-type]
         self.spatial_merge_size = config.spatial_merge_size
         self.patch_size = config.patch_size
         self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
