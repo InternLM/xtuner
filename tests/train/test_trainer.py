@@ -490,7 +490,7 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
     assert len(trainer0.meta.latest_exp.checkpoint_list) == 2
 
     # 1. create: first train with auto_resume and load_checkpoint_cfg from trainer0's checkpoint
-    checkpoint_path = Path(trainer0.meta.latest_exp.checkpoint_list[-1])
+    checkpoint_path = Path(trainer0.meta.latest_exp.latest_checkpoint)
     auto_resume = True
     load_checkpoint_cfg = LoadCheckpointConfig(
         checkpoint_path=checkpoint_path,
@@ -536,7 +536,7 @@ def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
     with (patch.object(Dataloader, 'load_state_dict') as mock_data_load_state_dict,
           patch.object(FakeEngine, 'load_dcp') as mock_load_dcp,
           patch.object(SequentialLR, 'load_state_dict') as mock_lr_load_state_dict):
-        latest_checkpoint = Path(trainer.meta.latest_exp.checkpoint_list[-1])
+        latest_checkpoint = Path(trainer.meta.latest_exp.latest_checkpoint)
         trainer2 = Trainer(
             load_from=fake_hf_model_dir,
             model_cfg=model_cfg,
