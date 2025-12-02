@@ -25,7 +25,7 @@ class Qwen3VLVisionPatchMerger(nn.Module):
     config: Qwen3VLProjectorConfig
 
     def __init__(self, config: Qwen3VLProjectorConfig, use_postshuffle_norm=False) -> None:
-        super().__init__(config)
+        super().__init__()
         self.factor = config.spatial_merge_size ** 2
         self.hidden_size = config.vision_hidden_size * self.factor
         self.use_postshuffle_norm = use_postshuffle_norm
