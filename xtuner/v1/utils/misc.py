@@ -6,12 +6,15 @@ from math import lcm
 from multiprocessing import resource_tracker as _mprt
 from multiprocessing import shared_memory as _mpshm
 from pathlib import Path
+from types import FunctionType
 from typing import Annotated
 
 from mmengine import is_installed
 
 from transformers import AutoConfig
-from xtuner.v1.utils import get_logger
+
+from .enum_helper import StrEnum
+from .logger import get_logger
 
 
 logger = get_logger()
@@ -125,3 +128,25 @@ def is_hf_model_path(path: str | Path) -> bool:
         return False
     else:
         return True
+
+
+class FunctionEnum(StrEnum):
+    TOP_LEVEL_FUNCTION = "top_level_function"
+    CLASS_LEVEL_FUNCTION = "class_level_function"
+    LOCAL_FUNCTION = "local_function"
+
+
+def get_function_type(func: FunctionType):
+    if not isinstance(func, FunctionType):
+        raise TypeError(f"Expected a function or method, but got {type(func)}")
+
+    qualname = func.__qualname__
+    parts = qualname.split(".")
+    # 检查是否恰好有两部分，且没有 <locals> 标记
+    if len(parts) != 1:
+        if "<locals>" in parts:
+            return FunctionEnum.LOCAL_FUNCTION
+        else:
+            return FunctionEnum.CLASS_LEVEL_FUNCTION
+    else:
+        return FunctionEnum.TOP_LEVEL_FUNCTION

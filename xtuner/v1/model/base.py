@@ -1,7 +1,9 @@
 import json
 import math
+import pydoc
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import reduce
+from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
@@ -18,7 +20,7 @@ from safetensors.torch import save_file
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-from typing_extensions import NotRequired, Self, TypedDict
+from typing_extensions import NamedTuple, NotRequired, Self, TypedDict
 
 from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig, GenerateConfig
@@ -34,9 +36,10 @@ from xtuner.v1.module.attention import MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
-from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.utils.compile import is_compiled_function, maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
+from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_type
 
 from .utils import ModelForwardExtraLogInfo
 
@@ -45,6 +48,34 @@ logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
+
+
+class TorchCompileOption(TypedDict):
+    fullgraph: NotRequired[bool]
+    dynamic: NotRequired[bool | None]
+    mode: NotRequired[str | None]
+    options: NotRequired[dict[str, int | bool | str] | None]
+
+
+class CompileTarget(NamedTuple):
+    name: str
+    option: TorchCompileOption
+
+
+DEFAULT_FLOAT8_CFG = [
+    CompileTarget("xtuner.v1.float8.fsdp_utils.tensor_to_per_block_fp8_scales", TorchCompileOption(fullgraph=True)),
+    CompileTarget("xtuner.v1.float8.fsdp_utils.cast_to_per_block_fp8_with_scales", TorchCompileOption(fullgraph=True)),
+    CompileTarget(
+        "xtuner.v1.float8.triton_kernels.per_block_quant_gemm.per_block_quant_torch",
+        TorchCompileOption(fullgraph=True),
+    ),
+    CompileTarget(
+        "xtuner.v1.float8.fsdp_utils.cast_to_per_tensor_fp8_with_scales", TorchCompileOption(fullgraph=True)
+    ),
+    CompileTarget(
+        "xtuner.v1.float8.float8_linear_tensor_wise.per_tensor_fp8_quant", TorchCompileOption(fullgraph=True)
+    ),
+]
 
 
 class TransformerConfig(PydanticBaseModel):
@@ -74,6 +105,9 @@ class TransformerConfig(PydanticBaseModel):
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
     hf_save_worker: Annotated[int, Parameter(group="model")] = 16
+    compile_cfg: list[str | CompileTarget] | None | bool = (
+        None  # None means use default compile option, False means disable compile
+    )
     dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
 
     @computed_field
@@ -180,11 +214,12 @@ class BaseModel(nn.Module):
     SAFETENSOR_SIZE = 1024**3 * 4  # 4GB
     FSDP_SHARD_DIM = 0
 
-    def __init__(self):
+    def __init__(self, config: TransformerConfig):
         super().__init__()
-        self._hf_path = None
+        self.config = config
 
-        self._hf_path: Path | None = None
+        self._hf_path: Path | None = None  # type: ignore
+        self._compile_cfg = self._resolve_comile_cfg(self.config.compile_cfg)
 
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
@@ -266,6 +301,14 @@ class BaseModel(nn.Module):
         if self.fsdp_config is not None and self.fsdp_config.cpu_offload:
             return torch.device("cpu")
         return torch.device(DEVICE)
+
+    @property
+    def default_compile_cfg(self) -> list[str | CompileTarget]:
+        return []
+
+    @property
+    def compile_cfg(self) -> list[str | CompileTarget]:
+        return self._compile_cfg
 
     @torch.no_grad()
     def init_weights(self):
@@ -1157,17 +1200,6 @@ class BaseModel(nn.Module):
 
         return fsdp_unsharded_tensor_list
 
-    def _maybe_compile_layers(self):
-        if self.fsdp_config is not None:
-            if self.fsdp_config.torch_compile:
-                torch._dynamo.config.cache_size_limit = 256
-                if self.fsdp_config.compile_targets is not None:
-                    maybe_compile.clear_compile_targets()
-                    for target in self.fsdp_config.compile_targets:
-                        maybe_compile.set_compile_target(target)
-            else:
-                maybe_compile.clear_compile_targets()
-
     def _get_ranks_to_save_fused_tensor(self, fused_size: int) -> list[int]:
         # Goal: decide how many ranks are used to store model/expert parameters.
         # Policy: choose d such that:
@@ -1227,3 +1259,66 @@ class BaseModel(nn.Module):
             tasks.extend(pending)
         else:
             return
+
+    def _compile_overwrite(self, func_name: str, compile_options: TorchCompileOption | None = None):
+        """Overwrite a function in a module with a new function.
+
+        Args:
+            func_name (str): The name of the function to overwrite.
+            new_func (FunctionType): The new function to use.
+            module: The module containing the function to overwrite.
+        """
+        compiled_function = pydoc.locate(func_name)
+
+        if compile_options is None:
+            compile_options = {}
+
+        if isinstance(compiled_function, maybe_compile):
+            maybe_compile.enable_compile(compiled_function, **compile_options)
+            return
+
+        if compiled_function is not None:
+            compiled_function = cast(FunctionType, compiled_function)
+
+            if (function_type := get_function_type(compiled_function)) is FunctionEnum.LOCAL_FUNCTION:
+                raise ValueError(
+                    f"Compiling config error! {func_name} is a local function, which is not supported yet."
+                )
+            elif function_type is FunctionEnum.CLASS_LEVEL_FUNCTION:
+                class_name = compiled_function.__qualname__.split(".")[0]
+                module_name = compiled_function.__module__
+                _, method_name = func_name.rsplit(".", 1)
+
+                cls = getattr(import_module(module_name), class_name)
+                if not is_compiled_function(compiled_function):
+                    setattr(cls, method_name, torch.compile(compiled_function, **compile_options))
+        else:
+            raise AttributeError(f"Compiling Error! Cannot locate the function: {func_name}")
+
+    def _resolve_comile_cfg(self, custom_cfg: list[str | CompileTarget] | bool | None) -> list[str | CompileTarget]:
+        if custom_cfg is False:
+            return []
+
+        if custom_cfg is True or custom_cfg is None:
+            compile_cfg = self.default_compile_cfg
+        else:
+            compile_cfg = custom_cfg
+
+        return compile_cfg
+
+    def _maybe_enable_compile(self, compile_cfg: list[str | CompileTarget]):
+        if compile_cfg:
+            torch._dynamo.config.cache_size_limit = 256
+
+        def _compile_cfg_to_dict(compile_cfg: list[str | CompileTarget]) -> dict[str, TorchCompileOption]:
+            return {
+                (i.name if isinstance(i, CompileTarget) else i): (
+                    i.option if isinstance(i, CompileTarget) else TorchCompileOption()
+                )
+                for i in compile_cfg
+            }
+
+        compile_cfg_dict = _compile_cfg_to_dict(compile_cfg)
+
+        for target, option in compile_cfg_dict.items():
+            self._compile_overwrite(target, option)

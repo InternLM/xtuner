@@ -3,7 +3,7 @@ from pathlib import Path
 from transformers import AutoConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
-from .base import BaseModel, TransformerConfig
+from .base import DEFAULT_FLOAT8_CFG, BaseModel, CompileTarget, TorchCompileOption, TransformerConfig
 from .compose.intern_s1 import InternS1BaseConfig, InternS1Config, InternS1MiniConfig
 from .compose.internvl import (
     InternVL3P5Dense1BConfig,
@@ -93,4 +93,7 @@ __all__ = [
     "Qwen3VLDense4BConfig",
     "Qwen3VLDense8BConfig",
     "Qwen3VLMoE235BA22Config",
+    "TorchCompileOption",
+    "CompileTarget",
+    "DEFAULT_FLOAT8_CFG",
 ]
