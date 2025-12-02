@@ -59,9 +59,7 @@ class Train:
         action_info = config.get("pre_action", None)
         if action_info:
             action_cmd = action_info.get("command", None)
-
             if action_cmd:
-                print("Done in pre_action")
                 run_cmd(action_cmd)
 
     def post_action(config=None):
