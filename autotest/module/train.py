@@ -13,6 +13,7 @@ class Train:
             config_path = config.get("parameters", {}).get("config", None)
             dataset_path = config.get("parameters", {}).get("dataset", None)
             chat_template = config.get("parameters", {}).get("chat_template", None)
+            current_dir = config.get("current_dir", "xtuner")
             work_dir = "/".join(
                 [
                     config.get("base_path").get("base_output_path"),
@@ -23,12 +24,12 @@ class Train:
             )
 
             command = (
-                "cd xtuner; pwd; torchrun --nproc-per-node 8 --master_addr=${MASTER_ADDR} --master_port=${MASTER_PORT} --nnodes=${WORLD_SIZE} --node_rank=${RANK} "
+                "cd {current_dir}; pwd; torchrun --nproc-per-node 8 --master_addr=${MASTER_ADDR} --master_port=${MASTER_PORT} --nnodes=${WORLD_SIZE} --node_rank=${RANK} "
                 + f"xtuner/v1/train/cli/{train_type}.py"
             )
             if config_path:
                 output_path = model_config = config.get("parameters", {}).get("output_path", ".")
-                command += f" --config {config_path}; mkdir -p {work_dir}; mv {output_path}/. {work_dir}"
+                command += f" --config {config_path}; mkdir -p {work_dir}; mv {output_path}/202* {work_dir}"
             else:
                 if model_config:
                     command += f" --model-cfg {model_config}"

@@ -1,4 +1,5 @@
 import pytest
+import os
 from cluster.clusterx import ClusterTaskExecutor
 from module.get_module import TestHandler
 from utils.common_utils import get_case_list
@@ -39,6 +40,8 @@ def test_all(config, case, task_executor):
 def run_all_cases(config, case_name, task_executor) -> None:
     case_config = config["case"].get(case_name)
     base_path_config = config["base_path"]
+    current_dir = os.getcwd()
+    config["current_dir"] = current_dir
     context = {}
 
     for step_config in case_config:

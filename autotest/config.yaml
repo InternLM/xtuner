@@ -29,7 +29,7 @@ case:
         -
             type: sft
             parameters:
-                config: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner-fork/autotest/config/qwen3.py
+                config: autotest/config/qwen3.py
                 output_path: .
             resource:
                 envs: 
