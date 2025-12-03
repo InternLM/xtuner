@@ -49,16 +49,16 @@ def get_config():
     return env_config
 
 
-def get_case_list(type: str = "all"):
+def get_case_list(case_type: str = "all"):
     config = get_config()
     case_list = config["case"]
 
-    if type == "all":
+    if case_type == "all":
         return case_list.keys()
     else:
         filtered_cases = []
         for case in case_list:
             filter_type_set = {x.get("type") for x in case_list[case] if x.get("type") not in ["eval", "infer"]}
-            if type in filter_type_set and len(filter_type_set) == 1:
+            if case_type in filter_type_set and len(filter_type_set) == 1:
                 filtered_cases.append(case)
         return filtered_cases
