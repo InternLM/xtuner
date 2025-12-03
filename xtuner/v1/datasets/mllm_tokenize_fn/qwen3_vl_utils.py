@@ -78,7 +78,7 @@ def calc_frame_index_for_folder(image_list, frames_indices, timestamps, video_pa
 
 def read_frames_folder(video_path, frames_indices, timestamps=None, client=None,video_extra_dict=None,):
     oss_read_time = 0
-    if video_extra_dict is not None:
+    if video_extra_dict is not None and 'processed_video_length' in video_extra_dict:
         processed_video_length = video_extra_dict['processed_video_length']
         image_list = [f"{i:08d}.jpg" for i in range(1,processed_video_length+1,1)]
         image_list = [os.path.join(video_path, img) for img in image_list]
