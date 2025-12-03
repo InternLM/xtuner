@@ -92,8 +92,8 @@ class ExpInfo(BaseModel):
     snap_checkpoint_list: list[str] = []
     cur_step: int = 0
     cur_epoch: int = 0
-    reduced_consumed_tokens: int = 0
-    reduced_consumed_samples: int = 0
+    consumed_tokens: int = 0
+    consumed_samples: int = 0
 
     @property
     def latest_checkpoint(self) -> str | None:
@@ -986,8 +986,8 @@ class Trainer:
         ckp_list.append(str(checkpoint_path))
         current_exp.cur_step = self.cur_step
         current_exp.cur_epoch = self._cur_epoch
-        current_exp.reduced_consumed_samples = self._reduced_consumed_samples
-        current_exp.reduced_consumed_tokens = int(self._reduced_consumed_tokens)
+        current_exp.consumed_samples = int(self._reduced_consumed_samples)
+        current_exp.consumed_tokens = int(self._reduced_consumed_tokens)
         current_exp.history[-1]["end"] = self.cur_step
 
         # Delete checkpoints and update meta's checkpoint_list
