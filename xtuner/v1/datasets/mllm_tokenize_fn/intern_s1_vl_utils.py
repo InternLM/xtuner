@@ -90,14 +90,20 @@ def read_frames_folder(
     clip=None,
     min_num_frames=4,
     random_frame_num=None,
+    video_extra_dict=None,
 ):
     oss_read_time = 0
-    if "s3://" in video_path:
-        assert client is not None, "client should be provided for s3 backend"
-        image_list = sort_frames(client.list(video_path))
-        image_list = [os.path.join(video_path.split(image.split("/")[0])[0], image) for image in image_list]
+    if video_extra_dict is not None:
+        processed_video_length = video_extra_dict['processed_video_length']
+        image_list = [f"{i:08d}.jpg" for i in range(1,processed_video_length+1,1)]
+        image_list = [os.path.join(video_path, img) for img in image_list]
     else:
-        image_list = sort_frames(list(os.listdir(video_path)))
+        if "s3://" in video_path:
+            assert client is not None, "client should be provided for s3 backend"
+            image_list = sort_frames(client.list(video_path))
+            image_list = [os.path.join(video_path.split(image.split("/")[0])[0], image) for image in image_list]
+        else:
+            image_list = sort_frames(list(os.listdir(video_path)))
     vlen = len(image_list)
 
     if random_frame_num is None:
@@ -208,12 +214,13 @@ def read_interns1_vl_video(
     client=None,
     debug=False,
     oss_time_log_thr=10,
+    video_extra_dict=None,
 ):
     start_time = time.time()
     oss_read_time = 0
     vlen = 0
     video_get_batch_time = 0
-    if Path(path).is_dir():
+    if path.endswith("/"):
         frames, oss_read_time, vlen = read_frames_folder(
             path,
             num_frames=max_num_frames,
@@ -221,6 +228,7 @@ def read_interns1_vl_video(
             client=client,
             sample=sample,
             random_frame_num=random_frame_num,
+            video_extra_dict=video_extra_dict,
         )
     elif path.endswith(".gif"):
         frames = read_frames_gif(
@@ -287,6 +295,7 @@ class InternS1VLOSSLoader:
         sample="rand",
         clip=None,
         random_frame_num=None,
+        video_extra_dict=None,
     ):
         if image_type == "image":
             start_time = time.time()
@@ -309,4 +318,5 @@ class InternS1VLOSSLoader:
                 client=self.client,
                 debug=self.debug,
                 oss_time_log_thr=self.oss_time_log_thr,
+                video_extra_dict=video_extra_dict,
             )
