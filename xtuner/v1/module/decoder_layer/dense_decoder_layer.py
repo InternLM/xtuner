@@ -62,7 +62,6 @@ class DenseDecoderLayer(nn.Module):
             generate_config=generate_config,
             float8_cfg=float8_cfg,
         )
-        self.self_attn.name = f"layers.{layer_idx}.self_attn"  # type: ignore[assignment]
         self.mlp = DenseMLP(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
