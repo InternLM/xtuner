@@ -363,10 +363,11 @@ class ReplayBufferStorage:
             target_finished_list = self._returned[:global_batch_size]
             remain_finished_list = self._returned[global_batch_size:]
             for action_id in target_finished_list:
-                replay_meta = self._actions[action_id]
+                replay_meta = self._actions.pop(action_id)
                 # todo: add an unified state management
                 replay_meta.state = "history"
-                group_samples = mapping_replaymeta_to_dataitem(self._actions[action_id])
+                group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+                del replay_meta
                 multimodal_train_info = None
                 # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
                 for data_item in group_samples:
