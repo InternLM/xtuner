@@ -1,3 +1,4 @@
+import copy
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 from cyclopts import Parameter
@@ -71,12 +72,60 @@ class RLRolloutResponseItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     response: Optional[str] = None
+    async_response: Optional[List[Any]] = None
     response_ids: Optional[List[int]] = None
+    async_response_ids: Optional[List[Any]] = None
+    logprobs: Optional[List[float]] = None
+    async_logprobs: Optional[List[Any]] = None
     num_return_tokens: int = 0
     finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
-    logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
     state: Literal["init", "completed", "interrupted", "skipped", "failed"] = "init"
+
+    # def update(self, other: "RLRolloutResponseItem") -> None:
+    #     """Updates another RLRolloutResponseItem into this one for partial
+    #     rollout."""
+    #     if not isinstance(other, RLRolloutResponseItem):
+    #         raise TypeError("Can only update with another RLRolloutResponseItem instance.")
+
+    #     logger.info("call update RLRolloutResponseItem function")
+    #     init_response_ids_len = 0
+    #     if self.response_ids is not None:
+    #         init_response_ids_len = len(self.response_ids)
+    #         if other.response_ids is not None:
+    #             self.response_ids.extend(other.response_ids)
+    #         else:
+    #             self.response_ids = self.response_ids
+    #     else:
+    #         self.response_ids = other.response_ids
+
+    #     init_logprobs_len = 0
+    #     if self.logprobs is not None:
+    #         init_logprobs_len = len(self.logprobs)
+    #         if other.logprobs is not None:
+    #             self.logprobs.extend(other.logprobs)
+    #         else:
+    #             self.logprobs = self.logprobs
+    #     else:
+    #         self.logprobs = other.logprobs
+
+    #     init_response_len = 0
+    #     if self.response is not None:
+    #         init_response_len = len(self.response)
+    #         if other.response is not None and len(other.response) > 0:
+    #             self.response += other.response
+    #         else:
+    #             self.response = self.response
+    #     else:
+    #         self.response = other.response
+
+    #     logger.info(
+    #         f"Updated response_ids from {init_response_ids_len} to {len(self.response_ids)}, logprobs from {init_logprobs_len} to {len(self.logprobs)}. response from {init_response_len} to {len(self.response)}."
+    #     )
+    #     self.num_return_tokens = len(self.response_ids)
+    #     self.finish_reason = other.finish_reason
+    #     self.extra_info.update(other.extra_info)
+    #     self.state = other.state
 
     def update(self, other: "RLRolloutResponseItem") -> None:
         """Updates another RLRolloutResponseItem into this one for partial
@@ -84,41 +133,73 @@ class RLRolloutResponseItem(BaseModel):
         if not isinstance(other, RLRolloutResponseItem):
             raise TypeError("Can only update with another RLRolloutResponseItem instance.")
 
-        logger.info("call update RLRolloutResponseItem function")
-        init_response_ids_len = 0
         if self.response_ids is not None:
-            init_response_ids_len = len(self.response_ids)
+            init_response_ids = copy.deepcopy(self.response_ids)
+            other_response_ids = copy.deepcopy(other.response_ids)
+            init_async_response_ids = copy.deepcopy(self.async_response_ids)
             if other.response_ids is not None:
-                self.response_ids.extend(other.response_ids)
-            else:
-                self.response_ids = self.response_ids
+                self.async_response_ids.append(other_response_ids.copy())
+                self.response_ids.extend(other_response_ids.copy())
+                logger.debug(
+                    f"update response_ids from {init_response_ids} with {other_response_ids} to {self.response_ids}, async_response_ids from {init_async_response_ids} to {self.async_response_ids}."
+                )
         else:
-            self.response_ids = other.response_ids
+            if other.response_ids is not None:
+                other_response_ids = copy.deepcopy(other.response_ids)
+                self.response_ids = other_response_ids
+                self.async_response_ids = [other_response_ids.copy()]
+            else:
+                self.async_response_ids = []
 
-        init_logprobs_len = 0
         if self.logprobs is not None:
-            init_logprobs_len = len(self.logprobs)
+            other_logprobs = copy.deepcopy(other.logprobs)
             if other.logprobs is not None:
-                self.logprobs.extend(other.logprobs)
-            else:
-                self.logprobs = self.logprobs
+                self.async_logprobs.append(other_logprobs.copy())
+                self.logprobs.extend(other_logprobs.copy())
         else:
-            self.logprobs = other.logprobs
+            if other.logprobs is not None:
+                other_logprobs = copy.deepcopy(other.logprobs)
+                self.async_logprobs = [other_logprobs.copy()]
+                self.logprobs = other_logprobs
+            else:
+                self.async_logprobs = []
 
-        init_response_len = 0
         if self.response is not None:
-            init_response_len = len(self.response)
-            if other.response is not None and len(other.response) > 0:
-                self.response += other.response
-            else:
-                self.response = self.response
+            init_response = copy.deepcopy(self.response)
+            other_response = copy.deepcopy(other.response)
+            if other.response is not None:
+                self.response += other_response
+                self.async_response.append(other_response)
+                logger.debug(
+                    f"update response from {repr(init_response)} with {repr(other_response)} to {repr(self.response)}, async_response_ids: {self.async_response}."
+                )
         else:
-            self.response = other.response
+            if other.response is not None:
+                self.response = other.response
+                self.async_response = [other.response]
+            else:
+                self.async_response = []
 
-        logger.info(
-            f"Updated response_ids from {init_response_ids_len} to {len(self.response_ids)}, logprobs from {init_logprobs_len} to {len(self.logprobs)}. response from {init_response_len} to {len(self.response)}."
+        response_ids_lens = []
+        for response_ids in self.async_response_ids:
+            response_ids_lens.append(len(response_ids))
+        logprobs_lens = []
+        for logprobs in self.async_logprobs:
+            logprobs_lens.append(len(logprobs))
+        response_lens = []
+        for response in self.async_response:
+            response_lens.append(len(response))
+        logger.debug(
+            f"update response_ids lengths: {response_ids_lens}, logprobs lengths: {logprobs_lens}, response lengths: {response_lens}."
         )
-        self.num_return_tokens = len(self.response_ids)
+
+        if self.response_ids is not None:
+            assert sum(response_ids_lens) == len(self.response_ids), "response_ids length mismatch after update."
+        if self.logprobs is not None:
+            assert sum(logprobs_lens) == len(self.logprobs), "logprobs length mismatch after update."
+        if self.response is not None:
+            assert sum(response_lens) == len(self.response), "response length mismatch after update."
+        self.num_return_tokens = sum(response_ids_lens)
         self.finish_reason = other.finish_reason
         self.extra_info.update(other.extra_info)
         self.state = other.state
@@ -234,6 +315,31 @@ def check_valid_dataflow_item(group_data_items: List[RLDataFlowItem]) -> bool:
             logger.info(f"Invalid dataflow item found: logprobs and response_ids length mismatch. UID: {item.uid}")
             return False
     return True
+
+
+def update_rollout_item(group_data_items, target_value):
+    """Update a list of RLDataFlowItem objects by merging another
+    RLRolloutResponseItem into each item's env.rollout attribute.
+
+    Args:
+        group_data_items (List[RLDataFlowItem]): List of data items to update.
+        target_value (RLRolloutResponseItem): The rollout response item to merge into each data item.
+
+    Returns:
+        List[RLDataFlowItem]: The updated list of data items.
+
+    Example:
+        >>> # Suppose you want to update the rollout response for each item
+        >>> items = [RLDataFlowItem(), RLDataFlowItem()]
+        >>> rollout_response = RLRolloutResponseItem(response="new response", response_ids=[1,2,3])
+        >>> update_rollout_item(items, rollout_response)
+        # Now each item's env.rollout has been updated with the new response and response_ids
+    """
+
+    for idx, item in enumerate(group_data_items):
+        item.env.rollout.update(target_value[idx])
+
+    return group_data_items
 
 
 def update_dataflow_item(group_data_items, target_key, target_value):

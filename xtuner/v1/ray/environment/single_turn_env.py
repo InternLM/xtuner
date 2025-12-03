@@ -10,6 +10,7 @@ from xtuner.v1.data_proto.rl_data import (
     RLJudgerResponseItem,
     RLRolloutResponseItem,
     update_dataflow_item,
+    update_rollout_item,
 )
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
 from xtuner.v1.utils import get_logger
@@ -85,23 +86,15 @@ class SingleTurnEnvironment(BaseEnvironment):
             for sample in group_data_items:
                 sample.data.extra_info["root_id"] = sample.uid.root_id
                 sample.data.extra_info["action_id"] = sample.uid.action_id
+                exist_response_len = 0
                 if sample.env.rollout.num_return_tokens > 0:
-                    sample.data.extra_info["num_return_tokens"] = sample.env.rollout.num_return_tokens
-                    sample.data.extra_info["response_ids"] = sample.env.rollout.response_ids
-                    # sample.data.extra_info["response"] = sample.env.rollout.response
-                    # sample.data.extra_info["logprobs"] = sample.env.rollout.logprobs
-                    assert (
-                        len(sample.env.rollout.response_ids)
-                        == len(sample.env.rollout.logprobs)
-                        == sample.env.rollout.num_return_tokens
-                    ), (
-                        f"num_return_tokens {sample.env.rollout.num_return_tokens} mismatch "
-                        f"len of response_ids {len(sample.env.rollout.response_ids)} and "
-                        f"len of logprobs {len(sample.env.rollout.logprobs)} for sample {sample.uid}."
-                    )
-                    self.logger.info(
-                        f"Set num_return_tokens: {sample.env.rollout.num_return_tokens} and len of response_ids {len(sample.env.rollout.response_ids)} for sample {sample.uid}."
-                    )
+                    sample.data.extra_info["response_ids"] = sample.env.rollout.async_response_ids
+                    for res_id in sample.env.rollout.async_response_ids:
+                        exist_response_len += len(res_id)
+                    if exist_response_len == 32768:
+                        exist_response_len = 0
+                sample.data.extra_info["prefill_token_len"] = len(sample.data.input_ids) + exist_response_len
+                # self.logger.info(f"Set prefill_token_len: {sample.data.extra_info['prefill_token_len']} from input_ids {len(sample.data.input_ids)} and exist_response_len {exist_response_len}")
                 fut = self.rollout_controller.rollout.remote(
                     prompt=sample.data.messages,
                     input_ids=sample.data.input_ids,
@@ -109,7 +102,6 @@ class SingleTurnEnvironment(BaseEnvironment):
                     extra_params=extra_params,
                     extra_info=sample.data.extra_info,
                 )
-                sample.data.extra_info.pop("num_return_tokens", None)
                 sample.data.extra_info.pop("response_ids", None)
                 response_future.append(fut)
             try:
@@ -119,7 +111,7 @@ class SingleTurnEnvironment(BaseEnvironment):
             except asyncio.TimeoutError:
                 self.logger.error("Get rollout controller response timeout and return the failed response.")
                 rollout_responses = [RLRolloutResponseItem(state="skipped") for _ in group_data_items]
-            group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_responses)
+            group_data_items = update_rollout_item(group_data_items, rollout_responses)
             # for idx, data in enumerate(updated_group_data_items):
             #     if data.env.rollout.response_ids and len(data.env.rollout.response_ids) > 32768:
             #         raise ValueError(

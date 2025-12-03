@@ -150,6 +150,7 @@ class DataFlow:
                 f"Dataflow max_concurrent is set to {self.config.max_concurrent}, we proposed to set max_concurrent to {max_concurrent} based on rollout_max_batch_size_per_instance."
             )
         self.enable_partial_rollout = self.config.enable_partial_rollout
+        self.internal_rollout_idx = 0
 
     def _reset_internal_states_on_step(
         self,
@@ -159,7 +160,7 @@ class DataFlow:
     ):
         """Resets all internal state variables of DataFlow."""
         self.send_samples_count = 0
-        self.finished_samples_count = 0
+        self.finished_samples_count = ray.get(self.replay_buffer.get_completed_samples.remote())
         self.failed_samples_count = 0
         self.skipped_sample_count = 0
         self.filtered_sample_count = 0
@@ -173,7 +174,17 @@ class DataFlow:
         self.sample_from_expired_storage = (
             ray.get(self.replay_buffer.get_expired_samples.remote()) >= self.target_batch_size
         )
-        self.enable_partial_rollout = 0 if self.sample_from_expired_storage else self.config.enable_partial_rollout
+        # self.enable_partial_rollout = 0 if self.sample_from_expired_storage else self.config.enable_partial_rollout
+        # if self.internal_rollout_idx == self.config.partial_rollout_step:
+        #     self.enable_partial_rollout = 0
+        #     self.logger.info(
+        #         f"DataFlow disable partial rollout_controller as internal_rollout_idx {self.internal_rollout_idx} reached partial_rollout_step: {self.config.partial_rollout_step}."
+        #     )
+        #     self.internal_rollout_idx = 0
+        # else:
+        #     self.enable_partial_rollout = self.config.enable_partial_rollout
+        #     self.internal_rollout_idx += 1
+
         logger_msg = (
             f"DataFlow internal states reset for new run: target_batch_size={self.target_batch_size}, "
             f"sample_params: {self.config.sample_params}, extra_params: {self.config.extra_params}, "
@@ -221,7 +232,7 @@ class DataFlow:
 
         # Step 3: Determine the sample's state and act accordingly.
         group_state = determine_group_state(group_data_items)
-        self.logger.info(f"Determined replay state for {action_id}: {group_state}")
+        self.logger.debug(f"Determined replay state for {action_id}: {group_state}")
         if group_state == "completed":
             group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
             if len(group_data_items) > 0:
@@ -264,21 +275,33 @@ class DataFlow:
         with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
             update_step = max(1, int(self.target_batch_size * 0.01))
             next_update_threshold = update_step
+            # if self.enable_partial_rollout:
+            #     max_concurrent = self.config.max_concurrent
+            # else:
+            max_concurrent = self.config.max_concurrent - self.finished_samples_count
+            self.logger.info(f"set to sync mode and setting max_concurrent to {max_concurrent}")
+
+            for _ in range(max_concurrent):
+                task = create_task(self.worker_task())
+                waiting_tasks.add(task)
+
             while self.finished_samples_count < self.target_batch_size:
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
                     pbar.refresh()
                     next_update_threshold += update_step
-                    self.logger.info(f"waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}")
-                while len(waiting_tasks) < self.config.max_concurrent:
-                    # In async mode, we keep spawning. In sync mode, we stop if we have enough tasks in flight.
-                    if (
-                        not self.enable_partial_rollout
-                        and self.finished_samples_count + len(waiting_tasks) >= self.target_batch_size
-                    ):
-                        break
-                    task = create_task(self.worker_task())
-                    waiting_tasks.add(task)
+                    self.logger.info(
+                        f"waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
+                    )
+                # while len(waiting_tasks) < self.config.max_concurrent:
+                #     # In async mode, we keep spawning. In sync mode, we stop if we have enough tasks in flight.
+                #     if (
+                #         not self.enable_partial_rollout
+                #         and self.finished_samples_count + len(waiting_tasks) >= self.target_batch_size
+                #     ):
+                #         break
+                #     task = create_task(self.worker_task())
+                #     waiting_tasks.add(task)
 
                 _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
                 self.finished_samples_count = ray.get(self.replay_buffer.get_completed_samples.remote())
@@ -293,34 +316,34 @@ class DataFlow:
         # NOTE: Directly send pause requests to rollout workers because calling `rollout_controller.pause()`
         # would be queued behind many worker tasks, causing a significant delay.
         start_time = time.monotonic()
-        if self.enable_partial_rollout:
-            await self.pause()
-            cleanup_start_time = time.monotonic()
-            cleanup_timeout = 10 * 60  # 10 minutes in seconds
-            while len(waiting_tasks) > 0:
-                # elapsed_time = time.monotonic() - cleanup_start_time
-                # if elapsed_time > cleanup_timeout:
-                #     self.logger.warning(
-                #         f"Cleanup timeout of {cleanup_timeout}s reached. "
-                #         f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
-                #     )
-                #     for task in waiting_tasks:
-                #         task.cancel()
-                #     # Wait for cancellations to complete
-                #     await asyncio.gather(*waiting_tasks, return_exceptions=True)
-                #     break  # Exit the cleanup loop
-                done_tasks, pending_tasks = await asyncio.wait(
-                    waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
-                )
-                if len(pending_tasks) > 0:
-                    await self.pause()
-                waiting_tasks = pending_tasks
-            self.logger.info("All worker tasks have completed after pausing env controller.")
+        # if self.enable_partial_rollout:
+        await self.pause()
+        cleanup_start_time = time.monotonic()
+        cleanup_timeout = 10 * 60  # 10 minutes in seconds
+        while len(waiting_tasks) > 0:
+            # elapsed_time = time.monotonic() - cleanup_start_time
+            # if elapsed_time > cleanup_timeout:
+            #     self.logger.warning(
+            #         f"Cleanup timeout of {cleanup_timeout}s reached. "
+            #         f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
+            #     )
+            #     for task in waiting_tasks:
+            #         task.cancel()
+            #     # Wait for cancellations to complete
+            #     await asyncio.gather(*waiting_tasks, return_exceptions=True)
+            #     break  # Exit the cleanup loop
+            done_tasks, pending_tasks = await asyncio.wait(
+                waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
+            )
+            if len(pending_tasks) > 0:
+                await self.pause()
+            waiting_tasks = pending_tasks
+        self.logger.info("All worker tasks have completed after pausing env controller.")
         elapsed_time = time.monotonic() - start_time
         self.logger.info(f"Pause generation. Time taken: {elapsed_time:.2f} seconds.")
         self.logging_replaybuffer_state()
         self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))
-        
+
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
         self.logger.info("Sending abort requests to all rollout workers.")
@@ -330,7 +353,7 @@ class DataFlow:
         if not self.worker_url_list:
             self.logger.info("No active rollout workers to pause.")
             return
-    
+
         async with httpx.AsyncClient() as client:
             tasks = []
             for url in self.worker_url_list:
@@ -380,7 +403,14 @@ class DataFlow:
             self.logger.info(f"Resuming replay buffer from {resume_path}")
             await self.replay_buffer.resume.remote(resume_path)
 
+        start_time = time.monotonic()
         await self.concurrent_task_runner()
+        elapsed_time = time.monotonic() - start_time
+        tokens_info = ray.get(self.replay_buffer.get_generated_tokens.remote())
+        generated_tokens = tokens_info["total_response_tokens"]
+        self.logger.info(
+            f"dataflow.run completed in {elapsed_time:.2f} seconds. total_tokens: {generated_tokens} and throughput: {generated_tokens / elapsed_time:.2f} tokens/s. \n tokens_info: {tokens_info}"
+        )
 
         if dump:
             assert dump_path, "Dumping is enabled but no dump path is provided."

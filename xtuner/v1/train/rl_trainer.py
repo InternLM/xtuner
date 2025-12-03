@@ -70,7 +70,8 @@ class RLTrainerConfig(BaseModel):
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     seed: int = 42
-    debug: bool = False
+    debug_rollout: bool = False
+    debug_train: bool = False 
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -165,7 +166,8 @@ class RLTrainer:
         hf_max_keep (int | None): Maximum number of HuggingFace checkpoints to retain.
             Defaults to None.
         seed (int): Random seed for reproducible training. Defaults to 42.
-        debug (bool): Enable debug mode with additional logging. Defaults to False.
+        debug_rollout (bool): Enable debug mode for only the rollout process. Defaults to False.
+        debug_train (bool): Enable debug mode for only the training process. Defaults to False. 
 
     **Examples:**
 
@@ -209,7 +211,8 @@ class RLTrainer:
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         seed: int = 42,
-        debug: bool = False,
+        debug_rollout: bool = False,
+        debug_train: bool = False,
         trainer_cfg: RLTrainerConfig | None = None,
     ):
         """Initialize the RL training system."""
@@ -243,7 +246,9 @@ class RLTrainer:
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
-        self._debug = debug
+        self._debug_rollout = debug_rollout
+        self._debug_train = debug_train
+        self._no_debug = not self._debug_rollout and not self._debug_train
         self._seed = seed
         self._set_deterministic()
         self._set_random_seed(seed)
@@ -344,7 +349,8 @@ class RLTrainer:
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             seed=config.seed,
-            debug=config.debug,
+            debug_rollout=config.debug_rollout,
+            debug_train=config.debug_train,
             trainer_cfg=config,
         )
         return self
@@ -386,75 +392,90 @@ class RLTrainer:
         evaluation.
         """
         self.logger.info("Start RL training")
-        if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator:
+        if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator: 
             ray.get(self._rollout_env_controller.check_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
+
         for rollout_idx in range(1, self._rollout_steps + 1):
             timer_log_str = f"Rollout {rollout_idx} start \n"
             step_timer_dict = {}
             memory_status_dict = {}
             # 1. Rollout
-            with timer("generation", step_timer_dict):
-                ray.get(self._rollout_env_controller.check_active_workers.remote())
-                data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
-            # self._log_memory_usage(rollout_idx, stage="generation")
-            memory_status_dict["generation"] = self._get_memory_stats()
+            if self._debug_rollout or self._no_debug:
+                with timer("generation", step_timer_dict):
+                    ray.get(self._rollout_env_controller.check_active_workers.remote())
+                    memory_status_dict["check_health"] = self._get_memory_stats()
+                    data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
+                    memory_status_dict["generation"] = self._get_memory_stats()
+
             # 2. Offload rollout models and save trajectories
-            with timer("offload_and_dump", step_timer_dict):
-                ray.get(self._rollout_env_controller.offload.remote())
-                trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
-                self._save_trajectories(data_groups, trajectory_save_path)
-                self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
-            # self._log_memory_usage(rollout_idx, stage="offload_and_dump")
-            memory_status_dict["offload_and_dump"] = self._get_memory_stats()
+            if self._debug_rollout:
+                with timer("offload_and_dump", step_timer_dict):
+                    trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
+                    self._save_trajectories(data_groups, trajectory_save_path)
+                    self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
+            elif self._no_debug:
+                with timer("offload_and_dump", step_timer_dict):
+                    ray.get(self._rollout_env_controller.offload.remote())
+                    trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
+                    self._save_trajectories(data_groups, trajectory_save_path)
+                    self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
+                # memory_status_dict["offload_and_dump"] = self._get_memory_stats()
+            
+            if self._debug_train or self._no_debug:
             # 3. Onload training models and prepare data
-            with timer("onload_and_prepare_data", step_timer_dict):
-                ray.get(self._train_controller.onload.remote(target="all"))
-                self.logger.info("Training controller loaded")
-                data_batches, data_info = self._prepare_train_data(
-                    data_groups, self._train_worker_cfg.pack_max_length, multimodal_train_infos
-                )
-                self.logger.info(f"Prepared {len(data_batches)} training data batches")
-                self._log_data_info(rollout_idx, data_info)
-            memory_status_dict["onload_and_prepare_data"] = self._get_memory_stats()
-            # 4. Training Step
-            with timer("training", step_timer_dict):
-                ray.get(
-                    self._train_controller.fit.remote(
-                        data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
+                with timer("onload_and_prepare_data", step_timer_dict):
+                    ray.get(self._train_controller.onload.remote(target="all"))
+                    self.logger.info("Training controller loaded")
+                    data_batches, data_info = self._prepare_train_data(
+                        data_groups, self._train_worker_cfg.pack_max_length, multimodal_train_infos
                     )
-                )
-            memory_status_dict["training"] = self._get_memory_stats()
+                    self.logger.info(f"Prepared {len(data_batches)} training data batches")
+                    self._log_data_info(rollout_idx, data_info)
+                # memory_status_dict["onload_and_prepare_data"] = self._get_memory_stats()
+            # 4. Training Step
+                with timer("training", step_timer_dict):
+                    ray.get(
+                        self._train_controller.fit.remote(
+                            data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
+                        )
+                    )
+                # memory_status_dict["training"] = self._get_memory_stats()
+            
+            if self._no_debug:
             # 5. Saving and sync weights
-            with timer("saving_and_sync_weight", step_timer_dict):
-                ray.get(self._train_controller.offload.remote(target="optimizer"))
-                self._maybe_save_hf()
-                bind_train_rollout(
-                    train_controller=self._train_controller, env_controller=self._rollout_env_controller
-                )
-                ray.get(self._rollout_env_controller.onload_weights.remote())
-                ray.get(self._train_controller.update_weights.remote())
-                self.logger.info("Model weights synchronized successfully.")
-                ray.get(self._train_controller.offload.remote(target="model"))
-                ray.get(self._rollout_env_controller.onload_kvcache.remote())
-            memory_status_dict["saving_and_sync_weight"] = self._get_memory_stats()
+                with timer("saving_and_sync_weight", step_timer_dict):
+                    ray.get(self._train_controller.offload.remote(target="optimizer"))
+                    self._maybe_save_hf()
+                    bind_train_rollout(
+                        train_controller=self._train_controller, env_controller=self._rollout_env_controller
+                    )
+                    ray.get(self._rollout_env_controller.onload_weights.remote())
+                    ray.get(self._train_controller.update_weights.remote())
+                    self.logger.info("Model weights synchronized successfully.")
+                    ray.get(self._train_controller.offload.remote(target="model"))
+                    ray.get(self._rollout_env_controller.onload_kvcache.remote())
+                # memory_status_dict["saving_and_sync_weight"] = self._get_memory_stats()
+
             timer_log_str = f"Rollout {rollout_idx} training finished and timing listed: \n"
             timer_log_str += timer_logger(step_timer_dict)
 
             self.logger.info(timer_log_str)
 
             # evaluate
-            if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
+            if self._no_debug and self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
                 scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
                 self._save_trajectories(eval_data_groups, trajectory_save_path)
                 self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
-            memory_status_dict["saving_and_sync_weight"] = self._get_memory_stats()
+            # memory_status_dict["saving_and_sync_weight"] = self._get_memory_stats()
             self._log_memory_usage(rollout_idx, memory_status_dict)
             self._cur_step += 1
+            if rollout_idx >= 30:
+                break  # TODO: remove this line after testing
 
     def _get_memory_stats(self) -> dict:
         """Gets the current CPU and GPU memory usage stats."""
@@ -525,32 +546,6 @@ class RLTrainer:
             else:
                 log_lines.append(f"  - {key:<20}: {value}")
         self.logger.info("\n".join(log_lines))
-
-    def _log_memory_usage(self, rollout_idx: int, stage: str):
-        """Logs CPU and GPU memory usage at a given stage."""
-        if get_rank() != 0:
-            return
-
-        log_msg = f"Rollout {rollout_idx} memory usage after stage: '{stage}'"
-
-        # CPU Memory
-        cpu_mem = psutil.virtual_memory()
-        log_msg += (
-            f"\n  - CPU Memory: Used {cpu_mem.used / (1024**3):.2f} GB / "
-            f"Total {cpu_mem.total / (1024**3):.2f} GB ({cpu_mem.percent}%)"
-        )
-
-        # GPU Memory
-        if torch.cuda.is_available():
-            log_msg += "\n  - GPU Memory:"
-            for i in range(torch.cuda.device_count()):
-                free_mem, total_mem = torch.cuda.mem_get_info(i)
-                used_mem = total_mem - free_mem
-                log_msg += (
-                    f"\n    - Rank {i}: Used {used_mem / (1024**3):.2f} GB / "
-                    f"Total {total_mem / (1024**3):.2f} GB ({(used_mem / total_mem) * 100:.2f}%)"
-                )
-        self.logger.info(log_msg)
 
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
@@ -672,8 +667,16 @@ class RLTrainer:
                 if data.env.rollout.response_ids is not None:
                     if isinstance(data.env.rollout.response_ids, torch.Tensor):
                         response_ids = data.env.rollout.response_ids.flatten().tolist()
+                        async_response_ids = data.env.rollout.async_response_ids.flatten().tolist()
+                        async_response_len = 0
+                        async_len_list = []
+                        for item in async_response_ids:
+                            async_response_len += len(item)
+                            async_len_list.append(len(item))
+                        assert len(response_ids) == async_response_len, (f"{len(response_ids)} vs {async_response_len}, async_response_len: {async_len_list}")
                     else:
                         response_ids = data.env.rollout.response_ids
+
                     rollout_response_len_list.append(len(response_ids))
                     # response_str = self.tokenizer.decode(response_ids, skip_special_tokens=False)
                     # revert_encode_response_ids = self.tokenizer.encode(response_str, add_special_tokens=False)
@@ -716,10 +719,22 @@ class RLTrainer:
             f.write("\n")
             for group in data_groups:
                 for data in group:
+                    async_response_lens = []
+                    for item in data.env.rollout.async_response_ids:
+                        async_response_lens.append(len(item))
+                    log_response_ids = ' '.join(map(str, data.env.rollout.response_ids))
+                    log_async_response_ids = []
+                    for item in data.env.rollout.async_response_ids:
+                        log_async_response_ids.append(' '.join(map(str, item)))
                     item = {
+                        "action_id": data.uid.action_id,
                         "prompt": data.data.extra_info["raw_prompt"],
                         "response": data.env.rollout.response,
+                        "async_response": data.env.rollout.async_response,
+                        # "response_ids": log_response_ids,
+                        # "async_response_ids": log_async_response_ids,
                         "response_len": rollout_response_len_list[_count],
+                        "async_response_lens": async_response_lens,
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
                         "version": data.uid.version,

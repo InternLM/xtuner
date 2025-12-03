@@ -97,6 +97,8 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     # TODO: 单独管理每一条query，而不是一组query，提高效率
     assert len(grouped_dataitem) > 0
 
+    total_response_len = 0
+    total_prefill_len = 0
     env_str = grouped_dataitem[0].uid.env
     root_id = grouped_dataitem[0].uid.root_id
     action_id = grouped_dataitem[0].uid.action_id
@@ -109,6 +111,10 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     for item in grouped_dataitem:
         version = item.uid.version
         observation_ids.append(item.uid.observation_id)
+        total_response_len += (
+            len(item.env.rollout.async_response_ids[-1]) if item.env.rollout.async_response_ids else 0
+        )
+        total_prefill_len += item.data.extra_info.get("prefill_token_len", 0)
         observation_refs.append(ray.put(item.env))
         observation_versions.append(version)
         group_rollout_finish_reason.append(item.env.rollout.finish_reason)
@@ -118,7 +124,8 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     group_state = determine_group_state(grouped_dataitem)
 
     replay_state = ReplayState.from_str(group_state)
-    logger.info(f"determined group_state: {group_state}, replay_state: {replay_state}, version: {version}")
+    logger.debug(f"determined group_state: {group_state}, replay_state: {replay_state}, version: {version}")
+    logger.debug(f"total_response_len: {total_response_len} for action_id: {action_id}")
     replay_meta = ReplayMeta(
         env=env_str,
         root_id=root_id,
@@ -129,7 +136,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         observation_versions=observation_versions,
         state=replay_state,
         version=version,
-        extra_info={},
+        extra_info={"response_tokens": total_response_len, "prefill_tokens": total_prefill_len},
     )
     return replay_meta
 
@@ -357,7 +364,7 @@ class ReplayBufferStorage:
             replay_meta.version < partial_rollout_step or partial_rollout_step == 0
         ):
             self._interrupted_actions[replay_meta.version].append(action_id)
-            self.logger.info(
+            self.logger.debug(
                 f"Add aborted sample with action_id: {action_id} version: {replay_meta.version} to _interrupted_actions."
             )
         elif replay_meta.state == ReplayState.INTERRUPTED and replay_meta.version >= partial_rollout_step:
@@ -435,7 +442,7 @@ class ReplayBufferStorage:
                 while bucket:
                     action_id = bucket.pop()
                     replay_meta = self._actions[action_id]
-                    if replay_meta.version >= partial_rollout_step:
+                    if partial_rollout_step > 0 and replay_meta.version >= partial_rollout_step:
                         replay_meta.state = ReplayState.EXPIRED
                         replay_meta.version = 0
                         self._expired_actions.append(action_id)
@@ -603,6 +610,36 @@ class ReplayBufferStorage:
                 return bucket.pop()
         return None
 
+    def get_expired_tokens(self):
+        response_tokens = 0
+        prefill_tokens = 0
+        for action_id in self._expired_actions:
+            replay_meta = self._actions[action_id]
+            response_tokens += replay_meta.extra_info.get("response_tokens", 0)
+            prefill_tokens += replay_meta.extra_info.get("prefill_tokens", 0)
+        return response_tokens, prefill_tokens
+
+    def get_completed_tokens(self):
+        response_tokens = 0
+        prefill_tokens = 0
+        for bucket in self._completed_actions:
+            # self.logger.info(f"len(bucket): {len(bucket)}")
+            for action_id in bucket:
+                replay_meta = self._actions[action_id]
+                response_tokens += replay_meta.extra_info.get("response_tokens", 0)
+                prefill_tokens += replay_meta.extra_info.get("prefill_tokens", 0)
+        return response_tokens, prefill_tokens
+
+    def get_interrupted_tokens(self):
+        response_tokens = 0
+        prefill_tokens = 0
+        for bucket in self._interrupted_actions:
+            for action_id in bucket:
+                replay_meta = self._actions[action_id]
+                response_tokens += replay_meta.extra_info.get("response_tokens", 0)
+                prefill_tokens += replay_meta.extra_info.get("prefill_tokens", 0)
+        return response_tokens, prefill_tokens
+
 
 @ray.remote
 class ReplayBuffer:
@@ -672,7 +709,7 @@ class ReplayBuffer:
         if sample_from_expired_storage and self.get_expired_samples() > 0:
             self.sample_from_expired_count += 1
             return self.storage.sample_from_expired_storage()
-        elif enable_partial_rollout > 0 and self.get_interrupted_samples() > 0:
+        elif self.get_interrupted_samples() > 0:
             self.sample_from_interrupted_count += 1
             return self.storage.sample_from_interrupted_storage(self.tokenizer)
         else:
@@ -753,6 +790,33 @@ class ReplayBuffer:
 
     def get_interrupted_samples(self):
         return self.storage.get_interrupted_samples()
+
+    def get_expired_tokens(self):
+        return self.storage.get_expired_tokens()
+
+    def get_completed_tokens(self):
+        return self.storage.get_completed_tokens()
+
+    def get_interrupted_tokens(self):
+        return self.storage.get_interrupted_tokens()
+
+    def get_generated_tokens(self):
+        completed_response_tokens, completed_prefill_tokens = self.get_completed_tokens()
+        interrupted_response_tokens, interrupted_prefill_tokens = self.get_interrupted_tokens()
+        expired_response_tokens, expired_prefill_tokens = self.get_expired_tokens()
+        total_response_tokens = completed_response_tokens + interrupted_response_tokens + expired_response_tokens
+        total_prefill_tokens = completed_prefill_tokens + interrupted_prefill_tokens + expired_prefill_tokens
+
+        return {
+            "total_response_tokens": total_response_tokens,
+            "total_prefill_tokens": total_prefill_tokens,
+            "completed_response_tokens": completed_response_tokens,
+            "completed_prefill_tokens": completed_prefill_tokens,
+            "interrupted_response_tokens": interrupted_response_tokens,
+            "interrupted_prefill_tokens": interrupted_prefill_tokens,
+            "expired_response_tokens": expired_response_tokens,
+            "expired_prefill_tokens": expired_prefill_tokens,
+        }
 
     def clear(self):
         """Clears the replay buffer storage."""

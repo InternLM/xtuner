@@ -124,17 +124,28 @@ class LMDeployWorker(RolloutWorker):
         else:
             payload["messages"] = prompt
 
-        if "num_return_tokens" in extra_info:
-            max_return_tokens = sample_params["max_tokens"] - extra_info["num_return_tokens"]
+        if "response_ids" in extra_info:
+            new_response_ids = []
+            new_num_return_tokens = 0
+            num_return_tokens_lst = []
+            for res in extra_info["response_ids"]:
+                new_response_ids.extend(res)
+                new_num_return_tokens += len(res)
+                num_return_tokens_lst.append(len(res))
+
+            max_return_tokens = sample_params["max_tokens"] - new_num_return_tokens
             sample_params["max_tokens"] = max_return_tokens
             init_input_len = len(input_ids) if input_ids else 0
-            payload["input_ids"] += extra_info["response_ids"]
-            self.logger.info(
-                f"Set max_tokens to {max_return_tokens} based on num_return_tokens {extra_info['num_return_tokens']}, init input_len: {init_input_len} and payload input len {len(payload['input_ids'])}."
+            payload["input_ids"].extend(new_response_ids)
+            self.logger.debug(
+                f"Set max_tokens to {max_return_tokens} based on num_return_tokens {num_return_tokens_lst}, init input_len: {init_input_len} and payload input len {len(payload['input_ids'])}."
             )
         if self.enable_return_routed_experts:
             extra_params["return_routed_experts"] = True
 
+        assert len(payload["input_ids"]) <= 32768 + 2048, (
+            f"Input length {len(payload['input_ids'])} exceeds the maximum limit."
+        )
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
         payload.update(lmdeploy_sample_params)
 
