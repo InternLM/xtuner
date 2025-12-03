@@ -1496,10 +1496,6 @@ class Trainer:
             load_args=load_checkpoint_cfg.load_optimizer_args,
         )
 
-        if load_checkpoint_cfg.load_dataset:
-            dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
-            self._resume_dataloader(dataloader_path)
-
         train_state_path = resume_from / self._SAVE_TRAIN_STATE_PATH
 
         with train_state_path.open("r") as f:
@@ -1507,13 +1503,23 @@ class Trainer:
 
         self._cur_step = train_state["cur_step"]
         self._cur_epoch = train_state["cur_epoch"]
-        self._consumed_samples = train_state["consumed_samples"]
-        self._reduced_consumed_samples = train_state.get("reduced_consumed_samples", 0)  # default 0 for BC
-        # 当resume后，所有rank上恢复的是rank0的consumed_tokens。由于可能发生变卡resume，所以无法拿到各rank真实值。
-        # 故_consumed_tokens是近似值，只用于近似计算。需要真实值时，使用聚合后的_reduced_consumed_tokens。
-        self._consumed_tokens = train_state["consumed_tokens"]
-        self._reduced_consumed_tokens = train_state.get("reduced_consumed_tokens", 0)  # default 0 for BC
-        self._train_time_offset = train_state["train_time_offset"]
+
+        if load_checkpoint_cfg.load_dataset:
+            # 当resume后，所有rank上恢复的是rank0的consumed_tokens。由于可能发生变卡resume，所以无法拿到各rank真实值。
+            # 故_consumed_tokens是近似值，只用于近似计算。需要真实值时，使用聚合后的_reduced_consumed_tokens。
+            # 同理，_consumed_samples是近似值，只用于近似计算。需要真实值时，使用聚合后的_reduced_consumed_samples。
+            self._consumed_tokens = train_state["consumed_tokens"]
+            self._reduced_consumed_tokens = train_state.get("reduced_consumed_tokens", 0)  # default 0 for BC
+            self._train_time_offset = train_state["train_time_offset"]
+            # _reduced_consumed_samples 会影响 save dcp时 dataloader.get_state_dict的状态。
+            # 如果加载 dataset，应该恢复_reduced_consumed_samples为checkpoint中的值。
+            # 如果不加载 dataset，应该保持_reduced_consumed_samples为初始值0，否则如果加载上旧dataloader的reduced_consumed_samples
+            # 会导致存储新dataloader时 reduced_consumed_samples 是不正确的值。
+            self._consumed_samples = train_state["consumed_samples"]
+            self._reduced_consumed_samples = train_state.get("reduced_consumed_samples", 0)  # default 0 for BC
+
+            dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
+            self._resume_dataloader(dataloader_path)
 
         if load_checkpoint_cfg.load_scheduler:
             scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
