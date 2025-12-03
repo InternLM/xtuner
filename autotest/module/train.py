@@ -29,7 +29,10 @@ class Train:
             )
             if config_path:
                 output_path = model_config = config.get("parameters", {}).get("output_path", ".")
-                command += f" --config {config_path}; mkdir -p {work_dir}; mv {output_path}/202* {work_dir}"
+                if output_path == '.':
+                    command += f" --config {config_path}; mkdir -p {work_dir}; mv {output_path}/.xtuner {work_dir}; mv {output_path}/202* {work_dir}"
+                else:
+                    command += f" --config {config_path}"
             else:
                 if model_config:
                     command += f" --model-cfg {model_config}"
@@ -54,7 +57,11 @@ class Train:
         return check_result(base_path, cur_path, check_metrics)
     
     def pre_action(config=None):
-        return True, config
+        action_info = config.get("pre_action", None)
+        if action_info:
+            action_cmd = action_info.get("command", None)
+            if action_cmd:
+                run_cmd(action_cmd)
 
     def post_action(config=None):
         return True, config
