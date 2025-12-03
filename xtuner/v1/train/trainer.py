@@ -1425,9 +1425,11 @@ class Trainer:
         internal_metrics: InternalMetrics | None = None,
     ):
         """Log the training step information."""
+        if step_consumed_tokens == 0:
+            logger.warning("step_consumed_tokens is 0")
         e2e_train_time = train_time + train_time_offset
-        tgs = step_consumed_tokens / step_time
-        rank_consumed_tokens = reduced_consumed_tokens / self.world_size
+        tgs = max(1, step_consumed_tokens / step_time)
+        rank_consumed_tokens = max(1, reduced_consumed_tokens / self.world_size)
         e2e_tgs = rank_consumed_tokens / e2e_train_time
         exp_tgs = exp_consumed_tokens / train_time
         lr = self._lr_scheduler.get_last_lr()[0]

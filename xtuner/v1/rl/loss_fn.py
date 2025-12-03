@@ -27,6 +27,9 @@ def register_policy_loss(name: str) -> Callable[[PolicyLossFn], PolicyLossFn]:
     return decorator
 
 
+_loss_load_printed = False
+
+
 def get_policy_loss_fn(name):
     loss_name = name
     if loss_name not in POLICY_LOSS_REGISTRY:
@@ -35,7 +38,10 @@ def get_policy_loss_fn(name):
                 import importlib
 
                 package_name, module_name = loss_name.rsplit(".", 1)
-                print(f"Importing loss function from {package_name}.{module_name}")
+                global _loss_load_printed
+                if not _loss_load_printed:
+                    print(f"Importing loss function from {package_name}.{module_name}")
+                    _loss_load_printed = True
                 module = importlib.import_module(package_name)
                 loss_fn = getattr(module, module_name)
                 POLICY_LOSS_REGISTRY[loss_name] = loss_fn
