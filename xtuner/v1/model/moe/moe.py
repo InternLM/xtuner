@@ -20,7 +20,7 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
+from torch.distributed.tensor import DTensor, Replicate, distribute_tensor, Shard
 from tqdm import tqdm
 from typing_extensions import NotRequired, overload, override
 
@@ -47,6 +47,8 @@ from xtuner.v1.utils import (
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
+from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 
 
 DEVICE = get_device()
@@ -651,10 +653,22 @@ class MoE(BaseModel):
         self._init_device_mesh(fsdp_config)
         self._maybe_compile_layers()
 
+        def rebuild_dtensor(module):
+            for name, child in list(module.named_children()):
+                if hasattr(child, "ep_mesh"):
+                    child.ep_mesh = self.ep_mesh
+                if isinstance(child, (GroupedLinear, TileWiseFloat8GroupedLinear)) and self.ep_mesh is not None and self.ep_mesh.size() > 1:
+                    print(f"rebuild DTensor in {name}")
+                    weight = child.weight.to_local() if isinstance(child.weight, DTensor) else child.weight
+                    child.weight = nn.Parameter(distribute_tensor(weight, self.ep_mesh, [Shard(0)]))
+                else:
+                    rebuild_dtensor(child)
+
         # TODO: 一定不能少，因为在模型 init 时候会构建一套 ep_mesh，如果不重新构建，fsdp_mesh 和 ep_mesh 会没有任何联系
         # fully_shard 时候会出现： AssertionError: FSDP requires the DP and TP mesh to have the same parent mesh
         with torch.device("meta"):
-            self.layers = self.build_layers(self.config)
+            # self.layers = self.build_layers(self.config)
+            rebuild_dtensor(self.layers)
 
         if float8_handler is not None:
             # As we modify the shape of the model's parameters,
@@ -686,6 +700,10 @@ class MoE(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        if self.fsdp_config.lm_head_fp32:
+            lm_head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
+        else:
+            lm_head_mp_policy = mp_policy
         num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
 
         for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
@@ -731,7 +749,7 @@ class MoE(BaseModel):
         fully_shard(
             self.lm_head,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
+            mp_policy=lm_head_mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )

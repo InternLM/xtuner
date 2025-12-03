@@ -27,6 +27,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
+from xtuner.v1.model.adapter.lora import LoraConfig, LoraModel
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
@@ -118,6 +119,7 @@ class WorkerConfig(BaseModel):
 
     model_config = ConfigDict(title="Worker config", extra="forbid", arbitrary_types_allowed=True)
     model_cfg: TransformerConfig | VisionComposeConfigProtocol
+    adapter_cfg: LoraConfig | None = None
     optim_cfg: OptimConfig
     loss_cfg: BaseRLLossConfig
     lr_cfg: LRConfig
@@ -194,6 +196,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 optim_cfg=worker_cfg.optim_cfg,
                 fsdp_cfg=worker_cfg.fsdp_cfg,
                 model_cfg=worker_cfg.model_cfg,
+                adapter_cfg=worker_cfg.adapter_cfg,
             )
 
         if worker_cfg.load_from is not None:
@@ -621,6 +624,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_cfg_info["tp"] = tp
         self.rollout_cfg_info["ep"] = ep
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
+        self.rollout_cfg_info["update_weight_bucket_size_in_gb"] = rollout_config.update_weight_bucket_size_in_gb
         if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
             self.rollout_cfg_info["backend"] = "sglang"
         else:
@@ -641,6 +645,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         assert self.rollout_device_mesh is not None
 
         model = self._engine.model
+        lora_model = None
+        if isinstance(model, LoraModel):
+            lora_model = model
+            lora_model.merge_lora()
+            model = lora_model.base_model
+
+
         DEVICE_MODULE.empty_cache()
 
         if isinstance(model.config, VisionComposeConfigProtocol):
@@ -651,22 +662,62 @@ class TrainingWorker(SingleAcceleratorWorker):
             else:
                 dtype = torch.bfloat16
 
-        same_gen = model._get_same_hf_param(model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE)
+        bucket_size = int(self.rollout_cfg_info["update_weight_bucket_size_in_gb"] * 1024**3)
+        same_gen = model._get_same_hf_param(
+            model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE, bucket_size=bucket_size
+        )
         fused_gen = model._get_fused_hf_param(
             model._group_param_by_load_spec(LoadEnum.FUSED),
             dtype=dtype,
             device=DEVICE,
-            return_full_key_per_rank=True,
+            bucket_size=bucket_size,
+            update_weights_for_rl=True,
         )
         shard_gen = model._get_shard_hf_param(
-            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE
+            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE, bucket_size=bucket_size
         )
-        for name_list, param_list in chain(same_gen, fused_gen, shard_gen):
+
+        for name_list, fused_param_list in fused_gen:
+            state_dict = {name: param.detach() for name, param in zip(name_list, fused_param_list)}
+            for key in list(state_dict.keys()):
+                if "lora_" in key:
+                    del state_dict[key]
+            if model.fsdp_config.ep_size > 1:
+                ep_mesh: DeviceMesh = model.ep_mesh
+                ep_group = ep_mesh.get_group()
+                ep_rank = dist.get_rank(group=ep_group)
+                for src_global_rank in dist.get_process_group_ranks(ep_group):
+                    broadcast_state_dict = dict()
+                    for key, tensor in state_dict.items():
+                        obj_to_broadcast = [key, tensor.to("meta")] if ep_rank == src_global_rank else [None, None]
+                        dist.broadcast_object_list(obj_to_broadcast, src=src_global_rank, group=ep_group)
+                        real_key, meta_tensor = obj_to_broadcast
+                        buffer = (
+                            state_dict[real_key]
+                            if ep_rank == src_global_rank
+                            else torch.empty_like(meta_tensor, device=DEVICE)
+                        )
+                        dist.broadcast(buffer, src=src_global_rank, group=ep_group)
+                        broadcast_state_dict[real_key] = buffer
+                    self.request_update_params(broadcast_state_dict, finished=False)
+                    del broadcast_state_dict, buffer
+            else:
+                self.request_update_params(state_dict, finished=False)
+            del state_dict, name_list, fused_param_list
+
+        for name_list, param_list in chain(same_gen, shard_gen):
             state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
+            for key in list(state_dict.keys()):
+                if "lora_" in key:
+                    del state_dict[key]
             self.request_update_params(state_dict, finished=False)
+            del state_dict, name_list, param_list
 
         if self.rollout_cfg_info["backend"] == "pytorch":
             self.request_update_params({}, finished=True)
+
+        if lora_model:
+            lora_model.unmerge_lora()
 
         dist.barrier()
         DEVICE_MODULE.empty_cache()
@@ -678,6 +729,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         assert self.rollout_device_mesh is not None
 
         model = self._engine.model
+        lora_model = None
+        if isinstance(model, LoraModel):
+            lora_model = model
+            lora_model.merge_lora()
+            model = lora_model.base_model
         DEVICE_MODULE.empty_cache()
 
         if isinstance(model.config, VisionComposeConfigProtocol):
@@ -772,6 +828,9 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         if self.rollout_cfg_info["backend"] == "pytorch":
             self.request_update_params({}, finished=True)
+
+        if lora_model:
+            lora_model.unmerge_lora()
 
         dist.barrier()
         DEVICE_MODULE.empty_cache()
