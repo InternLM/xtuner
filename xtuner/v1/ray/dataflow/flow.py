@@ -246,6 +246,7 @@ class DataFlow:
             next_update_threshold = update_step
             while (
                 self.finished_samples_count < self.target_batch_size
+                and self.failed_samples_count < self.target_batch_size 
                 and self.skipped_sample_count < self.target_batch_size
             ):
                 if self.finished_samples_count >= next_update_threshold:

@@ -16,13 +16,17 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
+from transformers.models.llama.modeling_llama import repeat_kv
 from xtuner.v1.float8.float8_handler import Float8Handler
 from torch.distributed.device_mesh import init_device_mesh
 import torch.distributed as dist
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.model.utils.checkpointing import checkpoint_wrapper
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
+from torch.distributed.device_mesh import DeviceMesh
 from tqdm import tqdm
+from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
+from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
@@ -125,6 +129,7 @@ class Qwen3VLVisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        sequence_parallel_mesh: DeviceMesh | None = None,
     ):
         seq_length = hidden_states.shape[0]  # s, d
         query_states, key_states, value_states = (
@@ -136,6 +141,33 @@ class Qwen3VLVisionAttention(nn.Module):
         query_states = query_states.transpose(0, 1).unsqueeze(0)
         key_states = key_states.transpose(0, 1).unsqueeze(0)
         value_states = value_states.transpose(0, 1).unsqueeze(0)
+
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            sp_size = sequence_parallel_mesh.size()
+            num_kv_heads = key_states.size(1)
+            if sp_size > num_kv_heads:
+                assert sp_size % num_kv_heads == 0
+                key_states = repeat_kv(key_states, sp_size // num_kv_heads)
+                value_states = repeat_kv(value_states, sp_size // num_kv_heads)
+
+            query_states = ulysses_all_to_all(
+                query_states,
+                scatter_dim=1,
+                gather_dim=2,
+                mesh=sequence_parallel_mesh,
+            )
+            key_states = ulysses_all_to_all(
+                key_states,
+                scatter_dim=1,
+                gather_dim=2,
+                mesh=sequence_parallel_mesh,
+            )
+            value_states = ulysses_all_to_all(
+                value_states,
+                scatter_dim=1,
+                gather_dim=2,
+                mesh=sequence_parallel_mesh,
+            )
 
         attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
             query_states,  # [b, n_head, seq, head_dim]
@@ -150,7 +182,15 @@ class Qwen3VLVisionAttention(nn.Module):
             causal=False,
             deterministic=XTUNER_DETERMINISTIC
         )  # [b, seq, n_head, head_dim]
-        
+
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            attn_output = ulysses_all_to_all(
+                attn_output,
+                scatter_dim=1,
+                gather_dim=2,
+                mesh=sequence_parallel_mesh,
+            )
+
         attn_output = attn_output[0].reshape(seq_length, -1).contiguous()  # s, d
         attn_output = self.proj(attn_output)
         return attn_output
@@ -170,13 +210,15 @@ class Qwen3VLVisionLayer(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor]
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        sequence_parallel_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
-            position_embeddings=position_embeddings
+            position_embeddings=position_embeddings,
+            sequence_parallel_mesh=sequence_parallel_mesh,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -287,13 +329,17 @@ class Qwen3VLVisionModel(BaseModel):
         self.rotary_pos_emb = self.build_rotary_embedding(self.config)
         self._maybe_compile_layers()
 
+        checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         recompute_ratio = 1.0
         num_recompute_layers = int(len(self.blocks) * recompute_ratio)
         for layer_idx in tqdm(list(range(len(self.blocks))), desc="[Vision Fully Shard]"):
             layer = self.blocks[layer_idx]
 
             if layer_idx < num_recompute_layers:
-                layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+                layer = checkpoint_wrapper(layer,
+                                           preserve_rng_state=checkpoint_preserve_rng_state,
+                                           checkpoint_impl=CheckpointImpl.REENTRANT)
+            layer.forward = maybe_compile(layer.forward, fullgraph=True)
 
             self.blocks[layer_idx] = layer
 
@@ -419,20 +465,11 @@ class Qwen3VLVisionModel(BaseModel):
         embeddings = embeddings.flatten(1)
         return embeddings
 
-    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        hidden_states = self.patch_embed(hidden_states)
-
+    def forward(self, hidden_states: torch.Tensor,
+                grid_thw: torch.Tensor,
+                sequence_parallel_mesh: DeviceMesh | None = None) -> tuple[torch.Tensor, list[torch.Tensor]]:
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
-        hidden_states = hidden_states + pos_embeds
-
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
-        seq_len, _ = hidden_states.size()
-        hidden_states = hidden_states.reshape(seq_len, -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1).to(hidden_states.device)
-        position_embeddings = (emb.cos(), emb.sin())
-
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0,
             dtype=torch.int32,
@@ -440,13 +477,35 @@ class Qwen3VLVisionModel(BaseModel):
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            # To ensure that the sequence length after sp split is divisible by 4,
+            # we require that the sequence length before sp split is also divisible by 4.
+            assert max_seqlen % 4 == 0, f"max_seqlen {max_seqlen} must be divisible by 4. Please check dataset setting."
+            div_num = sequence_parallel_mesh.size() * 4
+            hidden_states = pad_to_multiple_of(hidden_states, 0, div_num, 0)
+            hidden_states = split_for_sequence_parallel(hidden_states, dim=0, sp_mesh=sequence_parallel_mesh)
+            pos_embeds = pad_to_multiple_of(pos_embeds, 0, div_num, 0)
+            pos_embeds = split_for_sequence_parallel(pos_embeds, dim=0, sp_mesh=sequence_parallel_mesh)
+            rotary_pos_emb = pad_to_multiple_of(rotary_pos_emb, 0, div_num, 0)
+            rotary_pos_emb = split_for_sequence_parallel(rotary_pos_emb, dim=0, sp_mesh=sequence_parallel_mesh)
+
+        hidden_states = self.patch_embed(hidden_states)
+        hidden_states = hidden_states + pos_embeds
+
+        seq_len, _ = hidden_states.size()
+        hidden_states = hidden_states.reshape(seq_len, -1)
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1).to(hidden_states.device)
+        position_embeddings = (emb.cos(), emb.sin())
+
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens,
                 max_seqlen,
-                position_embeddings
+                position_embeddings,
+                sequence_parallel_mesh
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = hidden_states

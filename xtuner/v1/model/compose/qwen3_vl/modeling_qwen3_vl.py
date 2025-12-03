@@ -9,7 +9,10 @@ from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
     fully_shard,
+    FSDPModule,
 )
+import torch.distributed as dist
+import torch.distributed.nn.functional as distF
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.utils import get_logger
 from .modeling_vision import init_world_mesh
@@ -18,6 +21,8 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE
 from xtuner.v1.float8.float8_handler import Float8Handler
+from torch.distributed.device_mesh import DeviceMesh
+from xtuner.v1.data_proto.utils import split_for_sequence_parallel
 
 logger = get_logger()
 
@@ -92,6 +97,15 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
+
+        if isinstance(self.vision_tower.blocks[0], FSDPModule):
+            self.language_model.embed_tokens.set_modules_to_forward_prefetch(  # type: ignore
+                [self.vision_tower.blocks[0]])
+            self.vision_tower.blocks[-1].set_modules_to_forward_prefetch(  # type: ignore
+                [self.multi_modal_projector])
+        self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
+        self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
+
         self._to_empty_meta()
         return self
 
@@ -138,30 +152,35 @@ class Qwen3VLForConditionalGeneration(BaseModel):
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()
 
-    def get_visual_features(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor):
+    def get_visual_features(self,
+                            pixel_values: torch.Tensor,
+                            grid_thw: torch.Tensor,
+                            sequence_parallel_mesh: DeviceMesh | None = None):
         """Encodes images into continuous embeddings that can be forwarded to
         the language model. The deepstack visual features are also returned.
 
         Args:
-            pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, image_size, image_size)`):
+            pixel_values (`torch.FloatTensor` of shape `(n, h)`):
                 The tensors corresponding to the input images.
             grid_thw (`torch.LongTensor` of shape `(num_images, 3)`):
                 The temporal, height and width of feature shape of each image in LLM.
+            sequence_parallel_mesh (`DeviceMesh`, *optional*):
+                The mesh to use for sequence parallelism.
         """
-        image_embeds, deepstack_image_embeds = self.vision_tower(pixel_values, grid_thw=grid_thw)
-
+        image_embeds, deepstack_image_embeds = self.vision_tower(pixel_values,
+                                                                 grid_thw=grid_thw,
+                                                                 sequence_parallel_mesh=sequence_parallel_mesh)
         # merge
         image_embeds, deepstack_image_embeds = self.multi_modal_projector(image_embeds, deepstack_image_embeds)
-
-        split_sizes = (grid_thw.prod(-1) // self.vision_tower.spatial_merge_size ** 2).tolist()
-        image_embeds = torch.split(image_embeds, split_sizes)
         return image_embeds, deepstack_image_embeds
 
     def get_placeholder_mask(
         self,
         input_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
         visual_features: torch.Tensor,
+        deepstack_visual_embeds: list[torch.Tensor],
+        origin_pixel_len: int,
+        sequence_parallel_mesh: DeviceMesh | None = None,
     ):
         """Obtains multimodal placeholder mask from `input_ids` or
         `inputs_embeds`, and checks that the placeholder token count is equal
@@ -169,17 +188,57 @@ class Qwen3VLForConditionalGeneration(BaseModel):
 
         If the lengths are different, an error is raised.
         """
+        assert origin_pixel_len % 4 == 0, f"origin_pixel_len must be divisible by 4, but got {origin_pixel_len}. " \
+                                          f"Please check dataset setting."
+        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
+            input_ids_list = [torch.empty_like(input_ids) for _ in range(sequence_parallel_mesh.size())]
+            dist.all_gather(input_ids_list, input_ids, group=sequence_parallel_mesh.get_group())
+            input_ids = torch.cat(input_ids_list, dim=1)  # type: ignore
+
+            visual_features_list = distF.all_gather(visual_features, group=sequence_parallel_mesh.get_group())
+            visual_features = torch.cat(visual_features_list, dim=0)[:origin_pixel_len // 4]
+
+            deepstack_image_embeds_list = []
+            for deepstack_image_embed in deepstack_visual_embeds:
+                deepstack_image_embed_ = distF.all_gather(deepstack_image_embed,
+                                                          group=sequence_parallel_mesh.get_group())
+                deepstack_image_embed = torch.cat(deepstack_image_embed_, dim=0)
+                deepstack_image_embed = deepstack_image_embed[:origin_pixel_len// 4]
+                deepstack_image_embeds_list.append(deepstack_image_embed)
+            deepstack_visual_embeds = deepstack_image_embeds_list
+
         special_image_mask = input_ids == self.config.image_token_id
         special_video_mask = input_ids == self.config.video_token_id
         special_visual_mask = special_image_mask | special_video_mask
 
         n_visual_tokens = special_visual_mask.sum()
-        special_visual_mask = special_visual_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-        if inputs_embeds[special_visual_mask].numel() != visual_features.numel():
+
+        if n_visual_tokens != visual_features.shape[0]:
             raise ValueError(
                 f"Visual features and image|video tokens do not match: tokens: {n_visual_tokens}, features {visual_features.shape[0]}"
             )
-        return special_visual_mask
+
+        if sequence_parallel_mesh is not None and sequence_parallel_mesh.size() > 1:
+            assert special_visual_mask.size(0) == 1
+            # special_visual_mask must be divisible by sp size
+            special_visual_mask_per_rank = split_for_sequence_parallel(
+                special_visual_mask,
+                dim=1,
+                sp_mesh=sequence_parallel_mesh
+            )
+            n_visual_tokens_per_rank = special_visual_mask_per_rank.sum()
+            sp_rank = sequence_parallel_mesh.get_local_rank()
+            start_index = special_visual_mask[:, :(special_visual_mask.shape[1] // sequence_parallel_mesh.size()) * sp_rank].sum()
+            end_index = start_index + n_visual_tokens_per_rank
+            visual_features = visual_features[start_index:end_index]
+            assert n_visual_tokens_per_rank == visual_features.shape[0]
+            special_visual_mask = special_visual_mask_per_rank
+
+            for i, deepstack_visual_embed in enumerate(deepstack_visual_embeds):
+                deepstack_visual_embeds[i] = deepstack_visual_embed[start_index:end_index]
+                assert n_visual_tokens_per_rank == deepstack_visual_embeds[i].shape[0]
+
+        return special_visual_mask, visual_features, deepstack_visual_embeds
 
     def forward(
             self,
@@ -195,23 +254,31 @@ class Qwen3VLForConditionalGeneration(BaseModel):
 
         if pixel_values is not None:
             assert image_grid_thw is not None
-            viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values, image_grid_thw)
-            viusal_embeds = torch.cat(viusal_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             assert input_ids is not None
-            visual_pos_masks = self.get_placeholder_mask(
-                input_ids, inputs_embeds=inputs_embeds, visual_features=viusal_embeds
-            )
+            visual_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values,
+                                                                              image_grid_thw,
+                                                                              sequence_parallel_mesh)
             try:
-                inputs_embeds = inputs_embeds.masked_scatter(visual_pos_masks, viusal_embeds)
+                # To simplify and facilitate the processing of deepstack_visual_embeds inside language_model,
+                # we all-gather visual_embeds, and then split them based on the input_ids,
+                # then non-uniformly split them based on the input_ids
+                visual_pos_masks, visual_features, deepstack_visual_embeds = self.get_placeholder_mask(
+                    input_ids,
+                    visual_features=visual_embeds,
+                    deepstack_visual_embeds=deepstack_visual_embeds,
+                    sequence_parallel_mesh=sequence_parallel_mesh,
+                    origin_pixel_len = pixel_values.size(0)
+                )
+                inputs_embeds[visual_pos_masks] = inputs_embeds[visual_pos_masks] * 0.0 + visual_features
             except RuntimeError as e:
                 print(f"!!!Warning: {e}, but continue anyway!!!!")
-                inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
+                inputs_embeds = inputs_embeds + visual_embeds.sum() * 0.0
+                deepstack_visual_embeds = None
+                visual_pos_masks = None
         else:
-            # 构建假数据，考虑到 moe 特性，最好不要构建全 0 数据
             pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
             image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
             viusal_embeds, _ = self.get_visual_features(pixel_values_dump, image_grid_thw)
-            viusal_embeds = torch.cat(viusal_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
             inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
             deepstack_visual_embeds = None
             visual_pos_masks = None

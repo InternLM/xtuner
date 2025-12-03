@@ -27,6 +27,6 @@ export TRITON_CACHE_DIR=/tmp/.triton
 export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 
 proxy_off
-pip install -e .
+pip install -e .[all]
 
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH

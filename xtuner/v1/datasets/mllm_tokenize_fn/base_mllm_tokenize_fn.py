@@ -23,6 +23,8 @@ IMAGE_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025"
 def collect_image_video_paths_and_extra(messages: list[dict]):
     image_paths = []
     image_wh_list = []
+    video_wh_list = []
+    video_extra_info_list = []
     video_paths = []
     for msg in messages:
         if msg["role"] == "user" or msg["role"] == "pretrain":
@@ -42,9 +44,44 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                             assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
                     if c["type"] == "video_url":
                         video_paths.append(c["video_url"]["url"])
+
+                        video_wh = c["video_url"].get("image_wh")
+                        if video_wh is not None:
+                            if isinstance(video_wh[0], (list, tuple)):
+                                assert len(video_wh) == 1, (
+                                    f"Only one video size is supported for each video. but got {video_wh}"
+                                )
+                                video_wh = video_wh[0]
+                            video_wh_list.append(video_wh)
+                            assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
+
+                        video_extra_dict = {}
+                        if "origin_video_length" in c["video_url"]:
+                            video_extra_dict["origin_video_length"] = c["video_url"]["origin_video_length"]
+                        if "origin_fps" in c["video_url"]:
+                            video_extra_dict["origin_fps"] = c["video_url"]["origin_fps"]
+                        if "processed_video_length" in c["video_url"]:
+                            video_extra_dict["processed_video_length"] = c["video_url"]["processed_video_length"]
+                        if "processed_fps" in c["video_url"]:
+                            video_extra_dict["processed_fps"] = c["video_url"]["processed_fps"]
+                        if "frames_timestamp" in c["video_url"]:
+                            video_extra_dict["frames_timestamp"] = c["video_url"]["frames_timestamp"]
+                        if len(video_extra_dict) > 0:
+                            video_extra_info_list.append(video_extra_dict)
+
     if len(image_wh_list) > 0:
         assert len(image_wh_list) == len(image_paths), "If image_wh is provided, it should match the number of images."
-    return image_paths, video_paths, {"image_wh": image_wh_list}
+    if len(video_wh_list) > 0:
+        assert len(video_wh_list) == len(video_paths), "If video_wh is provided, it should match the number of videos."
+    if len(video_extra_info_list) > 0:
+        assert len(video_extra_info_list) == len(video_paths), (
+            "If video_extra_info is provided, it should match the number of videos."
+        )
+    return (
+        image_paths,
+        video_paths,
+        {"image_wh": image_wh_list, "video_wh": video_wh_list, "video_extra_info": video_extra_info_list},
+    )
 
 
 def replace_image_token(
@@ -102,16 +139,20 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         max_length: int | None = None,
         tokenizer_hash: str | None = None,
         hash: str | None = None,
+        data_name: str | None = None,
     ):
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
         self._hash = hash
         self._hash_str = ""
         self.chat_template = chat_template
+        self.data_name = data_name
 
         self._image_path: list[str] = []
         self._video_path: list[str] = []
         self._image_wh_list: list[list] = []
+        self._video_wh_list: list[list] = []
+        self._video_extra_info_list: list[dict] = []
         super().__init__(tokenizer)
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
@@ -148,8 +189,18 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         return input_ids, labels
 
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
-        self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
-        self._image_wh_list = extra_info["image_wh"]
+        try:
+            self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
+            self._image_wh_list = extra_info["image_wh"]
+            self._video_wh_list = extra_info["video_wh"]
+            self._video_extra_info_list = extra_info["video_extra_info"]
+        except RuntimeError as e:
+            if self.state == "cache":
+                print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")
+                ret = CacheItem(num_tokens=0)
+                return ret
+            else:
+                raise RuntimeError(f"!!!! RuntimeError: {e} of {self.data_name}")
         if len(self._image_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
