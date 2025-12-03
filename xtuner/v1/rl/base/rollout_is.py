@@ -53,14 +53,24 @@ class RolloutImportanceSampling(BaseModel):
     rollout_is_mask_threshold: Optional[Tuple[float, float]] = None
     rollout_is_veto_threshold: Optional[Tuple[float, float]] = None
 
-    def compute_rollout_importance_weights(
+    def compute_rollout_importance_weights_and_metrics(
         self,
         old_log_prob: torch.Tensor,
         rollout_log_prob: torch.Tensor,
         num_tokens: torch.Tensor,
         response_mask: torch.Tensor,
-    ) -> tuple[Optional[torch.Tensor], torch.Tensor, dict[str, Any]]:
-        return compute_rollout_importance_weights(
+    ) -> tuple[Optional[torch.Tensor], torch.Tensor, dict[str, Any], dict[str, Any]]:
+        mismatch_metrics = compute_mismatch_metrics(
+            old_log_prob=old_log_prob, rollout_log_prob=rollout_log_prob, response_mask=response_mask
+        )
+        mismatch_metrics_scalar = {}
+        for key, value in mismatch_metrics.items():
+            if isinstance(value, torch.Tensor):
+                mismatch_metrics_scalar[f"mismatch/{key}"] = value.item()
+            else:
+                mismatch_metrics_scalar[f"mismatch/{key}"] = value
+
+        rollout_is_weights, modified_response_mask, metrics_scalar = compute_rollout_importance_weights(
             old_log_prob,
             rollout_log_prob,
             num_tokens,
@@ -71,6 +81,7 @@ class RolloutImportanceSampling(BaseModel):
             rollout_is_mask_threshold=self.rollout_is_mask_threshold,
             rollout_is_veto_threshold=self.rollout_is_veto_threshold,
         )
+        return rollout_is_weights, modified_response_mask, mismatch_metrics_scalar, metrics_scalar
 
 
 def compute_rollout_importance_weights(
@@ -291,12 +302,6 @@ def compute_rollout_importance_weights(
     # This is different from rejection - padding must be zeroed regardless of mode
     rollout_is_weights = rollout_is_weights * response_mask
 
-    # Compute mismatch metrics (KL, PPL, etc.) and merge with IS metrics
-    mismatch_metrics = compute_mismatch_metrics(
-        old_log_prob=old_log_prob, rollout_log_prob=rollout_log_prob, response_mask=response_mask
-    )
-    metrics.update(mismatch_metrics)
-
     # Convert all tensor metrics to scalars for logging
     # Note: No need to detach since old_log_prob and rollout_log_prob are computed with torch.no_grad()
     metrics_scalar = {}
@@ -477,7 +482,7 @@ def compute_mismatch_metrics(
     metrics["mismatch_training_ppl"] = training_ppl.detach().item()
 
     # Also log log-ppl for easier analysis (avoids exponential scale)
-    metrics["mismatch_training_log_ppl"] = (-mean_log_prob_training).mean().detach().item()
+    metrics["mismatch_training_entropy"] = (-mean_log_prob_training).mean().detach().item()
 
     # 2. Compute rollout mismatch metrics (only if rollout_log_probs available)
     if rollout_log_prob is not None:
@@ -497,7 +502,7 @@ def compute_mismatch_metrics(
         mean_log_prob_rollout = masked_mean(rollout_log_prob, response_mask, axis=-1)  # (batch_size,)
         rollout_ppl = torch.exp(-mean_log_prob_rollout).mean()  # Batch mean of per-sequence PPL
         metrics["mismatch_rollout_ppl"] = rollout_ppl.detach().item()
-        metrics["mismatch_rollout_log_ppl"] = (-mean_log_prob_rollout).mean().detach().item()
+        metrics["mismatch_rollout_entropy"] = (-mean_log_prob_rollout).mean().detach().item()
 
         # 2d. Log PPL difference (sequence-level perplexity difference)
         # log_ppl_diff = mean_log_prob_rollout - mean_log_prob_training
@@ -517,6 +522,13 @@ def compute_mismatch_metrics(
         # This is the inverse of geometric IS: ppl_ratio_i = 1 / geometric_is_i for each sequence
         ppl_ratio = torch.exp(log_ppl_diff).mean()  # mean(exp(log_ppl_diff)) = mean(ppl_ratio_i)
         metrics["mismatch_ppl_ratio"] = ppl_ratio.detach().item()
+
+        # 2f. Abs diff: Mean absolute log-probability difference
+        # This measures |log π_rollout - log π_training| averaged over tokens.
+        # Unlike KL-based metrics which penalize asymmetric discrepancies,
+        # abs-diff directly quantifies disagreement magnitude between the two
+        # policies without directionality.
+        metrics["mismatch_logprob_abs_diff"] = masked_mean(log_ratio.abs(), response_mask).detach().item()
 
     return metrics
 

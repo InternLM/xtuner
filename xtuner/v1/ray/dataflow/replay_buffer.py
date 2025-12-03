@@ -120,6 +120,8 @@ def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowIt
         replay_meta.observation_ids, replay_meta.observation_refs, replay_meta.observation_versions
     ):
         env_data = ray.get(obs_ref)
+        ray._private.internal_api.free(obs_ref)
+
         item = RLDataFlowItem(
             uid=RLUIDItem(env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=version),
             data=data_ref,
@@ -361,7 +363,7 @@ class ReplayBufferStorage:
         for attr in attrs_to_clear:
             getattr(self, attr).clear()
 
-    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any]]]:
+    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any] | None]]:
         """Retrieves a batch of finished sample groups from the buffer.
 
         Args:
@@ -388,10 +390,11 @@ class ReplayBufferStorage:
             target_finished_list = self._returned[:global_batch_size]
             remain_finished_list = self._returned[global_batch_size:]
             for action_id in target_finished_list:
-                replay_meta = self._actions[action_id]
+                replay_meta = self._actions.pop(action_id)
                 # todo: add an unified state management
                 replay_meta.state = RolloutState.ARCHIVED
-                group_samples = mapping_replaymeta_to_dataitem(self._actions[action_id])
+                group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+                del replay_meta
                 multimodal_train_info = None
                 # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
                 for data_item in group_samples:
@@ -399,8 +402,7 @@ class ReplayBufferStorage:
                         multimodal_train_info = data_item.data.multimodal_train_info
                         del data_item.data.multimodal_train_info
                 samples.append(group_samples)
-                if multimodal_train_info is not None:
-                    multimodal_train_infos.append(multimodal_train_info)
+                multimodal_train_infos.append(multimodal_train_info)
             self._returned = remain_finished_list
 
             return samples, multimodal_train_infos

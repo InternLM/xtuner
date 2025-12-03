@@ -29,8 +29,10 @@ VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
 class TestQwen3VL(DeterministicDDPTestCase):
 
+    # 在没有 sp 情况下，可以实现和 hf loss 完全一致
+    # 在开启 sp 后，纯文本的 loss 会差 0.01，非常不合理。其余模态 loss 完全对齐
+    # TODO(hha) 可能是一个隐患，后续要排查
     def _test_all(self, hf_model, qwen3vl_model, type, device, sp_size, tol):
-        rank = dist.get_rank()
         if type == 'image':
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
             tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_DENSE_PATH, add_vision_id=True).build(
@@ -81,9 +83,14 @@ class TestQwen3VL(DeterministicDDPTestCase):
             image_grid_thw = tokenized_data['image_grid_thw'].cuda()
             position_ids = tokenized_data['position_ids'].cuda()
         else:
+            rank = dist.get_rank()
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_DENSE_PATH)
-            input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
-                                  return_tensors="pt").input_ids.to(device)
+            if sp_size == 1:
+                input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+1 等于多少？",
+                                      return_tensors="pt").input_ids.to(device)
+            else:
+                input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
+                                      return_tensors="pt").input_ids.to(device)
             labels = input_ids.clone()
             pixel_values = None
             image_grid_thw = None
@@ -128,7 +135,8 @@ class TestQwen3VL(DeterministicDDPTestCase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.pixel_values = pixel_values
-        seq_ctx.position_ids = position_ids
+        if position_ids is not None:
+            seq_ctx.position_ids = position_ids
         seq_ctx.to('cuda')
         loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
         loss_ctx_input = loss_ctx_input.to('cuda')
@@ -163,7 +171,9 @@ class TestQwen3VL(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,sp_size,tol",
         [
-            ("cuda", 1, 1e-2)
+            ("cuda", 1, 1e-2),
+            ("cuda", 2, 1e-2),
+            ("cuda", 8, 1e-2)  # important
         ],
     )
     def test_qwen3vl_run(self, device, sp_size, tol):
@@ -190,10 +200,13 @@ class TestQwen3VL(DeterministicDDPTestCase):
         self._test_all(hf_model, qwen3vl_model, 'image', device, sp_size, tol)
         self._test_all(hf_model, qwen3vl_model, 'video', device, sp_size, tol)
 
+    # TODO: sp+ compile
     @parametrize.parametrize(
-        "device,sp_size,compile, tol",
+        "device,sp_size,compile,tol",
         [
-            ("cuda", 1, False, 1e-2)
+            ("cuda", 1, False, 1e-2),
+            ("cuda", 2, False, 1e-2),
+            ("cuda", 8, False, 1e-2)  # important
         ],
     )
     def test_fsdp_qwen3_run(self, device, sp_size, compile, tol):
@@ -231,8 +244,8 @@ class TestQwen3VL(DeterministicDDPTestCase):
             mp_policy=mp_policy,
             reshard_after_forward=True
         )
-        qwen3vl_model.vision_tower.fsdp_mesh=fsdp_mesh
-        qwen3vl_model.vision_tower.fsdp_config=fsdp_config
+        qwen3vl_model.vision_tower.fsdp_mesh = fsdp_mesh
+        qwen3vl_model.vision_tower.fsdp_config = fsdp_config
 
         qwen3vl_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
         qwen3vl_model.fully_shard(fsdp_config=fsdp_config)

@@ -47,7 +47,7 @@ class SequenceContext:
     num_img_tokens: list[int] | None
 
     # moe routed_experts
-    rollout_routed_experts: torch.LongTensor | None
+    rollout_routed_experts: torch.Tensor | None
 
     def __init__(
         self,
@@ -69,7 +69,7 @@ class SequenceContext:
         pixel_values: torch.FloatTensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[int] | None = None,
-        rollout_routed_experts: torch.LongTensor | None = None,
+        rollout_routed_experts: torch.Tensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
