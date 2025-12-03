@@ -18,6 +18,7 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from ..linear.linear import build_linear
 from ..rms_norm import RMSNorm
+from .attn_outputs import AttnOutputs
 
 
 logger = get_logger()
@@ -421,7 +422,7 @@ class MultiLatentAttention(nn.Module):
             block_offsets=seq_ctx.block_table,
         )  # type: ignore[assignment]
 
-        attn_output: torch.Tensor = flash_attn_varlen_func(
+        attn_output, extra_info = flash_attn_varlen_func(  # type: ignore
             query_states.squeeze(0),
             key_states.squeeze(0),
             value_states.squeeze(0),
@@ -556,7 +557,7 @@ class MultiLatentAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
+    ) -> AttnOutputs:
         bsz, q_len, _ = hidden_states.size()
 
         if self.q_lora_rank is None:
@@ -599,7 +600,11 @@ class MultiLatentAttention(nn.Module):
         assert query_states.size(0) == 1
         assert key_states.size(0) == 1
         assert value_states.size(0) == 1
-        attn_output = flash_attn_varlen_func(
+
+        raw_output: torch.Tensor | None = None
+        softmax_lse: torch.Tensor | None = None
+
+        fla_outputs = flash_attn_varlen_func(
             query_states.transpose(1, 2).squeeze(0),
             key_states.transpose(1, 2).squeeze(0),
             value_states.transpose(1, 2).squeeze(0),
@@ -611,16 +616,30 @@ class MultiLatentAttention(nn.Module):
             softmax_scale=self.softmax_scale,
             causal=True,
             deterministic=XTUNER_DETERMINISTIC,
+            return_attn_probs=True,
         )
-        attn_output = cast(torch.Tensor, attn_output)
+
+        if isinstance(fla_outputs, tuple):
+            raw_output = fla_outputs[0]
+            softmax_lse = fla_outputs[1].detach()
+        else:  # npu fused attn doesn't support softmax_lse
+            raw_output = fla_outputs
+
+        raw_output = cast(torch.Tensor, raw_output)
         if self.q_head_dim != self.v_head_dim:
-            attn_output = attn_output[:, :, : self.v_head_dim]
+            raw_output = raw_output[:, :, : self.v_head_dim]
 
-        attn_output = attn_output.reshape(bsz, q_len, self.num_attention_heads * self.v_head_dim).contiguous()
+        raw_output = raw_output.reshape(bsz, q_len, self.num_attention_heads * self.v_head_dim).contiguous()
+        projected_output = self.o_proj(raw_output)
 
-        attn_output = self.o_proj(attn_output)
+        attn_outputs: AttnOutputs = {
+            "raw_output": raw_output,
+            "projected_output": projected_output,
+            "softmax_lse": softmax_lse,
+        }  # type: ignore
+        # TODO: Apply the same output interface to decoding @nil0x9
 
-        return attn_output
+        return attn_outputs
 
     def build_kv_cache(
         self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None
