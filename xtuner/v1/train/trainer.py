@@ -92,9 +92,7 @@ class ExpInfo(BaseModel):
     snap_checkpoint_list: list[str] = []
     cur_step: int = 0
     cur_epoch: int = 0
-    consumed_tokens: int = 0
     reduced_consumed_tokens: int = 0
-    consumed_samples: int = 0
     reduced_consumed_samples: int = 0
 
     @property
@@ -379,11 +377,8 @@ class Trainer:
         self._debug = debug
         self._seed = seed
 
-        self._consumed_tokens = 0
         self._reduced_consumed_tokens = 0
         self._exp_consumed_tokens = 0
-        # TODO: remove _consumed_samples?
-        self._consumed_samples = 0
         self._reduced_consumed_samples = 0
 
         self._train_time = 0
@@ -623,9 +618,8 @@ class Trainer:
             internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
 
             self._cur_step += 1
-            self._consumed_tokens += step_consumed_tokens
 
-            reduced_step_consumed_tokens = self._reduce_number_across_dp(step_consumed_tokens)
+            reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
             self._reduced_consumed_tokens += reduced_step_consumed_tokens
 
             self._exp_consumed_tokens += step_consumed_tokens
@@ -636,7 +630,6 @@ class Trainer:
                 loss_log=loss_log,
                 step_consumed_tokens=step_consumed_tokens,
                 exp_consumed_tokens=self._exp_consumed_tokens,
-                rank_consumed_tokens=self._consumed_tokens,
                 reduced_consumed_tokens=self._reduced_consumed_tokens,
                 data_time=data_time,
                 step_time=step_time,
@@ -664,9 +657,9 @@ class Trainer:
             self._metrics_recorder.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
-    def _reduce_number_across_dp(self, rank_number: int) -> int:
-        _gathered_list = [None for _ in range(self.data_mesh["dp"].size())]
-        dist.all_gather_object(_gathered_list, rank_number, group=self.data_mesh["dp"].get_group())
+    def _reduce_number_across_rank(self, rank_number: int) -> int:
+        _gathered_list = [None for _ in range(self.world_size)]
+        dist.all_gather_object(_gathered_list, rank_number)
         reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
         return reduced_number
 
@@ -980,9 +973,7 @@ class Trainer:
                         {
                             "cur_step": self.cur_step,
                             "cur_epoch": self._cur_epoch,
-                            "consumed_samples": self._consumed_samples,
                             "reduced_consumed_samples": self._reduced_consumed_samples,
-                            "consumed_tokens": self._consumed_tokens,
                             "reduced_consumed_tokens": self._reduced_consumed_tokens,
                             "train_time_offset": self._train_time + self._train_time_offset,
                         }
@@ -995,9 +986,7 @@ class Trainer:
         ckp_list.append(str(checkpoint_path))
         current_exp.cur_step = self.cur_step
         current_exp.cur_epoch = self._cur_epoch
-        current_exp.consumed_samples = self._consumed_samples
         current_exp.reduced_consumed_samples = self._reduced_consumed_samples
-        current_exp.consumed_tokens = int(self._consumed_tokens)
         current_exp.reduced_consumed_tokens = int(self._reduced_consumed_tokens)
         current_exp.history[-1]["end"] = self.cur_step
 
@@ -1069,15 +1058,13 @@ class Trainer:
             # dist.breakpoint(skip=14)
             try:
                 data = next(data_iter)
-                self._consumed_samples += len(data)
-                self._reduced_consumed_samples += self._reduce_number_across_dp(len(data))
+                self._reduced_consumed_samples += self._reduce_number_across_rank(len(data))
             except StopIteration:
                 self._cur_epoch += 1
                 self._dataloader.set_epoch(self._cur_epoch)
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
-                self._consumed_samples += len(data)
-                self._reduced_consumed_samples += self._reduce_number_across_dp(len(data))
+                self._reduced_consumed_samples += self._reduce_number_across_rank(len(data))
             yield data
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
@@ -1250,7 +1237,6 @@ class Trainer:
         loss_log: dict,
         step_consumed_tokens: int,
         exp_consumed_tokens: int,
-        rank_consumed_tokens: int,
         reduced_consumed_tokens: int,
         data_time: float,
         step_time: float,
@@ -1262,6 +1248,7 @@ class Trainer:
         """Log the training step information."""
         e2e_train_time = train_time + train_time_offset
         tgs = step_consumed_tokens / step_time
+        rank_consumed_tokens = reduced_consumed_tokens / self.world_size
         e2e_tgs = rank_consumed_tokens / e2e_train_time
         exp_tgs = exp_consumed_tokens / train_time
         lr = self._lr_scheduler.get_last_lr()[0]
@@ -1288,7 +1275,6 @@ class Trainer:
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
             f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
-            f"rank_consumed_tokens: {rank_consumed_tokens} "
             f"reduced_consumed_tokens: {reduced_consumed_tokens} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
@@ -1309,7 +1295,6 @@ class Trainer:
             "time/eta_seconds": round(eta_seconds, 1),
             "runtime_info/text_tokens": step_consumed_tokens,
             "runtime_info/est_global_batch_tokens": est_global_batch_tokens,
-            "runtime_info/rank_consumed_tokens": rank_consumed_tokens,
             "runtime_info/reduced_consumed_tokens": reduced_consumed_tokens,
             "runtime_info/tgs": tgs,
             "runtime_info/exp_tgs": exp_tgs,
@@ -1505,17 +1490,12 @@ class Trainer:
         self._cur_epoch = train_state["cur_epoch"]
 
         if load_checkpoint_cfg.load_dataset:
-            # 当resume后，所有rank上恢复的是rank0的consumed_tokens。由于可能发生变卡resume，所以无法拿到各rank真实值。
-            # 故_consumed_tokens是近似值，只用于近似计算。需要真实值时，使用聚合后的_reduced_consumed_tokens。
-            # 同理，_consumed_samples是近似值，只用于近似计算。需要真实值时，使用聚合后的_reduced_consumed_samples。
-            self._consumed_tokens = train_state["consumed_tokens"]
             self._reduced_consumed_tokens = train_state.get("reduced_consumed_tokens", 0)  # default 0 for BC
             self._train_time_offset = train_state["train_time_offset"]
             # _reduced_consumed_samples 会影响 save dcp时 dataloader.get_state_dict的状态。
-            # 如果加载 dataset，应该恢复_reduced_consumed_samples为checkpoint中的值。
-            # 如果不加载 dataset，应该保持_reduced_consumed_samples为初始值0，否则如果加载上旧dataloader的reduced_consumed_samples
-            # 会导致存储新dataloader时 reduced_consumed_samples 是不正确的值。
-            self._consumed_samples = train_state["consumed_samples"]
+            # 1) 如果加载 dataset，应该恢复_reduced_consumed_samples为checkpoint中的值。
+            # 2) 如果不加载 dataset，应该保持_reduced_consumed_samples为初始值0，否则如果加载上旧dataloader的reduced_consumed_samples
+            #    会导致存储新dataloader时 reduced_consumed_samples 是不正确的值。
             self._reduced_consumed_samples = train_state.get("reduced_consumed_samples", 0)  # default 0 for BC
 
             dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
