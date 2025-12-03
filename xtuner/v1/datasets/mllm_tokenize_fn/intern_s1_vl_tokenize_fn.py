@@ -375,7 +375,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                 {"data_item": data_item, "video_path": video_path}, self.min_num_frames, self.max_num_frames
             )
             video_path = os.path.join(media_root, video_path)
-            if len(self._video_extra_info_list)>0:
+            if len(self._video_extra_info_list) > 0:
                 video_extra_dict = self._video_extra_info_list[index]
             else:
                 video_extra_dict = None
