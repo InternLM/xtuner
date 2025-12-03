@@ -113,6 +113,7 @@ class DataFlow:
         self.env_controller = environment
         self.finished_samples_count = 0
         self.skipped_sample_count = 0
+        self.failed_sample_count = 0
         self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
@@ -149,6 +150,7 @@ class DataFlow:
         """Resets all internal state variables of DataFlow."""
         self.finished_samples_count = 0
         self.skipped_sample_count = 0
+        self.failed_sample_count = 0
         if global_batch_size and global_batch_size > 0:
             self.target_batch_size = global_batch_size
         else:
@@ -206,12 +208,15 @@ class DataFlow:
             if len(group_data_items) > 0:
                 await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
             self.logger.debug(f"Worker task completed successfully for {action_id}.")
-        elif group_state == RolloutState.INTERRUPTED:
+        elif group_state == RolloutState.ABORTED:
             await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
-            self.logger.debug(f"Adding interrupted sample {action_id} to interrupted storage")
+            self.logger.debug(f"Adding aborted sample {action_id} to aborted storage")
         elif group_state == RolloutState.SKIPPED:
             self.skipped_sample_count += 1
             self.logger.info(f"Total skipped samples count: {self.skipped_sample_count}")
+        elif group_state == RolloutState.FAILED:
+            self.failed_sample_count += 1
+            self.logger.info(f"Total failed samples count: {self.failed_sample_count}")
         else:
             self.logger.error(f"Unexpected group state '{group_state}' for action_id {action_id}.")
 

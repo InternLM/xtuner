@@ -63,10 +63,12 @@ def determine_group_state(group_data_items: List[RLDataFlowItem]) -> RolloutStat
     if not group_data_items:
         return RolloutState.SKIPPED
     group_states = {item.env.rollout.state for item in group_data_items}
-    if RolloutState.SKIPPED in group_states or RolloutState.FAILED in group_states:
+    if RolloutState.SKIPPED in group_states:
         return RolloutState.SKIPPED
-    elif RolloutState.INTERRUPTED in group_states:
-        return RolloutState.INTERRUPTED
+    elif RolloutState.FAILED in group_states:
+        return RolloutState.FAILED
+    elif RolloutState.ABORTED in group_states:
+        return RolloutState.ABORTED
     elif all(state == RolloutState.COMPLETED for state in group_states):
         return RolloutState.COMPLETED
     else:
@@ -328,7 +330,7 @@ class ReplayBufferStorage:
         action_id = replay_meta.action_id
         state = replay_meta.state
 
-        if state == RolloutState.INTERRUPTED:
+        if state == RolloutState.ABORTED:
             self._paused.append(action_id)
         elif state == RolloutState.COMPLETED:
             self._returned.append(action_id)

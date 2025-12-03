@@ -146,6 +146,10 @@ class RolloutController:
             )
         )
         self.print_params_flag = True
+        # The timeout for the environment to wait for the rollout controller's response.
+        # This should be longer than the controller's internal timeout (`rollout_timeout`)
+        # to account for potential queuing delays and other overheads.
+        self.timeout_multiplier = 2.0
 
     def _get_worker_status_for_router(self) -> Dict[RolloutWorker, bool]:
         """Helper to generate the status dict required by the SessionRouter."""
@@ -376,7 +380,9 @@ class RolloutController:
         )
         try:
             selected_worker_info = self.workers_info[server_url]
-            response = await asyncio.wait_for(response_ref, timeout=self.config.rollout_timeout * 2)
+            response = await asyncio.wait_for(
+                response_ref, timeout=self.config.rollout_timeout * self.timeout_multiplier
+            )
             selected_worker_info.success_count += 1
             if response.state == "failed" or response.state == "skipped":
                 selected_worker_info.failure_count += 1
