@@ -461,7 +461,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             if len(rollout_is_metrics) > 0:
                 logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
         self.logger.info(logger_msg)
-
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
             loss_ctx_input_list = self.compute_ref_logprobs(seq_ctx_list, loss_ctx_input_list)
@@ -480,7 +479,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             dist.all_reduce(kl_div_sum, op=dist.ReduceOp.SUM)
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
-
+        all_log_infos = [rollout_is_metrics]
         for i in range(0, len(seq_ctx_list), iters_per_step):
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
             batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
@@ -521,6 +520,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
+            all_log_infos.append(log_info)
+        return all_log_infos
 
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
@@ -780,6 +781,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         dist.barrier()
         DEVICE_MODULE.empty_cache()
         return
+
+    def save_dcp(self, ckpt_dir: str):
+        self._engine.save_dcp(Path(ckpt_dir + "/model"), optimizer_dir=Path(ckpt_dir + "/optimizer"))
+
+    def load_dcp(self, ckpt_dir: str):
+        self._engine.load_dcp(Path(ckpt_dir + "/model"), optimizer_dir=Path(ckpt_dir + "/optimizer"))
 
     # def update_weights1(self):
     #     """Update the model weights."""

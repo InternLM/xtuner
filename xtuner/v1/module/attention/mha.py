@@ -450,3 +450,6 @@ class MultiHeadAttention(nn.Module):
     ) -> AttnOutputs: ...
 
     __call__ = nn.Module.__call__
+
+    def extra_repr(self):
+        return f"window_size={self.window_size}"
