@@ -1058,13 +1058,13 @@ class Trainer:
             # dist.breakpoint(skip=14)
             try:
                 data = next(data_iter)
-                self._reduced_consumed_samples += self._reduce_number_across_rank(len(data))
             except StopIteration:
                 self._cur_epoch += 1
                 self._dataloader.set_epoch(self._cur_epoch)
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
-                self._reduced_consumed_samples += self._reduce_number_across_rank(len(data))
+
+            self._reduced_consumed_samples += self._reduce_number_across_rank(len(data))
             yield data
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
