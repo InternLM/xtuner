@@ -1,6 +1,7 @@
 import copy
 import os
 from argparse import Namespace
+from itertools import chain
 from typing import Any, Dict, List, Union
 
 import ray
@@ -225,6 +226,7 @@ class LMDeployWorker(RolloutWorker):
         backend = lmdeploy_config_kwargs.get("backend", "pytorch")
         tp_size = self.config.tensor_parallel_size
         dp_size = ep_size = self.config.expert_parallel_size
+        max_batch_size = self.config.rollout_max_batch_size_per_instance // self.config.server_urls_per_engine
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
         lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "WARNING")
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "CRITICAL")
@@ -234,12 +236,32 @@ class LMDeployWorker(RolloutWorker):
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
 
+        dp_rank = 0
+        if backend == "pytorch":
+            # currently only support ep > 1 and tp == 1 / ep == 1 and tp > 1
+            assert ep_size == 1 or tp_size == 1
+            if ep_size > 1:
+                dp_rank_found = False
+                engine_list_for_ep = [
+                    list(chain.from_iterable(self.engine_mesh_list[i : i + ep_size]))
+                    for i in range(0, len(self.engine_mesh_list), ep_size)
+                ]
+                for engine_list in engine_list_for_ep:
+                    if self.rank in engine_list:
+                        dp_rank = engine_list.index(self.rank)
+                        dp_rank_found = True
+                        break
+                assert dp_rank_found, (
+                    f"self.rank: {self.rank} should be found in engine_mesh_list: {self.engine_mesh_list}"
+                )
+
         backend_config = (
             PytorchEngineConfig(
                 tp=tp_size,
                 ep=ep_size,
                 dp=dp_size,
-                max_batch_size=self.config.rollout_max_batch_size_per_instance,
+                dp_rank=dp_rank,
+                max_batch_size=max_batch_size,
                 empty_init=self.config.skip_load_weights,
                 distributed_executor_backend=distributed_executor_backend,
                 mp_engine_backend="ray",  # force ray to pass placement group
@@ -292,12 +314,13 @@ class LMDeployWorker(RolloutWorker):
                         "LMDEPLOY_DIST_MASTER_PORT": dist_port,
                     }
                 )
-            elif dp_size > 1:
+            elif ep_size > 1:
                 dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
                 env.update(
                     {
                         "LMDEPLOY_DP_MASTER_ADDR": dist_addr,
                         "LMDEPLOY_DP_MASTER_PORT": dist_port,
+                        "DEEPEP_MAX_TOKENS_PER_RANK": str(max_batch_size),
                     }
                 )
             if "uvicorn_log_level" in lmdeploy_config_kwargs:

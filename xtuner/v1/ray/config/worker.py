@@ -113,6 +113,20 @@ class RolloutConfig(BaseModel):
             help="Whether to enable cross-node communication for the rollout worker.",
         ),
     ] = False
+    server_urls_per_engine: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of server urls per inference engine for the rollout worker.",
+        ),
+    ] = 1
+    dist_port_base: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Base port number for distributed communication among rollout workers.",
+        ),
+    ] = 35000
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(
@@ -267,6 +281,10 @@ class RolloutConfig(BaseModel):
         else:
             self.launch_server_method = "ray"
             self.rollout_cross_node_comm = True
+        assert self.server_urls_per_engine == 1, "server_urls_per_engine is not configurable by users for now."
+        if rollout_backend == "lmdeploy" and self.expert_parallel_size > 1:
+            # when expert parallelism is used, lmdeploy requires expert_parallel_size SPMD servers instance per engine
+            self.server_urls_per_engine = self.expert_parallel_size
 
         if self.rollout_max_batch_size_per_instance is None:
             assert self.context_length is not None, (

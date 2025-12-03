@@ -61,6 +61,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.accelerator = accelerator
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
+        self.engine_mesh_list: list[list[int]]
         # http_concurrency is calculated based on the max batch size per engine and the total number of engines
         assert config.rollout_max_batch_size_per_instance, (
             "rollout_max_batch_size_per_instance must be set in RolloutConfig"
@@ -94,8 +95,12 @@ class RolloutWorker(SingleAcceleratorWorker):
             placement_group_capture_child_tasks=True,
             placement_group_bundle_index=self.engine_bundle_idxs[0],
         )
+        local_rank = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
+        start_port = self.config.dist_port_base + local_rank * 1024
         self.host, self.ports = ray.get(
-            find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(3)
+            find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(
+                nums=3, start_port=start_port, max_tries=1024
+            )
         )
         self.dist_port = self.ports[0]
         self.server_port = self.ports[1]
@@ -118,6 +123,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.dist_init_addr = dist_init_addr if dist_init_addr else self.dist_init_addr
         self.launch_server()
         return (self.rank, self.server_url)
+
+    def set_engine_mesh_list(self, engine_mesh_list: list[list[int]]):
+        self.engine_mesh_list = engine_mesh_list
 
     def set_engine_bundle_idxs(self, engine_bundle_idxs: list[int]):
         """Set the bundle indices for the inference engine.
