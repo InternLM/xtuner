@@ -13,7 +13,6 @@ class FSDPConfig(BaseModel):
         extra="forbid",
     )
     tp_size: Annotated[int, Parameter(help="Tensor parallel size")] = 1
-    sp_size: Annotated[int, Parameter(help="Sequence parallel size")] = 1
     ep_size: Annotated[int, Parameter(help="Expert parallel size")] = 1
     reshard_after_forward: Annotated[bool, Parameter(help="Reshard model parameters after forward pass")] = True
     recompute_ratio: Annotated[float, Parameter(help="Gradient checkpointing ratio for memory optimization")] = 1.0

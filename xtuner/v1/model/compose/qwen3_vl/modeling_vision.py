@@ -25,8 +25,8 @@ from xtuner.v1.model.utils.checkpointing import checkpoint_wrapper
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.device_mesh import DeviceMesh
 from tqdm import tqdm
-from xtuner.v1.rl.utils import sp_split
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
+from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
@@ -339,7 +339,7 @@ class Qwen3VLVisionModel(BaseModel):
                 layer = checkpoint_wrapper(layer,
                                            preserve_rng_state=checkpoint_preserve_rng_state,
                                            checkpoint_impl=CheckpointImpl.REENTRANT)
-            # layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
+            layer.forward = maybe_compile(layer.forward, fullgraph=True)
 
             self.blocks[layer_idx] = layer
 
@@ -478,9 +478,16 @@ class Qwen3VLVisionModel(BaseModel):
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            hidden_states = sp_split(hidden_states, sequence_parallel_mesh, 0, 0)
-            pos_embeds = sp_split(pos_embeds, sequence_parallel_mesh, 0, 0)
-            rotary_pos_emb = sp_split(rotary_pos_emb, sequence_parallel_mesh, 0, 0)
+            # To ensure that the sequence length after sp split is divisible by 4,
+            # we require that the sequence length before sp split is also divisible by 4.
+            assert max_seqlen % 4 == 0, f"max_seqlen {max_seqlen} must be divisible by 4. Please check dataset setting."
+            div_num = sequence_parallel_mesh.size() * 4
+            hidden_states = pad_to_multiple_of(hidden_states, 0, div_num, 0)
+            hidden_states = split_for_sequence_parallel(hidden_states, dim=0, sp_mesh=sequence_parallel_mesh)
+            pos_embeds = pad_to_multiple_of(pos_embeds, 0, div_num, 0)
+            pos_embeds = split_for_sequence_parallel(pos_embeds, dim=0, sp_mesh=sequence_parallel_mesh)
+            rotary_pos_emb = pad_to_multiple_of(rotary_pos_emb, 0, div_num, 0)
+            rotary_pos_emb = split_for_sequence_parallel(rotary_pos_emb, dim=0, sp_mesh=sequence_parallel_mesh)
 
         hidden_states = self.patch_embed(hidden_states)
         hidden_states = hidden_states + pos_embeds
