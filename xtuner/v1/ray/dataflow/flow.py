@@ -247,7 +247,8 @@ class DataFlow:
             next_update_threshold = update_step
             while (
                 self.finished_samples_count < self.target_batch_size
-                and self.skipped_sample_count < self.target_batch_size * self.target_batch_size
+                and self.skipped_sample_count < self.target_batch_size
+                and self.failed_sample_count < self.target_batch_size
             ):
                 if self.finished_samples_count >= next_update_threshold:
                     pbar.n = self.finished_samples_count
@@ -274,9 +275,13 @@ class DataFlow:
             self.logger.info(
                 f"Target batch size {self.target_batch_size} reached with {self.finished_samples_count} finished samples."
             )
-        else:
+        elif self.skipped_sample_count >= self.target_batch_size:
             self.logger.info(
                 f"Stopping data generation as skipped samples {self.skipped_sample_count} reached target batch size {self.target_batch_size}."
+            )
+        elif self.failed_sample_count >= self.target_batch_size:
+            self.logger.info(
+                f"Stopping data generation as failed samples {self.failed_sample_count} reached target batch size {self.target_batch_size}."
             )
 
         if self.enable_partial_rollout:
