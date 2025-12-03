@@ -56,8 +56,7 @@ def run_all_cases(config, case_name, task_executor) -> None:
 
 def exec_step_test(step_config, task_executor, context):
     # pre action
-    command, step_config = handler.pre_action(step_config.get("type"), step_config)
-    step_config["command"] = command
+    handler.pre_action(step_config.get("type"), step_config)
 
     # get cmd
     command, step_config = handler.get_cmd(step_config.get("type"), step_config)
