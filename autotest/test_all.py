@@ -14,19 +14,19 @@ def task_executor():
 handler = TestHandler()
 
 
-@pytest.mark.parametrize("case", get_case_list(type="pre_train"))
+@pytest.mark.parametrize("case", get_case_list("pre_train"))
 @pytest.mark.pre_train
 def test_pretrain(config, case, task_executor):
     run_all_cases(config, case, task_executor)
 
 
-@pytest.mark.parametrize("case", get_case_list(type="rl"))
+@pytest.mark.parametrize("case", get_case_list("rl"))
 @pytest.mark.rl
 def test_rl(config, case, task_executor):
     run_all_cases(config, case, task_executor)
 
 
-@pytest.mark.parametrize("case", get_case_list(type="sft"))
+@pytest.mark.parametrize("case", get_case_list("sft"))
 @pytest.mark.sft
 def test_sft(config, case, task_executor):
     run_all_cases(config, case, task_executor)
