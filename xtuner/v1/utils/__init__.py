@@ -5,6 +5,7 @@ from .dtensor import is_evenly_distributed
 from .enum_helper import StrEnum
 from .exception_helper import ParallelConfigException
 from .init_weight import default_init_weights, init_params
+from .internal_metrics import InternalMetrics, InternalMetricsRecorder
 from .loader import HFCheckpointLoader
 from .logger import get_logger, log_format
 from .misc import XTUNER_DETERMINISTIC, SharedMemory, get_padding_length, is_hf_model_path, record_git_info
@@ -14,6 +15,7 @@ from .state import ForwardState
 from .type_helper import copy_method_signature, copy_signature
 from .update_weights_utils import monkey_unpatch_torch_reductions
 
+from .internal_metrics import InternalMetricsRecorder
 
 IGNORE_INDEX = -100
 
@@ -45,4 +47,5 @@ __all__ = [
     "default_init_weights",
     "IGNORE_INDEX",
     "monkey_unpatch_torch_reductions",
+    "InternalMetricsRecorder",
 ]

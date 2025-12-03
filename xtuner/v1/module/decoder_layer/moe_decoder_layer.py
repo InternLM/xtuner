@@ -12,7 +12,15 @@ from torch.nn import functional as F
 from xtuner.v1.config.generate import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8 import Float8Config
-from xtuner.v1.module import GreedyRouterConfig, MHAConfig, MLAConfig, NoAuxRouterConfig, RMSNorm, RouterResults
+from xtuner.v1.module import (
+    AttnOutputs,
+    GreedyRouterConfig,
+    MHAConfig,
+    MLAConfig,
+    NoAuxRouterConfig,
+    RMSNorm,
+    RouterResults,
+)
 from xtuner.v1.module.dispatcher import (
     CombineResult,
     DispatchResult,
@@ -540,11 +548,12 @@ class MoEDecoderLayer(nn.Module):
 
         # Self Attention
         if state == ForwardState.TRAINING:
-            hidden_states = self.self_attn(
+            attn_outputs: AttnOutputs = self.self_attn(
                 hidden_states=hidden_states,
                 position_embeddings=position_embeddings,
                 seq_ctx=seq_ctx,
             )
+            hidden_states = cast(torch.Tensor, attn_outputs["projected_output"])
         elif state == ForwardState.PREFILLING:
             assert past_key_values is not None, "past_key_values should be provided in pre-filling state"
             hidden_states = self.self_attn.prefilling(

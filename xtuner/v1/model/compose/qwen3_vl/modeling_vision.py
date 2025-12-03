@@ -193,7 +193,7 @@ class Qwen3VLVisionAttention(nn.Module):
 
         attn_output = attn_output[0].reshape(seq_length, -1).contiguous()  # s, d
         attn_output = self.proj(attn_output)
-        return attn_output
+        return attn_output, extra_info
 
 
 class Qwen3VLVisionLayer(nn.Module):
@@ -219,7 +219,7 @@ class Qwen3VLVisionLayer(nn.Module):
             max_seqlen=max_seqlen,
             position_embeddings=position_embeddings,
             sequence_parallel_mesh=sequence_parallel_mesh,
-        )
+        )["projected_output"]
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
 
