@@ -431,3 +431,6 @@ class MultiHeadAttention(nn.Module):
         cache_v = torch.zeros(num_blocks, block_size, num_heads, head_dim, dtype=dtype, device="cuda")
 
         return cache_k, cache_v
+
+    def extra_repr(self):
+        return f"window_size={self.window_size}"

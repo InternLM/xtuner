@@ -253,7 +253,8 @@ class TrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        ray.get(handles)
+        log_infos = ray.get(handles)
+        return log_infos
 
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
         if target == "model":
@@ -287,5 +288,15 @@ class TrainingController:
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         handles = [worker.save_hf.remote(hf_dir, save_dtype) for worker in self.workers]  # type: ignore
+        ray.get(handles)
+        return
+
+    def save_dcp(self, ckpt_dir: str):
+        handles = [worker.save_dcp.remote(ckpt_dir) for worker in self.workers]  # type: ignore
+        ray.get(handles)
+        return
+
+    def load_dcp(self, ckpt_dir: str):
+        handles = [worker.load_dcp.remote(ckpt_dir) for worker in self.workers]  # type: ignore
         ray.get(handles)
         return
