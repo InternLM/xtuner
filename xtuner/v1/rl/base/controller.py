@@ -78,8 +78,6 @@ class TrainingController:
             assert language_cfg is not None
             has_rollout_routed_experts = True
             n_routed_experts = language_cfg.n_routed_experts
-            num_experts_per_tok = language_cfg.num_experts_per_tok
-            num_hidden_layers = language_cfg.num_hidden_layers
 
         for pack_info in pack_infos:
             indices = pack_info["indices"]
@@ -119,9 +117,7 @@ class TrainingController:
                     pad_seq_ctx.position_ids = torch.cat(_position_ids_list, dim=-1)
 
                 if has_rollout_routed_experts:
-                    pad_rand_index = torch.randint(
-                        low=0, high=n_routed_experts, size=(pad_len, 1, 1)
-                    )
+                    pad_rand_index = torch.randint(low=0, high=n_routed_experts, size=(pad_len, 1, 1))
                     pad_seq_ctx.rollout_routed_experts = pad_rand_index
 
                 seq_ctx_list.append(pad_seq_ctx)
