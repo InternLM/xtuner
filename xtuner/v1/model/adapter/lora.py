@@ -9,6 +9,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from pydantic import BaseModel as PydanticBaseModel
 from torch.distributed.tensor import DTensor
+from tqdm import tqdm
 
 from xtuner.v1.model.base import _save_file
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
@@ -148,7 +149,7 @@ class LoraModel(nn.Module):
         for name, child in list(module.named_children()):
             full_name = f"{prefix}.{name}" if prefix else name
 
-            if isinstance(child, LoraLinear):
+            if isinstance(child, (LoraLinear, LoraGroupedLinear)):
                 # 避免重复 wrap
                 continue
 
@@ -187,13 +188,13 @@ class LoraModel(nn.Module):
 
         if bias_mode == "all":
             for module in self.base_model.modules():
-                if isinstance(module, nn.Linear) and module.bias is not None:
+                if isinstance(module, (nn.Linear, GroupedLinear)) and module.bias is not None:
                     module.bias.requires_grad = True
             return
 
         if bias_mode == "lora_only":
             for module in self.base_model.modules():
-                if isinstance(module, LoraLinear) and module.base_layer.bias is not None:
+                if isinstance(module, (LoraLinear, LoraGroupedLinear)) and module.base_layer.bias is not None:
                     module.base_layer.bias.requires_grad = True
             return
 
@@ -217,13 +218,13 @@ class LoraModel(nn.Module):
 
     @torch.no_grad()
     def merge_lora(self):
-        for module in self.base_model.modules():
+        for module in tqdm(self.base_model.modules(), desc="[Merge LoRA]"):
             if isinstance(module, LoraLinear):
                 module.merge_lora()
 
     @torch.no_grad()
     def unmerge_lora(self):
-        for module in self.base_model.modules():
+        for module in tqdm(self.base_model.modules(), desc="[Unmerge LoRA]"):
             if isinstance(module, LoraLinear):
                 module.unmerge_lora()
 
