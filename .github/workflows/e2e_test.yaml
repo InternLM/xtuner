@@ -18,6 +18,8 @@ jobs:
     if: ${{!cancelled() }}
     runs-on: [h_cluster_ete]
     steps:
+      - name: Clean workdir
+        run: sudo git clean -ffdx
       - name: Clone repository
         uses: actions/checkout@v2
         with:
