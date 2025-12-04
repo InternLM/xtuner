@@ -17,15 +17,17 @@ class ClusterTaskExecutor:
         self.cluster = cluster
         self.params_cls = params_cls
 
-    def execute_task(self, task_config: Dict[str, Any]) -> Dict[str, Any]:
-        resource = task_config.get("resource", {})
+    def execute_task(self, task_config: Dict[str, Any]):
+        resource = task_config.get("resource", None)
         command = task_config.get("command", "")
         timeout = task_config.get("timeout", 600)
         envs = resource.get("envs", [])
         job_schema = None
 
         if not command:
-            return False, "Command is empty. Not implemented! Please check!"
+            return False, "Command is empty or resource is None. Not implemented! Please check!"
+        if resource is None:
+            return False, "Resource is None. Please check!"
 
         all_command = []
         print(envs, resource)
@@ -60,15 +62,8 @@ class ClusterTaskExecutor:
 
         while True:
             status = self.get_task_status(job_schema.job_id)
-            elapsed_time = time.time() - start_time
-            if elapsed_time >= timeout:
-                self.stop_task(job_schema.job_id)
-                return (
-                    False,
-                    f"Pool timeout: jobname {job_name}, {timeout} seconds, task {job_schema.job_id} status is {status}",
-                )
-            elif status in [JobStatus.SUCCEEDED]:
-                return True, status
+            if status in [JobStatus.SUCCEEDED]:
+                return True, "Task succeeded"
             elif status in [JobStatus.FAILED, JobStatus.STOPPED]:
                 if status in [JobStatus.FAILED]:
                     time.sleep(10)
@@ -78,7 +73,15 @@ class ClusterTaskExecutor:
                         print(log)
                     except Exception as e:
                         print(f"Get log failed: {e}")
-                return False, status
+                return False, "Task failed or stopped"
+            else:
+                start_time = time.time()
+            elapsed_time = time.time() - start_time
+            if elapsed_time >= timeout:
+                self.stop_task(job_schema.job_id)
+                raise Exception(
+                    f"Pool timeout: jobname {job_name}, {timeout} seconds, task {job_schema.job_id} status is {status}"
+                )
             time.sleep(10)
 
     def get_task_status(self, job_id: str) -> Optional[JobStatus]:
