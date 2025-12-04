@@ -129,6 +129,7 @@ class WorkerConfig(BaseModel):
     ref_load_from: str | Path | None = None
     ref_model_fsdp_cfg: FSDPConfig | None = None
     log_dir: str | Path | None = None
+    update_weight_bucket_size_in_gb: float = 0.5  # 512MB
 
 
 class WorkerInputItem(TypedDict):
@@ -578,7 +579,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_cfg_info["tp"] = tp
         self.rollout_cfg_info["ep"] = ep
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
-        self.rollout_cfg_info["update_weight_bucket_size_in_gb"] = rollout_config.update_weight_bucket_size_in_gb
         if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
             self.rollout_cfg_info["backend"] = "sglang"
         else:
@@ -609,7 +609,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             else:
                 dtype = torch.bfloat16
 
-        bucket_size = int(self.rollout_cfg_info["update_weight_bucket_size_in_gb"] * 1024**3)
+        bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
         same_gen = model._get_same_hf_param(
             model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE, bucket_size=bucket_size
         )
