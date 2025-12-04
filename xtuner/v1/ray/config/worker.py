@@ -170,10 +170,6 @@ class RolloutConfig(BaseModel):
             help="Whether to enable returning routed experts for the rollout worker.",
         ),
     ] = False
-    update_weight_bucket_size_in_gb: Annotated[
-        float,
-        Parameter(group=infer_group, help="Bucket size in GB for updating weight."),
-    ] = 0.5  # 512MB
     launch_server_method: Annotated[
         Literal["ray", "multiprocessing"],
         Parameter(
