@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import copy
+import io
 import math
 import os
 from collections.abc import Sequence
@@ -10,6 +11,7 @@ from typing import Optional, Union
 import numpy as np
 import torch
 from packaging import version
+from PIL import Image
 from pydantic import ConfigDict
 
 import transformers
@@ -335,7 +337,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         processor = copy.deepcopy(self.image_processor)
         image_path_ = get_image_path(image_file, media_root)
         if self.oss_loader is not None and "s3://" in image_path_:
-            image = self.oss_loader.client.get(image_path_)
+            img_str = self.oss_loader.client.get(image_path_)
+            buff = io.BytesIO(img_str)
+            image = Image.open(buff).convert("RGB")
         else:
             assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
             image = load_image(image_path_)
