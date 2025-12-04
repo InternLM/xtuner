@@ -53,7 +53,7 @@ class LossLog(TypedDict):
 class OtherLog(TypedDict):
     __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
     maxvio: NotRequired[float]
-    consumed_tokens: float
+    consumed_tokens: int
     consumed_img_tokens: NotRequired[float]
     extra_info: ModelForwardExtraLogInfo
     efficient_attn_ratio: float
@@ -253,7 +253,7 @@ class TrainEngine:
         step_llm_loss = torch.tensor(0.0, device=DEVICE)
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
-        step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
+        step_consumed_tokens = torch.tensor(0, device=DEVICE)
 
         if self._count == 0:
             logger.info(f"grad_accumulation_steps: {iters_per_step}")
@@ -347,7 +347,7 @@ class TrainEngine:
             reduced_z_loss = step_z_loss
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
-        other_log["consumed_tokens"] = step_consumed_tokens.item()
+        other_log["consumed_tokens"] = cast(int, step_consumed_tokens.item())
         other_log["extra_info"] = train_engine_extra_info
         other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
         return loss_log, other_log
