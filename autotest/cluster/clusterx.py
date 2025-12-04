@@ -74,10 +74,10 @@ class ClusterTaskExecutor:
                     time.sleep(10)
                     try:
                         log = self.cluster.get_log(job_schema.job_id)
-                        print("=== 任务失败日志 ===")
+                        print("=== Task log ===")
                         print(log)
                     except Exception as e:
-                        print(f"获取日志失败: {e}")
+                        print(f"Get log failed: {e}")
                 return False, status
             time.sleep(10)
 
