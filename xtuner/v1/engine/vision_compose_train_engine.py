@@ -188,7 +188,7 @@ class VisionComposeTrainEngine(TrainEngine):
         step_llm_loss = torch.tensor(0.0, device=DEVICE)
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
-        step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
+        step_consumed_tokens = torch.tensor(0, device=DEVICE)
         efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
         total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
 
@@ -262,7 +262,7 @@ class VisionComposeTrainEngine(TrainEngine):
             reduced_z_loss = step_z_loss
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
-        other_log["consumed_tokens"] = step_consumed_tokens.item()
+        other_log["consumed_tokens"] = cast(int, step_consumed_tokens.item())
         other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
         other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
         return loss_log, other_log
