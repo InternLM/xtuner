@@ -3,7 +3,6 @@ import io
 import os
 import re
 import time
-from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -76,14 +75,25 @@ def calc_frame_index_for_folder(image_list, frames_indices, timestamps, video_pa
     return frames_indices
 
 
-def read_frames_folder(video_path, frames_indices, timestamps=None, client=None):
+def read_frames_folder(
+    video_path,
+    frames_indices,
+    timestamps=None,
+    client=None,
+    video_extra_dict=None,
+):
     oss_read_time = 0
-    if "s3://" in video_path:
-        assert client is not None, "client should be provided for s3 backend"
-        image_list = sort_frames(client.list(video_path))
-        image_list = [os.path.join(video_path.split(image.split("/")[0])[0], image) for image in image_list]
+    if video_extra_dict is not None and "processed_video_length" in video_extra_dict:
+        processed_video_length = video_extra_dict["processed_video_length"]
+        image_list = [f"{i:08d}.jpg" for i in range(1, processed_video_length + 1, 1)]
+        image_list = [os.path.join(video_path, img) for img in image_list]
     else:
-        image_list = sort_frames(list(os.listdir(video_path)))
+        if "s3://" in video_path:
+            assert client is not None, "client should be provided for s3 backend"
+            image_list = sort_frames(client.list(video_path))
+            image_list = [os.path.join(video_path.split(image.split("/")[0])[0], image) for image in image_list]
+        else:
+            image_list = sort_frames(list(os.listdir(video_path)))
 
     frames_indices = calc_frame_index_for_folder(image_list, frames_indices, timestamps, video_path)
     frame_list = []
@@ -156,12 +166,17 @@ def read_qwen3_vl_video(
     client=None,
     debug=False,
     oss_time_log_thr=10,
+    video_extra_dict=None,
 ):
     start_time = time.time()
     video_get_batch_time = 0
-    if Path(path).is_dir():
+    if path.endswith("/"):
         frames, oss_read_time, vlen, frame_indices, timestamps = read_frames_folder(
-            path, frames_indices, timestamps, client=client
+            path,
+            frames_indices,
+            timestamps,
+            client=client,
+            video_extra_dict=video_extra_dict,
         )
     elif path.endswith(".gif"):
         raise NotImplementedError("gif format is not supported")
@@ -206,7 +221,7 @@ class Qwen3VLOSSLoader:
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
 
-    def __call__(self, path, image_type="image", frames_indices=None, timestamps=None):
+    def __call__(self, path, image_type="image", frames_indices=None, timestamps=None, video_extra_dict=None):
         if image_type == "image":
             start_time = time.time()
             img_value_str = self.client.get(path)
@@ -225,6 +240,7 @@ class Qwen3VLOSSLoader:
                 client=self.client,
                 debug=self.debug,
                 oss_time_log_thr=self.oss_time_log_thr,
+                video_extra_dict=video_extra_dict,
             )
         else:
             raise ValueError(f"Unsupported image type: {image_type}")

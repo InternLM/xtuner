@@ -715,14 +715,22 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 timestamps = timestamps_list[i]
 
             video_path = os.path.join(media_root, video_path)
+            if len(self._video_extra_info_list) > 0:
+                video_extra_dict = self._video_extra_info_list[i]
+            else:
+                video_extra_dict = None
 
             if self.oss_loader is not None:
                 image_list, frame_indices, timestamps = self.oss_loader(
-                    video_path, image_type="video", frames_indices=frames_indices, timestamps=timestamps
+                    video_path,
+                    image_type="video",
+                    frames_indices=frames_indices,
+                    timestamps=timestamps,
+                    video_extra_dict=video_extra_dict,
                 )
             else:
                 image_list, frame_indices, timestamps = read_qwen3_vl_video(
-                    video_path, frames_indices=frames_indices, timestamps=timestamps
+                    video_path, frames_indices=frames_indices, timestamps=timestamps, video_extra_dict=video_extra_dict
                 )
 
             assert len(image_list) % self.video_processor.merge_size == 0, "num_frames must be divisible by merge_size"

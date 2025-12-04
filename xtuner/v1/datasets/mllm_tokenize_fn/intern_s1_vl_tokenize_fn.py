@@ -370,11 +370,15 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         num_image_tokens_list = []
         pixel_values_list = []
         num_imgs_list = []
-        for video_path in self._video_path:
+        for index, video_path in enumerate(self._video_path):
             random_frame_num = generate_random_int_from_dict(
                 {"data_item": data_item, "video_path": video_path}, self.min_num_frames, self.max_num_frames
             )
             video_path = os.path.join(media_root, video_path)
+            if len(self._video_extra_info_list) > 0:
+                video_extra_dict = self._video_extra_info_list[index]
+            else:
+                video_extra_dict = None
 
             if self.oss_loader is not None:
                 image_list = self.oss_loader(
@@ -385,6 +389,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                     sample="rand",
                     clip=data_item.get("clip", None),
                     random_frame_num=random_frame_num,
+                    video_extra_dict=video_extra_dict,
                 )
             else:
                 image_list = read_interns1_vl_video(
@@ -394,6 +399,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
                     sample="rand",
                     clip=data_item.get("clip", None),
                     random_frame_num=random_frame_num,
+                    video_extra_dict=video_extra_dict,
                 )
 
             transform = self._get_transform()
