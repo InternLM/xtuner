@@ -20,17 +20,20 @@ resource_map = {"npu": "NPU", "cuda": "GPU"}
 class MockTimeoutRolloutController(RolloutController):
     def _get_worker_cls(self):
         return ray.remote(MockTimeoutRolloutWorker)
-    
+    def deactivate_worker_by_url(self, url):
+        pass
 @ray.remote
 class MockRequestErrorRolloutController(RolloutController):
     def _get_worker_cls(self):
         return ray.remote(MockRequestErrorRolloutWorker)
-    
+    def deactivate_worker_by_url(self, url):
+        pass
 @ray.remote    
 class MockClientErrorRolloutController(RolloutController):
     def _get_worker_cls(self):
         return ray.remote(MockClientErrorRolloutWorker)
-    
+    def deactivate_worker_by_url(self, url):
+        pass
 @ray.remote
 class MockServerErrorRolloutController(RolloutController):
     def _get_worker_cls(self):

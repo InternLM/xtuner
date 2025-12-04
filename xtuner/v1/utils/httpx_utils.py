@@ -6,8 +6,6 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem
-
 
 class HttpRequestErrorType(IntEnum):
     """An enumeration for HTTP status codes and client-side request errors.
@@ -132,14 +130,3 @@ class HttpRequestResult:
     @property
     def is_server_error(self) -> bool:
         return 500 <= self.error_type < 600
-
-
-def set_rollout_response_status(http_result: HttpRequestResult, response: RLRolloutResponseItem, server_url=None):
-    if http_result.is_retryable:
-        response.finish_reason = "failed"
-    elif http_result.is_client_error:
-        response.finish_reason = "skipped"
-    elif http_result.is_server_error:
-        response.finish_reason = "failed"
-        if server_url:
-            response.extra_info.update({"url": server_url})
