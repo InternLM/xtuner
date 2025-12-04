@@ -3,6 +3,7 @@ import io
 import os
 import re
 import time
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -87,6 +88,12 @@ def read_frames_folder(
         processed_video_length = video_extra_dict["processed_video_length"]
         image_list = [f"{i:08d}.jpg" for i in range(1, processed_video_length + 1, 1)]
         image_list = [os.path.join(video_path, img) for img in image_list]
+
+        if "s3://" not in video_path:
+            for image in image_list:
+                if not os.path.exists(image):
+                    image_list = sort_frames(list(os.listdir(video_path)))
+                    break
     else:
         if "s3://" in video_path:
             assert client is not None, "client should be provided for s3 backend"
@@ -170,7 +177,7 @@ def read_qwen3_vl_video(
 ):
     start_time = time.time()
     video_get_batch_time = 0
-    if path.endswith("/"):
+    if path.endswith("/") or Path(path).is_dir():
         frames, oss_read_time, vlen, frame_indices, timestamps = read_frames_folder(
             path,
             frames_indices,
