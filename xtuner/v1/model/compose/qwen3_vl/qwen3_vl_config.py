@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import Self
 
 from xtuner.v1.float8 import Float8Config
-from xtuner.v1.model.base import TransformerConfig
+from xtuner.v1.model.base import TransformerConfig, XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VLTextDense8BConfig
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config
 from xtuner.v1.module.rope import RopeScalingConfig
@@ -62,7 +62,7 @@ class Qwen3VLProjectorConfig(BaseModel):
         return Qwen3VLProjector(self)
 
 
-class Qwen3VLBaseConfig(BaseModel):
+class Qwen3VLBaseConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -78,7 +78,6 @@ class Qwen3VLBaseConfig(BaseModel):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
-    hf_save_worker: int = 16
     dcp_ignore_frozen_params: bool = True
 
     def build(self):

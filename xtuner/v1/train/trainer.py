@@ -47,9 +47,18 @@ from xtuner.v1.utils import (
     get_logger,
     is_hf_model_path,
     log_format,
+    profile_time_and_memory,
     record_git_info,
 )
+from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.internal_metrics import (
+    InternalMetrics,
+    InternalMetricsConfig,
+    InternalMetricsRecorder,
+    flatten_internal_metrics_for_logs,
+)
+from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -318,6 +327,7 @@ class TrainerConfig(BaseModel):
     checkpoint_maxkeep: int | None = -1
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     snapshot_interval: int | None = None
+    check_health_interval: int | None = None
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
@@ -333,6 +343,7 @@ class TrainerConfig(BaseModel):
     do_clip: bool = True
     grad_norm_dtype: torch.dtype = torch.float32
     hooks_config: HooksConfig = HooksConfig()
+    internal_metrics_cfg: InternalMetricsConfig | None = None
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -440,6 +451,7 @@ class Trainer:
         checkpoint_maxkeep: int | None = -1,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         snapshot_interval: int | None = None,
+        check_health_interval: int | None = None,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
@@ -456,6 +468,7 @@ class Trainer:
         grad_norm_dtype: torch.dtype = torch.float32,
         trainer_cfg: TrainerConfig | None = None,
         hooks_config: HooksConfig = HooksConfig(),
+        internal_metrics_cfg: InternalMetricsConfig | None = None,
     ):
         self._do_clip = do_clip
         self._grad_norm_dtype = grad_norm_dtype
@@ -489,14 +502,9 @@ class Trainer:
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
         self._snapshot_interval = snapshot_interval
+        self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
-
-        if tokenizer_path is not None:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        else:
-            self.tokenizer = UTF8ByteTokenizer()
-            logger.info(f"Using toy tokenizer: {self.tokenizer}!")
 
         if fsdp_cfg is None:
             fsdp_cfg = FSDPConfig()
@@ -506,32 +514,42 @@ class Trainer:
         self._debug = debug
         self._seed = seed
 
-        self._consumed_tokens = 0
-        self._consumed_samples = 0
+        self._reduced_consumed_tokens = 0
+        self._exp_consumed_tokens = 0
+        self._reduced_consumed_samples = 0
 
         self._train_time = 0
         self._train_time_offset = 0
 
         self._init_dist(backend)
-        self._try_bind_numa()
-        self._set_deterministic()
-        self._set_random_seed(seed)
-        self._setup_env()
-
         if resume_cfg is None:
             resume_cfg = ResumeConfig()
 
         self._work_dir = self._resolve_work_dir(work_dir)
-        logger.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
         self._auto_resume = auto_resume
         self._auto_resume = self._resolve_deprecated_resume_cfg(
             resume_cfg, self._auto_resume
         )  # TODO: Removed in version 1.1.0
         self._meta = self._init_xtuner_meta(self.work_dir, auto_resume=self._auto_resume)
-        self._log_dir = self._resolve_log_dir(log_dir)
+        self._log_dir = self._resolve_log_dir(log_dir)  # depends on exp_dir(work_dir and meta)
+        self.logger, log_dir = self._init_logger(self._log_dir)  # depends on log_dir and init_dist(get_rank)
+
+        # After init logger
+        logger.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
+
+        self._try_bind_numa()
+        self._set_deterministic()
+        self._set_random_seed(seed)
+        self._setup_env()
+
+        if tokenizer_path is not None:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        else:
+            self.tokenizer = UTF8ByteTokenizer()
+            logger.info(f"Using toy tokenizer: {self.tokenizer}!")
+
         self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(self._auto_resume, load_checkpoint_cfg)
 
-        self.logger, log_dir = self._init_logger(self._log_dir)
         self._exp_tracker = self._init_tracker(
             exp_tracker, self._log_dir / f"{self._EXP_TRACKING_PATH}/rank{self.rank}"
         )
@@ -609,6 +627,8 @@ class Trainer:
 
         setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
 
+        self._metrics_recorder = self._maybe_init_model_metrics_recorder(internal_metrics_cfg)
+
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
         """Create a Trainer instance from a TrainerConfig.
@@ -643,6 +663,7 @@ class Trainer:
             checkpoint_maxkeep=config.checkpoint_maxkeep,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             snapshot_interval=config.snapshot_interval,
+            check_health_interval=config.check_health_interval,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
@@ -659,6 +680,7 @@ class Trainer:
             grad_norm_dtype=config.grad_norm_dtype,
             hooks_config=config.hooks_config,
             trainer_cfg=config,
+            internal_metrics_cfg=config.internal_metrics_cfg,
         )
         self.config = config
         return self
@@ -744,22 +766,32 @@ class Trainer:
                 loss_log["maxvio"] = other_log["maxvio"]
             loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
 
+            internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
+
             self._cur_step += 1
-            self._consumed_tokens += step_consumed_tokens
+
+            reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
+            self._reduced_consumed_tokens += reduced_step_consumed_tokens
+
+            self._exp_consumed_tokens += step_consumed_tokens
             self._train_time = time_after_train_step - train_begin
 
             # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
             self._log_step(
                 loss_log=loss_log,
                 step_consumed_tokens=step_consumed_tokens,
-                total_consumed_tokens=self._consumed_tokens,
+                exp_consumed_tokens=self._exp_consumed_tokens,
+                reduced_consumed_tokens=self._reduced_consumed_tokens,
                 data_time=data_time,
                 step_time=step_time,
-                train_time=self._train_time + self._train_time_offset,
+                train_time=self._train_time,
+                train_time_offset=self._train_time_offset,
                 grad_norm=grad_norm.item(),
+                internal_metrics=internal_metrics,
             )
 
             self._lr_scheduler.step()
+            self._maybe_check_health()
             self._maybe_save_hf()
             ckpt_saved = self._maybe_save(is_snapshot=False)
             if not ckpt_saved:
@@ -772,7 +804,47 @@ class Trainer:
 
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
+        if self._metrics_recorder:
+            self._metrics_recorder.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
+
+    def _reduce_number_across_rank(self, rank_number: int) -> int:
+        _gathered_list = [None for _ in range(self.world_size)]
+        dist.all_gather_object(_gathered_list, rank_number)
+        reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
+        return reduced_number
+
+    def _maybe_init_model_metrics_recorder(
+        self,
+        internal_metrics_cfg: InternalMetricsConfig | None,
+    ) -> InternalMetricsRecorder | None:
+        if internal_metrics_cfg and internal_metrics_cfg.internal_metrics_interval:
+            self._internal_metrics_interval = internal_metrics_cfg.internal_metrics_interval
+            assert self._internal_metrics_interval > 0, (
+                "internal_metrics_interval must be greater than zero (or set to `None`)"
+            )
+            torch._dynamo.config.skip_nnmodule_hook_guards = (
+                False  # otherwise the hook will be ignored for compiled modules
+            )
+            return InternalMetricsRecorder(internal_metrics_cfg, self._engine)
+
+        else:
+            return None
+
+    def _maybe_pop_model_internal_metrics(self, data_batches: list[ModelItem]) -> InternalMetrics | None:
+        if not self._metrics_recorder:
+            return None
+
+        if self._internal_metrics_interval is None:
+            return None
+
+        if self.cur_step % self._internal_metrics_interval != 0 and self.cur_step != self.total_step:
+            return None
+
+        with profile_time_and_memory("[Check Model Internal Metrics]"):
+            metrics = self._metrics_recorder.pop_metrics(data_batches)
+
+        return metrics
 
     @property
     def world_size(self) -> int:
@@ -993,6 +1065,18 @@ class Trainer:
         )
         return lr_scheduler
 
+    def _maybe_check_health(self):
+        if self._check_health_interval is None:
+            return
+        if (
+            (self._check_health_interval is not None and self.cur_step % self._check_health_interval == 0)
+            or (self._checkpoint_interval is not None and self.cur_step % self._checkpoint_interval == 0)
+            or (self._snapshot_interval is not None and self.cur_step % self._snapshot_interval == 0)
+        ):
+            if not check_health():
+                raise RuntimeError("Health check failed, exit training")
+            logger.info(f"Health check passed at step {self.cur_step}")
+
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
         if ckp_interval is None:
@@ -1053,8 +1137,8 @@ class Trainer:
                         {
                             "cur_step": self.cur_step,
                             "cur_epoch": self._cur_epoch,
-                            "consumed_samples": self._consumed_samples,
-                            "consumed_tokens": self._consumed_tokens,
+                            "reduced_consumed_samples": self._reduced_consumed_samples,
+                            "reduced_consumed_tokens": self._reduced_consumed_tokens,
                             "train_time_offset": self._train_time + self._train_time_offset,
                         }
                     )
@@ -1066,8 +1150,8 @@ class Trainer:
         ckp_list.append(str(checkpoint_path))
         current_exp.cur_step = self.cur_step
         current_exp.cur_epoch = self._cur_epoch
-        current_exp.consumed_samples = self._consumed_samples
-        current_exp.consumed_tokens = int(self._consumed_tokens)
+        current_exp.consumed_samples = int(self._reduced_consumed_samples)
+        current_exp.consumed_tokens = int(self._reduced_consumed_tokens)
         current_exp.history[-1]["end"] = self.cur_step
 
         # Delete checkpoints and update meta's checkpoint_list
@@ -1103,12 +1187,8 @@ class Trainer:
         return True
 
     def _save_dataloader(self, dataloader_path: Path | str):
-        _gathered_list = [None for _ in range(self.data_mesh["dp"].size())]
-        dist.all_gather_object(_gathered_list, self._consumed_samples, group=self.data_mesh["dp"].get_group())
-        global_consumed_samples = sum(_gathered_list)  # type: ignore[arg-type]
-
         if self.rank == 0:
-            dataloader_state = self._dataloader.get_state_dict(global_consumed_samples)
+            dataloader_state = self._dataloader.get_state_dict(self._reduced_consumed_samples)
             torch.save(dataloader_state, dataloader_path)
 
     @property
@@ -1157,12 +1237,13 @@ class Trainer:
             # dist.breakpoint(skip=14)
             try:
                 data = next(data_iter)
-                self._consumed_samples += len(data)
             except StopIteration:
                 self._cur_epoch += 1
                 self._dataloader.set_epoch(self._cur_epoch)
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
+
+            self._reduced_consumed_samples += self._reduce_number_across_rank(len(data))
             yield data
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
@@ -1334,22 +1415,30 @@ class Trainer:
         self,
         loss_log: dict,
         step_consumed_tokens: int,
-        total_consumed_tokens: int,
+        exp_consumed_tokens: int,
+        reduced_consumed_tokens: int,
         data_time: float,
         step_time: float,
         train_time: float,
+        train_time_offset: float,
         grad_norm: float,
+        internal_metrics: InternalMetrics | None = None,
     ):
         """Log the training step information."""
+        e2e_train_time = train_time + train_time_offset
         tgs = step_consumed_tokens / step_time
-        e2e_tgs = total_consumed_tokens / train_time
+        rank_consumed_tokens = reduced_consumed_tokens / self.world_size
+        e2e_tgs = rank_consumed_tokens / e2e_train_time
+        exp_tgs = exp_consumed_tokens / train_time
         lr = self._lr_scheduler.get_last_lr()[0]
 
         remaining_steps = self.total_step - self.cur_step
-        avg_tokens_per_step = total_consumed_tokens / self.cur_step
+        avg_tokens_per_step = rank_consumed_tokens / self.cur_step
         remaining_tokens = remaining_steps * avg_tokens_per_step
         eta_seconds = remaining_tokens / (tgs + 1e-12)
         eta_hms = str(timedelta(seconds=int(eta_seconds)))
+
+        est_global_batch_tokens = self.data_mesh["dp"].size() * step_consumed_tokens
 
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
         loss_log_str = ", ".join(loss_log_list)
@@ -1357,16 +1446,23 @@ class Trainer:
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
 
+        flattened_internal_metrics = {}
+        if internal_metrics:
+            flattened_internal_metrics = flatten_internal_metrics_for_logs(internal_metrics)
+
         self.logger.info(
-            f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
+            f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
+            f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
-            f"total_consumed_tokens: {total_consumed_tokens} "
+            f"reduced_consumed_tokens: {reduced_consumed_tokens} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {tgs:.1f} "
+            f"exp_tgs: {exp_tgs: .1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
+            f"est_global_batch_tokens: {est_global_batch_tokens} "
             f"eta: {eta_hms} "
         )
 
@@ -1377,12 +1473,15 @@ class Trainer:
             "time/train_time": round(train_time, 4),
             "time/eta_seconds": round(eta_seconds, 1),
             "runtime_info/text_tokens": step_consumed_tokens,
-            "runtime_info/total_consumed_tokens": total_consumed_tokens,
+            "runtime_info/est_global_batch_tokens": est_global_batch_tokens,
+            "runtime_info/reduced_consumed_tokens": reduced_consumed_tokens,
             "runtime_info/tgs": tgs,
+            "runtime_info/exp_tgs": exp_tgs,
             "runtime_info/e2e_tgs": e2e_tgs,
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
+            **flattened_internal_metrics,
         }
         log_scalars.update({f"loss/{k}": v for k, v in loss_log.items()})
         self._exp_tracker.add_scalars(tag_scalar_dict=log_scalars, global_step=self.cur_step)
@@ -1411,10 +1510,10 @@ class Trainer:
                     rmtree(hf_dir)
 
         self._engine.save_hf(str(save_hf_path))
-        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-            self.tokenizer.save_pretrained(str(save_hf_path))
-        # 将 latest_hf_link 指向 save_hf_path
         if self.rank == 0:
+            if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+                self.tokenizer.save_pretrained(str(save_hf_path))
+            # 将 latest_hf_link 指向 save_hf_path
             latest_hf_link.unlink(missing_ok=True)
             latest_hf_link.symlink_to(save_hf_path.absolute(), target_is_directory=True)
 
@@ -1571,10 +1670,6 @@ class Trainer:
             load_args=load_checkpoint_cfg.load_optimizer_args,
         )
 
-        if load_checkpoint_cfg.load_dataset:
-            dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
-            self._resume_dataloader(dataloader_path)
-
         train_state_path = resume_from / self._SAVE_TRAIN_STATE_PATH
 
         with train_state_path.open("r") as f:
@@ -1582,9 +1677,18 @@ class Trainer:
 
         self._cur_step = train_state["cur_step"]
         self._cur_epoch = train_state["cur_epoch"]
-        self._consumed_samples = train_state["consumed_samples"]
-        self._consumed_tokens = train_state["consumed_tokens"]
-        self._train_time_offset = train_state["train_time_offset"]
+
+        if load_checkpoint_cfg.load_dataset:
+            self._reduced_consumed_tokens = train_state.get("reduced_consumed_tokens", 0)  # default 0 for BC
+            self._train_time_offset = train_state["train_time_offset"]
+            # _reduced_consumed_samples 会影响 save dcp时 dataloader.get_state_dict的状态。
+            # 1) 如果加载 dataset，应该恢复_reduced_consumed_samples为checkpoint中的值。
+            # 2) 如果不加载 dataset，应该保持_reduced_consumed_samples为初始值0，否则如果加载上旧dataloader的reduced_consumed_samples
+            #    会导致存储新dataloader时 reduced_consumed_samples 是不正确的值。
+            self._reduced_consumed_samples = train_state.get("reduced_consumed_samples", 0)  # default 0 for BC
+
+            dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
+            self._resume_dataloader(dataloader_path)
 
         if load_checkpoint_cfg.load_scheduler:
             scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
@@ -1614,6 +1718,7 @@ class Trainer:
     def _setup_env(self):
         if os.getenv("XTUNER_GC_ENABLE", "0") == "0":
             gc.disable()
+        monkey_patch_hf_modules_cache()
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
         log_str = "\n============XTuner Training Environment============\n"
