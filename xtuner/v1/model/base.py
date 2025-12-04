@@ -54,7 +54,17 @@ class HFSaveCfg(PydanticBaseModel):
     bucket_size: Annotated[int, Parameter(group="model")] = 1024**3 * 4
 
 
-class TransformerConfig(PydanticBaseModel):
+class XTunerBaseModelConfig(PydanticBaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hf_save_cfg: HFSaveCfg = HFSaveCfg()
+    float8_cfg: Float8Config | None = None
+
+    @property
+    def hf_config(self) -> PretrainedConfig | None:
+        raise NotImplementedError
+
+
+class TransformerConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -75,14 +85,11 @@ class TransformerConfig(PydanticBaseModel):
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
     model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
     generate_config: GenerateConfig | None = None
-    float8_cfg: Float8Config | None = None
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
-    hf_save_worker: Annotated[int, Parameter(group="model")] = 16
     dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
-    hf_save_cfg: HFSaveCfg = HFSaveCfg()
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -187,7 +194,7 @@ class BaseModel(nn.Module):
     fsdp_mesh: DeviceMesh | None = None
     hsdp_mesh: DeviceMesh | None = None
     fsdp_config: FSDPConfig | None = None
-    config: TransformerConfig
+    config: XTunerBaseModelConfig
 
     FSDP_SHARD_DIM = 0
 

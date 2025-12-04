@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import Self
 
 from xtuner.v1.float8 import Float8Config
+from xtuner.v1.model.base import XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
@@ -77,7 +78,7 @@ class InternS1ProjectorConfig(BaseModel):
         return InternS1MultiModalProjector(self)
 
 
-class InternS1BaseConfig(BaseModel):
+class InternS1BaseConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -96,7 +97,6 @@ class InternS1BaseConfig(BaseModel):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
-    hf_save_worker: int = 16
     dcp_ignore_frozen_params: bool = True
 
     def build(self) -> "InternS1ForConditionalGeneration":
