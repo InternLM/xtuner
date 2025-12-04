@@ -47,6 +47,13 @@ DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
 
 
+class HFSaveCfg(PydanticBaseModel):
+    model_config = ConfigDict(extra="forbid")
+    worker_per_rank: Annotated[int, Parameter(group="model")] = 16
+    max_save_rank: Annotated[int, Parameter(group="model")] = 16
+    bucket_size: Annotated[int, Parameter(group="model")] = 1024**3 * 4
+
+
 class TransformerConfig(PydanticBaseModel):
     model_config = ConfigDict(
         title="Base model config for xtuner",
@@ -75,6 +82,7 @@ class TransformerConfig(PydanticBaseModel):
     rope_scaling_cfg: RopeScalingConfig | None = None
     hf_save_worker: Annotated[int, Parameter(group="model")] = 16
     dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
+    hf_save_cfg: HFSaveCfg = HFSaveCfg()
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -181,7 +189,6 @@ class BaseModel(nn.Module):
     fsdp_config: FSDPConfig | None = None
     config: TransformerConfig
 
-    SAFETENSOR_SIZE = 1024**3 * 20
     FSDP_SHARD_DIM = 0
 
     def __init__(self):
@@ -454,7 +461,8 @@ class BaseModel(nn.Module):
             return unsharded_tensor_list
 
         if bucket_size is None:
-            bucket_size = self.SAFETENSOR_SIZE
+            bucket_size = self.config.hf_save_cfg.bucket_size
+
         safetensor_size = 0
         tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
         name_list: list[str] = []
@@ -521,7 +529,9 @@ class BaseModel(nn.Module):
                 current_rank = dist.get_rank()
 
                 expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
-                hardcode_fused_save_ranks = list(range(min((dist.get_world_size(), 16))))
+                hardcode_fused_save_ranks = list(
+                    range(min((dist.get_world_size(), self.config.hf_save_cfg.max_save_rank)))
+                )
 
                 key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
                 # assert key_per_rank.is_integer(), (
@@ -609,7 +619,7 @@ class BaseModel(nn.Module):
             return hf_tensor_list, name_list
 
         if bucket_size is None:
-            bucket_size = self.SAFETENSOR_SIZE
+            bucket_size = self.config.hf_save_cfg.bucket_size
         safetensor_size = 0
         tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
         name_list: list[str] = []
@@ -643,7 +653,7 @@ class BaseModel(nn.Module):
         if not params:
             return
         if bucket_size is None:
-            bucket_size = self.SAFETENSOR_SIZE
+            bucket_size = self.config.hf_save_cfg.bucket_size
         safetensor_size = 0
         tensor_list: list[torch.Tensor] = []
         load_spec_list: list[LoadSpec] = []
@@ -729,6 +739,7 @@ class BaseModel(nn.Module):
 
     def _get_safe_tensor_num(self, dtype: torch.dtype) -> int:
         """Get the size of the model in bytes."""
+        bucket_size = self.config.hf_save_cfg.bucket_size
         shard_size = 0
         same_size = 0
         fused_size = 0
@@ -743,9 +754,9 @@ class BaseModel(nn.Module):
             elif load_spec.load_enum == LoadEnum.FUSED:
                 fused_size += self._get_tensor_size(param, dtype)
         return (
-            math.ceil(shard_size / self.SAFETENSOR_SIZE)
-            + math.ceil(same_size / self.SAFETENSOR_SIZE)
-            + math.ceil(fused_size / self.SAFETENSOR_SIZE)
+            math.ceil(shard_size / bucket_size)
+            + math.ceil(same_size / bucket_size)
+            + math.ceil(fused_size / bucket_size)
         )
 
     def _save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16):
@@ -777,7 +788,7 @@ class BaseModel(nn.Module):
         # Tell me why! why! old cao! @HIT-cwh
         # mp_context = multiprocessing.get_context("fork")
         # save_executor = ProcessPoolExecutor(max_workers=16, mp_context=mp_context)
-        save_executor = ThreadPoolExecutor(max_workers=16)
+        save_executor = ThreadPoolExecutor(max_workers=self.config.hf_save_cfg.worker_per_rank)
 
         if dist.is_initialized():
             save_rank = dist.get_rank()
