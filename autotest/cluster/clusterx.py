@@ -70,6 +70,14 @@ class ClusterTaskExecutor:
             elif status in [JobStatus.SUCCEEDED]:
                 return True, status
             elif status in [JobStatus.FAILED, JobStatus.STOPPED]:
+                if status in [JobStatus.FAILED]:
+                    time.sleep(10)
+                    try:
+                        log = self.cluster.get_log(job_schema.job_id)
+                        print("=== 任务失败日志 ===")
+                        print(log)
+                    except Exception as e:
+                        print(f"获取日志失败: {e}")
                 return False, status
             time.sleep(10)
 
