@@ -131,16 +131,16 @@ class MoE(BaseModel):
 
     def __init__(self, config: MoEConfig):
         super().__init__()
+        self.config = config
         if config.ep_size is not None and config.ep_size > 1:
             world_size = dist.get_world_size()
             self.ep_mesh = init_device_mesh(
                 DEVICE,
                 (world_size // config.ep_size, config.ep_size),
-                mesh_dim_names=("dp", "ep"),
-            )["ep"]
+                mesh_dim_names=(f"{self.config.mesh_prefix}.dp", f"{self.config.mesh_prefix}.ep"),
+            )[f"{self.config.mesh_prefix}.ep"]
         else:
             self.ep_mesh = None
-        self.config = config
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -651,11 +651,6 @@ class MoE(BaseModel):
         self._init_device_mesh(fsdp_config)
         self._maybe_compile_layers()
 
-        # TODO: 一定不能少，因为在模型 init 时候会构建一套 ep_mesh，如果不重新构建，fsdp_mesh 和 ep_mesh 会没有任何联系
-        # fully_shard 时候会出现： AssertionError: FSDP requires the DP and TP mesh to have the same parent mesh
-        with torch.device("meta"):
-            self.layers = self.build_layers(self.config)
-
         if float8_handler is not None:
             # As we modify the shape of the model's parameters,
             # we need to reinitialize the load spec mapping.
@@ -784,40 +779,51 @@ class MoE(BaseModel):
             model_mesh = init_device_mesh(
                 device,
                 (experts_fsdp_size, self.fsdp_config.ep_size),
-                mesh_dim_names=(f"{self.fsdp_config.mesh_prefix}.fsdp", f"{self.fsdp_config.mesh_prefix}.ep"),
+                mesh_dim_names=(f"{self.config.mesh_prefix}.fsdp", f"{self.config.mesh_prefix}.ep"),
             )
             if self.ep_mesh is not None:
-                assert torch.equal(self.ep_mesh.mesh, model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"].mesh), (
+                # WARN: This assertion is **VERY** important.
+                # FSDP requires that `device_mesh` shares the same root mesh across all mesh dimensions.
+                # If not, it will raise an AssertionError:
+                # "FSDP requires the DP and TP mesh to have the same parent mesh but got:
+                #  DP's global mesh: {dp_global_mesh}\nTP's global mesh: {tp_global_mesh}"
+                # ...
+                # For MoE models that can perform inference independently without FSDP,
+                # they build their own `ep_mesh`, which may not initially share the same root mesh
+                # as `fsdp_mesh`. However, PyTorch's mesh management uses global logic: when a
+                # submesh with an existing name is accessed (e.g., `model_mesh[f"{self.config.mesh_prefix}.ep"]`),
+                # it creating a new submesh with the same **hash** as the existing `ep_mesh`
+                # ...
+                # FSDP's mesh manage the parent-child mapping by _mesh_resources, of which the key is the child mesh
+                # and the value is the parent mesh, then, something interesting happened:
+                # >>> print(id(old_ep_mesh), hash(old_ep_mesh))
+                # 9753864, 6644214454873602895
+                # >>> print(id(new_ep_mesh), hash(new_ep_mesh))
+                # 9753878, 6644214454873602895
+                # >>> _mesh_resources.get_root_mesh(old_ep_mesh) == _mesh_resources.get_root_mesh(new_ep_mesh)
+                # True
+                # Aha, although `old_ep_mesh` and `new_ep_mesh` are two different mesh, but `_mesh_resources` think
+                # they share the same root mesh, which follows FSDP's assumption.
+                # ...
+                # Although I think it is an unexpected behavior of PyTorch's mesh management, but we can take
+                # advantage of it to satisfy FSDP's requirement without changing the original `ep_mesh`.
+                _new_created_ep_mesh = model_mesh[f"{self.config.mesh_prefix}.ep"]
+                assert _new_created_ep_mesh.mesh_dim_names == self.ep_mesh.mesh_dim_names, (
+                    f"FSDP enabled, it requires the name of new created `ep_mesh`: {_new_created_ep_mesh.mesh_dim_names}"  # noqa: E501
+                    f"equals to the origin one: {self.ep_mesh.mesh_dim_names}"
+                )
+                assert torch.equal(self.ep_mesh.mesh, model_mesh[f"{self.config.mesh_prefix}.ep"].mesh), (
                     "FSDP enabled, it requires the `ep_size` of model config equals to the `ep_size` of FSDPConfig."
                 )
-            self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
-            self.fsdp_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.fsdp"]
+            else:
+                self.ep_mesh = model_mesh[f"{self.config.mesh_prefix}.ep"]
+
+            self.fsdp_mesh = model_mesh[f"{self.config.mesh_prefix}.fsdp"]
         else:
             assert self.fsdp_config.ep_size == 1, "Currently, HSDP requires expert parallel size to be 1"
-            # We can not init ep_mesh and fsdp_mesh like this.
-            # This will lead to "RuntimeError: Cannot create a submesh from a submesh."
-            # in FSDPParam.shard_mesh, as fsdp_mesh is not the root mesh. The root mesh is model_mesh.
-            # So we have to init the ep_mesh and fsdp_mesh separately.
-            # model_mesh = init_device_mesh(
-            #     device,
-            #     (
-            #         experts_fsdp_size // self.fsdp_config.hsdp_sharding_size,
-            #         self.fsdp_config.hsdp_sharding_size,
-            #         self.fsdp_config.ep_size,
-            #     ),
-            #     mesh_dim_names=(
-            #         f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
-            #         f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
-            #         f"{self.fsdp_config.mesh_prefix}.ep",
-            #     ),
-            # )
-            # self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
-            # self.fsdp_mesh = model_mesh[
-            #     (f"{self.fsdp_config.mesh_prefix}.hsdp_replicate", f"{self.fsdp_config.mesh_prefix}.hsdp_shard")
-            # ]
-            ep_mesh = init_device_mesh(
-                device, (world_size, 1), mesh_dim_names=("_", f"{self.fsdp_config.mesh_prefix}.ep")
-            )[f"{self.fsdp_config.mesh_prefix}.ep"]
+            ep_mesh = init_device_mesh(device, (world_size, 1), mesh_dim_names=("_", f"{self.config.mesh_prefix}.ep"))[
+                f"{self.config.mesh_prefix}.ep"
+            ]
             if self.ep_mesh is not None:
                 assert self.ep_mesh == ep_mesh, "ep_mesh should be the same as the previous one"
             self.ep_mesh = ep_mesh
@@ -828,11 +834,11 @@ class MoE(BaseModel):
                     self.fsdp_config.hsdp_sharding_size,
                 ),
                 mesh_dim_names=(
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
+                    f"{self.config.mesh_prefix}.hsdp_replicate",
+                    f"{self.config.mesh_prefix}.hsdp_shard",
                 ),
             )
-            self.fsdp_mesh = self.hsdp_mesh[f"{self.fsdp_config.mesh_prefix}.hsdp_shard"]
+            self.fsdp_mesh = self.hsdp_mesh[f"{self.config.mesh_prefix}.hsdp_shard"]
 
     def _replicate_other_params(self, model: nn.Module):
         def traverse(module):

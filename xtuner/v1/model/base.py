@@ -75,6 +75,9 @@ class TransformerConfig(PydanticBaseModel):
     rope_scaling_cfg: RopeScalingConfig | None = None
     hf_save_worker: Annotated[int, Parameter(group="model")] = 16
     dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
+    mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
+        "default"
+    )
 
     @computed_field
     def num_attention_heads(self) -> int:

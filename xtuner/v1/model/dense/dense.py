@@ -270,9 +270,9 @@ class Dense(BaseModel):
             model_mesh = init_device_mesh(
                 device,
                 (world_size, 1),
-                mesh_dim_names=(f"{self.fsdp_config.mesh_prefix}.fsdp", f"{self.fsdp_config.mesh_prefix}.others"),
+                mesh_dim_names=(f"{self.config.mesh_prefix}.fsdp", f"{self.config.mesh_prefix}.others"),
             )
-            self.fsdp_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.fsdp"]
+            self.fsdp_mesh = model_mesh[f"{self.config.mesh_prefix}.fsdp"]
         else:
             self.hsdp_mesh = init_device_mesh(
                 device,
@@ -281,11 +281,11 @@ class Dense(BaseModel):
                     self.fsdp_config.hsdp_sharding_size,
                 ),
                 mesh_dim_names=(
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
+                    f"{self.config.mesh_prefix}.hsdp_replicate",
+                    f"{self.config.mesh_prefix}.hsdp_shard",
                 ),
             )
-            self.fsdp_mesh = self.hsdp_mesh[f"{self.fsdp_config.mesh_prefix}.hsdp_shard"]
+            self.fsdp_mesh = self.hsdp_mesh[f"{self.config.mesh_prefix}.hsdp_shard"]
 
     # TODO: Remove patch before opensource
     @staticmethod
