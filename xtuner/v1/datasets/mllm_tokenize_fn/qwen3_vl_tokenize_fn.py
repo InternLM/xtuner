@@ -212,6 +212,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         video_max_total_pixels: int | None = None,  # Max pixels within a frame
         video_min_total_pixels: int | None = None,  # Min pixels within a frame
         system_message: str | None = None,
+        enable_3d_rope: bool = True,
         add_vision_id: bool = True,
         max_length: int | None = None,
         oss_loader_cfg: OSSLoaderConfig | None = None,
@@ -225,6 +226,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.oss_loader = None
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
+        self.enable_3d_rope = enable_3d_rope
+
         if oss_loader_cfg is not None:
             self.oss_loader = Qwen3VLOSSLoader(
                 backend=oss_loader_cfg.backend,
@@ -356,12 +359,13 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids = tokenized["input_ids"]
         labels: list[int] = tokenized["labels"]
 
-        position_ids: torch.Tensor
+        position_ids: torch.Tensor | None = None
 
-        position_ids = get_rope_index_3(
-            torch.tensor(input_ids).unsqueeze(0),
-            spatial_merge_size=self.image_processor.merge_size,
-        )
+        if self.enable_3d_rope:
+            position_ids = get_rope_index_3(
+                torch.tensor(input_ids).unsqueeze(0),
+                spatial_merge_size=self.image_processor.merge_size,
+            )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
@@ -456,11 +460,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             np_labels[np_labels == self.img_end_token_id] = -100
             labels = np_labels.tolist()
 
-        position_ids = get_rope_index_3(
-            torch.tensor(input_ids).unsqueeze(0),
-            spatial_merge_size=self.image_processor.merge_size,
-            image_grid_thw=torch.stack(grid_thw, dim=0),
-        )
+        position_ids: torch.Tensor | None = None
+
+        if self.enable_3d_rope:
+            position_ids = get_rope_index_3(
+                torch.tensor(input_ids).unsqueeze(0),
+                spatial_merge_size=self.image_processor.merge_size,
+                image_grid_thw=torch.stack(grid_thw, dim=0),
+            )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
@@ -824,11 +831,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             np_labels[np_labels == self.img_end_token_id] = -100
             labels = np_labels.tolist()
 
-        position_ids = get_rope_index_3(
-            torch.tensor(input_ids).unsqueeze(0),
-            spatial_merge_size=self.image_processor.merge_size,
-            video_grid_thw=torch.cat(grid_thw_list),
-        )
+        position_ids: torch.Tensor | None = None
+
+        if self.enable_3d_rope:
+            position_ids = get_rope_index_3(
+                torch.tensor(input_ids).unsqueeze(0),
+                spatial_merge_size=self.image_processor.merge_size,
+                video_grid_thw=torch.cat(grid_thw_list),
+            )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
@@ -870,6 +880,8 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     fps: int | None = None
     rand_video_max_frames: int = 24
 
+    enable_3d_rope: bool = True
+
     # When handling multiple images or multiple videos,
     # it's helpful to add labels to the images and videos for better reference.
     # 注意这个逻辑和 hf 官方不是完全一致。 hf 官方只要开启这个 flag 就一定追加，不管是单个图片还是单个视频
@@ -892,6 +904,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             video_max_frames=self.video_max_frames,
             rand_video_max_frames=self.rand_video_max_frames,
             fps=self.fps,
+            enable_3d_rope=self.enable_3d_rope,
             add_vision_id=self.add_vision_id,
             max_length=self.max_length,
             system_message=self.system_message,

@@ -212,10 +212,26 @@ def qwen3_vl_sft_collator(
 
         input_ids = torch.cat([torch.tensor(i["input_ids"]).view(1, -1) for i in instance], dim=-1)
         labels = torch.cat([torch.tensor(i["labels"]).view(1, -1) for i in instance], dim=-1)
-        position_ids = torch.cat([i["position_ids"] for i in instance], dim=-1)
+
+        position_ids_list = []
+        for _instance in instance:
+            if "position_ids" in _instance and _instance["position_ids"] is not None:
+                position_ids_list.append(_instance["position_ids"])
+
+        assert len(position_ids_list) == len(instance) or len(position_ids_list) == 0, (
+            f"position_ids_list length {len(position_ids_list)} != instance length {len(instance)} or "
+            f"position_ids_list is not empty"
+        )
+
         input_ids = input_ids[:, :-1]
         shifted_labels = labels[:, 1:]
-        position_ids = position_ids[:, :, :-1]
+
+        if len(position_ids_list) > 0:
+            position_ids = torch.cat(position_ids_list, dim=-1)
+            position_ids = position_ids[:, :, :-1]
+        else:
+            position_ids = None
+
         num_tokens = [i["num_tokens"] for i in instance]
         if num_tokens[-1] == 1:
             num_tokens = num_tokens[:-1]  # remove the last sample if it is a single token
@@ -234,7 +250,8 @@ def qwen3_vl_sft_collator(
         if pad_len > 0:
             input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
             shifted_labels = pad_to_max_length(shifted_labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
-            position_ids = pad_to_max_length(position_ids, 0, max_length=pack_max_length, dim=-1)
+            if position_ids is not None:
+                position_ids = pad_to_max_length(position_ids, 0, max_length=pack_max_length, dim=-1)
             num_tokens = [0] + num_tokens + [pad_len]
 
         elif pad_len < 0:
