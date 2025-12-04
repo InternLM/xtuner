@@ -51,7 +51,7 @@ case:
         -
             type: sft
             parameters:
-                config: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_ci_config/qwen3_moe_30BA3_ep8.py
+                config: autotest/config/qwen3_moe_30BA3_ep8.py
                 output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
@@ -75,7 +75,7 @@ case:
             pre_action:
                 command: 'python ./autotest/utils/update_meta.py'
             parameters:
-                config: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_ci_config/qwen3_moe_30BA3_ep8_resume.py
+                config: autotest/config/qwen3_moe_30BA3_ep8_resume.py
                 output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
@@ -99,7 +99,7 @@ case:
         -
             type: sft
             parameters:
-                config: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_ci_config/qwen3_moe_30BA3_tp2.py
+                config: autotest/config/qwen3_moe_30BA3_tp2.py
                 output_path: .
             resource:
                 envs:
