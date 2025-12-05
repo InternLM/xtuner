@@ -26,7 +26,6 @@ class Qwen3VLVisionConfig(BaseModel):
     hidden_size: int = 1152
     num_attention_heads: int = 16
     intermediate_size: int = 4304
-    num_hidden_layers: int = 24
     hidden_act: str = "gelu_pytorch_tanh"
     patch_size: int = 16
     spatial_merge_size: int = 2

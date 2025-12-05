@@ -5,7 +5,6 @@ import torch
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.module import NoAuxRouterConfig
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 
 from .moe import MoEModelOutputs
@@ -31,6 +30,9 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
         if key.startswith("norm."):
             return [key.replace("norm.", "model.language_model.norm.")]
+        elif key.startswith("rotary_emb."):
+            # FoPE has model.rotary_emb.sin_coef and model.rotary_emb.cos_coef in the safetensors
+            return [key.replace("rotary_emb.", "model.language_model.rotary_emb.")]
         else:
             return [key]
 
@@ -201,17 +203,16 @@ class Qwen3VLTextMoE(Qwen3MoE):
             z_loss = self.z_loss(router_logits=router_logits)
             output["z_loss"] = z_loss
 
-        if isinstance(self.config.router, NoAuxRouterConfig) and self.config.router.router_bias_update_speed > 0:
-            tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
-            output["tokens_per_expert_global"] = tokens_per_expert_global
+        tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
+        output["tokens_per_expert_global"] = tokens_per_expert_global
 
         del router_logits
 
         if self.config.return_router_results or return_router_logits:
-            raise NotImplementedError
+            # raise NotImplementedError
             # TODO: Move router logits to CPU is cost
-            # for layer_name, router_logits in output["router_logits"].items():
-            #     output["router_logits"][layer_name] = router_logits.detach().cpu().unsqueeze(0)
+            for layer_name, router_logits in output["router_logits"].items():
+                output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
         else:
             output["router_logits"] = None
 
