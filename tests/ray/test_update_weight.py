@@ -72,7 +72,8 @@ class TestUpdateWeight(unittest.TestCase):
         if hasattr(model_cfg, 'balancing_loss_cfg'):
             model_cfg.balancing_loss_cfg = BalancingLossConfig()
         optim_cfg: AdamWConfig = AdamWConfig(lr=5e-7, foreach=False)
-        fsdp_cfg: FSDPConfig = FSDPConfig()
+        fsdp_cfg: FSDPConfig = FSDPConfig(ep_size=4)
+        model_cfg.ep_size = fsdp_cfg.ep_size
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=5e-7)
         self.worker_cfg: WorkerConfig = WorkerConfig(
             model_cfg=model_cfg,
@@ -84,7 +85,7 @@ class TestUpdateWeight(unittest.TestCase):
                     loss_type="vanilla",
                 ),
                 ignore_idx=-100,
-                use_kl_loss=True,
+                use_kl_loss=False,
                 kl_loss_coef=0.001, 
                 kl_loss_type="low_var_kl",
                 mode="eager"),
