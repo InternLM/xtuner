@@ -1,4 +1,4 @@
-from typing import Dict, TypeVar
+from typing import Any, Dict, TypeVar
 
 import ray
 from cyclopts import Parameter
@@ -31,21 +31,21 @@ class CPUResourcesConfig(BaseModel):
         int, Parameter(help="Amount of memory (in bytes) to allocate for the placement group.")
     ] = 1024**3  # 1 GB
 
-    def __init__(self, **kwargs):
+    def model_post_init(self, __context: Any) -> None:
         assert ray.is_initialized(), "Ray must be initialized before creating CPUResourcesConfig."
         available_resources = ray.available_resources()
         available_cpus = available_resources.get("CPU", 0)
         available_memory = available_resources.get("memory", 0)
         # TODO: manage single controller's cpu resource to replace "10" here
-        assert (kwargs["num_cpus_per_worker"] * kwargs["num_workers"]) + 10 <= available_cpus, (
-            f"Not enough available CPUs in Ray cluster, available_cpus is {available_cpus} but xtuner needs {kwargs['num_cpus_per_worker'] * kwargs['num_workers'] + 10}."
+        needed_cpus = (self.num_cpus_per_worker * self.num_workers) + 10
+        assert needed_cpus <= available_cpus, (
+            f"Not enough available CPUs in Ray cluster, available_cpus is {available_cpus} but xtuner needs {needed_cpus}."
         )
-        assert kwargs["cpu_memory_per_worker"] * kwargs["num_workers"] + 10 * 1024**3 <= available_memory, (
-            f"Not enough available memory in Ray cluster, available_memory is {available_memory} but xtuner needs {kwargs['cpu_memory_per_worker'] * kwargs['num_workers'] + 10 * 1024**3}."
+        needed_memory = self.cpu_memory_per_worker * self.num_workers + 10 * 1024**3
+        assert needed_memory <= available_memory, (
+            f"Not enough available memory in Ray cluster, available_memory is {available_memory} but xtuner needs {needed_memory}."
         )
         # TODO: check all resources sum in cluster to avoid over allocation
-
-        super().__init__(**kwargs)
 
     @classmethod
     def from_total(cls, total_cpus: float | int, total_memory: int, num_workers: int):

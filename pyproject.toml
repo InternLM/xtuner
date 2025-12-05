@@ -75,10 +75,12 @@ rl = [
 ]
 video = [
   "decord",
+  "av",
 ]
 all = [
   "jsonlines",
   "decord",
+  "av",
   "ray[default]",
   "httpx",
   "fastapi",

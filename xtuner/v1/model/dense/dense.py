@@ -1,5 +1,4 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import types
 from pathlib import Path
 from typing import cast
 
@@ -122,7 +121,8 @@ class Dense(BaseModel):
         return layers
 
     def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
-        return get_rope_embedding(config=config)
+        with torch.device(DEVICE):
+            return get_rope_embedding(config=config)
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
@@ -144,7 +144,8 @@ class Dense(BaseModel):
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # xTODO: remove this line below when with torch.device(DEVICE) in __init__()
+        # self.rotary_emb = self.build_rotary_embedding(self.config)
         return loaded_keys, unloaded_keys, missing_keys
 
     @override
@@ -182,7 +183,8 @@ class Dense(BaseModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # xTODO: remove this line below when with torch.device(DEVICE) in __init__()
+        # self.rotary_emb = self.build_rotary_embedding(self.config)
 
         self._maybe_compile_layers()
         mp_policy = MixedPrecisionPolicy(
@@ -202,7 +204,8 @@ class Dense(BaseModel):
                     layer, preserve_rng_state=checkpoint_preserve_rng_state, checkpoint_impl=CheckpointImpl.REENTRANT
                 )
                 # __class__ without self attribute
-                layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
+
+            layer.forward = maybe_compile(layer.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
             fully_shard(
@@ -252,11 +255,6 @@ class Dense(BaseModel):
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
 
-        for _, module in self.named_modules():
-            if isinstance(module, nn.Embedding):
-                module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
-            elif isinstance(module, RMSNorm):
-                module.forward = types.MethodType(self.patched_rms_norm_forward, module)  # type: ignore
         self._to_empty_meta()
 
         # Make sure it works properly when using fsdp

@@ -119,6 +119,7 @@ autodoc_mock_imports = [
     "PIL",
     "uvicorn",
     "fastapi",
+    "huggingface_hub",
 ]
 
 

@@ -1,5 +1,6 @@
 import contextlib
 import gc
+import inspect
 import json
 import os
 import pickle
@@ -9,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from shutil import rmtree
-from typing import Annotated, Literal, Sized, cast
+from typing import Annotated, Callable, Literal, Protocol, Sequence, Sized, cast, overload, runtime_checkable
 
 import torch
 import torch.distributed as dist
@@ -18,7 +19,7 @@ from cyclopts import Parameter
 from mmengine import load
 from mmengine.dist import get_rank, get_world_size
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_serializer, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import init_device_mesh
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
@@ -29,7 +30,7 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
-from xtuner.v1.engine import TrainEngine
+from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
@@ -42,12 +43,22 @@ from xtuner.v1.profiler.prober_utils import setup_prober_list
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
     ParallelConfigException,
+    StrEnum,
     get_logger,
     is_hf_model_path,
     log_format,
+    profile_time_and_memory,
     record_git_info,
 )
+from xtuner.v1.utils.check_health import check_health
 from xtuner.v1.utils.device import get_device, get_torch_device_module
+from xtuner.v1.utils.internal_metrics import (
+    InternalMetrics,
+    InternalMetricsConfig,
+    InternalMetricsRecorder,
+    flatten_internal_metrics_for_logs,
+)
+from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -121,6 +132,13 @@ class XTunerMeta(BaseModel):
         return None
 
     @property
+    def latest_hf_checkpoint(self) -> str | None:
+        for exp in self.exps:
+            if exp.hf_checkpoint_list:
+                return exp.hf_checkpoint_list[-1]
+        return None
+
+    @property
     def latest_exp(self) -> ExpInfo:
         return self.exps[-1]
 
@@ -136,6 +154,141 @@ class ResumeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     resume_from: str | Path | None = None
     auto_resume: bool = False
+    load_optimizer_states: bool = True
+    load_optimizer_args: bool = True
+    load_dataset: bool = True
+    load_scheduler: bool = True
+
+
+@runtime_checkable
+class CheckpointHookBase(Protocol):
+    def __call__(
+        self,
+        checkpoint: Path,
+        step: int,
+        epoch: int | None,
+        total_step: int,
+        total_epoch: int | None,
+    ) -> None: ...
+
+
+@runtime_checkable
+class CheckpointHook(CheckpointHookBase, Protocol):
+    def connect_trainer(self, trainer: "Trainer"): ...
+
+
+@runtime_checkable
+class TrainStepHookBase(Protocol):
+    def __call__(
+        self,
+        loss_log: LossLog,
+        other_log: OtherLog,
+        step: int,
+        epoch: int | None,
+        total_step: int,
+        total_epoch: int | None,
+    ) -> None: ...
+
+
+@runtime_checkable
+class TrainStepHook(TrainStepHookBase, Protocol):
+    def connect_trainer(self, trainer: "Trainer"): ...
+
+
+TrainStepHookProtocol = TrainStepHookBase | TrainStepHook
+CheckpointHookProtocol = CheckpointHookBase | CheckpointHook
+HookProtocol = TrainStepHookProtocol | CheckpointHookProtocol
+
+
+class HookStage(StrEnum):
+    AFTER_SAVE_DCP = "after_save_dcp"
+    AFTER_SAVE_HF = "after_save_hf"
+    AFTER_SAVE_SNAPSHOT = "after_save_snapshot"
+    AFTER_TRAIN_STEP = "after_train_step"
+
+
+class HooksConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+    after_save_dcp: list[CheckpointHookProtocol] | CheckpointHookProtocol | None = None
+    after_save_hf: list[CheckpointHookProtocol] | CheckpointHookProtocol | None = None
+    after_save_snapshot: list[CheckpointHookProtocol] | CheckpointHookProtocol | None = None
+    after_train_step: list[TrainStepHookBase] | TrainStepHookBase | None = None
+
+    @field_validator("after_train_step", "after_save_dcp", "after_save_hf", "after_save_snapshot", mode="after")
+    @classmethod
+    def _validate_hooks(
+        cls,
+        value: list[HookProtocol] | HookProtocol | None,
+    ) -> list[Callable] | None:
+        if value is None:
+            return None
+        if not isinstance(value, list):
+            value = [value]
+        return value
+
+    def _get_hook_name(self, hook: HookProtocol) -> str:
+        if inspect.isfunction(hook):
+            return hook.__name__
+        else:
+            return hook.__class__.__name__
+
+    @model_serializer
+    def serialize_hooks(self) -> dict[str, list[str] | None]:
+        def serialize_hook_list(hook_list: Sequence[HookProtocol]) -> list[str]:
+            return [self._get_hook_name(hook) for hook in hook_list]
+
+        return {
+            "after_save_dcp": serialize_hook_list(self.get_hooks(HookStage.AFTER_SAVE_DCP)),
+            "after_save_hf": serialize_hook_list(self.get_hooks(HookStage.AFTER_SAVE_HF)),
+            "after_save_snapshot": serialize_hook_list(self.get_hooks(HookStage.AFTER_SAVE_SNAPSHOT)),
+            "after_train_step": serialize_hook_list(self.get_hooks(HookStage.AFTER_TRAIN_STEP)),
+        }
+
+    @overload
+    def get_hooks(self, stage: Literal[HookStage.AFTER_TRAIN_STEP]) -> list[TrainStepHookProtocol]: ...
+
+    @overload
+    def get_hooks(
+        self,
+        stage: Literal[HookStage.AFTER_SAVE_DCP, HookStage.AFTER_SAVE_HF, HookStage.AFTER_SAVE_SNAPSHOT],
+    ) -> list[CheckpointHookProtocol]: ...
+
+    @overload
+    def get_hooks(self, stage: HookStage) -> list[HookProtocol]: ...
+
+    def get_hooks(
+        self,
+        stage: HookStage,
+    ) -> list:
+        hooks = getattr(self, stage)
+        if hooks is None:
+            return []
+        if not isinstance(hooks, list):
+            hooks = [hooks]
+        return hooks
+
+    def __getstate__(self):
+        state = {}
+        for k, v in self.__dict__.items():
+            try:
+                pickle.dumps(v)
+            # Some <local> function could raise AttributeError
+            except (pickle.PicklingError, AttributeError):
+                state[k] = f"<unpicklable: {type(v)}>"
+            else:
+                state[k] = v
+        return state
+
+    def __setstate__(self, state):
+        valid_state = {
+            k: None if isinstance(v, str) and v.startswith("<unpicklable:") else v for k, v in state.items()
+        }
+        self.__dict__.update(valid_state)
+
+
+class LoadCheckpointConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    checkpoint_path: str | Path | None = None
     load_optimizer_states: bool = True
     load_optimizer_args: bool = True
     load_dataset: bool = True
@@ -166,12 +319,15 @@ class TrainerConfig(BaseModel):
     sp_size: int = 1
     total_step: int | None = None
     total_epoch: int | None = None
-    resume_cfg: ResumeConfig | None = None
+    resume_cfg: ResumeConfig | None = None  # TODO: Removed in version 1.1.0
+    auto_resume: bool = False
+    load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
     strict_load: bool = True
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     snapshot_interval: int | None = None
+    check_health_interval: int | None = None
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl"
@@ -186,6 +342,8 @@ class TrainerConfig(BaseModel):
     prober_list: list[str] = []
     do_clip: bool = True
     grad_norm_dtype: torch.dtype = torch.float32
+    hooks_config: HooksConfig = HooksConfig()
+    internal_metrics_cfg: InternalMetricsConfig | None = None
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -237,6 +395,8 @@ class Trainer:
         total_step (int | None): Total training steps.
         total_epoch (int | None): Number of training epochs.
         resume_cfg (ResumeConfig | None): Configuration for resuming training.
+        auto_resume (bool): Whether to automatically resume training. Defaults to False.
+        load_checkpoint_cfg (LoadCheckpointConfig): Configuration for loading checkpoints.
         strict_load (bool): Whether to strictly load model weights.
         checkpoint_interval (int | None): Interval for saving checkpoints.
         checkpoint_maxkeep (int | None): Maximum number of checkpoints to keep.
@@ -283,12 +443,15 @@ class Trainer:
         sp_size: int = 1,
         total_step: int | None = None,
         total_epoch: int | None = None,
-        resume_cfg: ResumeConfig | None = ResumeConfig(),
+        resume_cfg: ResumeConfig | None = ResumeConfig(),  # TODO: Removed in version 1.1.0
+        auto_resume: bool = False,
+        load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig(),
         strict_load: bool = True,
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         snapshot_interval: int | None = None,
+        check_health_interval: int | None = None,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         exp_tracker: Literal["tensorboard", "jsonl"] = "jsonl",
@@ -304,6 +467,8 @@ class Trainer:
         do_clip: bool = True,
         grad_norm_dtype: torch.dtype = torch.float32,
         trainer_cfg: TrainerConfig | None = None,
+        hooks_config: HooksConfig = HooksConfig(),
+        internal_metrics_cfg: InternalMetricsConfig | None = None,
     ):
         self._do_clip = do_clip
         self._grad_norm_dtype = grad_norm_dtype
@@ -337,14 +502,9 @@ class Trainer:
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
         self._snapshot_interval = snapshot_interval
+        self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
-
-        if tokenizer_path is not None:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        else:
-            self.tokenizer = UTF8ByteTokenizer()
-            logger.info(f"Using toy tokenizer: {self.tokenizer}!")
 
         if fsdp_cfg is None:
             fsdp_cfg = FSDPConfig()
@@ -354,27 +514,42 @@ class Trainer:
         self._debug = debug
         self._seed = seed
 
-        self._consumed_tokens = 0
-        self._consumed_samples = 0
+        self._reduced_consumed_tokens = 0
+        self._exp_consumed_tokens = 0
+        self._reduced_consumed_samples = 0
 
         self._train_time = 0
         self._train_time_offset = 0
 
         self._init_dist(backend)
+        if resume_cfg is None:
+            resume_cfg = ResumeConfig()
+
+        self._work_dir = self._resolve_work_dir(work_dir)
+        self._auto_resume = auto_resume
+        self._auto_resume = self._resolve_deprecated_resume_cfg(
+            resume_cfg, self._auto_resume
+        )  # TODO: Removed in version 1.1.0
+        self._meta = self._init_xtuner_meta(self.work_dir, auto_resume=self._auto_resume)
+        self._log_dir = self._resolve_log_dir(log_dir)  # depends on exp_dir(work_dir and meta)
+        self.logger, log_dir = self._init_logger(self._log_dir)  # depends on log_dir and init_dist(get_rank)
+
+        # After init logger
+        logger.warning("`resume_cfg` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead")
+
         self._try_bind_numa()
         self._set_deterministic()
         self._set_random_seed(seed)
         self._setup_env()
 
-        if resume_cfg is None:
-            resume_cfg = ResumeConfig()
+        if tokenizer_path is not None:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        else:
+            self.tokenizer = UTF8ByteTokenizer()
+            logger.info(f"Using toy tokenizer: {self.tokenizer}!")
 
-        self._work_dir = self._resolve_work_dir(work_dir)
-        self._meta = self._init_xtuner_meta(self.work_dir, auto_resume=resume_cfg.auto_resume)
-        self._log_dir = self._resolve_log_dir(log_dir)
-        self._resume_cfg = self._resolve_resume_cfg(resume_cfg)
+        self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(self._auto_resume, load_checkpoint_cfg)
 
-        self.logger, log_dir = self._init_logger(self._log_dir)
         self._exp_tracker = self._init_tracker(
             exp_tracker, self._log_dir / f"{self._EXP_TRACKING_PATH}/rank{self.rank}"
         )
@@ -392,6 +567,7 @@ class Trainer:
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
+            logger.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
             # For backward compatibility, reserve the dataset_cfg interface, remove it later
             if dataloader_cfg.dataset_config_list is not None:
                 logger.warning("Outside dataset_cfg will override inner dataset_config_list")
@@ -420,7 +596,7 @@ class Trainer:
             model_config=model_cfg,
             optim_config=optim_cfg,
             fsdp_config=fsdp_cfg,
-            resume_cfg=resume_cfg,
+            load_checkpoint_path=self._load_checkpoint_cfg.checkpoint_path,
             strict=strict_load,
             intra_layer_micro_batch=intra_layer_micro_batch,
         )
@@ -444,10 +620,14 @@ class Trainer:
             self._checkpoint_interval = None
             self._snapshot_interval = None
 
-        if self._resume_cfg.resume_from is not None:
-            self._resume()
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            self._load_checkpoint()
+
+        self.hooks_config = self._setup_hooks(hooks_config=hooks_config)
 
         setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
+
+        self._metrics_recorder = self._maybe_init_model_metrics_recorder(internal_metrics_cfg)
 
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
@@ -476,11 +656,14 @@ class Trainer:
             total_step=config.total_step,
             total_epoch=config.total_epoch,
             resume_cfg=config.resume_cfg,
+            auto_resume=config.auto_resume,
+            load_checkpoint_cfg=config.load_checkpoint_cfg,
             strict_load=config.strict_load,
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             snapshot_interval=config.snapshot_interval,
+            check_health_interval=config.check_health_interval,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             exp_tracker=config.exp_tracker,
@@ -495,7 +678,9 @@ class Trainer:
             prober_list=config.prober_list,
             do_clip=config.do_clip,
             grad_norm_dtype=config.grad_norm_dtype,
+            hooks_config=config.hooks_config,
             trainer_cfg=config,
+            internal_metrics_cfg=config.internal_metrics_cfg,
         )
         self.config = config
         return self
@@ -551,6 +736,17 @@ class Trainer:
             with self._maybe_profiling():
                 loss_log, other_log = self._engine.train_step(engine_input)
 
+            hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
+            for hook in hooks:
+                hook(
+                    loss_log=loss_log,
+                    other_log=other_log,
+                    step=self.cur_step,
+                    epoch=self._cur_epoch,
+                    total_step=self.total_step,
+                    total_epoch=self.total_epoch,
+                )
+
             grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
             self._engine.step_optimizer(grad_norm)
             time_after_train_step = time.time()
@@ -570,22 +766,32 @@ class Trainer:
                 loss_log["maxvio"] = other_log["maxvio"]
             loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
 
+            internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
+
             self._cur_step += 1
-            self._consumed_tokens += step_consumed_tokens
+
+            reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
+            self._reduced_consumed_tokens += reduced_step_consumed_tokens
+
+            self._exp_consumed_tokens += step_consumed_tokens
             self._train_time = time_after_train_step - train_begin
 
             # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
             self._log_step(
                 loss_log=loss_log,
                 step_consumed_tokens=step_consumed_tokens,
-                total_consumed_tokens=self._consumed_tokens,
+                exp_consumed_tokens=self._exp_consumed_tokens,
+                reduced_consumed_tokens=self._reduced_consumed_tokens,
                 data_time=data_time,
                 step_time=step_time,
-                train_time=self._train_time + self._train_time_offset,
+                train_time=self._train_time,
+                train_time_offset=self._train_time_offset,
                 grad_norm=grad_norm.item(),
+                internal_metrics=internal_metrics,
             )
 
             self._lr_scheduler.step()
+            self._maybe_check_health()
             self._maybe_save_hf()
             ckpt_saved = self._maybe_save(is_snapshot=False)
             if not ckpt_saved:
@@ -598,7 +804,47 @@ class Trainer:
 
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
+        if self._metrics_recorder:
+            self._metrics_recorder.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
+
+    def _reduce_number_across_rank(self, rank_number: int) -> int:
+        _gathered_list = [None for _ in range(self.world_size)]
+        dist.all_gather_object(_gathered_list, rank_number)
+        reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
+        return reduced_number
+
+    def _maybe_init_model_metrics_recorder(
+        self,
+        internal_metrics_cfg: InternalMetricsConfig | None,
+    ) -> InternalMetricsRecorder | None:
+        if internal_metrics_cfg and internal_metrics_cfg.internal_metrics_interval:
+            self._internal_metrics_interval = internal_metrics_cfg.internal_metrics_interval
+            assert self._internal_metrics_interval > 0, (
+                "internal_metrics_interval must be greater than zero (or set to `None`)"
+            )
+            torch._dynamo.config.skip_nnmodule_hook_guards = (
+                False  # otherwise the hook will be ignored for compiled modules
+            )
+            return InternalMetricsRecorder(internal_metrics_cfg, self._engine)
+
+        else:
+            return None
+
+    def _maybe_pop_model_internal_metrics(self, data_batches: list[ModelItem]) -> InternalMetrics | None:
+        if not self._metrics_recorder:
+            return None
+
+        if self._internal_metrics_interval is None:
+            return None
+
+        if self.cur_step % self._internal_metrics_interval != 0 and self.cur_step != self.total_step:
+            return None
+
+        with profile_time_and_memory("[Check Model Internal Metrics]"):
+            metrics = self._metrics_recorder.pop_metrics(data_batches)
+
+        return metrics
 
     @property
     def world_size(self) -> int:
@@ -662,6 +908,10 @@ class Trainer:
         return self._total_step
 
     @property
+    def total_epoch(self) -> int | None:
+        return self._total_epoch
+
+    @property
     def cur_step(self) -> int:
         """Get the current training step.
 
@@ -669,6 +919,15 @@ class Trainer:
             int: Current step number.
         """
         return self._cur_step
+
+    @property
+    def cur_epoch(self) -> int | None:
+        """Get the current training epoch.
+
+        Returns:
+            int | None: Current epoch number or None if not applicable.
+        """
+        return self._cur_epoch
 
     def _init_logger(self, log_dir: Path):
         # Logging system maybe need better design
@@ -723,7 +982,7 @@ class Trainer:
         model_config: TransformerConfig | VisionComposeConfigProtocol,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
-        resume_cfg: ResumeConfig,
+        load_checkpoint_path: str | Path | None,
         intra_layer_micro_batch: int = 1,
         strict: bool = True,
     ):
@@ -755,9 +1014,9 @@ class Trainer:
                 model_cfg=model_config,
                 intra_layer_micro_batch=intra_layer_micro_batch,
             )
-        if model_path is not None and (model_config.dcp_ignore_frozen_params or resume_cfg.resume_from is None):
+        if model_path is not None and (model_config.dcp_ignore_frozen_params or load_checkpoint_path is None):
             engine.from_hf(hf_path=model_path, strict=strict)
-        elif resume_cfg.resume_from is None:
+        elif load_checkpoint_path is None:
             engine.init_model_weights()
 
         if model_path is not None:
@@ -806,6 +1065,18 @@ class Trainer:
         )
         return lr_scheduler
 
+    def _maybe_check_health(self):
+        if self._check_health_interval is None:
+            return
+        if (
+            (self._check_health_interval is not None and self.cur_step % self._check_health_interval == 0)
+            or (self._checkpoint_interval is not None and self.cur_step % self._checkpoint_interval == 0)
+            or (self._snapshot_interval is not None and self.cur_step % self._snapshot_interval == 0)
+        ):
+            if not check_health():
+                raise RuntimeError("Health check failed, exit training")
+            logger.info(f"Health check passed at step {self.cur_step}")
+
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
         if ckp_interval is None:
@@ -825,11 +1096,7 @@ class Trainer:
 
         meta_path = self.work_dir / self._META_PATH
 
-        optimizer_path = (
-            checkpoint_path / self._SAVE_OPTIMIZER_DIR
-            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
-            else None
-        )
+        optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR
         model_path = checkpoint_path / self._SAVE_MODEL_DIR
         dataloader_path = checkpoint_path / self._SAVE_DATALOADER_DIR
         scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
@@ -870,8 +1137,8 @@ class Trainer:
                         {
                             "cur_step": self.cur_step,
                             "cur_epoch": self._cur_epoch,
-                            "consumed_samples": self._consumed_samples,
-                            "consumed_tokens": self._consumed_tokens,
+                            "reduced_consumed_samples": self._reduced_consumed_samples,
+                            "reduced_consumed_tokens": self._reduced_consumed_tokens,
                             "train_time_offset": self._train_time + self._train_time_offset,
                         }
                     )
@@ -883,8 +1150,8 @@ class Trainer:
         ckp_list.append(str(checkpoint_path))
         current_exp.cur_step = self.cur_step
         current_exp.cur_epoch = self._cur_epoch
-        current_exp.consumed_samples = self._consumed_samples
-        current_exp.consumed_tokens = int(self._consumed_tokens)
+        current_exp.consumed_samples = int(self._reduced_consumed_samples)
+        current_exp.consumed_tokens = int(self._reduced_consumed_tokens)
         current_exp.history[-1]["end"] = self.cur_step
 
         # Delete checkpoints and update meta's checkpoint_list
@@ -902,15 +1169,26 @@ class Trainer:
                 f.write(self.meta.model_dump_json(indent=2))
 
         dist.barrier()
+
+        if is_snapshot:
+            hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_SNAPSHOT)
+        else:
+            hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_DCP)
+
+        for hook in hooks:
+            hook(
+                checkpoint=checkpoint_path,
+                step=self.cur_step,
+                epoch=self._cur_epoch,
+                total_step=self.total_step,
+                total_epoch=self.total_epoch,
+            )
+
         return True
 
     def _save_dataloader(self, dataloader_path: Path | str):
-        _gathered_list = [None for _ in range(self.data_mesh["dp"].size())]
-        dist.all_gather_object(_gathered_list, self._consumed_samples, group=self.data_mesh["dp"].get_group())
-        global_consumed_samples = sum(_gathered_list)  # type: ignore[arg-type]
-
         if self.rank == 0:
-            dataloader_state = self._dataloader.get_state_dict(global_consumed_samples)
+            dataloader_state = self._dataloader.get_state_dict(self._reduced_consumed_samples)
             torch.save(dataloader_state, dataloader_path)
 
     @property
@@ -959,12 +1237,13 @@ class Trainer:
             # dist.breakpoint(skip=14)
             try:
                 data = next(data_iter)
-                self._consumed_samples += len(data)
             except StopIteration:
                 self._cur_epoch += 1
                 self._dataloader.set_epoch(self._cur_epoch)
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
+
+            self._reduced_consumed_samples += self._reduce_number_across_rank(len(data))
             yield data
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:
@@ -1136,22 +1415,30 @@ class Trainer:
         self,
         loss_log: dict,
         step_consumed_tokens: int,
-        total_consumed_tokens: int,
+        exp_consumed_tokens: int,
+        reduced_consumed_tokens: int,
         data_time: float,
         step_time: float,
         train_time: float,
+        train_time_offset: float,
         grad_norm: float,
+        internal_metrics: InternalMetrics | None = None,
     ):
         """Log the training step information."""
+        e2e_train_time = train_time + train_time_offset
         tgs = step_consumed_tokens / step_time
-        e2e_tgs = total_consumed_tokens / train_time
+        rank_consumed_tokens = reduced_consumed_tokens / self.world_size
+        e2e_tgs = rank_consumed_tokens / e2e_train_time
+        exp_tgs = exp_consumed_tokens / train_time
         lr = self._lr_scheduler.get_last_lr()[0]
 
         remaining_steps = self.total_step - self.cur_step
-        avg_tokens_per_step = total_consumed_tokens / self.cur_step
+        avg_tokens_per_step = rank_consumed_tokens / self.cur_step
         remaining_tokens = remaining_steps * avg_tokens_per_step
-        eta_seconds = remaining_tokens / tgs
+        eta_seconds = remaining_tokens / (tgs + 1e-12)
         eta_hms = str(timedelta(seconds=int(eta_seconds)))
+
+        est_global_batch_tokens = self.data_mesh["dp"].size() * step_consumed_tokens
 
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
         loss_log_str = ", ".join(loss_log_list)
@@ -1159,16 +1446,23 @@ class Trainer:
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
 
+        flattened_internal_metrics = {}
+        if internal_metrics:
+            flattened_internal_metrics = flatten_internal_metrics_for_logs(internal_metrics)
+
         self.logger.info(
-            f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
+            f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
+            f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {step_consumed_tokens} "
-            f"total_consumed_tokens: {total_consumed_tokens} "
+            f"reduced_consumed_tokens: {reduced_consumed_tokens} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {tgs:.1f} "
+            f"exp_tgs: {exp_tgs: .1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
+            f"est_global_batch_tokens: {est_global_batch_tokens} "
             f"eta: {eta_hms} "
         )
 
@@ -1179,12 +1473,15 @@ class Trainer:
             "time/train_time": round(train_time, 4),
             "time/eta_seconds": round(eta_seconds, 1),
             "runtime_info/text_tokens": step_consumed_tokens,
-            "runtime_info/total_consumed_tokens": total_consumed_tokens,
+            "runtime_info/est_global_batch_tokens": est_global_batch_tokens,
+            "runtime_info/reduced_consumed_tokens": reduced_consumed_tokens,
             "runtime_info/tgs": tgs,
+            "runtime_info/exp_tgs": exp_tgs,
             "runtime_info/e2e_tgs": e2e_tgs,
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
+            **flattened_internal_metrics,
         }
         log_scalars.update({f"loss/{k}": v for k, v in loss_log.items()})
         self._exp_tracker.add_scalars(tag_scalar_dict=log_scalars, global_step=self.cur_step)
@@ -1213,10 +1510,10 @@ class Trainer:
                     rmtree(hf_dir)
 
         self._engine.save_hf(str(save_hf_path))
-        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
-            self.tokenizer.save_pretrained(str(save_hf_path))
-        # 将 latest_hf_link 指向 save_hf_path
         if self.rank == 0:
+            if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+                self.tokenizer.save_pretrained(str(save_hf_path))
+            # 将 latest_hf_link 指向 save_hf_path
             latest_hf_link.unlink(missing_ok=True)
             latest_hf_link.symlink_to(save_hf_path.absolute(), target_is_directory=True)
 
@@ -1225,6 +1522,16 @@ class Trainer:
         if self.rank == 0:
             with meta_path.open("w") as f:
                 f.write(self.meta.model_dump_json(indent=2))
+
+        hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_HF)
+        for hook in hooks:
+            hook(
+                checkpoint=save_hf_path,
+                step=self.cur_step,
+                epoch=self._cur_epoch,
+                total_step=self.total_step,
+                total_epoch=self.total_epoch,
+            )
 
     def _register_debug_hook(self):
         """Register a debug hook function to be called at the end of each
@@ -1316,16 +1623,29 @@ class Trainer:
             )
             dataloader_cfg.pad_token_id = pad_token_id
 
-    def _resolve_resume_cfg(self, resume_cfg: ResumeConfig):
+    def _resolve_deprecated_resume_cfg(self, resume_cfg: ResumeConfig, auto_resume: bool) -> bool:
+        if resume_cfg.auto_resume:
+            return True
+        return auto_resume
+
+    def _resolve_load_checkpoint_cfg(
+        self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
+    ) -> LoadCheckpointConfig:
+        # auto_resume优先级高，如果有latest ckp，则说明走auto_resume逻辑
+        # 此时，覆盖load checkpoint path，并且加载optimizer states, optimizer args, dataset, scheduler
         latest_checkpoint = self.meta.latest_exp.latest_checkpoint
-        if latest_checkpoint is not None and resume_cfg.auto_resume:
-            resume_cfg.resume_from = Path(latest_checkpoint)
-        return resume_cfg
+        if latest_checkpoint is not None and auto_resume:
+            load_checkpoint_cfg.checkpoint_path = Path(latest_checkpoint)
+            load_checkpoint_cfg.load_optimizer_states = True
+            load_checkpoint_cfg.load_optimizer_args = True
+            load_checkpoint_cfg.load_dataset = True
+            load_checkpoint_cfg.load_scheduler = True
+        return load_checkpoint_cfg
 
-    def _resume(self):
-        resume_cfg = self._resume_cfg
+    def _load_checkpoint(self):
+        load_checkpoint_cfg: LoadCheckpointConfig = self._load_checkpoint_cfg
 
-        if (resume_from := resume_cfg.resume_from) is None:
+        if (resume_from := load_checkpoint_cfg.checkpoint_path) is None:
             logger.info("No checkpoint to resume from.")
             return
 
@@ -1339,20 +1659,16 @@ class Trainer:
         model_path = resume_from / self._SAVE_MODEL_DIR
         optimizer_path = (
             resume_from / self._SAVE_OPTIMIZER_DIR
-            if self._resume_cfg.load_optimizer_states or self._resume_cfg.load_optimizer_args
+            if load_checkpoint_cfg.load_optimizer_states or load_checkpoint_cfg.load_optimizer_args
             else None
         )
 
         self._engine.load_dcp(
             model_dir=model_path,
             optimizer_dir=optimizer_path,
-            load_states=self._resume_cfg.load_optimizer_states,
-            load_args=self._resume_cfg.load_optimizer_args,
+            load_states=load_checkpoint_cfg.load_optimizer_states,
+            load_args=load_checkpoint_cfg.load_optimizer_args,
         )
-
-        if resume_cfg.load_dataset:
-            dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
-            self._resume_dataloader(dataloader_path)
 
         train_state_path = resume_from / self._SAVE_TRAIN_STATE_PATH
 
@@ -1361,11 +1677,20 @@ class Trainer:
 
         self._cur_step = train_state["cur_step"]
         self._cur_epoch = train_state["cur_epoch"]
-        self._consumed_samples = train_state["consumed_samples"]
-        self._consumed_tokens = train_state["consumed_tokens"]
-        self._train_time_offset = train_state["train_time_offset"]
 
-        if resume_cfg.load_scheduler:
+        if load_checkpoint_cfg.load_dataset:
+            self._reduced_consumed_tokens = train_state.get("reduced_consumed_tokens", 0)  # default 0 for BC
+            self._train_time_offset = train_state["train_time_offset"]
+            # _reduced_consumed_samples 会影响 save dcp时 dataloader.get_state_dict的状态。
+            # 1) 如果加载 dataset，应该恢复_reduced_consumed_samples为checkpoint中的值。
+            # 2) 如果不加载 dataset，应该保持_reduced_consumed_samples为初始值0，否则如果加载上旧dataloader的reduced_consumed_samples
+            #    会导致存储新dataloader时 reduced_consumed_samples 是不正确的值。
+            self._reduced_consumed_samples = train_state.get("reduced_consumed_samples", 0)  # default 0 for BC
+
+            dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
+            self._resume_dataloader(dataloader_path)
+
+        if load_checkpoint_cfg.load_scheduler:
             scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
             if not scheduler_path.exists():
                 raise FileNotFoundError(f"Scheduler path {scheduler_path} does not exist.")
@@ -1382,13 +1707,24 @@ class Trainer:
         dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
         self._dataloader.load_state_dict(dataloader_state)
 
+    def _setup_hooks(self, hooks_config: HooksConfig) -> HooksConfig:
+        for stage in HookStage:
+            hooks = hooks_config.get_hooks(stage)
+            for hook in hooks:
+                if isinstance(hook, (TrainStepHook, CheckpointHook)):
+                    hook.connect_trainer(self)
+        return hooks_config
+
     def _setup_env(self):
-        gc.disable()
+        if os.getenv("XTUNER_GC_ENABLE", "0") == "0":
+            gc.disable()
+        monkey_patch_hf_modules_cache()
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
         log_str = "\n============XTuner Training Environment============\n"
         env = {
             "XTUNER_DETERMINISTIC": os.getenv("XTUNER_DETERMINISTIC"),
+            "XTUNER_GC_ENABLE": os.getenv("XTUNER_GC_ENABLE"),
             "XTUNER_FILE_OPEN_CONCURRENCY": os.getenv("XTUNER_FILE_OPEN_CONCURRENCY"),
             "XTUNER_TOKENIZE_CHUNK_SIZE": os.getenv("XTUNER_TOKENIZE_CHUNK_SIZE"),
             "XTUNER_TOKENIZE_WORKERS": os.getenv("XTUNER_TOKENIZE_WORKERS"),

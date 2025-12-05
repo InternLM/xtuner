@@ -151,7 +151,6 @@ class TestInternS1(DeterministicDDPTestCase):
             [256 * num_patches]
         )
         input_ids = torch.tensor(ret["input_ids"])[None].cuda()
-        image_flags = torch.tensor([1] * num_patches, dtype=torch.long).cuda()
         pixel_values = pixel_values.to(device="cuda", dtype=torch.bfloat16)
 
         with torch.no_grad():
@@ -184,7 +183,6 @@ class TestInternS1(DeterministicDDPTestCase):
             sp_mesh = data_mesh["sp"]
 
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        seq_ctx.image_flags = image_flags
         seq_ctx.pixel_values = pixel_values
         seq_ctx.to('cuda')
         loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)

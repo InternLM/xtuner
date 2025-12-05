@@ -4,6 +4,7 @@ from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.float8 import Float8Config
+from xtuner.v1.model.base import XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
@@ -73,7 +74,7 @@ class InternVLProjectorConfig(BaseModel):
         return InternVLMultiModalProjector(self)
 
 
-class InternVLBaseConfig(BaseModel):
+class InternVLBaseConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -92,7 +93,6 @@ class InternVLBaseConfig(BaseModel):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
-    hf_save_worker: int = 16
     dcp_ignore_frozen_params: bool = True
 
     def build(self) -> "InternVLForConditionalGeneration":

@@ -1,6 +1,6 @@
 import os
 import unittest
-
+import tempfile
 import ray
 
 from xtuner.v1.ray.base import AutoAcceleratorWorkers
@@ -19,25 +19,34 @@ from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.model import get_model_config_from_hf
 
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
-MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
+MODEL_PATH = os.environ["QWEN3_MOE_PATH"]
 
 class TestUpdateWeight(unittest.TestCase):
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls) -> None:
         os.environ["XTUNER_USE_FA3"] = "1"
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        del os.environ["XTUNER_USE_FA3"]
+
+    def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
         self.model_path = MODEL_PATH
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
         self.init_config()
         self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
 
     def tearDown(self):
         ray.shutdown()
-        del os.environ["XTUNER_USE_FA3"]
+        self.temp_dir.cleanup()
 
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator="GPU",
-            num_workers=2,
-            num_cpus_per_worker=16,
+            num_workers=4,
+            num_cpus_per_worker=12,
             cpu_memory_per_worker=16 * 1024 ** 3,  # 16 GB
         )
         self.rollout_cfg = RolloutConfig(
@@ -46,12 +55,14 @@ class TestUpdateWeight(unittest.TestCase):
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
             rollout_cross_node_comm=False,
-            tensor_parallel_size=2,
+            tensor_parallel_size=4,
             expert_parallel_size=1,
             gpus_per_node=8, # gpu: 8, npu: 16
             dtype="bfloat16",
             skip_load_weights=True,
             context_length=256,
+            worker_log_dir=self.worker_log_dir,
+            gpu_memory_utilization=0.5,
         )
 
         # training config
@@ -109,7 +120,7 @@ class TestUpdateWeight(unittest.TestCase):
         sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
 
         # init rollout_update
-        rollout_controller = RolloutController.remote(
+        rollout_controller = ray.remote(RolloutController).remote(
             self.rollout_cfg,
             self.pg,
         )
@@ -129,7 +140,7 @@ class TestUpdateWeight(unittest.TestCase):
 
         # init rollout_ref
         self.rollout_cfg.skip_load_weights = False
-        rollout_controller_ref = RolloutController.remote(
+        rollout_controller_ref = ray.remote(RolloutController).remote(
             self.rollout_cfg,
             self.pg,
         )

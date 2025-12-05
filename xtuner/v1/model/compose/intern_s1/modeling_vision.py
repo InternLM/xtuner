@@ -1,7 +1,7 @@
 from functools import partial
 from torch import nn
 import torch
-from typing import Union, Optional
+from typing import Union, Optional, Callable
 from typing_extensions import override
 import numpy as np
 
@@ -28,13 +28,14 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from xtuner.v1.ops.attn_imp import attn_impl_mapping
+from xtuner.v1.ops.attn_imp import attn_impl_mapping, AttnOpOutputs
 from xtuner.v1.model.utils.checkpointing import checkpoint_wrapper
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from xtuner.v1.module import RMSNorm
 from xtuner.v1.ops.others import Dropout
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import get_logger
+from xtuner.v1.module import AttnOutputs
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
@@ -79,7 +80,9 @@ class InternS1VisionAttention(nn.Module):
         self.q_norm = RMSNorm(self.embed_dim) if qk_norm else nn.Identity()
         self.k_norm = RMSNorm(self.embed_dim) if qk_norm else nn.Identity()
 
-        self.attn_impl_func = attn_impl_mapping[config.attn_impl]
+        self.attn_impl_func: Callable[..., AttnOpOutputs] = (
+            attn_impl_mapping[config.attn_impl]  # type: ignore[assignment]
+        )
 
     def forward(
             self,
@@ -102,7 +105,7 @@ class InternS1VisionAttention(nn.Module):
                                    dtype=torch.int32,
                                    device=hidden_states.device)
 
-        attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
+        attn_op_outputs = self.attn_impl_func(
             query_states[None].transpose(1, 2),  # [b, n_head, seq, head_dim]
             key_states[None].transpose(1, 2),
             value_states[None].transpose(1, 2),
@@ -115,10 +118,15 @@ class InternS1VisionAttention(nn.Module):
             causal=False,
             deterministic=XTUNER_DETERMINISTIC
         )
-        attn_output = attn_output.reshape(batch_size, seq_len, self.embed_dim)
-        output = self.projection_layer(attn_output)
-        output = self.projection_dropout(output)
-        return output
+        raw_output = attn_op_outputs["raw_output"]
+        raw_output = raw_output.reshape(batch_size, seq_len, self.embed_dim)
+        projected_output = self.projection_layer(raw_output)
+        projected_output = self.projection_dropout(projected_output)
+        attn_outputs: AttnOutputs = {
+            "projected_output": projected_output,
+            **attn_op_outputs,
+        }
+        return attn_outputs
 
 
 class InternS1VisionMLP(nn.Module):
@@ -188,9 +196,10 @@ class InternS1VisionLayer(nn.Module):
 
     @maybe_compile(fullgraph=True)
     def attention_pre_forward(self, hidden_states):
-        attention_output = self.attention(self.layernorm_before(hidden_states))
-        attention_output = self.lambda_1 * attention_output
-        return attention_output
+        attn_outputs = self.attention(self.layernorm_before(hidden_states))
+        attn_final_output = attn_outputs["projected_output"]
+        attn_final_output = self.lambda_1 * attn_final_output
+        return attn_final_output
 
     @maybe_compile(fullgraph=True)
     def attention_post_forward(self, hidden_states):
@@ -385,8 +394,7 @@ class InternS1VisionModel(BaseModel):
                                            preserve_rng_state=checkpoint_preserve_rng_state,
                                            checkpoint_impl=CheckpointImpl.REENTRANT)
                 if self.config.drop_path_rate == 0.0:
-                    # __class__ without self attribute
-                    layer.__class__.forward = maybe_compile(layer.__class__.forward, fullgraph=True)
+                    layer.forward = maybe_compile(layer.forward, fullgraph=True)
 
             self.encoder.layer[layer_idx] = layer
 

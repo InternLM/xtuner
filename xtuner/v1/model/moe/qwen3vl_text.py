@@ -111,6 +111,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext | None,
+        return_router_logits: bool = False,
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -169,13 +170,9 @@ class Qwen3VLTextMoE(Qwen3MoE):
                 output["router_logits"][f"layer{idx}"] = router_results
                 output["router_weights"][f"layer{idx}"] = router_weights
 
-            if deepstack_visual_embeds is not None and idx in range(len(deepstack_visual_embeds)):
+            if deepstack_visual_embeds is not None and ((idx := int(idx)) in range(len(deepstack_visual_embeds))):
                 assert visual_pos_masks is not None
-                hidden_states = self._deepstack_process(
-                    hidden_states,
-                    visual_pos_masks,
-                    deepstack_visual_embeds[idx],
-                )
+                hidden_states = self._deepstack_process(hidden_states, visual_pos_masks, deepstack_visual_embeds[idx])
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
@@ -210,7 +207,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
         del router_logits
 
-        if self.config.return_router_results:
+        if self.config.return_router_results or return_router_logits:
             raise NotImplementedError
             # TODO: Move router logits to CPU is cost
             # for layer_name, router_logits in output["router_logits"].items():

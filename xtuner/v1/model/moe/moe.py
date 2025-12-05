@@ -259,6 +259,7 @@ class MoE(BaseModel):
         self,
         seq_ctx: list[SequenceContext] | SequenceContext,
         loss_ctx: list[CELossContext] | CELossContext | None,
+        return_router_logits: bool = False,
     ):
         # TODO: caoweihan: Recover this assertion after the refactor of LossContext
         if isinstance(seq_ctx, SequenceContext):
@@ -269,6 +270,7 @@ class MoE(BaseModel):
             return self._forward(
                 seq_ctx=seq_ctx,
                 loss_ctx=loss_ctx,  # type: ignore
+                return_router_logits=return_router_logits,
             )
         else:
             assert isinstance(loss_ctx, list) and len(loss_ctx) == len(seq_ctx), (
@@ -280,12 +282,14 @@ class MoE(BaseModel):
             return self._micro_batch_forward(
                 seq_ctx_list=seq_ctx,
                 loss_ctx_list=loss_ctx,
+                return_router_logits=return_router_logits,
             )
 
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
         loss_ctx_list: list[CELossContext],
+        return_router_logits: bool = False,
     ) -> MoEModelOutputs:
         """Micro-batch forward pass for MoE model.
 
@@ -454,22 +458,22 @@ class MoE(BaseModel):
         else:
             final_logits = None
 
-        if self.config.return_router_results:
-            raise NotImplementedError
+        if self.config.return_router_results or return_router_logits:
+            # raise NotImplementedError
 
             # TODO: Return router logits is costy
 
-            # router_logits_dict: dict[str, torch.Tensor] = {}
-            # layer_names = list(router_logits_list[0].keys())
-            #
-            # for layer_name in layer_names:
-            #     layer_router_logits_list: list[torch.Tensor] = []
-            #     for micro_batch_idx in range(len(seq_ctx_list)):
-            #         layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].clone().detach())
-            #     router_logits = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
-            #     router_logits_dict["router_logits"] = router_logits
-            #
-            # output["router_logits"] = router_logits_dict
+            router_logits_dict: dict[str, torch.Tensor] = {}
+            layer_names = list(router_logits_list[0].keys())
+
+            for layer_name in layer_names:
+                layer_router_logits_list: list[torch.Tensor] = []
+                for micro_batch_idx in range(len(seq_ctx_list)):
+                    layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].detach())
+                router_logits = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
+                router_logits_dict[layer_name] = router_logits
+
+            output["router_logits"] = router_logits_dict
 
         return MoEModelOutputs(**output, logits=final_logits)  # type: ignore[typeddict-item]
 
@@ -477,6 +481,7 @@ class MoE(BaseModel):
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext | None,
+        return_router_logits: bool = False,
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -561,11 +566,11 @@ class MoE(BaseModel):
 
         del router_logits
 
-        if self.config.return_router_results:
-            raise NotImplementedError
+        if self.config.return_router_results or return_router_logits:
+            # raise NotImplementedError
             # TODO: Move router logits to CPU is cost
-            # for layer_name, router_logits in output["router_logits"].items():
-            #     output["router_logits"][layer_name] = router_logits.detach().cpu().unsqueeze(0)
+            for layer_name, router_logits in output["router_logits"].items():
+                output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
         else:
             output["router_logits"] = None
 
@@ -627,14 +632,23 @@ class MoE(BaseModel):
         return layers
 
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbeddingProtocol:
-        return get_rope_embedding(config=config)
+        with torch.device(DEVICE):
+            return get_rope_embedding(config=config)
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
-        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # This is used for training without FSDP.
+        # remove this because init with actual device already
+        # For FoPE, the rotary_emb parameters (such as sin_coef) were already sharded by full_shard previously.
+        # However, rebuilding them here would revert sin_coef back to its pre-sharded state, causing issues like dimension mismatches during loading.
+        # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
+
+        # logger.debug(f"before load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
+        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
+        # logger.debug(f"after load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
+
         return loaded_keys, unloaded_keys, missing_keys
 
     @override
@@ -681,7 +695,10 @@ class MoE(BaseModel):
         if self.ep_mesh.size() > 1:
             self._replicate_other_params(self)
 
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # Although rotary_emb was already constructed in __init__, it was built on the meta device.
+        # Here we need to rebuild it on the actual device to calculate coefficients like inv_freq.
+        # xTODO: remove this because init with actual device already, Check it
+        # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype

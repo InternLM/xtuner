@@ -32,7 +32,7 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, 
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.utils.env_check import get_rollout_engine_version
 
-from .trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
+from .trainer import ExpHistory, ExpInfo, GitInfo, LoadCheckpointConfig, XTunerMeta
 
 
 # TODO: Move DEVICE to `xtuner.utils.device`
@@ -65,6 +65,8 @@ class RLTrainerConfig(BaseModel):
     log_dir: Path | str | None = None
     total_epochs: int
     resume_config: ResumeConfig | None = None
+    auto_resume: bool = False
+    load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
     strict_load: bool = True
     hf_interval: int | None = None
     hf_max_keep: int | None = None
@@ -109,9 +111,9 @@ def get_train_seq_ctx(
             )
             position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
             seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+            assert position_ids.size(-1) == input_ids.size(-1)
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
-        seq_ctx.image_flags = multimodal_train_info.get("image_flags")
     return seq_ctx
 
 
@@ -157,6 +159,8 @@ class RLTrainer:
         enable_evaluate (bool): Whether to perform periodic evaluation during training.
         resume_config (ResumeConfig | None): Configuration for resuming training from
             a previous checkpoint. Defaults to None.
+        auto_resume (bool): Whether to automatically resume training. Defaults to False.
+        load_checkpoint_cfg (LoadCheckpointConfig): Configuration for loading checkpoints.
         strict_load (bool): Whether to strictly enforce checkpoint loading compatibility.
             Defaults to True.
         hf_interval (int | None): Interval (in epochs) for saving HuggingFace format
@@ -203,7 +207,9 @@ class RLTrainer:
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
         total_epochs: int,
-        resume_config: ResumeConfig | None = None,
+        resume_config: ResumeConfig | None = None,  # TODO: Removed in version 1.1.0
+        auto_resume: bool = False,
+        load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig(),
         strict_load: bool = True,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
@@ -257,7 +263,8 @@ class RLTrainer:
             work_dir.mkdir(parents=True, exist_ok=True)
 
         self._work_dir = work_dir
-        self._meta = self._init_xtuner_meta(work_dir, resume_config is not None)
+        auto_resume = auto_resume or (resume_config is not None and resume_config.auto_resume)
+        self._meta = self._init_xtuner_meta(work_dir, auto_resume)
 
         if log_dir is None:
             log_dir = self.exp_dir
@@ -265,6 +272,11 @@ class RLTrainer:
             log_dir = Path(log_dir)
 
         self.logger = self._init_logger(log_dir)
+
+        self.logger.warning(
+            "`resume_config` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead"
+        )
+
         train_worker_cfg.log_dir = log_dir
         dataflow_config.worker_log_dir = log_dir
         rollout_config.worker_log_dir = log_dir
@@ -338,6 +350,8 @@ class RLTrainer:
             log_dir=config.log_dir,
             total_epochs=config.total_epochs,
             resume_config=config.resume_config,
+            auto_resume=config.auto_resume,
+            load_checkpoint_cfg=config.load_checkpoint_cfg,
             strict_load=config.strict_load,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
@@ -426,6 +440,9 @@ class RLTrainer:
             with timer("saving and sync_weight", step_timer_dict):
                 ray.get(self._train_controller.offload.remote(target="optimizer"))
                 self._maybe_save_hf()
+                bind_train_rollout(
+                    train_controller=self._train_controller, env_controller=self._rollout_env_controller
+                )
                 ray.get(self._rollout_env_controller.onload_weights.remote())
                 ray.get(self._train_controller.update_weights.remote())
                 self.logger.info("Model weights synchronized successfully.")
@@ -520,7 +537,7 @@ class RLTrainer:
                 else:
                     rollout_logprobs = None
 
-                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids))
+                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids) - 1)
                 data_dict = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels,

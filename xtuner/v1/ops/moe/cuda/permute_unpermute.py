@@ -101,7 +101,7 @@ class PermuteMoE_topK(torch.autograd.Function):
         if not input_act.numel():
             return input_act, None
 
-        if indices.dtype is torch.int32:
+        if indices.dtype != torch.int32:
             indices = indices.to(torch.int32)
 
         if indices.dim() == 1:

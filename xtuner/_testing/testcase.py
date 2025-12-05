@@ -1,11 +1,13 @@
 from torch.testing._internal.common_distributed import DistributedTestBase, MultiProcessTestCase, logger, TEST_SKIPS, c10d
 import torch
+import torch.distributed as dist
 import threading
 import sys
 import os
 import unittest
 import traceback
 from .utils import enable_full_determinism
+from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 import torch.nn.functional as F
 
 
@@ -16,6 +18,7 @@ class DeterministicDDPTestCase(DistributedTestBase):
 
     def run_func(self, test_name):
         enable_full_determinism()
+        monkey_patch_hf_modules_cache()
         self.prepare()
         return getattr(self, test_name)()
 
@@ -91,3 +94,7 @@ class DeterministicDDPTestCase(DistributedTestBase):
             raise AssertionError(
                 f"Failed to check relative error of loss, expected: {losses_ref}, got {losses}, Mean diff: {avg_relative_diff}")
 
+    def create_pg(self, device):
+        ret = super().create_pg(device)
+        os.environ["LOCAL_RANK"] = str(dist.get_rank() % torch.cuda.device_count())
+        return ret

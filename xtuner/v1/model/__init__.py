@@ -23,7 +23,7 @@ from .dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense4BConfig, Qwen3Dense8BC
 from .moe.deepseek_v3 import DeepSeekV3Config
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
 from .moe.moe import BalancingLossConfig, MoE, MoEModelOutputs, ZLossConfig
-from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig
+from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig, Qwen3MoEFoPEConfig
 
 
 model_mapping = {
@@ -51,6 +51,8 @@ def get_model_config_from_hf(model_path: Path):
 
     if cfg.model_type == "qwen3_moe":
         return Qwen3MoEConfig.from_hf(model_path)
+    elif cfg.model_type == "qwen3_moe_fope":
+        return Qwen3MoEFoPEConfig.from_hf(model_path)
     elif cfg.model_type == "qwen2":
         return Qwen2DenseConfig.from_hf(model_path)
     elif cfg.model_type == "qwen3":

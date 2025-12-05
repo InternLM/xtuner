@@ -27,8 +27,7 @@ def sp_split(
 def sp_gather(tensor, sp_mesh: DeviceMesh, dim: int):
     if sp_mesh.size() == 1:
         return tensor
-    tensor_list = [torch.empty_like(tensor) for _ in range(sp_mesh.size())]
-    dist.all_gather(tensor_list, tensor, group=sp_mesh)
+    tensor_list = dist.all_gather(tensor, group=sp_mesh.get_group())
     return torch.cat(tensor_list, dim=dim)
 
 
