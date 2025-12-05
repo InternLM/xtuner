@@ -295,7 +295,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"{self.image_processor.size['shortest_edge']}_{self.image_processor.size['longest_edge']}_"
             f"{self.video_processor.size['shortest_edge']}"
             f"_{self.video_processor.size['longest_edge']}_{self.video_processor.min_frames}_"
-            f"{self.video_processor.max_frames}_{self.video_processor.fps}_"
+            f"{self.video_processor.max_frames}_{self.video_processor.fps}_{self.enable_3d_rope}_"
             f"{self.add_vision_id}_{system_message}_{max_length}_{self.rand_video_max_frames}"
         )
 

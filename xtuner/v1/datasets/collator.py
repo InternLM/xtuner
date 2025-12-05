@@ -213,15 +213,21 @@ def qwen3_vl_sft_collator(
         input_ids = torch.cat([torch.tensor(i["input_ids"]).view(1, -1) for i in instance], dim=-1)
         labels = torch.cat([torch.tensor(i["labels"]).view(1, -1) for i in instance], dim=-1)
 
-        all_position_ids_none = all("position_ids" not in _instance or _instance["position_ids"] is None for _instance in instance)
+        all_position_ids_none = all(
+            "position_ids" not in _instance or _instance["position_ids"] is None for _instance in instance
+        )
         position_ids_list = []
         if not all_position_ids_none:
             for _instance in instance:
                 if "position_ids" in _instance and _instance["position_ids"] is not None:
                     position_ids_list.append(_instance["position_ids"])
                 else:
-                    position_ids = torch.arange(len(_instance["input_ids"])).view(1, 1, -1).expand(3, len(_instance["input_ids"]), -1)
-                    position_ids_list.append(position_ids)
+                    position_ids_ = (
+                        torch.arange(len(_instance["input_ids"]))
+                        .view(1, 1, -1)
+                        .expand(3, len(_instance["input_ids"]), -1)
+                    )
+                    position_ids_list.append(position_ids_)
 
         assert len(position_ids_list) == len(instance) or len(position_ids_list) == 0, (
             f"position_ids_list length {len(position_ids_list)} != instance length {len(instance)} or "
@@ -231,11 +237,10 @@ def qwen3_vl_sft_collator(
         input_ids = input_ids[:, :-1]
         shifted_labels = labels[:, 1:]
 
+        position_ids: torch.Tensor | None = None
         if len(position_ids_list) > 0:
             position_ids = torch.cat(position_ids_list, dim=-1)
             position_ids = position_ids[:, :, :-1]
-        else:
-            position_ids = None
 
         num_tokens = [i["num_tokens"] for i in instance]
         if num_tokens[-1] == 1:
@@ -271,7 +276,7 @@ def qwen3_vl_sft_collator(
 
         num_img_tokens: list[int] = []
         for data in instance:
-            num_img_tokens.extend(data["num_img_tokens"])
+            num_img_tokens.extend(data.get("num_img_tokens", [0]))
 
         pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
