@@ -124,12 +124,25 @@ class LMDeployWorker(RolloutWorker):
         else:
             payload["messages"] = prompt
 
+        if "partial_rollout_input_ids" in extra_info:
+            assert "return_token_ids" in extra_params and extra_params["return_token_ids"], (
+                "concat response_ids and input_ids is only compatible with return_token_ids=True."
+            )
+            max_return_tokens = self.config.context_length - len(extra_info["partial_rollout_input_ids"])
+            sample_params["max_tokens"] = max_return_tokens
+            self.logger.info(
+                f"Set max_tokens to {max_return_tokens} based on partial_rollout_input_ids length {len(extra_info['partial_rollout_input_ids'])}, init input_len: {len(payload['input_ids'])}."
+            )
+            payload["input_ids"] = extra_info["partial_rollout_input_ids"]
+            assert len(payload["input_ids"]) <= self.config.context_length, (
+                f"Total input length {len(payload['input_ids'])} exceeds context length {self.config.context_length}."
+            )
+
         if self.enable_return_routed_experts:
             extra_params["return_routed_experts"] = True
 
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
         payload.update(lmdeploy_sample_params)
-
         return await self._safe_post_request(url, headers, payload)
 
     def get_logprobs(self, input_ids, sampling_params):

@@ -332,6 +332,22 @@ class RolloutWorker(SingleAcceleratorWorker):
             endpoint_url = f"{self.server_url}/{self.endpoints['v1/chat/completions']}"
 
         while True:
+            # 当拼接后的response_ids长度已经达到了max_tokens时，则不需要发送数据，直接返回
+            if extra_info.get("partial_rollout_input_ids", None) is not None:
+                expected_max_tokens = self.config.context_length - len(extra_info["partial_rollout_input_ids"])
+                if expected_max_tokens <= 0:
+                    self.logger.info(
+                        f"Request {uid} reached max context length {self.config.context_length}, no need to rollout more."
+                    )
+                    return RLRolloutResponseItem(
+                        response=None,
+                        response_ids=None,
+                        logprobs=None,
+                        num_return_tokens=0,
+                        finish_reason="length",
+                        state=RolloutState.COMPLETED,
+                    )
+
             http_result = await self._create_request(
                 endpoint_url,
                 openai_prompts,
@@ -370,7 +386,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             elif http_result.is_retryable and cur_retry_times < self.config.max_retry_per_sample:
                 cur_retry_times += 1
                 self.logger.warning(
-                    f"Retrying rollout request {uid} to {http_result.url} due to {http_result.error_type} with exception {http_result.exception}. "
+                    f"Retrying rollout request {uid} to {http_result.url} due to {http_result.error_type} with {http_result.error_msg}. "
                     f"Retry {cur_retry_times}/{self.config.max_retry_per_sample}."
                 )
                 await asyncio.sleep(0.1)
@@ -378,17 +394,17 @@ class RolloutWorker(SingleAcceleratorWorker):
 
             elif http_result.is_retryable and cur_retry_times >= self.config.max_retry_per_sample:
                 self.logger.warning(
-                    "rollout request {uid} to {http_result.url} was skipped due to max retries reached"
+                    f"rollout request {uid} to {http_result.url} was skipped due to max retries reached"
                 )
                 return RLRolloutResponseItem(state=RolloutState.SKIPPED)
             elif http_result.is_client_error:
                 self.logger.warning(
-                    f"rollout request {uid} to {http_result.url} was skipped due to client error {http_result.error_type} with exception {http_result.exception}"
+                    f"rollout request {uid} to {http_result.url} was skipped due to client error {http_result.error_type} with {http_result.error_msg}"
                 )
                 return RLRolloutResponseItem(state=RolloutState.SKIPPED)
             elif http_result.is_server_error:
                 self.logger.warning(
-                    f"rollout request {uid} to {http_result.url} failed due to server error {http_result.error_type} with exception {http_result.exception}"
+                    f"rollout request {uid} to {http_result.url} failed due to server error {http_result.error_type} with {http_result.error_msg}"
                 )
                 return RLRolloutResponseItem(state=RolloutState.FAILED)
             else:
@@ -474,9 +490,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                         assert len(last_token_ids) <= sample_params["max_tokens"], (
                             f"Generation length exceeds the limit: generated length is {len(last_token_ids)}, limit is {sample_params['max_tokens']}"
                         )
-                        assert len(last_logprobs) == len(last_token_ids), (
-                            f"The lengths of generated token_ids and logprobs do not match: token_ids length is {len(last_token_ids)}, logprobs length is {len(last_logprobs)}"
-                        )
                 else:
                     num_return_tokens = response["meta_info"].get("completion_tokens", 0)
                     last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
@@ -500,6 +513,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 # If not, we consider it as an invalid response and retry it.
                 # NOTE: !!! When finish_reason is abort, some queries may not return token_ids or logprobs. !!!
                 if finish_reason != "abort" and (len(last_token_ids) == 0 or len(last_logprobs) == 0):
+                    self.logger.error(f"Invalid rollout response for request {uid}: {response}")
                     return RLRolloutResponseItem(state=RolloutState.SKIPPED)
                 else:
                     rollout_response = RLRolloutResponseItem(
@@ -509,7 +523,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         finish_reason=finish_reason,
                         logprobs=last_logprobs,
                         extra_info=extra_info,
-                        state=RolloutState.COMPLETED if finish_reason == "abort" else RolloutState.COMPLETED,
+                        state=RolloutState.ABORTED if finish_reason == "abort" else RolloutState.COMPLETED,
                     )
                 return rollout_response
             except KeyError as e:

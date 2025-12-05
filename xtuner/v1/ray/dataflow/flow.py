@@ -231,7 +231,9 @@ class DataFlow:
         action_id = group_data_items[0].uid.action_id
         # step 2: env generate
         group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
-            group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
+            group_data_items,
+            sample_params=self.sample_params,
+            extra_params=self.extra_params,
         )
 
         # Step 3: Determine the sample's state and act accordingly.

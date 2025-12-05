@@ -10,6 +10,7 @@ from xtuner.v1.data_proto.rl_data import (
     RLJudgerResponseItem,
     RLRolloutResponseItem,
     update_dataflow_item,
+    update_rollout_item,
 )
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
 from xtuner.v1.utils import get_logger
@@ -64,7 +65,10 @@ class SingleTurnEnvironment(BaseEnvironment):
         self.timeout_multiplier = 2.0
 
     async def generate(
-        self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
+        self,
+        group_data_items: List[RLDataFlowItem],
+        sample_params=None,
+        extra_params=None,
     ) -> List[RLDataFlowItem]:
         """Generate responses for a batch of RLTextDataItem using the rollout
         controller.
@@ -104,7 +108,7 @@ class SingleTurnEnvironment(BaseEnvironment):
             except asyncio.TimeoutError:
                 self.logger.error("Get rollout controller response timeout and return the failed response.")
                 rollout_responses = [RLRolloutResponseItem(state="skipped") for _ in group_data_items]
-            group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_responses)
+            group_data_items = update_rollout_item(group_data_items, rollout_responses)
         return group_data_items
 
     async def run(
