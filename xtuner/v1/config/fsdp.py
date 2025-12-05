@@ -29,9 +29,6 @@ class FSDPConfig(BaseModel):
             help="Specific targets for compilation, e.g. ('module.MyClass.method', 'module.function'). If None, all eligible functions will be compiled."
         ),
     ] = None
-    mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
-        "default"
-    )
     requires_grad: Annotated[bool, Parameter(help="Enable gradient computation for model parameters")] = True
     hsdp_sharding_size: Annotated[
         Optional[int], Parameter(help="Sharding size for HSDP (Hybrid Sharding Data Parallel)")
