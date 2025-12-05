@@ -96,7 +96,9 @@ class ModelForwardExtraLogInfo(dict):
             while self["log_rank_loss"].dim() >= 1:
                 self["log_rank_loss"] = torch.sum(self["log_rank_loss"], dim=-1)
             log_rank_loss_value = self["log_rank_loss"].item()
-            return_dict["loss"] = log_rank_loss_value
+            # vague keys such as `loss` should be avoided in extra_log_info,
+            # otherwise it may cause confusion in exp-track logs.
+            return_dict["local_base_loss"] = log_rank_loss_value
         return return_dict
 
 

@@ -210,7 +210,7 @@ class VisionComposeTrainEngine(TrainEngine):
         reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
 
-        loss_log["total_loss"] = step_loss.item()
+        loss_log["local_loss"] = step_loss.item()
         loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
         if step_balancing_loss is not None:
             reduced_balancing_loss = step_balancing_loss
