@@ -31,6 +31,9 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
         if key.startswith("norm."):
             return [key.replace("norm.", "model.language_model.norm.")]
+        elif key.startswith("rotary_emb."):
+            # FoPE has model.rotary_emb.sin_coef and model.rotary_emb.cos_coef in the safetensors
+            return [key.replace("rotary_emb.", "model.language_model.rotary_emb.")]
         else:
             return [key]
 

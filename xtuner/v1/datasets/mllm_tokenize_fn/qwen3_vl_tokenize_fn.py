@@ -241,7 +241,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if version.parse(version_str) < version.parse("4.57.0"):
             raise ValueError(f"请升级 transformers 到 4.57.0 及其以上版本，当前版本为 {version_str}")
 
-        _processor = AutoProcessor.from_pretrained(processor_path)
+        _processor = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
         self.image_processor = _processor.image_processor
         self.video_processor = _processor.video_processor
         # default min_pixels 4096=4x32x32=4x16x16x2x2 pix 一张图片 patch size=16x16，然后 merge size=2x2, 最终输出给 llm 占 4 个 token
