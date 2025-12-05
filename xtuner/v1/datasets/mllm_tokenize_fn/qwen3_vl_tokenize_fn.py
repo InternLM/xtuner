@@ -291,7 +291,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
-        self._hash_str = (
+        _hash_str = (
             f"{self.image_processor.size['shortest_edge']}_{self.image_processor.size['longest_edge']}_"
             f"{self.video_processor.size['shortest_edge']}"
             f"_{self.video_processor.size['longest_edge']}_{self.video_processor.min_frames}_"
@@ -312,7 +312,15 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.eos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
 
         # 必须要最后调用
-        super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash, data_name=self.data_name)
+        super().__init__(
+            tokenizer,
+            self.chat_template,
+            max_length,
+            tokenizer_hash,
+            hash,
+            hash_str=_hash_str,
+            data_name=self.data_name,
+        )
 
     def _truncated_data_item(
         self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
