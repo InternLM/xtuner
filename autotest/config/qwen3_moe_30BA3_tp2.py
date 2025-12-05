@@ -1,14 +1,15 @@
 import os
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
-from xtuner.v1.train import TrainerConfig
+
 from xtuner.v1.config import (
     AdamWConfig,
     FSDPConfig,
     LRConfig,
 )
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
-from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.train import TrainerConfig
 
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -32,9 +33,7 @@ dataset_config = [
     },
 ]
 
-dataloader_config = DataloaderConfig(
-    pack_max_length=16384
-)
+dataloader_config = DataloaderConfig(pack_max_length=16384)
 
 loss_cfg = CELossConfig()
 
@@ -51,6 +50,6 @@ trainer = TrainerConfig(
     tokenizer_path=QWEN3_MOE_PATH,
     global_batch_size=16,
     total_epoch=1,
-    work_dir=".",
+    work_dir=f"/mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output/{os.environ['GITHUB_RUN_ID']}/qwen3-sft-tp2/sft",
     seed=0,
 )
