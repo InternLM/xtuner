@@ -1461,7 +1461,7 @@ class Trainer:
             flattened_internal_metrics = flatten_internal_metrics_for_logs(internal_metrics)
 
         if step_consumed_img_tokens is not None:
-            img_tokens_str = f"img_tokens: {step_consumed_img_tokens}"
+            img_tokens_str = f"img_tokens: {step_consumed_img_tokens} "
         else:
             img_tokens_str = ""
 
@@ -1475,7 +1475,7 @@ class Trainer:
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {tgs:.1f} "
-            f"exp_tgs: {exp_tgs: .1f} "
+            f"exp_tgs: {exp_tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
             f"est_global_batch_tokens: {est_global_batch_tokens} "
             f"eta: {eta_hms} "
