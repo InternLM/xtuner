@@ -5,10 +5,9 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import reduce
 from importlib import import_module
 from itertools import chain
-from more_itertools import consume
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Literal, cast, Iterable, Mapping
+from typing import Annotated, Generator, Iterable, Literal, Mapping, cast
 
 import torch
 import torch.distributed as dist
@@ -1345,7 +1344,8 @@ class BaseModel(nn.Module):
         logger.info(f"Enabling torch.compile for function {full_name} with options: {compile_options}")
 
     def _resolve_compile_cfg(
-        self, config: XTunerBaseModelConfig,
+        self,
+        config: XTunerBaseModelConfig,
     ) -> dict[str, TorchCompileOption]:
         if not hasattr(config, "compile_cfg"):
             return {}
@@ -1365,7 +1365,7 @@ class BaseModel(nn.Module):
     def _disable_compile_cfg(self, obj):
         if isinstance(obj, PydanticBaseModel) and hasattr(obj, "compile_cfg"):
             obj.compile_cfg = False
-            consume(map(lambda x: self._disable_compile_cfg(getattr(obj, x)), obj.__class__.model_fields))
+            consume(self._disable_compile_cfg(getattr(obj, x)) for x in obj.__class__.model_fields)
         elif isinstance(obj, Mapping):
             consume(map(self._disable_compile_cfg, obj.values()))
         # str&bytes are special Iterable, need to exclude it, otherwise it will infinite loop
