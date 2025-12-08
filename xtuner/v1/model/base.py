@@ -68,13 +68,15 @@ class XTunerBaseModelConfig(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
     hf_save_cfg: HFSaveCfg = HFSaveCfg()
     float8_cfg: Float8Config | None = None
-    compile_cfg: Annotated[dict[str, TorchCompileOption] | None | bool, Parameter(
-        group="model",
-        help="The compile config of model. "
-             "`None` | `True`: Use default compile config defined in model, "
-             "`False`: Disable the compile"
-             "`dict[str, TorchCompileOption]`: Customize the compile option"
-        )
+    compile_cfg: Annotated[
+        dict[str, TorchCompileOption] | None | bool,
+        Parameter(
+            group="model",
+            help="The compile config of model. "
+            "`None` | `True`: Use default compile config defined in model, "
+            "`False`: Disable the compile"
+            "`dict[str, TorchCompileOption]`: Customize the compile option",
+        ),
     ] = None
 
     @property
