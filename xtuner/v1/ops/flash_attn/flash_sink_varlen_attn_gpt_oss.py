@@ -496,10 +496,10 @@ class FlashSinkVarlenAttention(torch.autograd.Function):
         ctx.window_size = window_size
         ctx.cu_seqlen = cu_seqlen
 
-        return o
+        return o, lse
 
     @staticmethod
-    def backward(ctx, do):
+    def backward(ctx, do, dlse):
         q, k, v, o, lse = ctx.saved_tensors
 
         dq = torch.zeros_like(q)

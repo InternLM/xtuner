@@ -55,9 +55,13 @@ class SingleTurnEnvironment(BaseEnvironment):
             worker_log_dir = Path.cwd() / "work_dir"
         self.logger = get_logger(log_dir=worker_log_dir, tag="SingleTurnEnv")
         if rollout_cfg and rollout_cfg.enable_return_routed_experts:
-            self.logger.info("！！！ Enable `return routed experts` in rollout controller. ！！！")
+            self.logger.info("!!! Enable `return routed experts` in rollout controller. !!!")
         self.rollout_timeout = rollout_cfg.rollout_timeout if rollout_cfg else 1200.0
         self.judger_timeout = judger_cfg.judger_timeout if judger_cfg else 1200.0
+        # The timeout for the environment to wait for the rollout controller's response.
+        # This should be longer than the controller's internal timeout (`rollout_timeout`)
+        # to account for potential queuing delays and other overheads.
+        self.timeout_multiplier = 2.0
 
     async def generate(
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
@@ -95,16 +99,11 @@ class SingleTurnEnvironment(BaseEnvironment):
                 response_future.append(fut)
             try:
                 rollout_responses = await asyncio.wait_for(
-                    asyncio.gather(*response_future), timeout=self.rollout_timeout
+                    asyncio.gather(*response_future), timeout=self.rollout_timeout * self.timeout_multiplier
                 )
             except asyncio.TimeoutError:
                 self.logger.error("Get rollout controller response timeout and return the failed response.")
-                rollout_responses = [
-                    RLRolloutResponseItem(
-                        finish_reason="failed",
-                    )
-                    for _ in group_data_items
-                ]
+                rollout_responses = [RLRolloutResponseItem(state="skipped") for _ in group_data_items]
             group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_responses)
         return group_data_items
 
@@ -127,13 +126,12 @@ class SingleTurnEnvironment(BaseEnvironment):
             The format of the return value matches the format of the input `data`.
         """
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
-        skip_judger = any(
-            item.env.rollout.finish_reason in ["failed", "skipped", "abort"] for item in group_data_items
-        )
-        if self.judger_controller and not skip_judger:
+        continue_judger = all(item.env.rollout.state == "completed" for item in group_data_items)
+        if self.judger_controller and continue_judger:
             try:
                 judger_responses: List[RLJudgerResponseItem] = await asyncio.wait_for(
-                    self.judger_controller.run.remote(group_data_items), timeout=self.judger_timeout
+                    self.judger_controller.run.remote(group_data_items),
+                    timeout=self.judger_timeout * self.timeout_multiplier,
                 )
             except asyncio.TimeoutError:
                 self.logger.error("Get judger controller response timeout and return the failed response.")
