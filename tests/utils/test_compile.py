@@ -19,14 +19,19 @@ logger = get_logger()
     InternVL3P5Dense1BConfig,
     DeepSeekV3Config,
 ])
-def test_compile_model(model_cfg):
+@pytest.mark.parametrize("compile", [None, False])
+def test_compile_model(model_cfg, compile):
     with LogCapture(logger) as cap:
         with torch.device("meta"):
-            model = model_cfg().build()
+            model = model_cfg(compile_cfg=compile).build()
         out = cap.get_output()
 
-
     matched = re.findall(r"\s([0-9a-zA-Z_\.]+) with options: (.*)", out)
+
+    if compile == {} or compile is False:
+        assert not matched, f"Expected no compile cfg in log, but got: {out}"
+        assert model.compile_cfg == {}, f"Expected empty compile cfg, but got: {model.compile_cfg}"
+        return
 
     if not matched:
         raise RuntimeError(f"Cannot find compile cfg in log: {out}")
