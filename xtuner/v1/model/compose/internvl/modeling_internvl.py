@@ -18,8 +18,7 @@ def convert_llm_to_hf_keys(key):
 
 class InternVLForConditionalGeneration(InternS1ForConditionalGeneration):
     def __init__(self, config: InternVLBaseConfig):
-        super(InternS1ForConditionalGeneration, self).__init__()
-        self.config = config
+        super(InternS1ForConditionalGeneration, self).__init__(config)
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
         self.image_size = config.vision_config.image_size[0]
@@ -52,4 +51,5 @@ class InternVLForConditionalGeneration(InternS1ForConditionalGeneration):
         for key, value in self.language_model.load_spec_mapping.items():
             self.load_spec_mapping['language_model.' + key] = value
 
+        self._maybe_enable_compile(self.compile_cfg)
         self._freeze_modules()

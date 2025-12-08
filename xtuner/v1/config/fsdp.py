@@ -1,4 +1,4 @@
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 from cyclopts import Parameter
@@ -23,12 +23,9 @@ class FSDPConfig(BaseModel):
     param_dtype: Annotated[torch.dtype, Parameter(help="Data type for model parameters")] = torch.bfloat16
     reduce_dtype: Annotated[torch.dtype, Parameter(help="Data type for reduction operations")] = torch.bfloat16
     torch_compile: Annotated[bool, Parameter(help="Enable model compilation for faster inference")] = False
-    compile_targets: Annotated[
-        Optional[Tuple[str, ...]],
-        Parameter(
-            help="Specific targets for compilation, e.g. ('module.MyClass.method', 'module.function'). If None, all eligible functions will be compiled."
-        ),
-    ] = None
+    mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
+        "default"
+    )
     requires_grad: Annotated[bool, Parameter(help="Enable gradient computation for model parameters")] = True
     hsdp_sharding_size: Annotated[
         Optional[int], Parameter(help="Sharding size for HSDP (Hybrid Sharding Data Parallel)")

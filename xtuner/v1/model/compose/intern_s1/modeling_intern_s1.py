@@ -2,6 +2,7 @@ import types
 from typing import cast, Callable
 from pathlib import Path
 
+
 import torch
 import torch.distributed as dist
 import torch.distributed.nn.functional as distF
@@ -9,7 +10,7 @@ import torch.distributed.nn.functional as distF
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.utils import get_logger, get_padding_length, get_device
-from xtuner.v1.model import BaseModel
+from xtuner.v1.model import BaseModel, TorchCompileOption, DEFAULT_FLOAT8_CFG
 from xtuner.v1.rl.utils import sp_split
 
 from .modeling_vision import InternS1VisionModel, init_world_mesh
@@ -27,6 +28,13 @@ from torch.distributed.fsdp import (
 
 DEVICE = get_device()
 logger = get_logger()
+
+INTERNS1_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.model.compose.intern_s1.modeling_projector.InternS1MultiModalProjector.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.attention_pre_forward": TorchCompileOption(fullgraph=True),
+    **DEFAULT_FLOAT8_CFG,
+}
 
 
 def pixel_shuffle(x, scale_factor=0.5):
@@ -52,8 +60,7 @@ class InternS1ForConditionalGeneration(BaseModel):
     config: InternS1BaseConfig
 
     def __init__(self, config: InternS1BaseConfig):
-        super().__init__()
-        self.config = config
+        super().__init__(config)  # type: ignore[arg-type]
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
 
@@ -87,6 +94,7 @@ class InternS1ForConditionalGeneration(BaseModel):
         for key, value in self.language_model.load_spec_mapping.items():
             self.load_spec_mapping['language_model.' + key] = value
 
+        self._maybe_enable_compile(self.compile_cfg)
         self._freeze_modules()
 
     def _freeze_modules(self):
@@ -280,3 +288,8 @@ class InternS1ForConditionalGeneration(BaseModel):
         self.vision_tower.init_weights()
         self.language_model.init_weights()
         self.multi_modal_projector.init_weights()
+
+    @property
+    @override
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        return INTERNS1_COMPILE_CFG

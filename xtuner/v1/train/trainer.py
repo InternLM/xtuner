@@ -591,6 +591,7 @@ class Trainer:
         if isinstance(load_from, str):
             load_from = Path(load_from)
 
+        self._resolve_deprecate_compile_cfg(model_cfg=model_cfg, fsdp_cfg=fsdp_cfg)  # TODO: Remove in version 1.1.0
         self._engine = self.build_engine(
             model_path=load_from,
             model_config=model_cfg,
@@ -1021,6 +1022,9 @@ class Trainer:
 
         if model_path is not None:
             engine.model.set_hf(model_path)
+
+        if engine.model.compile_cfg is not None and self.rank == 0:
+            logger.info(f"The `compile_cfg` of model is {json.dumps(engine.model.compile_cfg, indent=4)}")
         return engine
 
     def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:
@@ -1742,3 +1746,9 @@ class Trainer:
             log_str += f"{k}: {v}\n"
         log_str += "=================================================="
         logger.info(log_str)
+
+    def _resolve_deprecate_compile_cfg(
+        self, model_cfg: TransformerConfig | VisionComposeConfigProtocol, fsdp_cfg: FSDPConfig
+    ):
+        if not fsdp_cfg.torch_compile:
+            model_cfg.compile_cfg = False
