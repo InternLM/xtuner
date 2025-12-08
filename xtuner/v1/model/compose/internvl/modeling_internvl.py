@@ -51,4 +51,5 @@ class InternVLForConditionalGeneration(InternS1ForConditionalGeneration):
         for key, value in self.language_model.load_spec_mapping.items():
             self.load_spec_mapping['language_model.' + key] = value
 
+        self._maybe_enable_compile(self.compile_cfg)
         self._freeze_modules()
