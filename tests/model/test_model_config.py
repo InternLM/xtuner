@@ -1,6 +1,7 @@
 import tempfile
 import json
 from pathlib import Path
+from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 
 def test_hf_config_has_torch_dtype():

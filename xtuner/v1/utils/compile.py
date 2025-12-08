@@ -1,4 +1,5 @@
 import functools
+import inspect
 from typing import Any, Dict, Optional
 
 import torch
@@ -50,13 +51,16 @@ class MaybeCompile:
 
     def __call__(self, fn=None, **compile_kwargs):
         """Apply the decorator with optional torch.compile arguments."""
-        _id = id(fn)
+        if inspect.ismethod(fn):
+            id_suffix = f"_id{id(fn)}"
+        else:
+            id_suffix = ""
 
         def decorator(func):
             original_func = func
             module_name = original_func.__module__
             func_name = original_func.__qualname__
-            func_id = f"{module_name}.{func_name}_id{_id}"
+            func_id = f"{module_name}.{func_name}{id_suffix}"
 
             # Check if this function should be compiled
             should_compile = self._should_compile(module_name, func_name)

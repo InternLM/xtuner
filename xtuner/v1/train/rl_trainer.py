@@ -17,7 +17,7 @@ from ray.actor import ActorClass
 from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import check_dataflow_item
+from xtuner.v1.data_proto.rl_data import is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -32,7 +32,7 @@ from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, 
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.utils.env_check import get_rollout_engine_version
 
-from .trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
+from .trainer import ExpHistory, ExpInfo, GitInfo, LoadCheckpointConfig, XTunerMeta
 
 
 # TODO: Move DEVICE to `xtuner.utils.device`
@@ -65,6 +65,8 @@ class RLTrainerConfig(BaseModel):
     log_dir: Path | str | None = None
     total_epochs: int
     resume_config: ResumeConfig | None = None
+    auto_resume: bool = False
+    load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
     strict_load: bool = True
     hf_interval: int | None = None
     hf_max_keep: int | None = None
@@ -157,6 +159,8 @@ class RLTrainer:
         enable_evaluate (bool): Whether to perform periodic evaluation during training.
         resume_config (ResumeConfig | None): Configuration for resuming training from
             a previous checkpoint. Defaults to None.
+        auto_resume (bool): Whether to automatically resume training. Defaults to False.
+        load_checkpoint_cfg (LoadCheckpointConfig): Configuration for loading checkpoints.
         strict_load (bool): Whether to strictly enforce checkpoint loading compatibility.
             Defaults to True.
         hf_interval (int | None): Interval (in epochs) for saving HuggingFace format
@@ -203,7 +207,9 @@ class RLTrainer:
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
         total_epochs: int,
-        resume_config: ResumeConfig | None = None,
+        resume_config: ResumeConfig | None = None,  # TODO: Removed in version 1.1.0
+        auto_resume: bool = False,
+        load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig(),
         strict_load: bool = True,
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
@@ -257,7 +263,8 @@ class RLTrainer:
             work_dir.mkdir(parents=True, exist_ok=True)
 
         self._work_dir = work_dir
-        self._meta = self._init_xtuner_meta(work_dir, resume_config is not None)
+        auto_resume = auto_resume or (resume_config is not None and resume_config.auto_resume)
+        self._meta = self._init_xtuner_meta(work_dir, auto_resume)
 
         if log_dir is None:
             log_dir = self.exp_dir
@@ -265,6 +272,11 @@ class RLTrainer:
             log_dir = Path(log_dir)
 
         self.logger = self._init_logger(log_dir)
+
+        self.logger.warning(
+            "`resume_config` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead"
+        )
+
         train_worker_cfg.log_dir = log_dir
         dataflow_config.worker_log_dir = log_dir
         rollout_config.worker_log_dir = log_dir
@@ -338,6 +350,8 @@ class RLTrainer:
             log_dir=config.log_dir,
             total_epochs=config.total_epochs,
             resume_config=config.resume_config,
+            auto_resume=config.auto_resume,
+            load_checkpoint_cfg=config.load_checkpoint_cfg,
             strict_load=config.strict_load,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
@@ -385,7 +399,7 @@ class RLTrainer:
         """
         self.logger.info("Start RL training")
         if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator:
-            ray.get(self._rollout_env_controller.check_active_workers.remote())
+            ray.get(self._rollout_env_controller.update_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
@@ -395,7 +409,7 @@ class RLTrainer:
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
-                ray.get(self._rollout_env_controller.check_active_workers.remote())
+                ray.get(self._rollout_env_controller.update_active_workers.remote())
                 data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):
@@ -475,7 +489,7 @@ class RLTrainer:
             is_multimodal = True
 
         for j, group in enumerate(data_groups):
-            if not check_dataflow_item(group):
+            if not is_valid_for_training(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             if is_multimodal:
@@ -566,7 +580,7 @@ class RLTrainer:
         # mismatch_token_ids_count = 0
         # response_len_list = []
         for group in data_groups:
-            if not check_dataflow_item(group):
+            if not is_valid_for_training(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
             for data in group:
@@ -618,6 +632,7 @@ class RLTrainer:
                         "response_len": rollout_response_len_list[_count],
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
+                        "finish_reason": data.env.rollout.finish_reason,
                     }
                     json.dump(item, f, ensure_ascii=False, indent=2)
                     f.write("\n")
