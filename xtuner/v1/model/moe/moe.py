@@ -178,7 +178,7 @@ class MoE(BaseModel):
         # TODO(@yehaochen): 把这两行移除 _maybe_compile_layers 要把 compile 相关的 setting 放到 fsdp_config 之外
         # _init_load_spec 放到 post init 里
         self._init_load_spec()
-        self._maybe_enable_compile(self._compile_cfg)
+        self._maybe_enable_compile(self.compile_cfg)
 
         self.balancing_loss: BalancingLoss | None
         self.z_loss: ZLoss | None
