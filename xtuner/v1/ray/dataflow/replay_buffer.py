@@ -12,10 +12,20 @@ from ray import ObjectRef
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLExtraDataItem, RLUIDItem, check_dataflow_item
+from xtuner.v1.data_proto.rl_data import (
+    RLDataFlowItem,
+    RLDatasetItem,
+    RLExtraDataItem,
+    RLUIDItem,
+    RolloutState,
+    is_valid_for_replaybuffer,
+)
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.utils import get_logger
+
+
+logger = get_logger()
 
 
 @dataclass
@@ -42,8 +52,27 @@ class ReplayMeta:
     observation_ids: List[int] = field(default_factory=list)  # observation IDs for different versions
     observation_refs: List[ObjectRef] = field(default_factory=list)
     observation_versions: List[int] = field(default_factory=list)  # reserved for async rollout
-    state: str = ""  # overall state, e.g., for partial rollout
+    state: RolloutState = RolloutState.INIT
     extra_info: Dict[str, Any] = field(default_factory=dict)
+
+
+def determine_group_state(group_data_items: List[RLDataFlowItem]) -> RolloutState:
+    """Determines the processing strategy for a group of rollout samples based
+    on their state."""
+    # TODO(@duanyanhui): remove this function when send one request instead of group requests.
+    if not group_data_items:
+        return RolloutState.SKIPPED
+    group_states = {item.env.rollout.state for item in group_data_items}
+    if RolloutState.SKIPPED in group_states:
+        return RolloutState.SKIPPED
+    elif RolloutState.FAILED in group_states:
+        return RolloutState.FAILED
+    elif RolloutState.ABORTED in group_states:
+        return RolloutState.ABORTED
+    elif all(state == RolloutState.COMPLETED for state in group_states):
+        return RolloutState.COMPLETED
+    else:
+        raise ValueError(f"Unknown group states: {group_states}")
 
 
 def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> ReplayMeta:
@@ -65,7 +94,8 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         observation_versions.append(version)
         group_states.append(item.env.rollout.finish_reason)
 
-    state_str = "abort" if "abort" in group_states else "returned"
+    group_state = determine_group_state(grouped_dataitem)
+    logger.debug(f"determined group_state: {group_state}, replay_state: {group_state}")
     replay_meta = ReplayMeta(
         env=env_str,
         root_id=root_id,
@@ -74,7 +104,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         observation_ids=observation_ids,
         observation_refs=observation_refs,
         observation_versions=observation_versions,
-        state=state_str,  # 指代一个prompt的整体状态，用于partial rollout
+        state=group_state,
         extra_info={},
     )
     return replay_meta
@@ -290,28 +320,25 @@ class ReplayBufferStorage:
             grouped_dataitem (List[RLDataFlowItem]): A list of data items
                 belonging to the same group.
         """
-        if not check_dataflow_item(grouped_dataitem):
+        if (
+            grouped_dataitem is None
+            or len(grouped_dataitem) == 0
+            or is_valid_for_replaybuffer(grouped_dataitem) is False
+        ):
             return
 
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
         root_id = replay_meta.root_id
         action_id = replay_meta.action_id
-        state_str = replay_meta.state
+        state = replay_meta.state
 
-        # Here, partial rollout is handled based on whether finish_reason is "paused".
-        # The logic for "paused" is user-defined, indicating that this data was
-        # interrupted before inference was completed. Other states are returned
-        # by the inference engine.
-
-        if state_str == "abort":
+        if state == RolloutState.ABORTED:
             self._paused.append(action_id)
-        elif state_str == "returned":
+        elif state == RolloutState.COMPLETED:
             self._returned.append(action_id)
-
         self.logger.debug(
-            f"Adding action_id: {action_id} with state: {state_str} to ReplayBufferStorage. Paused count: {len(self._paused)}, Returned count: {len(self._returned)}"
+            f"Adding action_id: {action_id} with state: {state} to ReplayBufferStorage. Paused count: {len(self._paused)}, Returned count: {len(self._returned)}"
         )
-        # action
         self._root2actions[root_id].append(action_id)
         self._actions[action_id] = replay_meta
 
@@ -365,7 +392,7 @@ class ReplayBufferStorage:
             for action_id in target_finished_list:
                 replay_meta = self._actions.pop(action_id)
                 # todo: add an unified state management
-                replay_meta.state = "history"
+                replay_meta.state = RolloutState.ARCHIVED
                 group_samples = mapping_replaymeta_to_dataitem(replay_meta)
                 del replay_meta
                 multimodal_train_info = None
