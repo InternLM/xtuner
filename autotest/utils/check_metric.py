@@ -38,7 +38,7 @@ def check_result(base_path, cur_path, check_metric):
         check_flag = True
         if metric == "runtime_info/tgs":
             if cur_steps > 10:
-                max_error = abs(mean(base_metrics[metric][10:-1]) - mean(cur_metrics[metric][10:-1]))
+                max_error = abs(mean(base_metrics[metric][10:-1]) - mean(cur_metrics[metric][10:-1]))/(mean(base_metrics[metric][10:-1]))
                 if max_error > threshold:
                     mean_base_metrics = f'{mean(base_metrics[metric][10:-1]):.6f}'
                     mean_cur_metrics = f'{mean(cur_metrics[metric][10:-1]):.6f}'
