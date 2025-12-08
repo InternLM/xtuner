@@ -14,7 +14,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import BaseModel as XTunerBaseModel
-from xtuner.v1.model.base import TorchCompileOption, ModelItem, ModelOutputs, TransformerConfig
+from xtuner.v1.model.base import ModelItem, ModelOutputs, TorchCompileOption, TransformerConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
@@ -63,7 +63,7 @@ class VisionComposeConfigProtocol(Protocol):
     freeze_projector: bool = False
     freeze_language: bool = False
     dcp_ignore_frozen_params: bool = True
-    compile_cfg: dict[str | TorchCompileOption] | None | bool = None
+    compile_cfg: dict[str, TorchCompileOption] | None | bool = None
 
     def build(self) -> VisionComposeModelProtocol: ...
 

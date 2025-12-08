@@ -6,8 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import Self
 
 from xtuner.v1.float8 import Float8Config
-from xtuner.v1.model.base import TransformerConfig, XTunerBaseModelConfig
-from xtuner.v1.model.base import TorchCompileOption, TransformerConfig
+from xtuner.v1.model.base import TorchCompileOption, TransformerConfig, XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VLTextDense8BConfig
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config
 from xtuner.v1.module.rope import RopeScalingConfig
@@ -80,9 +79,6 @@ class Qwen3VLBaseConfig(XTunerBaseModelConfig):
     freeze_projector: bool = False
     freeze_language: bool = False
     dcp_ignore_frozen_params: bool = True
-    compile_cfg: dict[str, TorchCompileOption] | None | bool = (
-        None  # None means use default compile option, False means disable compile
-    )
 
     def build(self):
         from .modeling_qwen3_vl import Qwen3VLForConditionalGeneration
