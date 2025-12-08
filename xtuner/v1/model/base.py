@@ -5,9 +5,10 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import reduce
 from importlib import import_module
 from itertools import chain
+from more_itertools import consume
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Literal, cast
+from typing import Annotated, Generator, Literal, cast, Iterable, Mapping
 
 import torch
 import torch.distributed as dist
@@ -230,18 +231,13 @@ class BaseModel(nn.Module):
 
     FSDP_SHARD_DIM = 0
 
-    def __init__(self, config: TransformerConfig):
+    def __init__(self, config: XTunerBaseModelConfig):
         super().__init__()
         self.config = config
 
         self._hf_path: Path | None = None  # type: ignore
 
-        if hasattr(self.config, "compile_cfg"):
-            # TODO: The config protocol in `BaseModel` now is weird, we need to update the config protocol
-            # to make sure VL model config can be compatible with `resolve_compile_cfg`
-            self._compile_cfg = self._resolve_comile_cfg(self.config.compile_cfg)
-        else:
-            self._compile_cfg = {}
+        self._compile_cfg = self._resolve_compile_cfg(self.config)
 
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
@@ -1348,10 +1344,15 @@ class BaseModel(nn.Module):
         full_name = get_function_full_qualname(compiled_function)  # type: ignore[arg-type]
         logger.info(f"Enabling torch.compile for function {full_name} with options: {compile_options}")
 
-    def _resolve_comile_cfg(
-        self, custom_cfg: dict[str, TorchCompileOption] | bool | None
+    def _resolve_compile_cfg(
+        self, config: XTunerBaseModelConfig,
     ) -> dict[str, TorchCompileOption]:
+        if not hasattr(config, "compile_cfg"):
+            return {}
+
+        custom_cfg = config.compile_cfg
         if custom_cfg is False:
+            self._disable_compile_cfg(self.config)
             return {}
 
         if custom_cfg is True or custom_cfg is None:
@@ -1360,6 +1361,18 @@ class BaseModel(nn.Module):
             compile_cfg = custom_cfg
 
         return compile_cfg
+
+    def _disable_compile_cfg(self, obj):
+        if isinstance(obj, PydanticBaseModel) and hasattr(obj, "compile_cfg"):
+            obj.compile_cfg = False
+            consume(map(lambda x: self._disable_compile_cfg(getattr(obj, x)), obj.__class__.model_fields))
+        elif isinstance(obj, Mapping):
+            consume(map(self._disable_compile_cfg, obj.values()))
+        # str&bytes are special Iterable, need to exclude it, otherwise it will infinite loop
+        elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
+            consume(map(self._disable_compile_cfg, obj))
+        else:
+            return
 
     def _maybe_enable_compile(self, compile_cfg: dict[str, TorchCompileOption]):
         if compile_cfg:
