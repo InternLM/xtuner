@@ -6,7 +6,7 @@ import torch.nn as nn
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
-from xtuner.v1.module import MHAConfig, MLAConfig, RMSNorm
+from xtuner.v1.module import AttnOutputs, MHAConfig, MLAConfig, RMSNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
@@ -83,11 +83,12 @@ class DenseDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states = self.self_attn(
+        attn_outputs: AttnOutputs = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
         )
+        hidden_states = attn_outputs["projected_output"]
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -137,11 +138,11 @@ class DenseDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states = self.self_attn(
+        hidden_states = self.self_attn.decoding(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
-            state=ForwardState.DECODING,
+            state=ForwardState.DECODING,  # type: ignore   # TODO: Fix outdated interface
         )
         hidden_states = residual + hidden_states
 

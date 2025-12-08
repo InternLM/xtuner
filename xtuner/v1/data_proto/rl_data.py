@@ -4,10 +4,53 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Annotated
 
+from xtuner.v1.utils import StrEnum
 
 # ====================================
 # ====== DataFlow 数据流 ==============
 # ====================================
+from xtuner.v1.utils.logger import get_logger
+
+
+logger = get_logger()
+
+
+class RolloutState(StrEnum):
+    """
+
+    1. State Transitions from finish_reason and RolloutState:
+    - A new task starts as `INIT`.
+    - A successful generation (finish_reason 'stop' or 'length') becomes `COMPLETED`.
+    - A generation stopped by the dataflow (e.g., for partial rollout) becomes `ABORTED`.
+    - A generation that fails due to an inference server error becomes `FAILED`.
+    - A generation skipped due to client errors or timeout errors (e.g., invalid input) becomes `SKIPPED`.
+    - Data used for training is marked as `ARCHIVED`.
+    - Old data (rollout for morn than expiration step) in the replay buffer is marked as `EXPIRED`.
+
+    2. Dataflow Handling Based on RolloutState:
+    - `INIT`: Data is in progress; no special handling.
+    - `COMPLETED`: Data is valid for filtering, replay buffer insertion and training.
+    - `ABORTED`: Data may be partially valid; It's valid for replay buffer insertion but not for filtering and training.
+    - `FAILED`: Data is invalid; not used for filtering, replay buffer or training.
+    - `SKIPPED`: Data is invalid; not used for filtering, replay buffer or training.
+    - `ARCHIVED`: Data is stored for historical purposes; not used for training.
+    - `EXPIRED`: Data is removed from the replay buffer; not used for training.
+    """
+
+    INIT = "init"
+    COMPLETED = "completed"
+    ABORTED = "aborted"
+    FAILED = "failed"
+    ARCHIVED = "archived"
+    EXPIRED = "expired"
+    SKIPPED = "skipped"
+
+    @staticmethod
+    def from_str(state_str: str) -> "RolloutState":
+        for state in RolloutState:
+            if state.value == state_str:
+                return state
+        raise ValueError(f"Unknown ReplayState string: {state_str}")
 
 
 class RLUIDItem(BaseModel):
@@ -72,6 +115,7 @@ class RLRolloutResponseItem(BaseModel):
     finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
     logprobs: Optional[List[float]] = None
     extra_info: Dict[str, Any] = dict()
+    state: RolloutState = RolloutState.INIT
 
 
 class RLJudgerResponseItem(BaseModel):
@@ -147,28 +191,79 @@ class RLDataFlowItem(BaseModel):
     extra_info: RLExtraDataItem = RLExtraDataItem()
 
 
-def check_dataflow_item(group_data_items):
-    if not group_data_items or len(group_data_items) == 0:
+def is_valid_for_replaybuffer(group_data_items: List[RLDataFlowItem]) -> bool:
+    """Checks if a group of data items is valid for insertion into the replay
+    buffer.
+
+    Args:
+        group_data_items: A list of RLDataFlowItem objects.
+
+    Returns:
+        True if the group is valid, False otherwise.
+
+    NOTE: Why this check is needed:
+    - For system fault tolerance, this check is performed at rollout / dataflow
+    time, but we still do it here to ensure replay buffer data integrity.
+    - 'skipped' or 'failed' states indicate that the rollout process did not
+      complete successfully or was intentionally bypassed.
+    - 'aborted' states may still contain useful data for the replay buffer,
+      as the rollout was started but not finished.
+    - 'completed' states are valid and should be included in the replay buffer.
+    """
+    is_skipped = any(item.env.rollout.state == RolloutState.SKIPPED for item in group_data_items)
+    is_failed = any(item.env.rollout.state == RolloutState.FAILED for item in group_data_items)
+    if is_skipped or is_failed:
+        logger.warning(
+            "Invalid dataflow group found during replay buffer insertion, skipped: {is_skipped}, failed: {is_failed}."
+        )
         return False
+    return True
 
-    # 如果存在abort的状态，相当于跳过检查，下次会重新rollout
-    is_abort = any(item.env.rollout.finish_reason == "abort" for item in group_data_items)
-    is_skipped = any(item.env.rollout.finish_reason == "skipped" for item in group_data_items)
-    if is_abort or is_skipped:
-        return True
 
-    no_failures = all(item.env.rollout.finish_reason != "failed" for item in group_data_items)
-    if not no_failures:
+def is_valid_for_training(group_data_items: List[RLDataFlowItem]) -> bool:
+    """Checks if a group of data items is valid for a training step.
+
+    Args:
+        group_data_items: A list of RLDataFlowItem objects.
+
+    Returns:
+        True if the group is valid, False otherwise.
+
+    NOTE: Why this check is needed:
+    - For system fault tolerance, this check is performed at rollout / dataflow
+      time, but we still do it here to ensure training data integrity.
+    - 'skipped'/'failed': These items are fundamentally broken or incomplete and
+      should not be used for training.
+    - 'aborted': These items represent rollouts that were stopped
+      prematurely. Using such partial data could lead the model to learn
+      undesirable behaviors (e.g., stopping generation too early).
+    - Empty response/response_ids: The model's generated response is the core
+      of the training data for RL algorithms like PPO. If the response is
+      missing, there is nothing to compute rewards on or to train the model with.
+    """
+    is_abort = any(item.env.rollout.state == RolloutState.ABORTED for item in group_data_items)
+    is_skipped = any(item.env.rollout.state == RolloutState.SKIPPED for item in group_data_items)
+    is_failed = any(item.env.rollout.state == RolloutState.FAILED for item in group_data_items)
+    if is_skipped or is_failed or is_abort:
+        logger.warning(
+            "Invalid dataflow group found during training, rollout state skipped: {is_skipped}, failed: {is_failed}, aborted: {is_abort}."
+        )
         return False
-
-    no_judger_failures = all(item.env.judger.extra_info.get("state", "") != "failed" for item in group_data_items)
-    if not no_judger_failures:
-        return False
-
-    all_responses_valid = all(item.env.rollout.response for item in group_data_items)
-    all_ids_valid = all(item.env.rollout.response_ids for item in group_data_items)
-
-    return all_responses_valid or all_ids_valid
+    for item in group_data_items:
+        rollout_info = item.env.rollout
+        response_valid = True if rollout_info.response is not None and len(rollout_info.response) > 0 else False
+        ids_valid = True if rollout_info.response_ids is not None and len(rollout_info.response_ids) > 0 else False
+        if not ids_valid:
+            # NOTE: `response_ids` is the critical field for token-in-token-out mode, so we ensure it's not empty.
+            logger.warning(
+                "Invalid dataflow item found during training: no response or response_ids and skip this item."
+            )
+            return False
+        if not response_valid:
+            # NOTE: check valid response string for judger inputs
+            logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
+            return False
+    return True
 
 
 def update_dataflow_item(group_data_items, target_key, target_value):

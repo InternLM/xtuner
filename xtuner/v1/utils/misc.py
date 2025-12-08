@@ -9,13 +9,17 @@ from pathlib import Path
 from types import FunctionType
 from typing import Annotated
 
+from huggingface_hub import constants
 from mmengine import is_installed
 
+import transformers
 from transformers import AutoConfig
 
 from .enum_helper import StrEnum
 from .logger import get_logger
 
+
+HF_PATCH_MODULES_CACHE_PREFIX = "modules_pid_"
 
 logger = get_logger()
 XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
@@ -128,6 +132,21 @@ def is_hf_model_path(path: str | Path) -> bool:
         return False
     else:
         return True
+
+
+def monkey_patch_hf_modules_cache():
+    # 如果在hf中tokenizer、config等使用remote_code，例如 `AutoConfig.from_pretrained(hf_model_path, trust_remote_code=True)`，
+    # 会将hf_model_path 拷贝到 HF_MODULES_CACHE 中。 如果单机八卡机器上多个进程同时读写此目录，会导致冲突。
+    # 因此需要将 HF_MODULES_CACHE 设置为当前进程的临时目录。
+    modules_cache = os.path.join(constants.HF_HOME, f"{HF_PATCH_MODULES_CACHE_PREFIX}{os.getpid()}")
+    os.environ["HF_MODULES_CACHE"] = modules_cache
+    transformers.utils.hub.HF_MODULES_CACHE = modules_cache
+    # 在 import 时刻，Python 会在 dynamic_module_utils 模块的命名空间中创建一个新的名字 HF_MODULES_CACHE，
+    # 并将其绑定到 transformers.utils.HF_MODULES_CACHE 当时所指向的对象。
+    # 因此，需要将 transformers.dynamic_module_utils.HF_MODULES_CACHE 也设置为新的 modules_cache。
+    transformers.dynamic_module_utils.HF_MODULES_CACHE = modules_cache
+    transformers.utils.HF_MODULES_CACHE = modules_cache
+    logger.info(f"set HF_MODULES_CACHE to {modules_cache} for current process {os.getpid()}")
 
 
 class FunctionEnum(StrEnum):

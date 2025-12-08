@@ -1,11 +1,11 @@
-from typing import List
+from typing import List, Callable
 from xtuner.v1.ops.act_fn import get_act_fn
 import torch.nn as nn
 import torch
 from typing_extensions import override
 from .qwen3_vl_config import Qwen3VLVisionConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params
-from xtuner.v1.ops.attn_imp import attn_impl_mapping
+from xtuner.v1.ops.attn_imp import attn_impl_mapping, AttnOpOutputs
 import torch.nn.functional as F
 from pathlib import Path
 from xtuner.v1.model import BaseModel
@@ -22,6 +22,7 @@ from torch.distributed.device_mesh import init_device_mesh
 import torch.distributed as dist
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.model.utils.checkpointing import checkpoint_wrapper
+from xtuner.v1.module import AttnOutputs
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.device_mesh import DeviceMesh
 from tqdm import tqdm
@@ -121,8 +122,10 @@ class Qwen3VLVisionAttention(nn.Module):
         self.scale = self.head_dim ** -0.5
         self.config = config
         self.attention_dropout = 0.0
-        self.attn_impl_func = attn_impl_mapping[config.attn_impl]
-    
+        self.attn_impl_func: Callable[..., AttnOpOutputs] = (
+            attn_impl_mapping[config.attn_impl]  # type: ignore[assignment]
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -169,7 +172,7 @@ class Qwen3VLVisionAttention(nn.Module):
                 mesh=sequence_parallel_mesh,
             )
 
-        attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
+        attn_op_outputs = self.attn_impl_func(
             query_states,  # [b, n_head, seq, head_dim]
             key_states,
             value_states,
@@ -183,17 +186,22 @@ class Qwen3VLVisionAttention(nn.Module):
             deterministic=XTUNER_DETERMINISTIC
         )  # [b, seq, n_head, head_dim]
 
+        raw_output = attn_op_outputs["raw_output"]
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            attn_output = ulysses_all_to_all(
-                attn_output,
+            raw_output = ulysses_all_to_all(
+                raw_output,
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=sequence_parallel_mesh,
             )
 
-        attn_output = attn_output[0].reshape(seq_length, -1).contiguous()  # s, d
-        attn_output = self.proj(attn_output)
-        return attn_output
+        raw_output = raw_output[0].reshape(seq_length, -1).contiguous()  # s, d
+        projected_output = self.proj(raw_output)
+        attn_outputs: AttnOutputs = {
+            "projected_output": projected_output,
+            **attn_op_outputs,
+        }
+        return attn_outputs
 
 
 class Qwen3VLVisionLayer(nn.Module):
@@ -218,7 +226,7 @@ class Qwen3VLVisionLayer(nn.Module):
             max_seqlen=max_seqlen,
             position_embeddings=position_embeddings,
             sequence_parallel_mesh=sequence_parallel_mesh,
-        )
+        )["projected_output"]
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
 

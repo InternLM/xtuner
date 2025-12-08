@@ -52,14 +52,14 @@ def dcp_to_hf(
         ),
     ] = "bf16",
 ):
-    dist.init_process_group()
+    dist.init_process_group(backend="cuda:nccl,cpu:gloo")
     torch.serialization.add_safe_globals(
         [
             WeightWithDynamicTilewiseFloat8CastTensor,
             WeightWithDynamicTensorWiseFloat8CastTensor,
         ]
     )
-    ep_size = dist.get_world_size()
+    ep_size = 16
     torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
 
     if hf_path is None:
