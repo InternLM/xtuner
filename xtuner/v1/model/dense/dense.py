@@ -219,7 +219,6 @@ class Dense(BaseModel):
                 )
                 # __class__ without self attribute
 
-
             if self.compile_cfg:
                 layer.forward = torch.compile(layer.forward, fullgraph=True)
 
