@@ -12,6 +12,8 @@ on:
         description: 'Set branch or tag or commit id. Default is "main"'
         type: string
         default: 'main'
+  schedule:
+    - cron:  '00 14 * * 0-4'
 
 jobs:
   ete_test:
