@@ -33,6 +33,7 @@ class VisionComposeModelProtocol(Protocol):
     vision_tower: XTunerBaseModel
     multi_modal_projector: XTunerBaseModel
     language_model: XTunerBaseModel
+    compile_cfg: dict[str, TorchCompileOption] | None | bool
 
     def set_hf(self, hf_path: str | Path): ...
 
