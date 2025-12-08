@@ -76,6 +76,14 @@ class BaseProber(ABC):
         pass
 
     @classmethod
+    def before_rotary_emb(cls, name: str, x: torch.Tensor, position_ids: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_rotary_emb(cls, name: str, cos: torch.Tensor, sin: torch.Tensor):
+        pass
+
+    @classmethod
     def before_layer(cls, name: str, hidden_states: torch.Tensor):
         pass
 
@@ -246,6 +254,19 @@ class ProberList:
         return wrapped_forward
 
     @classmethod
+    def wrap_rotary_emb_forward(cls, forward: Callable, name: str):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            x, position_ids = args[0], args[1]
+            ProberList.before_rotary_emb(name, x, position_ids)
+            outputs = forward(*args, **kwargs)
+            cos, sin = outputs
+            ProberList.after_rotary_emb(name, cos, sin)
+            return outputs
+
+        return wrapped_forward
+
+    @classmethod
     def wrap_decoder_layer_forward(cls, forward: Callable, name: str):
         @functools.wraps(forward)
         def wrapped_forward(self, *args, **kwargs):
@@ -289,7 +310,11 @@ class ProberList:
                 hidden_states = kwargs["hidden_states"]
             ProberList.before_attention(name, hidden_states)
             outputs = forward(*args, **kwargs)
-            ProberList.after_attention(name, outputs)
+            if isinstance(outputs, tuple):
+                hidden_states = outputs[0]
+            else:
+                hidden_states = outputs
+            ProberList.after_attention(name, hidden_states)
             return outputs
 
         return wrapped_forward
@@ -390,6 +415,16 @@ class ProberList:
     def after_embed_tokens(cls, name: str, hidden_states: torch.Tensor):
         for prober_cls in cls.prober_list:
             prober_cls.after_embed_tokens(name, hidden_states)
+
+    @classmethod
+    def before_rotary_emb(cls, name: str, x: torch.Tensor, position_ids: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_rotary_emb(name, x, position_ids)
+
+    @classmethod
+    def after_rotary_emb(cls, name: str, cos: torch.Tensor, sin: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_rotary_emb(name, cos, sin)
 
     @classmethod
     def before_layer(cls, name: str, hidden_states: torch.Tensor):
@@ -580,6 +615,16 @@ class AccProber(BaseProber):
     @classmethod
     def after_embed_tokens(cls, name: str, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[{name}][after]hidden_states")
+
+    @classmethod
+    def before_rotary_emb(cls, name: str, x: torch.Tensor, position_ids: torch.Tensor):
+        cls.record_tensor(x, f"[{name}][before]x")
+        cls.record_tensor(position_ids, f"[{name}][before]position_ids")
+
+    @classmethod
+    def after_rotary_emb(cls, name: str, cos: torch.Tensor, sin: torch.Tensor):
+        cls.record_tensor(cos, f"[{name}][after]cos")
+        cls.record_tensor(sin, f"[{name}][after]sin")
 
     @classmethod
     def before_layer(cls, name: str | int, hidden_states: torch.Tensor):
