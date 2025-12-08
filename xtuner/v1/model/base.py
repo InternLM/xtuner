@@ -39,7 +39,7 @@ from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, pro
 from xtuner.v1.utils.compile import is_compiled_function, maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
-from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_type
+from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_full_qualname, get_function_type
 
 from .utils import ModelForwardExtraLogInfo
 
@@ -330,7 +330,13 @@ class BaseModel(nn.Module):
 
     @property
     def compile_cfg(self) -> dict[str, TorchCompileOption]:
-        return self._compile_cfg
+        _compile_cfg = self._compile_cfg.copy()
+        for module in self.modules():
+            if isinstance(module, BaseModel) and module is not self:
+                sub_custom_cfg = module.compile_cfg
+                _compile_cfg |= sub_custom_cfg
+
+        return _compile_cfg
 
     @torch.no_grad()
     def init_weights(self):
@@ -1313,11 +1319,12 @@ class BaseModel(nn.Module):
         if compile_options is None:
             compile_options = {}
 
+        if compiled_function is None:
+            raise AttributeError(f"Compiling Error! Cannot locate the function: {func_name}")
+
         if isinstance(compiled_function, maybe_compile):
             maybe_compile.enable_compile(compiled_function, **compile_options)
-            return
-
-        if compiled_function is not None:
+        else:
             compiled_function = cast(FunctionType, compiled_function)
 
             if (function_type := get_function_type(compiled_function)) is FunctionEnum.LOCAL_FUNCTION:
@@ -1337,8 +1344,9 @@ class BaseModel(nn.Module):
 
                 if not is_compiled_function(compiled_function):
                     setattr(cls, method_name, torch.compile(compiled_function, **compile_options))
-        else:
-            raise AttributeError(f"Compiling Error! Cannot locate the function: {func_name}")
+
+        full_name = get_function_full_qualname(compiled_function)  # type: ignore[arg-type]
+        logger.info(f"Enabling torch.compile for function {full_name} with options: {compile_options}")
 
     def _resolve_comile_cfg(
         self, custom_cfg: dict[str, TorchCompileOption] | bool | None
