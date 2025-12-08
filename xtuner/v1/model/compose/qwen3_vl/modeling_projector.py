@@ -56,16 +56,20 @@ class Qwen3VLProjector(BaseModel):
         super().__init__()
         self.merger = Qwen3VLVisionPatchMerger(config, use_postshuffle_norm=False)
         self.deepstack_visual_indexes = config.deepstack_visual_indexes
-        self.deepstack_merger_list = nn.ModuleList(
-            [
-                Qwen3VLVisionPatchMerger(
-                    config=config,
-                    use_postshuffle_norm=True,
-                )
-                for _ in range(len(config.deepstack_visual_indexes))
-            ]
-        )
 
+        self.deepstack_merger_list: nn.ModuleList | list
+        if len(config.deepstack_visual_indexes) == 0:
+            self.deepstack_merger_list = []
+        else:
+            self.deepstack_merger_list = nn.ModuleList(
+                [
+                    Qwen3VLVisionPatchMerger(
+                        config=config,
+                        use_postshuffle_norm=True,
+                    )
+                    for _ in range(len(config.deepstack_visual_indexes))
+                ]
+            )
         self._hf_prefix = "model.visual."
         self._init_load_spec()
 

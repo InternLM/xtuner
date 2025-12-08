@@ -121,7 +121,8 @@ class Dense(BaseModel):
         return layers
 
     def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
-        return get_rope_embedding(config=config)
+        with torch.device(DEVICE):
+            return get_rope_embedding(config=config)
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
@@ -143,7 +144,8 @@ class Dense(BaseModel):
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # xTODO: remove this line below when with torch.device(DEVICE) in __init__()
+        # self.rotary_emb = self.build_rotary_embedding(self.config)
         return loaded_keys, unloaded_keys, missing_keys
 
     @override
@@ -181,7 +183,8 @@ class Dense(BaseModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # xTODO: remove this line below when with torch.device(DEVICE) in __init__()
+        # self.rotary_emb = self.build_rotary_embedding(self.config)
 
         self._maybe_compile_layers()
         mp_policy = MixedPrecisionPolicy(
@@ -270,9 +273,9 @@ class Dense(BaseModel):
             model_mesh = init_device_mesh(
                 device,
                 (world_size, 1),
-                mesh_dim_names=(f"{self.fsdp_config.mesh_prefix}.fsdp", f"{self.fsdp_config.mesh_prefix}.others"),
+                mesh_dim_names=(f"{self.config.mesh_prefix}.fsdp", f"{self.config.mesh_prefix}.others"),
             )
-            self.fsdp_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.fsdp"]
+            self.fsdp_mesh = model_mesh[f"{self.config.mesh_prefix}.fsdp"]
         else:
             self.hsdp_mesh = init_device_mesh(
                 device,
@@ -281,11 +284,11 @@ class Dense(BaseModel):
                     self.fsdp_config.hsdp_sharding_size,
                 ),
                 mesh_dim_names=(
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
+                    f"{self.config.mesh_prefix}.hsdp_replicate",
+                    f"{self.config.mesh_prefix}.hsdp_shard",
                 ),
             )
-            self.fsdp_mesh = self.hsdp_mesh[f"{self.fsdp_config.mesh_prefix}.hsdp_shard"]
+            self.fsdp_mesh = self.hsdp_mesh[f"{self.config.mesh_prefix}.hsdp_shard"]
 
     # TODO: Remove patch before opensource
     @staticmethod
