@@ -118,8 +118,8 @@ class TestMockRollout(unittest.TestCase):
         status = ray.get(self.test_dataflow.get_replaybuffer_status.remote())
         print(f"[{error_name}] Completed rollouts: {completed_rollouts}, Status: {status}")
         self.assertEqual(len(completed_rollouts[0]), 0, f"[{error_name}] Expected no rollouts to complete successfully.")
-        self.assertEqual(status["rollout_finished_count"], 0, f"[{error_name}] Completed count in buffer should be 0.")
-        self.assertEqual(status["rollout_paused_count"], 0, f"[{error_name}] Expected no rollouts to be interrupted.")
+        self.assertEqual(status["remain_completed_samples_count"], 0, f"[{error_name}] Completed count in buffer should be 0.")
+        self.assertEqual(status["remain_aborted_samples_count"], 0, f"[{error_name}] Expected no rollouts to be interrupted.")
         ray.get(self.test_env.shutdown.remote())
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")

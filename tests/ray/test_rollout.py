@@ -156,9 +156,9 @@ class TestRollout(unittest.TestCase):
         finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        finished_count = status["rollout_finished_count"] # 已经去掉了data_flow返回的数量
-        paused_count = status["rollout_paused_count"]
-        sample_count = status["action_count"]
+        finished_count = status["remain_completed_samples_count"] # 已经去掉了data_flow返回的数量
+        paused_count = status["remain_aborted_samples_count"]
+        sample_count = status["sample_from_dataset_count"] + status["sample_from_aborted_count"] + status["sample_from_expired_count"]
         self.assertEqual(len(responses) + finished_count + paused_count, sample_count)
         self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
 
@@ -167,9 +167,9 @@ class TestRollout(unittest.TestCase):
         finished_resume_samples_count = sum(1 for data in response_resume[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_resume_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        finished_count = status["rollout_finished_count"] 
-        paused_count = status["rollout_paused_count"]
-        sample_count = status["action_count"]
+        finished_count = status["remain_completed_samples_count"] 
+        paused_count = status["remain_aborted_samples_count"]
+        sample_count = status["sample_from_dataset_count"] + status["sample_from_aborted_count"] + status["sample_from_expired_count"]
         self.assertEqual(len(response_resume) + finished_count + paused_count, sample_count)
         self.assertEqual(len(response_resume), self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote())
@@ -236,9 +236,9 @@ class TestRollout(unittest.TestCase):
         finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        finished_count = status["rollout_finished_count"] # 已经去掉了data_flow返回的数量
-        paused_count = status["rollout_paused_count"]
-        sample_count = status["action_count"]
+        finished_count = status["remain_completed_samples_count"] # 已经去掉了data_flow返回的数量
+        paused_count = status["remain_aborted_samples_count"]
+        sample_count = status["sample_from_dataset_count"] + status["sample_from_aborted_count"] + status["sample_from_expired_count"]
         self.assertEqual(len(responses) + finished_count + paused_count, sample_count)
         self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
 
@@ -247,9 +247,9 @@ class TestRollout(unittest.TestCase):
         finished_resume_samples_count = sum(1 for data in response_resume[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_resume_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         status = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        finished_count = status["rollout_finished_count"] 
-        paused_count = status["rollout_paused_count"]
-        sample_count = status["action_count"]
+        finished_count = status["remain_completed_samples_count"] 
+        paused_count = status["remain_aborted_samples_count"]
+        sample_count = status["sample_from_dataset_count"] + status["sample_from_aborted_count"] + status["sample_from_expired_count"]
         self.assertEqual(len(response_resume) + finished_count + paused_count, sample_count)
         self.assertEqual(len(response_resume), self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote())
