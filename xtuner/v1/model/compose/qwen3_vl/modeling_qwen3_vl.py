@@ -283,6 +283,13 @@ class Qwen3VLForConditionalGeneration(BaseModel):
             deepstack_visual_embeds = None
             visual_pos_masks = None
 
+        if deepstack_visual_embeds is not None and len(deepstack_visual_embeds) == 0:
+            assert seq_ctx.position_ids is not None
+            assert seq_ctx.position_ids.ndim == 2, f"position_ids must be 2-dim when deepstack_visual_embeds is None," \
+                                                   f" but got {seq_ctx.position_ids.ndim}"
+            deepstack_visual_embeds = None
+            visual_pos_masks = None
+
         # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
         lang_seq_ctx = SequenceContext(input_ids=None,
                                        cu_seq_lens_q=seq_ctx.cu_seq_lens_q,

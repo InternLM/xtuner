@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
 import copy
+import io
 import math
 import os
 from collections.abc import Sequence
@@ -10,6 +11,7 @@ from typing import Optional, Union
 import numpy as np
 import torch
 from packaging import version
+from PIL import Image
 from pydantic import ConfigDict
 
 import transformers
@@ -212,6 +214,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         video_max_total_pixels: int | None = None,  # Max pixels within a frame
         video_min_total_pixels: int | None = None,  # Min pixels within a frame
         system_message: str | None = None,
+        enable_3d_rope: bool = True,
         add_vision_id: bool = True,
         max_length: int | None = None,
         oss_loader_cfg: OSSLoaderConfig | None = None,
@@ -225,6 +228,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.oss_loader = None
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
+        self.enable_3d_rope = enable_3d_rope
+
         if oss_loader_cfg is not None:
             self.oss_loader = Qwen3VLOSSLoader(
                 backend=oss_loader_cfg.backend,
@@ -236,7 +241,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if version.parse(version_str) < version.parse("4.57.0"):
             raise ValueError(f"请升级 transformers 到 4.57.0 及其以上版本，当前版本为 {version_str}")
 
-        _processor = AutoProcessor.from_pretrained(processor_path)
+        _processor = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
         self.image_processor = _processor.image_processor
         self.video_processor = _processor.video_processor
         # default min_pixels 4096=4x32x32=4x16x16x2x2 pix 一张图片 patch size=16x16，然后 merge size=2x2, 最终输出给 llm 占 4 个 token
@@ -286,11 +291,11 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
-        self._hash_str = (
+        _hash_str = (
             f"{self.image_processor.size['shortest_edge']}_{self.image_processor.size['longest_edge']}_"
             f"{self.video_processor.size['shortest_edge']}"
             f"_{self.video_processor.size['longest_edge']}_{self.video_processor.min_frames}_"
-            f"{self.video_processor.max_frames}_{self.video_processor.fps}_"
+            f"{self.video_processor.max_frames}_{self.video_processor.fps}_{self.enable_3d_rope}_"
             f"{self.add_vision_id}_{system_message}_{max_length}_{self.rand_video_max_frames}"
         )
 
@@ -307,7 +312,15 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.eos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
 
         # 必须要最后调用
-        super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash, data_name=self.data_name)
+        super().__init__(
+            tokenizer,
+            self.chat_template,
+            max_length,
+            tokenizer_hash,
+            hash,
+            hash_str=_hash_str,
+            data_name=self.data_name,
+        )
 
     def _truncated_data_item(
         self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
@@ -332,7 +345,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         processor = copy.deepcopy(self.image_processor)
         image_path_ = get_image_path(image_file, media_root)
         if self.oss_loader is not None and "s3://" in image_path_:
-            image = self.oss_loader.client.get(image_path_)
+            img_str = self.oss_loader.client.get(image_path_)
+            buff = io.BytesIO(img_str)
+            image = Image.open(buff).convert("RGB")
         else:
             assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
             image = load_image(image_path_)
@@ -356,12 +371,13 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids = tokenized["input_ids"]
         labels: list[int] = tokenized["labels"]
 
-        position_ids: torch.Tensor
+        position_ids: torch.Tensor | None = None
 
-        position_ids = get_rope_index_3(
-            torch.tensor(input_ids).unsqueeze(0),
-            spatial_merge_size=self.image_processor.merge_size,
-        )
+        if self.enable_3d_rope:
+            position_ids = get_rope_index_3(
+                torch.tensor(input_ids).unsqueeze(0),
+                spatial_merge_size=self.image_processor.merge_size,
+            )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
@@ -456,11 +472,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             np_labels[np_labels == self.img_end_token_id] = -100
             labels = np_labels.tolist()
 
-        position_ids = get_rope_index_3(
-            torch.tensor(input_ids).unsqueeze(0),
-            spatial_merge_size=self.image_processor.merge_size,
-            image_grid_thw=torch.stack(grid_thw, dim=0),
-        )
+        position_ids: torch.Tensor | None = None
+
+        if self.enable_3d_rope:
+            position_ids = get_rope_index_3(
+                torch.tensor(input_ids).unsqueeze(0),
+                spatial_merge_size=self.image_processor.merge_size,
+                image_grid_thw=torch.stack(grid_thw, dim=0),
+            )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
@@ -715,14 +734,22 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 timestamps = timestamps_list[i]
 
             video_path = os.path.join(media_root, video_path)
+            if len(self._video_extra_info_list) > 0:
+                video_extra_dict = self._video_extra_info_list[i]
+            else:
+                video_extra_dict = None
 
             if self.oss_loader is not None:
                 image_list, frame_indices, timestamps = self.oss_loader(
-                    video_path, image_type="video", frames_indices=frames_indices, timestamps=timestamps
+                    video_path,
+                    image_type="video",
+                    frames_indices=frames_indices,
+                    timestamps=timestamps,
+                    video_extra_dict=video_extra_dict,
                 )
             else:
                 image_list, frame_indices, timestamps = read_qwen3_vl_video(
-                    video_path, frames_indices=frames_indices, timestamps=timestamps
+                    video_path, frames_indices=frames_indices, timestamps=timestamps, video_extra_dict=video_extra_dict
                 )
 
             assert len(image_list) % self.video_processor.merge_size == 0, "num_frames must be divisible by merge_size"
@@ -816,11 +843,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             np_labels[np_labels == self.img_end_token_id] = -100
             labels = np_labels.tolist()
 
-        position_ids = get_rope_index_3(
-            torch.tensor(input_ids).unsqueeze(0),
-            spatial_merge_size=self.image_processor.merge_size,
-            video_grid_thw=torch.cat(grid_thw_list),
-        )
+        position_ids: torch.Tensor | None = None
+
+        if self.enable_3d_rope:
+            position_ids = get_rope_index_3(
+                torch.tensor(input_ids).unsqueeze(0),
+                spatial_merge_size=self.image_processor.merge_size,
+                video_grid_thw=torch.cat(grid_thw_list),
+            )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
@@ -862,6 +892,8 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     fps: int | None = None
     rand_video_max_frames: int = 24
 
+    enable_3d_rope: bool = True
+
     # When handling multiple images or multiple videos,
     # it's helpful to add labels to the images and videos for better reference.
     # 注意这个逻辑和 hf 官方不是完全一致。 hf 官方只要开启这个 flag 就一定追加，不管是单个图片还是单个视频
@@ -884,6 +916,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             video_max_frames=self.video_max_frames,
             rand_video_max_frames=self.rand_video_max_frames,
             fps=self.fps,
+            enable_3d_rope=self.enable_3d_rope,
             add_vision_id=self.add_vision_id,
             max_length=self.max_length,
             system_message=self.system_message,
