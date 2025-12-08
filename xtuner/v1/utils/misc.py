@@ -169,3 +169,27 @@ def get_function_type(func: FunctionType):
             return FunctionEnum.CLASS_LEVEL_FUNCTION
     else:
         return FunctionEnum.TOP_LEVEL_FUNCTION
+
+
+def get_function_full_qualname(function: FunctionType) -> str:
+    """Get the full qualified name of a function, including module and class
+    names if applicable.
+
+    Args:
+        function: The function to get the qualified name for.
+
+    Returns:
+        The full qualified name of the function.
+    """
+    if isinstance(function, FunctionType):
+        module_name = function.__module__
+        qualname = function.__qualname__
+    # For `xtuner.v1.utils.compile.MaybeCompile`, using attributes check to avoid from circular import.
+    elif hasattr(function, "origin_func"):
+        module_name = function.origin_func.__module__
+        qualname = function.origin_func.__qualname__
+    else:
+        raise TypeError(f"Expected a `function` or `MaybeCompile`, but got {type(function)}")
+
+    full_qualname = f"{module_name}.{qualname}"
+    return full_qualname
