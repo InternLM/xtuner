@@ -14,6 +14,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from cyclopts import Parameter
+from more_itertools import consume
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, computed_field
 from safetensors.torch import save_file
