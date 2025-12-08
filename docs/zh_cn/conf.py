@@ -120,6 +120,7 @@ autodoc_mock_imports = [
     "uvicorn",
     "fastapi",
     "huggingface_hub",
+    "more_itertools",
 ]
 
 
