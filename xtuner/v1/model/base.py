@@ -90,6 +90,9 @@ class TransformerConfig(XTunerBaseModelConfig):
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
     dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
+    mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
+        "default"
+    )
 
     @computed_field
     def num_attention_heads(self) -> int:
