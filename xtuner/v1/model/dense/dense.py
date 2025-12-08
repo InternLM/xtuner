@@ -219,8 +219,8 @@ class Dense(BaseModel):
                 )
                 # __class__ without self attribute
 
-            if self.compile_cfg:
-                layer.forward = torch.compile(layer.forward, fullgraph=True)
+                if self.compile_cfg:
+                    layer.forward = torch.compile(layer.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
             fully_shard(
