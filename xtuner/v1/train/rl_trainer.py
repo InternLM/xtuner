@@ -234,7 +234,13 @@ class RLTrainer:
 
         self._rl_trainer_cfg = trainer_cfg
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
-        self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
+
+        is_hf_path = is_hf_model_path(load_from)
+        if isinstance(is_hf_path, tuple):
+            raise NotImplementedError(is_hf_path[1])
+        else:
+            self._load_from_hf = load_from is not None
+
         if not self._load_from_hf:
             raise NotImplementedError
 

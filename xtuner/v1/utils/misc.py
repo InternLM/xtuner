@@ -119,14 +119,13 @@ def record_git_info(staged_path: Path, unstaged_path: Path) -> Annotated[str, "C
     return commit
 
 
-def is_hf_model_path(path: str | Path) -> bool:
+def is_hf_model_path(path: str | Path) -> bool | tuple[bool, Exception]:
     try:
         AutoConfig.from_pretrained(path, trust_remote_code=True)
     except KeyboardInterrupt as e:
         raise e
     except Exception as e:
-        logger.debug(f"Model path {path} is not a valid HuggingFace model path. Error: {e}")
-        return False
+        return False, e
     else:
         return True
 

@@ -491,13 +491,20 @@ class Trainer:
         self._profile_time = profile_time
         self._profile_memory = profile_memory
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
-        self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
+
+        is_hf_path = is_hf_model_path(load_from)
+        if isinstance(is_hf_path, tuple):
+            self._load_from_hf = False
+        else:
+            self._load_from_hf = load_from is not None
         self._can_save_hf = model_cfg.hf_config is not None or self._load_from_hf
 
         if not self._can_save_hf:
-            assert hf_interval is None and hf_max_keep is None, (
-                "`hf_interval` and `hf_max_keep` should be None when `load_from` is not a Huggingface model path, "
-            )
+            assert_info = f"`hf_interval`: {hf_interval} and `hf_max_keep`: {hf_max_keep} " \
+                          f"should be None when `load_from` is not a Huggingface model path, "
+            if isinstance(is_hf_path, tuple):
+                assert_info += f", HF path load error Info: {is_hf_path[1]}"
+            assert hf_interval is None and hf_max_keep is None, assert_info
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
@@ -753,6 +760,7 @@ class Trainer:
             ProberList.after_step()
             step_time = time_after_train_step - time_before_train_step
             step_consumed_tokens = other_log["consumed_tokens"]
+            step_consumed_img_tokens = other_log.get("consumed_img_tokens", None)
 
             extra_info = other_log.get("extra_info", {})
             if isinstance(extra_info, ModelForwardExtraLogInfo):
@@ -781,6 +789,7 @@ class Trainer:
                 loss_log=loss_log,
                 step_consumed_tokens=step_consumed_tokens,
                 exp_consumed_tokens=self._exp_consumed_tokens,
+                step_consumed_img_tokens=step_consumed_img_tokens,
                 reduced_consumed_tokens=self._reduced_consumed_tokens,
                 data_time=data_time,
                 step_time=step_time,
@@ -1422,6 +1431,7 @@ class Trainer:
         train_time: float,
         train_time_offset: float,
         grad_norm: float,
+        step_consumed_img_tokens: float | None,
         internal_metrics: InternalMetrics | None = None,
     ):
         """Log the training step information."""
@@ -1450,10 +1460,15 @@ class Trainer:
         if internal_metrics:
             flattened_internal_metrics = flatten_internal_metrics_for_logs(internal_metrics)
 
+        if step_consumed_img_tokens is not None:
+            img_tokens_str = f"img_tokens: {step_consumed_img_tokens}"
+        else:
+            img_tokens_str = ""
+
         self.logger.info(
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
             f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
-            f"text_tokens: {step_consumed_tokens} "
+            f"text_tokens: {step_consumed_tokens} {img_tokens_str}"
             f"reduced_consumed_tokens: {reduced_consumed_tokens} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
