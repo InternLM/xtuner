@@ -4,8 +4,7 @@ from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.float8 import Float8Config
-from xtuner.v1.model.base import XTunerBaseModelConfig
-from xtuner.v1.model.base import TorchCompileOption
+from xtuner.v1.model.base import TorchCompileOption, XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
@@ -95,9 +94,6 @@ class InternVLBaseConfig(XTunerBaseModelConfig):
     freeze_projector: bool = False
     freeze_language: bool = False
     dcp_ignore_frozen_params: bool = True
-    compile_cfg: dict[str, TorchCompileOption] | None | bool = (
-        None  # None means use default compile option, False means disable compile
-    )
 
     def build(self) -> "InternVLForConditionalGeneration":
         from .modeling_internvl import InternVLForConditionalGeneration
