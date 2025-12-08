@@ -50,6 +50,23 @@ DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
 
 
+class HFSaveCfg(PydanticBaseModel):
+    model_config = ConfigDict(extra="forbid")
+    worker_per_rank: Annotated[int, Parameter(group="model")] = 16
+    max_save_rank: Annotated[int, Parameter(group="model")] = 16
+    bucket_size: Annotated[int, Parameter(group="model")] = 1024**3 * 4
+
+
+class XTunerBaseModelConfig(PydanticBaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hf_save_cfg: HFSaveCfg = HFSaveCfg()
+    float8_cfg: Float8Config | None = None
+
+    @property
+    def hf_config(self) -> PretrainedConfig | None:
+        raise NotImplementedError
+
+
 class TorchCompileOption(TypedDict):
     fullgraph: NotRequired[bool]
     dynamic: NotRequired[bool | None]
@@ -57,28 +74,16 @@ class TorchCompileOption(TypedDict):
     options: NotRequired[dict[str, int | bool | str] | None]
 
 
-class CompileTarget(NamedTuple):
-    name: str
-    option: TorchCompileOption
+DEFAULT_FLOAT8_CFG = {
+    "xtuner.v1.float8.fsdp_utils.tensor_to_per_block_fp8_scales": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.float8.fsdp_utils.cast_to_per_block_fp8_with_scales": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.float8.triton_kernels.per_block_quant_gemm.per_block_quant_torch": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.float8.fsdp_utils.cast_to_per_tensor_fp8_with_scales": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.float8.float8_linear_tensor_wise.per_tensor_fp8_quant": TorchCompileOption(fullgraph=True),
+}
 
 
-DEFAULT_FLOAT8_CFG = [
-    CompileTarget("xtuner.v1.float8.fsdp_utils.tensor_to_per_block_fp8_scales", TorchCompileOption(fullgraph=True)),
-    CompileTarget("xtuner.v1.float8.fsdp_utils.cast_to_per_block_fp8_with_scales", TorchCompileOption(fullgraph=True)),
-    CompileTarget(
-        "xtuner.v1.float8.triton_kernels.per_block_quant_gemm.per_block_quant_torch",
-        TorchCompileOption(fullgraph=True),
-    ),
-    CompileTarget(
-        "xtuner.v1.float8.fsdp_utils.cast_to_per_tensor_fp8_with_scales", TorchCompileOption(fullgraph=True)
-    ),
-    CompileTarget(
-        "xtuner.v1.float8.float8_linear_tensor_wise.per_tensor_fp8_quant", TorchCompileOption(fullgraph=True)
-    ),
-]
-
-
-class TransformerConfig(PydanticBaseModel):
+class TransformerConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -99,20 +104,25 @@ class TransformerConfig(PydanticBaseModel):
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
     model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
     generate_config: GenerateConfig | None = None
-    float8_cfg: Float8Config | None = None
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
-    hf_save_worker: Annotated[int, Parameter(group="model")] = 16
-    compile_cfg: list[str | CompileTarget] | None | bool = (
+    compile_cfg: dict[str, TorchCompileOption] | None | bool = (
         None  # None means use default compile option, False means disable compile
     )
     dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
+    mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
+        "default"
+    )
 
     @computed_field
     def num_attention_heads(self) -> int:
         return self.attention.num_attention_heads
+
+    @computed_field
+    def num_key_value_heads(self) -> int:
+        return self.attention.num_key_value_heads
 
     @computed_field
     def head_dim(self) -> int:
@@ -209,9 +219,8 @@ class BaseModel(nn.Module):
     fsdp_mesh: DeviceMesh | None = None
     hsdp_mesh: DeviceMesh | None = None
     fsdp_config: FSDPConfig | None = None
-    config: TransformerConfig
+    config: XTunerBaseModelConfig
 
-    SAFETENSOR_SIZE = 1024**3 * 4  # 4GB
     FSDP_SHARD_DIM = 0
 
     def __init__(self, config: TransformerConfig):
@@ -225,7 +234,7 @@ class BaseModel(nn.Module):
             # to make sure VL model config can be compatible with `resolve_compile_cfg`
             self._compile_cfg = self._resolve_comile_cfg(self.config.compile_cfg)
         else:
-            self._compile_cfg = []
+            self._compile_cfg = {}
 
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
@@ -309,11 +318,11 @@ class BaseModel(nn.Module):
         return torch.device(DEVICE)
 
     @property
-    def default_compile_cfg(self) -> list[str | CompileTarget]:
-        return []
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        return {}
 
     @property
-    def compile_cfg(self) -> list[str | CompileTarget]:
+    def compile_cfg(self) -> dict[str, TorchCompileOption]:
         return self._compile_cfg
 
     @torch.no_grad()
@@ -499,7 +508,8 @@ class BaseModel(nn.Module):
             return unsharded_tensor_list
 
         if bucket_size is None:
-            bucket_size = self.SAFETENSOR_SIZE
+            bucket_size = self.config.hf_save_cfg.bucket_size
+
         safetensor_size = 0
         tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
         name_list: list[str] = []
@@ -564,12 +574,19 @@ class BaseModel(nn.Module):
                     all_hf_keys = hf_keys
 
                 current_rank = dist.get_rank()
-                fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
-                key_per_rank = len(all_hf_keys) / len(fused_save_ranks)
-                assert key_per_rank.is_integer(), (
-                    f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
-                    f"size of `fused_save_ranks` {len(fused_save_ranks)}"
+
+                expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
+                hardcode_fused_save_ranks = list(
+                    range(min((dist.get_world_size(), self.config.hf_save_cfg.max_save_rank)))
                 )
+
+                key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
+                # assert key_per_rank.is_integer(), (
+                #     f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
+                #     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
+                # )
+                if not key_per_rank.is_integer():
+                    key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
 
                 # 1. When return_full_key_per_rank is False, we intends to save hf models across ranks,
                 # each rank only saves part of hf keys and tensors
@@ -649,7 +666,7 @@ class BaseModel(nn.Module):
             return hf_tensor_list, name_list
 
         if bucket_size is None:
-            bucket_size = self.SAFETENSOR_SIZE
+            bucket_size = self.config.hf_save_cfg.bucket_size
         safetensor_size = 0
         tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
         name_list: list[str] = []
@@ -683,13 +700,20 @@ class BaseModel(nn.Module):
         if not params:
             return
         if bucket_size is None:
-            bucket_size = self.SAFETENSOR_SIZE
+            bucket_size = self.config.hf_save_cfg.bucket_size
         safetensor_size = 0
         tensor_list: list[torch.Tensor] = []
         load_spec_list: list[LoadSpec] = []
         name_list: list[str] = []
+        buffer_tensor_list: list[torch.Tensor] = []
+        buffer_name_list: list[str] = []
 
         for param, load_spec in params:
+            if not isinstance(param, DTensor):
+                # in case, param is a buffer of module, FSDP will not shard it, so it's not a DTensor
+                buffer_tensor_list.append(param)
+                buffer_name_list.append(load_spec.hf_keys[0])
+                continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
             local_tensor = local_tensor.bfloat16()
             tensor_size = self._get_tensor_size(param, dtype)
@@ -732,6 +756,9 @@ class BaseModel(nn.Module):
             gathered_tensor_list = [t.to(device=device) for t in gathered_tensor_list]
             yield name_list, gathered_tensor_list
 
+        if buffer_tensor_list:
+            yield buffer_name_list, buffer_tensor_list
+
     def _clean_param_name(self, name: str) -> str:
         if "._checkpoint_wrapped_module." in name:
             name = name.replace("._checkpoint_wrapped_module.", ".")
@@ -759,6 +786,7 @@ class BaseModel(nn.Module):
 
     def _get_safe_tensor_num(self, dtype: torch.dtype) -> int:
         """Get the size of the model in bytes."""
+        bucket_size = self.config.hf_save_cfg.bucket_size
         shard_size = 0
         same_size = 0
         fused_size = 0
@@ -773,9 +801,9 @@ class BaseModel(nn.Module):
             elif load_spec.load_enum == LoadEnum.FUSED:
                 fused_size += self._get_tensor_size(param, dtype)
         return (
-            math.ceil(shard_size / self.SAFETENSOR_SIZE)
-            + math.ceil(same_size / self.SAFETENSOR_SIZE)
-            + math.ceil(fused_size / self.SAFETENSOR_SIZE)
+            math.ceil(shard_size / bucket_size)
+            + math.ceil(same_size / bucket_size)
+            + math.ceil(fused_size / bucket_size)
         )
 
     def _save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16):
@@ -807,7 +835,7 @@ class BaseModel(nn.Module):
         # Tell me why! why! old cao! @HIT-cwh
         # mp_context = multiprocessing.get_context("fork")
         # save_executor = ProcessPoolExecutor(max_workers=16, mp_context=mp_context)
-        save_executor = ThreadPoolExecutor(max_workers=16)
+        save_executor = ThreadPoolExecutor(max_workers=self.config.hf_save_cfg.worker_per_rank)
 
         if dist.is_initialized():
             save_rank = dist.get_rank()
@@ -827,7 +855,7 @@ class BaseModel(nn.Module):
 
             safetensor_index += 1
             safetensor_name = f"model-{safetensor_index:04d}-fused-save_rank{save_rank}.safetensors"
-            weight_map.update({name: safetensor_name for name in name_list})
+            weight_map.update(dict.fromkeys(name_list, safetensor_name))
             assert save_executor is not None, "Internal Error, save_executor should not be None"
             future = save_executor.submit(
                 _save_file,
@@ -881,9 +909,12 @@ class BaseModel(nn.Module):
         weight_map = reduce(lambda x, y: x | y, weight_map_list)
 
         if not dist.is_initialized() or dist.get_rank() == 0:
+            if self.config.hf_config is None and self._hf_path is None:
+                raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
+
             if self.config.hf_config is not None:
                 self.config.save_hf(hf_dir)
-            elif self._hf_path is not None:
+            else:  # if self._hf_path is not None:
                 for file in cast(Path, self._hf_path).iterdir():
                     if file.suffix != ".safetensors":
                         # Copy the model config and tokenizer files to the save path
@@ -893,9 +924,7 @@ class BaseModel(nn.Module):
                         else:
                             copytree(file, target_path)
 
-            else:
-                raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
-
+            # write or overwrite `model.safetensors.index.json`
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 index = {"weight_map": weight_map, "metadata": {}}
                 json.dump(index, f, indent=2, ensure_ascii=False)
@@ -991,7 +1020,6 @@ class BaseModel(nn.Module):
     ) -> list[str]:  # return missing key
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
         hf_key = load_spec.hf_keys[0]
-
         if self._is_loaded_param_fp8(hf_key, checkpoint_loader):
             if not _is_float8_available():
                 raise RuntimeError(
@@ -1080,7 +1108,6 @@ class BaseModel(nn.Module):
             start = None
             end = None
 
-        # dist.breakpoint(1)
         missing_keys: list[str] = []
         _loaded_tensor: list[torch.Tensor] = []
         for hf_key in hf_keys:
@@ -1301,9 +1328,9 @@ class BaseModel(nn.Module):
         else:
             raise AttributeError(f"Compiling Error! Cannot locate the function: {func_name}")
 
-    def _resolve_comile_cfg(self, custom_cfg: list[str | CompileTarget] | bool | None) -> list[str | CompileTarget]:
+    def _resolve_comile_cfg(self, custom_cfg: dict[str, TorchCompileOption] | bool | None) -> dict[str, TorchCompileOption]:
         if custom_cfg is False:
-            return []
+            return {}
 
         if custom_cfg is True or custom_cfg is None:
             compile_cfg = self.default_compile_cfg
@@ -1312,19 +1339,9 @@ class BaseModel(nn.Module):
 
         return compile_cfg
 
-    def _maybe_enable_compile(self, compile_cfg: list[str | CompileTarget]):
+    def _maybe_enable_compile(self, compile_cfg: dict[str, TorchCompileOption]):
         if compile_cfg:
             torch._dynamo.config.cache_size_limit = 256
 
-        def _compile_cfg_to_dict(compile_cfg: list[str | CompileTarget]) -> dict[str, TorchCompileOption]:
-            return {
-                (i.name if isinstance(i, CompileTarget) else i): (
-                    i.option if isinstance(i, CompileTarget) else TorchCompileOption()
-                )
-                for i in compile_cfg
-            }
-
-        compile_cfg_dict = _compile_cfg_to_dict(compile_cfg)
-
-        for target, option in compile_cfg_dict.items():
+        for target, option in compile_cfg.items():
             self._compile_overwrite(target, option)

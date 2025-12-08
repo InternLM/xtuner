@@ -8,6 +8,12 @@ from .misc import FunctionEnum, get_function_type
 from .type_helper import P, T
 
 
+from .logger import get_logger
+
+
+logger = get_logger()
+
+
 TARGET_DEVICE = get_device()
 
 
@@ -42,11 +48,13 @@ class MaybeCompile(Generic[P, T]):
 
     def enable_compile(self, **compile_options) -> None:
         """Enable torch.compile with the given arguments."""
+        logger.info(f"Enabling torch.compile for function {self.origin_func.__name__} with options: {compile_options}")
         if not is_compiled_function(self.func):
             self.func = torch.compile(self.origin_func, **compile_options)
 
     def disable_compile(self) -> None:
         """Disable torch.compile, reverting to the original function."""
+        logger.info(f"Disabling torch.compile for function {self.origin_func.__name__}")
         self.func = self.origin_func
 
 
