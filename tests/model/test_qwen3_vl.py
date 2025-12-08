@@ -189,7 +189,6 @@ class TestQwen3VL(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             model_cfg = Qwen3VLDense4BConfig(compile_cfg=False)
-            model_cfg.text_config.compile_cfg = False
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
@@ -224,7 +223,6 @@ class TestQwen3VL(DeterministicDDPTestCase):
             model_cfg = Qwen3VLDense4BConfig()
             if compile is False:
                 model_cfg.compile_cfg = False
-                model_cfg.text_config.compile_cfg = False
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
