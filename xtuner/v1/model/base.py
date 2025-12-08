@@ -201,7 +201,7 @@ class BaseModel(nn.Module):
 
     FSDP_SHARD_DIM = 0
 
-    def __init__(self, config: TransformerConfig):
+    def __init__(self, config: XTunerBaseModelConfig):
         super().__init__()
         self.config = config
 
