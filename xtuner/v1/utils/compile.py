@@ -46,7 +46,6 @@ class MaybeCompile(Generic[P, T]):
 
     def enable_compile(self, **compile_options) -> None:
         """Enable torch.compile with the given arguments."""
-        logger.info(f"Enabling torch.compile for function {self.origin_func.__name__} with options: {compile_options}")
         if not is_compiled_function(self.func):
             self.func = torch.compile(self.origin_func, **compile_options)
 
