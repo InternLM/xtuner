@@ -4,7 +4,7 @@ from .comm import all_to_all_single_autograd, ulysses_all_to_all
 __all__ = ["all_to_all_single_autograd", "ulysses_all_to_all"]
 
 from .act_fn import get_act_fn
-from .attn_imp import attn_impl_mapping
+from .attn_imp import AttnOpOutputs, attn_impl_mapping
 from .flash_attn import flash_attn_varlen_func
 from .moe import group_gemm, permute, unpermute
 from .rms_norm import rms_norm
