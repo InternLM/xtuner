@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 import multiprocessing
@@ -16,12 +17,12 @@ from packaging.version import Version
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from transformers import AutoTokenizer
-from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem
+from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem, RolloutState
 from xtuner.v1.ray import find_master_addr_and_port
 from xtuner.v1.ray.base import AutoAcceleratorWorkers, SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import get_logger
-from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult, set_rollout_response_status
+from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 
 class RolloutWorker(SingleAcceleratorWorker):
@@ -318,8 +319,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     ) -> RLRolloutResponseItem:
         uid = extra_info.get("action_id", str(uuid.uuid4()))
         response = None
-        failed_rollout_response = RLRolloutResponseItem(finish_reason="failed")
-        self._check_infer_engine_version("return_token_ids" in extra_params and extra_params["return_token_ids"])
+        cur_retry_times = 0
 
         if format == "openai":
             openai_prompts, openai_tools = prompts, tools
@@ -331,37 +331,70 @@ class RolloutWorker(SingleAcceleratorWorker):
         else:
             endpoint_url = f"{self.server_url}/{self.endpoints['v1/chat/completions']}"
 
-        http_result = await self._create_request(
-            endpoint_url,
-            openai_prompts,
-            input_ids,
-            openai_tools,
-            tool_choice,
-            sample_params=sample_params,
-            extra_params=extra_params,
-            extra_info=extra_info,
-        )
-
-        if http_result.response is not None:
-            response = http_result.response
-            try:
-                rollout_response = (
-                    await self._handle_stream_response(uid, sample_params, extra_params, response)
-                    if extra_params["stream"]
-                    else await self._handle_non_stream_response(uid, sample_params, extra_params, response)
+        while True:
+            http_result = await self._create_request(
+                endpoint_url,
+                openai_prompts,
+                input_ids,
+                openai_tools,
+                tool_choice,
+                sample_params=sample_params,
+                extra_params=extra_params,
+                extra_info=extra_info,
+            )
+            # Case 1: Request was successful
+            if http_result.response is not None:  # 推理完成：completed状态：finish_reason为abort/stop/length, 退出
+                response = await self._handle_non_stream_response(
+                    uid, sample_params, extra_params, http_result.response
                 )
-            finally:
-                if hasattr(response, "aclose"):
-                    await response.aclose()
-            return rollout_response
-        else:
+                if response.state == RolloutState.SKIPPED:
+                    # retry
+                    cur_retry_times += 1
+                    if cur_retry_times < self.config.max_retry_per_sample:
+                        self.logger.warning(
+                            f"Invalid rollout response for request {uid}, retrying {cur_retry_times}/{self.config.max_retry_per_sample}."
+                        )
+                        await asyncio.sleep(0.1)
+                        continue
+                    else:
+                        return RLRolloutResponseItem(state=RolloutState.SKIPPED)
+                return response
+
+            # Case 2: A fatal, non-retryable error occurred
             if http_result.is_unknown_error:
                 raise RuntimeError(
                     f"Unexpected error during rollout request {uid} to {http_result.url}: {http_result.exception}"
                 )
+
+            # Case 3: A retryable error occurred, and we still have retries left
+            elif http_result.is_retryable and cur_retry_times < self.config.max_retry_per_sample:
+                cur_retry_times += 1
+                self.logger.warning(
+                    f"Retrying rollout request {uid} to {http_result.url} due to {http_result.error_type} with exception {http_result.exception}. "
+                    f"Retry {cur_retry_times}/{self.config.max_retry_per_sample}."
+                )
+                await asyncio.sleep(0.1)
+                continue
+
+            elif http_result.is_retryable and cur_retry_times >= self.config.max_retry_per_sample:
+                self.logger.warning(
+                    "rollout request {uid} to {http_result.url} was skipped due to max retries reached"
+                )
+                return RLRolloutResponseItem(state=RolloutState.SKIPPED)
+            elif http_result.is_client_error:
+                self.logger.warning(
+                    f"rollout request {uid} to {http_result.url} was skipped due to client error {http_result.error_type} with exception {http_result.exception}"
+                )
+                return RLRolloutResponseItem(state=RolloutState.SKIPPED)
+            elif http_result.is_server_error:
+                self.logger.warning(
+                    f"rollout request {uid} to {http_result.url} failed due to server error {http_result.error_type} with exception {http_result.exception}"
+                )
+                return RLRolloutResponseItem(state=RolloutState.FAILED)
             else:
-                set_rollout_response_status(http_result, failed_rollout_response, self.server_url)
-                return failed_rollout_response
+                raise RuntimeError(
+                    f"Unhandled error case for rollout request {uid} to {http_result.url}: {http_result.exception}"
+                )
 
     async def _handle_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
         last_trajectory = ""
@@ -414,9 +447,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     finish_reason="failed",
                 )
 
-        assert finish_reason in ["stop", "length", "tool_call", "paused", "failed", "abort"], (
-            f"Unexpected finish_reason: {finish_reason}"
-        )
+        assert finish_reason in ["stop", "length", "tool_call", "abort"], f"Unexpected finish_reason: {finish_reason}"
         rollout_response = RLRolloutResponseItem(
             response=last_trajectory,
             response_ids=last_token_ids if len(last_token_ids) > 0 else None,
@@ -429,21 +460,23 @@ class RolloutWorker(SingleAcceleratorWorker):
     async def _handle_non_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
         response = response.json()
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-            # generate API response
-            last_logprobs = []
+            last_logprobs: list[float] = []
             try:
                 extra_info = {}
                 finish_reason = response["meta_info"]["finish_reason"]["type"]
-                if finish_reason == "abort":
-                    return RLRolloutResponseItem(
-                        finish_reason="abort",
-                    )
                 if "output_token_logprobs" in response["meta_info"]:
-                    last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
-                    last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
-                    assert len(last_token_ids) <= sample_params["max_tokens"], (
-                        f"生成长度超过限制，生成长度 {len(last_token_ids)}，限制 {sample_params['max_tokens']}"
-                    )
+                    if response["meta_info"]["output_token_logprobs"] is None:
+                        last_token_ids = []
+                        last_logprobs = []
+                    else:
+                        last_token_ids = [item[1] for item in response["meta_info"]["output_token_logprobs"]]
+                        last_logprobs = [item[0] for item in response["meta_info"]["output_token_logprobs"]]
+                        assert len(last_token_ids) <= sample_params["max_tokens"], (
+                            f"Generation length exceeds the limit: generated length is {len(last_token_ids)}, limit is {sample_params['max_tokens']}"
+                        )
+                        assert len(last_logprobs) == len(last_token_ids), (
+                            f"The lengths of generated token_ids and logprobs do not match: token_ids length is {len(last_token_ids)}, logprobs length is {len(last_logprobs)}"
+                        )
                 else:
                     num_return_tokens = response["meta_info"].get("completion_tokens", 0)
                     last_token_ids = response["output_ids"][-num_return_tokens:] if num_return_tokens > 0 else []
@@ -463,15 +496,21 @@ class RolloutWorker(SingleAcceleratorWorker):
                         routed_experts = ray.put(routed_experts)
                     extra_info = {"routed_experts": routed_experts}
 
-                last_trajectory = response["text"]
-                rollout_response = RLRolloutResponseItem(
-                    response=last_trajectory,
-                    response_ids=last_token_ids if len(last_token_ids) > 0 else None,
-                    num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
-                    finish_reason=finish_reason,
-                    logprobs=last_logprobs if len(last_logprobs) > 0 else None,
-                    extra_info=extra_info,
-                )
+                # NOTE: When set return_token_ids = True, the response must contain valid token_ids/logprobs.
+                # If not, we consider it as an invalid response and retry it.
+                # NOTE: !!! When finish_reason is abort, some queries may not return token_ids or logprobs. !!!
+                if finish_reason != "abort" and (len(last_token_ids) == 0 or len(last_logprobs) == 0):
+                    return RLRolloutResponseItem(state=RolloutState.SKIPPED)
+                else:
+                    rollout_response = RLRolloutResponseItem(
+                        response=response["text"],
+                        response_ids=last_token_ids,
+                        num_return_tokens=len(last_token_ids),
+                        finish_reason=finish_reason,
+                        logprobs=last_logprobs,
+                        extra_info=extra_info,
+                        state=RolloutState.COMPLETED if finish_reason == "abort" else RolloutState.COMPLETED,
+                    )
                 return rollout_response
             except KeyError as e:
                 error_msg = f"Missing expected key {e} in response {response} for {uid}"
