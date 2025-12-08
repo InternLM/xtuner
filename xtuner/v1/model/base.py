@@ -1174,37 +1174,27 @@ class BaseModel(nn.Module):
         fsdp_unsharded_tensor_list = []
 
         # Concatenate the tensors along the FSDP shard dim
+        fuse_without_alloc = self.FSDP_SHARD_DIM == 0 and len(_fsdp_unsharded_tensor_list) == 1
         for tensors, size in zip(_fsdp_unsharded_tensor_list, origin_fsdp_size):
-            # Tn the case of one big tensor in tensor_list, the partition of tensors are contiguous.
-            # Therefore the cat and index_select operation can be omitted,
-            # and use _fuse_contiguous_chunks_without_alloc instead to reduce device peak memory.
-            # e.g. When a fused MoE weight exceeds bucket_size given, len(tensor_list) would be 1.
-            # and fused_tensor is not None reducing peak device memory.
-            fused_tensor = self._fuse_contiguous_chunks_without_alloc(tensors)
-            if fused_tensor is not None and fused_tensor.shape[self.FSDP_SHARD_DIM] == size:
-                fsdp_unsharded_tensor_list.append(fused_tensor)
-                continue
-            elif fused_tensor is not None:
-                # free memory ASAP
-                del fused_tensor
-            tensor = torch.cat(tensors, dim=self.FSDP_SHARD_DIM)
-            cat_tensor = torch.index_select(
-                tensor,
-                dim=self.FSDP_SHARD_DIM,
-                index=torch.arange(0, size, dtype=torch.int64, device=tensors[0].device),
-            )
-            pad_tensor = torch.index_select(
-                tensor,
-                dim=self.FSDP_SHARD_DIM,
-                index=torch.arange(size, tensor.shape[0], dtype=torch.int64, device=tensors[0].device),
-            )
+            if fuse_without_alloc:
+                # In the case of only one big tensor in tensor_list, the partition of tensors are contiguous.
+                # Therefore the cat and index_select operation can be omitted,
+                # and use _fuse_contiguous_chunks_without_alloc instead to reduce device peak memory.
+                # e.g. When a fused MoE weight exceeds bucket_size given, len(tensor_list) would be 1,
+                # and tensor is not None reducing peak device memory.
+                tensor = self._fuse_contiguous_chunks_without_alloc(tensors)
+            else:
+                tensor = torch.cat(tensors, dim=self.FSDP_SHARD_DIM)
+            unpaded_tensor = tensor.narrow(self.FSDP_SHARD_DIM, 0, size)
+            pad_tensor = tensor.narrow(self.FSDP_SHARD_DIM, size, tensor.shape[self.FSDP_SHARD_DIM] - size)
             assert (pad_tensor == 0).all(), f"Internal Error, padded tensor is not zero {pad_tensor}!"
-            fsdp_unsharded_tensor_list.append(cat_tensor)
+            # when self.FSDP_SHARD_DIM != 0, narrow operation may lead to non-contiguous tensor
+            fsdp_unsharded_tensor_list.append(unpaded_tensor.contiguous())
 
         return fsdp_unsharded_tensor_list
 
     @staticmethod
-    def _fuse_contiguous_chunks_without_alloc(tensors: list[torch.Tensor]) -> torch.Tensor | None:
+    def _fuse_contiguous_chunks_without_alloc(tensors: list[torch.Tensor]) -> torch.Tensor:
         """Fuse contiguous chunks without extra memory allocation.
 
         Return None if not possible.
@@ -1224,8 +1214,10 @@ class BaseModel(nn.Module):
         for t in tensors:
             # we should check both storage and stride to ensure contiguity
             # regardless of the implementation of foreach_all_gather
-            if t.untyped_storage().data_ptr() != storage.data_ptr() or t.stride()[1:] != inner_stride:
-                return None
+            if t.untyped_storage().data_ptr() != storage.data_ptr():
+                raise RuntimeError("Tensors are not sharing the same storage.")
+            if t.stride()[1:] != inner_stride:
+                raise RuntimeError("Tensors have mismatched strides.")
             chunks.append((t.storage_offset(), t.shape[0], t))
         chunks.sort(key=lambda x: x[0])
 
@@ -1233,7 +1225,7 @@ class BaseModel(nn.Module):
         total_rows = 0
         for offset, rows, _ in chunks:
             if offset != expected_offset:
-                return None
+                raise RuntimeError("Tensors are not contiguous in the storage")
             expected_offset += rows * inner_elems
             total_rows += rows
 
