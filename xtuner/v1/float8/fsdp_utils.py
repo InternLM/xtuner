@@ -71,7 +71,7 @@ def tensor_to_per_block_fp8_devided_64_scales(
     return w_scales
 
 
-@maybe_compile(fullgraph=True)
+@maybe_compile
 def tensor_to_per_block_fp8_scales(
     tensor: "WeightWithDynamicTilewiseFloat8CastTensor",
     reduce_mesh: Optional[DeviceMesh] = None,
@@ -192,7 +192,7 @@ _ops_to_preserve_subclass = {
 }
 
 
-@maybe_compile(fullgraph=True)
+@maybe_compile
 def cast_to_per_block_fp8_with_scales(
     tensor: torch.Tensor, scales: torch.Tensor, block_size=128, float8_dtype=torch.float8_e4m3fn
 ):
@@ -505,7 +505,7 @@ def precompute_tensorwise_float8_scale_for_fsdp(module: nn.Module, reduce_mesh: 
         weight._precomputed_scale = scale_tensor[i].clone()
 
 
-@maybe_compile(fullgraph=True)
+@maybe_compile
 def cast_to_per_tensor_fp8_with_scales(tensor: torch.Tensor, scales: torch.Tensor, float8_dtype=torch.float8_e4m3fn):
     # Note: when the line below is compiled with `torch.compile`, `tensor` is automatically
     # upcasted to `float32` to multiply with the scale
