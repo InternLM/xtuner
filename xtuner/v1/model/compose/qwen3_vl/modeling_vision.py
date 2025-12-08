@@ -344,8 +344,8 @@ class Qwen3VLVisionModel(BaseModel):
                 layer = checkpoint_wrapper(layer,
                                            preserve_rng_state=checkpoint_preserve_rng_state,
                                            checkpoint_impl=CheckpointImpl.REENTRANT)
-            if self.compile_cfg:
-                layer.forward = torch.compile(layer.forward, fullgraph=True)
+                if self.compile_cfg:
+                    layer.forward = torch.compile(layer.forward, fullgraph=True)
 
             self.blocks[layer_idx] = layer
 
