@@ -144,6 +144,7 @@ class DataFlow:
         self.skipped_sample_count = 0
         self.failed_sample_count = 0
         self.filtered_samples_count = 0
+        self.tb_metrics: Dict[str, Any] = {}
         self.target_batch_size = self.config.global_batch_size
         rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
         self.worker_url_list = list(rollout_info["server_url_dict"].values())
@@ -188,7 +189,7 @@ class DataFlow:
         self.skipped_sample_count = 0
         self.failed_sample_count = 0
         self.filtered_samples_count = 0
-
+        self.tb_metrics = {}
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
         logger_msg = (
@@ -305,6 +306,9 @@ class DataFlow:
                 data_concurrency = math.ceil(
                     (1 + self.config.staleness_threshold) * (self.target_batch_size - self.finished_samples_count)
                 )
+                init_increment_data_concurrency = data_concurrency - (
+                    self.target_batch_size - self.finished_samples_count
+                )
                 staleness_threshold = self.config.staleness_threshold
                 self.logger.info(
                     f"Starting dataflow concurrent task runner with data_concurrency: {data_concurrency}, target_batch_size: {self.target_batch_size}, finished_samples_count: {self.finished_samples_count}, staleness_threshold: {staleness_threshold}"
@@ -325,14 +329,18 @@ class DataFlow:
                     )
                     if len(waiting_tasks) < self.target_batch_size - self.finished_samples_count:
                         # 当在执行的task的数量不足以满足需要的数量的时候，补充新的task, 补充的方式是超发当前需要数量的staleness_threshold比例的task
-                        increment_data_concurrency = math.ceil(
-                            (1 + staleness_threshold)
-                            * (self.target_batch_size - self.finished_samples_count - len(waiting_tasks))
-                        )
+                        # increment_data_concurrency = math.ceil(
+                        #     (1 + staleness_threshold)
+                        #     * (self.target_batch_size - self.finished_samples_count - len(waiting_tasks))
+                        # )
                         self.logger.info(
-                            f"Increment data concurrency to {increment_data_concurrency} tasks based on staleness_threshold: {staleness_threshold}, current waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
+                            f"Increment data concurrency to {init_increment_data_concurrency} tasks based on staleness_threshold: {staleness_threshold}, current waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
                         )
-                        for _ in range(increment_data_concurrency):
+                        if init_increment_data_concurrency == 0:
+                            init_increment_data_concurrency = (
+                                self.target_batch_size - self.finished_samples_count - len(waiting_tasks)
+                            )
+                        for _ in range(init_increment_data_concurrency):
                             task = create_task(self.worker_task())
                             waiting_tasks.add(task)
                         self.logger.info(f"After increment, waiting_tasks: {len(waiting_tasks)}")
@@ -346,14 +354,16 @@ class DataFlow:
                             f"Too many failed or skipped samples, aborting dataflow. failed_sample_count: {self.failed_sample_count}, skipped_sample_count: {self.skipped_sample_count}, target_batch_size: {self.target_batch_size}"
                         )
                         break
-                    increment_data_concurrency = math.ceil(
-                        (1 + staleness_threshold)
-                        * (self.target_batch_size - self.finished_samples_count - len(waiting_tasks))
-                    )
+                    # increment_data_concurrency = math.ceil(
+                    #     (1 + staleness_threshold)
+                    #     * (self.target_batch_size - self.finished_samples_count - len(waiting_tasks))
+                    # )
                     self.logger.info(
-                        f"Length of waiting task is 0 and increment data concurrency to {increment_data_concurrency} tasks based on staleness_threshold: {staleness_threshold}, current waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
+                        f"Length of waiting task is 0 and increment data concurrency to {init_increment_data_concurrency} tasks based on staleness_threshold: {staleness_threshold}, current waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
                     )
-                    for _ in range(increment_data_concurrency):
+                    if init_increment_data_concurrency == 0:
+                        init_increment_data_concurrency = self.target_batch_size - self.finished_samples_count
+                    for _ in range(init_increment_data_concurrency):
                         task = create_task(self.worker_task())
                         waiting_tasks.add(task)
                     self.logger.info(f"After increment, waiting_tasks: {len(waiting_tasks)}")
@@ -404,7 +414,12 @@ class DataFlow:
         self.logger.info(
             f"dataflow task finished, generation_time: {generation_time:.2f}s, pause_time: {pause_time:.2f}s, total_time: {dataflow_time:.2f}s"
         )
-        self._log_task_completion_stats(task_completion_times)
+        self.tb_metrics["time/generation_time"] = generation_time
+        self.tb_metrics["time/pause_time"] = pause_time
+
+        task_completion_dict = self._log_task_completion_stats(task_completion_times, "Task Completion Time Stats:\n")
+        for k, v in task_completion_dict.items():
+            self.tb_metrics[f"time/task_time_{k}"] = v
 
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
@@ -460,7 +475,13 @@ class DataFlow:
             self.logger.info(f"Dump replay buffer from {dump_path}")
             await self.replay_buffer.dump.remote(dump_path)
 
-        return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
+        get_start_time = time.perf_counter()
+        return_samples = await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
+        self.logger.info(
+            f"Getting {self.target_batch_size} samples from replay buffer took {time.perf_counter() - get_start_time:.2f}s"
+        )
+        self.tb_metrics["time/get_samples_time"] = time.perf_counter() - get_start_time
+        return return_samples, self.tb_metrics
 
     def logging_replaybuffer_state(self, logging_msg: Optional[str] = None):
         status = self.get_replaybuffer_status()
@@ -489,25 +510,30 @@ class DataFlow:
             self.logger.error(f"Failed to send abort request to {url}: {e}")
             return url, False
 
-    def _log_task_completion_stats(self, task_times: List[float]):
+    def _log_task_completion_stats(self, task_times: List[float], logger_msg: Optional[str] = None):
         if not task_times:
             self.logger.info("No task completion times to report.")
             return
 
         import numpy as np
 
-        p50 = np.percentile(task_times, 50)
-        p90 = np.percentile(task_times, 90)
-        p95 = np.percentile(task_times, 95)
-        p99 = np.percentile(task_times, 99)
-        max_time = np.max(task_times)
-        avg_time = np.mean(task_times)
-        std_dev = np.std(task_times)
+        stats_dict = {
+            "p50": np.percentile(task_times, 50),
+            "p90": np.percentile(task_times, 90),
+            "p95": np.percentile(task_times, 95),
+            "p99": np.percentile(task_times, 99),
+            "max": np.max(task_times),
+            "avg": np.mean(task_times),
+            "std": np.std(task_times),
+        }
+        stats_dict["p99_p50_ratio"] = stats_dict["p99"] / stats_dict["p50"] if stats_dict["p50"] > 0 else float("inf")
 
         task_completions_report = (
-            "Task Completions Time:\n"
-            f"  - Task Count: {len(task_times)}, Avg Time: {avg_time:.2f}s, Std: {std_dev:.2f}s\n"
-            f"  - P50 (Median): {p50:.2f}s, P90: {p90:.2f}s, P95: {p95:.2f}s, P99: {p99:.2f}s\n"
-            f"  - Max Time: {max_time:.2f}s, Ratio (P99 / P50): {p99 / p50 if p50 > 0 else float('inf'):.2f}\n"
+            f"  - Avg Time: {stats_dict['avg']:.2f}s, Std: {stats_dict['std']:.2f}s\n"
+            f"  - P50 (Median): {stats_dict['p50']:.2f}s, P90: {stats_dict['p90']:.2f}s, P95: {stats_dict['p95']:.2f}s, P99: {stats_dict['p99']:.2f}s\n"
+            f"  - Max Time: {stats_dict['max']:.2f}s, Ratio (P99 / P50): {stats_dict['p99_p50_ratio']:.2f}\n"
         )
-        self.logger.info(task_completions_report)
+        logger_msg = logger_msg if logger_msg else ""
+        logger_msg += task_completions_report
+        self.logger.info(logger_msg)
+        return stats_dict

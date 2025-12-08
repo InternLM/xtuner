@@ -253,7 +253,8 @@ class TrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        ray.get(handles)
+        log_infos = ray.get(handles)
+        return log_infos
 
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
         if target == "model":
