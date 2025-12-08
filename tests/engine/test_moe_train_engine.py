@@ -7,6 +7,7 @@ from torch.distributed.device_mesh import init_device_mesh
 import parametrize
 import torch
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 from xtuner._testing import DeterministicDDPTestCase
 from transformers import AutoTokenizer
 from collections import defaultdict
@@ -14,7 +15,7 @@ from collections import defaultdict
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, ZLossConfig
 from xtuner.v1.engine.train_engine import TrainEngine
@@ -23,10 +24,12 @@ from xtuner.v1.utils import pad_to_max_length
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.utils.test_utils import init_data_mesh
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
+from xtuner.v1.model import get_model_config_from_hf
 
 
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
+QWEN3_MOE_FOPE_PATH = os.environ["QWEN3_MOE_FOPE_PATH"]
 DEVICE = get_device()
 
 
@@ -285,6 +288,88 @@ class TestMoEEngine(DeterministicDDPTestCase):
             pass
     
     @parametrize.parametrize(
+        "device,dispatcher,ep_size,load_from_type",
+        [
+            ("cuda", None, 1, "qwen3"),
+            ("cuda", "all2all", 4, "qwen3"),
+            ("cuda", "all2all", 8, "qwen3"),
+            ("cuda", None, 1, "qwen3_fope"),
+            ("cuda", "all2all", 4, "qwen3_fope"),
+            ("cuda", "all2all", 8, "qwen3_fope"),
+        ],
+    )
+    def test_checkpoint_save_load(self, device, dispatcher, ep_size, load_from_type):
+        pg = self.create_pg(device)
+        print(f"dist.get_rank(): {dist.get_rank()}")
+        os.environ["LOCAL_RANK"] = str(dist.get_rank())
+        torch.accelerator.set_device_index(int(dist.get_rank()))
+        assert load_from_type in ["qwen3", "qwen3_fope"]
+        load_from = Path(QWEN3_MOE_PATH) if load_from_type == "qwen3" else Path(QWEN3_MOE_FOPE_PATH)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tiny_model = True
+            # 1. create
+            engine = create_engine_from_hf(load_from, dispatcher, ep_size, tiny=tiny_model)
+            # 2. operate
+            syncdir = [tmpdir]
+            dist.broadcast_object_list(syncdir, src=0)
+            tmpdir = Path(syncdir[0])
+
+            engine.from_hf(load_from, strict=not tiny_model)
+            dist.barrier()
+            model_dir, optimizer_dir = tmpdir / "model", tmpdir / "optimizer"
+            engine.save_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir)
+
+            dist.barrier()
+            time.sleep(1)
+
+            engine2 = create_engine_from_hf(load_from, dispatcher, ep_size, tiny=tiny_model)
+            engine2.init_model_weights()
+            engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir)
+            # 3. check
+            # check the model state
+            state_dict = engine.model.state_dict()
+            state_dict2 = engine2.model.state_dict()
+
+            assert len(state_dict) == len(state_dict2)
+
+            if load_from_type == "qwen3_fope":
+                assert 'rotary_emb.sin_coef' in state_dict 
+                assert 'rotary_emb.cos_coef' in state_dict
+            
+            for key, val in state_dict.items():
+                val2 = state_dict2[key]
+                val = val._local_tensor if isinstance(val, DTensor) else val
+                val2 = val2._local_tensor if isinstance(val2, DTensor) else val2
+                self.assertTrue(torch.equal(val, val2),
+                                f"Mismatch in {key}, val shape {val.shape} and val2 shape {val2.shape}")
+            # check the optimizer state
+            opt_state = engine.optimizer.state_dict()['state']
+            opt_state2 = engine2.optimizer.state_dict()['state']
+            # state_dict['state'] = {
+            #         0: {'momentum_buffer': tensor(...), ...},
+            #         1: {'momentum_buffer': tensor(...), ...},
+            #         2: {'momentum_buffer': tensor(...), ...},
+            #         3: {'momentum_buffer': tensor(...), ...}
+            #     },
+            assert len(opt_state) == len(opt_state2)
+            assert len(opt_state) != 0
+            for param_id, cur_state_dict in opt_state.items():
+                cur_state_dict2 = opt_state2[param_id]
+                assert len(cur_state_dict) == len(cur_state_dict2)
+                assert len(cur_state_dict) != 0
+                for state_key, val in cur_state_dict.items():
+                    val2 = cur_state_dict2[state_key]
+                    val = val._local_tensor if isinstance(val, DTensor) else val
+                    val2 = val2._local_tensor if isinstance(val2, DTensor) else val2
+                    self.assertTrue(torch.equal(val, val2), f"Mismatch in {key}, val shape {val.shape} and val2 shape {val2.shape}")
+
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except:
+            pass
+    
+    @parametrize.parametrize(
         "device",
         [
             ("cuda",),
@@ -363,3 +448,23 @@ class TestMoEEngine(DeterministicDDPTestCase):
     @property
     def destroy_pg_upon_exit(self) -> bool:
         return False
+
+def create_engine_from_hf(load_from: Path, dispatcher: str | None, ep_size: int, tiny: bool = False):
+    moe_cfg : Qwen3MoEConfig = get_model_config_from_hf(load_from)
+    moe_cfg.dispatcher = dispatcher
+    moe_cfg.ep_size = ep_size
+    if tiny:
+        moe_cfg.num_hidden_layers = 2
+
+    optim_cfg: AdamWConfig = AdamWConfig()
+    fsdp_cfg: FSDPConfig = FSDPConfig(
+        torch_compile=False,
+        cpu_offload=False,
+        ep_size=ep_size,
+    )
+    engine = TrainEngine(
+        model_cfg=moe_cfg,
+        optim_cfg=optim_cfg,
+        fsdp_cfg=fsdp_cfg,
+    )
+    return engine

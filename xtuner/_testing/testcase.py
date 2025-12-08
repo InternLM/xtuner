@@ -7,6 +7,7 @@ import os
 import unittest
 import traceback
 from .utils import enable_full_determinism
+from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 import torch.nn.functional as F
 
 
@@ -17,6 +18,7 @@ class DeterministicDDPTestCase(DistributedTestBase):
 
     def run_func(self, test_name):
         enable_full_determinism()
+        monkey_patch_hf_modules_cache()
         self.prepare()
         return getattr(self, test_name)()
 

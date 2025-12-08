@@ -218,7 +218,7 @@ def main():
     os.environ["DG_CACHE_DIR"] = f"/tmp/.adaptive_gemm-{os.getenv('RANK', '0')}"
 
     moe_cfgs = [
-        (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
+        # (Qwen3MoE30BA3Config(balancing_loss_cfg=BalancingLossConfig()), "ep1"),
         (Qwen3MoE30BA3Config(ep_size=8, dispatcher="all2all"), "ep8"),
     ]
     for moe_cfg, name in moe_cfgs:
