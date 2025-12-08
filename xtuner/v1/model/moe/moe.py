@@ -31,7 +31,6 @@ from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
-    CompileTarget,
     ModelOutputs,
     TorchCompileOption,
     TransformerConfig,
@@ -59,36 +58,18 @@ DEVICE = get_device()
 logger = get_logger()
 
 
-MOE_NON_EP_COMPILE_CFG: list[str | CompileTarget] = [
-    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward",
-    CompileTarget(
-        "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward", TorchCompileOption(fullgraph=True)
-    ),
-    CompileTarget(
-        "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward",
-        TorchCompileOption(fullgraph=True),
-    ),
-    CompileTarget(
-        "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._shared_experts_forward",
-        TorchCompileOption(fullgraph=True),
-    ),
-    CompileTarget(
-        "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._post_moe_forward",
-        TorchCompileOption(fullgraph=True),
-    ),
-    CompileTarget(
-        "xtuner.v1.module.decoder_layer.dense_decoder_layer.DenseDecoderLayer.forward",
-        TorchCompileOption(fullgraph=True),
-    ),
-    *DEFAULT_FLOAT8_CFG,
-]
+MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward": TorchCompileOption(),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._shared_experts_forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._post_moe_forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.module.decoder_layer.dense_decoder_layer.DenseDecoderLayer.forward": TorchCompileOption(fullgraph=True),
+    **DEFAULT_FLOAT8_CFG,
+}
 
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
-MOE_EP_COMPILE_CFG.remove(
-    CompileTarget(
-        "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward", TorchCompileOption(fullgraph=True)
-    ),
-)
+MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward")
 
 
 class MoEModelOutputs(ModelOutputs):
@@ -174,8 +155,8 @@ class MoE(BaseModel):
             self.ep_mesh = init_device_mesh(
                 DEVICE,
                 (world_size // config.ep_size, config.ep_size),
-                mesh_dim_names=("dp", "ep"),
-            )["ep"]
+                mesh_dim_names=(f"{self.config.mesh_prefix}.dp", f"{self.config.mesh_prefix}.ep"),
+            )[f"{self.config.mesh_prefix}.ep"]
         else:
             self.ep_mesh = None
 
@@ -296,6 +277,7 @@ class MoE(BaseModel):
         self,
         seq_ctx: list[SequenceContext] | SequenceContext,
         loss_ctx: list[CELossContext] | CELossContext | None,
+        return_router_logits: bool = False,
     ):
         # TODO: caoweihan: Recover this assertion after the refactor of LossContext
         if isinstance(seq_ctx, SequenceContext):
@@ -306,6 +288,7 @@ class MoE(BaseModel):
             return self._forward(
                 seq_ctx=seq_ctx,
                 loss_ctx=loss_ctx,  # type: ignore
+                return_router_logits=return_router_logits,
             )
         else:
             assert isinstance(loss_ctx, list) and len(loss_ctx) == len(seq_ctx), (
@@ -317,12 +300,14 @@ class MoE(BaseModel):
             return self._micro_batch_forward(
                 seq_ctx_list=seq_ctx,
                 loss_ctx_list=loss_ctx,
+                return_router_logits=return_router_logits,
             )
 
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
         loss_ctx_list: list[CELossContext],
+        return_router_logits: bool = False,
     ) -> MoEModelOutputs:
         """Micro-batch forward pass for MoE model.
 
@@ -491,22 +476,22 @@ class MoE(BaseModel):
         else:
             final_logits = None
 
-        if self.config.return_router_results:
-            raise NotImplementedError
+        if self.config.return_router_results or return_router_logits:
+            # raise NotImplementedError
 
             # TODO: Return router logits is costy
 
-            # router_logits_dict: dict[str, torch.Tensor] = {}
-            # layer_names = list(router_logits_list[0].keys())
-            #
-            # for layer_name in layer_names:
-            #     layer_router_logits_list: list[torch.Tensor] = []
-            #     for micro_batch_idx in range(len(seq_ctx_list)):
-            #         layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].clone().detach())
-            #     router_logits = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
-            #     router_logits_dict["router_logits"] = router_logits
-            #
-            # output["router_logits"] = router_logits_dict
+            router_logits_dict: dict[str, torch.Tensor] = {}
+            layer_names = list(router_logits_list[0].keys())
+
+            for layer_name in layer_names:
+                layer_router_logits_list: list[torch.Tensor] = []
+                for micro_batch_idx in range(len(seq_ctx_list)):
+                    layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].detach())
+                router_logits = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
+                router_logits_dict[layer_name] = router_logits
+
+            output["router_logits"] = router_logits_dict
 
         return MoEModelOutputs(**output, logits=final_logits)  # type: ignore[typeddict-item]
 
@@ -514,6 +499,7 @@ class MoE(BaseModel):
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext | None,
+        return_router_logits: bool = False,
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -598,11 +584,11 @@ class MoE(BaseModel):
 
         del router_logits
 
-        if self.config.return_router_results:
-            raise NotImplementedError
+        if self.config.return_router_results or return_router_logits:
+            # raise NotImplementedError
             # TODO: Move router logits to CPU is cost
-            # for layer_name, router_logits in output["router_logits"].items():
-            #     output["router_logits"][layer_name] = router_logits.detach().cpu().unsqueeze(0)
+            for layer_name, router_logits in output["router_logits"].items():
+                output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
         else:
             output["router_logits"] = None
 
@@ -664,14 +650,23 @@ class MoE(BaseModel):
         return layers
 
     def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbeddingProtocol:
-        return get_rope_embedding(config=config)
+        with torch.device(DEVICE):
+            return get_rope_embedding(config=config)
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
-        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # This is used for training without FSDP.
+        # remove this because init with actual device already
+        # For FoPE, the rotary_emb parameters (such as sin_coef) were already sharded by full_shard previously.
+        # However, rebuilding them here would revert sin_coef back to its pre-sharded state, causing issues like dimension mismatches during loading.
+        # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
+
+        # logger.debug(f"before load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
+        loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
+        # logger.debug(f"after load hf: self.rotary_emb.sin_coef = {self.rotary_emb.sin_coef}, self.rotary_emb.cos_coef = {self.rotary_emb.cos_coef}")
+
         return loaded_keys, unloaded_keys, missing_keys
 
     @override
@@ -686,11 +681,6 @@ class MoE(BaseModel):
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
         self._init_device_mesh(fsdp_config)
-
-        # TODO: 一定不能少，因为在模型 init 时候会构建一套 ep_mesh，如果不重新构建，fsdp_mesh 和 ep_mesh 会没有任何联系
-        # fully_shard 时候会出现： AssertionError: FSDP requires the DP and TP mesh to have the same parent mesh
-        with torch.device("meta"):
-            self.layers = self.build_layers(self.config)
 
         if float8_handler is not None:
             # As we modify the shape of the model's parameters,
@@ -717,7 +707,10 @@ class MoE(BaseModel):
         if self.ep_mesh.size() > 1:
             self._replicate_other_params(self)
 
-        self.rotary_emb = self.build_rotary_embedding(self.config)
+        # Although rotary_emb was already constructed in __init__, it was built on the meta device.
+        # Here we need to rebuild it on the actual device to calculate coefficients like inv_freq.
+        # xTODO: remove this because init with actual device already, Check it
+        # self.rotary_emb = self.build_rotary_embedding(self.config).to(self.device)
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
@@ -790,7 +783,7 @@ class MoE(BaseModel):
 
     @property
     @override
-    def default_compile_cfg(self) -> list[str | CompileTarget]:
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
         if self.ep_mesh is not None and self.ep_mesh.size() > 1:
             return MOE_EP_COMPILE_CFG
         else:
@@ -828,40 +821,51 @@ class MoE(BaseModel):
             model_mesh = init_device_mesh(
                 device,
                 (experts_fsdp_size, self.fsdp_config.ep_size),
-                mesh_dim_names=(f"{self.fsdp_config.mesh_prefix}.fsdp", f"{self.fsdp_config.mesh_prefix}.ep"),
+                mesh_dim_names=(f"{self.config.mesh_prefix}.fsdp", f"{self.config.mesh_prefix}.ep"),
             )
             if self.ep_mesh is not None:
-                assert torch.equal(self.ep_mesh.mesh, model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"].mesh), (
+                # WARN: This assertion is **VERY** important.
+                # FSDP requires that `device_mesh` shares the same root mesh across all mesh dimensions.
+                # If not, it will raise an AssertionError:
+                # "FSDP requires the DP and TP mesh to have the same parent mesh but got:
+                #  DP's global mesh: {dp_global_mesh}\nTP's global mesh: {tp_global_mesh}"
+                # ...
+                # For MoE models that can perform inference independently without FSDP,
+                # they build their own `ep_mesh`, which may not initially share the same root mesh
+                # as `fsdp_mesh`. However, PyTorch's mesh management uses global logic: when a
+                # submesh with an existing name is accessed (e.g., `model_mesh[f"{self.config.mesh_prefix}.ep"]`),
+                # it creating a new submesh with the same **hash** as the existing `ep_mesh`
+                # ...
+                # FSDP's mesh manage the parent-child mapping by _mesh_resources, of which the key is the child mesh
+                # and the value is the parent mesh, then, something interesting happened:
+                # >>> print(id(old_ep_mesh), hash(old_ep_mesh))
+                # 9753864, 6644214454873602895
+                # >>> print(id(new_ep_mesh), hash(new_ep_mesh))
+                # 9753878, 6644214454873602895
+                # >>> _mesh_resources.get_root_mesh(old_ep_mesh) == _mesh_resources.get_root_mesh(new_ep_mesh)
+                # True
+                # Aha, although `old_ep_mesh` and `new_ep_mesh` are two different mesh, but `_mesh_resources` think
+                # they share the same root mesh, which follows FSDP's assumption.
+                # ...
+                # Although I think it is an unexpected behavior of PyTorch's mesh management, but we can take
+                # advantage of it to satisfy FSDP's requirement without changing the original `ep_mesh`.
+                _new_created_ep_mesh = model_mesh[f"{self.config.mesh_prefix}.ep"]
+                assert _new_created_ep_mesh.mesh_dim_names == self.ep_mesh.mesh_dim_names, (
+                    f"FSDP enabled, it requires the name of new created `ep_mesh`: {_new_created_ep_mesh.mesh_dim_names}"  # noqa: E501
+                    f"equals to the origin one: {self.ep_mesh.mesh_dim_names}"
+                )
+                assert torch.equal(self.ep_mesh.mesh, model_mesh[f"{self.config.mesh_prefix}.ep"].mesh), (
                     "FSDP enabled, it requires the `ep_size` of model config equals to the `ep_size` of FSDPConfig."
                 )
-            self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
-            self.fsdp_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.fsdp"]
+            else:
+                self.ep_mesh = model_mesh[f"{self.config.mesh_prefix}.ep"]
+
+            self.fsdp_mesh = model_mesh[f"{self.config.mesh_prefix}.fsdp"]
         else:
             assert self.fsdp_config.ep_size == 1, "Currently, HSDP requires expert parallel size to be 1"
-            # We can not init ep_mesh and fsdp_mesh like this.
-            # This will lead to "RuntimeError: Cannot create a submesh from a submesh."
-            # in FSDPParam.shard_mesh, as fsdp_mesh is not the root mesh. The root mesh is model_mesh.
-            # So we have to init the ep_mesh and fsdp_mesh separately.
-            # model_mesh = init_device_mesh(
-            #     device,
-            #     (
-            #         experts_fsdp_size // self.fsdp_config.hsdp_sharding_size,
-            #         self.fsdp_config.hsdp_sharding_size,
-            #         self.fsdp_config.ep_size,
-            #     ),
-            #     mesh_dim_names=(
-            #         f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
-            #         f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
-            #         f"{self.fsdp_config.mesh_prefix}.ep",
-            #     ),
-            # )
-            # self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
-            # self.fsdp_mesh = model_mesh[
-            #     (f"{self.fsdp_config.mesh_prefix}.hsdp_replicate", f"{self.fsdp_config.mesh_prefix}.hsdp_shard")
-            # ]
-            ep_mesh = init_device_mesh(
-                device, (world_size, 1), mesh_dim_names=("_", f"{self.fsdp_config.mesh_prefix}.ep")
-            )[f"{self.fsdp_config.mesh_prefix}.ep"]
+            ep_mesh = init_device_mesh(device, (world_size, 1), mesh_dim_names=("_", f"{self.config.mesh_prefix}.ep"))[
+                f"{self.config.mesh_prefix}.ep"
+            ]
             if self.ep_mesh is not None:
                 assert self.ep_mesh == ep_mesh, "ep_mesh should be the same as the previous one"
             self.ep_mesh = ep_mesh
@@ -872,11 +876,11 @@ class MoE(BaseModel):
                     self.fsdp_config.hsdp_sharding_size,
                 ),
                 mesh_dim_names=(
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
+                    f"{self.config.mesh_prefix}.hsdp_replicate",
+                    f"{self.config.mesh_prefix}.hsdp_shard",
                 ),
             )
-            self.fsdp_mesh = self.hsdp_mesh[f"{self.fsdp_config.mesh_prefix}.hsdp_shard"]
+            self.fsdp_mesh = self.hsdp_mesh[f"{self.config.mesh_prefix}.hsdp_shard"]
 
     def _replicate_other_params(self, model: nn.Module):
         def traverse(module):

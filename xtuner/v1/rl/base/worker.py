@@ -313,6 +313,14 @@ class TrainingWorker(SingleAcceleratorWorker):
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_input_list: list[RLLossContextInputItem] = []
         rollout_logprobs_list: list[torch.Tensor | None] = []
+        # convert dummy padding experts to real size
+
+        language_cfg = (
+            self.config.model_cfg.text_config
+            if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
+            else self.config.model_cfg
+        )
+
         for data in data_batches:
             seq_ctx = data["seq_ctx"]
             pixel_values = seq_ctx.pixel_values
@@ -329,26 +337,30 @@ class TrainingWorker(SingleAcceleratorWorker):
             if rollout_routed_experts is not None:
                 if isinstance(rollout_routed_experts, list):
                     # list[n,l,e]
-                    if not isinstance(rollout_routed_experts[0], torch.Tensor):
-                        rollout_routed_experts_refs = rollout_routed_experts
-                        rollout_routed_experts = ray.get(rollout_routed_experts_refs)
-                        # free obj store explicitly
-                        ray._private.internal_api.free(rollout_routed_experts_refs)
-                        if not isinstance(rollout_routed_experts[0], torch.Tensor):
-                            rollout_routed_experts = [
-                                torch.as_tensor(routed_experts, dtype=torch.long)
-                                for routed_experts in rollout_routed_experts
-                            ]
-                    seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts, dim=0)  # max_len,l,e
+                    out_rollout_routed_expert = []
+                    for rollout_routed_expert in rollout_routed_experts:
+                        if isinstance(rollout_routed_expert, torch.Tensor):
+                            rollout_routed_experts_tensor = torch.randint(
+                                low=0,
+                                high=language_cfg.n_routed_experts,
+                                size=(
+                                    rollout_routed_expert.size(0),
+                                    language_cfg.num_hidden_layers,
+                                    language_cfg.num_experts_per_tok,
+                                ),
+                            )
+                            out_rollout_routed_expert.append(rollout_routed_experts_tensor)
+                        else:
+                            rollout_routed_expert_refs = rollout_routed_expert
+                            rollout_routed_expert = ray.get(rollout_routed_expert_refs)
+                            # free obj store explicitly
+                            ray._private.internal_api.free(rollout_routed_expert_refs)
+                            out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
+
+                    seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
                 else:
                     assert isinstance(rollout_routed_experts, torch.Tensor), (
                         f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
-                    )
-                    # convert dummy padding experts to real size
-                    language_cfg = (
-                        self.config.model_cfg.text_config
-                        if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
-                        else self.config.model_cfg
                     )
                     rollout_routed_experts_tensor = torch.randint(
                         low=0,
@@ -400,8 +412,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"rollout_logprobs_list {len(rollout_logprobs_list)} vs loss_ctx_input_list {len(loss_ctx_input_list)}"
             )
 
-        all_diffs = []
         all_rollout_is_metrics = []
+        all_mismatch_metrics = []
         for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
@@ -413,40 +425,16 @@ class TrainingWorker(SingleAcceleratorWorker):
                 )
 
             if not mask.any():  # all padding tokens, skip
+                self.logger.warning(f"Skip batch {i} as all tokens are padding.")
                 continue
 
             if len(rollout_logprobs_list) > 0:
-                # calculate logprob diff
-                rollout_logprobs = rollout_logprobs_list[i][mask]  # type: ignore[index]
-                old_logprobs = loss_ctx_input.old_logprobs[mask]  # type: ignore[index]
-
-                assert len(rollout_logprobs.size()) == 1, (
-                    f"len(rollout_logprobs.size()): {len(rollout_logprobs.size())}"
-                )
-                assert rollout_logprobs.shape == old_logprobs.shape, (
-                    f"rollout_logprobs {rollout_logprobs.shape} vs old_logprobs {old_logprobs.shape}"
-                )
-                if rollout_logprobs.numel() == 0:  # pad 情况下是空的
-                    min_diff = torch.tensor(0.0)
-                    max_diff = min_diff
-                    std_diff = min_diff
-                    mean_diff = min_diff
-                else:
-                    min_diff = torch.min(rollout_logprobs - old_logprobs)
-                    max_diff = torch.max(rollout_logprobs - old_logprobs)
-                    mean_diff = torch.mean(rollout_logprobs - old_logprobs)
-                    if rollout_logprobs.numel() == 1:
-                        std_diff = torch.tensor(0.0)
-                    else:
-                        std_diff = torch.std(rollout_logprobs - old_logprobs)
-                all_diffs.append((min_diff, max_diff, mean_diff, std_diff))
-
                 # calculate importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
 
-                rollout_is_weights, rollout_is_mask, rollout_is_metrics = (
-                    loss_cfg.rollout_is.compute_rollout_importance_weights(
+                rollout_is_weights, rollout_is_mask, mismatch_metrics, rollout_is_metrics = (
+                    loss_cfg.rollout_is.compute_rollout_importance_weights_and_metrics(
                         old_log_prob=loss_ctx_input.old_logprobs,
                         rollout_log_prob=rollout_logprobs_list[i],
                         num_tokens=num_tokens,
@@ -456,50 +444,19 @@ class TrainingWorker(SingleAcceleratorWorker):
                 loss_ctx_input.shifted_labels[~rollout_is_mask.bool()] = -100  # update loss mask
                 loss_ctx_input.is_weights = rollout_is_weights
                 all_rollout_is_metrics.append(rollout_is_metrics)
+                all_mismatch_metrics.append(mismatch_metrics)
 
         logger_msg = f"Rollout {rollout_idx}: "
 
-        tis_logger_msg = ""
+        if len(all_mismatch_metrics) > 0:
+            mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
+            if len(mismatch_metrics) > 0:
+                logger_msg += f"\n rollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}"
+
         if len(all_rollout_is_metrics) > 0:
             rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
             if len(rollout_is_metrics) > 0:
-                tis_logger_msg = (
-                    f"\n\nrollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
-                )
-
-        logprob_logger_msg = ""
-        if len(rollout_logprobs_list) > 0:
-            all_diffs_tensor = torch.stack([torch.tensor(d).to(DEVICE) for d in all_diffs]).to(
-                dtype=torch.float32
-            )  # n, 4
-            min_diff_val = torch.min(all_diffs_tensor[:, 0]).item()
-            max_diff_val = torch.max(all_diffs_tensor[:, 1]).item()
-            mean_diff_val = torch.mean(all_diffs_tensor[:, 2]).item()
-            if all_diffs_tensor[:, 3].numel() <= 1:
-                std_diff_val = 0.0
-            else:
-                std_diff_val = torch.std(all_diffs_tensor[:, 3]).item()
-            logprob_logger_msg = f"\nlogprobs diff min {float(min_diff_val):.4f}, max {float(max_diff_val):.4f}, mean {float(mean_diff_val):.4f}, std {float(std_diff_val):.4f}, "
-
-        entropy_logger_msg = ""
-        sum_entropy = cast(torch.Tensor, sum_entropy)
-        dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
-        avg_gen_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-        entropy_logger_msg = f"avg generation entropy: {avg_gen_entropy:.4f}"
-
-        rollout_entropy_logger_msg = ""
-        if sum_rollout_entropy is not None:
-            sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
-            dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
-            avg_gen_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-            rollout_entropy_logger_msg = f"avg rollout generation entropy: {avg_gen_entropy:.4f}"
-
-        if tis_logger_msg:
-            logger_msg += entropy_logger_msg
-            logger_msg += tis_logger_msg
-        else:
-            logger_msg += f"{entropy_logger_msg}, {rollout_entropy_logger_msg}"
-            logger_msg += logprob_logger_msg
+                logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
         self.logger.info(logger_msg)
 
         if self._has_ref:

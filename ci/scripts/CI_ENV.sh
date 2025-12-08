@@ -12,6 +12,7 @@ export VERL_ROLLOUT_DATA_PATH=${CI_SHARE_DATA}/verl-rollout-step0.jsonl
 export QWEN3_PATH=${CI_SHARE_MODEL}/Qwen3-8B
 export QWEN3_VL_PATH=${CI_SHARE_MODEL}/Qwen2.5-VL-3B-Instruct
 export QWEN3_MOE_PATH=${CI_SHARE_MODEL}/Qwen3-30B-A3B
+export QWEN3_MOE_FOPE_PATH=${CI_SHARE_MODEL}/Qwen3_30B_fope_g0.1_sephead
 export INTERNS1_DENSE_PATH=${CI_SHARE_MODEL}/intern-s1-mini
 export ROLLOUT_MODEL_PATH=${CI_SHARE_MODEL}/Qwen3-8B
 export ALPACA_PATH=${CI_SHARE_DATA}/alpaca
@@ -25,6 +26,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONPYCACHEPREFIX=/tmp
 export TRITON_CACHE_DIR=/tmp/.triton
 export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
+
+# Some DDP test will cost more than 300s, set it to 600 avoid timeout error.
+export DISTRIBUTED_TESTS_DEFAULT_TIMEOUT=600
 
 proxy_off
 pip install -e .[all]

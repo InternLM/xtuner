@@ -28,7 +28,7 @@ class RMSNorm(nn.Module):
         # hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         # return (weight * hidden_states).to(input_dtype)  # gpt_oss
         # return weight * hidden_states.to(input_dtype)  # Llama
-        return rms_norm(hidden_states, weight, epsilon=self.variance_epsilon)  # xtuner
+        return rms_norm(hidden_states, weight, epsilon=self.variance_epsilon)  # type: ignore[operator]
 
     def init_weights(self):
         self.weight.data.fill_(1.0)
