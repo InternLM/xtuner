@@ -175,9 +175,14 @@ class VisionComposeTrainEngine(TrainEngine):
             isinstance(getattr(self.model_cfg.text_config, "router", None), NoAuxRouterConfig)
             and self.model_cfg.text_config.router.router_bias_update_speed > 0
         )
-        moe_need_log_maxvio = getattr(self.model_cfg, "router", None) is not None
+        moe_need_log_maxvio = getattr(self.model_cfg.text_config, "router", None) is not None
         if moe_need_log_maxvio:
-            tokens_per_expert_global_for_bias = torch.tensor(0, device=DEVICE)
+            tokens_per_expert_global_for_bias = torch.zeros(
+                self.model_cfg.text_config.num_hidden_layers - self.model_cfg.text_config.first_k_dense_replace,
+                self.model_cfg.text_config.n_routed_experts,
+                dtype=torch.int64,
+                device=DEVICE,
+            )
 
         step_loss = torch.tensor(0.0, device=DEVICE)
         step_llm_loss = torch.tensor(0.0, device=DEVICE)
