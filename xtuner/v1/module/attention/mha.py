@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import Annotated, Literal, cast
+from typing import Annotated, Callable, Literal, cast
 
 import torch
 from cyclopts import Parameter
@@ -8,18 +8,20 @@ from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
 from torch import nn
 from torch.distributed.tensor import DTensor
+from typing_extensions import overload
 
 from transformers.models.llama.modeling_llama import repeat_kv
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
-from xtuner.v1.ops import attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
+from xtuner.v1.ops import AttnOpOutputs, attn_impl_mapping, flash_attn_varlen_func, get_apply_rotary_emb
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger
 
 from ..linear.linear import build_linear
 from ..rms_norm import RMSNorm
+from .attn_outputs import AttnOutputs
 from .kv_cache import fill_paged_kv_cache
 
 
@@ -130,6 +132,7 @@ class MultiHeadAttention(nn.Module):
         layer_idx: int = 0,
     ):
         super().__init__()
+        self.name = f"layers.{layer_idx}.self_attn"
         self.head_dim = head_dim
         self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
@@ -183,9 +186,10 @@ class MultiHeadAttention(nn.Module):
         if layer_type == "sliding_attention":
             self.window_size = (sliding_window, sliding_window)
 
-        self.apply_rotary_emb = get_apply_rotary_emb()  # type: ignore
+        fope_sep_head = rope_scaling_cfg.fope_sep_head if rope_scaling_cfg is not None else None
+        self.apply_rotary_emb = get_apply_rotary_emb(fope_sep_head)  # type: ignore
 
-        self.attn_impl_func = attn_impl_mapping[attn_impl]
+        self.attn_impl_func: Callable[..., AttnOpOutputs] = attn_impl_mapping[attn_impl]  # type: ignore[assignment]
 
     def prefilling(
         self,
@@ -301,7 +305,7 @@ class MultiHeadAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> torch.Tensor:
+    ) -> AttnOutputs:
         """Forward pass for the Multi-Head Attention module.
 
         This method dispatches to specific forward implementations based on the
@@ -378,7 +382,7 @@ class MultiHeadAttention(nn.Module):
                 sinks = self.sinks
             kwargs["s_aux"] = sinks
         # [b, n_head, seq, head_dim]
-        attn_output: torch.Tensor = self.attn_impl_func(  # type: ignore
+        attn_op_outputs = self.attn_impl_func(
             query_states,
             key_states,
             value_states,
@@ -394,17 +398,22 @@ class MultiHeadAttention(nn.Module):
             **kwargs,
         )
 
+        raw_output = attn_op_outputs["raw_output"]
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
-            attn_output = ulysses_all_to_all(
-                attn_output,
+            raw_output = ulysses_all_to_all(
+                raw_output,
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
 
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
-        return attn_output
+        raw_output = raw_output.reshape(*input_shape, -1).contiguous()
+        projected_output = self.o_proj(raw_output)
+        attn_outputs: AttnOutputs = {
+            "projected_output": projected_output,
+            **attn_op_outputs,
+        }
+        return attn_outputs
 
     def build_kv_cache(
         self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None
@@ -431,3 +440,13 @@ class MultiHeadAttention(nn.Module):
         cache_v = torch.zeros(num_blocks, block_size, num_heads, head_dim, dtype=dtype, device="cuda")
 
         return cache_k, cache_v
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        seq_ctx: SequenceContext,
+    ) -> AttnOutputs: ...
+
+    __call__ = nn.Module.__call__

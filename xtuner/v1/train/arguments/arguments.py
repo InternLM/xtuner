@@ -1,4 +1,4 @@
-# flake8: noqa=E501
+# noqa: E501
 from pathlib import Path
 from typing import Annotated, Literal, cast
 

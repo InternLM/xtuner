@@ -2,7 +2,6 @@ import types
 from typing import cast, Callable
 from pathlib import Path
 
-from numpy import full
 
 import torch
 import torch.distributed as dist
@@ -11,7 +10,7 @@ import torch.distributed.nn.functional as distF
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.utils import get_logger, get_padding_length, get_device
-from xtuner.v1.model import BaseModel, TorchCompileOption, CompileTarget, DEFAULT_FLOAT8_CFG
+from xtuner.v1.model import BaseModel, TorchCompileOption, DEFAULT_FLOAT8_CFG
 from xtuner.v1.rl.utils import sp_split
 
 from .modeling_vision import InternS1VisionModel, init_world_mesh
@@ -30,21 +29,12 @@ from torch.distributed.fsdp import (
 DEVICE = get_device()
 logger = get_logger()
 
-INTERNS1_COMPILE_CFG: list[str | CompileTarget] = [
-    CompileTarget(
-        "xtuner.v1.model.compose.intern_s1.modeling_projector.InternS1MultiModalProjector.forward",
-        TorchCompileOption(fullgraph=True)
-    ),
-    CompileTarget(
-        "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.forward",
-        TorchCompileOption(fullgraph=True)
-    ),
-    CompileTarget(
-        "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.attention_pre_forward",
-        TorchCompileOption(fullgraph=True)
-    ),
-    *DEFAULT_FLOAT8_CFG
-]
+INTERNS1_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.model.compose.intern_s1.modeling_projector.InternS1MultiModalProjector.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.attention_pre_forward": TorchCompileOption(fullgraph=True),
+    **DEFAULT_FLOAT8_CFG,
+}
 
 
 def pixel_shuffle(x, scale_factor=0.5):
@@ -301,5 +291,5 @@ class InternS1ForConditionalGeneration(BaseModel):
 
     @property
     @override
-    def default_compile_cfg(self) -> list[str | CompileTarget]:
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
         return INTERNS1_COMPILE_CFG

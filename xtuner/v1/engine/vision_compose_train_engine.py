@@ -14,7 +14,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import BaseModel as XTunerBaseModel
-from xtuner.v1.model.base import CompileTarget, ModelItem, ModelOutputs, TransformerConfig
+from xtuner.v1.model.base import TorchCompileOption, ModelItem, ModelOutputs, TransformerConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
@@ -63,7 +63,7 @@ class VisionComposeConfigProtocol(Protocol):
     freeze_projector: bool = False
     freeze_language: bool = False
     dcp_ignore_frozen_params: bool = True
-    compile_cfg: list[str | CompileTarget] | None | bool = None
+    compile_cfg: dict[str | TorchCompileOption] | None | bool = None
 
     def build(self) -> VisionComposeModelProtocol: ...
 
@@ -176,9 +176,14 @@ class VisionComposeTrainEngine(TrainEngine):
             isinstance(getattr(self.model_cfg.text_config, "router", None), NoAuxRouterConfig)
             and self.model_cfg.text_config.router.router_bias_update_speed > 0
         )
-        moe_need_log_maxvio = getattr(self.model_cfg, "router", None) is not None
+        moe_need_log_maxvio = getattr(self.model_cfg.text_config, "router", None) is not None
         if moe_need_log_maxvio:
-            tokens_per_expert_global_for_bias = torch.tensor(0, device=DEVICE)
+            tokens_per_expert_global_for_bias = torch.zeros(
+                self.model_cfg.text_config.num_hidden_layers - self.model_cfg.text_config.first_k_dense_replace,
+                self.model_cfg.text_config.n_routed_experts,
+                dtype=torch.int64,
+                device=DEVICE,
+            )
 
         step_loss = torch.tensor(0.0, device=DEVICE)
         step_llm_loss = torch.tensor(0.0, device=DEVICE)

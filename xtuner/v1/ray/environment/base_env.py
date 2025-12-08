@@ -149,7 +149,7 @@ class BaseEnvironment(ABC):
             return ray.get(getattr(self.rollout_controller, method_name).remote())
         return getattr(self.rollout_controller, method_name).remote()
 
-    def pause(self, block=True):
+    def pause(self, block=True) -> None:
         """Pauses the rollout workers.
 
         Args:
@@ -157,7 +157,7 @@ class BaseEnvironment(ABC):
         """
         return self._call_rollout_func("pause", block)
 
-    def shutdown(self, block=True):
+    def shutdown(self, block=True) -> None:
         """Shuts down the rollout workers.
 
         Args:
@@ -165,7 +165,7 @@ class BaseEnvironment(ABC):
         """
         return self._call_rollout_func("shutdown", block)
 
-    def restart(self, block=True):
+    def restart(self, block=True) -> None:
         """Restarts the rollout workers.
 
         Args:
@@ -173,7 +173,7 @@ class BaseEnvironment(ABC):
         """
         return self._call_rollout_func("restart", block)
 
-    def get_rollout_info(self, block=True):
+    def get_rollout_info(self, block=True) -> dict[str, Any]:
         """Gets information about the rollout workers.
 
         Args:
@@ -181,7 +181,7 @@ class BaseEnvironment(ABC):
         """
         return self._call_rollout_func("get_rollout_info", block)
 
-    def onload_weights(self, block=True):
+    def onload_weights(self, block=True) -> None:
         """Loads weights onto the rollout workers.
 
         Args:
@@ -189,7 +189,7 @@ class BaseEnvironment(ABC):
         """
         return self._call_rollout_func("onload_weights", block)
 
-    def onload_kvcache(self, block=True):
+    def onload_kvcache(self, block=True) -> str:
         """Loads the KV cache onto the rollout workers.
 
         Args:
@@ -197,7 +197,7 @@ class BaseEnvironment(ABC):
         """
         return self._call_rollout_func("onload_kvcache", block)
 
-    def offload(self, block=True):
+    def offload(self, block=True) -> str:
         """Offloads weights and the KV cache from the rollout workers.
 
         Args:
@@ -205,10 +205,18 @@ class BaseEnvironment(ABC):
         """
         return self._call_rollout_func("offload", block)
 
-    def check_active_workers(self, block=True):
+    def update_active_workers(self, block=True) -> None:
         """Checks the status of active rollout workers.
 
         Args:
             block (bool): Whether to block until the operation completes.
         """
-        return self._call_rollout_func("check_active_workers", block)
+        return self._call_rollout_func("update_active_workers", block)
+
+    def get_rollout_stats(self, block=True) -> dict[str, Any]:
+        """Gets statistics from the rollout workers.
+
+        Args:
+            block (bool): Whether to block until the operation completes.
+        """
+        return self._call_rollout_func("get_rollout_stats", block)
