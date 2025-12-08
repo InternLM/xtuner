@@ -4,11 +4,9 @@ from typing import Callable, Generic, cast
 import torch
 
 from .device import get_device
+from .logger import get_logger
 from .misc import FunctionEnum, get_function_type
 from .type_helper import P, T
-
-
-from .logger import get_logger
 
 
 logger = get_logger()

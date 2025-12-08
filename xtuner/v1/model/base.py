@@ -20,7 +20,7 @@ from safetensors.torch import save_file
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-from typing_extensions import NamedTuple, NotRequired, Self, TypedDict
+from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig, GenerateConfig
@@ -50,6 +50,13 @@ DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
 
 
+class TorchCompileOption(TypedDict):
+    fullgraph: NotRequired[bool]
+    dynamic: NotRequired[bool | None]
+    mode: NotRequired[str | None]
+    options: NotRequired[dict[str, int | bool | str] | None]
+
+
 class HFSaveCfg(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
     worker_per_rank: Annotated[int, Parameter(group="model")] = 16
@@ -61,17 +68,18 @@ class XTunerBaseModelConfig(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
     hf_save_cfg: HFSaveCfg = HFSaveCfg()
     float8_cfg: Float8Config | None = None
+    compile_cfg: Annotated[dict[str, TorchCompileOption] | None | bool, Parameter(
+        group="model",
+        help="The compile config of model. "
+             "`None` | `True`: Use default compile config defined in model, "
+             "`False`: Disable the compile"
+             "`dict[str, TorchCompileOption]`: Customize the compile option"
+        )
+    ] = None
 
     @property
     def hf_config(self) -> PretrainedConfig | None:
         raise NotImplementedError
-
-
-class TorchCompileOption(TypedDict):
-    fullgraph: NotRequired[bool]
-    dynamic: NotRequired[bool | None]
-    mode: NotRequired[str | None]
-    options: NotRequired[dict[str, int | bool | str] | None]
 
 
 DEFAULT_FLOAT8_CFG = {
@@ -108,9 +116,6 @@ class TransformerConfig(XTunerBaseModelConfig):
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
-    compile_cfg: dict[str, TorchCompileOption] | None | bool = (
-        None  # None means use default compile option, False means disable compile
-    )
     dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
@@ -1318,17 +1323,24 @@ class BaseModel(nn.Module):
                     f"Compiling config error! {func_name} is a local function, which is not supported yet."
                 )
             elif function_type is FunctionEnum.CLASS_LEVEL_FUNCTION:
-                class_name = compiled_function.__qualname__.split(".")[0]
-                module_name = compiled_function.__module__
-                _, method_name = func_name.rsplit(".", 1)
+                qualname_split = compiled_function.__qualname__.split(".")
+                assert len(qualname_split) == 2, (
+                    f"XTuner Internal Error! the name of {compiled_function} should be recognized as "
+                    f"<class_name>.<method_name>, but got {qualname_split}"
+                )
+                class_name, method_name = qualname_split
 
+                module_name = compiled_function.__module__
                 cls = getattr(import_module(module_name), class_name)
+
                 if not is_compiled_function(compiled_function):
                     setattr(cls, method_name, torch.compile(compiled_function, **compile_options))
         else:
             raise AttributeError(f"Compiling Error! Cannot locate the function: {func_name}")
 
-    def _resolve_comile_cfg(self, custom_cfg: dict[str, TorchCompileOption] | bool | None) -> dict[str, TorchCompileOption]:
+    def _resolve_comile_cfg(
+        self, custom_cfg: dict[str, TorchCompileOption] | bool | None
+    ) -> dict[str, TorchCompileOption]:
         if custom_cfg is False:
             return {}
 
