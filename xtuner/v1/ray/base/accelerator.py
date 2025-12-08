@@ -247,7 +247,11 @@ class AutoAcceleratorWorkers:
                 resources_config.accelerator: resources_config.num_accelerators_per_worker,
             }
         ] * resources_config.num_workers
-        if name in ray.util.placement_group_table().keys():
+
+        pg_info = ray.util.placement_group_table()
+        names = [i["name"] for i in pg_info.values()]
+
+        if name in names:
             pg = ray.util.get_placement_group(name)
         else:
             pg = placement_group(bundles=bundles, strategy="PACK", name=name)
