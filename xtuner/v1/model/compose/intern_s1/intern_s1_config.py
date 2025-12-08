@@ -6,8 +6,7 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import Self
 
 from xtuner.v1.float8 import Float8Config
-from xtuner.v1.model.base import XTunerBaseModelConfig
-from xtuner.v1.model.base import TorchCompileOption
+from xtuner.v1.model.base import TorchCompileOption, XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
@@ -99,9 +98,6 @@ class InternS1BaseConfig(XTunerBaseModelConfig):
     freeze_projector: bool = False
     freeze_language: bool = False
     dcp_ignore_frozen_params: bool = True
-    compile_cfg: dict[str, TorchCompileOption] | None | bool = (
-        None  # None means use default compile option, False means disable compile
-    )
 
     def build(self) -> "InternS1ForConditionalGeneration":
         from .modeling_intern_s1 import InternS1ForConditionalGeneration
