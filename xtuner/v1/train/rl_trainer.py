@@ -13,7 +13,6 @@ from mmengine import load
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
-from ray.actor import ActorClass
 from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -21,11 +20,17 @@ from xtuner.v1.data_proto.rl_data import is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.environment import SingleTurnEnvironment
+from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, DataFlowProxy, ReplayBufferConfig
+from xtuner.v1.ray.environment import SingleTurnEnvironment, SingleTurnEnvironmentProxy
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.ray.judger import JudgerConfig
-from xtuner.v1.rl.base import TrainingController, WorkerConfig
+from xtuner.v1.rl.base import (
+    TrainingController,
+    TrainingControllerProxy,
+    TrainingWorkerClass,
+    TrainingWorkerProxy,
+    WorkerConfig,
+)
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer, timer_logger
@@ -376,27 +381,28 @@ class RLTrainer:
         rollout_cfg: RolloutConfig,
         judger_cfg: JudgerConfig,
         replay_buffer_config: ReplayBufferConfig,
-    ):
-        env = cast(ActorClass, SingleTurnEnvironment).remote("grpo", self._pg, rollout_cfg, self._pg, judger_cfg)
-        flow = cast(ActorClass, DataFlow).remote("grpo", dataflow_cfg, replay_buffer_config, env)
+    ) -> tuple[SingleTurnEnvironmentProxy, DataFlowProxy]:
+        env = SingleTurnEnvironment.remote("grpo", self._pg, rollout_cfg, self._pg, judger_cfg)
+        flow = DataFlow.remote("grpo", dataflow_cfg, replay_buffer_config, env)
         return env, flow
 
-    def _build_train_controller(self, train_worker_cfg: WorkerConfig):
-        TrainingWorker = ray.remote(
-            runtime_env={
-                "env_vars": {
-                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                    "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
-                }
-            },
-        )(BaseTrainingWorker)
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
-        ray.get([worker.__ray_ready__.remote() for worker in train_workers])
-        train_controller = cast(ActorClass, TrainingController).remote(
-            workers=train_workers,
+    def _build_train_controller(self, train_worker_cfg: WorkerConfig) -> TrainingControllerProxy:
+        TrainingWorker = cast(
+            TrainingWorkerClass,
+            ray.remote(
+                runtime_env={
+                    "env_vars": {
+                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                        "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+                    }
+                },
+            )(BaseTrainingWorker),
         )
-        ray.get(train_controller.__ray_ready__.remote())
+        train_workers: list[TrainingWorkerProxy]
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
+        ray.wait([worker.ready.remote() for worker in train_workers])
+        train_controller = TrainingController.remote(workers=train_workers)
         return train_controller
 
     def fit(self):
