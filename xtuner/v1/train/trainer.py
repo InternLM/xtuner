@@ -492,16 +492,18 @@ class Trainer:
         self._profile_memory = profile_memory
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
 
-        is_hf_path = is_hf_model_path(load_from)
+        is_hf_path = is_hf_model_path(load_from) if load_from is not None else False
         if isinstance(is_hf_path, tuple):
             self._load_from_hf = False
         else:
-            self._load_from_hf = load_from is not None
+            self._load_from_hf = is_hf_path
         self._can_save_hf = model_cfg.hf_config is not None or self._load_from_hf
 
         if not self._can_save_hf:
-            assert_info = f"`hf_interval`: {hf_interval} and `hf_max_keep`: {hf_max_keep} " \
-                          f"should be None when `load_from` is not a Huggingface model path, "
+            assert_info = (
+                f"`hf_interval`: {hf_interval} and `hf_max_keep`: {hf_max_keep} "
+                f"should be None when `load_from` is not a Huggingface model path, "
+            )
             if isinstance(is_hf_path, tuple):
                 assert_info += f", HF path load error Info: {is_hf_path[1]}"
             assert hf_interval is None and hf_max_keep is None, assert_info

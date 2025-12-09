@@ -1,10 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-import copy
 import io
 import math
 import os
-from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Optional, Union
 
@@ -489,7 +487,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             input_ids=input_ids,
             labels=labels,
             pixel_values=image_tensor,  # (n,d)
-            image_grid_thw=torch.cat([_thw.unsqueeze(0) for _thw in grid_thw], dim=0),  # b,3
+            image_grid_thw=grid_thw,  # b,3
             position_ids=position_ids,
             num_tokens=len(input_ids),
             num_img_tokens=[num_img_tokens],
