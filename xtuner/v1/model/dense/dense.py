@@ -21,7 +21,13 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossContext
-from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
+from xtuner.v1.model.base import (
+    DEFAULT_FLOAT8_CFG,
+    BaseModel,
+    ModelOutputs,
+    TorchCompileOption,
+    TransformerConfig,
+)
 from xtuner.v1.model.utils import checkpoint_wrapper
 from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbeddingProtocol, get_rope_embedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
@@ -29,19 +35,23 @@ from xtuner.v1.utils import (
     get_device,
     get_logger,
 )
-from xtuner.v1.utils.compile import maybe_compile
 
 
 DEVICE = get_device()
 logger = get_logger()
 
 
+DENSE_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.module.decoder_layer.dense_decoder_layer.DenseDecoderLayer.forward": TorchCompileOption(fullgraph=True),
+    **DEFAULT_FLOAT8_CFG,
+}
+
+
 class Dense(BaseModel):
     config: TransformerConfig
 
     def __init__(self, config: TransformerConfig):
-        super().__init__()
-        self.config = config
+        super().__init__(config)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -56,7 +66,7 @@ class Dense(BaseModel):
         # TODO(@yehaochen): 把这两行移除 _maybe_compile_layers 要把 compile 相关的 setting 放到 fsdp_config 之外
         # _init_load_spec 放到 post init 里
         self._init_load_spec()
-        self._maybe_compile_layers()
+        self._maybe_enable_compile(self.compile_cfg)
 
     def forward(
         self,
@@ -124,6 +134,11 @@ class Dense(BaseModel):
         with torch.device(DEVICE):
             return get_rope_embedding(config=config)
 
+    @property
+    @override
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        return DENSE_COMPILE_CFG
+
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
     def __call__(  # type: ignore
@@ -186,7 +201,6 @@ class Dense(BaseModel):
         # xTODO: remove this line below when with torch.device(DEVICE) in __init__()
         # self.rotary_emb = self.build_rotary_embedding(self.config)
 
-        self._maybe_compile_layers()
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
@@ -205,7 +219,8 @@ class Dense(BaseModel):
                 )
                 # __class__ without self attribute
 
-            layer.forward = maybe_compile(layer.forward, fullgraph=True)
+                if self.compile_cfg:
+                    layer.forward = torch.compile(layer.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
             fully_shard(
