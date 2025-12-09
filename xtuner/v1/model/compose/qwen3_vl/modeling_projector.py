@@ -53,7 +53,7 @@ class Qwen3VLProjector(BaseModel):
     config: Qwen3VLProjectorConfig
 
     def __init__(self, config: Qwen3VLProjectorConfig) -> None:
-        super().__init__()
+        super().__init__(config)  # type: ignore[arg-type]
         self.merger = Qwen3VLVisionPatchMerger(config, use_postshuffle_norm=False)
         self.deepstack_visual_indexes = config.deepstack_visual_indexes
 

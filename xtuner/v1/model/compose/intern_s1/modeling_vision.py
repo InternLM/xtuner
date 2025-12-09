@@ -265,7 +265,7 @@ class InternS1VisionModel(BaseModel):
     config: InternS1VisionConfig
 
     def __init__(self, config: InternS1VisionConfig) -> None:
-        super().__init__()
+        super().__init__(config)  # type: ignore[arg-type]
         self.config = config
 
         self.embeddings = InternS1VisionEmbeddings(config)

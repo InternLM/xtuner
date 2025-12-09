@@ -201,9 +201,9 @@ class BaseModel(nn.Module):
 
     FSDP_SHARD_DIM = 0
 
-    def __init__(self):
+    def __init__(self, config: XTunerBaseModelConfig):
         super().__init__()
-        self._hf_path = None
+        self.config = config
 
         self._hf_path: Path | None = None
 
