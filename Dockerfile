@@ -42,6 +42,7 @@ ARG FLASH_ATTN3_DIR=/tmp/flash-attn3
 ARG ADAPTIVE_GEMM_DIR=/tmp/adaptive_gemm
 ARG GROUPED_GEMM_DIR=/tmp/grouped_gemm
 ARG DEEP_EP_DIR=/tmp/deep_ep
+ARG DEEP_GEMM_DIR=/tmp/deep_gemm
 ARG NVSHMEM_PREFIX=/usr/local/nvshmem
 
 RUN mkdir -p $CODESPACE
@@ -137,6 +138,23 @@ WORKDIR ${CODESPACE}/DeepEP
 
 RUN NVSHMEM_DIR=${NVSHMEM_PREFIX} pip wheel -w ${DEEP_EP_DIR} -v --no-deps .
 
+# compile deep_gemm
+FROM setup_env AS deep_gemm
+
+ARG CODESPACE
+ARG DEEP_GEMM_DIR
+ARG DEEP_GEMM_URL
+
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    git clone $(echo ${DEEP_GEMM_URL} | cut -d '@' -f 1) && \
+    cd ${CODESPACE}/DeepGEMM && \
+    git checkout $(echo ${DEEP_GEMM_URL} | cut -d '@' -f 2) && \
+    git submodule update --init --recursive --force
+
+WORKDIR ${CODESPACE}/DeepGEMM
+
+RUN pip wheel -w ${DEEP_GEMM_DIR} -v --no-deps .
+
 # integration xtuner
 FROM setup_env AS xtuner_dev
 
@@ -148,6 +166,7 @@ ARG FLASH_ATTN3_DIR
 ARG ADAPTIVE_GEMM_DIR
 ARG GROUPED_GEMM_DIR
 ARG DEEP_EP_DIR
+ARG DEEP_GEMM_DIR
 
 COPY --from=flash_attn ${FLASH_ATTN3_DIR} ${FLASH_ATTN3_DIR}
 COPY --from=flash_attn ${FLASH_ATTN_DIR} ${FLASH_ATTN_DIR}
@@ -155,12 +174,14 @@ COPY --from=adaptive_gemm ${ADAPTIVE_GEMM_DIR} ${ADAPTIVE_GEMM_DIR}
 COPY --from=grouped_gemm ${GROUPED_GEMM_DIR} ${GROUPED_GEMM_DIR}
 COPY --from=deep_ep ${DEEP_EP_DIR} ${DEEP_EP_DIR}
 COPY --from=deep_ep ${NVSHMEM_PREFIX} ${NVSHMEM_PREFIX}
+COPY --from=deep_gemm ${DEEP_GEMM_DIR} ${DEEP_GEMM_DIR}
 
 RUN unzip ${FLASH_ATTN_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${FLASH_ATTN3_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${ADAPTIVE_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${GROUPED_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${DEEP_EP_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
+RUN unzip ${DEEP_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 
 # install sglang and its runtime requirements
 ARG SGLANG_VERSION
@@ -178,7 +199,7 @@ ARG LMDEPLOY_URL
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     pip install fastapi fire openai outlines \
         partial_json_parser ray[default] shortuuid uvicorn \
-        'pydantic>2' openai_harmony --no-cache-dir && \
+        'pydantic>2' openai_harmony --no-cache-dir dlblas && \
     if [ -n "${LMDEPLOY_VERSION}" ]; then \
         pip install lmdeploy==${LMDEPLOY_VERSION} --no-deps --no-cache-dir; \
     else \
