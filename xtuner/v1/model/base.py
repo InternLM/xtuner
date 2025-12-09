@@ -37,7 +37,7 @@ from xtuner.v1.module.attention import MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
-from xtuner.v1.utils.compile import is_compiled_function, maybe_compile
+from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
 from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_full_qualname, get_function_type
@@ -1310,7 +1310,7 @@ class BaseModel(nn.Module):
             new_func (FunctionType): The new function to use.
             module: The module containing the function to overwrite.
         """
-        compiled_function = pydoc.locate(func_name)
+        compiled_function = cast(FunctionType | MaybeCompile, pydoc.locate(func_name))
 
         if compile_options is None:
             compile_options = {}
@@ -1320,6 +1320,11 @@ class BaseModel(nn.Module):
 
         if isinstance(compiled_function, maybe_compile):
             maybe_compile.enable_compile(compiled_function, **compile_options)
+        elif (function_type := get_function_type(compiled_function)) is FunctionEnum.TOP_LEVEL_FUNCTION:
+            raise ValueError(
+                f"Compiling config error! {func_name} is a `TOP LEVEL FUNCTION`, it must be wrapped with "
+                "`@maybe_compile` decorator to enable `torch.compile`."
+            )
         else:
             compiled_function = cast(FunctionType, compiled_function)
 

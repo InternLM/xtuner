@@ -44,3 +44,19 @@ def test_compile_model(model_cfg, compile):
 
     compile_cfg = model.compile_cfg
     assert matched_compile_cfg == compile_cfg
+
+
+def test_compile_model_exception():
+    # Test nonexistent function
+    with pytest.raises(Exception):
+        with torch.device("meta"):
+            Qwen3Dense8BConfig(compile_cfg={"a.b.c": {}}).build()
+
+    # TOP level function without `@maybe_compile` cannot be defined in `compile_cfg`
+    with pytest.raises(Exception):
+        with torch.device("meta"):
+            Qwen3Dense8BConfig(compile_cfg={"xtuner.v1.loss.utils.sp_split": {}}).build()
+
+    with pytest.raises(Exception):
+        with torch.device("meta"):
+            Qwen3Dense8BConfig(compile_cfg={"xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.fuck": {}}).build()

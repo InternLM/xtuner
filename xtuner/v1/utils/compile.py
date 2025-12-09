@@ -16,8 +16,7 @@ TARGET_DEVICE = get_device()
 
 
 class MaybeCompile(Generic[P, T]):
-    """A decorator class that can conditionally apply torch.compile to a
-    function.
+    """A decorator class that can conditionally apply `torch.compile` to a **Top(Module) level function**.
 
     XTuner adopts a runtime compile strategy, which applies different compile strategies based on different model
     configurations, rather than using a decorator-based approach. However, this also makes it difficult to compile some
