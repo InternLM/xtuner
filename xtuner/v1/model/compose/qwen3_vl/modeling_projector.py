@@ -73,7 +73,6 @@ class Qwen3VLProjector(BaseModel):
         self._hf_prefix = "model.visual."
         self._init_load_spec()
 
-    @maybe_compile(fullgraph=True)
     def forward(self, hidden_states: torch.Tensor, deepstack_feature_lists: list[torch.Tensor]) -> tuple[torch.Tensor, list[torch.Tensor]]:
         hidden_states = self.merger(hidden_states)
         deepstack_projected_features = []
