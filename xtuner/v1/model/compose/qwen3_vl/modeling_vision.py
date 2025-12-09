@@ -212,7 +212,6 @@ class Qwen3VLVisionLayer(nn.Module):
         self.attn = Qwen3VLVisionAttention(config=config)
         self.mlp = Qwen3VLVisionMLP(config=config)
 
-    @maybe_compile(fullgraph=True)
     def forward(
         self,
         hidden_states: torch.Tensor,
