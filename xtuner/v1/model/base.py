@@ -549,7 +549,7 @@ class BaseModel(nn.Module):
         dtype: torch.dtype,
         device="cpu",
         bucket_size=None,
-        return_full_key_per_rank: bool = False,
+        update_weights_for_rl: bool = False,
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
@@ -574,70 +574,65 @@ class BaseModel(nn.Module):
             for load_spec, fsdp_unshared_tensor in zip(spec_list, fsdp_unshard_tensor_list):
                 hf_keys = load_spec.hf_keys
 
-                if load_spec.group is not None:
-                    all_hf_keys_list: list[None] | list[list[str]] = [None for _ in range(load_spec.group.size())]
-                    dist.all_gather_object(all_hf_keys_list, hf_keys, group=load_spec.group)
-                    all_hf_keys_list = cast(list[list[str]], all_hf_keys_list)
-                    all_hf_keys = list(chain(*all_hf_keys_list))
+                if update_weights_for_rl:
+                    hf_keys_list.append(hf_keys)
+                    saved_fused_tensor_list.append(fsdp_unshared_tensor)
                 else:
-                    all_hf_keys = hf_keys
+                    if load_spec.group is not None:
+                        all_hf_keys_list: list[None] | list[list[str]] = [None for _ in range(load_spec.group.size())]
+                        dist.all_gather_object(all_hf_keys_list, hf_keys, group=load_spec.group)
+                        all_hf_keys_list = cast(list[list[str]], all_hf_keys_list)
+                        all_hf_keys = list(chain(*all_hf_keys_list))
+                    else:
+                        all_hf_keys = hf_keys
 
-                current_rank = dist.get_rank()
+                    current_rank = dist.get_rank()
 
-                expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
-                hardcode_fused_save_ranks = list(
-                    range(min((dist.get_world_size(), self.config.hf_save_cfg.max_save_rank)))
-                )
+                    expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
+                    hardcode_fused_save_ranks = list(
+                        range(min((dist.get_world_size(), self.config.hf_save_cfg.max_save_rank)))
+                    )
 
-                key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
-                # assert key_per_rank.is_integer(), (
-                #     f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
-                #     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
-                # )
-                if not key_per_rank.is_integer():
-                    key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
+                    key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
+                    # assert key_per_rank.is_integer(), (
+                    #     f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
+                    #     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
+                    # )
+                    if not key_per_rank.is_integer():
+                        key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
 
-                # 1. When return_full_key_per_rank is False, we intends to save hf models across ranks,
-                # each rank only saves part of hf keys and tensors
-                # 2. When return_full_key_per_rank is True, we intends to generate full tensors on each
-                # rank for ipc updating weights in RL training.
-                if not return_full_key_per_rank:
                     start = int(current_rank * key_per_rank)
                     end = int(start + key_per_rank)
-                else:
-                    start = 0
-                    end = len(all_hf_keys)
 
-                _hf_key_list = all_hf_keys[start:end]
+                    _hf_key_list = all_hf_keys[start:end]
 
-                if not _hf_key_list:
-                    continue
+                    if not _hf_key_list:
+                        continue
 
-                hf_keys_list.append(_hf_key_list)
+                    hf_keys_list.append(_hf_key_list)
 
-                assert load_spec.dim is not None
-                if load_spec.group is not None:
                     assert load_spec.dim is not None
-                    _gathered_tensor_list = [
-                        torch.zeros_like(fsdp_unshared_tensor) for _ in range(load_spec.group.size())
-                    ]
-                    dist.all_gather(_gathered_tensor_list, fsdp_unshared_tensor, group=load_spec.group)
-                    _gathered_tensor = torch.cat(_gathered_tensor_list, dim=load_spec.dim)
-                else:
-                    _gathered_tensor = fsdp_unshared_tensor
-
-                hf_tensor_size = _gathered_tensor.shape[load_spec.dim] / len(all_hf_keys)
-                _saved_fused_tensor = torch.index_select(
-                    _gathered_tensor,
-                    dim=load_spec.dim,
-                    index=torch.arange(
-                        int(start * hf_tensor_size),
-                        int(end * hf_tensor_size),
-                        dtype=torch.int64,
-                        device=_gathered_tensor.device,
-                    ),
-                )
-                saved_fused_tensor_list.append(_saved_fused_tensor)
+                    if load_spec.group is not None:
+                        assert load_spec.dim is not None
+                        _gathered_tensor_list = [
+                            torch.zeros_like(fsdp_unshared_tensor) for _ in range(load_spec.group.size())
+                        ]
+                        dist.all_gather(_gathered_tensor_list, fsdp_unshared_tensor, group=load_spec.group)
+                        _gathered_tensor = torch.cat(_gathered_tensor_list, dim=load_spec.dim)
+                    else:
+                        _gathered_tensor = fsdp_unshared_tensor
+                    hf_tensor_size = _gathered_tensor.shape[load_spec.dim] / len(all_hf_keys)
+                    _saved_fused_tensor = torch.index_select(
+                        _gathered_tensor,
+                        dim=load_spec.dim,
+                        index=torch.arange(
+                            int(start * hf_tensor_size),
+                            int(end * hf_tensor_size),
+                            dtype=torch.int64,
+                            device=_gathered_tensor.device,
+                        ),
+                    )
+                    saved_fused_tensor_list.append(_saved_fused_tensor)
 
             # Split the fused tensor into hf tensors
             hf_tensor_list: list[torch.Tensor] = []
@@ -1225,22 +1220,65 @@ class BaseModel(nn.Module):
         fsdp_unsharded_tensor_list = []
 
         # Concatenate the tensors along the FSDP shard dim
+        fuse_without_alloc = self.FSDP_SHARD_DIM == 0 and len(_fsdp_unsharded_tensor_list) == 1
         for tensors, size in zip(_fsdp_unsharded_tensor_list, origin_fsdp_size):
-            tensor = torch.cat(tensors, dim=self.FSDP_SHARD_DIM)
-            cat_tensor = torch.index_select(
-                tensor,
-                dim=self.FSDP_SHARD_DIM,
-                index=torch.arange(0, size, dtype=torch.int64, device=tensors[0].device),
-            )
-            pad_tensor = torch.index_select(
-                tensor,
-                dim=self.FSDP_SHARD_DIM,
-                index=torch.arange(size, tensor.shape[0], dtype=torch.int64, device=tensors[0].device),
-            )
+            if fuse_without_alloc:
+                # In the case of only one big tensor in tensor_list, the partition of tensors are contiguous.
+                # Therefore the cat and index_select operation can be omitted,
+                # and use _fuse_contiguous_chunks_without_alloc instead to reduce device peak memory.
+                # e.g. When a fused MoE weight exceeds bucket_size given, len(tensor_list) would be 1,
+                # and tensor is not None reducing peak device memory.
+                tensor = self._fuse_contiguous_chunks_without_alloc(tensors)
+            else:
+                tensor = torch.cat(tensors, dim=self.FSDP_SHARD_DIM)
+            unpaded_tensor = tensor.narrow(self.FSDP_SHARD_DIM, 0, size)
+            pad_tensor = tensor.narrow(self.FSDP_SHARD_DIM, size, tensor.shape[self.FSDP_SHARD_DIM] - size)
             assert (pad_tensor == 0).all(), f"Internal Error, padded tensor is not zero {pad_tensor}!"
-            fsdp_unsharded_tensor_list.append(cat_tensor)
+            # when self.FSDP_SHARD_DIM != 0, narrow operation may lead to non-contiguous tensor
+            fsdp_unsharded_tensor_list.append(unpaded_tensor.contiguous())
 
         return fsdp_unsharded_tensor_list
+
+    @staticmethod
+    def _fuse_contiguous_chunks_without_alloc(tensors: list[torch.Tensor]) -> torch.Tensor:
+        """Fuse contiguous chunks without extra memory allocation.
+
+        Return None if not possible.
+        """
+        if not tensors:
+            raise ValueError("tensors should not be empty")
+        base = tensors[0]
+        storage = base.untyped_storage()
+        dtype = base.dtype
+        device = base.device
+        stride = base.stride()
+
+        inner_stride = stride[1:]
+        inner_elems = math.prod(base.shape[1:]) if base.dim() > 1 else 1
+
+        chunks = []
+        for t in tensors:
+            # we should check both storage and stride to ensure contiguity
+            # regardless of the implementation of foreach_all_gather
+            if t.untyped_storage().data_ptr() != storage.data_ptr():
+                raise RuntimeError("Tensors are not sharing the same storage.")
+            if t.stride()[1:] != inner_stride:
+                raise RuntimeError("Tensors have mismatched strides.")
+            chunks.append((t.storage_offset(), t.shape[0], t))
+        chunks.sort(key=lambda x: x[0])
+
+        expected_offset = chunks[0][0]
+        total_rows = 0
+        for offset, rows, _ in chunks:
+            if offset != expected_offset:
+                raise RuntimeError("Tensors are not contiguous in the storage")
+            expected_offset += rows * inner_elems
+            total_rows += rows
+
+        size = (total_rows, *base.shape[1:])
+        flat = torch.empty(0, dtype=dtype, device=device)
+        flat.set_(storage, chunks[0][0], size, stride)
+        return flat
 
     def _get_ranks_to_save_fused_tensor(self, fused_size: int) -> list[int]:
         # Goal: decide how many ranks are used to store model/expert parameters.
