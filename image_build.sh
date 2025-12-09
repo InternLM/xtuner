@@ -4,8 +4,8 @@ export BASE_IMAGE=nvcr.io/nvidia/pytorch:25.03-py3
 export XTUNER_COMMIT=$(git rev-parse HEAD)
 export XTUNER_URL=https://github.com/InternLM/xtuner@${XTUNER_COMMIT}
 export FLASH_ATTN_URL=https://github.com/Dao-AILab/flash-attention@060c9188beec3a8b62b33a3bfa6d5d2d44975fab
-export ADAPTIVE_GEMM_URL=https://github.com/InternLM/AdaptiveGEMM@f0314fa6b6c54da0aa98b3718025ab8e860fdff4
-export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@3ae328844bb13679ef2ae4f704a8eb615cca7571
+export ADAPTIVE_GEMM_URL=https://github.com/InternLM/AdaptiveGEMM@374e68fb9ea7168c038cc92d89b438de2b3beb9a
+export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@aa5ffb21cb626d6cd61d99fc42958127b0b99be7
 export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee # v1.2.1
 export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@c9f8b34dcdacc20aa746b786f983492c51072870 # v2.1.1.post3
 
