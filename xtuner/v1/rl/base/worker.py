@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import tqdm
 from pydantic import BaseModel, ConfigDict
+from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 
@@ -36,6 +37,7 @@ from xtuner.v1.utils import (
     get_logger,
     get_torch_device_module,
     monkey_unpatch_torch_reductions,
+    ray_method,
 )
 from xtuner.v1.utils.load_spec import LoadEnum
 
@@ -300,6 +302,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         other_log["extra_info"] = extra_info_dict
         return other_log
 
+    @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
@@ -520,19 +523,23 @@ class TrainingWorker(SingleAcceleratorWorker):
             log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
 
+    @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         self._engine.save_hf(hf_dir, save_dtype)
 
+    @ray_method
     def get_data_replicate_size(self) -> int:
         """Get the data replicate size for the training worker."""
         # tp and pp will affect the data replicate size in engine
         # sp will affect the data replicate size in worker
         return self._engine.data_replicate_size * self.sp_mesh.size()
 
+    @ray_method
     def get_model_cfg(self):
         model_cfg = self._engine.model_cfg
         return model_cfg
 
+    @ray_method
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
         DEVICE_MODULE.empty_cache()
@@ -540,6 +547,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
 
+    @ray_method
     def offload_optimizer(self):
         """Offload the optimizer of the training worker."""
         self._engine.put_optimizer_to_device("cpu")
@@ -549,12 +557,15 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
 
+    @ray_method
     def onload_model(self):
         self._engine.put_model_to_device(DEVICE)
 
+    @ray_method
     def onload_optimizer(self):
         self._engine.put_optimizer_to_device(DEVICE)
 
+    @ray_method
     def update_rollout_info(
         self,
         engine_mesh_list: DeviceMeshRaw,
@@ -586,6 +597,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 "lmdeploy_backend", "pytorch"
             )
 
+    @ray_method
     def update_weights(self):
         """Update the model weights."""
         if self.rollout_cfg_info.get("backend") == "turbomind":
@@ -947,6 +959,7 @@ class TrainingWorker(SingleAcceleratorWorker):
     #     DEVICE_MODULE.empty_cache()
     #     return
 
+    @ray_method
     def request_update_params(self, state_dict, finished=False):
         """Send a request to update the parameters on the rollout workers.
 
@@ -1106,3 +1119,11 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         monkey_unpatch_torch_reductions()
         return
+
+    @ray_method
+    def ready(self) -> bool:
+        return True
+
+
+TrainingWorkerClass = ActorClass[TrainingWorker]
+TrainingWorkerProxy = ActorProxy[TrainingWorker]
