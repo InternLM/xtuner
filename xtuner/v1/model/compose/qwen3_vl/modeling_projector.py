@@ -98,8 +98,6 @@ class Qwen3VLProjector(BaseModel):
         self.fsdp_mesh = init_world_mesh()
         assert self.fsdp_mesh is not None
 
-        self._maybe_compile_layers()
-
         if fsdp_config.requires_grad:
             for module in self.modules():
                 for p_name, param in module.named_parameters(recurse=False):
