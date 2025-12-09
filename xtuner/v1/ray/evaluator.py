@@ -1,10 +1,11 @@
 import asyncio
 from pathlib import Path
-from typing import Callable, List, Optional, Sized, Union
+from typing import Callable, List, Optional, Sized, TypeVar, Union
 
 import ray
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
+from ray.actor import ActorProxy
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
@@ -15,6 +16,11 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.type_helper import ray_method
+
+
+T = TypeVar("T")
+Ret = TypeVar("Ret")
 
 
 class EvaluatorConfig(BaseModel):
@@ -106,8 +112,7 @@ class EvaluatorConfig(BaseModel):
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
-@ray.remote
-class Evaluator:
+class RawEvaluator:
     """A Ray actor for evaluating a model's performance on a given dataset.
 
     The Evaluator generates responses using an environment controller or rollout controller, then it use default or
@@ -241,6 +246,7 @@ class Evaluator:
 
         self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))  # type: ignore[attr-defined]
 
+    @ray_method
     async def run(self, return_samples=False):
         """Run the full evaluation process.
 
@@ -269,3 +275,7 @@ class Evaluator:
         if return_samples:
             return scores, self.eval_samples
         return scores
+
+
+Evaluator = ray.remote(RawEvaluator)
+EvaluatorProxy = ActorProxy[RawEvaluator]

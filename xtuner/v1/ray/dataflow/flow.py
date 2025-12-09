@@ -6,6 +6,7 @@ import httpx
 import ray
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
+from ray.actor import ActorProxy
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
@@ -13,7 +14,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RolloutState
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, ray_method
 
 from .replay_buffer import ReplayBuffer, ReplayBufferConfig, determine_group_state
 
@@ -79,8 +80,7 @@ class DataFlowConfig(BaseModel):
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
 
-@ray.remote
-class DataFlow:
+class RawDataFlow:
     """A Ray actor that manages the data flow for reinforcement learning.
 
     This class is responsible for sampling prompts, interacting with the environment or to generate responses,
@@ -165,10 +165,12 @@ class DataFlow:
         )
         self.logger.info(logger_msg)
 
+    @ray_method
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
         return ray.get(self.replay_buffer.get_train_dataset_length.remote())
 
+    @ray_method
     async def worker_task(self, group_samples_for_retry: Optional[List[RLDataFlowItem]] = None):
         """A single worker task to generate and process a group of samples.
 
@@ -301,6 +303,7 @@ class DataFlow:
         self.logging_replaybuffer_state()
         self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))  # type: ignore[attr-defined]
 
+    @ray_method
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
         if not self.worker_url_list:
@@ -322,6 +325,7 @@ class DataFlow:
         else:
             self.logger.debug(f"All {succeeded_count} abort requests sent successfully.")
 
+    @ray_method
     async def run(
         self,
         num: Optional[int] = None,
@@ -375,3 +379,7 @@ class DataFlow:
         except Exception as e:
             self.logger.error(f"Failed to send abort request to {url}: {e}")
             return url, False
+
+
+DataFlow = ray.remote(RawDataFlow)
+DataFlowProxy = ActorProxy[RawDataFlow]
