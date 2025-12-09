@@ -10,7 +10,7 @@ class InternVLMultiModalProjector(InternS1MultiModalProjector):
     config: InternVLProjectorConfig
 
     def __init__(self, config: InternVLProjectorConfig):
-        super(InternS1MultiModalProjector, self).__init__()
+        super(InternS1MultiModalProjector, self).__init__(config)
         self.layer_norm = nn.LayerNorm(config.vision_hidden_size * int(1 / config.downsample_ratio) ** 2)
         self.linear_1 = nn.Linear(
             config.vision_hidden_size * int(1 / config.downsample_ratio) ** 2, config.text_hidden_size
