@@ -9,6 +9,7 @@ import torch.distributed as dist
 from cyclopts import App, Parameter
 from cyclopts.group import Group
 
+from xtuner.v1.rl.utils import register_cleanup
 from xtuner.v1.train.rl_trainer import RLTrainer
 from xtuner.v1.utils import Config
 from xtuner.v1.utils.track_rl_mem import monitor_actor_memory
@@ -63,4 +64,5 @@ def main(
 
 
 if __name__ == "__main__":
+    register_cleanup()
     app(exit_on_error=False)
