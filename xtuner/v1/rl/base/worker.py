@@ -129,6 +129,7 @@ class WorkerConfig(BaseModel):
     ref_load_from: str | Path | None = None
     ref_model_fsdp_cfg: FSDPConfig | None = None
     log_dir: str | Path | None = None
+    update_weight_bucket_size_in_gb: float = 0.5  # 512MB
 
 
 class WorkerInputItem(TypedDict):
@@ -608,19 +609,54 @@ class TrainingWorker(SingleAcceleratorWorker):
             else:
                 dtype = torch.bfloat16
 
-        same_gen = model._get_same_hf_param(model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE)
+        bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
+        same_gen = model._get_same_hf_param(
+            model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE, bucket_size=bucket_size
+        )
         fused_gen = model._get_fused_hf_param(
             model._group_param_by_load_spec(LoadEnum.FUSED),
             dtype=dtype,
             device=DEVICE,
-            return_full_key_per_rank=True,
+            bucket_size=bucket_size,
+            update_weights_for_rl=True,
         )
         shard_gen = model._get_shard_hf_param(
-            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE
+            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE, bucket_size=bucket_size
         )
-        for name_list, param_list in chain(same_gen, fused_gen, shard_gen):
+
+        for name_list, fused_param_list in fused_gen:
+            state_dict = {name: param.detach() for name, param in zip(name_list, fused_param_list)}
+            if model.fsdp_config.ep_size > 1:
+                # When ep_size > 1, generator generates part of the fused param on each ep rank in one ep_group.
+                # We can all gather them to get full fused param but it would lead to a larger memory usage.
+                # So we broadcast the part fused param from each ep rank in ep_group sequentially,
+                # and update the part of the fused param sequentially to reduce memory usage.
+                ep_mesh: DeviceMesh = model.ep_mesh
+                ep_group = ep_mesh.get_group()
+                global_rank = dist.get_rank()
+                for src_global_rank in dist.get_process_group_ranks(ep_group):
+                    broadcast_state_dict = dict()
+                    for key, tensor in state_dict.items():
+                        obj_to_broadcast = [key, tensor.to("meta")] if global_rank == src_global_rank else [None, None]
+                        dist.broadcast_object_list(obj_to_broadcast, src=src_global_rank, group=ep_group)
+                        real_key, meta_tensor = obj_to_broadcast
+                        buffer = (
+                            state_dict[real_key]
+                            if global_rank == src_global_rank
+                            else torch.empty_like(meta_tensor, device=DEVICE)
+                        )
+                        dist.broadcast(buffer, src=src_global_rank, group=ep_group)
+                        broadcast_state_dict[real_key] = buffer
+                    self.request_update_params(broadcast_state_dict, finished=False)
+                    del broadcast_state_dict, buffer
+            else:
+                self.request_update_params(state_dict, finished=False)
+            del state_dict, name_list, fused_param_list
+
+        for name_list, param_list in chain(same_gen, shard_gen):
             state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
             self.request_update_params(state_dict, finished=False)
+            del state_dict, name_list, param_list
 
         if self.rollout_cfg_info["backend"] == "pytorch":
             self.request_update_params({}, finished=True)
