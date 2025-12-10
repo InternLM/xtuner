@@ -119,7 +119,7 @@ def record_git_info(staged_path: Path, unstaged_path: Path) -> Annotated[str, "C
     return commit
 
 
-def is_hf_model_path(path: str | Path) -> bool | tuple[bool, Exception]:
+def is_hf_model_path(path: str | Path) -> tuple[bool, Exception | None]:
     try:
         AutoConfig.from_pretrained(path, trust_remote_code=True)
     except KeyboardInterrupt as e:
@@ -127,7 +127,7 @@ def is_hf_model_path(path: str | Path) -> bool | tuple[bool, Exception]:
     except Exception as e:
         return False, e
     else:
-        return True
+        return True, None
 
 
 def monkey_patch_hf_modules_cache():

@@ -112,11 +112,11 @@ class TrainingArguments(BaseModel):
         if self.tokenizer_path is None:
             load_from = self.load_from
             if load_from is not None:
-                is_hf_path = is_hf_model_path(load_from)
-                if isinstance(is_hf_path, tuple):
+                is_hf_path, error_info = is_hf_model_path(self.load_from)
+                if is_hf_path is False:
                     raise ValueError(
                         "Transformer model path should be a valid HuggingFace model path if "
-                        f"`tokenizer_path` is None.Error: {is_hf_path[1]}"
+                        f"`tokenizer_path` is None.Error: {error_info}"
                     )
                 self.tokenizer_path = cast(Path, Path(load_from))
 
@@ -224,8 +224,8 @@ class TrainingArguments(BaseModel):
 
         model_path = Path(self.load_from)
 
-        is_hf_path = is_hf_model_path(self.load_from)
-        if not isinstance(is_hf_path, tuple):
+        is_hf_path, error_info = is_hf_model_path(self.load_from)
+        if is_hf_path:
             return get_model_config_from_hf(model_path)
         else:
-            raise NotImplementedError(f"Failed to parse model config from {self.load_from}. Error: {is_hf_path[1]}")
+            raise NotImplementedError(f"Failed to parse model config from {self.load_from}. Error: {error_info}")
