@@ -1,10 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-import copy
 import io
 import math
 import os
-from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Optional, Union
 
@@ -341,24 +339,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 position_ids = position_ids[..., : self.max_length]
         return input_ids, labels, position_ids
 
-    def process_image_unified(self, image_file: str, media_root: str = ""):
-        processor = copy.deepcopy(self.image_processor)
-        image_path_ = get_image_path(image_file, media_root)
-        if self.oss_loader is not None and "s3://" in image_path_:
-            img_str = self.oss_loader.client.get(image_path_)
-            buff = io.BytesIO(img_str)
-            image = Image.open(buff).convert("RGB")
-        else:
-            assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
-            image = load_image(image_path_)
-        image = apply_exif_orientation(image)
-        visual_processed = processor.preprocess(image, return_tensors="pt")
-        image_tensor = visual_processed["pixel_values"]
-        if isinstance(image_tensor, list):
-            image_tensor = image_tensor[0]
-        grid_thw = visual_processed["image_grid_thw"][0]
-        return image_tensor, grid_thw
-
     def pure_text_get_item(self, data_item: dict) -> QwenVL3DataItem:
         messages = ChatMessages(messages=data_item["messages"])
 
@@ -442,14 +422,23 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return {"num_tokens": len(input_ids)}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
-        results = [self.process_image_unified(file, media_root) for file in self._image_path]
-        image, grid_thw = zip(*results)
+        image_data_list = []
+        for image_file in self._image_path:
+            image_path_ = get_image_path(image_file, media_root)
+            if self.oss_loader is not None and "s3://" in image_path_:
+                img_str = self.oss_loader.client.get(image_path_)
+                buff = io.BytesIO(img_str)
+                image = Image.open(buff).convert("RGB")
+            else:
+                assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+                image = load_image(image_path_)
+            image = apply_exif_orientation(image)
+            image_data_list.append(image)
 
-        grid_thw_merged = copy.deepcopy(grid_thw)
-        if not isinstance(grid_thw, Sequence):
-            grid_thw_merged = [grid_thw_merged]
-            grid_thw = [grid_thw]
-        grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw_merged]  # type: ignore
+        visual_processed = self.image_processor.preprocess(image_data_list, return_tensors="pt")
+        image_tensor = visual_processed["pixel_values"]
+        grid_thw = visual_processed["image_grid_thw"]  # b,3
+        grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw]  # type: ignore
         messages = ChatMessages(messages=data_item["messages"])
         replace_image_token(messages, self.chat_template, grid_thw_merged, add_vision_id=self.add_vision_id)  # type: ignore
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
@@ -478,7 +467,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             position_ids = get_rope_index_3(
                 torch.tensor(input_ids).unsqueeze(0),
                 spatial_merge_size=self.image_processor.merge_size,
-                image_grid_thw=torch.stack(grid_thw, dim=0),
+                image_grid_thw=grid_thw,
             )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
@@ -497,8 +486,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         ret = QwenVL3DataItem(
             input_ids=input_ids,
             labels=labels,
-            pixel_values=torch.cat(image, dim=0),  # (n,d)
-            image_grid_thw=torch.cat([_thw.unsqueeze(0) for _thw in grid_thw], dim=0),  # b,3
+            pixel_values=image_tensor,  # (n,d)
+            image_grid_thw=grid_thw,  # b,3
             position_ids=position_ids,
             num_tokens=len(input_ids),
             num_img_tokens=[num_img_tokens],

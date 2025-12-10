@@ -234,14 +234,12 @@ class RLTrainer:
 
         self._rl_trainer_cfg = trainer_cfg
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
-        self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
-        if not self._load_from_hf:
-            raise NotImplementedError
+
+        is_hf_path, error_info = is_hf_model_path(load_from) if load_from is not None else False, ""
+        self._load_from_hf = is_hf_path
 
         if not self._load_from_hf:
-            assert hf_interval is None and hf_max_keep is None, (
-                "`hf_interval` and `hf_max_keep` should be None when `load_from` is not a Huggingface model path, "
-            )
+            raise NotImplementedError(error_info)
 
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
