@@ -557,7 +557,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def update_rollout_info(
         self,
-        engine_mesh_list: DeviceMeshRaw,
+        engine_rank_mesh_array: DeviceMeshRaw,
         server_url_dict: ServiceUrlMap,
         rollout_config: RolloutConfig,
         worker_server_urls_status: Dict[str, bool],
@@ -568,7 +568,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
         if self.rollout_device_mesh is None:
             self.rollout_device_mesh = DeviceMesh(
-                "cpu", mesh=engine_mesh_list, mesh_dim_names=("engine_instance", "engine_parallel")
+                "cpu", mesh=engine_rank_mesh_array, mesh_dim_names=("engine_instance", "engine_parallel")
             )
         rollout_server_url = server_url_dict.get(self.rank, "")
         if worker_server_urls_status.get(rollout_server_url, "False") is False:

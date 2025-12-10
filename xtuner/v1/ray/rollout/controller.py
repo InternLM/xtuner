@@ -128,7 +128,7 @@ class RolloutController:
         self.workers, self.rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
             self._get_worker_cls(), infer_config, placement_group
         )
-        self.engine_mesh_list, self.worker_server_urls_map = self.init_workers()
+        self.engine_rank_mesh_array, self.worker_server_urls_map = self.init_workers()
         self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
         self.router = SessionRouter(self._get_worker_status_for_router())
@@ -213,7 +213,7 @@ class RolloutController:
         """
         worker_server_urls_status = {url: info.is_active for url, info in self.workers_info.items()}
         return dict(
-            engine_mesh_list=self.engine_mesh_list,
+            engine_rank_mesh_array=self.engine_rank_mesh_array,
             server_url_dict=self.worker_server_urls_map,
             rollout_config=self.config,
             worker_server_urls_status=worker_server_urls_status,
@@ -225,13 +225,13 @@ class RolloutController:
         This method configures distributed inference engines by grouping
         workers, where each group forms a tensor-parallel inference engine. It
         determines the `active_workers` to act as the head of each engine,
-        constructs the `engine_mesh_list` to define engine topology, acquires
+        constructs the `engine_rank_mesh_array` to define engine topology, acquires
         necessary distributed communication ports, and finally launches servers
         on the `active_workers` to get their addresses.
 
         Returns:
             Tuple[List, Dict]: A tuple where the first element is
-            `engine_mesh_list`, a list of lists containing the ranks of workers
+            `engine_rank_mesh_array`, a list of lists containing the ranks of workers
             in each engine, and the second element is `worker_server_urls_map`,
             a dictionary mapping the ID of each active worker to its
             corresponding server URL.
@@ -243,18 +243,20 @@ class RolloutController:
         server_urls_per_engine = self.config.server_urls_per_engine
 
         set_bundle_idxs_objectref = []
-        engine_mesh_list = []
+        engine_rank_mesh_array = []
         activate_worker_idx = 0
         for active_worker in active_rollout_workers:
             head_rank, _ = self.rank_bundle_idx_list[activate_worker_idx]
             engine_workers_meta = self.rank_bundle_idx_list[head_rank : head_rank + interval]
             engine_bundle_idxs = [meta[1] for meta in engine_workers_meta]  # meta: (rank, bundle_idx)
             set_bundle_idxs_objectref.append(active_worker.set_engine_bundle_idxs.remote(engine_bundle_idxs))  # type: ignore[attr-defined]
-            engine_mesh_list.append([meta[0] for meta in engine_workers_meta])
+            engine_rank_mesh_array.append([meta[0] for meta in engine_workers_meta])
             activate_worker_idx += interval
         ray.get(set_bundle_idxs_objectref)
         # set engine mesh list for each worker
-        ray.get([worker.set_engine_mesh_list.remote(engine_mesh_list) for worker in active_rollout_workers])  # type: ignore[attr-defined]
+        ray.get(
+            [worker.set_engine_rank_mesh_array.remote(engine_rank_mesh_array) for worker in active_rollout_workers]
+        )  # type: ignore[attr-defined]
         # init dist_init_addr for each worker according to parallel settings
         init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in active_rollout_workers])  # type: ignore[attr-defined]
         dist_init_addrs = self._update_dist_init_addr(
@@ -273,7 +275,7 @@ class RolloutController:
             url = worker_server_urls_map[rank]
             self.workers_info[url] = WorkerInfo(rank=rank, actor=active_rollout_workers[i])
         self.logger.info(f"Rollout worker server URLs: {list(self.workers_info.keys())}")
-        return engine_mesh_list, worker_server_urls_map
+        return engine_rank_mesh_array, worker_server_urls_map
 
     def _deactivate_worker(self, url: str):
         """A helper function to deactivate a worker, update all related states,
@@ -498,8 +500,7 @@ class RolloutController:
             if support_cross_node_comm or self.num_gpus_per_engine < gpus_per_node
             else self.num_gpus_per_engine // gpus_per_node
         )
-        # server_urls_per_engine is introduced for lmdeploy ep settings
-        # for now only lmdeploy pytorch backend with ep > 1 requires multiple servers per engine
+
         active_servers_count = int(
             (gpu_nums // self.num_gpus_per_engine) * nodes_per_engine * infer_config.server_urls_per_engine
         )

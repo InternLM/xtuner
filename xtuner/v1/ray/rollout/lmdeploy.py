@@ -226,7 +226,9 @@ class LMDeployWorker(RolloutWorker):
         backend = lmdeploy_config_kwargs.get("backend", "pytorch")
         tp_size = self.config.tensor_parallel_size
         dp_size = ep_size = self.config.expert_parallel_size
-        max_batch_size = self.config.rollout_max_batch_size_per_instance // self.config.server_urls_per_engine
+        # RolloutController plays the role of proxy server in LMDeploy, which balances dp requests.
+        # Therefore, each server only needs to handle 1 / dp_size of the total requests
+        max_batch_size = self.config.rollout_max_batch_size_per_instance // dp_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
         lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "WARNING")
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "CRITICAL")
@@ -242,17 +244,28 @@ class LMDeployWorker(RolloutWorker):
             assert ep_size == 1 or tp_size == 1
             if ep_size > 1:
                 dp_rank_found = False
-                engine_list_for_ep = [
-                    list(chain.from_iterable(self.engine_mesh_list[i : i + ep_size]))
-                    for i in range(0, len(self.engine_mesh_list), ep_size)
+                # In the case of pure expert parallelism, each worker from all ranks serve url.
+                # `engine_rank_mesh_array` would miss the ep_size information in inner list,
+                # Therefore, we need to regroup them into `engine_rank_mesh_array_for_ep`.
+                # For example, ep_size = 2, work_size = 8:
+                # engine_rank_mesh_array = [[0],[1],[2],[3],[4],[5],[6],[7]] ->
+                # engine_rank_mesh_array_for_ep = [[0,1],[2,3],[4,5],[6,7]]
+                engine_rank_mesh_array_for_ep = [
+                    list(chain.from_iterable(self.engine_rank_mesh_array[i : i + ep_size]))
+                    for i in range(0, len(self.engine_rank_mesh_array), ep_size)
                 ]
-                for engine_list in engine_list_for_ep:
-                    if self.rank in engine_list:
-                        dp_rank = engine_list.index(self.rank)
+                # dp_rank is the index of self.rank in the inner list of rank mesh array.
+                # For example, ep_size = 2, work_size = 8:
+                # engine_rank_mesh_array_for_ep = [[0,1],[2,3],[4,5],[6,7]]
+                # rank 3 is in [2, 3], dp_rank = [2, 3].index(3) = 1
+                for engine_rank_mesh in engine_rank_mesh_array_for_ep:
+                    if self.rank in engine_rank_mesh:
+                        dp_rank = engine_rank_mesh.index(self.rank)
                         dp_rank_found = True
                         break
                 assert dp_rank_found, (
-                    f"self.rank: {self.rank} should be found in engine_mesh_list: {self.engine_mesh_list}"
+                    f"self.rank: {self.rank} should be found in "
+                    f"engine_rank_mesh_array_for_ep: {engine_rank_mesh_array_for_ep}"
                 )
 
         backend_config = (
