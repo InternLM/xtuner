@@ -33,12 +33,6 @@ SMALL_VAL = -1e9
 MOE_MODEL_CLS = (MoE,)
 ATTENTION_CLS = (MultiHeadAttention, MultiLatentAttention)
 
-# In our prev tests, registering these stats dicts could lead to unexpected recompile behavior.
-# We want to avoid accessing class members in hooks here, thus the global vars.
-# TODO: This could be optimized in torch2.8 @nil0x9
-ATTN_MAX_LSE: dict[str, torch.Tensor] = {}
-ATTN_MAX_LOGITS: dict[str, torch.Tensor] = {}
-
 
 class InternalMetrics(TypedDict, total=False):
     weight_rms: dict[str, float]
@@ -80,6 +74,8 @@ class InternalMetricsRecorder:
         self.intra_layer_micro_batch = engine.intra_layer_micro_batch
         self.hooks: list[RemovableHandle] = []
         self._attn_monitor_type: str | None = None
+        self.attn_max_lse: dict[str, torch.Tensor] = {}
+        self.attn_max_logits: dict[str, torch.Tensor] = {}
         self.metrics = self._init_metrics_dict()
         self._closed = False
 
@@ -88,7 +84,7 @@ class InternalMetricsRecorder:
         if self.internal_metrics_cfg.monitor_weights_rms_norm:
             metrics["weight_rms"] = {}
         if self.internal_metrics_cfg.monitor_attn_logits_stats:
-            attn_cfg: MHAConfig | MLAConfig = self.model.config.attention
+            attn_cfg: MHAConfig | MLAConfig = self.model.config.attention  # type: ignore[attr-defined]
             if isinstance(attn_cfg, MLAConfig):
                 attn_impl = "flash_attention"
             else:
@@ -100,12 +96,12 @@ class InternalMetricsRecorder:
             elif not (DEVICE == "npu" and attn_impl == "flash_attention"):
                 self._attn_monitor_type = "softmax_lse"
                 metrics["attn_max_lse"] = {}
-            for name, module in self.model.named_modules():
+            for module in self.model.modules():
                 if isinstance(module, ATTENTION_CLS):
                     if self._attn_monitor_type == "attn_logits":
-                        ATTN_MAX_LOGITS[module.name] = torch.tensor(SMALL_VAL).to(DEVICE)
+                        self.attn_max_logits[module.name] = torch.tensor(SMALL_VAL).to(DEVICE)
                     elif self._attn_monitor_type == "softmax_lse":
-                        ATTN_MAX_LSE[module.name] = torch.tensor(SMALL_VAL).to(DEVICE)
+                        self.attn_max_lse[module.name] = torch.tensor(SMALL_VAL).to(DEVICE)
 
         if isinstance(self.model, MoE):
             if self.internal_metrics_cfg.monitor_moe_router_logits_stats:
@@ -142,9 +138,9 @@ class InternalMetricsRecorder:
 
         def hook(module, input, output):
             if output.get("softmax_lse") is not None:
-                ATTN_MAX_LSE[module.name] = torch.max(ATTN_MAX_LSE[module.name], output["softmax_lse"].max())
+                self.attn_max_lse[module.name] = torch.max(self.attn_max_lse[module.name], output["softmax_lse"].max())
             if output.get("attn_logits") is not None:
-                ATTN_MAX_LOGITS[module.name] = max(ATTN_MAX_LOGITS[module.name], output["attn_logits"].max())
+                self.attn_max_logits[module.name] = max(self.attn_max_logits[module.name], output["attn_logits"].max())
 
         hook_handle: RemovableHandle = module.register_forward_hook(hook)
         self.hooks.append(hook_handle)
@@ -243,17 +239,17 @@ class InternalMetricsRecorder:
                 self.metrics["router_logits_mean"][layer_name] = local_router_logits_mean.item()
 
         if self._attn_monitor_type == "softmax_lse":
-            for layer_name, local_attn_max_lse in ATTN_MAX_LSE.items():
+            for layer_name, local_attn_max_lse in self.attn_max_lse.items():
                 dist.all_reduce(local_attn_max_lse, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_lse"][layer_name] = local_attn_max_lse.item()
 
         if self._attn_monitor_type == "attn_logits":
-            for layer_name, local_attn_max_logits in ATTN_MAX_LOGITS.items():
+            for layer_name, local_attn_max_logits in self.attn_max_logits.items():
                 dist.all_reduce(local_attn_max_logits, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_logits"][layer_name] = local_attn_max_logits.item()
 
-        self._maybe_reset_attn_max_lse_or_logits(ATTN_MAX_LSE)
-        self._maybe_reset_attn_max_lse_or_logits(ATTN_MAX_LOGITS)
+        self._maybe_reset_attn_max_lse_or_logits(self.attn_max_lse)
+        self._maybe_reset_attn_max_lse_or_logits(self.attn_max_logits)
 
         for hook in self.hooks:
             hook.remove()
@@ -263,10 +259,8 @@ class InternalMetricsRecorder:
     def close(self):
         if not self._closed:
             del self.metrics
-            global ATTN_MAX_LSE
-            global ATTN_MAX_LOGITS
-            ATTN_MAX_LSE = None
-            ATTN_MAX_LOGITS = None
+            del self.attn_max_lse
+            del self.attn_max_logits
             self._closed = True
 
     def __enter__(self):
