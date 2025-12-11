@@ -115,7 +115,7 @@ model = dict(
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
-        trust_remote_code=True,
+        trust_remote_code=False,
     ),
     visual_encoder=dict(
         type=CLIPVisionModel.from_pretrained,
@@ -136,6 +136,7 @@ sharegpt4v_caption_dataset = dict(
     template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
     max_length=max_length,
     pad_image_to_square=True,
+    preprocess_text_data=False,
 )
 
 llava_dataset = dict(
