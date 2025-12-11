@@ -34,7 +34,8 @@ from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
-from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.base import ModelItem, TransformerConfig, XTunerBaseModelConfig
+from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
@@ -569,7 +570,7 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
-        self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
+        self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg, fsdp_cfg)
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
             logger.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
@@ -596,7 +597,6 @@ class Trainer:
         if isinstance(load_from, str):
             load_from = Path(load_from)
 
-        self._resolve_deprecate_compile_cfg(model_cfg=model_cfg, fsdp_cfg=fsdp_cfg)  # TODO: Remove in version 1.1.0
         self._engine = self.build_engine(
             model_path=load_from,
             model_config=model_cfg,
@@ -1597,6 +1597,7 @@ class Trainer:
         tokenizer: PreTrainedTokenizer,
         model_cfg: TransformerConfig | VisionComposeConfigProtocol,
         dataloader_cfg: DataloaderConfig,
+        fsdp_cfg: FSDPConfig,
     ):
         if hasattr(tokenizer, "pad_token_id"):
             pad_token_id = tokenizer.pad_token_id
@@ -1639,6 +1640,31 @@ class Trainer:
                 f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
             )
             dataloader_cfg.pad_token_id = pad_token_id
+
+        # Resolve parallel config conlicts between model and fsdp configs
+        self._resolve_deprecate_compile_cfg(model_cfg=model_cfg, fsdp_cfg=fsdp_cfg)  # TODO: Remove in version 1.1.0
+
+        match model_cfg, fsdp_cfg:
+            case (MoEConfig(ep_size=1), FSDPConfig(ep_size=1)):
+                ...
+            case (MoEConfig(ep_size=1), _):
+                model_cfg.ep_size = fsdp_cfg.ep_size
+                logger.warning(f"Found model ep_size 1, using fsdp ep_size {fsdp_cfg.ep_size}.")
+            case (MoEConfig(), FSDPConfig(ep_size=1)):
+                fsdp_cfg.ep_size = model_cfg.ep_size
+                logger.warning(f"Found fsdp ep_size 1, using fsdp ep_size {fsdp_cfg.ep_size}.")
+
+        match dataloader_cfg, model_cfg:
+            case DataloaderConfig(pack_to_max_length=False), XTunerBaseModelConfig(compile_cfg=value) if (
+                value is not False and value != {}
+            ):
+                raise RuntimeError(
+                    "`model_cfg.compile_cfg` and `fsdp_cfg.torch_compile` must be `False` if "
+                    "`dataloader_cfg.pack_to_max_length` is `False`., but got:\n"
+                    f"dataloader_cfg.pack_to_max_length: {dataloader_cfg.pack_to_max_length}\n"
+                    f"model_cfg.compile_cfg: {model_cfg.compile_cfg}\n"
+                    f"fsdp_cfg.torch_compile: {fsdp_cfg.torch_compile}"  # TODO: removed in version 1.1.0 (FSDPConfig.torch_compile is deprecated)
+                )
 
     def _resolve_deprecated_resume_cfg(self, resume_cfg: ResumeConfig, auto_resume: bool) -> bool:
         if resume_cfg.auto_resume:
