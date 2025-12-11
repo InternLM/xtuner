@@ -368,6 +368,8 @@ class TrainingWorker(SingleAcceleratorWorker):
     def compute_actor_logprobs(
         self, seq_ctx_list: list[SequenceContext], loss_ctx_input_list: list[RLLossContextInputItem]
     ) -> list[RLLossContextInputItem]:
+        # precompute float8 dynamic scale only once
+        self._engine.maybe_precompute_float8_dynamic_scale_for_fsdp()
         for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
             output = self._engine.forward_only(seq_ctx=seq_ctx)
             loss_ctx_input.old_logprobs = gather_logprobs(output["logits"], loss_ctx_input.shifted_labels)

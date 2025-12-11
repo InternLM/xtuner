@@ -98,18 +98,22 @@ class VisionComposeTrainEngine(TrainEngine):
         if self._processor is not None:
             self._processor.save_pretrained(hf_dir)
 
-    def train_step(self, data_batches: List[ModelItem]) -> tuple[LossLog, OtherLog]:
-        """Perform a training step with the given data batches and mesh.
-
-        Args:
-            data_batches (List[Dict]): The input data batches for the training step.
-        """
+    # this method can be called outside, e.g., at the beginning of compute_actor_logprobs or compute_ref_logprobs during rl training
+    def maybe_precompute_float8_dynamic_scale_for_fsdp(self):
         if self.llm_float8_handler is not None and self.llm_float8_handler.enabled:
             self.llm_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.language_model)
         if self.vision_float8_handler is not None and self.vision_float8_handler.enabled:
             self.vision_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.vision_tower)
         if self.projector_float8_handler is not None and self.projector_float8_handler.enabled:
             self.projector_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.multi_modal_projector)
+
+    def train_step(self, data_batches: List[ModelItem]) -> tuple[LossLog, OtherLog]:
+        """Perform a training step with the given data batches and mesh.
+
+        Args:
+            data_batches (List[Dict]): The input data batches for the training step.
+        """
+        self.maybe_precompute_float8_dynamic_scale_for_fsdp()
 
         loss_log: LossLog = {}  # type: ignore[typeddict-item]
         other_log: OtherLog = {}  # type: ignore[typeddict-item]
