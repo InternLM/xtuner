@@ -31,8 +31,8 @@ logger = get_logger()
 
 INTERNS1_COMPILE_CFG: dict[str, TorchCompileOption] = {
     "xtuner.v1.model.compose.intern_s1.modeling_projector.InternS1MultiModalProjector.forward": TorchCompileOption(fullgraph=True),
-    "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.forward": TorchCompileOption(fullgraph=True),
     "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.attention_pre_forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.attention_post_forward": TorchCompileOption(fullgraph=True),
     **DEFAULT_FLOAT8_CFG,
 }
 

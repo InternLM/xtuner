@@ -790,7 +790,7 @@ class MoE(BaseModel):
     @property
     @override
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
-        if self.ep_mesh is not None and self.ep_mesh.size() > 1:
+        if self.config.ep_size > 1:
             return MOE_EP_COMPILE_CFG
         else:
             return MOE_NON_EP_COMPILE_CFG
