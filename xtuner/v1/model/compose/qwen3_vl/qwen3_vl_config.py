@@ -115,7 +115,7 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
 class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
-    text_config: Qwen3VLTextMoE235BA22Config | Qwen3MoE235BA22Config = Qwen3VLTextMoE235BA22Config(
+    text_config: Qwen3MoE235BA22Config = Qwen3VLTextMoE235BA22Config(
         max_position_embeddings=262144,
         rope_theta=5000000,
         rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
