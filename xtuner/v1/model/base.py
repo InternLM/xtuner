@@ -1209,7 +1209,7 @@ class BaseModel(nn.Module):
                 if load_spec.group is None:
                     dim_before_fsdp = param._ori_shape[self.FSDP_SHARD_DIM]  # type: ignore
                 else:
-                    dim_before_fsdp = param._ori_shape[self.FSDP_SHARD_DIM] / dist.get_world_size(  # type: ignore
+                    dim_before_fsdp = param._ori_shape[self.FSDP_SHARD_DIM] // dist.get_world_size(  # type: ignore
                         group=load_spec.group
                     )
                 origin_fsdp_size.append(dim_before_fsdp)
