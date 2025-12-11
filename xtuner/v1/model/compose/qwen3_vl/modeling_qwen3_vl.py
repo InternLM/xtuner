@@ -11,6 +11,7 @@ from torch.distributed.fsdp import (
     fully_shard,
     FSDPModule,
 )
+from typing import Callable
 import torch.distributed as dist
 import torch.distributed.nn.functional as distF
 from xtuner.v1.model.moe.moe import SequenceContext
@@ -19,12 +20,20 @@ from .modeling_vision import init_world_mesh
 from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE
 from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE
 from xtuner.v1.float8.float8_handler import Float8Handler
 from torch.distributed.device_mesh import DeviceMesh
 from xtuner.v1.data_proto.utils import split_for_sequence_parallel
 
 logger = get_logger()
+
+
+def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[str], str]):
+    def wrapper(self, *args, **kwargs):
+        return [convertor(i) for i in fn(*args, **kwargs)]
+
+    return wrapper
 
 
 class Qwen3VLForConditionalGeneration(BaseModel):
@@ -39,6 +48,15 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         self.language_model = config.text_config.build()
 
         self._hf_path: Path | None = None
+
+        if isinstance(self.language_model, Qwen3MoE):
+            # TODO(YHC): This is a hack to make the language model compatible with HF
+            _hf_prefix = "model.language_model."
+            self.language_model.to_hf_key_list = types.MethodType(to_hf_key_list_wrapper(  # type: ignore
+                fn=self.language_model.to_hf_key_list,
+                convertor=lambda x: x.replace('model.', _hf_prefix)),
+                self.language_model)
+            self.language_model._init_load_spec()
 
         # Note: global load spec mapping for save_hf
         self.load_spec_mapping = {}
