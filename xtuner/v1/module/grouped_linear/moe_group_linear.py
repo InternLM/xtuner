@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
-from xtuner.v1.float8.config import ScalingGranularity
+from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
 from xtuner.v1.ops import group_gemm
 
@@ -55,10 +55,10 @@ def build_grouped_linear(
     num_routed_experts: int,
     moe_bias: bool = False,
     ep_mesh: DeviceMesh | None = None,
-    float8_cfg=None,
+    float8_cfg: Float8Config | None = None,
 ):
     """Build a grouped linear layer with optional float8 support."""
-    if float8_cfg is None:
+    if float8_cfg is None or float8_cfg.scaling_granularity_gemm is None:
         return GroupedLinear(in_features, out_features, num_routed_experts, moe_bias=moe_bias, ep_mesh=ep_mesh)
     elif float8_cfg.scaling_granularity_grouped_gemm == ScalingGranularity.TILEWISE:
         return TileWiseFloat8GroupedLinear(
