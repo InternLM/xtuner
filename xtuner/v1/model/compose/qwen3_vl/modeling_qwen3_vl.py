@@ -31,7 +31,7 @@ logger = get_logger()
 
 
 QWEN3VL_COMPILE_CFG: dict[str, TorchCompileOption] = {
-    "xtuner.v1.model.compose.qwen3_vl.modeling_projector.Qwen3VLProjector.forward": TorchCompileOption(fullgraph=True),
+    # "xtuner.v1.model.compose.qwen3_vl.modeling_projector.Qwen3VLProjector.forward": TorchCompileOption(fullgraph=True),
     "xtuner.v1.model.compose.qwen3_vl.modeling_vision.Qwen3VLVisionLayer.forward": TorchCompileOption(fullgraph=True),
     **DEFAULT_FLOAT8_CFG,
 }
