@@ -31,7 +31,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
     config: Qwen3VLBaseConfig
 
     def __init__(self, config: Qwen3VLBaseConfig):
-        super().__init__()
+        super().__init__(config)  # type: ignore[arg-type]
         self.config = config
 
         self.vision_tower = Qwen3VLVisionModel(config.vision_config)
@@ -278,8 +278,11 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         else:
             pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
             image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
-            viusal_embeds, _ = self.get_visual_features(pixel_values_dump, image_grid_thw)
+            viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values_dump, image_grid_thw)
             inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
+            for deepstack_visual_embed in deepstack_visual_embeds:
+                inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
+
             deepstack_visual_embeds = None
             visual_pos_masks = None
 

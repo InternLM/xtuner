@@ -14,7 +14,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import BaseModel as XTunerBaseModel
-from xtuner.v1.model.base import ModelItem, ModelOutputs, TransformerConfig
+from xtuner.v1.model.base import ModelItem, ModelOutputs, TorchCompileOption, TransformerConfig
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
@@ -33,6 +33,7 @@ class VisionComposeModelProtocol(Protocol):
     vision_tower: XTunerBaseModel
     multi_modal_projector: XTunerBaseModel
     language_model: XTunerBaseModel
+    compile_cfg: dict[str, TorchCompileOption] | None | bool
 
     def set_hf(self, hf_path: str | Path): ...
 
@@ -63,6 +64,7 @@ class VisionComposeConfigProtocol(Protocol):
     freeze_projector: bool = False
     freeze_language: bool = False
     dcp_ignore_frozen_params: bool = True
+    compile_cfg: dict[str, TorchCompileOption] | None | bool = None
 
     def build(self) -> VisionComposeModelProtocol: ...
 
@@ -193,6 +195,7 @@ class VisionComposeTrainEngine(TrainEngine):
         total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
 
         train_engine_extra_info = ModelForwardExtraLogInfo()
+        step_consumed_img_tokens = 0.0
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             data_batch = data_batches[i : i + intra_layer_micro_batch]
             seq_ctx_list = []
@@ -203,6 +206,11 @@ class VisionComposeTrainEngine(TrainEngine):
                 seq_ctx_list.append(seq_ctx)
                 loss_ctx_list.append(loss_ctx)
                 step_consumed_tokens += seq_ctx.mask.sum()
+
+                if seq_ctx.num_img_tokens is not None:
+                    step_consumed_img_tokens += sum(seq_ctx.num_img_tokens)
+                    if seq_ctx.sequence_parallel_mesh:
+                        step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
 
                 num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
                 efficient_forward_tokens += (num_tokens**2).sum()
@@ -265,4 +273,5 @@ class VisionComposeTrainEngine(TrainEngine):
         other_log["consumed_tokens"] = step_consumed_tokens.item()
         other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
         other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
+        other_log["consumed_img_tokens"] = step_consumed_img_tokens
         return loss_log, other_log

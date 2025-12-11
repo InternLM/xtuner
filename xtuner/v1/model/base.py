@@ -1,17 +1,20 @@
 import json
 import math
+import pydoc
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import reduce
+from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Literal, cast
+from typing import Annotated, Generator, Iterable, Literal, Mapping, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from cyclopts import Parameter
+from more_itertools import consume
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, computed_field
 from safetensors.torch import save_file
@@ -34,9 +37,10 @@ from xtuner.v1.module.attention import MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
-from xtuner.v1.utils.compile import maybe_compile
+from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
 from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 from xtuner.v1.utils.loader import HFCheckpointLoader
+from xtuner.v1.utils.misc import FunctionEnum, FunctionType, get_function_full_qualname, get_function_type
 
 from .utils import ModelForwardExtraLogInfo
 
@@ -45,6 +49,13 @@ logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
+
+
+class TorchCompileOption(TypedDict):
+    fullgraph: NotRequired[bool]
+    dynamic: NotRequired[bool | None]
+    mode: NotRequired[str | None]
+    options: NotRequired[dict[str, int | bool | str] | None]
 
 
 class HFSaveCfg(PydanticBaseModel):
@@ -58,10 +69,29 @@ class XTunerBaseModelConfig(PydanticBaseModel):
     model_config = ConfigDict(extra="forbid")
     hf_save_cfg: HFSaveCfg = HFSaveCfg()
     float8_cfg: Float8Config | None = None
+    compile_cfg: Annotated[
+        dict[str, TorchCompileOption] | None | bool,
+        Parameter(
+            group="model",
+            help="The compile config of model. "
+            "`None` | `True`: Use default compile config defined in model, "
+            "`False`: Disable the compile"
+            "`dict[str, TorchCompileOption]`: Customize the compile option",
+        ),
+    ] = None
 
     @property
     def hf_config(self) -> PretrainedConfig | None:
         raise NotImplementedError
+
+
+DEFAULT_FLOAT8_CFG = {
+    "xtuner.v1.float8.fsdp_utils.tensor_to_per_block_fp8_scales": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.float8.fsdp_utils.cast_to_per_block_fp8_with_scales": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.float8.triton_kernels.per_block_quant_gemm.per_block_quant_torch": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.float8.fsdp_utils.cast_to_per_tensor_fp8_with_scales": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.float8.float8_linear_tensor_wise.per_tensor_fp8_quant": TorchCompileOption(fullgraph=True),
+}
 
 
 class TransformerConfig(XTunerBaseModelConfig):
@@ -90,6 +120,9 @@ class TransformerConfig(XTunerBaseModelConfig):
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
     dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
+    mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
+        "default"
+    )
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -198,11 +231,13 @@ class BaseModel(nn.Module):
 
     FSDP_SHARD_DIM = 0
 
-    def __init__(self):
+    def __init__(self, config: XTunerBaseModelConfig):
         super().__init__()
-        self._hf_path = None
+        self.config = config
 
-        self._hf_path: Path | None = None
+        self._hf_path: Path | None = None  # type: ignore
+
+        self._compile_cfg = self._resolve_compile_cfg(self.config)
 
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
@@ -284,6 +319,20 @@ class BaseModel(nn.Module):
         if self.fsdp_config is not None and self.fsdp_config.cpu_offload:
             return torch.device("cpu")
         return torch.device(DEVICE)
+
+    @property
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        return {}
+
+    @property
+    def compile_cfg(self) -> dict[str, TorchCompileOption]:
+        _compile_cfg = self._compile_cfg.copy()
+        for module in self.modules():
+            if isinstance(module, BaseModel) and module is not self:
+                sub_custom_cfg = module.compile_cfg
+                _compile_cfg |= sub_custom_cfg
+
+        return _compile_cfg
 
     @torch.no_grad()
     def init_weights(self):
@@ -500,7 +549,7 @@ class BaseModel(nn.Module):
         dtype: torch.dtype,
         device="cpu",
         bucket_size=None,
-        return_full_key_per_rank: bool = False,
+        update_weights_for_rl: bool = False,
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
@@ -525,70 +574,65 @@ class BaseModel(nn.Module):
             for load_spec, fsdp_unshared_tensor in zip(spec_list, fsdp_unshard_tensor_list):
                 hf_keys = load_spec.hf_keys
 
-                if load_spec.group is not None:
-                    all_hf_keys_list: list[None] | list[list[str]] = [None for _ in range(load_spec.group.size())]
-                    dist.all_gather_object(all_hf_keys_list, hf_keys, group=load_spec.group)
-                    all_hf_keys_list = cast(list[list[str]], all_hf_keys_list)
-                    all_hf_keys = list(chain(*all_hf_keys_list))
+                if update_weights_for_rl:
+                    hf_keys_list.append(hf_keys)
+                    saved_fused_tensor_list.append(fsdp_unshared_tensor)
                 else:
-                    all_hf_keys = hf_keys
+                    if load_spec.group is not None:
+                        all_hf_keys_list: list[None] | list[list[str]] = [None for _ in range(load_spec.group.size())]
+                        dist.all_gather_object(all_hf_keys_list, hf_keys, group=load_spec.group)
+                        all_hf_keys_list = cast(list[list[str]], all_hf_keys_list)
+                        all_hf_keys = list(chain(*all_hf_keys_list))
+                    else:
+                        all_hf_keys = hf_keys
 
-                current_rank = dist.get_rank()
+                    current_rank = dist.get_rank()
 
-                expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
-                hardcode_fused_save_ranks = list(
-                    range(min((dist.get_world_size(), self.config.hf_save_cfg.max_save_rank)))
-                )
+                    expected_fused_save_ranks = self._get_ranks_to_save_fused_tensor(len(all_hf_keys))
+                    hardcode_fused_save_ranks = list(
+                        range(min((dist.get_world_size(), self.config.hf_save_cfg.max_save_rank)))
+                    )
 
-                key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
-                # assert key_per_rank.is_integer(), (
-                #     f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
-                #     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
-                # )
-                if not key_per_rank.is_integer():
-                    key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
+                    key_per_rank = len(all_hf_keys) / len(hardcode_fused_save_ranks)
+                    # assert key_per_rank.is_integer(), (
+                    #     f"XTuner Internal Error, size of all_hf_keys: {len(all_hf_keys)},  "
+                    #     f"size of `fused_save_ranks` {len(fused_save_ranks)}"
+                    # )
+                    if not key_per_rank.is_integer():
+                        key_per_rank = len(all_hf_keys) / len(expected_fused_save_ranks)
 
-                # 1. When return_full_key_per_rank is False, we intends to save hf models across ranks,
-                # each rank only saves part of hf keys and tensors
-                # 2. When return_full_key_per_rank is True, we intends to generate full tensors on each
-                # rank for ipc updating weights in RL training.
-                if not return_full_key_per_rank:
                     start = int(current_rank * key_per_rank)
                     end = int(start + key_per_rank)
-                else:
-                    start = 0
-                    end = len(all_hf_keys)
 
-                _hf_key_list = all_hf_keys[start:end]
+                    _hf_key_list = all_hf_keys[start:end]
 
-                if not _hf_key_list:
-                    continue
+                    if not _hf_key_list:
+                        continue
 
-                hf_keys_list.append(_hf_key_list)
+                    hf_keys_list.append(_hf_key_list)
 
-                assert load_spec.dim is not None
-                if load_spec.group is not None:
                     assert load_spec.dim is not None
-                    _gathered_tensor_list = [
-                        torch.zeros_like(fsdp_unshared_tensor) for _ in range(load_spec.group.size())
-                    ]
-                    dist.all_gather(_gathered_tensor_list, fsdp_unshared_tensor, group=load_spec.group)
-                    _gathered_tensor = torch.cat(_gathered_tensor_list, dim=load_spec.dim)
-                else:
-                    _gathered_tensor = fsdp_unshared_tensor
-
-                hf_tensor_size = _gathered_tensor.shape[load_spec.dim] / len(all_hf_keys)
-                _saved_fused_tensor = torch.index_select(
-                    _gathered_tensor,
-                    dim=load_spec.dim,
-                    index=torch.arange(
-                        int(start * hf_tensor_size),
-                        int(end * hf_tensor_size),
-                        dtype=torch.int64,
-                        device=_gathered_tensor.device,
-                    ),
-                )
-                saved_fused_tensor_list.append(_saved_fused_tensor)
+                    if load_spec.group is not None:
+                        assert load_spec.dim is not None
+                        _gathered_tensor_list = [
+                            torch.zeros_like(fsdp_unshared_tensor) for _ in range(load_spec.group.size())
+                        ]
+                        dist.all_gather(_gathered_tensor_list, fsdp_unshared_tensor, group=load_spec.group)
+                        _gathered_tensor = torch.cat(_gathered_tensor_list, dim=load_spec.dim)
+                    else:
+                        _gathered_tensor = fsdp_unshared_tensor
+                    hf_tensor_size = _gathered_tensor.shape[load_spec.dim] / len(all_hf_keys)
+                    _saved_fused_tensor = torch.index_select(
+                        _gathered_tensor,
+                        dim=load_spec.dim,
+                        index=torch.arange(
+                            int(start * hf_tensor_size),
+                            int(end * hf_tensor_size),
+                            dtype=torch.int64,
+                            device=_gathered_tensor.device,
+                        ),
+                    )
+                    saved_fused_tensor_list.append(_saved_fused_tensor)
 
             # Split the fused tensor into hf tensors
             hf_tensor_list: list[torch.Tensor] = []
@@ -1176,33 +1220,65 @@ class BaseModel(nn.Module):
         fsdp_unsharded_tensor_list = []
 
         # Concatenate the tensors along the FSDP shard dim
+        fuse_without_alloc = self.FSDP_SHARD_DIM == 0 and len(_fsdp_unsharded_tensor_list) == 1
         for tensors, size in zip(_fsdp_unsharded_tensor_list, origin_fsdp_size):
-            tensor = torch.cat(tensors, dim=self.FSDP_SHARD_DIM)
-            cat_tensor = torch.index_select(
-                tensor,
-                dim=self.FSDP_SHARD_DIM,
-                index=torch.arange(0, size, dtype=torch.int64, device=tensors[0].device),
-            )
-            pad_tensor = torch.index_select(
-                tensor,
-                dim=self.FSDP_SHARD_DIM,
-                index=torch.arange(size, tensor.shape[0], dtype=torch.int64, device=tensors[0].device),
-            )
+            if fuse_without_alloc:
+                # In the case of only one big tensor in tensor_list, the partition of tensors are contiguous.
+                # Therefore the cat and index_select operation can be omitted,
+                # and use _fuse_contiguous_chunks_without_alloc instead to reduce device peak memory.
+                # e.g. When a fused MoE weight exceeds bucket_size given, len(tensor_list) would be 1,
+                # and tensor is not None reducing peak device memory.
+                tensor = self._fuse_contiguous_chunks_without_alloc(tensors)
+            else:
+                tensor = torch.cat(tensors, dim=self.FSDP_SHARD_DIM)
+            unpaded_tensor = tensor.narrow(self.FSDP_SHARD_DIM, 0, size)
+            pad_tensor = tensor.narrow(self.FSDP_SHARD_DIM, size, tensor.shape[self.FSDP_SHARD_DIM] - size)
             assert (pad_tensor == 0).all(), f"Internal Error, padded tensor is not zero {pad_tensor}!"
-            fsdp_unsharded_tensor_list.append(cat_tensor)
+            # when self.FSDP_SHARD_DIM != 0, narrow operation may lead to non-contiguous tensor
+            fsdp_unsharded_tensor_list.append(unpaded_tensor.contiguous())
 
         return fsdp_unsharded_tensor_list
 
-    def _maybe_compile_layers(self):
-        if self.fsdp_config is not None:
-            if self.fsdp_config.torch_compile:
-                torch._dynamo.config.cache_size_limit = 256
-                if self.fsdp_config.compile_targets is not None:
-                    maybe_compile.clear_compile_targets()
-                    for target in self.fsdp_config.compile_targets:
-                        maybe_compile.set_compile_target(target)
-            else:
-                maybe_compile.clear_compile_targets()
+    @staticmethod
+    def _fuse_contiguous_chunks_without_alloc(tensors: list[torch.Tensor]) -> torch.Tensor:
+        """Fuse contiguous chunks without extra memory allocation.
+
+        Return None if not possible.
+        """
+        if not tensors:
+            raise ValueError("tensors should not be empty")
+        base = tensors[0]
+        storage = base.untyped_storage()
+        dtype = base.dtype
+        device = base.device
+        stride = base.stride()
+
+        inner_stride = stride[1:]
+        inner_elems = math.prod(base.shape[1:]) if base.dim() > 1 else 1
+
+        chunks = []
+        for t in tensors:
+            # we should check both storage and stride to ensure contiguity
+            # regardless of the implementation of foreach_all_gather
+            if t.untyped_storage().data_ptr() != storage.data_ptr():
+                raise RuntimeError("Tensors are not sharing the same storage.")
+            if t.stride()[1:] != inner_stride:
+                raise RuntimeError("Tensors have mismatched strides.")
+            chunks.append((t.storage_offset(), t.shape[0], t))
+        chunks.sort(key=lambda x: x[0])
+
+        expected_offset = chunks[0][0]
+        total_rows = 0
+        for offset, rows, _ in chunks:
+            if offset != expected_offset:
+                raise RuntimeError("Tensors are not contiguous in the storage")
+            expected_offset += rows * inner_elems
+            total_rows += rows
+
+        size = (total_rows, *base.shape[1:])
+        flat = torch.empty(0, dtype=dtype, device=device)
+        flat.set_(storage, chunks[0][0], size, stride)
+        return flat
 
     def _get_ranks_to_save_fused_tensor(self, fused_size: int) -> list[int]:
         # Goal: decide how many ranks are used to store model/expert parameters.
@@ -1263,3 +1339,88 @@ class BaseModel(nn.Module):
             tasks.extend(pending)
         else:
             return
+
+    def _compile_overwrite(self, func_name: str, compile_options: TorchCompileOption | None = None):
+        """Overwrite a function in a module with a new function.
+
+        Args:
+            func_name (str): The name of the function to overwrite.
+            new_func (FunctionType): The new function to use.
+            module: The module containing the function to overwrite.
+        """
+        compiled_function = cast(FunctionType | MaybeCompile, pydoc.locate(func_name))
+
+        if compile_options is None:
+            compile_options = {}
+
+        if compiled_function is None:
+            raise AttributeError(f"Compiling Error! Cannot locate the function: {func_name}")
+
+        if isinstance(compiled_function, maybe_compile):
+            maybe_compile.enable_compile(compiled_function, **compile_options)
+        elif (function_type := get_function_type(compiled_function)) is FunctionEnum.TOP_LEVEL_FUNCTION:
+            raise ValueError(
+                f"Compiling config error! {func_name} is a `TOP LEVEL FUNCTION`, it must be wrapped with "
+                "`@maybe_compile` decorator to enable `torch.compile`."
+            )
+        else:
+            compiled_function = cast(FunctionType, compiled_function)
+
+            if (function_type := get_function_type(compiled_function)) is FunctionEnum.LOCAL_FUNCTION:
+                raise ValueError(
+                    f"Compiling config error! {func_name} is a local function, which is not supported yet."
+                )
+            elif function_type is FunctionEnum.CLASS_LEVEL_FUNCTION:
+                qualname_split = compiled_function.__qualname__.split(".")
+                assert len(qualname_split) == 2, (
+                    f"XTuner Internal Error! the name of {compiled_function} should be recognized as "
+                    f"<class_name>.<method_name>, but got {qualname_split}"
+                )
+                class_name, method_name = qualname_split
+
+                module_name = compiled_function.__module__
+                cls = getattr(import_module(module_name), class_name)
+
+                if not is_compiled_function(compiled_function):
+                    setattr(cls, method_name, torch.compile(compiled_function, **compile_options))
+
+        full_name = get_function_full_qualname(compiled_function)  # type: ignore[arg-type]
+        logger.info(f"Enabling torch.compile for function {full_name} with options: {compile_options}")
+
+    def _resolve_compile_cfg(
+        self,
+        config: XTunerBaseModelConfig,
+    ) -> dict[str, TorchCompileOption]:
+        if not hasattr(config, "compile_cfg"):
+            return {}
+
+        custom_cfg = config.compile_cfg
+        if custom_cfg is False:
+            self._disable_compile_cfg(self.config)
+            return {}
+
+        if custom_cfg is True or custom_cfg is None:
+            compile_cfg = self.default_compile_cfg
+        else:
+            compile_cfg = custom_cfg
+
+        return compile_cfg
+
+    def _disable_compile_cfg(self, obj):
+        if isinstance(obj, PydanticBaseModel) and hasattr(obj, "compile_cfg"):
+            obj.compile_cfg = False
+            consume(self._disable_compile_cfg(getattr(obj, x)) for x in obj.__class__.model_fields)
+        elif isinstance(obj, Mapping):
+            consume(map(self._disable_compile_cfg, obj.values()))
+        # str&bytes are special Iterable, need to exclude it, otherwise it will infinite loop
+        elif isinstance(obj, Iterable) and not isinstance(obj, (str, bytes)):
+            consume(map(self._disable_compile_cfg, obj))
+        else:
+            return
+
+    def _maybe_enable_compile(self, compile_cfg: dict[str, TorchCompileOption]):
+        if compile_cfg:
+            torch._dynamo.config.cache_size_limit = 256
+
+        for target, option in compile_cfg.items():
+            self._compile_overwrite(target, option)

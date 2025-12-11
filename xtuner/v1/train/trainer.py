@@ -491,13 +491,19 @@ class Trainer:
         self._profile_time = profile_time
         self._profile_memory = profile_memory
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
-        self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
+
+        is_hf_path, error_info = is_hf_model_path(load_from) if load_from is not None else False, None
+        self._load_from_hf = is_hf_path
         self._can_save_hf = model_cfg.hf_config is not None or self._load_from_hf
 
         if not self._can_save_hf:
-            assert hf_interval is None and hf_max_keep is None, (
-                "`hf_interval` and `hf_max_keep` should be None when `load_from` is not a Huggingface model path, "
+            assert_info = (
+                f"`hf_interval`: {hf_interval} and `hf_max_keep`: {hf_max_keep} "
+                f"should be None when `load_from` is not a Huggingface model path, "
             )
+            if is_hf_path is False and error_info is not None:
+                assert_info += f", HF path load error Info: {error_info}"
+            assert hf_interval is None and hf_max_keep is None, assert_info
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
@@ -591,6 +597,7 @@ class Trainer:
         if isinstance(load_from, str):
             load_from = Path(load_from)
 
+        self._resolve_deprecate_compile_cfg(model_cfg=model_cfg, fsdp_cfg=fsdp_cfg)  # TODO: Remove in version 1.1.0
         self._engine = self.build_engine(
             model_path=load_from,
             model_config=model_cfg,
@@ -753,6 +760,7 @@ class Trainer:
             ProberList.after_step()
             step_time = time_after_train_step - time_before_train_step
             step_consumed_tokens = other_log["consumed_tokens"]
+            step_consumed_img_tokens = other_log.get("consumed_img_tokens", None)
 
             extra_info = other_log.get("extra_info", {})
             if isinstance(extra_info, ModelForwardExtraLogInfo):
@@ -781,6 +789,7 @@ class Trainer:
                 loss_log=loss_log,
                 step_consumed_tokens=step_consumed_tokens,
                 exp_consumed_tokens=self._exp_consumed_tokens,
+                step_consumed_img_tokens=step_consumed_img_tokens,
                 reduced_consumed_tokens=self._reduced_consumed_tokens,
                 data_time=data_time,
                 step_time=step_time,
@@ -1021,6 +1030,9 @@ class Trainer:
 
         if model_path is not None:
             engine.model.set_hf(model_path)
+
+        if engine.model.compile_cfg is not None and self.rank == 0:
+            logger.info(f"The `compile_cfg` of model is {json.dumps(engine.model.compile_cfg, indent=4)}")
         return engine
 
     def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:
@@ -1422,6 +1434,7 @@ class Trainer:
         train_time: float,
         train_time_offset: float,
         grad_norm: float,
+        step_consumed_img_tokens: float | None,
         internal_metrics: InternalMetrics | None = None,
     ):
         """Log the training step information."""
@@ -1450,17 +1463,22 @@ class Trainer:
         if internal_metrics:
             flattened_internal_metrics = flatten_internal_metrics_for_logs(internal_metrics)
 
+        if step_consumed_img_tokens is not None:
+            img_tokens_str = f"img_tokens: {step_consumed_img_tokens} "
+        else:
+            img_tokens_str = ""
+
         self.logger.info(
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
             f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
-            f"text_tokens: {step_consumed_tokens} "
+            f"text_tokens: {step_consumed_tokens} {img_tokens_str}"
             f"reduced_consumed_tokens: {reduced_consumed_tokens} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {tgs:.1f} "
-            f"exp_tgs: {exp_tgs: .1f} "
+            f"exp_tgs: {exp_tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
             f"est_global_batch_tokens: {est_global_batch_tokens} "
             f"eta: {eta_hms} "
@@ -1742,3 +1760,9 @@ class Trainer:
             log_str += f"{k}: {v}\n"
         log_str += "=================================================="
         logger.info(log_str)
+
+    def _resolve_deprecate_compile_cfg(
+        self, model_cfg: TransformerConfig | VisionComposeConfigProtocol, fsdp_cfg: FSDPConfig
+    ):
+        if not fsdp_cfg.torch_compile:
+            model_cfg.compile_cfg = False
