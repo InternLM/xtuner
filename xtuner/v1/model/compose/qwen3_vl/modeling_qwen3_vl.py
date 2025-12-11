@@ -1,5 +1,5 @@
 import torch
-from xtuner.v1.model import BaseModel
+import types
 from .qwen3_vl_config import Qwen3VLBaseConfig
 from .modeling_vision import Qwen3VLVisionModel
 from .modeling_projector import Qwen3VLProjector
@@ -25,8 +25,16 @@ from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE
 from xtuner.v1.float8.float8_handler import Float8Handler
 from torch.distributed.device_mesh import DeviceMesh
 from xtuner.v1.data_proto.utils import split_for_sequence_parallel
+from xtuner.v1.model import BaseModel, TorchCompileOption, DEFAULT_FLOAT8_CFG
 
 logger = get_logger()
+
+
+QWEN3VL_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.model.compose.qwen3_vl.modeling_projector.Qwen3VLProjector.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.model.compose.qwen3_vl.modeling_vision.Qwen3VLVisionLayer.forward": TorchCompileOption(fullgraph=True),
+    **DEFAULT_FLOAT8_CFG,
+}
 
 
 def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[str], str]):
@@ -67,6 +75,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         for key, value in self.language_model.load_spec_mapping.items():
             self.load_spec_mapping['language_model.' + key] = value
 
+        self._maybe_enable_compile(self.compile_cfg)
         self._freeze_modules()
 
     def _freeze_modules(self):
@@ -126,6 +135,11 @@ class Qwen3VLForConditionalGeneration(BaseModel):
 
         self._to_empty_meta()
         return self
+
+    @property
+    @override
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        return QWEN3VL_COMPILE_CFG
 
     def from_hf(self, hf_path: str | Path, strict=True):
         self._hf_path = Path(hf_path)
