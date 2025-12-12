@@ -1,4 +1,5 @@
 import torch.distributed as dist
+from torch.distributed.device_mesh import DeviceMesh
 from pydantic import BaseModel, ConfigDict
 
 from .enum_helper import StrEnum
@@ -21,6 +22,7 @@ class LoadSpec(BaseModel):
     shard_start: int | None = None
     shard_end: int | None = None
     group: dist.ProcessGroup | None = None
+    fsdp_mesh: DeviceMesh | None = None  # TODO: (yehaochen) Only a workaround
 
     def model_post_init(self, _) -> None:
         if self.load_enum == LoadEnum.SAME:

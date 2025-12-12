@@ -11,7 +11,6 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
-    fully_shard,
 )
 from torch.distributed.tensor import DTensor
 from tqdm import tqdm
@@ -223,7 +222,7 @@ class Dense(BaseModel):
                     layer.forward = torch.compile(layer.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
-            fully_shard(
+            self._fully_shard(
                 layer,
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
@@ -237,7 +236,7 @@ class Dense(BaseModel):
         ):
             layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
 
-        fully_shard(
+        self._fully_shard(
             self.embed_tokens,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
@@ -245,7 +244,7 @@ class Dense(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
 
-        fully_shard(
+        self._fully_shard(
             self.norm,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
@@ -253,7 +252,7 @@ class Dense(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
 
-        fully_shard(
+        self._fully_shard(
             self.lm_head,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
@@ -261,7 +260,7 @@ class Dense(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
 
-        fully_shard(
+        self._fully_shard(
             self,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,

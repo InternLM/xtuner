@@ -136,7 +136,7 @@ class InternS1ForConditionalGeneration(BaseModel):
         # Note: 非常关键，不能删除这个 assert
         assert self.fsdp_mesh is not None
 
-        fully_shard(
+        self._fully_shard(
             self,
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
