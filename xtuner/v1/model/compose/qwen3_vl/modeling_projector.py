@@ -70,8 +70,6 @@ class Qwen3VLProjector(BaseModel):
                     for _ in range(len(config.deepstack_visual_indexes))
                 ]
             )
-        from pathlib import Path
-        self._hf_path: Path | None = None
         self._hf_prefix = "model.visual."
         self._init_load_spec()
 

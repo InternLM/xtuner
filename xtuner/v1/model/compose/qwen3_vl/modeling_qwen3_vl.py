@@ -68,12 +68,12 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
         return image_embeds, deepstack_image_embeds
 
     def get_placeholder_mask(
-            self,
-            input_ids: torch.Tensor,
-            visual_features: torch.Tensor,
-            deepstack_visual_embeds: list[torch.Tensor],
-            origin_pixel_len: int,
-            sequence_parallel_mesh: DeviceMesh | None = None,
+        self,
+        input_ids: torch.Tensor,
+        visual_features: torch.Tensor,
+        deepstack_visual_embeds: list[torch.Tensor],
+        origin_pixel_len: int,
+        sequence_parallel_mesh: DeviceMesh | None = None,
     ):
         """Obtains multimodal placeholder mask from `input_ids` or
         `inputs_embeds`, and checks that the placeholder token count is equal

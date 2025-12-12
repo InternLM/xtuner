@@ -251,8 +251,6 @@ class Qwen3VLVisionModel(BaseModel):
 
         self.deepstack_visual_indexes = config.deepstack_visual_indexes
 
-        self._hf_path: Path | None = None
-
         self._hf_prefix = "model.visual."
         self._init_load_spec()
 

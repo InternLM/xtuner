@@ -810,7 +810,9 @@ class BaseModel(nn.Module):
             + math.ceil(fused_size / bucket_size)
         )
 
-    def _save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
+    def _save_hf(
+        self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"
+    ):
         """Save the hf model to the given directory.
 
         Args:

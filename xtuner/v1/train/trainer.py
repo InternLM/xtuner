@@ -1000,7 +1000,7 @@ class Trainer:
 
         Args:
             model_path (Path | None): Path to the model checkpoint or None for new initialization.
-            model_config (TransformerConfig | VisionComposeConfigProtocol): Model configuration.
+            model_config (TransformerConfig | BaseComposeConfig): Model configuration.
             optim_config (OptimConfig): Optimizer configuration.
             fsdp_config (FSDPConfig): FSDP configuration for distributed training.
             resume_cfg (ResumeConfig | None): Resume configuration for continuing training.
@@ -1618,7 +1618,7 @@ class Trainer:
         # Model's pad_token_id only affects the embedding module which acts specially for pad token.
         # Model's pad_token_id may be different from tokenizer's pad_token_id.
         # Note: Qwen3 Model's pad_token_id is None, which is different from Qwen tokenizer's pad_token_id.
-        # if isinstance(model_cfg, VisionComposeConfigProtocol):
+        # if isinstance(model_cfg, BaseComposeConfig):
         #     if model_cfg.text_config.pad_token_id != pad_token_id:
         #         logger.warning(
         #             f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "
