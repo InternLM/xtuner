@@ -11,7 +11,7 @@ from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
 
-from ..linear.linear import build_linear
+from ..linear import build_linear
 
 
 class DenseMLP(nn.Module):
