@@ -270,9 +270,9 @@ class BaseModel(nn.Module):
         """Fully shard the model parameters."""
         raise NotImplementedError
 
-    def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, prefix: str = "model"):
-        with profile_time_and_memory(f"[Saving HF to {hf_dir} cost]"):
-            self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype, prefix=prefix)
+    def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
+        with profile_time_and_memory(f"[Saving HF to [{safetensors_prefix}]{hf_dir} cost]"):
+            self._save_hf(hf_dir=hf_dir, save_dtype=save_dtype, safetensors_prefix=safetensors_prefix)
 
     def safetensors_to_params(
         self,
@@ -810,7 +810,7 @@ class BaseModel(nn.Module):
             + math.ceil(fused_size / bucket_size)
         )
 
-    def _save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, prefix: str = "model"):
+    def _save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
         """Save the hf model to the given directory.
 
         Args:
@@ -858,7 +858,7 @@ class BaseModel(nn.Module):
                 continue
 
             safetensor_index += 1
-            safetensor_name = f"{prefix}-{safetensor_index:04d}-fused-save_rank{save_rank}.safetensors"
+            safetensor_name = f"{safetensors_prefix}-{safetensor_index:04d}-fused-save_rank{save_rank}.safetensors"
             weight_map.update(dict.fromkeys(name_list, safetensor_name))
             assert save_executor is not None, "Internal Error, save_executor should not be None"
             future = save_executor.submit(
@@ -872,7 +872,7 @@ class BaseModel(nn.Module):
         safetensor_index = 0
         for name_list, hf_tensor_list in chain(same_gen, shard_gen):
             safetensor_index += 1
-            safetensor_name = f"{prefix}-{safetensor_index:04d}-others-save_rank{save_rank}.safetensors"
+            safetensor_name = f"{safetensors_prefix}-{safetensor_index:04d}-others-save_rank{save_rank}.safetensors"
 
             if is_others_save_rank:
                 # for tie_word_embeddings, we need to make sure each key is only saved once

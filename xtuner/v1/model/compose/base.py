@@ -147,7 +147,7 @@ class BaseComposeModel(BaseModel):
             if missing:
                 raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
 
-    def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, prefix: str = "model"):
+    def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
         hf_dir = Path(hf_dir)
         self.language_model.save_hf(hf_dir, save_dtype, "model-language")
 
@@ -157,7 +157,7 @@ class BaseComposeModel(BaseModel):
         self.vision_tower.save_hf(hf_dir, save_dtype, "model-vision")
         modify_safetensors_index_json(hf_dir, weight_map_dict)
 
-        self.multi_modal_projector.save_hf(hf_dir, save_dtype, "model-project")
+        self.multi_modal_projector.save_hf(hf_dir, save_dtype, "model-projector")
         modify_safetensors_index_json(hf_dir, weight_map_dict)
 
         if dist.get_rank() == 0:
