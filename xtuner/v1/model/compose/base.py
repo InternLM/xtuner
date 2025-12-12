@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -53,6 +54,12 @@ def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[
         return [convertor(i) for i in fn(*args, **kwargs)]
 
     return wrapper
+
+
+def modify_safetensors_index_json(hf_dir: Path, weight_map_dict: dict):
+    if dist.get_rank() == 0:
+        with open(hf_dir / "model.safetensors.index.json") as f:
+            weight_map_dict.update(json.load(f)["weight_map"])
 
 
 class BaseComposeModel(BaseModel):
@@ -144,26 +151,18 @@ class BaseComposeModel(BaseModel):
         hf_dir = Path(hf_dir)
         self.language_model.save_hf(hf_dir, save_dtype, "model-language")
 
-        if dist.get_rank() == 0:
-            import json
-
-            weight_map_dict = {}
-            with open(hf_dir / "model.safetensors.index.json") as f:
-                weight_map_dict.update(json.load(f)["weight_map"])
+        weight_map_dict: dict = {}
+        modify_safetensors_index_json(hf_dir, weight_map_dict)
 
         self.vision_tower.save_hf(hf_dir, save_dtype, "model-vision")
-        if dist.get_rank() == 0:
-            with open(hf_dir / "model.safetensors.index.json") as f:
-                weight_map_dict.update(json.load(f)["weight_map"])
+        modify_safetensors_index_json(hf_dir, weight_map_dict)
 
         self.multi_modal_projector.save_hf(hf_dir, save_dtype, "model-project")
-        if dist.get_rank() == 0:
-            with open(hf_dir / "model.safetensors.index.json") as f:
-                weight_map_dict.update(json.load(f)["weight_map"])
+        modify_safetensors_index_json(hf_dir, weight_map_dict)
 
+        if dist.get_rank() == 0:
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 json.dump({"weight_map": weight_map_dict, "metadata": {}}, f, indent=4)
-
         dist.barrier()
 
     def scale_and_reduce_grad(self):

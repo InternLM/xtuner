@@ -50,13 +50,6 @@ class Qwen3VLVisionConfig(XTunerBaseModelConfig):
 
     @property
     def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
         return None
 
 
@@ -74,13 +67,6 @@ class Qwen3VLProjectorConfig(XTunerBaseModelConfig):
 
     @property
     def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
         return None
 
 
@@ -111,6 +97,17 @@ class Qwen3VLBaseConfig(BaseComposeConfig):
     def from_hf(cls, hf_path: str | Path) -> Self:
         raise NotImplementedError
 
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
+
 
 class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
@@ -121,17 +118,6 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
         rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
     )
 
-    @property
-    def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
-        return None
-
 
 class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
@@ -141,17 +127,6 @@ class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
         rope_theta=5000000,
         rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
     )
-
-    @property
-    def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
-        return None
 
 
 class Qwen3VLDense4BConfig(Qwen3VLBaseConfig):
@@ -167,17 +142,6 @@ class Qwen3VLDense4BConfig(Qwen3VLBaseConfig):
         rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
     )
 
-    @property
-    def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
-        return None
-
 
 class Qwen3VLDense8BConfig(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
@@ -187,14 +151,3 @@ class Qwen3VLDense8BConfig(Qwen3VLBaseConfig):
         rope_theta=5000000,
         rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
     )
-
-    @property
-    def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
-        return None

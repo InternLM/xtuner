@@ -1,7 +1,5 @@
 import types
-from typing import cast, Callable
-from pathlib import Path
-
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -10,11 +8,10 @@ import torch.distributed.nn.functional as distF
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.utils import get_logger, get_padding_length, get_device
-from xtuner.v1.model import BaseModel, TorchCompileOption, DEFAULT_FLOAT8_CFG
+from xtuner.v1.model import TorchCompileOption, DEFAULT_FLOAT8_CFG
 from xtuner.v1.rl.utils import sp_split
 
-from .modeling_vision import InternS1VisionModel, init_world_mesh
-from .modeling_projector import InternS1MultiModalProjector
+from .modeling_vision import init_world_mesh
 from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from .intern_s1_config import InternS1BaseConfig
@@ -70,6 +67,45 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
         self.img_context_token_id = config.image_token_id
         self.image_size = config.vision_config.image_size[0]
 
+    @override
+    def fully_shard(
+        self,
+        fsdp_config: FSDPConfig,
+        float8_handler: Float8Handler | None = None,
+    ):
+        self.fsdp_config = fsdp_config
+        # TODO: 判断其余模块是否已经被 fsdp 切分了
+
+        # NOTE: 暂时只能在这个地方进行 checkpoint_wrapper
+        # TODO: 当只训练某个部分时候，不能开启 checkpoint，否则 grad 是 None, 后续有需要再支持。
+        # self.multi_modal_projector = checkpoint_wrapper(self.multi_modal_projector,  # type: ignore
+        #                                                     checkpoint_impl=CheckpointImpl.REENTRANT)
+
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        )
+
+        self.fsdp_mesh = init_world_mesh()
+        # Note: 非常关键，不能删除这个 assert
+        assert self.fsdp_mesh is not None
+
+        fully_shard(
+            self,
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=fsdp_config.reshard_after_forward,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+        )
+
+        self.language_model.embed_tokens.set_modules_to_forward_prefetch(   # type: ignore
+            [self.vision_tower.encoder.layer[0]])
+        self.vision_tower.encoder.layer[-1].set_modules_to_forward_prefetch(   # type: ignore
+            [self.multi_modal_projector])
+        self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
+        self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
+
+        self._to_empty_meta()
+        return self
 
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:

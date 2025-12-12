@@ -31,7 +31,7 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
     def __init__(self, config: Qwen3VLBaseConfig):
         super().__init__(config)  # type: ignore[arg-type]
 
-        if isinstance(self.language_model, Qwen3MoE):
+        if type(self.language_model) is Qwen3MoE:
             # TODO(YHC): This is a hack to make the language model compatible with HF
             _hf_prefix = "model.language_model."
             self.language_model.to_hf_key_list = types.MethodType(to_hf_key_list_wrapper(  # type: ignore
@@ -39,7 +39,6 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
                 convertor=lambda x: x.replace('model.', _hf_prefix)),
                 self.language_model)
             self.language_model._init_load_spec()
-
 
     @property
     @override
