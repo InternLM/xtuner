@@ -1,14 +1,15 @@
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 from mmengine import is_installed
-from pydantic import BaseModel, ConfigDict
+from pydantic import ConfigDict
 
-from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.base import XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import get_device, get_logger
+
+from ..base import BaseComposeConfig
 
 
 if TYPE_CHECKING:
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 
-class InternVLVisionConfig(BaseModel):
+class InternVLVisionConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -45,7 +46,6 @@ class InternVLVisionConfig(BaseModel):
     use_absolute_position_embeddings: bool = True
     use_mask_token: bool = False
     use_mean_pooling: bool = True
-    float8_cfg: Optional["Float8Config"] = None
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
@@ -60,13 +60,12 @@ class InternVLVisionConfig(BaseModel):
         return InternVLVisionModel(self)
 
 
-class InternVLProjectorConfig(BaseModel):
+class InternVLProjectorConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(extra="forbid")
     vision_hidden_size: int = 1024
     text_hidden_size: int = 4096
     downsample_ratio: float = 0.5
     hidden_act: str = "gelu"
-    float8_cfg: Optional["Float8Config"] = None
 
     def build(self):
         from .modeling_projector import InternVLMultiModalProjector
@@ -74,7 +73,7 @@ class InternVLProjectorConfig(BaseModel):
         return InternVLMultiModalProjector(self)
 
 
-class InternVLBaseConfig(XTunerBaseModelConfig):
+class InternVLBaseConfig(BaseComposeConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",

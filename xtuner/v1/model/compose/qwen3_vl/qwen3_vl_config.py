@@ -1,11 +1,10 @@
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 from mmengine import is_installed
-from pydantic import BaseModel, ConfigDict
+from pydantic import ConfigDict
 from typing_extensions import Self
 
-from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.base import TransformerConfig, XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VLTextDense8BConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
@@ -13,11 +12,13 @@ from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLT
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.utils import get_device, get_logger
 
+from ..base import BaseComposeConfig
+
 
 logger = get_logger()
 
 
-class Qwen3VLVisionConfig(BaseModel):
+class Qwen3VLVisionConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -34,7 +35,6 @@ class Qwen3VLVisionConfig(BaseModel):
     num_position_embeddings: int = 2304
     deepstack_visual_indexes: list[int] = [8, 16, 24]
     initializer_range: float = 0.02
-    float8_cfg: Optional["Float8Config"] = None
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
@@ -48,22 +48,43 @@ class Qwen3VLVisionConfig(BaseModel):
 
         return Qwen3VLVisionModel(self)
 
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
 
-class Qwen3VLProjectorConfig(BaseModel):
+
+class Qwen3VLProjectorConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(extra="forbid")
     vision_hidden_size: int = 1152
     text_hidden_size: int = 2048
     spatial_merge_size: int = 2
     deepstack_visual_indexes: list[int] = [8, 16, 24]
-    float8_cfg: Optional["Float8Config"] = None
 
     def build(self):
         from .modeling_projector import Qwen3VLProjector
 
         return Qwen3VLProjector(self)
 
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
 
-class Qwen3VLBaseConfig(XTunerBaseModelConfig):
+
+class Qwen3VLBaseConfig(BaseComposeConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",

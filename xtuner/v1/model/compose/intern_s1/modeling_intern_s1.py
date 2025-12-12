@@ -25,6 +25,7 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
+from ..base import BaseComposeModel, to_hf_key_list_wrapper
 
 DEVICE = get_device()
 logger = get_logger()
@@ -49,29 +50,14 @@ def pixel_shuffle(x, scale_factor=0.5):
     return x
 
 
-def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[str], str]):
-    def wrapper(self, *args, **kwargs):
-        return [convertor(i) for i in fn(*args, **kwargs)]
-
-    return wrapper
-
-
-class InternS1ForConditionalGeneration(BaseModel):
+class InternS1ForConditionalGeneration(BaseComposeModel):
     config: InternS1BaseConfig
 
     def __init__(self, config: InternS1BaseConfig):
         super().__init__(config)  # type: ignore[arg-type]
+
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
-
-        vision_config = config.vision_config
-        text_config = config.text_config
-        projector_config = config.projector_config
-
-        self.vision_tower = InternS1VisionModel(vision_config)
-        self.multi_modal_projector = InternS1MultiModalProjector(projector_config)
-
-        self.language_model = text_config.build()
 
         # TODO(YHC): This is a hack to make the language model compatible with HF
         _hf_prefix = "model.language_model."
@@ -82,95 +68,8 @@ class InternS1ForConditionalGeneration(BaseModel):
         self.language_model._init_load_spec()
 
         self.img_context_token_id = config.image_token_id
-        self._hf_path: Path | None = None
         self.image_size = config.vision_config.image_size[0]
 
-        # Note: global load spec mapping for save_hf
-        self.load_spec_mapping = {}
-        for key, value in self.vision_tower.load_spec_mapping.items():
-            self.load_spec_mapping['vision_tower.' + key] = value
-        for key, value in self.multi_modal_projector.load_spec_mapping.items():
-            self.load_spec_mapping['multi_modal_projector.' + key] = value
-        for key, value in self.language_model.load_spec_mapping.items():
-            self.load_spec_mapping['language_model.' + key] = value
-
-        self._maybe_enable_compile(self.compile_cfg)
-        self._freeze_modules()
-
-    def _freeze_modules(self):
-        freeze_vision = self.config.freeze_vision
-        if freeze_vision:
-            self.vision_tower.requires_grad_(False)
-            self.vision_tower.eval()
-            logger.info("Freeze vision tower")
-        freeze_projector = self.config.freeze_projector
-        if freeze_projector:
-            self.multi_modal_projector.requires_grad_(False)
-            self.multi_modal_projector.eval()
-            logger.info("Freeze multi modal projector")
-        freeze_language = self.config.freeze_language
-        if freeze_language:
-            self.language_model.requires_grad_(False)
-            self.language_model.eval()
-            logger.info("Freeze language model")
-
-    @override
-    def fully_shard(
-        self,
-        fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ):
-        self.fsdp_config = fsdp_config
-        # TODO: 判断其余模块是否已经被 fsdp 切分了
-
-        # NOTE: 暂时只能在这个地方进行 checkpoint_wrapper
-        # TODO: 当只训练某个部分时候，不能开启 checkpoint，否则 grad 是 None, 后续有需要再支持。
-        # self.multi_modal_projector = checkpoint_wrapper(self.multi_modal_projector,  # type: ignore
-        #                                                     checkpoint_impl=CheckpointImpl.REENTRANT)
-
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
-        )
-
-        self.fsdp_mesh = init_world_mesh()
-        # Note: 非常关键，不能删除这个 assert
-        assert self.fsdp_mesh is not None
-
-        fully_shard(
-            self,
-            mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
-        )
-
-        self.language_model.embed_tokens.set_modules_to_forward_prefetch(   # type: ignore
-            [self.vision_tower.encoder.layer[0]])
-        self.vision_tower.encoder.layer[-1].set_modules_to_forward_prefetch(   # type: ignore
-            [self.multi_modal_projector])
-        self.multi_modal_projector.set_modules_to_forward_prefetch([self.language_model])  # type: ignore
-        self.language_model.set_modules_to_forward_prefetch([self.language_model.layers["0"]])  # type: ignore
-
-        self._to_empty_meta()
-        return self
-
-    def from_hf(self, hf_path: str | Path, strict=True):
-        self._hf_path = Path(hf_path)
-
-        if isinstance(hf_path, Path):
-            hf_path = str(hf_path)
-
-        _, _, missing_llm_keys = self.language_model.from_hf(hf_path, strict=False)
-        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path, strict=False)
-        _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False)
-
-        missing = missing_llm_keys | missing_vision_keys | missing_project_keys
-        if strict:
-            if missing:
-                raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
-
-    def scale_and_reduce_grad(self):
-        self.language_model.scale_and_reduce_grad()
 
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:
@@ -282,12 +181,6 @@ class InternS1ForConditionalGeneration(BaseModel):
             loss_ctx
         )
         return outputs
-
-    @override
-    def init_weights(self) -> None:
-        self.vision_tower.init_weights()
-        self.language_model.init_weights()
-        self.multi_modal_projector.init_weights()
 
     @property
     @override

@@ -31,10 +31,11 @@ from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
 from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
-from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
+from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
@@ -302,7 +303,7 @@ class TrainerConfig(BaseModel):
         arbitrary_types_allowed=True,
         protected_namespaces=(),
     )
-    model_cfg: TransformerConfig | VisionComposeConfigProtocol
+    model_cfg: TransformerConfig | BaseComposeConfig
     load_from: str | Path | None = None
     tokenizer_path: str | Path | None = None
     dataset_cfg: Annotated[DatasetConfigList | None, Parameter(show_default=False)] = (
@@ -429,7 +430,7 @@ class Trainer:
         self,
         *,
         load_from: str | Path | None = None,  # Huggingface model path or saved trainer_path
-        model_cfg: TransformerConfig | VisionComposeConfigProtocol,
+        model_cfg: TransformerConfig | BaseComposeConfig,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig | None = FSDPConfig(),
         dataset_cfg: DatasetConfigList | None = None,  # TODO: Removed in version 1.1.0
@@ -988,7 +989,7 @@ class Trainer:
     def build_engine(
         self,
         model_path: Path | None,
-        model_config: TransformerConfig | VisionComposeConfigProtocol,
+        model_config: TransformerConfig | BaseComposeConfig,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
         load_checkpoint_path: str | Path | None,
@@ -1009,7 +1010,7 @@ class Trainer:
         Returns:
             TrainEngine: Initialized training engine.
         """
-        if isinstance(model_config, VisionComposeConfigProtocol):
+        if isinstance(model_config, BaseComposeConfig):
             engine = VisionComposeTrainEngine(
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
@@ -1596,7 +1597,7 @@ class Trainer:
     def _resolve_config_conflicts(
         self,
         tokenizer: PreTrainedTokenizer,
-        model_cfg: TransformerConfig | VisionComposeConfigProtocol,
+        model_cfg: TransformerConfig | BaseComposeConfig,
         dataloader_cfg: DataloaderConfig,
     ):
         if hasattr(tokenizer, "pad_token_id"):
@@ -1761,8 +1762,6 @@ class Trainer:
         log_str += "=================================================="
         logger.info(log_str)
 
-    def _resolve_deprecate_compile_cfg(
-        self, model_cfg: TransformerConfig | VisionComposeConfigProtocol, fsdp_cfg: FSDPConfig
-    ):
+    def _resolve_deprecate_compile_cfg(self, model_cfg: TransformerConfig | BaseComposeConfig, fsdp_cfg: FSDPConfig):
         if not fsdp_cfg.torch_compile:
             model_cfg.compile_cfg = False
