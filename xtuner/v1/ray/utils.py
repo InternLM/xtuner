@@ -61,7 +61,7 @@ def load_function(path):
 
 
 @ray.remote
-def find_master_addr_and_port(nums=1):
+def find_master_addr_and_port(nums=1, start_port=None, max_tries=1024):
     """Finds an available master address and a specified number of ports.
 
     This remote function gets the node's IP address and binds to one or more
@@ -69,6 +69,10 @@ def find_master_addr_and_port(nums=1):
 
     Args:
         nums (int): The number of ports to find. Defaults to 1.
+        start_port (Optional[int]): The starting port to search from.
+            If None, random available ports will be used. Defaults to None.
+        max_tries (int): The maximum number of attempts to find available ports.
+            Defaults to 1024.
 
     Returns:
         A tuple containing the address and a single port if `nums` is 1,
@@ -78,12 +82,34 @@ def find_master_addr_and_port(nums=1):
     ports = []
     sockets = []
     try:
-        for _ in range(nums):
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(("", 0))
-            s.listen(1)
-            ports.append(s.getsockname()[1])
-            sockets.append(s)
+        if start_port is None:
+            for _ in range(nums):
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.bind(("", 0))
+                s.listen(1)
+                ports.append(s.getsockname()[1])
+                sockets.append(s)
+        else:
+            candidate_port = start_port
+            tries = 0
+            while len(ports) < nums and tries < max_tries:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    s.bind(("", candidate_port))
+                    s.listen(1)
+                except OSError:
+                    tries += 1
+                    candidate_port += 1
+                    s.close()
+                    continue
+                ports.append(s.getsockname()[1])
+                sockets.append(s)
+                tries += 1
+                candidate_port += 1
+            if len(ports) < nums:
+                raise RuntimeError(
+                    f"Could not find {nums} available ports starting from port {start_port} after {max_tries} tries."
+                )
     finally:
         for s in sockets:
             s.close()
