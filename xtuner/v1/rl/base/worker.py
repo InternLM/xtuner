@@ -20,13 +20,12 @@ from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import (
-    VisionComposeConfigProtocol,
-    VisionComposeModelProtocol,
     VisionComposeTrainEngine,
 )
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
@@ -119,7 +118,7 @@ class WorkerConfig(BaseModel):
     """
 
     model_config = ConfigDict(title="Worker config", extra="forbid", arbitrary_types_allowed=True)
-    model_cfg: TransformerConfig | VisionComposeConfigProtocol
+    model_cfg: TransformerConfig | BaseComposeConfig
     optim_cfg: OptimConfig
     loss_cfg: BaseRLLossConfig
     lr_cfg: LRConfig
@@ -186,7 +185,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.logger = get_logger()
 
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine | VisionComposeTrainEngine:
-        if isinstance(worker_cfg.model_cfg, VisionComposeConfigProtocol):
+        if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
             engine = VisionComposeTrainEngine(
                 optim_cfg=worker_cfg.optim_cfg,
                 fsdp_cfg=worker_cfg.fsdp_cfg,
@@ -206,17 +205,17 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def _build_ref_model(
         self,
-        ref_model_cfg: TransformerConfig | VisionComposeConfigProtocol,
+        ref_model_cfg: TransformerConfig | BaseComposeConfig,
         load_from: str | Path,
         ref_model_fsdp_cfg: FSDPConfig | None = None,
     ):
         # TODO: 需要重构，使得能更优雅的兼容 mllm
-        model: VisionComposeModelProtocol | XtunerBaseModel
+        model: BaseComposeModel | XtunerBaseModel
         with torch.device("meta"):
             model = ref_model_cfg.build()
 
-        if isinstance(ref_model_cfg, VisionComposeConfigProtocol):
-            assert ref_model_cfg.text_config.float8_cfg is None, "VisionComposeConfigProtocol does not support float8"
+        if isinstance(ref_model_cfg, BaseComposeConfig):
+            assert ref_model_cfg.text_config.float8_cfg is None, "BaseComposeConfig does not support float8"
             if ref_model_fsdp_cfg is None:
                 ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
             model.language_model.fully_shard(ref_model_fsdp_cfg)  # type: ignore
@@ -321,7 +320,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         language_cfg = (
             self.config.model_cfg.text_config
-            if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
+            if isinstance(self.config.model_cfg, BaseComposeConfig)
             else self.config.model_cfg
         )
 
@@ -613,7 +612,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
 
-        if isinstance(model.config, VisionComposeConfigProtocol):
+        if isinstance(model.config, BaseComposeConfig):
             dtype = torch.bfloat16
         else:
             if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
@@ -685,7 +684,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
 
-        if isinstance(model.config, VisionComposeConfigProtocol):
+        if isinstance(model.config, BaseComposeConfig):
             # TODO: support float8 for vision compose model
             dtype = torch.bfloat16
         else:
@@ -705,7 +704,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         saved_list = []
         is_qwen3vl = False
-        if isinstance(model.config, VisionComposeConfigProtocol):
+        if isinstance(model.config, BaseComposeConfig):
             language_model = model.language_model
             if isinstance(model, Qwen3VLForConditionalGeneration):
                 is_qwen3vl = True
@@ -723,7 +722,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             tensor_list = []
             name_list = []
             for sub_name, param in layer.state_dict().items():
-                if isinstance(model.config, VisionComposeConfigProtocol):
+                if isinstance(model.config, BaseComposeConfig):
                     saved_list.append(f"language_model.layers.{i}.{sub_name}")
                 else:
                     saved_list.append(f"layers.{i}.{sub_name}")
@@ -731,7 +730,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 local_tensor = local_tensor.bfloat16()
                 load_spec = language_model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
 
-                if isinstance(model.config, VisionComposeConfigProtocol):
+                if isinstance(model.config, BaseComposeConfig):
                     name = f"model.language_model.layers.{i}.{sub_name}"
                 else:
                     name = f"model.layers.{i}.{sub_name}"
@@ -753,7 +752,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             local_tensor = local_tensor.bfloat16()
             load_spec = model.load_spec_mapping.get(name)
 
-            if isinstance(model.config, VisionComposeConfigProtocol):
+            if isinstance(model.config, BaseComposeConfig):
                 if "vision_tower." in name:
                     name = name.replace("vision_tower.", vision_hf_prefix)
                 elif "multi_modal_projector." in name:

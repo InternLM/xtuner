@@ -6,7 +6,7 @@ import torch
 from ray.actor import ActorProxy
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol
+from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.utils import ray_method
 
 from .worker import TrainingWorker
@@ -171,7 +171,7 @@ class RawTrainingController:
             model_cfg = ray.get(self.workers[0].get_model_cfg.remote())  # type: ignore[attr-defined]
             has_rollout_routed_experts = True
             language_cfg = model_cfg
-            if isinstance(model_cfg, VisionComposeConfigProtocol):
+            if isinstance(model_cfg, BaseComposeConfig):
                 language_cfg = model_cfg.text_config
 
         packed_data_batches = self._packing(data_batches, pack_max_length, language_cfg)
