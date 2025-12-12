@@ -14,7 +14,6 @@ from xtuner.v1.config import FSDPConfig
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
-    fully_shard,
 )
 from transformers.models.llama.modeling_llama import repeat_kv
 from xtuner.v1.float8.float8_handler import Float8Handler
@@ -349,7 +348,7 @@ class Qwen3VLVisionModel(BaseModel):
 
             self.blocks[layer_idx] = layer
 
-            fully_shard(
+            self._fully_shard(
                 layer,
                 mesh=self.fsdp_mesh,
                 mp_policy=mp_policy,
@@ -362,7 +361,7 @@ class Qwen3VLVisionModel(BaseModel):
         for layer_cur, layer_next in zip(self.blocks[:-1],  self.blocks[1:]):
             layer_cur.set_modules_to_forward_prefetch([layer_next])
 
-        fully_shard(
+        self._fully_shard(
             self,
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
