@@ -203,6 +203,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         logger.info(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
 
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
+            logger.info(f"[Dataset] Load cached [{self.name}]{self.path} of cache tgs {cache_tag}.")
             offset_path, num_tokens_path = cached["offsets"], cached["num_tokens"]
             offsets = np.load(offset_path)
             num_tokens = np.load(num_tokens_path)
