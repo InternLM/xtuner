@@ -118,6 +118,8 @@ class InternalMetricsRecorder:
     def calculate_module_weight_rms(self, module: nn.Module, layer_name: str, dtype: torch.dtype = torch.float32):
         """Calculate the RMS of the module's parameters."""
         self._check_closed()
+        if "weight_rms" not in self.metrics:
+            return
         all_params = [param.data for param in module.parameters() if param.requires_grad]
         if not all_params:
             return
@@ -188,20 +190,20 @@ class InternalMetricsRecorder:
 
                 if (
                     self.internal_metrics_cfg.monitor_moe_load_balance_stats
-                    and output.get("tokens_per_expert_global") is not None
+                    and (cur_tokens_per_expert := output.get("tokens_per_expert_global")) is not None
                 ):
                     # At this point, tokens_per_expert_global is already all-reduced into current rank.
                     # [num_layers, num_experts]
                     if tokens_per_expert_global is None:
-                        tokens_per_expert_global = output["tokens_per_expert_global"].float()
+                        tokens_per_expert_global = cur_tokens_per_expert.float()
                     else:
-                        tokens_per_expert_global += output["tokens_per_expert_global"].float()
+                        tokens_per_expert_global += cur_tokens_per_expert.float()
 
                 if (
                     self.internal_metrics_cfg.monitor_moe_router_logits_stats
-                    and output.get("router_logits") is not None
+                    and (cur_router_logits := output.get("router_logits")) is not None
                 ):
-                    for layer_name, router_logits in output["router_logits"].items():
+                    for layer_name, router_logits in cur_router_logits.items():
                         # [bsz, packed_len, num_experts]
                         router_logits_max[layer_name].append(router_logits.max())
                         router_logits_mean[layer_name].append(router_logits.mean())
@@ -210,40 +212,41 @@ class InternalMetricsRecorder:
             avg_count_load = tokens_per_expert_global.mean(1)
             max_load_i = torch.amax(tokens_per_expert_global, dim=1)
             maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
-            drop_ratio_all_layers = (tokens_per_expert_global - avg_count_load[:, None]).abs().mean(
-                dim=1
-            ) / avg_count_load
-            drop_ratio = drop_ratio_all_layers.mean()
-            self.metrics["drop_ratio"].update(
-                {f"layer{idx}": drop_ratio_all_layers[idx].item() for idx in range(drop_ratio_all_layers.shape[0])}
-            )
-            self.metrics["maxvio"].update(
-                {f"layer{idx}": maxvio_all_layers[idx].item() for idx in range(max_load_i.shape[0])}
-            )
-            maxvio = maxvio_all_layers.mean()
-            self.metrics["maxvio"]["total"] = maxvio.item()
-            self.metrics["drop_ratio"]["total"] = drop_ratio.item()
+            centered_tokens_per_expert = tokens_per_expert_global - avg_count_load[:, None]
+            drop_ratio_all_layers = (centered_tokens_per_expert).abs().mean(dim=1) / avg_count_load
+            if "drop_ratio" in self.metrics:
+                self.metrics["drop_ratio"].update(
+                    {f"layer{idx}": drop_ratio_all_layers[idx].item() for idx in range(drop_ratio_all_layers.shape[0])}
+                )
+                drop_ratio = drop_ratio_all_layers.mean()
+                self.metrics["drop_ratio"]["total"] = drop_ratio.item()
+            if "maxvio" in self.metrics:
+                self.metrics["maxvio"].update(
+                    {f"layer{idx}": maxvio_all_layers[idx].item() for idx in range(max_load_i.shape[0])}
+                )
+                maxvio = maxvio_all_layers.mean()
+                self.metrics["maxvio"]["total"] = maxvio.item()
 
-        if router_logits_max:
+        if "router_logits_max" in self.metrics and router_logits_max:
             for layer_name, router_logits_list in router_logits_max.items():
                 # [bsz/intra_layer_micro_batch, ]
                 local_router_logits_max = torch.max(torch.stack(router_logits_list))
                 dist.all_reduce(local_router_logits_max, op=dist.ReduceOp.MAX)
                 self.metrics["router_logits_max"][layer_name] = local_router_logits_max.item()
 
-        if router_logits_mean:
+        if "router_logits_mean" in self.metrics and router_logits_mean:
             for layer_name, router_logits_list in router_logits_mean.items():
                 # [bsz/intra_layer_micro_batch, ]
                 local_router_logits_mean = torch.mean(torch.stack(router_logits_list))
                 dist.all_reduce(local_router_logits_mean.div_(get_world_size()), op=dist.ReduceOp.SUM)
                 self.metrics["router_logits_mean"][layer_name] = local_router_logits_mean.item()
 
-        if self._attn_monitor_type == "softmax_lse":
+        if "attn_max_lse" in self.metrics and self._attn_monitor_type == "softmax_lse":
             for layer_name, local_attn_max_lse in self.attn_max_lse.items():
                 dist.all_reduce(local_attn_max_lse, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_lse"][layer_name] = local_attn_max_lse.item()
 
-        if self._attn_monitor_type == "attn_logits":
+        if "attn_max_logits" in self.metrics and self._attn_monitor_type == "attn_logits":
             for layer_name, local_attn_max_logits in self.attn_max_logits.items():
                 dist.all_reduce(local_attn_max_logits, op=dist.ReduceOp.MAX)
                 self.metrics["attn_max_logits"][layer_name] = local_attn_max_logits.item()
