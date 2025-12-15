@@ -38,10 +38,12 @@ def check_result(base_path, cur_path, check_metric):
         check_flag = True
         if metric == "runtime_info/tgs":
             if cur_steps > 10:
-                max_error = abs(mean(base_metrics[metric][10:-1]) - mean(cur_metrics[metric][10:-1]))/(mean(base_metrics[metric][10:-1]))
+                max_error = abs(mean(base_metrics[metric][10:-1]) - mean(cur_metrics[metric][10:-1])) / (
+                    mean(base_metrics[metric][10:-1])
+                )
                 if max_error > threshold:
-                    mean_base_metrics = f'{mean(base_metrics[metric][10:-1]):.6f}'
-                    mean_cur_metrics = f'{mean(cur_metrics[metric][10:-1]):.6f}'
+                    mean_base_metrics = f"{mean(base_metrics[metric][10:-1]):.6f}"
+                    mean_cur_metrics = f"{mean(cur_metrics[metric][10:-1]):.6f}"
                     fail_metric[metric] = (
                         f"{metric} relative error bigger than {threshold} after 10 step, baseline: {mean_base_metrics}, now: {mean_cur_metrics}, relative error: {max_error}"
                     )
@@ -59,9 +61,9 @@ def check_result(base_path, cur_path, check_metric):
                     max_error = relative_error
                     max_error_idx = idx
                 if relative_error > threshold:
-                    baseline_old = f'{old:.6f}'
-                    baseline_cur = f'{cur:.6f}'
-                    
+                    baseline_old = f"{old:.6f}"
+                    baseline_cur = f"{cur:.6f}"
+
                     fail_metric[metric] = (
                         f"{metric} relative error bigger than {threshold} in {idx} steps, baseline: {baseline_old}, now: {baseline_cur}, relative error: {relative_error}"
                     )
@@ -71,4 +73,3 @@ def check_result(base_path, cur_path, check_metric):
             logger.info(f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step.")
     result = not fail_metric
     return result, f"Some metric check failed,{fail_metric}"
-
