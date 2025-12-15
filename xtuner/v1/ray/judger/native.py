@@ -2,9 +2,63 @@ import inspect
 from typing import Any, Callable, List, Optional
 
 import httpx
+import ray
+from pydantic import BaseModel
+from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
 from xtuner.v1.utils import get_logger
+
+
+class NativeJudgerConfig(BaseModel):
+    """Base configuration class for judgers."""
+
+    model_config = {"arbitrary_types_allowed": True}
+    judger_name: str
+    num_ray_actors: int = 1
+    reward_func: Optional[Callable] = None
+    remote_url: Optional[str] = None
+    preprocess_func: Optional[Callable] = None
+    postprocess_func: Optional[Callable] = None
+    request_timeout: float = 30.0
+    extra_info: dict = {}
+
+    def build_actor(self, pg: PlacementGroup, start_bundle_idx: int) -> List[ray.actor.ActorClass]:
+        """Create and launch Ray actor instances for the GSM8K judger.
+
+        This method instantiates multiple NativeJudger Ray actors according to `num_ray_actors`,
+        assigning each to a specific bundle in the provided placement group for resource isolation.
+        Each actor is initialized with the judger's configuration and reward function.
+
+        Args:
+            pg: The Ray PlacementGroup used to allocate resources for the actors.
+            start_bundle_idx: The starting bundle index in the placement group for actor placement.
+
+        Returns:
+            List[ActorClass]: A list of Ray actor handles representing the launched judger workers.
+        """
+        workers_list = []
+        pg_options = {"num_cpus": pg.bundle_specs[0].get("CPU", 1)}
+        for idx in range(self.num_ray_actors):
+            worker = (
+                ray.remote(NativeJudger)
+                .options(
+                    placement_group=pg,
+                    placement_group_bundle_index=(start_bundle_idx + idx),
+                    **pg_options,
+                )
+                .remote(
+                    judger_name=self.judger_name,
+                    reward_func=self.reward_func,
+                    remote_url=self.remote_url,
+                    preprocess_func=self.preprocess_func,
+                    postprocess_func=self.postprocess_func,
+                    request_timeout=self.request_timeout,
+                    extra_info=self.extra_info,
+                )
+            )
+            workers_list.append(worker)
+        return workers_list
 
 
 class NativeJudger:
@@ -67,7 +121,6 @@ class NativeJudger:
         elif self.remote_url:
             self.http_client = httpx.AsyncClient(timeout=request_timeout)
             self.execute_func = self._remote_executor
-        self.logger = get_logger(__name__)
 
     def _default_preprocess(self, data_item: List[RLDataFlowItem], extra_info: dict) -> Any:
         """Default preprocessing function.
@@ -155,7 +208,7 @@ class NativeJudger:
             # transform json to RLJudgerResponseItem
             return self.postprocess_func(json_result)
         except httpx.RequestError as exc:
-            self.logger.error(f"An error occurred while requesting {exc.request.url}: {exc}")
+            get_logger().error(f"An error occurred while requesting {exc.request.url}: {exc}")
             return []
 
     async def judge(self, data_item: List[RLDataFlowItem]) -> List[RLJudgerResponseItem]:
@@ -175,3 +228,11 @@ class NativeJudger:
         if self.execute_func is None:
             raise RuntimeError("Judger is not properly initialized.")
         return await self.execute_func(data_item)
+
+    def get_judger_name(self) -> str:
+        """Get the name of the judger.
+
+        Returns:
+            str: The name of the judger.
+        """
+        return self.judger_name
