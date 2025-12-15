@@ -18,7 +18,6 @@ from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
-    fully_shard,
 )
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from tqdm import tqdm
@@ -733,7 +732,7 @@ class MoE(BaseModel):
                 reshard_after_forward = False
             else:
                 reshard_after_forward = self.fsdp_config.reshard_after_forward
-            fully_shard(
+            self._fully_shard(
                 layer,
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
@@ -747,7 +746,7 @@ class MoE(BaseModel):
         ):
             layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
 
-        fully_shard(
+        self._fully_shard(
             self.embed_tokens,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
@@ -755,7 +754,7 @@ class MoE(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
 
-        fully_shard(
+        self._fully_shard(
             self.norm,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
@@ -763,7 +762,7 @@ class MoE(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
 
-        fully_shard(
+        self._fully_shard(
             self.lm_head,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
@@ -771,7 +770,7 @@ class MoE(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
 
-        fully_shard(
+        self._fully_shard(
             self,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,

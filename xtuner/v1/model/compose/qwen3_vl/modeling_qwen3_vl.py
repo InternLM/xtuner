@@ -8,7 +8,6 @@ from xtuner.v1.loss import CELossContext
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
-    fully_shard,
     FSDPModule,
 )
 from typing import Callable
@@ -117,7 +116,7 @@ class Qwen3VLForConditionalGeneration(BaseModel):
         # Note: 非常关键，不能删除这个 assert
         assert self.fsdp_mesh is not None
 
-        fully_shard(
+        self._fully_shard(
             self,
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
