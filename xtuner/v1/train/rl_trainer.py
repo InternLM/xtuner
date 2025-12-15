@@ -13,12 +13,13 @@ from mmengine import load
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
+from ray.util.placement_group import placement_group
 from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, AutoCPUWorkers, CPUResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, DataFlowProxy, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment, SingleTurnEnvironmentProxy
@@ -59,6 +60,7 @@ class RLTrainerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     load_from: str | Path
     resources: AcceleratorResourcesConfig
+    cpu_resource: CPUResourcesConfig | None = None
     rollout_config: RolloutConfig
     dataflow_config: DataFlowConfig
     judger_config: JudgerConfig
@@ -202,6 +204,7 @@ class RLTrainer:
         *,
         load_from: str | Path,  # Huggingface model path or saved trainer_path
         resources: AcceleratorResourcesConfig,
+        cpu_resource: CPUResourcesConfig | None = None,
         rollout_config: RolloutConfig,
         dataflow_config: DataFlowConfig,
         judger_config: JudgerConfig,
@@ -290,6 +293,10 @@ class RLTrainer:
             self._enable_evaluate = evaluator_config.enable_evaluate
             self._enable_initial_evaluate = evaluator_config.enable_initial_evaluate
         self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
+        if cpu_resource is None:
+            self._cpu_pg = placement_group(bundles=[{"CPU": 1, "memory": 1024**3}], strategy="PACK")
+        else:
+            self._cpu_pg = AutoCPUWorkers.build_placement_group(cpu_resource)
         # We need to build train controller first, and then build rollout dataflow to make
         # inference engines know how much memory they can utilize.
         self._train_controller = self._build_train_controller(train_worker_cfg)
@@ -353,6 +360,7 @@ class RLTrainer:
         self = cls(
             load_from=config.load_from,
             resources=config.resources,
+            cpu_resource=config.cpu_resource,
             rollout_config=config.rollout_config,
             dataflow_config=config.dataflow_config,
             judger_config=config.judger_config,
@@ -382,7 +390,7 @@ class RLTrainer:
         judger_cfg: JudgerConfig,
         replay_buffer_config: ReplayBufferConfig,
     ) -> tuple[SingleTurnEnvironmentProxy, DataFlowProxy]:
-        env = SingleTurnEnvironment.remote("grpo", self._pg, rollout_cfg, self._pg, judger_cfg)
+        env = SingleTurnEnvironment.remote("grpo", self._pg, rollout_cfg, self._pg, judger_cfg, self._cpu_pg)
         flow = DataFlow.remote("grpo", dataflow_cfg, replay_buffer_config, env)
         return env, flow
 

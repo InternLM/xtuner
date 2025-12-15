@@ -1,6 +1,9 @@
 import re
+from typing import List
 
+import ray
 from pydantic import BaseModel, ConfigDict
+from ray.actor import ActorClass
 
 from .native import NativeJudger
 
@@ -84,11 +87,25 @@ class GSM8KJudgerConfig(BaseModel):
     judger_name: str = "openai/gsm8k"
     model_config = ConfigDict(extra="forbid")
     extra_info: dict = {"score": 1, "format_score": 0}
+    num_ray_actors: int = 1
 
-    def build(self):
-        """Build a NativeJudger instance from the configuration.
+    def build_actor(self, pg, start_bundle_idx) -> List[ActorClass]:
+        """Build the actor class for the judger.
 
         Returns:
-            NativeJudger: An instance of the NativeJudger configured for GSM8K.
+            List[ActorClass]: The actor class for the judger.
         """
-        return NativeJudger(judger_name=self.judger_name, reward_func=compute_reward, extra_info=self.extra_info)
+        workers_list = []
+        pg_options = {"num_cpus": pg.bundle_specs[0].get("CPU", 1)}
+        for idx in range(self.num_ray_actors):
+            worker = (
+                ray.remote(NativeJudger)
+                .options(
+                    placement_group=pg,
+                    placement_group_bundle_index=(start_bundle_idx + idx),
+                    **pg_options,
+                )
+                .remote(judger_name=self.judger_name, reward_func=compute_reward, extra_info=self.extra_info)
+            )
+            workers_list.append(worker)
+        return workers_list

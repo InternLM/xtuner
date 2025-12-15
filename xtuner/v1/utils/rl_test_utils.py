@@ -172,11 +172,32 @@ class GSM8KRemoteJudgerConfig(BaseModel):
     remote_url: str
     extra_info: dict = {"score": 1, "format_score": 0}
     model_config = ConfigDict(extra="forbid")
+    num_ray_actors: int = 1
 
-    def build(self):
-        return NativeJudger(
-            judger_name=self.judger_name,
-            remote_url=self.remote_url,
-            postprocess_func=custom_postprocessor_for_gsm8k,
-            extra_info=self.extra_info,
-        )
+    def build_actor(self, pg, start_bundle_idx):
+        """Build the actor class for the judger.
+
+        Returns:
+            List[ActorClass]: The actor class for the judger.
+        """
+        workers_list = []
+        pg_options = {"num_cpus": pg.bundle_specs[0].get("CPU", 0.01)}
+        import ray
+
+        for idx in range(self.num_ray_actors):
+            worker = (
+                ray.remote(NativeJudger)
+                .options(
+                    placement_group=pg,
+                    placement_group_bundle_index=(start_bundle_idx + idx),
+                    **pg_options,
+                )
+                .remote(
+                    judger_name=self.judger_name,
+                    remote_url=self.remote_url,
+                    postprocess_func=custom_postprocessor_for_gsm8k,
+                    extra_info=self.extra_info,
+                )
+            )
+            workers_list.append(worker)
+        return workers_list

@@ -67,7 +67,6 @@ class NativeJudger:
         elif self.remote_url:
             self.http_client = httpx.AsyncClient(timeout=request_timeout)
             self.execute_func = self._remote_executor
-        self.logger = get_logger(__name__)
 
     def _default_preprocess(self, data_item: List[RLDataFlowItem], extra_info: dict) -> Any:
         """Default preprocessing function.
@@ -155,7 +154,7 @@ class NativeJudger:
             # transform json to RLJudgerResponseItem
             return self.postprocess_func(json_result)
         except httpx.RequestError as exc:
-            self.logger.error(f"An error occurred while requesting {exc.request.url}: {exc}")
+            get_logger().error(f"An error occurred while requesting {exc.request.url}: {exc}")
             return []
 
     async def judge(self, data_item: List[RLDataFlowItem]) -> List[RLJudgerResponseItem]:
@@ -175,3 +174,11 @@ class NativeJudger:
         if self.execute_func is None:
             raise RuntimeError("Judger is not properly initialized.")
         return await self.execute_func(data_item)
+
+    def get_judger_name(self) -> str:
+        """Get the name of the judger.
+
+        Returns:
+            str: The name of the judger.
+        """
+        return self.judger_name

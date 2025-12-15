@@ -1,7 +1,9 @@
 import re
 from typing import Any, List, Optional, Tuple
 
+import ray
 from pydantic import BaseModel, ConfigDict, Field
+from ray.actor import ActorClass
 
 from .native import NativeJudger
 
@@ -303,6 +305,7 @@ class DapoMathJudgerConfig(BaseModel):
     overlong_penalty_factor: Optional[float] = None
     tokenizer: Any = None
     extra_info: dict = Field(default_factory=dict)
+    num_ray_actors: int = 1
 
     def __init__(
         self,
@@ -364,5 +367,18 @@ class DapoMathJudgerConfig(BaseModel):
                 }
             )
 
-    def build(self):
-        return NativeJudger(judger_name=self.judger_name, reward_func=compute_reward, extra_info=self.extra_info)
+    def build_actor(self, pg, start_bundle_idx: int = 0) -> List[ActorClass]:
+        workers_list = []
+        pg_options = {"num_cpus": pg.bundle_specs[0].get("CPU", 1)}
+        for idx in range(self.num_ray_actors):
+            worker = (
+                ray.remote(NativeJudger)
+                .options(
+                    placement_group=pg,
+                    placement_group_bundle_index=(start_bundle_idx + idx),
+                    **pg_options,
+                )
+                .remote(judger_name=self.judger_name, reward_func=compute_reward, extra_info=self.extra_info)
+            )
+            workers_list.append(worker)
+        return workers_list

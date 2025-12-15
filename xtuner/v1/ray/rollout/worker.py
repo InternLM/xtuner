@@ -97,6 +97,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         )
         local_rank = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
         start_port = self.config.dist_port_base + local_rank * 1024
+        self.logger.info(f"rank {self.rank} find dist ports from {start_port}")
         self.host, self.ports = ray.get(
             find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(
                 nums=3, start_port=start_port, max_tries=1024

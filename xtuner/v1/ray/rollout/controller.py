@@ -473,6 +473,7 @@ class RolloutController:
             activate_servers = len(dist_init_addrs)
             for i in range(0, activate_servers, server_urls_per_engine):
                 dist_init_addrs[i : i + server_urls_per_engine] = [dist_init_addrs[i]] * server_urls_per_engine
+        self.logger.info(f"Updated dist init addrs: {dist_init_addrs}")
         return dist_init_addrs
 
     def _get_active_servers_count(self, infer_config: RolloutConfig, gpu_nums: int):
