@@ -58,7 +58,6 @@ from xtuner.v1.utils.internal_metrics import (
     InternalMetricsRecorder,
     flatten_internal_metrics_for_logs,
 )
-from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -1736,7 +1735,6 @@ class Trainer:
     def _setup_env(self):
         if os.getenv("XTUNER_GC_ENABLE", "0") == "0":
             gc.disable()
-        monkey_patch_hf_modules_cache()
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
         log_str = "\n============XTuner Training Environment============\n"
