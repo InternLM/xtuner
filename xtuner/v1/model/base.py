@@ -926,9 +926,9 @@ class BaseModel(nn.Module):
                         # Copy the model config and tokenizer files to the save path
                         target_path = hf_dir / file.name
                         if file.is_file():
-                            copy(file, target_path)
+                            copy(file, target_path, follow_symlinks=False)
                         else:
-                            copytree(file, target_path)
+                            copytree(file, target_path, ignore_dangling_symlinks=True, dirs_exist_ok=True)
 
             # write or overwrite `model.safetensors.index.json`
             with open(hf_dir / "model.safetensors.index.json", "w") as f:

@@ -164,7 +164,7 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
                     origin_pixel_len=pixel_values.size(0)
                 )
                 inputs_embeds[visual_pos_masks] = inputs_embeds[visual_pos_masks] * 0.0 + visual_features
-            except RuntimeError as e:
+            except Exception as e:
                 print(f"!!!Warning: {e}, but continue anyway!!!!")
                 inputs_embeds = inputs_embeds + visual_embeds.sum() * 0.0
                 deepstack_visual_embeds = None
