@@ -22,7 +22,7 @@ from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_serializer, model_validator
 from torch.distributed import init_process_group
 from torch.distributed.device_mesh import init_device_mesh
-from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, LinearLR, LRScheduler, SequentialLR
 from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -1035,7 +1035,7 @@ class Trainer:
             logger.info(f"The `compile_cfg` of model is {json.dumps(engine.model.compile_cfg, indent=4)}")
         return engine
 
-    def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:
+    def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> LRScheduler:
         """Build the learning rate scheduler.
 
         Args:
@@ -1045,36 +1045,49 @@ class Trainer:
             torch.optim.lr_scheduler.LRScheduler: Configured learning rate scheduler.
         """
         if lr_cfg.warmup_ratio < 1:
-            warmup_steps = int(lr_cfg.warmup_ratio * scheduler_step)
+            warmup_step = int(lr_cfg.warmup_ratio * scheduler_step)
         else:
-            warmup_steps = int(lr_cfg.warmup_ratio)
+            warmup_step = int(lr_cfg.warmup_ratio)
 
         def warmup_fn(x):
-            return x / warmup_steps if x < warmup_steps else 1
+            return x / warmup_step if x < warmup_step else 1
 
         warmup_scheduler = LambdaLR(self._engine.optimizer, warmup_fn)
 
-        scheduler: torch.optim.lr_scheduler.LRScheduler
-        if lr_cfg.lr_type == "linear":
-            scheduler = LinearLR(
-                self._engine.optimizer,
-                start_factor=1.0,
-                end_factor=lr_cfg.lr_min / self._engine.optimizer.defaults["lr"],
-                total_iters=scheduler_step - warmup_steps,
+        scheduler_after_warmup: LRScheduler
+        lr_scheduler: LRScheduler
+
+        if warmup_step < scheduler_step:
+            if lr_cfg.lr_type == "linear":
+                scheduler_after_warmup = LinearLR(
+                    self._engine.optimizer,
+                    start_factor=1.0,
+                    end_factor=lr_cfg.lr_min / self._engine.optimizer.defaults["lr"],
+                    total_iters=scheduler_step - warmup_step,
+                )
+            elif lr_cfg.lr_type == "cosine":
+                scheduler_after_warmup = CosineAnnealingLR(
+                    self._engine.optimizer, T_max=scheduler_step - warmup_step, eta_min=lr_cfg.lr_min
+                )
+            elif lr_cfg.lr_type == "constant":
+                scheduler_after_warmup = LambdaLR(self._engine.optimizer, lambda x: 1.0)
+            else:
+                raise ValueError(f"Unsupported lr type: {lr_cfg.lr_type}")
+            lr_scheduler = SequentialLR(
+                optimizer=self._engine.optimizer,
+                schedulers=[warmup_scheduler, scheduler_after_warmup],
+                milestones=[warmup_step],
             )
-        elif lr_cfg.lr_type == "cosine":
-            scheduler = CosineAnnealingLR(
-                self._engine.optimizer, T_max=scheduler_step - warmup_steps, eta_min=lr_cfg.lr_min
+        elif warmup_step == scheduler_step:
+            self.logger.warning(
+                f"You're setting warmup_step ({warmup_step} to be equal to scheduler_step ({scheduler_step}), "
+                "which is generally not recommended."
             )
-        elif lr_cfg.lr_type == "constant":
-            scheduler = LambdaLR(self._engine.optimizer, lambda x: 1.0)
+            lr_scheduler = warmup_scheduler
         else:
-            raise ValueError(f"Unsupported lr type: {lr_cfg.lr_type}")
-        lr_scheduler = SequentialLR(
-            optimizer=self._engine.optimizer,
-            schedulers=[warmup_scheduler, scheduler],
-            milestones=[warmup_steps],
-        )
+            raise ValueError(
+                f"Expected warmup_step ({warmup_step}) to be no more than scheduler_step ({scheduler_step})"
+            )
         return lr_scheduler
 
     def _maybe_check_health(self):
