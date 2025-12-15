@@ -107,8 +107,8 @@ class ParallelSampler(Sampler):
 
     def __len__(self) -> int:
         """The number of samples in this rank."""
-        # TODO: not same with LengthGroupedSampler?
-        return self.num_samples - self.step
+        # stay same with LengthGroupedSampler: return self.num_samples
+        return self.num_samples
 
     def set_epoch(self, epoch: int) -> None:
         """Sets the epoch for this sampler.
