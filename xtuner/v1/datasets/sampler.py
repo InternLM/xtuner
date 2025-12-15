@@ -139,7 +139,7 @@ class ParallelSampler(Sampler):
 
     def get_state_dict(self, step: int):
         # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
-        # self.step = step % self.total_size
+        step = step % self.total_size
         return {
             "epoch": self.epoch,
             "step": step,
@@ -294,10 +294,10 @@ class LengthGroupedSampler(Sampler):
             dict: The state of the sampler.
         """
         # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
-        # self.step = step % self.total_size
+        step = step % self.total_size
         return {
             "epoch": self.epoch,
-            "step": self.step,
+            "step": step,
             "world_size": self.world_size,
             "round_up": self.round_up,
             "num_samples": self.num_samples,
