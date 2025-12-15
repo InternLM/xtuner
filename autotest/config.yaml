@@ -1,5 +1,5 @@
 base_path:
-    base_output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
+    base_output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
     base_baseline_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/xtuner_baseline
 
 default_config:
@@ -30,7 +30,7 @@ case:
             type: sft
             parameters:
                 config: autotest/config/qwen3.py
-                output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 envs: 
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
@@ -52,7 +52,7 @@ case:
             type: sft
             parameters:
                 config: autotest/config/qwen3_moe_30BA3_ep8.py
-                output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
                 cpus_per_task: 80
@@ -76,7 +76,7 @@ case:
                 command: 'python ./autotest/utils/update_meta.py'
             parameters:
                 config: autotest/config/qwen3_moe_30BA3_ep8_resume.py
-                output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
                 cpus_per_task: 80
@@ -100,7 +100,7 @@ case:
             type: sft
             parameters:
                 config: autotest/config/qwen3_moe_30BA3_tp2.py
-                output_path: /mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 envs:
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B

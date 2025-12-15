@@ -42,7 +42,7 @@ def get_latest_subdir(work_dir):
     return os.path.join(work_dir, latest)
 
 
-base_dir = f"/mnt/shared-storage-user/caoweihan/qa-llm-cicd/test_output/{os.environ['GITHUB_RUN_ID']}/qwen3-sft-ep8/sft"
+base_dir = f"/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output/{os.environ['GITHUB_RUN_ID']}/qwen3-sft-ep8/sft"
 real_dir = get_latest_subdir(base_dir)
 new_meta = {
     'end': 10,
