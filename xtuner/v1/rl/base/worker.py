@@ -479,7 +479,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             dist.all_reduce(kl_div_sum, op=dist.ReduceOp.SUM)
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
-        all_log_infos = [rollout_is_metrics]
+        all_log_infos = [rollout_is_metrics, mismatch_metrics]
         for i in range(0, len(seq_ctx_list), iters_per_step):
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
             batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
