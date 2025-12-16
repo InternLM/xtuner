@@ -302,9 +302,6 @@ class RawTrainingController:
     def ready(self) -> bool:
         return True
 
-
-TrainingController = ray.remote(RawTrainingController)
-TrainingControllerProxy = ActorProxy[RawTrainingController]
     def save_dcp(self, ckpt_dir: str):
         handles = [worker.save_dcp.remote(ckpt_dir) for worker in self.workers]  # type: ignore
         ray.get(handles)
@@ -314,3 +311,7 @@ TrainingControllerProxy = ActorProxy[RawTrainingController]
         handles = [worker.load_dcp.remote(ckpt_dir) for worker in self.workers]  # type: ignore
         ray.get(handles)
         return
+
+
+TrainingController = ray.remote(RawTrainingController)
+TrainingControllerProxy = ActorProxy[RawTrainingController]
