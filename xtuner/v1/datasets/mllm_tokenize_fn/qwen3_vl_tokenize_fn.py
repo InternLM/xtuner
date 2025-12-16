@@ -414,7 +414,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_image_tokens_2 = sum_media_grid_thw.sum()
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
-                f"num_image_tokens_1.shape {num_image_tokens_1} != num_image_tokens_2.shape {num_image_tokens_2}, "
+                f"num_image_tokens of input_ids {num_image_tokens_1} != num_image_tokens of media_grid_thw {num_image_tokens_2}, "
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
             return {"num_tokens": 0}
@@ -476,8 +476,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()
         num_image_tokens_2 = torch.stack(grid_thw_merged, dim=0).sum()
         # assert 会被捕获，该数据会丢弃
-        assert num_image_tokens_1.shape == num_image_tokens_2.shape, (
-            f"num_image_tokens_1.shape {num_image_tokens_1.shape} != num_image_tokens_2.shape {num_image_tokens_2.shape}, "
+        assert num_image_tokens_1 == num_image_tokens_2, (
+            f"num_image_tokens of input_ids {num_image_tokens_1} != num_image_tokens of media_grid_thw {num_image_tokens_2}, "
             f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
         )
 
@@ -700,7 +700,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_image_tokens_2 = total_sum_media_grid_thw
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
-                f"num_video_tokens_1 {num_image_tokens_1} != num_video_tokens_2 {num_image_tokens_2}, "
+                f"num_video_tokens of input_ids {num_image_tokens_1} != num_video_tokens of media_grid_thw {num_image_tokens_2}, "
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
             return {"num_tokens": 0}
@@ -848,7 +848,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_image_tokens_2 = total_sum_media_grid_thw
         # assert 会被捕获，该数据会丢弃
         assert num_image_tokens_1 == num_image_tokens_2, (
-            f"num_video_tokens_1 {num_image_tokens_1} != num_video_tokens_2 {num_image_tokens_2}, "
+            f"num_video_tokens of input_ids {num_image_tokens_1} != num_video_tokens of media_grid_thw {num_image_tokens_2}, "
             f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
         )
 
