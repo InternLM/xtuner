@@ -1,6 +1,7 @@
 import copy
 import os
 from argparse import Namespace
+from itertools import chain
 from typing import Any, Dict, List, Union
 
 import ray
@@ -225,6 +226,9 @@ class LMDeployWorker(RolloutWorker):
         backend = lmdeploy_config_kwargs.get("backend", "pytorch")
         tp_size = self.config.tensor_parallel_size
         dp_size = ep_size = self.config.expert_parallel_size
+        # RolloutController plays the role of proxy server in LMDeploy, which balances dp requests.
+        # Therefore, each server only needs to handle 1 / dp_size of the total requests
+        max_batch_size = self.config.rollout_max_batch_size_per_instance // dp_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
         lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "WARNING")
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "CRITICAL")
@@ -234,12 +238,43 @@ class LMDeployWorker(RolloutWorker):
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
 
+        dp_rank = 0
+        if backend == "pytorch":
+            # currently only support ep > 1 and tp == 1 / ep == 1 and tp > 1
+            assert ep_size == 1 or tp_size == 1
+            if ep_size > 1:
+                dp_rank_found = False
+                # In the case of pure expert parallelism, each worker from all ranks serve url.
+                # `engine_rank_mesh_array` would miss the ep_size information in inner list,
+                # Therefore, we need to regroup them into `engine_rank_mesh_array_for_ep`.
+                # For example, ep_size = 2, work_size = 8:
+                # engine_rank_mesh_array = [[0],[1],[2],[3],[4],[5],[6],[7]] ->
+                # engine_rank_mesh_array_for_ep = [[0,1],[2,3],[4,5],[6,7]]
+                engine_rank_mesh_array_for_ep = [
+                    list(chain.from_iterable(self.engine_rank_mesh_array[i : i + ep_size]))
+                    for i in range(0, len(self.engine_rank_mesh_array), ep_size)
+                ]
+                # dp_rank is the index of self.rank in the inner list of rank mesh array.
+                # For example, ep_size = 2, work_size = 8:
+                # engine_rank_mesh_array_for_ep = [[0,1],[2,3],[4,5],[6,7]]
+                # rank 3 is in [2, 3], dp_rank = [2, 3].index(3) = 1
+                for engine_rank_mesh in engine_rank_mesh_array_for_ep:
+                    if self.rank in engine_rank_mesh:
+                        dp_rank = engine_rank_mesh.index(self.rank)
+                        dp_rank_found = True
+                        break
+                assert dp_rank_found, (
+                    f"self.rank: {self.rank} should be found in "
+                    f"engine_rank_mesh_array_for_ep: {engine_rank_mesh_array_for_ep}"
+                )
+
         backend_config = (
             PytorchEngineConfig(
                 tp=tp_size,
                 ep=ep_size,
                 dp=dp_size,
-                max_batch_size=self.config.rollout_max_batch_size_per_instance,
+                dp_rank=dp_rank,
+                max_batch_size=max_batch_size,
                 empty_init=self.config.skip_load_weights,
                 distributed_executor_backend=distributed_executor_backend,
                 mp_engine_backend="ray",  # force ray to pass placement group
@@ -292,12 +327,13 @@ class LMDeployWorker(RolloutWorker):
                         "LMDEPLOY_DIST_MASTER_PORT": dist_port,
                     }
                 )
-            elif dp_size > 1:
+            elif ep_size > 1:
                 dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
                 env.update(
                     {
                         "LMDEPLOY_DP_MASTER_ADDR": dist_addr,
                         "LMDEPLOY_DP_MASTER_PORT": dist_port,
+                        "DEEPEP_MAX_TOKENS_PER_RANK": str(max_batch_size),
                     }
                 )
             if "uvicorn_log_level" in lmdeploy_config_kwargs:

@@ -20,14 +20,14 @@ class TestHandler:
 
         handler_class = self.type_map[type]
         return handler_class.validate(config=config)
-    
+
     def pre_action(self, type, config=None):
         if type not in self.type_map:
             raise ValueError(f"Unsupported type: {type}")
 
         handler_class = self.type_map[type]
         return handler_class.pre_action(config=config)
-    
+
     def post_action(self, type, config=None):
         if type not in self.type_map:
             raise ValueError(f"Unsupported type: {type}")

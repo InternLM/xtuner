@@ -926,7 +926,7 @@ class BaseModel(nn.Module):
                         # Copy the model config and tokenizer files to the save path
                         target_path = hf_dir / file.name
                         if file.is_file():
-                            copy(file, target_path, follow_symlinks=False)
+                            copy(file, target_path)
                         else:
                             copytree(file, target_path, ignore_dangling_symlinks=True, dirs_exist_ok=True)
 

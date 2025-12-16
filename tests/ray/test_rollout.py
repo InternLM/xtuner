@@ -22,6 +22,7 @@ from xtuner.v1.datasets.config import (
 
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
+MOE_MODEL_PATH = os.environ["QWEN3_MOE_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 resource_map = {
@@ -111,8 +112,14 @@ class TestRollout(unittest.TestCase):
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_generate(self):
+        rollout_cfg = self.rollout_cfg.model_copy(
+            deep=True,
+            update=dict(tensor_parallel_size=2),
+        )
+        rollout_cfg.model_post_init(None)
+
         sample_params = SampleParams(temperature=0.0)
-        rollout_controller = ray.remote(RolloutController).remote(self.rollout_cfg, self.pg)  # type: ignore[attr-defined]
+        rollout_controller = ray.remote(RolloutController).remote(rollout_cfg, self.pg)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
        
         self.assertEqual(res1.finish_reason, "stop") 
@@ -121,11 +128,22 @@ class TestRollout(unittest.TestCase):
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_dataflow(self):
+        rollout_cfg = self.rollout_cfg.model_copy(
+            deep=True,
+            update=dict(
+                expert_parallel_size=2,
+                model_path=MOE_MODEL_PATH,
+                model_name=os.path.basename(MOE_MODEL_PATH).lower(),
+                tokenizer_path=MOE_MODEL_PATH,
+            ),
+        )
+        rollout_cfg.model_post_init(None)
+
         self.dataflow_cfg.enable_partial_rollout = 0
         self.test_env = SingleTurnEnvironment.remote(
             "test_env",
             self.pg,
-            rollout_cfg=self.rollout_cfg,
+            rollout_cfg=rollout_cfg,
         )
         self.test_flow = DataFlow.remote("test_env",
                                          self.dataflow_cfg,
