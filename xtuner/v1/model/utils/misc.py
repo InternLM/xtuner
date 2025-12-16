@@ -102,5 +102,7 @@ class ModelForwardExtraLogInfo(dict):
 
 @master_only
 def update_weight_map_from_safetensors_index(weight_map: dict[str, str], hf_dir: Path | str):
-    with open(Path(hf_dir) / "model.safetensors.index.json") as f:
+    if not isinstance(hf_dir, Path):
+        hf_dir = Path(hf_dir)
+    with open(hf_dir / "model.safetensors.index.json") as f:
         weight_map.update(json.load(f)["weight_map"])
