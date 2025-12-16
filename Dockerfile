@@ -187,7 +187,7 @@ RUN unzip ${DEEP_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 ARG SGLANG_VERSION
 
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
-   pip install sglang==${SGLANG_VERSION} sgl_kernel pybase64 orjson uvloop setproctitle msgspec \
+   pip install sglang==${SGLANG_VERSION} sgl-kernel==0.3.14.post1 pybase64 orjson uvloop setproctitle msgspec \
    compressed_tensors python-multipart torch_memory_saver \
    grpcio-tools==1.75.1 hf_transfer interegular llguidance==0.7.11 \
    xgrammar==0.1.24 blobfile==3.0.0 flashinfer_python==0.4.0 --no-cache-dir --no-deps
@@ -199,7 +199,7 @@ ARG LMDEPLOY_URL
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     pip install fastapi fire openai outlines \
         partial_json_parser ray[default] shortuuid uvicorn \
-        'pydantic>2' openai_harmony --no-cache-dir dlblas && \
+        'pydantic>2' openai_harmony dlblas --no-cache-dir  && \
     if [ -n "${LMDEPLOY_VERSION}" ]; then \
         pip install lmdeploy==${LMDEPLOY_VERSION} --no-deps --no-cache-dir; \
     else \
