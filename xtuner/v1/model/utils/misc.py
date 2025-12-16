@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -95,3 +97,8 @@ class ModelForwardExtraLogInfo(dict):
             log_rank_loss_value = self["log_rank_loss"].item()
             return_dict["loss"] = log_rank_loss_value
         return return_dict
+
+
+def update_weight_map_from_safetensors_index(weight_map: dict[str, str], hf_dir: Path | str):
+    with open(Path(hf_dir) / "model.safetensors.index.json") as f:
+        weight_map.update(json.load(f)["weight_map"])

@@ -20,6 +20,8 @@ from xtuner.v1.model import BaseModel
 from xtuner.v1.model.base import XTunerBaseModelConfig
 from xtuner.v1.utils import get_device, get_logger
 
+from ..utils.misc import update_weight_map_from_safetensors_index
+
 
 DEVICE = get_device()
 logger = get_logger()
@@ -54,12 +56,6 @@ def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[
         return [convertor(i) for i in fn(*args, **kwargs)]
 
     return wrapper
-
-
-def modify_safetensors_index_json(hf_dir: Path, weight_map_dict: dict):
-    if dist.get_rank() == 0:
-        with open(hf_dir / "model.safetensors.index.json") as f:
-            weight_map_dict.update(json.load(f)["weight_map"])
 
 
 class BaseComposeModel(BaseModel):
@@ -152,13 +148,13 @@ class BaseComposeModel(BaseModel):
         self.language_model.save_hf(hf_dir, save_dtype, "model-language")
 
         weight_map_dict: dict = {}
-        modify_safetensors_index_json(hf_dir, weight_map_dict)
+        update_weight_map_from_safetensors_index(weight_map_dict, hf_dir)
 
         self.vision_tower.save_hf(hf_dir, save_dtype, "model-vision")
-        modify_safetensors_index_json(hf_dir, weight_map_dict)
+        update_weight_map_from_safetensors_index(weight_map_dict, hf_dir)
 
         self.multi_modal_projector.save_hf(hf_dir, save_dtype, "model-projector")
-        modify_safetensors_index_json(hf_dir, weight_map_dict)
+        update_weight_map_from_safetensors_index(weight_map_dict, hf_dir)
 
         if dist.get_rank() == 0:
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
