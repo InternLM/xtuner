@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from mmengine.dist import master_only
 
 
 def module_dict_repr(self):
@@ -99,6 +100,7 @@ class ModelForwardExtraLogInfo(dict):
         return return_dict
 
 
+@master_only
 def update_weight_map_from_safetensors_index(weight_map: dict[str, str], hf_dir: Path | str):
     with open(Path(hf_dir) / "model.safetensors.index.json") as f:
         weight_map.update(json.load(f)["weight_map"])
