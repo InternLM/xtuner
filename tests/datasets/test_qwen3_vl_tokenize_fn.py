@@ -14,11 +14,16 @@ VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 class TestMLLMTokenizeFn(TestCase):
     def setUp(self):
         self.tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_PATH)
-        self.tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH, rand_video_max_frames=14).build(
+        self.tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
+                                                   rand_video_max_frames=14,
+                                                   add_vision_id=False).build(
             self.tokenizer)
         self.processor = AutoProcessor.from_pretrained(QWEN3_VL_PATH)
 
-    def test_qwen3_vl_sft_single_image(self):
+    @parametrize.parametrize("add_vision_id", [(True,), (False,)])
+    def test_qwen3_vl_sft_single_image(self, add_vision_id):
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
+                                              add_vision_id=add_vision_id).build(self.tokenizer)
         data_path = 'tests/resource/mllm_sft_single_image_example_data.jsonl'
         total_step = 5
         with open(data_path) as f:
@@ -27,7 +32,7 @@ class TestMLLMTokenizeFn(TestCase):
                     break
                 raw_data = json.loads(line)
 
-                ret = self.tokenize_fn(raw_data, media_root='tests/')
+                ret = tokenize_fn(raw_data, media_root='tests/')
                 input_ids_xtuner = ret['input_ids']
                 pixel_values_xtuner: torch.Tensor = ret['pixel_values']
                 image_grid_thw_xtuner: torch.Tensor = ret['image_grid_thw']
@@ -44,7 +49,10 @@ class TestMLLMTokenizeFn(TestCase):
                     if not isinstance(msg['content'], list):
                         msg['content'] = [{"type": "text", "text": msg['content']}]
 
-                ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
+                ret = self.processor.apply_chat_template(messages,
+                                                         add_generation_prompt=False,
+                                                         tokenize=True,
+                                                         add_vision_id=add_vision_id,
                                                          return_dict=True)
                 input_ids_hf = ret['input_ids'][0]
                 pixel_values_hf = ret['pixel_values']
@@ -221,12 +229,6 @@ class TestMLLMTokenizeFn(TestCase):
                 messages = hf_raw_data['messages']
                 add_video_root(messages, VIDEO_ROOT)
 
-                # 如果只有1个视频，则 add_vision_id 不生效
-                if len(tokenize_fn._video_path) <= 1:
-                    add_vision_id_ = False
-                else:
-                    add_vision_id_ = add_vision_id
-
                 if i not in [8, 9]:
                     ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
                                                              do_sample_frames=do_sample_frames,
@@ -277,7 +279,10 @@ class TestMLLMTokenizeFn(TestCase):
                 input_ids_hf = self.tokenizer(content)['input_ids']
                 self.assertEqual(input_ids_xtuner, input_ids_hf)
 
-    def test_qwen3_vl_pretrain_image(self):
+    @parametrize.parametrize("add_vision_id", [(True,), (False,)])
+    def test_qwen3_vl_pretrain_image(self, add_vision_id):
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
+                                              add_vision_id=add_vision_id).build(self.tokenizer)
         data_path = 'tests/resource/mllm_pretrain_image_example_data.jsonl'
         total_step = 6
         with open(data_path, encoding='utf-8') as f:
@@ -286,10 +291,10 @@ class TestMLLMTokenizeFn(TestCase):
                     break
                 raw_data = json.loads(line)
 
-                ret = self.tokenize_fn(raw_data, media_root='tests/')
+                ret = tokenize_fn(raw_data, media_root='tests/')
                 input_ids_xtuner = ret['input_ids']
                 labels_xtuner = torch.tensor(ret['labels'])
-                input_str = self.tokenize_fn.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
+                input_str = tokenize_fn.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
                 input_str = input_str.replace('<|image_pad|>', '')
                 input_xtuner_str = input_str.replace('<|vision_start|><|vision_end|>', '<IMG_CONTEXT>')
                 ground_truth_content = raw_data['messages'][0]
@@ -297,7 +302,7 @@ class TestMLLMTokenizeFn(TestCase):
                     if item['type'] == 'text':
                         ground_truth_str = item['text'] + "<|im_end|>"
                 image_cnt = ground_truth_str.count('<IMG_CONTEXT>')
-                if image_cnt > 1:
+                if add_vision_id:
                     for i in range(image_cnt):
                         ground_truth_str = ground_truth_str.replace('<IMG_CONTEXT>',
                                                                     f'Picture {i + 1}: <IMG_CONTEXT_1>', 1)
