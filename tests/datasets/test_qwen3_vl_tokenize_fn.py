@@ -66,11 +66,11 @@ class TestMLLMTokenizeFn(TestCase):
         tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
                                               add_vision_id=add_vision_id).build(self.tokenizer)
         data_path = 'tests/resource/mllm_sft_multi_image_example_data.jsonl'
-        total_step = 5
+        total_index = [0, 1, 2, 3, 4, 10]
         with open(data_path) as f:
             for i, line in enumerate(f):
-                if i >= total_step:
-                    break
+                if i not in total_index:
+                    continue
                 raw_data = json.loads(line)
 
                 # \n 必须去掉，否则和 hf 无法对齐
@@ -84,13 +84,25 @@ class TestMLLMTokenizeFn(TestCase):
 
                 # to hf openai format
                 messages = raw_data['messages']
-                messages[0]['content'][0]['type'] = 'image'
-                messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image_url']['url']
-                messages[0]['content'][1]['type'] = 'image'
-                messages[0]['content'][1]['path'] = 'tests/' + messages[0]['content'][1]['image_url']['url']
-                del messages[0]['content'][0]['image_url']
-                del messages[0]['content'][1]['image_url']
-                messages[0]['content'][2]['text'] = messages[0]['content'][2]['text'].replace('<IMG_CONTEXT>', '')
+                if total_index != 10:
+                    messages[0]['content'][0]['type'] = 'image'
+                    messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image_url']['url']
+                    messages[0]['content'][1]['type'] = 'image'
+                    messages[0]['content'][1]['path'] = 'tests/' + messages[0]['content'][1]['image_url']['url']
+                    del messages[0]['content'][0]['image_url']
+                    del messages[0]['content'][1]['image_url']
+                    messages[0]['content'][2]['text'] = messages[0]['content'][2]['text'].replace('<IMG_CONTEXT>', '')
+                else:
+                    messages[0]['content'][0]['type'] = 'image'
+                    messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image_url']['url']
+                    del messages[0]['content'][0]['image_url']
+                    messages[0]['content'][2]['text'] = messages[4]['content'][2]['text'].replace('<IMG_CONTEXT>', '')
+
+                    messages[4]['content'][0]['type'] = 'image'
+                    messages[4]['content'][0]['path'] = 'tests/' + messages[4]['content'][0]['image_url']['url']
+                    del messages[4]['content'][0]['image_url']
+                    messages[4]['content'][2]['text'] = messages[4]['content'][2]['text'].replace('<IMG_CONTEXT>', '')
+
                 for msg in messages:
                     if not isinstance(msg['content'], list):
                         msg['content'] = [{"type": "text", "text": msg['content']}]
@@ -202,7 +214,7 @@ class TestMLLMTokenizeFn(TestCase):
             for line in f:
                 hf_raw_datas.append(json.loads(line))
 
-        total_index = [1,4,5,6,7,8,9]
+        total_index = [1, 4, 5, 6, 7, 8, 9]
         with open(data_path) as f:
             for i, line in enumerate(f):
                 if i not in total_index:
