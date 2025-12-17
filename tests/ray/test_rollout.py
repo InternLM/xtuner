@@ -1,4 +1,5 @@
 import os
+import subprocess
 from functools import wraps
 import unittest
 import tempfile
@@ -110,6 +111,15 @@ class TestRollout(unittest.TestCase):
         ray.shutdown()
         self.temp_dir.cleanup()
 
+    def _cleanup_lmdeploy_ray_worker_wrapper(self):
+        try:
+            result = subprocess.run(["pkill", "-f", "ray::RayWorkerWrapper*"], capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                print(f"pkill command failed with return code {result.returncode}: {result.stderr}."
+                      " Maybe no lmdeploy ray::RayWorkerWrapper processes found.")
+        except Exception as e:
+            print(f"Error stopping ray::RayWorkerWrapper cluster: {e}")
+
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_generate(self):
         rollout_cfg = self.rollout_cfg.model_copy(
@@ -154,6 +164,10 @@ class TestRollout(unittest.TestCase):
         finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
+        # When lmdeploy enable ep>1, it uses deep_ep. Buffer implicit destroy would cause some ray actor stucked.
+        # Use pkill cleen up ray::WorkerWrapper process as workaround.
+        # TODO(chenchiyu): add excplicit deep_ep destroy in lmdeploy.
+        self._cleanup_lmdeploy_ray_worker_wrapper()
     
     @unittest.skip("skip lmdeploy async dataflow after lmdeploy support abort_request")
     def test_lmdeploy_async_dataflow(self):
