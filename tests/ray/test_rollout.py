@@ -109,6 +109,10 @@ class TestRollout(unittest.TestCase):
 
     def tearDown(self):
         ray.shutdown()
+        # When lmdeploy enable ep>1, it uses deep_ep. Buffer implicit destroy would cause some ray actor stucked.
+        # Use pkill cleen up ray::WorkerWrapper process after close ray cluster connection as workaround.
+        # TODO(chenchiyu): add excplicit deep_ep destroy in lmdeploy.
+        self._cleanup_lmdeploy_ray_worker_wrapper()
         self.temp_dir.cleanup()
 
     def _cleanup_lmdeploy_ray_worker_wrapper(self):
@@ -164,10 +168,6 @@ class TestRollout(unittest.TestCase):
         finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
-        # When lmdeploy enable ep>1, it uses deep_ep. Buffer implicit destroy would cause some ray actor stucked.
-        # Use pkill cleen up ray::WorkerWrapper process as workaround.
-        # TODO(chenchiyu): add excplicit deep_ep destroy in lmdeploy.
-        self._cleanup_lmdeploy_ray_worker_wrapper()
     
     @unittest.skip("skip lmdeploy async dataflow after lmdeploy support abort_request")
     def test_lmdeploy_async_dataflow(self):
