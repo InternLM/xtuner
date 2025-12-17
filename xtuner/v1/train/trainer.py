@@ -1279,6 +1279,10 @@ class Trainer:
             logger.info("Current device is not cuda, skip numa binding.")
             return
 
+        if os.environ.get("XTUNER_NUMA_BINDING", "0") == "0":
+            logger.info("XTUNER_NUMA_BINDING is set to 0, skip numa binding.")
+            return
+
         try:
             import numa
             from numa import memory, schedule
