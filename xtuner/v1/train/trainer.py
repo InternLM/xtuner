@@ -1306,7 +1306,7 @@ class Trainer:
 
             # bind numa node
             schedule.run_on_nodes(numa_id)
-            memory.set_membind_nodes(numa_id)
+            memory.set_interleave_nodes(numa_id)
         except Exception:
             logger.info(f"Rank: {self.rank} failed to bind process to numa node.")
             return  # try_bind_numa should not raise exception
