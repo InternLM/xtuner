@@ -36,7 +36,7 @@ docker build . \
   --build-arg SGLANG_VERSION=$SGLANG_VERSION \
   --progress=plain \
   --label "BASE_IMAGE=$BASE_IMAGE" \
-  --label "XTUNER_URL=${XTUNER_URL/@/\/tree\/}}" \
+  --label "XTUNER_URL=${XTUNER_URL/@/\/tree\/}" \
   --label "XTUNER_COMMIT=$XTUNER_COMMIT" \
   --label "ADAPTIVE_GEMM_URL=${ADAPTIVE_GEMM_URL/@/\/tree\/}" \
   --label "FLASH_ATTN_URL=${FLASH_ATTN_URL/@/\/tree\/}" \
