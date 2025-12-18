@@ -38,13 +38,14 @@ class NativeJudgerConfig(BaseModel):
             List[ActorClass]: A list of Ray actor handles representing the launched judger workers.
         """
         workers_list = []
-        pg_options = {"num_cpus": pg.bundle_specs[0].get("CPU", 1)}
         for idx in range(self.num_ray_actors):
+            bundle_idx = start_bundle_idx + idx
+            pg_options = {"num_cpus": pg.bundle_specs[bundle_idx].get("CPU", 1)}
             worker = (
                 ray.remote(NativeJudger)
                 .options(
                     placement_group=pg,
-                    placement_group_bundle_index=(start_bundle_idx + idx),
+                    placement_group_bundle_index=bundle_idx,
                     **pg_options,
                 )
                 .remote(

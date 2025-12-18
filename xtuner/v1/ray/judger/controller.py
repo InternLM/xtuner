@@ -100,9 +100,13 @@ class JudgerController:
             ray.get([defaule_placement_group.ready()], timeout=PG_READY_TIMEOUT)
             self.pg = defaule_placement_group
         else:
+            assert len(pg.bundle_specs) >= sum(
+                config.num_ray_actors for config in self.judger_config.reward_judger_configs
+            ), "The provided placement group does not have enough bundles for all judger actors."
             self.pg = pg
         self.reward_judger: List[List[ray.actor.ActorHandle]] = []
         self.judger_instance_count = 0
+
         for idx, config in enumerate(self.judger_config.reward_judger_configs):
             # start_bundle_idx用于指定从placement group的哪个bundle开始分配资源
             judger = config.build_actor(pg=self.pg, start_bundle_idx=self.judger_instance_count)

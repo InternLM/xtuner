@@ -2,8 +2,8 @@ from typing import Any, Dict, TypeVar
 
 import ray
 from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict
-from ray.util.placement_group import PlacementGroup, placement_group
+from pydantic import BaseModel, ConfigDict, field_validator
+from ray.util.placement_group import VALID_PLACEMENT_GROUP_STRATEGIES, PlacementGroup, placement_group
 from typing_extensions import Annotated
 
 
@@ -30,6 +30,17 @@ class CPUResourcesConfig(BaseModel):
     cpu_memory_per_worker: Annotated[
         int, Parameter(help="Amount of memory (in bytes) to allocate for the placement group.")
     ] = 1024**3  # 1 GB
+    pg_pack_strategy: Annotated[
+        str,
+        Parameter(help="Placement group packing strategy, options: " + ", ".join(VALID_PLACEMENT_GROUP_STRATEGIES)),
+    ] = "SPREAD"
+
+    @field_validator("pg_pack_strategy")
+    @classmethod
+    def check_pg_pack_strategy(cls, v):
+        if v not in VALID_PLACEMENT_GROUP_STRATEGIES:
+            raise ValueError(f"pg_pack_strategy must be one of {VALID_PLACEMENT_GROUP_STRATEGIES}")
+        return v
 
     def model_post_init(self, __context: Any) -> None:
         assert ray.is_initialized(), "Ray must be initialized before creating CPUResourcesConfig."
@@ -48,7 +59,9 @@ class CPUResourcesConfig(BaseModel):
         # TODO: check all resources sum in cluster to avoid over allocation
 
     @classmethod
-    def from_total(cls, total_cpus: float | int, total_memory: int, num_workers: int):
+    def from_total(
+        cls, total_cpus: float | int, total_memory: int, num_workers: int, pg_pack_strategy: str = "SPREAD"
+    ):
         """Create a CPUResourcesConfig from total CPU and memory resources.
 
         Args:
@@ -64,6 +77,7 @@ class CPUResourcesConfig(BaseModel):
             num_workers=num_workers,
             num_cpus_per_worker=total_cpus / num_workers,
             cpu_memory_per_worker=total_memory / num_workers,
+            pg_pack_strategy=pg_pack_strategy,
         )
 
 
@@ -109,7 +123,7 @@ class AutoCPUWorkers:
             }
         ] * resources_config.num_workers
 
-        pg = placement_group(bundles=bundles, strategy="PACK")
+        pg = placement_group(bundles=bundles, strategy=resources_config.pg_pack_strategy)
 
         ray.get(pg.ready(), timeout=PG_READY_TIMEOUT)
         return pg
