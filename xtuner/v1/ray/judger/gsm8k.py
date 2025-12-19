@@ -1,8 +1,7 @@
 import re
+from typing import Callable
 
-from pydantic import BaseModel, ConfigDict
-
-from .native import NativeJudger
+from .native import NativeJudgerConfig
 
 
 _SOLUTION_CLIP_CHARS = 300
@@ -78,17 +77,9 @@ def compute_reward(response, label, extra_info):
             return {"score": extra_info["format_score"]}
 
 
-class GSM8KJudgerConfig(BaseModel):
+class GSM8KJudgerConfig(NativeJudgerConfig):
     """Configuration for the GSM8K judger."""
 
     judger_name: str = "openai/gsm8k"
-    model_config = ConfigDict(extra="forbid")
     extra_info: dict = {"score": 1, "format_score": 0}
-
-    def build(self):
-        """Build a NativeJudger instance from the configuration.
-
-        Returns:
-            NativeJudger: An instance of the NativeJudger configured for GSM8K.
-        """
-        return NativeJudger(judger_name=self.judger_name, reward_func=compute_reward, extra_info=self.extra_info)
+    reward_func: Callable = compute_reward
