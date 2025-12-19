@@ -326,73 +326,97 @@ class DataloaderConfig(BaseDataloaderConfig):
         shuffle: bool = True,
         total_step: int | None = None,
     ) -> Dataloader:
-        if self.dataset_config_list is None:
-            raise ValueError("dataset_config_list is required.")
+        load_datasets = False  # 第一次运行设置为 false，然后设置为 true
 
-        with profile_time_and_memory("[Build Datasets]"):
-            datasets = build_datasets(self.dataset_config_list, tokenizer, tokenizer_hash=self.tokenizer_hash)
+        if load_datasets:
+            # 防止 remote 模式下 load 后缺少文件
+            from transformers import AutoProcessor
 
-        assert isinstance(datasets, list), "datasets must be a list of datasets."
+            path = "xxxxx/hf-1472"
+            AutoProcessor.from_pretrained(path, trust_remote_code=True)
+            dataset = torch.load("dataset.pt", weights_only=False)
 
-        if self.pack_level != "none" and get_rank == 0:
-            num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
-            logger.debug(f"[Dataset] {num_tokens} tokens.")
+            # 换成新的 tokenizer，防止 remote code 下 tokenizer 文件缺少报错
+            hardpack_datasets = dataset.hard_pack_datasets[0].datasets
+            for dataset1 in hardpack_datasets:
+                dataset1.tokenize_fn.tokenizer = tokenizer
 
-        with profile_time_and_memory("[Pack Datasets]"):
-            dataset: (
-                ExpandSoftPackDataset
-                | _LegacySoftPackDataset
-                | ConcatDataset
-                | HardPackDataset
-                | MLLMPretrainHybridPackDataset
-            )
-            if self.pack_level == "soft":
-                logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
-                dataset = ExpandSoftPackDataset(
-                    datasets,
-                    pack_max_length=self.pack_max_length,
-                    pack_chunk_size=self.pack_chunk_size,
-                    pack_workers=self.pack_workers,
-                    global_pack=self.global_pack,
-                    pack_extra_buffer_size=self.pack_extra_buffer_size,
-                    seed=seed,
+            softpack_datasets = dataset.datasets[0].datasets
+            for dataset1 in softpack_datasets:
+                dataset1.tokenize_fn.tokenizer = tokenizer
+
+        else:
+            if self.dataset_config_list is None:
+                raise ValueError("dataset_config_list is required.")
+
+            with profile_time_and_memory("[Build Datasets]"):
+                datasets = build_datasets(self.dataset_config_list, tokenizer, self.tokenizer_hash)
+
+            assert isinstance(datasets, list), "datasets must be a list of datasets."
+
+            if self.pack_level != "none" and get_rank == 0:
+                num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
+                logger.debug(f"[Dataset] {num_tokens} tokens.")
+
+            with profile_time_and_memory("[Pack Datasets]"):
+                dataset: (
+                    ExpandSoftPackDataset
+                    | _LegacySoftPackDataset
+                    | ConcatDataset
+                    | HardPackDataset
+                    | MLLMPretrainHybridPackDataset
                 )
-            elif self.pack_level == "mllm_hybrid":
-                logger.info("[Dataset] Start packing data of MLLMPretrainHybridPackDataset.")
-                dataset = MLLMPretrainHybridPackDataset(
-                    datasets,
-                    pack_max_length=self.pack_max_length,
-                    pack_chunk_size=self.pack_chunk_size,
-                    pack_workers=self.pack_workers,
-                    global_pack=self.global_pack,
-                    pack_extra_buffer_size=self.pack_extra_buffer_size,
-                    seed=seed,
-                )
-            elif self.pack_level == "hard":
-                logger.info("[Dataset] Start packing data of HardPackDataset.")
-                dataset = HardPackDataset(
-                    datasets,
-                    pack_max_length=self.pack_max_length,
-                    global_pack=self.global_pack,
-                    seed=seed,
-                )
-            elif self.pack_level == "none":
-                dataset = ConcatDataset(datasets)  # type: ignore
-            elif self.pack_level == "__legacy":
-                logger.info("[Dataset] Start packing data of _LegacySoftPackDataset.")
-                dataset = _LegacySoftPackDataset(
-                    datasets,
-                    pack_max_length=self.pack_max_length,
-                    global_pack=self.global_pack,
-                    seed=seed,
-                )
-            else:
-                raise NotImplementedError(f"Unsupported pack level: {self.pack_level}")
+                if self.pack_level == "soft":
+                    logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
+                    dataset = ExpandSoftPackDataset(
+                        datasets,
+                        pack_max_length=self.pack_max_length,
+                        pack_chunk_size=self.pack_chunk_size,
+                        pack_workers=self.pack_workers,
+                        global_pack=self.global_pack,
+                        pack_extra_buffer_size=self.pack_extra_buffer_size,
+                        seed=seed,
+                    )
+                elif self.pack_level == "mllm_hybrid":
+                    logger.info("[Dataset] Start packing data of MLLMPretrainHybridPackDataset.")
+                    dataset = MLLMPretrainHybridPackDataset(
+                        datasets,
+                        pack_max_length=self.pack_max_length,
+                        pack_chunk_size=self.pack_chunk_size,
+                        pack_workers=self.pack_workers,
+                        global_pack=self.global_pack,
+                        pack_extra_buffer_size=self.pack_extra_buffer_size,
+                        seed=seed,
+                    )
+                elif self.pack_level == "hard":
+                    logger.info("[Dataset] Start packing data of HardPackDataset.")
+                    dataset = HardPackDataset(
+                        datasets,
+                        pack_max_length=self.pack_max_length,
+                        global_pack=self.global_pack,
+                        seed=seed,
+                    )
+                elif self.pack_level == "none":
+                    dataset = ConcatDataset(datasets)  # type: ignore
+                elif self.pack_level == "__legacy":
+                    logger.info("[Dataset] Start packing data of _LegacySoftPackDataset.")
+                    dataset = _LegacySoftPackDataset(
+                        datasets,
+                        pack_max_length=self.pack_max_length,
+                        global_pack=self.global_pack,
+                        seed=seed,
+                    )
+                else:
+                    raise NotImplementedError(f"Unsupported pack level: {self.pack_level}")
+
+            if self.pack_level in ("mllm_hybrid", "soft", "__legacy") and get_rank() == 0:
+                ori_samples = sum([len(dset) for dset in datasets])
+                logger.info(f"[Dataset] (Original) {ori_samples} samples.")
+
+            torch.save(dataset, "dataset.pt")
 
         if self.pack_level in ("mllm_hybrid", "soft", "__legacy") and get_rank() == 0:
-            ori_samples = sum([len(dset) for dset in datasets])
             packed_samples = len(dataset)
-            logger.info(f"[Dataset] (Original) {ori_samples} samples.")
             logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
         sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler
