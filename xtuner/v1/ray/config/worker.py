@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any, List, Literal, Optional, Union
 
 from cyclopts import Group, Parameter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 from typing_extensions import Annotated
+
+from xtuner.v1.utils import get_logger
 
 
 worker_group = Group("worker", help="Types of workers available.")
@@ -113,6 +115,13 @@ class RolloutConfig(BaseModel):
             help="Whether to enable cross-node communication for the rollout worker.",
         ),
     ] = False
+    dist_port_base: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Base port number for distributed communication among rollout workers.",
+        ),
+    ] = 35000
     rollout_max_batch_size_per_instance: Annotated[
         Optional[int],
         Parameter(
@@ -220,6 +229,37 @@ class RolloutConfig(BaseModel):
         ),
     ] = 1
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
+    _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
+
+    @property
+    def rollout_backend(self) -> str:
+        backend = ""
+        if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
+            backend = "sglang"
+        elif os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+            backend = "vllm"
+        elif os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
+            backend = "lmdeploy"
+
+        assert backend in ["sglang", "vllm", "lmdeploy"], (
+            f"Unsupported rollout backend: {backend}. Please set XTUNER_USE_SGLANG, XTUNER_USE_VLLM, or XTUNER_USE_LMDEPLOY to 1."
+        )
+        return backend
+
+    @property
+    def server_urls_per_engine(self) -> int:
+        # server_urls_per_engine is introduced for lmdeploy ep settings
+        # for now only lmdeploy pytorch backend with ep > 1 requires multiple server urls per engine
+        if self.rollout_backend == "lmdeploy" and self.expert_parallel_size > 1:
+            # when expert parallelism is used, lmdeploy requires `expert_parallel_size` server instances per engine
+            if not self._logged_server_urls_per_engine:
+                self._logged_server_urls_per_engine = True
+                get_logger().info(
+                    f"Setting server_urls_per_engine={self.expert_parallel_size} due to expert parallelism in LMDeploy."
+                )
+            return self.expert_parallel_size
+        else:
+            return 1
 
     def model_post_init(self, __context: Any) -> None:
         if self.model_name is None:
@@ -249,19 +289,7 @@ class RolloutConfig(BaseModel):
         if self.device == "NPU":
             self.gpus_per_node = 16
 
-        rollout_backend = ""
-        if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
-            rollout_backend = "sglang"
-        elif os.environ.get("XTUNER_USE_VLLM", "0") == "1":
-            rollout_backend = "vllm"
-        elif os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
-            rollout_backend = "lmdeploy"
-
-        assert rollout_backend in ["sglang", "vllm", "lmdeploy"], (
-            f"Unsupported rollout backend: {rollout_backend}. Please set XTUNER_USE_SGLANG, XTUNER_USE_VLLM, or XTUNER_USE_LMDEPLOY to 1."
-        )
-
-        if rollout_backend == "sglang":
+        if self.rollout_backend == "sglang":
             self.launch_server_method = "multiprocessing"
             self.rollout_cross_node_comm = False
         else:

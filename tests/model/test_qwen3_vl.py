@@ -178,7 +178,6 @@ class TestQwen3VL(DeterministicDDPTestCase):
     )
     def test_qwen3vl_run(self, device, sp_size, tol):
         self.create_pg(device)
-        maybe_compile.clear_compile_targets()
 
         hf_model = AutoModelForImageTextToText.from_pretrained(
             QWEN3_VL_DENSE_PATH,
@@ -189,7 +188,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         patch_hf_rms_norm(hf_model)
 
         with torch.device("meta"):
-            model_cfg = Qwen3VLDense4BConfig()
+            model_cfg = Qwen3VLDense4BConfig(compile_cfg=False)
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
@@ -211,8 +210,6 @@ class TestQwen3VL(DeterministicDDPTestCase):
     )
     def test_fsdp_qwen3_run(self, device, sp_size, compile, tol):
         self.create_pg(device)
-        if compile is False:
-            maybe_compile.clear_compile_targets()
 
         hf_model = AutoModelForImageTextToText.from_pretrained(
             QWEN3_VL_DENSE_PATH,
@@ -224,6 +221,8 @@ class TestQwen3VL(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             model_cfg = Qwen3VLDense4BConfig()
+            if compile is False:
+                model_cfg.compile_cfg = False
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(

@@ -2,9 +2,10 @@ import asyncio
 import copy
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 import ray
+from ray.actor import ActorClass, ActorProxy
 
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
@@ -16,11 +17,10 @@ from xtuner.v1.data_proto.rl_data import (
 )
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, ray_method
 
 
-@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
-class SingleTurnEnvironment(BaseEnvironment):
+class RawSingleTurnEnvironment(BaseEnvironment):
     """A single-turn environment for handling generation and evaluation tasks.
 
     This class extends `BaseEnvironment` to provide a concrete implementation for
@@ -134,7 +134,8 @@ class SingleTurnEnvironment(BaseEnvironment):
             group_data_items = update_rollout_item(group_data_items, rollout_responses)
         return group_data_items
 
-    async def run(
+    @ray_method
+    async def run(  # type: ignore[override]
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
     ) -> List[RLDataFlowItem]:
         """Runs a full generation and judger cycle.
@@ -170,3 +171,10 @@ class SingleTurnEnvironment(BaseEnvironment):
                 ]
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
         return group_data_items
+
+
+SingleTurnEnvironment = cast(
+    ActorClass[RawSingleTurnEnvironment],
+    ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))(RawSingleTurnEnvironment),
+)
+SingleTurnEnvironmentProxy = ActorProxy[RawSingleTurnEnvironment]

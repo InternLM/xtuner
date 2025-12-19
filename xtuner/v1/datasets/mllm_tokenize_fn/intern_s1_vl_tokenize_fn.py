@@ -133,7 +133,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.system_message = system_message
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
-        self._hash_str = (
+        _hash_str = (
             f"{self.downsample_ratio}_{self.num_image_token}_{self.system_message}_{self.use_thumbnail}"
             f"_{self.dynamic_image_size}_{self.max_num_frames}_{self.min_num_frames}"
             f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}_{max_length}"
@@ -159,7 +159,15 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         self.eos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
 
         # 必须要最后调用
-        super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash, data_name=self.data_name)
+        super().__init__(
+            tokenizer,
+            self.chat_template,
+            max_length,
+            tokenizer_hash,
+            hash,
+            hash_str=_hash_str,
+            data_name=self.data_name,
+        )
 
     def _get_transform(self):
         transform = build_transform(

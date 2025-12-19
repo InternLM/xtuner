@@ -10,9 +10,8 @@ from xtuner.v1.module import AttnOutputs, MHAConfig, MLAConfig, RMSNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
-from xtuner.v1.utils.compile import maybe_compile
 
-from ..linear.linear import build_linear
+from ..linear import build_linear
 
 
 class DenseMLP(nn.Module):
@@ -72,7 +71,6 @@ class DenseDecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
 
-    @maybe_compile(fullgraph=True)
     def forward(
         self,
         hidden_states: torch.Tensor,

@@ -169,14 +169,15 @@ class FourierEmbedding(RotaryEmbedding):
         self.num_inv_freq = rope_scaling_cfg.num_inv_freq
         self.fope_sep_head = rope_scaling_cfg.fope_sep_head
         self.fope_init_factor = rope_scaling_cfg.fope_init_factor
-        if self.num_inv_freq is not None:
-            assert (self.inv_freq > (2.0 * torch.pi / config.max_position_embeddings)).all() or (
-                self.inv_freq.shape[-1] == self.num_inv_freq
-            ), "FoPE is wrongly initialized."
 
         # zero out under-trained frequencies
         inv_freq = _compute_fope_parameters(self.num_inv_freq, self.inv_freq, config.max_position_embeddings)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+        if self.num_inv_freq is not None:
+            assert (self.inv_freq > (2.0 * torch.pi / config.max_position_embeddings)).all() or (
+                self.inv_freq.shape[-1] == self.num_inv_freq
+            ), "FoPE is wrongly initialized."
 
         self.head_dim = getattr(self.config, "head_dim", None) or config.hidden_size // config.num_attention_heads
         self.input_dim = self.inv_freq.shape[-1]

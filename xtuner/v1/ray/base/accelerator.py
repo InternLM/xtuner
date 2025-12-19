@@ -6,6 +6,7 @@ import torch
 import torch.distributed as dist
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
+from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup, placement_group, placement_group_table
 from typing_extensions import Annotated
 
@@ -247,7 +248,11 @@ class AutoAcceleratorWorkers:
                 resources_config.accelerator: resources_config.num_accelerators_per_worker,
             }
         ] * resources_config.num_workers
-        if name in ray.util.placement_group_table().keys():
+
+        pg_info = ray.util.placement_group_table()
+        names = [i["name"] for i in pg_info.values()]
+
+        if name in names:
             pg = ray.util.get_placement_group(name)
         else:
             pg = placement_group(bundles=bundles, strategy="PACK", name=name)
@@ -389,7 +394,9 @@ class AutoAcceleratorWorkers:
         return workers_list, rank_bundle_idx_list, pg
 
     @classmethod
-    def from_placement_group(cls, worker_cls, worker_config, pg: PlacementGroup):
+    def from_placement_group(
+        cls, worker_cls: ActorClass[T], worker_config, pg: PlacementGroup
+    ) -> tuple[list[ActorProxy[T]], list[tuple[int, int]]]:
         """Create workers from an existing placement group.
 
         Args:
@@ -406,8 +413,8 @@ class AutoAcceleratorWorkers:
         device_type = cls.get_device_type(pg)
         sorted_bundle_idxs, master_addr, master_port, world_size = cls.get_spmd_info(pg)
 
-        workers_list = []
-        rank_bundle_idx_list = []
+        workers_list: list[ActorProxy[T]] = []
+        rank_bundle_idx_list: list[tuple[int, int]] = []
         for rank, bundle_idx in enumerate(sorted_bundle_idxs):
             worker = worker_cls.options(
                 placement_group=pg,

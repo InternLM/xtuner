@@ -54,6 +54,7 @@ class OtherLog(TypedDict):
     __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
     maxvio: NotRequired[float]
     consumed_tokens: float
+    consumed_img_tokens: NotRequired[float]
     extra_info: ModelForwardExtraLogInfo
     efficient_attn_ratio: float
 

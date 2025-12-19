@@ -1,4 +1,5 @@
 import os
+import subprocess
 from functools import wraps
 import unittest
 import tempfile
@@ -22,6 +23,7 @@ from xtuner.v1.datasets.config import (
 
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
+MOE_MODEL_PATH = os.environ["QWEN3_MOE_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
 resource_map = {
@@ -107,12 +109,31 @@ class TestRollout(unittest.TestCase):
 
     def tearDown(self):
         ray.shutdown()
+        # When lmdeploy enable ep>1, it uses deep_ep. Buffer implicit destroy would cause some ray actor stucked.
+        # Use pkill cleen up ray::WorkerWrapper process after close ray cluster connection as workaround.
+        # TODO(chenchiyu): add excplicit deep_ep destroy in lmdeploy.
+        self._cleanup_lmdeploy_ray_worker_wrapper()
         self.temp_dir.cleanup()
+
+    def _cleanup_lmdeploy_ray_worker_wrapper(self):
+        try:
+            result = subprocess.run(["pkill", "-f", "ray::RayWorkerWrapper*"], capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                print(f"pkill command failed with return code {result.returncode}: {result.stderr}."
+                      " Maybe no lmdeploy ray::RayWorkerWrapper processes found.")
+        except Exception as e:
+            print(f"Error stopping ray::RayWorkerWrapper cluster: {e}")
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_generate(self):
+        rollout_cfg = self.rollout_cfg.model_copy(
+            deep=True,
+            update=dict(tensor_parallel_size=2),
+        )
+        rollout_cfg.model_post_init(None)
+
         sample_params = SampleParams(temperature=0.0)
-        rollout_controller = ray.remote(RolloutController).remote(self.rollout_cfg, self.pg)  # type: ignore[attr-defined]
+        rollout_controller = ray.remote(RolloutController).remote(rollout_cfg, self.pg)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
        
         self.assertEqual(res1.finish_reason, "stop") 
@@ -121,11 +142,22 @@ class TestRollout(unittest.TestCase):
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_lmdeploy_dataflow(self):
+        rollout_cfg = self.rollout_cfg.model_copy(
+            deep=True,
+            update=dict(
+                expert_parallel_size=2,
+                model_path=MOE_MODEL_PATH,
+                model_name=os.path.basename(MOE_MODEL_PATH).lower(),
+                tokenizer_path=MOE_MODEL_PATH,
+            ),
+        )
+        rollout_cfg.model_post_init(None)
+
         self.dataflow_cfg.enable_partial_rollout = 0
         self.test_env = SingleTurnEnvironment.remote(
             "test_env",
             self.pg,
-            rollout_cfg=self.rollout_cfg,
+            rollout_cfg=rollout_cfg,
         )
         self.test_flow = DataFlow.remote("test_env",
                                          self.dataflow_cfg,

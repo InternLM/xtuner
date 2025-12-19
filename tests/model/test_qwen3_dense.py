@@ -32,8 +32,6 @@ class TestQwen3Dense(DeterministicDDPTestCase):
     )
     def test_qwen3_dense_run(self, device, tp_size, compile, tol, loss_class):
         self.create_pg(device)
-        if not compile:
-            maybe_compile.clear_compile_targets()
 
         hf_model = AutoModelForCausalLM.from_pretrained(
             QWEN3_PATH,
@@ -55,6 +53,8 @@ class TestQwen3Dense(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             cfg = Qwen3Dense8BConfig()
+            if not compile:
+                cfg.compile_cfg = False
             qwen_model = cfg.build().to(torch.bfloat16)
 
         shift_input_ids = input_ids[:, :-1]
@@ -91,7 +91,6 @@ class TestQwen3Dense(DeterministicDDPTestCase):
     )
     def test_fsdp_accuracy(self, device, tp_size):
         self.create_pg(device)
-        maybe_compile.clear_compile_targets()
         hf_model = AutoModelForCausalLM.from_pretrained(
             QWEN3_PATH,
             torch_dtype=torch.bfloat16,
@@ -110,7 +109,7 @@ class TestQwen3Dense(DeterministicDDPTestCase):
         torch.cuda.empty_cache()
 
         with torch.device("meta"):
-            cfg = Qwen3Dense8BConfig()
+            cfg = Qwen3Dense8BConfig(compile_cfg=False)
             qwen_model = cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(

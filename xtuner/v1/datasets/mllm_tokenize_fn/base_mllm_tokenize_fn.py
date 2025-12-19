@@ -139,12 +139,13 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         max_length: int | None = None,
         tokenizer_hash: str | None = None,
         hash: str | None = None,
+        hash_str: str = "",
         data_name: str | None = None,
     ):
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
         self._hash = hash
-        self._hash_str = ""
+        self._hash_str = hash_str
         self.chat_template = chat_template
         self.data_name = data_name
 

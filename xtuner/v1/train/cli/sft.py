@@ -8,6 +8,7 @@ from cyclopts.group import Group
 from xtuner.v1.train.arguments import TrainingArguments
 from xtuner.v1.train.trainer import Trainer
 from xtuner.v1.utils import Config
+from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 
 
 app = App(
@@ -23,6 +24,8 @@ def main(
         TrainingArguments | None, Parameter(group=Group("Training Arguments", sort_key=1), name="*")
     ] = None,
 ):
+    monkey_patch_hf_modules_cache()
+
     if arguments is not None:
         if config is not None:
             raise ValueError("Cannot specify both `config` and `arguments`.")

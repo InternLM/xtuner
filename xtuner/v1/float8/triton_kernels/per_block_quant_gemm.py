@@ -133,8 +133,8 @@ def pad_tensor_for_matmul(tensor, dims) -> torch.Tensor:
     return torch.nn.functional.pad(tensor, (0, pad_dim2, 0, pad_dim1))
 
 
+@maybe_compile
 @torch.no_grad()
-@maybe_compile(fullgraph=True)
 def per_block_quant_torch(tensor: torch.Tensor, block_size=128, float8_dtype=torch.float8_e4m3fn):
     dim0, dim1 = tensor.shape
     tensor_pad = pad_tensor_for_matmul(tensor, (0, 1))

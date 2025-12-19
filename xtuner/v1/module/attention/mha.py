@@ -19,7 +19,7 @@ from xtuner.v1.ops import AttnOpOutputs, attn_impl_mapping, flash_attn_varlen_fu
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger
 
-from ..linear.linear import build_linear
+from ..linear import build_linear
 from ..rms_norm import RMSNorm
 from .attn_outputs import AttnOutputs
 from .kv_cache import fill_paged_kv_cache

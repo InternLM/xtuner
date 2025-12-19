@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import tqdm
 from pydantic import BaseModel, ConfigDict
+from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 
@@ -19,13 +20,12 @@ from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import (
-    VisionComposeConfigProtocol,
-    VisionComposeModelProtocol,
     VisionComposeTrainEngine,
 )
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
@@ -36,6 +36,7 @@ from xtuner.v1.utils import (
     get_logger,
     get_torch_device_module,
     monkey_unpatch_torch_reductions,
+    ray_method,
 )
 from xtuner.v1.utils.load_spec import LoadEnum
 
@@ -117,7 +118,7 @@ class WorkerConfig(BaseModel):
     """
 
     model_config = ConfigDict(title="Worker config", extra="forbid", arbitrary_types_allowed=True)
-    model_cfg: TransformerConfig | VisionComposeConfigProtocol
+    model_cfg: TransformerConfig | BaseComposeConfig
     optim_cfg: OptimConfig
     loss_cfg: BaseRLLossConfig
     lr_cfg: LRConfig
@@ -129,6 +130,7 @@ class WorkerConfig(BaseModel):
     ref_load_from: str | Path | None = None
     ref_model_fsdp_cfg: FSDPConfig | None = None
     log_dir: str | Path | None = None
+    update_weight_bucket_size_in_gb: float = 0.5  # 512MB
 
 
 class WorkerInputItem(TypedDict):
@@ -183,7 +185,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.logger = get_logger()
 
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine | VisionComposeTrainEngine:
-        if isinstance(worker_cfg.model_cfg, VisionComposeConfigProtocol):
+        if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
             engine = VisionComposeTrainEngine(
                 optim_cfg=worker_cfg.optim_cfg,
                 fsdp_cfg=worker_cfg.fsdp_cfg,
@@ -203,17 +205,17 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def _build_ref_model(
         self,
-        ref_model_cfg: TransformerConfig | VisionComposeConfigProtocol,
+        ref_model_cfg: TransformerConfig | BaseComposeConfig,
         load_from: str | Path,
         ref_model_fsdp_cfg: FSDPConfig | None = None,
     ):
         # TODO: 需要重构，使得能更优雅的兼容 mllm
-        model: VisionComposeModelProtocol | XtunerBaseModel
+        model: BaseComposeModel | XtunerBaseModel
         with torch.device("meta"):
             model = ref_model_cfg.build()
 
-        if isinstance(ref_model_cfg, VisionComposeConfigProtocol):
-            assert ref_model_cfg.text_config.float8_cfg is None, "VisionComposeConfigProtocol does not support float8"
+        if isinstance(ref_model_cfg, BaseComposeConfig):
+            assert ref_model_cfg.text_config.float8_cfg is None, "BaseComposeConfig does not support float8"
             if ref_model_fsdp_cfg is None:
                 ref_model_fsdp_cfg = FSDPConfig(recompute_ratio=0, cpu_offload=False, requires_grad=False)
             model.language_model.fully_shard(ref_model_fsdp_cfg)  # type: ignore
@@ -299,6 +301,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         other_log["extra_info"] = extra_info_dict
         return other_log
 
+    @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
@@ -317,7 +320,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         language_cfg = (
             self.config.model_cfg.text_config
-            if isinstance(self.config.model_cfg, VisionComposeConfigProtocol)
+            if isinstance(self.config.model_cfg, BaseComposeConfig)
             else self.config.model_cfg
         )
 
@@ -522,19 +525,23 @@ class TrainingWorker(SingleAcceleratorWorker):
             all_log_infos.append(log_info)
         return all_log_infos
 
+    @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         self._engine.save_hf(hf_dir, save_dtype)
 
+    @ray_method
     def get_data_replicate_size(self) -> int:
         """Get the data replicate size for the training worker."""
         # tp and pp will affect the data replicate size in engine
         # sp will affect the data replicate size in worker
         return self._engine.data_replicate_size * self.sp_mesh.size()
 
+    @ray_method
     def get_model_cfg(self):
         model_cfg = self._engine.model_cfg
         return model_cfg
 
+    @ray_method
     def offload_model(self):
         self._engine.put_model_to_device("cpu")
         DEVICE_MODULE.empty_cache()
@@ -542,6 +549,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"Offloaded model to CPU. Current allocate {DEVICE_MODULE.memory_allocated() / (1024**2)} MB, reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
 
+    @ray_method
     def offload_optimizer(self):
         """Offload the optimizer of the training worker."""
         self._engine.put_optimizer_to_device("cpu")
@@ -551,15 +559,18 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"reserved: {DEVICE_MODULE.memory_reserved() / (1024**2)} MB"
         )
 
+    @ray_method
     def onload_model(self):
         self._engine.put_model_to_device(DEVICE)
 
+    @ray_method
     def onload_optimizer(self):
         self._engine.put_optimizer_to_device(DEVICE)
 
+    @ray_method
     def update_rollout_info(
         self,
-        engine_mesh_list: DeviceMeshRaw,
+        engine_rank_mesh_array: DeviceMeshRaw,
         server_url_dict: ServiceUrlMap,
         rollout_config: RolloutConfig,
         worker_server_urls_status: Dict[str, bool],
@@ -570,7 +581,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
         if self.rollout_device_mesh is None:
             self.rollout_device_mesh = DeviceMesh(
-                "cpu", mesh=engine_mesh_list, mesh_dim_names=("engine_instance", "engine_parallel")
+                "cpu", mesh=engine_rank_mesh_array, mesh_dim_names=("engine_instance", "engine_parallel")
             )
         rollout_server_url = server_url_dict.get(self.rank, "")
         if worker_server_urls_status.get(rollout_server_url, "False") is False:
@@ -588,6 +599,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 "lmdeploy_backend", "pytorch"
             )
 
+    @ray_method
     def update_weights(self):
         """Update the model weights."""
         if self.rollout_cfg_info.get("backend") == "turbomind":
@@ -603,7 +615,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
 
-        if isinstance(model.config, VisionComposeConfigProtocol):
+        if isinstance(model.config, BaseComposeConfig):
             dtype = torch.bfloat16
         else:
             if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
@@ -611,19 +623,54 @@ class TrainingWorker(SingleAcceleratorWorker):
             else:
                 dtype = torch.bfloat16
 
-        same_gen = model._get_same_hf_param(model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE)
+        bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
+        same_gen = model._get_same_hf_param(
+            model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE, bucket_size=bucket_size
+        )
         fused_gen = model._get_fused_hf_param(
             model._group_param_by_load_spec(LoadEnum.FUSED),
             dtype=dtype,
             device=DEVICE,
-            return_full_key_per_rank=True,
+            bucket_size=bucket_size,
+            update_weights_for_rl=True,
         )
         shard_gen = model._get_shard_hf_param(
-            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE
+            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE, bucket_size=bucket_size
         )
-        for name_list, param_list in chain(same_gen, fused_gen, shard_gen):
+
+        for name_list, fused_param_list in fused_gen:
+            state_dict = {name: param.detach() for name, param in zip(name_list, fused_param_list)}
+            if model.fsdp_config.ep_size > 1:
+                # When ep_size > 1, generator generates part of the fused param on each ep rank in one ep_group.
+                # We can all gather them to get full fused param but it would lead to a larger memory usage.
+                # So we broadcast the part fused param from each ep rank in ep_group sequentially,
+                # and update the part of the fused param sequentially to reduce memory usage.
+                ep_mesh: DeviceMesh = model.ep_mesh
+                ep_group = ep_mesh.get_group()
+                global_rank = dist.get_rank()
+                for src_global_rank in dist.get_process_group_ranks(ep_group):
+                    broadcast_state_dict = dict()
+                    for key, tensor in state_dict.items():
+                        obj_to_broadcast = [key, tensor.to("meta")] if global_rank == src_global_rank else [None, None]
+                        dist.broadcast_object_list(obj_to_broadcast, src=src_global_rank, group=ep_group)
+                        real_key, meta_tensor = obj_to_broadcast
+                        buffer = (
+                            state_dict[real_key]
+                            if global_rank == src_global_rank
+                            else torch.empty_like(meta_tensor, device=DEVICE)
+                        )
+                        dist.broadcast(buffer, src=src_global_rank, group=ep_group)
+                        broadcast_state_dict[real_key] = buffer
+                    self.request_update_params(broadcast_state_dict, finished=False)
+                    del broadcast_state_dict, buffer
+            else:
+                self.request_update_params(state_dict, finished=False)
+            del state_dict, name_list, fused_param_list
+
+        for name_list, param_list in chain(same_gen, shard_gen):
             state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
             self.request_update_params(state_dict, finished=False)
+            del state_dict, name_list, param_list
 
         if self.rollout_cfg_info["backend"] == "pytorch":
             self.request_update_params({}, finished=True)
@@ -640,7 +687,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
 
-        if isinstance(model.config, VisionComposeConfigProtocol):
+        if isinstance(model.config, BaseComposeConfig):
             # TODO: support float8 for vision compose model
             dtype = torch.bfloat16
         else:
@@ -660,7 +707,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         saved_list = []
         is_qwen3vl = False
-        if isinstance(model.config, VisionComposeConfigProtocol):
+        if isinstance(model.config, BaseComposeConfig):
             language_model = model.language_model
             if isinstance(model, Qwen3VLForConditionalGeneration):
                 is_qwen3vl = True
@@ -678,7 +725,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             tensor_list = []
             name_list = []
             for sub_name, param in layer.state_dict().items():
-                if isinstance(model.config, VisionComposeConfigProtocol):
+                if isinstance(model.config, BaseComposeConfig):
                     saved_list.append(f"language_model.layers.{i}.{sub_name}")
                 else:
                     saved_list.append(f"layers.{i}.{sub_name}")
@@ -686,7 +733,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 local_tensor = local_tensor.bfloat16()
                 load_spec = language_model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
 
-                if isinstance(model.config, VisionComposeConfigProtocol):
+                if isinstance(model.config, BaseComposeConfig):
                     name = f"model.language_model.layers.{i}.{sub_name}"
                 else:
                     name = f"model.layers.{i}.{sub_name}"
@@ -708,7 +755,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             local_tensor = local_tensor.bfloat16()
             load_spec = model.load_spec_mapping.get(name)
 
-            if isinstance(model.config, VisionComposeConfigProtocol):
+            if isinstance(model.config, BaseComposeConfig):
                 if "vision_tower." in name:
                     name = name.replace("vision_tower.", vision_hf_prefix)
                 elif "multi_modal_projector." in name:
@@ -914,6 +961,7 @@ class TrainingWorker(SingleAcceleratorWorker):
     #     DEVICE_MODULE.empty_cache()
     #     return
 
+    @ray_method
     def request_update_params(self, state_dict, finished=False):
         """Send a request to update the parameters on the rollout workers.
 
@@ -1073,3 +1121,11 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         monkey_unpatch_torch_reductions()
         return
+
+    @ray_method
+    def ready(self) -> bool:
+        return True
+
+
+TrainingWorkerClass = ActorClass[TrainingWorker]
+TrainingWorkerProxy = ActorProxy[TrainingWorker]

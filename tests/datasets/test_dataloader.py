@@ -165,6 +165,7 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     RESUME_ITER = 10
     AFTER_RESUME_ITER = 10
     BATCH_SIZE = 8
+    GLOBAL_BATCH_SIZE = BATCH_SIZE
 
     data_dir1 = tmp_path / "data1"
     _create_fake_dataset(data_dir1 / f"depth1", dataset_num=3, max_depth=1, dup_times=3)
@@ -196,11 +197,12 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     dataloader1 = build_dataloader(
         dataloader_config=dataloader_config,
         datasets=datasets,
-        global_batch_size=16,
+        global_batch_size=GLOBAL_BATCH_SIZE,
         micro_batch_size=BATCH_SIZE,
         seed=10,
     )
 
+    print(f"dataloader1 length: {len(dataloader1)}")
     assert len(dataloader1) > 10
 
     dataloader_iter = iter(dataloader1)
@@ -219,7 +221,7 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     new_dataloader1 = build_dataloader(
         dataloader_config=dataloader_config,
         datasets=datasets,
-        global_batch_size=16,
+        global_batch_size=GLOBAL_BATCH_SIZE,
         micro_batch_size=BATCH_SIZE,
         seed=10,
     )
@@ -257,7 +259,7 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     new_dataloader2 = build_dataloader(
         dataloader_config=dataloader_config,
         datasets=datasets,
-        global_batch_size=16,
+        global_batch_size=GLOBAL_BATCH_SIZE,
         micro_batch_size=BATCH_SIZE,
         seed=10,
     )
@@ -488,3 +490,7 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
 
     for b1, b2 in zip(expected_data, resume_data):
         assert _is_batch_same(b1, b2)
+
+
+if __name__ == "__main__":
+    test_dataloader_resume_single_process(tmp_path=Path("/tmp/test_dataloader_resume_single_process"), pack_level="hard", num_workers=0, group_by_length=False, pack_workers=1)

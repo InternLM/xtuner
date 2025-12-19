@@ -31,10 +31,12 @@ from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
 from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
-from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol, VisionComposeTrainEngine
+from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
-from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.base import ModelItem, TransformerConfig, XTunerBaseModelConfig
+from xtuner.v1.model.compose.base import BaseComposeConfig
+from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
@@ -58,7 +60,6 @@ from xtuner.v1.utils.internal_metrics import (
     InternalMetricsRecorder,
     flatten_internal_metrics_for_logs,
 )
-from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
 
 from .toy_tokenizer import UTF8ByteTokenizer
 
@@ -302,7 +303,7 @@ class TrainerConfig(BaseModel):
         arbitrary_types_allowed=True,
         protected_namespaces=(),
     )
-    model_cfg: TransformerConfig | VisionComposeConfigProtocol
+    model_cfg: TransformerConfig | BaseComposeConfig
     load_from: str | Path | None = None
     tokenizer_path: str | Path | None = None
     dataset_cfg: Annotated[DatasetConfigList | None, Parameter(show_default=False)] = (
@@ -429,7 +430,7 @@ class Trainer:
         self,
         *,
         load_from: str | Path | None = None,  # Huggingface model path or saved trainer_path
-        model_cfg: TransformerConfig | VisionComposeConfigProtocol,
+        model_cfg: TransformerConfig | BaseComposeConfig,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig | None = FSDPConfig(),
         dataset_cfg: DatasetConfigList | None = None,  # TODO: Removed in version 1.1.0
@@ -491,13 +492,19 @@ class Trainer:
         self._profile_time = profile_time
         self._profile_memory = profile_memory
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
-        self._load_from_hf = load_from is not None and is_hf_model_path(load_from)
+
+        is_hf_path, error_info = is_hf_model_path(load_from) if load_from is not None else False, None
+        self._load_from_hf = is_hf_path
         self._can_save_hf = model_cfg.hf_config is not None or self._load_from_hf
 
         if not self._can_save_hf:
-            assert hf_interval is None and hf_max_keep is None, (
-                "`hf_interval` and `hf_max_keep` should be None when `load_from` is not a Huggingface model path, "
+            assert_info = (
+                f"`hf_interval`: {hf_interval} and `hf_max_keep`: {hf_max_keep} "
+                f"should be None when `load_from` is not a Huggingface model path, "
             )
+            if is_hf_path is False and error_info is not None:
+                assert_info += f", HF path load error Info: {error_info}"
+            assert hf_interval is None and hf_max_keep is None, assert_info
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
@@ -564,7 +571,7 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
-        self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg)
+        self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg, fsdp_cfg)
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
             logger.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
@@ -753,6 +760,7 @@ class Trainer:
             ProberList.after_step()
             step_time = time_after_train_step - time_before_train_step
             step_consumed_tokens = other_log["consumed_tokens"]
+            step_consumed_img_tokens = other_log.get("consumed_img_tokens", None)
 
             extra_info = other_log.get("extra_info", {})
             if isinstance(extra_info, ModelForwardExtraLogInfo):
@@ -781,6 +789,7 @@ class Trainer:
                 loss_log=loss_log,
                 step_consumed_tokens=step_consumed_tokens,
                 exp_consumed_tokens=self._exp_consumed_tokens,
+                step_consumed_img_tokens=step_consumed_img_tokens,
                 reduced_consumed_tokens=self._reduced_consumed_tokens,
                 data_time=data_time,
                 step_time=step_time,
@@ -931,10 +940,12 @@ class Trainer:
 
     def _init_logger(self, log_dir: Path):
         # Logging system maybe need better design
+        log_level = os.environ.get("XTUNER_LOG_LEVEL", "INFO").upper()
         logger = get_logger()
         logger.remove()
         logger.add(log_dir / f"rank{get_rank()}.log", format=log_format(), backtrace=True, catch=True)
-        logger.add(sys.stderr, format=log_format(rank=get_rank()))
+        # Set log level to hide debug output
+        logger.add(sys.stderr, format=log_format(rank=get_rank()), level=log_level)
         return logger, log_dir
 
     def _init_tracker(self, exp_tracker: Literal["tensorboard", "jsonl"], log_dir: Path):
@@ -979,7 +990,7 @@ class Trainer:
     def build_engine(
         self,
         model_path: Path | None,
-        model_config: TransformerConfig | VisionComposeConfigProtocol,
+        model_config: TransformerConfig | BaseComposeConfig,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
         load_checkpoint_path: str | Path | None,
@@ -990,7 +1001,7 @@ class Trainer:
 
         Args:
             model_path (Path | None): Path to the model checkpoint or None for new initialization.
-            model_config (TransformerConfig | VisionComposeConfigProtocol): Model configuration.
+            model_config (TransformerConfig | BaseComposeConfig): Model configuration.
             optim_config (OptimConfig): Optimizer configuration.
             fsdp_config (FSDPConfig): FSDP configuration for distributed training.
             resume_cfg (ResumeConfig | None): Resume configuration for continuing training.
@@ -1000,7 +1011,7 @@ class Trainer:
         Returns:
             TrainEngine: Initialized training engine.
         """
-        if isinstance(model_config, VisionComposeConfigProtocol):
+        if isinstance(model_config, BaseComposeConfig):
             engine = VisionComposeTrainEngine(
                 optim_cfg=optim_config,
                 fsdp_cfg=fsdp_config,
@@ -1021,6 +1032,9 @@ class Trainer:
 
         if model_path is not None:
             engine.model.set_hf(model_path)
+
+        if engine.model.compile_cfg is not None and self.rank == 0:
+            logger.info(f"The `compile_cfg` of model is {json.dumps(engine.model.compile_cfg, indent=4)}")
         return engine
 
     def build_lr_scheduler(self, lr_cfg: LRConfig, scheduler_step: int) -> torch.optim.lr_scheduler.LRScheduler:
@@ -1422,6 +1436,7 @@ class Trainer:
         train_time: float,
         train_time_offset: float,
         grad_norm: float,
+        step_consumed_img_tokens: float | None,
         internal_metrics: InternalMetrics | None = None,
     ):
         """Log the training step information."""
@@ -1450,17 +1465,22 @@ class Trainer:
         if internal_metrics:
             flattened_internal_metrics = flatten_internal_metrics_for_logs(internal_metrics)
 
+        if step_consumed_img_tokens is not None:
+            img_tokens_str = f"img_tokens: {step_consumed_img_tokens} "
+        else:
+            img_tokens_str = ""
+
         self.logger.info(
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
             f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
-            f"text_tokens: {step_consumed_tokens} "
+            f"text_tokens: {step_consumed_tokens} {img_tokens_str}"
             f"reduced_consumed_tokens: {reduced_consumed_tokens} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {tgs:.1f} "
-            f"exp_tgs: {exp_tgs: .1f} "
+            f"exp_tgs: {exp_tgs:.1f} "
             f"e2e_tgs: {e2e_tgs:.1f} "
             f"est_global_batch_tokens: {est_global_batch_tokens} "
             f"eta: {eta_hms} "
@@ -1578,8 +1598,9 @@ class Trainer:
     def _resolve_config_conflicts(
         self,
         tokenizer: PreTrainedTokenizer,
-        model_cfg: TransformerConfig | VisionComposeConfigProtocol,
+        model_cfg: TransformerConfig | BaseComposeConfig,
         dataloader_cfg: DataloaderConfig,
+        fsdp_cfg: FSDPConfig,
     ):
         if hasattr(tokenizer, "pad_token_id"):
             pad_token_id = tokenizer.pad_token_id
@@ -1599,7 +1620,7 @@ class Trainer:
         # Model's pad_token_id only affects the embedding module which acts specially for pad token.
         # Model's pad_token_id may be different from tokenizer's pad_token_id.
         # Note: Qwen3 Model's pad_token_id is None, which is different from Qwen tokenizer's pad_token_id.
-        # if isinstance(model_cfg, VisionComposeConfigProtocol):
+        # if isinstance(model_cfg, BaseComposeConfig):
         #     if model_cfg.text_config.pad_token_id != pad_token_id:
         #         logger.warning(
         #             f"Model pad_token_id {model_cfg.text_config.pad_token_id} is different from tokenizer "
@@ -1622,6 +1643,31 @@ class Trainer:
                 f"pad_token_id {pad_token_id}. Using tokenizer pad_token_id {pad_token_id}."
             )
             dataloader_cfg.pad_token_id = pad_token_id
+
+        # Resolve parallel config conlicts between model and fsdp configs
+        self._resolve_deprecate_compile_cfg(model_cfg=model_cfg, fsdp_cfg=fsdp_cfg)  # TODO: Remove in version 1.1.0
+
+        match model_cfg, fsdp_cfg:
+            case (MoEConfig(ep_size=1), FSDPConfig(ep_size=1)):
+                ...
+            case (MoEConfig(ep_size=1), _):
+                model_cfg.ep_size = fsdp_cfg.ep_size
+                logger.warning(f"Found model ep_size 1, using fsdp ep_size {fsdp_cfg.ep_size}.")
+            case (MoEConfig(), FSDPConfig(ep_size=1)):
+                fsdp_cfg.ep_size = model_cfg.ep_size
+                logger.warning(f"Found fsdp ep_size 1, using fsdp ep_size {fsdp_cfg.ep_size}.")
+
+        match dataloader_cfg, model_cfg:
+            case DataloaderConfig(pack_to_max_length=False), XTunerBaseModelConfig(compile_cfg=value) if (
+                value is not False and value != {}
+            ):
+                raise RuntimeError(
+                    "`model_cfg.compile_cfg` and `fsdp_cfg.torch_compile` must be `False` if "
+                    "`dataloader_cfg.pack_to_max_length` is `False`., but got:\n"
+                    f"dataloader_cfg.pack_to_max_length: {dataloader_cfg.pack_to_max_length}\n"
+                    f"model_cfg.compile_cfg: {model_cfg.compile_cfg}\n"
+                    f"fsdp_cfg.torch_compile: {fsdp_cfg.torch_compile}"  # TODO: removed in version 1.1.0 (FSDPConfig.torch_compile is deprecated)
+                )
 
     def _resolve_deprecated_resume_cfg(self, resume_cfg: ResumeConfig, auto_resume: bool) -> bool:
         if resume_cfg.auto_resume:
@@ -1718,7 +1764,6 @@ class Trainer:
     def _setup_env(self):
         if os.getenv("XTUNER_GC_ENABLE", "0") == "0":
             gc.disable()
-        monkey_patch_hf_modules_cache()
         os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
         log_str = "\n============XTuner Training Environment============\n"
@@ -1742,3 +1787,7 @@ class Trainer:
             log_str += f"{k}: {v}\n"
         log_str += "=================================================="
         logger.info(log_str)
+
+    def _resolve_deprecate_compile_cfg(self, model_cfg: TransformerConfig | BaseComposeConfig, fsdp_cfg: FSDPConfig):
+        if not fsdp_cfg.torch_compile:
+            model_cfg.compile_cfg = False
