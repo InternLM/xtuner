@@ -7,7 +7,6 @@ from pathlib import Path
 from shutil import rmtree
 from typing import cast
 
-import numpy as np
 import ray
 import torch
 from mmengine import load
@@ -74,6 +73,8 @@ class RLTrainerConfig(BaseModel):
     hf_max_keep: int | None = None
     seed: int = 42
     debug: bool = False
+    debug_rollout: bool = False
+    rollout_steps: int | None = None
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -217,6 +218,8 @@ class RLTrainer:
         hf_max_keep: int | None = None,
         seed: int = 42,
         debug: bool = False,
+        debug_rollout: bool = False,
+        rollout_steps: int | None = None,
         trainer_cfg: RLTrainerConfig | None = None,
     ):
         """Initialize the RL training system."""
@@ -251,6 +254,7 @@ class RLTrainer:
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
         self._debug = debug
+        self._debug_rollout = debug_rollout
         self._seed = seed
         self._set_deterministic()
         self._set_random_seed(seed)
@@ -312,6 +316,10 @@ class RLTrainer:
             // dataflow_config.global_batch_size
             * total_epochs
         )
+        if rollout_steps is not None:
+            self._rollout_steps = rollout_steps
+            self.logger.info(f"Set rollout steps to {self._rollout_steps} according to rollout_steps arg")
+
         bind_train_rollout(train_controller=self._train_controller, env_controller=self._rollout_env_controller)
         ray.get(self._train_controller.offload.remote(target="all"))
 
@@ -362,6 +370,8 @@ class RLTrainer:
             hf_max_keep=config.hf_max_keep,
             seed=config.seed,
             debug=config.debug,
+            debug_rollout=config.debug_rollout,
+            rollout_steps=config.rollout_steps,
             trainer_cfg=config,
         )
         return self
@@ -402,11 +412,11 @@ class RLTrainer:
             ray.get(self._rollout_env_controller.update_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
-            self._save_trajectories(eval_data_groups, trajectory_save_path)
+            self._save_trajectories(eval_data_groups, trajectory_save_path, is_eval=True)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
-            self._writer.add_scalar(
-                tag="evaluate_metrics/scores",
-                scalar_value=scores["accuracy"],
+            tb_scores = {f"eval/{k}": v for k, v in scores.items()}
+            self._writer.add_scalars(
+                tag_scalar_dict=tb_scores,
                 global_step=0,
             )
 
@@ -429,22 +439,27 @@ class RLTrainer:
             self._save_trajectories(data_groups, trajectory_save_path)
             self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
 
-        with timer("rollout_offload", step_timer_dict):
-            ray.get(self._rollout_env_controller.offload.remote())
-
         self._writer.add_scalar(
             tag="time/save_trajectory", scalar_value=step_timer_dict["save_trajectory"], global_step=rollout_idx
         )
-        self._writer.add_scalar(
-            tag="time/rollout_offload", scalar_value=step_timer_dict["rollout_offload"], global_step=rollout_idx
-        )
+
+        if not self._debug_rollout:
+            with timer("rollout_offload", step_timer_dict):
+                ray.get(self._rollout_dataflow.pause.remote())
+                ray.get(self._rollout_env_controller.offload.remote())
+
+            self._writer.add_scalar(
+                tag="time/rollout_offload", scalar_value=step_timer_dict["rollout_offload"], global_step=rollout_idx
+            )
         return data_groups, multimodal_train_infos
 
     def _train_step(self, rollout_idx: int, data_groups, multimodal_train_infos, step_timer_dict: dict):
         """Performs a single training step on the generated experience."""
-        with timer("onload_and_prepare_data", step_timer_dict):
+        with timer("onload", step_timer_dict):
             ray.get(self._train_controller.onload.remote(target="all"))
             self.logger.info("Training controller loaded")
+
+        with timer("prepare_data", step_timer_dict):
             data_batches, data_info = self._prepare_train_data(
                 data_groups, self._train_worker_cfg.pack_max_length, multimodal_train_infos
             )
@@ -452,8 +467,14 @@ class RLTrainer:
             self._log_data_info(rollout_idx, data_info)
 
         self._writer.add_scalar(
-            tag="time/onload_and_prepare_data",
-            scalar_value=step_timer_dict["onload_and_prepare_data"],
+            tag="time/onload",
+            scalar_value=step_timer_dict["onload"],
+            global_step=rollout_idx,
+        )
+
+        self._writer.add_scalar(
+            tag="time/prepare_data",
+            scalar_value=step_timer_dict["prepare_data"],
             global_step=rollout_idx,
         )
 
@@ -464,8 +485,11 @@ class RLTrainer:
                 )
             )
 
-        tb_tis_metrics = {f"train_metrics/tis/{k}": v for k, v in log_infos[0][0].items()}
-        tb_mismatch_metrics = {f"train_metrics/mismatch/{k}": v for k, v in log_infos[0][1].items()}
+        tb_tis_metrics = {f"tis/{k}": v for k, v in log_infos[0][0].items()}
+        tb_mismatch_metrics = {f"mismatch/{k}": v for k, v in log_infos[0][1].items()}
+        tb_train_log_dict = log_infos[0][2]
+        for tb_key, tb_value in tb_train_log_dict.items():
+            self._writer.add_scalar(tag=f"train_metrics/{tb_key}", scalar_value=tb_value, global_step=rollout_idx)
         self._writer.add_scalars(tag_scalar_dict=tb_tis_metrics, global_step=rollout_idx)
         self._writer.add_scalars(tag_scalar_dict=tb_mismatch_metrics, global_step=rollout_idx)
         self._writer.add_scalar(tag="time/training", scalar_value=step_timer_dict["training"], global_step=rollout_idx)
@@ -494,11 +518,11 @@ class RLTrainer:
             with timer("evaluation", step_timer_dict):
                 scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
-                self._save_trajectories(eval_data_groups, trajectory_save_path)
+                self._save_trajectories(eval_data_groups, trajectory_save_path, is_eval=True)
                 self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
-            self._writer.add_scalar(
-                tag="evaluate_metrics/scores",
-                scalar_value=scores["accuracy"],
+            tb_scores = {f"eval/{k}": v for k, v in scores.items()}
+            self._writer.add_scalars(
+                tag_scalar_dict=tb_scores,
                 global_step=rollout_idx,
             )
 
@@ -510,7 +534,8 @@ class RLTrainer:
         evaluation.
         """
         self.logger.info("Start RL training")
-        self._initial_evaluate()
+        if not self._debug_rollout:
+            self._initial_evaluate()
 
         for rollout_idx in range(1, self._rollout_steps + 1):
             self.logger.info(f"Rollout {rollout_idx}/{self._rollout_steps} start")
@@ -520,14 +545,15 @@ class RLTrainer:
             # 1. Rollout to generate experience
             data_groups, multimodal_train_infos = self._rollout_step(rollout_idx, step_timer_dict)
 
-            # 2. Train on the generated experience
-            self._train_step(rollout_idx, data_groups, multimodal_train_infos, step_timer_dict)
+            if not self._debug_rollout:
+                # 2. Train on the generated experience
+                self._train_step(rollout_idx, data_groups, multimodal_train_infos, step_timer_dict)
 
-            # 3. Synchronize weights and save checkpoints
-            self._sync_weights_and_save(rollout_idx, step_timer_dict)
+                # 3. Synchronize weights and save checkpoints
+                self._sync_weights_and_save(rollout_idx, step_timer_dict)
 
-            # 4. Evaluate model performance
-            self._evaluate_step(rollout_idx, step_timer_dict)
+                # 4. Evaluate model performance
+                self._evaluate_step(rollout_idx, step_timer_dict)
 
             # 5. Log timing information
             timer_log_str = f"Rollout {rollout_idx} training finished and timing listed: \n"
@@ -556,6 +582,14 @@ class RLTrainer:
     # TODO: advantage 是在 DataFlow 里算好，还是在 train controller 里算？
     # 因为可能有根据 advantage 来判断数据能否进 rl 训练的需求。暂时先放在这
     def _prepare_train_data(self, data_groups, pack_max_length, multimodal_train_infos=None):
+        all_input_ids = []
+        all_response_ids = []
+        all_multimodal_train_infos = []
+        all_routed_experts = []
+        all_shifted_labels = []
+        all_advantages = []
+        all_rollout_logprobs = []
+
         rewards_list = []
         advantages_list = []
         prompt_len_list = []
@@ -573,13 +607,10 @@ class RLTrainer:
             if not is_valid_for_training(group):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
-            if is_multimodal:
-                multimodal_train_info = multimodal_train_infos[j]
-            else:
-                multimodal_train_info = None
 
+            multimodal_train_info = multimodal_train_infos[j] if is_multimodal else None
             prompt_ids = group[0].data.extra_info["train_prompt_ids"]
-            rewards = [data.env.judger.reward["score"] for data in group]
+            rewards = [float(data.env.judger.reward["score"]) for data in group]
             rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
@@ -612,49 +643,73 @@ class RLTrainer:
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
+                all_input_ids.append(input_ids)
+                all_response_ids.append(response_ids)
+                all_shifted_labels.append(shifted_labels)
+                all_advantages.append(advantages[i].item())
+                all_multimodal_train_infos.append(multimodal_train_info)
+
                 if logprobs is not None:
                     rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
                     assert rollout_logprobs.size() == shifted_labels.size(), (
                         f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
                     )
+                    all_rollout_logprobs.append(rollout_logprobs)
                 else:
                     rollout_logprobs = None
+                    all_rollout_logprobs.append(None)
 
-                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids) - 1)
-                data_dict = {
-                    "seq_ctx": seq_ctx,
-                    "shifted_labels": shifted_labels,
-                    "advantage": advantages[i].item(),
-                    "rollout_logprobs": rollout_logprobs,
-                }
-
-                if "routed_experts" in group[i].env.rollout.extra_info:
+                if "router_experts" in group[i].env.rollout.extra_info:
                     routed_experts = group[i].env.rollout.extra_info["routed_experts"]  # n,layer*expert
-                    seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
+                    all_routed_experts.append(routed_experts)  # n,layer,expert
 
-                data_batches.append(data_dict)
-        random.shuffle(data_batches)
+                else:
+                    all_routed_experts.append(None)
 
-        advantages_list = np.array(advantages_list)
+        num_samples = len(all_input_ids)
+        indices = list(range(num_samples))
+        random.shuffle(indices)
+
+        data_batches = []
+        for i in indices:
+            seq_ctx = get_train_seq_ctx(all_input_ids[i], all_multimodal_train_infos[i], len(all_response_ids[i]) - 1)
+            data_dict = {
+                "seq_ctx": seq_ctx,
+                "shifted_labels": all_shifted_labels[i],
+                "advantage": all_advantages[i],
+                "rollout_logprobs": all_rollout_logprobs[i],
+            }
+            if all_routed_experts[i] is not None:
+                seq_ctx.rollout_routed_experts = all_routed_experts[i]
+
+            data_batches.append(data_dict)
+
+        rewards_arr = torch.tensor(rewards_list).float() if rewards_list else torch.tensor([0.0]).float()
+        advantages_arr = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
+        prompt_len_arr = torch.tensor(prompt_len_list).float() if prompt_len_list else torch.tensor([0.0]).float()
+        response_len_arr = (
+            torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
+        )
+
         info_dict = {
             "batch_size": len(rewards_list),
-            "rewards/mean": np.mean(rewards_list),
-            "rewards/min": np.min(rewards_list),
-            "rewards/max": np.max(rewards_list),
-            "advantages/mean": np.mean(advantages_list),
-            "advantages/min": np.min(advantages_list),
-            "advantages/max": np.max(advantages_list),
-            "response_len/mean": np.mean(response_len_list),
-            "response_len/min": np.min(response_len_list),
-            "response_len/max": np.max(response_len_list),
-            "response_len/std": np.std(response_len_list),
-            "prompt_len/mean": np.mean(prompt_len_list),
-            "prompt_len/min": np.min(prompt_len_list),
-            "prompt_len/max": np.max(prompt_len_list),
+            "rewards/mean": rewards_arr.mean().item(),
+            "rewards/min": rewards_arr.min().item(),
+            "rewards/max": rewards_arr.max().item(),
+            "advantages/mean": advantages_arr.mean().item(),
+            "advantages/min": advantages_arr.min().item(),
+            "advantages/max": advantages_arr.max().item(),
+            "response_len/mean": response_len_arr.mean().item(),
+            "response_len/min": response_len_arr.min().item(),
+            "response_len/max": response_len_arr.max().item(),
+            "response_len/std": response_len_arr.std().item(),
+            "prompt_len/mean": prompt_len_arr.mean().item(),
+            "prompt_len/min": prompt_len_arr.min().item(),
+            "prompt_len/max": prompt_len_arr.max().item(),
         }
         return data_batches, info_dict
 
-    def _save_trajectories(self, data_groups, save_path):
+    def _save_trajectories(self, data_groups, save_path, is_eval: bool = False):
         rewards = []
 
         rollout_response_len_list = []
@@ -693,18 +748,18 @@ class RLTrainer:
                     version_dict[version] = 0
                 version_dict[version] += 1
 
-        rewards = torch.tensor(rewards).float()
-        rollout_response_lens = None
+        rewards_tensor = torch.tensor(rewards).float()
+        rollout_response_lens: torch.Tensor = torch.tensor([0.0]).float()
         if len(rollout_response_len_list) > 0:
             rollout_response_lens = torch.tensor(rollout_response_len_list).float()
 
         _count = 0
         with open(save_path, "w", encoding="utf-8") as f:
             item = {
-                "reward_mean": rewards.mean().item(),
-                "reward_std": rewards.std().item(),
-                "reward_max": rewards.max().item(),
-                "reward_min": rewards.min().item(),
+                "reward_mean": rewards_tensor.mean().item(),
+                "reward_std": rewards_tensor.std().item(),
+                "reward_max": rewards_tensor.max().item(),
+                "reward_min": rewards_tensor.min().item(),
                 "response_len_mean": rollout_response_lens.mean().item(),
                 "response_len_std": rollout_response_lens.std().item(),
                 "response_len_max": rollout_response_lens.max().item(),
@@ -713,11 +768,22 @@ class RLTrainer:
                 "versions": version_dict,
                 # "mismatch_token_ids_count": mismatch_token_ids_count,
             }
+            self.logger.info(f"versions distribution: {version_dict}")
             json.dump(item, f, ensure_ascii=False, indent=2)
             f.write("\n")
-            tb_item = {f"train_metrics/{k}": v for k, v in item.items() if isinstance(v, (int, float))}
+            if is_eval:
+                tb_item = {f"eval/{k}": v for k, v in item.items() if isinstance(v, (int, float))}
+                tb_version_dict = {f"eval/version_{k}": float(v) for k, v in version_dict.items()}
+            else:
+                tb_item = {f"response/{k}": v for k, v in item.items() if isinstance(v, (int, float))}
+                tb_version_dict = {f"response/version_{k}": float(v) for k, v in version_dict.items()}
+
             self._writer.add_scalars(
                 tag_scalar_dict=tb_item,
+                global_step=self._cur_step,
+            )
+            self._writer.add_scalars(
+                tag_scalar_dict=tb_version_dict,
                 global_step=self._cur_step,
             )
             for group in data_groups:
@@ -730,6 +796,8 @@ class RLTrainer:
                         "prompt": data.data.extra_info["raw_prompt"],
                         "response": data.env.rollout.response,
                         "versioned_response": data.env.rollout.versioned_response,
+                        # "response_ids": str(data.env.rollout.response_ids),
+                        # "versioned_response_ids": str(data.env.rollout.versioned_response_ids),
                         "response_len": rollout_response_len_list[_count],
                         "versioned_response_len": data.env.rollout.versioned_num_return_tokens,
                         "label": data.data.reward_model["ground_truth"],

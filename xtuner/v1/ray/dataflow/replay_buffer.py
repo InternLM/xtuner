@@ -1,4 +1,5 @@
 import itertools
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +84,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     env_str = grouped_dataitem[0].uid.env
     root_id = grouped_dataitem[0].uid.root_id
     action_id = grouped_dataitem[0].uid.action_id
+    # !!! 注意：这里放的是第一个dataitem的data，因为一组数据的data是一样的 !!!
     data = grouped_dataitem[0].data
     # 现在是按组发送，那么一组里的dataitem的version是一样的，如果一组中的数据在某次rollout step中没有生成的数据，version也还是会+1
     group_version = grouped_dataitem[0].uid.version
@@ -346,7 +348,7 @@ class ReplayBufferStorage:
             # TODO: 考虑到非共卡的情况，version是否更新需要根据是否update_weights来判断
             replay_meta.version += 1
             self._root2actions[root_id].append(action_id)
-            self.logger.info(
+            self.logger.debug(
                 f"Existing root_id: {root_id} with action_id {action_id} found. Incrementing version to {replay_meta.version}."
             )
         else:
@@ -382,7 +384,9 @@ class ReplayBufferStorage:
         multimodal_train_infos = []
         target_batch_size = min(global_batch_size, self.completed_samples_count)
         self.logger.info(f"Retrieving {target_batch_size} completed samples from the replay buffer.")
+        task_time = []
         for _ in range(target_batch_size):
+            task_start_time = time.perf_counter()
             action_id = self._pop_highest_version_action(self._completed_actions)
             if action_id is None:
                 self.logger.warning("Get action_id None from completed_actions and skip this iteration.")
@@ -397,14 +401,18 @@ class ReplayBufferStorage:
                 if hasattr(data_item.data, "multimodal_train_info"):
                     multimodal_train_info = data_item.data.multimodal_train_info
                     del data_item.data.multimodal_train_info
-                if "partial_rollout_input_ids" in data_item.data.extra_info:
-                    del data_item.data.extra_info["partial_rollout_input_ids"]
+                if "partial_rollout_input_ids" in data_item.env.rollout.extra_info:
+                    del data_item.env.rollout.extra_info["partial_rollout_input_ids"]
             samples.append(group_samples)
             multimodal_train_infos.append(multimodal_train_info)
-
+            task_end_time = time.perf_counter()
+            task_time.append(task_end_time - task_start_time)
         # 检查completed_samples中是否还有剩余的数据，并且检查其是否过期
-        self.logger.info(f"Remaining completed samples in buffer: {self.completed_samples_count}")
+        self.logger.info(
+            f"Remaining completed samples in buffer: {self.completed_samples_count}, task_time: {sum(task_time)}s, avg_time: {sum(task_time) / len(task_time)}s"
+        )
         self._check_completed_samples_expired()
+        self._check_completed_samples_aborted()
         return samples, multimodal_train_infos
 
     def sample(self, sample_from_expired_states) -> List[RLDataFlowItem]:
@@ -535,7 +543,7 @@ class ReplayBufferStorage:
             sample.uid.action_id = action_id
             sample.uid.version = 0
 
-        self.logger.info(
+        self.logger.debug(
             f"Sampling expired action_id: {action_id} from replay buffer, remain expired samples: {len(self._expired_actions)}"
         )
         return group_samples
@@ -567,17 +575,21 @@ class ReplayBufferStorage:
                 # 清除上次的response_ids等env数据
                 del sample.env
                 sample.env = RLEnvDataItem()
+                sample.uid.version = 0
+                sample.uid.action_id = action_id if action_id is not None else sample_action_id
             else:
                 # 将异步的逻辑尽量放在replay buffer中处理，尽量不在env/rollout中进行处理
                 history_response_ids = list(itertools.chain.from_iterable(sample.env.rollout.versioned_response_ids))
-                sample.data.extra_info["partial_rollout_input_ids"] = sample.data.input_ids + history_response_ids
-                self.logger.debug(
-                    f"Partial rollout enabled, pass response_ids {len(history_response_ids)} to data extra info when sampling."
+                sample.env.rollout.extra_info["partial_rollout_input_ids"] = (
+                    sample.data.input_ids + history_response_ids
                 )
-            sample.uid.action_id = int(sample_action_id)
-            sample.uid.version = replay_meta_version
+                self.logger.debug(
+                    f"partial rollout enabled, {sample_action_id} pass response_ids {len(history_response_ids)} to input_ids {len(sample.data.input_ids)} to data extra info when sampling."
+                )
+                sample.uid.version = replay_meta_version
+                sample.uid.action_id = int(sample_action_id)
 
-        self.logger.info(
+        self.logger.debug(
             f"Sampling aborted action_id: {sample_action_id}, root_id: {group_samples[0].uid.root_id} from replay buffer, remain aborted samples: {self.aborted_samples_count}"
         )
         return group_samples
@@ -614,6 +626,17 @@ class ReplayBufferStorage:
             self.logger.info(
                 f"Moved {len(bucket)} completed samples with version {version} to expired samples due to exceeding tail_batch_candidate_steps."
             )
+
+    def _check_completed_samples_aborted(self):
+        if self.enable_partial_rollout:
+            return
+
+        for version, bucket in self._completed_actions.items():
+            self._aborted_actions[0].extend(bucket)
+            self.logger.info(
+                f"Moved {len(bucket)} completed samples with version {version} to aborted samples due to partial rollout disabled."
+            )
+        self._completed_actions.clear()
 
     def _clear_meta_for_actions(self, replay_meta: ReplayMeta):
         """Completely removes an action and all its associated data from the
@@ -673,28 +696,16 @@ class ReplayBufferStorage:
         action_id = replay_meta.action_id
 
         if state == RolloutState.ABORTED:
-            if self.tail_batch_candidate_steps == 0:
-                replay_meta.version = 0
-                self._aborted_actions[replay_meta.version].append(action_id)
-                self.logger.debug(
-                    f"Add aborted sample with action_id: {action_id} version 0 to _aborted_actions because of no tail_batch_candidate_steps."
-                )
-            elif self.tail_batch_candidate_steps > 0 and replay_meta.version < self.tail_batch_candidate_steps:
-                self._aborted_actions[replay_meta.version].append(action_id)
-                self.logger.debug(
-                    f"Add aborted sample with action_id: {action_id} version: {replay_meta.version} to _aborted_actions."
-                )
-            elif self.tail_batch_candidate_steps > 0 and replay_meta.version >= self.tail_batch_candidate_steps:
+            if self.tail_batch_candidate_steps > 0 and replay_meta.version >= self.tail_batch_candidate_steps:
                 # 过期的数据需要重置状态
-                replay_meta.version = 0
-                replay_meta.state = RolloutState.EXPIRED
                 self._expired_actions.append(action_id)
                 self.logger.debug(
                     f"Add expired sample with action_id: {action_id} to _expired_actions because version: {replay_meta.version} >= tail_batch_candidate_steps: {self.tail_batch_candidate_steps}."
                 )
             else:
-                assert False, (
-                    f"Unsupported rollout state {state} and rollout version {replay_meta.version} for action_id {action_id} in ReplayBufferStorage."
+                self._aborted_actions[replay_meta.version].append(action_id)
+                self.logger.debug(
+                    f"Add aborted sample with action_id: {action_id} version: {replay_meta.version} to _aborted_actions."
                 )
         elif state == RolloutState.COMPLETED:
             self._completed_actions[replay_meta.version].append(action_id)

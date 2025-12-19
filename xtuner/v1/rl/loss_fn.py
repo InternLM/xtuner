@@ -56,7 +56,7 @@ def check_config(keys_needed: list[str], config: dict[str, Any]) -> None:
 
 
 @register_policy_loss("vanilla")
-def pg_loss_fn(
+def vanilla_pg_loss_fn(
     log_prob: torch.Tensor,
     old_log_prob: torch.Tensor,
     advantages: torch.Tensor,
@@ -80,6 +80,28 @@ def pg_loss_fn(
     pg_losses3 = -clip_ratio_c * advantages
     clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    loss = (pg_losses * loss_weights.to(pg_losses.dtype)).sum()
+    return loss
+
+
+@register_policy_loss("cispo")
+def cispo_pg_loss_fn(
+    logprobs: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_weights: torch.Tensor,
+    policy_loss_cfg: dict,
+) -> torch.Tensor:
+    check_config(["cliprange_low", "cliprange_high"], policy_loss_cfg)
+    cliprange_low = policy_loss_cfg["cliprange_low"]
+    cliprange_high = policy_loss_cfg["cliprange_high"]
+
+    advantages = advantages.to(logprobs.dtype)
+    negative_approx_kl = logprobs.detach() - old_logprobs.detach()
+    # Clamp negative_approx_kl for stability
+    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    ratio = torch.exp(negative_approx_kl)
+    pg_losses = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high) * logprobs
     loss = (pg_losses * loss_weights.to(pg_losses.dtype)).sum()
     return loss
 

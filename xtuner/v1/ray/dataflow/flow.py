@@ -186,6 +186,7 @@ class DataFlow:
         self.sample_from_expired_storage, self.finished_samples_count = ray.get(
             self.replay_buffer.get_prerun_state.remote(self.target_batch_size)
         )
+        ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         self.skipped_sample_count = 0
         self.failed_sample_count = 0
         self.filtered_samples_count = 0
@@ -306,9 +307,6 @@ class DataFlow:
                 data_concurrency = math.ceil(
                     (1 + self.config.staleness_threshold) * (self.target_batch_size - self.finished_samples_count)
                 )
-                init_increment_data_concurrency = data_concurrency - (
-                    self.target_batch_size - self.finished_samples_count
-                )
                 staleness_threshold = self.config.staleness_threshold
                 self.logger.info(
                     f"Starting dataflow concurrent task runner with data_concurrency: {data_concurrency}, target_batch_size: {self.target_batch_size}, finished_samples_count: {self.finished_samples_count}, staleness_threshold: {staleness_threshold}"
@@ -327,46 +325,6 @@ class DataFlow:
                     self.logger.info(
                         f"waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
                     )
-                    if len(waiting_tasks) < self.target_batch_size - self.finished_samples_count:
-                        # 当在执行的task的数量不足以满足需要的数量的时候，补充新的task, 补充的方式是超发当前需要数量的staleness_threshold比例的task
-                        # increment_data_concurrency = math.ceil(
-                        #     (1 + staleness_threshold)
-                        #     * (self.target_batch_size - self.finished_samples_count - len(waiting_tasks))
-                        # )
-                        self.logger.info(
-                            f"Increment data concurrency to {init_increment_data_concurrency} tasks based on staleness_threshold: {staleness_threshold}, current waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
-                        )
-                        if init_increment_data_concurrency == 0:
-                            init_increment_data_concurrency = (
-                                self.target_batch_size - self.finished_samples_count - len(waiting_tasks)
-                            )
-                        for _ in range(init_increment_data_concurrency):
-                            task = create_task(self.worker_task())
-                            waiting_tasks.add(task)
-                        self.logger.info(f"After increment, waiting_tasks: {len(waiting_tasks)}")
-
-                if len(waiting_tasks) == 0:
-                    if (
-                        self.failed_sample_count > self.target_batch_size
-                        or self.skipped_sample_count > self.target_batch_size
-                    ):
-                        self.logger.error(
-                            f"Too many failed or skipped samples, aborting dataflow. failed_sample_count: {self.failed_sample_count}, skipped_sample_count: {self.skipped_sample_count}, target_batch_size: {self.target_batch_size}"
-                        )
-                        break
-                    # increment_data_concurrency = math.ceil(
-                    #     (1 + staleness_threshold)
-                    #     * (self.target_batch_size - self.finished_samples_count - len(waiting_tasks))
-                    # )
-                    self.logger.info(
-                        f"Length of waiting task is 0 and increment data concurrency to {init_increment_data_concurrency} tasks based on staleness_threshold: {staleness_threshold}, current waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
-                    )
-                    if init_increment_data_concurrency == 0:
-                        init_increment_data_concurrency = self.target_batch_size - self.finished_samples_count
-                    for _ in range(init_increment_data_concurrency):
-                        task = create_task(self.worker_task())
-                        waiting_tasks.add(task)
-                    self.logger.info(f"After increment, waiting_tasks: {len(waiting_tasks)}")
 
                 done_tasks, pending_tasks = await asyncio.wait(
                     waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
@@ -379,6 +337,10 @@ class DataFlow:
                 self.finished_samples_count = ray.get(self.replay_buffer.get_completed_samples_count.remote())
                 waiting_tasks = pending_tasks
 
+                while len(waiting_tasks) + self.finished_samples_count < max(data_concurrency, self.target_batch_size):
+                    task = create_task(self.worker_task())
+                    waiting_tasks.add(task)
+
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
@@ -388,24 +350,27 @@ class DataFlow:
         if len(waiting_tasks) > 0:
             self.logger.info(f"Start pausing env controller for remaining worker tasks {len(waiting_tasks)}.")
             await self.pause()
-            cleanup_start_time = time.perf_counter()
             while len(waiting_tasks) > 0:
-                elapsed_time = time.perf_counter() - cleanup_start_time
-                if elapsed_time > self.cleanup_task_time:
-                    self.logger.warning(
-                        f"Cleanup timeout of {self.cleanup_task_time}s reached. "
-                        f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
-                    )
-                    for task in waiting_tasks:
-                        task.cancel()
-                    # Wait for cancellations to complete
-                    await asyncio.gather(*waiting_tasks, return_exceptions=True)
-                    break  # Exit the cleanup loop
+                # elapsed_time = time.perf_counter() - cleanup_start_time
+                # if elapsed_time > self.cleanup_task_time:
+                #     self.logger.warning(
+                #         f"Cleanup timeout of {self.cleanup_task_time}s reached. "
+                #         f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
+                #     )
+                #     for task in waiting_tasks:
+                #         task.cancel()
+                #     # Wait for cancellations to complete
+                #     await asyncio.gather(*waiting_tasks, return_exceptions=True)
+                #     break  # Exit the cleanup loop
                 # NOTE: Keep sending pause requests because the inference engine only marks currently running requests as aborted.
                 # When a waiting request starts running, it still needs another pause request to be marked as aborted.
                 _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
                 if len(pending_tasks) > 0:
                     await self.pause()
+                    await asyncio.sleep(1)
+                    self.logger.debug(
+                        f"Waiting for {len(pending_tasks)} remaining worker tasks to complete after pausing env controller."
+                    )
                 waiting_tasks = pending_tasks
             self.logger.info("All worker tasks have completed after pausing env controller.")
 
@@ -419,7 +384,7 @@ class DataFlow:
 
         task_completion_dict = self._log_task_completion_stats(task_completion_times, "Task Completion Time Stats:\n")
         for k, v in task_completion_dict.items():
-            self.tb_metrics[f"time/task_time_{k}"] = v
+            self.tb_metrics[f"task_time/{k}"] = v
 
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
@@ -513,7 +478,7 @@ class DataFlow:
     def _log_task_completion_stats(self, task_times: List[float], logger_msg: Optional[str] = None):
         if not task_times:
             self.logger.info("No task completion times to report.")
-            return
+            return {}
 
         import numpy as np
 

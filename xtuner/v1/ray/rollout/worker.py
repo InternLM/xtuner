@@ -25,6 +25,22 @@ from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 
+def get_eos_token(model_path: str) -> int | List[int]:
+    from xtuner.v1.utils.logger import get_logger
+
+    logger = get_logger()
+    generation_config_path = os.path.join(model_path, "generation_config.json")
+    if not os.path.exists(generation_config_path):
+        logger.warning(
+            f"Config {generation_config_path} does not exist and thus cannot get eos_token. You must provide eos_token manually."
+        )
+        return []
+    with open(generation_config_path) as f:
+        generation_config = json.load(f)
+    eos_token_id = generation_config.get("eos_token_id")
+    return eos_token_id
+
+
 class RolloutWorker(SingleAcceleratorWorker):
     """Base class for a rollout worker that runs an inference server.
 
@@ -78,6 +94,11 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
         if self.rank == 0:
             self.logger.info(f"RolloutConfig:\n{self.config.model_dump_json(indent=2)}")
+        eos_token = get_eos_token(self.config.model_path)
+        self.logger.info(f"Using eos_token: {self.eos_token} for model at {self.config.model_path}")
+        self.eos_token: List[int] = [eos_token] if isinstance(eos_token, int) else eos_token
+        self.receive_abort_request = asyncio.Event()
+        self.abort_timeout = 5.0
 
     def init_dist_port(self):
         """Initialize distributed communication ports.
@@ -116,6 +137,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 server URL.
         """
         self.dist_init_addr = dist_init_addr if dist_init_addr else self.dist_init_addr
+        self.receive_abort_request.clear()
         self.launch_server()
         return (self.rank, self.server_url)
 
@@ -292,6 +314,9 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
         try:
+            if self.receive_abort_request.is_set():
+                self.logger.debug(f"Request to {url} was cancelled before sending due to an abort signal.")
+                return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
             req = self.client.build_request(
                 "POST",
                 url,
@@ -301,6 +326,38 @@ class RolloutWorker(SingleAcceleratorWorker):
             r = await self.client.send(req)
             r.raise_for_status()
             return HttpRequestResult(response=r)
+
+            # send_task = asyncio.create_task(self.client.send(req))
+            # abort_wait_task = asyncio.create_task(self.receive_abort_request.wait())
+
+            # done, pending = await asyncio.wait(
+            #     {send_task, abort_wait_task}, timeout=self.config.rollout_timeout, return_when=asyncio.FIRST_COMPLETED
+            # )
+
+            # if send_task in done:
+            #     abort_wait_task.cancel()
+            #     r = await send_task
+            #     r.raise_for_status()
+            #     return HttpRequestResult(response=r)
+
+            # if abort_wait_task in done:
+            #     self.logger.debug(
+            #         f"Request to {url} was aborted. Waiting up to 5s for the request to gracefully finish."
+            #     )
+            # try:
+            #     # Wait for send_task for a short period before force-cancelling
+            #     r = await asyncio.wait_for(send_task, timeout=self.abort_timeout)
+            #     r.raise_for_status()
+            #     return HttpRequestResult(response=r)
+            # except asyncio.TimeoutError:
+            #     self.logger.debug(f"Request to {url} did not finish gracefully within 5s. Force cancelling.")
+            #     send_task.cancel()
+            # except asyncio.CancelledError:
+            #     pass
+            # # Ensure the task is awaited to suppress warnings, even if cancelled
+            # await asyncio.gather(send_task, return_exceptions=True)
+            # return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
+
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
@@ -334,9 +391,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         while True:
             # 当拼接后的response_ids长度已经达到了max_tokens时，则不需要发送数据，直接返回
             if extra_info.get("partial_rollout_input_ids", None) is not None:
-                expected_max_tokens = self.config.context_length - len(extra_info["partial_rollout_input_ids"])
-                if expected_max_tokens <= 0:
-                    self.logger.info(
+                if sample_params["max_tokens"] == 0:
+                    self.logger.debug(
                         f"Request {uid} reached max context length {self.config.context_length}, no need to rollout more."
                     )
                     return RLRolloutResponseItem(
@@ -347,7 +403,18 @@ class RolloutWorker(SingleAcceleratorWorker):
                         finish_reason="length",
                         state=RolloutState.COMPLETED,
                     )
-
+                if extra_info["partial_rollout_input_ids"][-1] in self.eos_token:
+                    self.logger.debug(
+                        f"Request {uid} already ends with eos token {extra_info['partial_rollout_input_ids'][-1]}, no need to rollout more"
+                    )
+                    return RLRolloutResponseItem(
+                        response=None,
+                        response_ids=None,
+                        logprobs=None,
+                        num_return_tokens=0,
+                        finish_reason="stop",
+                        state=RolloutState.COMPLETED,
+                    )
             http_result = await self._create_request(
                 endpoint_url,
                 openai_prompts,
@@ -376,13 +443,17 @@ class RolloutWorker(SingleAcceleratorWorker):
                         return RLRolloutResponseItem(state=RolloutState.SKIPPED)
                 return response
 
-            # Case 2: A fatal, non-retryable error occurred
-            if http_result.is_unknown_error:
+            # Case2: Return aborted error if receive abort signal
+            if http_result.error_type == HttpRequestErrorType.REQUEST_ABORTED:
+                return RLRolloutResponseItem(finish_reason="abort", state=RolloutState.ABORTED)
+
+            # Case 3: A fatal, non-retryable error occurred
+            elif http_result.is_unknown_error:
                 raise RuntimeError(
                     f"Unexpected error during rollout request {uid} to {http_result.url}: {http_result.exception}"
                 )
 
-            # Case 3: A retryable error occurred, and we still have retries left
+            # Case 4: A retryable error occurred, and we still have retries left
             elif http_result.is_retryable and cur_retry_times < self.config.max_retry_per_sample:
                 cur_retry_times += 1
                 self.logger.warning(
@@ -480,6 +551,9 @@ class RolloutWorker(SingleAcceleratorWorker):
             try:
                 extra_info = {}
                 finish_reason = response["meta_info"]["finish_reason"]["type"]
+                if finish_reason == "abort" and self.receive_abort_request.is_set() is False:
+                    self.receive_abort_request.set()
+                    self.logger.info(f"Setting receive_abort_request to True for rank {self.rank}")
                 if "output_token_logprobs" in response["meta_info"]:
                     if response["meta_info"]["output_token_logprobs"] is None:
                         last_token_ids = []
@@ -499,15 +573,16 @@ class RolloutWorker(SingleAcceleratorWorker):
                         "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                     )
                     routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
-                    if isinstance(routed_experts, str):
-                        import base64
+                    if routed_experts is not None:
+                        if isinstance(routed_experts, str):
+                            import base64
 
-                        data = base64.b64decode(routed_experts)
-                        routed_experts = ray.cloudpickle.loads(data)
-                    else:
-                        routed_experts = torch.tensor(routed_experts)  # n,layer,expert
-                        routed_experts = ray.put(routed_experts)
-                    extra_info = {"routed_experts": routed_experts}
+                            data = base64.b64decode(routed_experts)
+                            routed_experts = ray.cloudpickle.loads(data)
+                        else:
+                            routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                            routed_experts = ray.put(routed_experts)
+                        extra_info = {"routed_experts": routed_experts}
 
                 # NOTE: When set return_token_ids = True, the response must contain valid token_ids/logprobs.
                 # If not, we consider it as an invalid response and retry it.
@@ -525,6 +600,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         extra_info=extra_info,
                         state=RolloutState.ABORTED if finish_reason == "abort" else RolloutState.COMPLETED,
                     )
+                    # self.logger.info(f"Rollout response for request {uid}: finish_reason={finish_reason}, num_return_tokens={len(last_token_ids)}")
                 return rollout_response
             except KeyError as e:
                 error_msg = f"Missing expected key {e} in response {response} for {uid}"
@@ -601,12 +677,10 @@ class RolloutWorker(SingleAcceleratorWorker):
     def pause(self):
         """Pause the worker's generation process."""
         self.paused = True
-        self.pause_generation()
 
     def restart(self):
         """Resume the worker's generation process."""
-        self.paused = False
-        self.continue_generation()
+        self.receive_abort_request.clear()
 
     def check_health(self) -> bool:
         """Check the health of the worker's server.
