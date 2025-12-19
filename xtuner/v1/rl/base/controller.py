@@ -255,7 +255,8 @@ class RawTrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        ray.get(handles)
+        log_infos = ray.get(handles)
+        return log_infos
 
     @ray_method
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):

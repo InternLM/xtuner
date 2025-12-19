@@ -449,6 +449,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 all_rollout_is_metrics.append(rollout_is_metrics)
                 all_mismatch_metrics.append(mismatch_metrics)
 
+        all_log_infos = [rollout_is_metrics, mismatch_metrics]
         logger_msg = f"Rollout {rollout_idx}: "
 
         if len(all_mismatch_metrics) > 0:
@@ -521,6 +522,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
+            all_log_infos.append(log_info)
+        return all_log_infos
 
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):

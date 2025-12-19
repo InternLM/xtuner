@@ -125,12 +125,20 @@ class LMDeployWorker(RolloutWorker):
         else:
             payload["messages"] = prompt
 
+        if "partial_rollout_input_ids" in extra_info:
+            assert "return_token_ids" in extra_params and extra_params["return_token_ids"], (
+                "concat response_ids and input_ids is only compatible with return_token_ids=True."
+            )
+            payload["input_ids"] = extra_info["partial_rollout_input_ids"]
+            assert len(payload["input_ids"]) <= self.config.context_length, (
+                f"Total input length {len(payload['input_ids'])} exceeds context length {self.config.context_length}."
+            )
+
         if self.enable_return_routed_experts:
             extra_params["return_routed_experts"] = True
 
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
         payload.update(lmdeploy_sample_params)
-
         return await self._safe_post_request(url, headers, payload)
 
     def get_logprobs(self, input_ids, sampling_params):
@@ -231,8 +239,8 @@ class LMDeployWorker(RolloutWorker):
         max_batch_size = self.config.rollout_max_batch_size_per_instance // dp_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
         lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "WARNING")
-        lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "CRITICAL")
-        lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "CRITICAL")
+        lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
+        lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
 
         extra_engine_config = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
