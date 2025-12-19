@@ -517,7 +517,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         finish_reason=finish_reason,
                         logprobs=last_logprobs,
                         extra_info=extra_info,
-                        state=RolloutState.COMPLETED if finish_reason == "abort" else RolloutState.COMPLETED,
+                        state=RolloutState.ABORTED if finish_reason == "abort" else RolloutState.COMPLETED,
                     )
                 return rollout_response
             except KeyError as e:

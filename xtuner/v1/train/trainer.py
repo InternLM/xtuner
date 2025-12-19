@@ -940,10 +940,12 @@ class Trainer:
 
     def _init_logger(self, log_dir: Path):
         # Logging system maybe need better design
+        log_level = os.environ.get("XTUNER_LOG_LEVEL", "INFO").upper()
         logger = get_logger()
         logger.remove()
         logger.add(log_dir / f"rank{get_rank()}.log", format=log_format(), backtrace=True, catch=True)
-        logger.add(sys.stderr, format=log_format(rank=get_rank()))
+        # Set log level to hide debug output
+        logger.add(sys.stderr, format=log_format(rank=get_rank()), level=log_level)
         return logger, log_dir
 
     def _init_tracker(self, exp_tracker: Literal["tensorboard", "jsonl"], log_dir: Path):

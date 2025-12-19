@@ -5,9 +5,14 @@ import ray
 import torch
 import torch.distributed as dist
 from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from ray.actor import ActorClass, ActorProxy
-from ray.util.placement_group import PlacementGroup, placement_group, placement_group_table
+from ray.util.placement_group import (
+    VALID_PLACEMENT_GROUP_STRATEGIES,
+    PlacementGroup,
+    placement_group,
+    placement_group_table,
+)
 from typing_extensions import Annotated
 
 from ..utils import find_master_addr_and_port, get_accelerator_ids
@@ -64,6 +69,17 @@ class AcceleratorResourcesConfig(BaseModel):
         float,
         Parameter(help="Number of accelerators to allocate for each worker in the placement group."),
     ] = 1
+    pg_pack_strategy: Annotated[
+        str,
+        Parameter(help="Placement group packing strategy, options: " + ", ".join(VALID_PLACEMENT_GROUP_STRATEGIES)),
+    ] = "PACK"
+
+    @field_validator("pg_pack_strategy")
+    @classmethod
+    def check_pg_pack_strategy(cls, v):
+        if v not in VALID_PLACEMENT_GROUP_STRATEGIES:
+            raise ValueError(f"pg_pack_strategy must be one of {VALID_PLACEMENT_GROUP_STRATEGIES}")
+        return v
 
     def model_post_init(self, __context: Any) -> None:
         if self.accelerator == "NPU":
@@ -103,6 +119,7 @@ class AcceleratorResourcesConfig(BaseModel):
         total_cpus: float | int,
         total_memory: int,
         num_workers: int,
+        pg_pack_strategy: str = "PACK",
     ):
         """Create an AcceleratorResourcesConfig from total accelerator, CPU,
         and memory resources.
@@ -125,6 +142,7 @@ class AcceleratorResourcesConfig(BaseModel):
             num_accelerators_per_worker=total_accelerators / num_workers,
             num_cpus_per_worker=total_cpus / num_workers,
             cpu_memory_per_worker=total_memory / num_workers,
+            pg_pack_strategy=pg_pack_strategy,
         )
 
 
@@ -255,7 +273,7 @@ class AutoAcceleratorWorkers:
         if name in names:
             pg = ray.util.get_placement_group(name)
         else:
-            pg = placement_group(bundles=bundles, strategy="PACK", name=name)
+            pg = placement_group(bundles=bundles, strategy=resources_config.pg_pack_strategy, name=name)
             ray.get(pg.ready())
         return pg
 

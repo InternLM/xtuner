@@ -36,7 +36,7 @@ class BaseEnvironment(ABC):
         rollout_controller=None,
         judger_controller=None,
     ):
-        judger_pg = judger_pg if judger_pg else rollout_pg
+        # judger_pg = judger_pg if judger_pg else rollout_pg
         self.environment = environment
         if rollout_controller:
             self.rollout_controller = rollout_controller

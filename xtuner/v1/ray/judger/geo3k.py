@@ -1,6 +1,5 @@
 import re
-
-from pydantic import BaseModel, ConfigDict
+from typing import Callable
 
 
 try:
@@ -9,7 +8,7 @@ except Exception:
     extract_boxed_content = None
     grade_answer = None
 
-from .native import NativeJudger
+from .native import NativeJudgerConfig
 
 
 def format_reward(predict_str: str) -> float:
@@ -36,17 +35,9 @@ def compute_reward(response, label, extra_info) -> dict:
     return {"score": score, "acc": acc}
 
 
-class GEO3KJudgerConfig(BaseModel):
+class GEO3KJudgerConfig(NativeJudgerConfig):
     """Configuration for the GEO3K judger."""
 
     judger_name: str = "hiyouga/geometry3k"
     extra_info: dict = {"format_score": 0.1, "use_boxed": True}
-    model_config = ConfigDict(extra="forbid")
-
-    def build(self):
-        """Build a NativeJudger instance from the configuration.
-
-        Returns:
-            NativeJudger: An instance of the NativeJudger configured for GEO3K.
-        """
-        return NativeJudger(judger_name=self.judger_name, reward_func=compute_reward, extra_info=self.extra_info)
+    reward_func: Callable = compute_reward

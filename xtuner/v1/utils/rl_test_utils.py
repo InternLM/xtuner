@@ -2,7 +2,7 @@ import json
 import multiprocessing
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import httpx
 import requests
@@ -10,7 +10,7 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from xtuner.v1.ray.judger.native import NativeJudger
+from xtuner.v1.ray.judger.native import NativeJudgerConfig
 
 # try:
 from xtuner.v1.ray.rollout.lmdeploy import LMDeployWorker
@@ -167,16 +167,8 @@ def custom_postprocessor_for_gsm8k(result):
     return judger_response_item
 
 
-class GSM8KRemoteJudgerConfig(BaseModel):
+class GSM8KRemoteJudgerConfig(NativeJudgerConfig):
     judger_name: str
     remote_url: str
     extra_info: dict = {"score": 1, "format_score": 0}
-    model_config = ConfigDict(extra="forbid")
-
-    def build(self):
-        return NativeJudger(
-            judger_name=self.judger_name,
-            remote_url=self.remote_url,
-            postprocess_func=custom_postprocessor_for_gsm8k,
-            extra_info=self.extra_info,
-        )
+    postprocess_func: Callable = custom_postprocessor_for_gsm8k

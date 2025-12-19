@@ -1,9 +1,9 @@
 import re
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict
 
-from .native import NativeJudger
+from .native import NativeJudgerConfig
 
 
 # Adapted from https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/math_dapo.py
@@ -291,9 +291,8 @@ def compute_reward(response, label, extra_info):
     return {"score": reward, "acc": out["acc"]}
 
 
-class DapoMathJudgerConfig(BaseModel):
+class DapoMathJudgerConfig(NativeJudgerConfig):
     model_config = ConfigDict(extra="forbid")
-    judger_name: str = "dapo_math"
     eos_token: List[str] | str
     enable_overlong_buffer: bool
     score: int = 1
@@ -302,7 +301,7 @@ class DapoMathJudgerConfig(BaseModel):
     overlong_buffer_len: Optional[int] = None
     overlong_penalty_factor: Optional[float] = None
     tokenizer: Any = None
-    extra_info: dict = Field(default_factory=dict)
+    reward_func: Callable = compute_reward
 
     def __init__(
         self,
@@ -315,7 +314,6 @@ class DapoMathJudgerConfig(BaseModel):
         tokenizer: Any,
         score: int = 1,
         format_score: int = 0,
-        extra_info: dict = {},
     ):
         if isinstance(eos_token, str):
             assert eos_token.strip() != "", "eos_token string must not be empty"
@@ -338,7 +336,6 @@ class DapoMathJudgerConfig(BaseModel):
             overlong_buffer_len=overlong_buffer_len,
             overlong_penalty_factor=overlong_penalty_factor,
             tokenizer=tokenizer,
-            extra_info=extra_info,
         )
 
         self.extra_info.update(
@@ -363,6 +360,3 @@ class DapoMathJudgerConfig(BaseModel):
                     "tokenizer": tokenizer,
                 }
             )
-
-    def build(self):
-        return NativeJudger(judger_name=self.judger_name, reward_func=compute_reward, extra_info=self.extra_info)
