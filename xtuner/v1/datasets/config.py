@@ -96,11 +96,15 @@ DatasetConfigListAdatper = TypeAdapter(DatasetConfigList, config=ConfigDict(arbi
 
 # TODO: (huanghaian) Fix the return type hint static check
 # TODO: (huanghaian) Moving arguments to dataset config
-def build_datasets(dataset_config: DatasetConfigList, tokenizer) -> list[JsonlDataset]:
+def build_datasets(
+    dataset_config: DatasetConfigList, tokenizer: PreTrainedTokenizer, tokenizer_hash: str | None = None
+) -> list[JsonlDataset]:
     datasets: list[JsonlDataset] = []
     assert len(dataset_config) > 0
 
-    tokenizer_hash = tokenizer_xxhash(tokenizer)[:16]
+    if tokenizer_hash is None:
+        tokenizer_hash = tokenizer_xxhash(tokenizer)[:16]
+
     for config in dataset_config:
         _dataset_config = config["dataset"]
         assert isinstance(_dataset_config, DatasetConfig)
@@ -284,6 +288,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     ] = 100
     num_workers: Annotated[int, Parameter(help="dataloader num workers")] = 0
     pad_token_id: Annotated[int | None, Parameter(help="padding token id")] = None
+    tokenizer_hash: Annotated[str | None, Parameter(help="tokenizer hash")] = None
 
     def build_collator(self):
         if self.collator == "sft_llm_collator":
@@ -325,7 +330,7 @@ class DataloaderConfig(BaseDataloaderConfig):
             raise ValueError("dataset_config_list is required.")
 
         with profile_time_and_memory("[Build Datasets]"):
-            datasets = build_datasets(self.dataset_config_list, tokenizer)
+            datasets = build_datasets(self.dataset_config_list, tokenizer, tokenizer_hash=self.tokenizer_hash)
 
         assert isinstance(datasets, list), "datasets must be a list of datasets."
 
