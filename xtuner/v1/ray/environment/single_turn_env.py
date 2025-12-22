@@ -110,11 +110,14 @@ class SingleTurnEnvironment(BaseEnvironment):
                     update_sample_params.max_tokens = sample_params.max_tokens - (
                         current_partial_length - input_ids_length
                     )
-                    self.logger.debug(
-                        f"action_id {sample.uid.action_id} pass current_partial_length {current_partial_length}, input_ids_length {input_ids_length} to rollout and set max_tokens to {update_sample_params.max_tokens}"
+                    self.logger.info(
+                        f"root_id: {sample.uid.root_id}, action_id {sample.uid.action_id} pass current_partial_length {current_partial_length}, input_ids_length {input_ids_length} to rollout and set max_tokens to {update_sample_params.max_tokens}"
                     )
                 else:
                     rollout_extra_info = sample.data.extra_info
+
+                if "routed_experts" in sample.env.rollout.extra_info:
+                    rollout_extra_info["routed_experts"] = sample.env.rollout.extra_info["routed_experts"]
 
                 fut = self.rollout_controller.rollout.remote(
                     prompt=sample.data.messages,

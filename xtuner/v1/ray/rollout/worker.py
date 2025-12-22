@@ -10,6 +10,7 @@ from abc import abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import httpx
+import numpy as np
 import ray
 import requests  # type: ignore[import-untyped]
 import torch
@@ -95,7 +96,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         if self.rank == 0:
             self.logger.info(f"RolloutConfig:\n{self.config.model_dump_json(indent=2)}")
         eos_token = get_eos_token(self.config.model_path)
-        self.logger.info(f"Using eos_token: {self.eos_token} for model at {self.config.model_path}")
+        self.logger.info(f"Using eos_token: {eos_token} for model at {self.config.model_path}")
         self.eos_token: List[int] = [eos_token] if isinstance(eos_token, int) else eos_token
         self.receive_abort_request = asyncio.Event()
         self.abort_timeout = 5.0
@@ -375,6 +376,8 @@ class RolloutWorker(SingleAcceleratorWorker):
         extra_info: dict,
     ) -> RLRolloutResponseItem:
         uid = extra_info.get("action_id", str(uuid.uuid4()))
+        action_id = extra_info.get("action_id", str(uuid.uuid4()))
+        root_id = extra_info.get("action_id", str(uuid.uuid4()))
         response = None
         cur_retry_times = 0
 
@@ -392,7 +395,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             # 当拼接后的response_ids长度已经达到了max_tokens时，则不需要发送数据，直接返回
             if extra_info.get("partial_rollout_input_ids", None) is not None:
                 if sample_params["max_tokens"] == 0:
-                    self.logger.debug(
+                    self.logger.info(
                         f"Request {uid} reached max context length {self.config.context_length}, no need to rollout more."
                     )
                     return RLRolloutResponseItem(
@@ -404,7 +407,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         state=RolloutState.COMPLETED,
                     )
                 if extra_info["partial_rollout_input_ids"][-1] in self.eos_token:
-                    self.logger.debug(
+                    self.logger.info(
                         f"Request {uid} already ends with eos token {extra_info['partial_rollout_input_ids'][-1]}, no need to rollout more"
                     )
                     return RLRolloutResponseItem(
@@ -415,6 +418,21 @@ class RolloutWorker(SingleAcceleratorWorker):
                         finish_reason="stop",
                         state=RolloutState.COMPLETED,
                     )
+
+            get_experts_task = None
+            if "routed_experts" in extra_info:
+                experts_ref = extra_info["routed_experts"]
+                if isinstance(experts_ref, ray.ObjectRef):
+
+                    async def _get_and_free_experts(ref):
+                        res = await ref
+                        ray._private.internal_api.free(ref)
+                        return res
+
+                    get_experts_task = asyncio.create_task(_get_and_free_experts(experts_ref))
+                else:
+                    get_experts_task = experts_ref
+
             http_result = await self._create_request(
                 endpoint_url,
                 openai_prompts,
@@ -428,7 +446,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             # Case 1: Request was successful
             if http_result.response is not None:  # 推理完成：completed状态：finish_reason为abort/stop/length, 退出
                 response = await self._handle_non_stream_response(
-                    uid, sample_params, extra_params, http_result.response
+                    root_id, action_id, sample_params, extra_params, http_result.response, get_experts_task
                 )
                 if response.state == RolloutState.SKIPPED:
                     # retry
@@ -544,8 +562,11 @@ class RolloutWorker(SingleAcceleratorWorker):
         )
         return rollout_response
 
-    async def _handle_non_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
+    async def _handle_non_stream_response(
+        self, root_id, action_id, sample_params, extra_params, response, get_experts_task=None
+    ) -> RLRolloutResponseItem:
         response = response.json()
+        uid = action_id
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
             last_logprobs: list[float] = []
             try:
@@ -582,7 +603,30 @@ class RolloutWorker(SingleAcceleratorWorker):
                         else:
                             routed_experts = torch.tensor(routed_experts)  # n,layer,expert
                             routed_experts = ray.put(routed_experts)
-                        extra_info = {"routed_experts": routed_experts}
+
+                        if get_experts_task is not None:
+                            exist_routed_experts = await get_experts_task  # [n, layer, expert]
+                            cur_routed_experts = await routed_experts  # [n, layer, expert]
+                            ray._private.internal_api.free(routed_experts)
+                            assert (exist_routed_experts.shape[0] - 1) > 0 and exist_routed_experts.shape[
+                                0
+                            ] - 1 <= cur_routed_experts.shape[0], (
+                                f"Existing routed_experts shape: {exist_routed_experts.shape}, current routed_experts shape: {cur_routed_experts.shape}"
+                            )
+                            # self.logger.info(f"last_token_ids: {len(last_token_ids)} and len(cur_routed_experts): {cur_routed_experts[exist_routed_experts.shape[0] - 1 :, :,:].shape[0]}")
+                            init_cur_roued_experts = cur_routed_experts.shape[0]
+                            cur_routed_experts = cur_routed_experts[exist_routed_experts.shape[0] :, :, :]
+                            concat_routed_experts = np.concatenate((exist_routed_experts, cur_routed_experts), axis=0)
+                            prompt_tokens = response["meta_info"].get("prompt_tokens", 0)
+                            response_tokens = response["meta_info"].get("completion_tokens", 0)
+                            self.logger.info(
+                                f"[{root_id}/{action_id}] Partial Rollout Stats: "
+                                f"Tokens(prompt={prompt_tokens}, response={response_tokens}, total={prompt_tokens + response_tokens}) | "
+                                f"Experts(exist={exist_routed_experts.shape}, init_cur={init_cur_roued_experts}, cur={cur_routed_experts.shape}, concat={concat_routed_experts.shape})"
+                            )
+                            extra_info["routed_experts"] = ray.put(concat_routed_experts)
+                        else:
+                            extra_info["routed_experts"] = routed_experts
 
                 # NOTE: When set return_token_ids = True, the response must contain valid token_ids/logprobs.
                 # If not, we consider it as an invalid response and retry it.

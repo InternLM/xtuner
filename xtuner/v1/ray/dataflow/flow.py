@@ -334,7 +334,7 @@ class DataFlow:
                     task_time = done_task.result()
                     task_completion_times.append(task_time)
 
-                self.finished_samples_count = ray.get(self.replay_buffer.get_completed_samples_count.remote())
+                self.finished_samples_count = await self.replay_buffer.get_completed_samples_count.remote()
                 waiting_tasks = pending_tasks
 
                 while len(waiting_tasks) + self.finished_samples_count < max(data_concurrency, self.target_batch_size):

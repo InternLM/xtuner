@@ -538,6 +538,8 @@ class ReplayBufferStorage:
 
         for sample in group_samples:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
+            if "routed_experts" in sample.env.rollout.extra_info:
+                del sample.env.rollout.extra_info["routed_experts"]
             del sample.env
             sample.env = RLEnvDataItem()  # 重置env数据
             sample.uid.action_id = action_id
@@ -573,6 +575,8 @@ class ReplayBufferStorage:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
             if not self.enable_partial_rollout:
                 # 清除上次的response_ids等env数据
+                if "routed_experts" in sample.env.rollout.extra_info:
+                    del sample.env.rollout.extra_info["routed_experts"]
                 del sample.env
                 sample.env = RLEnvDataItem()
                 sample.uid.version = 0
@@ -583,7 +587,7 @@ class ReplayBufferStorage:
                 sample.env.rollout.extra_info["partial_rollout_input_ids"] = (
                     sample.data.input_ids + history_response_ids
                 )
-                self.logger.debug(
+                self.logger.info(
                     f"partial rollout enabled, {sample_action_id} pass response_ids {len(history_response_ids)} to input_ids {len(sample.data.input_ids)} to data extra info when sampling."
                 )
                 sample.uid.version = replay_meta_version
