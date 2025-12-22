@@ -9,6 +9,17 @@ INFER_BACKEND=$2
 MODEL_PATH=$3
 DATA_PATH=$4
 EVAL_DATA_PATH=${5:-""}
+ACCELERATOR=${6:-"gpu"} # "gpu" or "npu"
+ACCELERATOR=$(echo "$ACCELERATOR" | tr '[:lower:]' '[:upper:]')
+if [ $ACCELERATOR != "GPU" ] && [ $ACCELERATOR != "NPU" ]; then
+  echo "Error: ACCELERATOR must be either 'gpu' or 'npu'!"
+  exit 1
+fi
+if [ "$ACCELERATOR" = "NPU" ]; then
+  ACCELERATOR_PER_NODE=${7:-16}
+else
+  ACCELERATOR_PER_NODE=${7:-8}
+fi
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
 # NOTE: if you add new env vars, please also add them to RUNTIME_ENV_JSON in step 4.
@@ -59,12 +70,19 @@ if [ ! -d "$WORK_DIR" ]; then
   mkdir -p "$WORK_DIR"
 fi
 export LMDEPLOY_LOG_FILE="${WORK_DIR}/lmdeploy_log_${current_time}.txt"
-export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
+if [ "$ACCELERATOR" = "GPU" ]; then
+    # TODO: support NPU RL Memory Monitor
+    export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
+fi
 
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
-total_cpus=$((node_count * 128))
+if [ "$ACCELERATOR" = "GPU" ]; then
+  total_cpus=$((node_count * 128))
+elif [ "$ACCELERATOR" = "NPU" ]; then
+  total_cpus=$((node_count * 256))
+fi
 
 if [ "$RAY_RANK" -eq 0 ]; then
   rm -rf /tmp/ray_log
@@ -94,12 +112,12 @@ else
 fi
 
 while true; do
-  result=$(ray status | grep GPU | cut -d ' ' -f2 | cut -d '/' -f2)
-  expected_gpu_count=$((node_count * 8))
-  if [ "$result" = "$expected_gpu_count.0" ]; then
+  result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
+  expected_accelerator_count=$((node_count * ${ACCELERATOR_PER_NODE}))
+  if [ "$result" = "$expected_accelerator_count.0" ]; then
     break
   else
-    echo "Waiting for GPU count to be $expected_gpu_count, current: $result"
+    echo "Waiting for ${ACCELERATOR} count to be $expected_accelerator_count, current: $result"
     sleep 2
   fi
 done
