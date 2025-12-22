@@ -1323,6 +1323,13 @@ class Trainer:
         if not dist.is_initialized():
             init_process_group(backend=backend)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
+        # In some cases, the datasets can perform massive numpy loading before the first communication.
+        # After build dataset, massive numpy loading causing a lot of anonymous mmap allocation.
+        # THP(transparent huge page) kernel thread would continuously scan and merge these anonymous mmap to huge page.
+        # At the same time, if we perform communication for the first time, backend (e.g., NCCL) may register
+        # and lock address that might have been changed by THP, which causes a crash. So we should warmup first.
+        warmup_tensor = torch.ones(4, 4, device=torch.accelerator.current_accelerator())
+        dist.all_reduce(warmup_tensor)
 
     def _init_xtuner_meta(self, work_dir: Path, auto_resume: bool) -> XTunerMeta:
         if not work_dir.exists():
