@@ -1,4 +1,5 @@
 set -ex
+ray stop --force
 # examples of usage:
 # qwen3_8B_grpo_gsm8k training: 
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen3_8B_grpo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
@@ -54,8 +55,13 @@ current_time=$(date "+%m%d%H")
 # 取模型路径的最后一级作为model_name，取数据路径的倒数第二级作为data_name
 model_dir_name=$(basename "$MODEL_PATH")
 data_dir_name=$(basename "$(dirname "$DATA_PATH")")
-export WORK_DIR="work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
-
+DIR=$(pwd)
+export WORK_DIR="${DIR}/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
+if [ ! -d "$WORK_DIR" ]; then
+  mkdir -p "$WORK_DIR"
+fi
+export LMDEPLOY_LOG_FILE="${WORK_DIR}/lmdeploy_log_${current_time}.txt"
+export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
 
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
@@ -63,6 +69,10 @@ node_count=${NODE_COUNT:-1}
 total_cpus=$((node_count * 128))
 
 if [ "$RAY_RANK" -eq 0 ]; then
+  rm -rf /tmp/ray_log
+  export RAY_LOG_DIR="${WORK_DIR}/ray_${current_time}/"
+  mkdir -p ${RAY_LOG_DIR}
+  ln -sfn "${RAY_LOG_DIR}" /tmp/ray_log
   ray start --head \
     --node-ip-address="$RAY_MASTER_ADDR" \
     --port="$RAY_HEAD_PORT" \
@@ -70,7 +80,8 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --dashboard-port=$RAY_DASHBOARD_PORT \
     --include-dashboard=true \
     --disable-usage-stats \
-    --num-cpus=$total_cpus
+    --num-cpus=$total_cpus \
+    --temp-dir="/tmp/ray_log/"
 else
   while true; do
     if curl --connect-timeout 2 "http://${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT}" >/dev/null 2>&1; then
@@ -94,11 +105,6 @@ while true; do
     sleep 2
   fi
 done
-
-# 3. start training job
-if [ ! -d "$WORK_DIR" ]; then
-  mkdir -p "$WORK_DIR"
-fi
 
 SCRIPT_NAME=$(basename "$0")
 cp "$0" "${WORK_DIR}/${SCRIPT_NAME}"
