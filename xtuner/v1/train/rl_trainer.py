@@ -79,6 +79,7 @@ class RLTrainerConfig(BaseModel):
     strict_load: bool = True
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
+    checkpoint_no_save_optimizer: bool = False
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     hf_interval: int | None = None
     hf_max_keep: int | None = None
@@ -228,6 +229,7 @@ class RLTrainer:
         strict_load: bool = True,
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
+        checkpoint_no_save_optimizer: bool = False,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
@@ -266,6 +268,7 @@ class RLTrainer:
         self._hf_interval = hf_interval
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
+        self._checkpoint_no_save_optimizer = checkpoint_no_save_optimizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
@@ -424,6 +427,7 @@ class RLTrainer:
             strict_load=config.strict_load,
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
+            checkpoint_no_save_optimizer=config.checkpoint_no_save_optimizer,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             seed=config.seed,
@@ -785,7 +789,7 @@ class RLTrainer:
         self.logger.info(f"Saving step {self.cur_step + 1} rollout dataflow to: {checkpoint_path}")
         ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)))
         self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
-        ray.get(self._train_controller.save_dcp.remote(str(checkpoint_path)))
+        ray.get(self._train_controller.save_dcp.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer))
 
         # Update meta
         current_exp = self.meta.latest_exp

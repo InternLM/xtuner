@@ -1130,7 +1130,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         return
 
     @ray_method
-    def save_dcp(self, checkpoint_path: Path | str):
+    def save_dcp(self, checkpoint_path: Path | str, no_save_optimizer: bool = False):
         """Save the DCP checkpoint of the training worker."""
         if not isinstance(checkpoint_path, Path):
             checkpoint_path = Path(checkpoint_path)
@@ -1140,7 +1140,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         # Save model and optimizer
         self._engine.save_dcp(
             model_dir=model_path,
-            optimizer_dir=optimizer_path,
+            optimizer_dir=None if no_save_optimizer else optimizer_path,
         )
 
     @ray_method
