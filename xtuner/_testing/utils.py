@@ -44,7 +44,12 @@ class LogCapture:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self._logger.remove(self._handle_id)
+        try:
+            self._logger.remove(self._handle_id)
+        except KeyboardInterrupt as e:
+            raise e
+        except:
+            ...
 
     def get_output(self) -> str:
         self._handle.seek(0)
