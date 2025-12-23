@@ -157,6 +157,16 @@ class TrainingWorker(SingleAcceleratorWorker):
         super().__init__(worker_cfg, rank, master_addr, master_port, world_size, accelerator)
         self.config = cast(WorkerConfig, self.config)
         torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
+        self.rank = rank
+
+        # TODO: add lr scheduler
+        log_dir = worker_cfg.log_dir
+        self.log_dir = None
+        if log_dir is not None:
+            self.log_dir = Path(log_dir) if isinstance(log_dir, str) else log_dir
+            self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
+        else:
+            self.logger = get_logger()
 
         if not worker_cfg.fsdp_cfg.torch_compile:
             worker_cfg.model_cfg.compile_cfg = False
@@ -176,20 +186,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._optimizer_steps = worker_cfg.optimizer_steps
 
         # Used to update weight to rollout engine
-        self.rank = rank
         self.rollout_device_mesh: DeviceMesh | None = None
         self.rollout_url: str | None = None
         self.rollout_cfg_info: dict = dict()
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
-        # TODO: add lr scheduler
-        log_dir = worker_cfg.log_dir
-        self.log_dir = None
-        if log_dir is not None:
-            self.log_dir = Path(log_dir) if isinstance(log_dir, str) else log_dir
-            self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
-        else:
-            self.logger = get_logger()
+
 
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine | VisionComposeTrainEngine:
         if isinstance(worker_cfg.model_cfg, BaseComposeConfig):

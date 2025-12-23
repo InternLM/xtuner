@@ -6,6 +6,15 @@ from xtuner.v1.utils import get_logger, get_torch_device_module
 
 logger = get_logger()
 
+@contextmanager
+def profile_time(desc):
+    start_t = time.time()
+
+    yield
+
+    cost_time = time.time() - start_t
+    logger.success(f"{desc} Elapsed time {cost_time:.2f} seconds")
+
 
 @contextmanager
 def profile_time_and_memory(desc):

@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader as TorchDataLoader
 from typing_extensions import TypedDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.utils import get_logger, profile_time_and_memory
+from xtuner.v1.utils import get_logger, profile_time
 
 from ..datasets.collator import ColateItem
 from .collator import (
@@ -329,7 +329,7 @@ class DataloaderConfig(BaseDataloaderConfig):
         if self.dataset_config_list is None:
             raise ValueError("dataset_config_list is required.")
 
-        with profile_time_and_memory("[Build Datasets]"):
+        with profile_time("[Build Datasets]"):
             datasets = build_datasets(self.dataset_config_list, tokenizer, tokenizer_hash=self.tokenizer_hash)
 
         assert isinstance(datasets, list), "datasets must be a list of datasets."
@@ -338,7 +338,7 @@ class DataloaderConfig(BaseDataloaderConfig):
             num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
             logger.debug(f"[Dataset] {num_tokens} tokens.")
 
-        with profile_time_and_memory("[Pack Datasets]"):
+        with profile_time("[Pack Datasets]"):
             dataset: (
                 ExpandSoftPackDataset
                 | _LegacySoftPackDataset

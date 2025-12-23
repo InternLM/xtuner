@@ -202,16 +202,14 @@ class ReplayBufferConfig(BaseModel):
 class Sampler:
     """Sampler for drawing prompts from datasets or the replay buffer."""
 
-    def __init__(self, dataset, dataloader, tokenizer, storage):
+    def __init__(self, dataloader, tokenizer, storage):
         """Initializes the Sampler.
 
         Args:
-            dataset: The dataset to sample from.
             dataloader: The dataloader for the dataset.
             tokenizer: The tokenizer for processing text.
             storage: The ReplayBufferStorage instance.
         """
-        self.train_dataset = dataset
         self.train_dataloader = dataloader
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.tokenizer = (
@@ -525,12 +523,13 @@ class ReplayBuffer:
         self.tokenizer = config.tokenizer
         if isinstance(self.tokenizer, str):
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer, trust_remote_code=True)
-        self.datasets = build_datasets(config.dataset_cfg, self.tokenizer)
 
         if config.dataloader_cfg is not None:
             self.dataloader_cfg = config.dataloader_cfg
+            self.dataloader_cfg.dataset_config_list = config.dataset_cfg
         else:
             self.dataloader_cfg = DataloaderConfig(
+                dataset_config_list=config.dataset_cfg,
                 collator="fake_collator",
                 pack_level="none",
             )
@@ -538,7 +537,6 @@ class ReplayBuffer:
             tokenizer=self.tokenizer, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=1
         )
         self.sampler = Sampler(
-            self.datasets,
             self._dataloader,
             self.tokenizer,
             self.storage,
