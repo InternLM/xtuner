@@ -485,13 +485,15 @@ class RLTrainer:
                 )
             )
 
-        tb_tis_metrics = {f"tis/{k}": v for k, v in log_infos[0][0].items()}
-        tb_mismatch_metrics = {f"mismatch/{k}": v for k, v in log_infos[0][1].items()}
-        tb_train_log_dict = log_infos[0][2]
+        tb_tis_metrics = {f"tis/{k}": v for k, v in log_infos[0]["rollout_is"].items()}
+        tb_mismatch_metrics = {f"mismatch/{k}": v for k, v in log_infos[0]["mismatch"].items()}
+        tb_train_log_dict = log_infos[0]["training"]
+        tb_entropy_log_dict = log_infos[0]["entropy"]
         for tb_key, tb_value in tb_train_log_dict.items():
             self._writer.add_scalar(tag=f"train_metrics/{tb_key}", scalar_value=tb_value, global_step=rollout_idx)
         self._writer.add_scalars(tag_scalar_dict=tb_tis_metrics, global_step=rollout_idx)
         self._writer.add_scalars(tag_scalar_dict=tb_mismatch_metrics, global_step=rollout_idx)
+        self._writer.add_scalars(tag_scalar_dict=tb_entropy_log_dict, global_step=rollout_idx)
         self._writer.add_scalar(tag="time/training", scalar_value=step_timer_dict["training"], global_step=rollout_idx)
 
     def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):

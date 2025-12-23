@@ -446,8 +446,32 @@ class TrainingWorker(SingleAcceleratorWorker):
                 all_rollout_is_metrics.append(rollout_is_metrics)
                 all_mismatch_metrics.append(mismatch_metrics)
 
-        all_log_infos = [rollout_is_metrics, mismatch_metrics]
+        all_log_infos = {}
         logger_msg = f"Rollout {rollout_idx}: "
+
+        sum_entropy = cast(torch.Tensor, sum_entropy)
+        dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
+        avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+        avg_sum_entropy_value = (
+            avg_sum_entropy.item() if isinstance(avg_sum_entropy, torch.Tensor) else avg_sum_entropy
+        )
+        logger_msg += f"avg entropy: {avg_sum_entropy:.4f}"
+
+        if sum_rollout_entropy is not None:
+            sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
+            dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
+            avg_rollout_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+            avg_rollout_entropy_value = (
+                avg_rollout_entropy.item() if isinstance(avg_rollout_entropy, torch.Tensor) else avg_rollout_entropy
+            )
+            logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
+
+        entropy_dict = {
+            "entropy/old_lobprob": avg_sum_entropy_value,
+            "entropy/rollout": avg_rollout_entropy_value if sum_rollout_entropy is not None else 0.0,
+        }
+
+        all_log_infos["entropy"] = entropy_dict
 
         if len(all_mismatch_metrics) > 0:
             mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
@@ -459,6 +483,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             if len(rollout_is_metrics) > 0:
                 logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
         self.logger.info(logger_msg)
+
+        all_log_infos["mismatch"] = mismatch_metrics if len(all_mismatch_metrics) > 0 else {}
+        all_log_infos["rollout_is"] = rollout_is_metrics if len(all_rollout_is_metrics) > 0 else {}
 
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
@@ -519,7 +546,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
-            all_log_infos.append(log_info)
+
+        all_log_infos["training"] = log_info
         return all_log_infos
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
