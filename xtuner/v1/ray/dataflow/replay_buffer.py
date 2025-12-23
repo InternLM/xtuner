@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 import ray
+import torch
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from ray import ObjectRef
@@ -20,11 +21,13 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     is_valid_for_replaybuffer,
 )
-from xtuner.v1.datasets import build_dataloader, build_datasets
+from xtuner.v1.datasets import build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.device import get_device
 
 
+DEVICE = get_device()
 logger = get_logger()
 
 
@@ -463,7 +466,7 @@ class ReplayBufferStorage:
             pickle.dump(all_data_items, f)
         self.logger.info(f"ReplayBufferStorage state dumped to {file_path}")
 
-    def resume(self, file_path: str):
+    def resume(self, file_path: Path | str):
         """Resumes the replay buffer storage from a single file.
 
         Args:
@@ -531,17 +534,12 @@ class ReplayBuffer:
                 collator="fake_collator",
                 pack_level="none",
             )
-        self.dataloader = build_dataloader(
-            dataloader_config=self.dataloader_cfg,
-            datasets=self.datasets,
-            global_batch_size=1,
-            micro_batch_size=1,
-            seed=1,
+        self._dataloader = self.dataloader_cfg.build(
+            tokenizer=self.tokenizer, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=1
         )
-
         self.sampler = Sampler(
             self.datasets,
-            self.dataloader,
+            self._dataloader,
             self.tokenizer,
             self.storage,
         )
@@ -549,7 +547,7 @@ class ReplayBuffer:
 
     def get_train_dataset_length(self):
         """Returns the length of the training dataloader."""
-        return len(self.dataloader)
+        return len(self._dataloader)
 
     def post_processor(self, group_samples):
         """Applies a post-processing function to a group of samples.
@@ -617,13 +615,34 @@ class ReplayBuffer:
     def status(self):
         return self.storage.status()
 
-    def resume(self, file_path: str):
+    def save(self, file_path: Path | str):
+        """Saves the replay buffer's storage to a file.
+
+        Args:
+            file_path (str): The path to the file for saving the data.
+        """
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+        file_path.mkdir(parents=True, exist_ok=True)
+
+        fake_reduced_consumed_samples = 0
+        dataloader_path = file_path / "dataloader"
+        dataloader_state = self._dataloader.get_state_dict(fake_reduced_consumed_samples)
+        torch.save(dataloader_state, dataloader_path)
+
+    def resume(self, file_path: Path | str):
         """Resumes the replay buffer's storage from a file.
 
         Args:
             file_path (str): The path to the file from which to restore the
                 state.
         """
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+        dataloader_path = file_path / "dataloader"
+        dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
+        self._dataloader.load_state_dict(dataloader_state)
+
         self.storage.resume(file_path)
         num = self.storage.get_prompt_num()
         self.sampler.resume(num)

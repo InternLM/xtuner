@@ -380,6 +380,22 @@ class RawDataFlow:
             self.logger.error(f"Failed to send abort request to {url}: {e}")
             return url, False
 
+    def save(self, save_path: Path | str):
+        """Saves the replay buffer to the specified path.
+
+        Args:
+            save_path (str): The path to the checkpoint file to save to.
+        """
+        ray.get(self.replay_buffer.save.remote(save_path))
+
+    def resume(self, resume_path: Path | str):
+        """Resumes the replay buffer from the specified path.
+
+        Args:
+            resume_path (str): The path to the checkpoint file to resume from.
+        """
+        ray.get(self.replay_buffer.resume.remote(resume_path))
+
 
 DataFlow = ray.remote(RawDataFlow)
 DataFlowProxy = ActorProxy[RawDataFlow]

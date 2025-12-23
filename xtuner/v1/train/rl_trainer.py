@@ -19,6 +19,7 @@ from typing_extensions import Self
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, AutoCPUWorkers, CPUResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, DataFlowProxy, ReplayBufferConfig
@@ -76,6 +77,9 @@ class RLTrainerConfig(BaseModel):
     auto_resume: bool = False
     load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
     strict_load: bool = True
+    checkpoint_interval: int | None = -1
+    checkpoint_maxkeep: int | None = -1
+    skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     hf_interval: int | None = None
     hf_max_keep: int | None = None
     seed: int = 42
@@ -200,6 +204,9 @@ class RLTrainer:
 
     META_PATH = ".xtuner_grpo"
 
+    _CHECKPOINT_DIR = "checkpoints"
+    _SAVE_TRAIN_STATE_PATH = "train_state.json"
+
     def __init__(
         self,
         *,
@@ -216,10 +223,12 @@ class RLTrainer:
         work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
         total_epochs: int,
-        resume_config: ResumeConfig | None = None,  # TODO: Removed in version 1.1.0
         auto_resume: bool = False,
         load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig(),
         strict_load: bool = True,
+        checkpoint_interval: int | None = -1,
+        checkpoint_maxkeep: int | None = -1,
+        skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         hf_interval: int | None = None,
         hf_max_keep: int | None = None,
         seed: int = 42,
@@ -241,6 +250,9 @@ class RLTrainer:
         self._total_epochs = total_epochs
         self._cur_step = 0
 
+        if skip_checkpoint_validation:
+            patch_default_save_plan()
+
         self._rl_trainer_cfg = trainer_cfg
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
 
@@ -252,6 +264,8 @@ class RLTrainer:
 
         self._hf_max_keep = hf_max_keep
         self._hf_interval = hf_interval
+        self._checkpoint_interval = checkpoint_interval
+        self._checkpoint_maxkeep = checkpoint_maxkeep
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
@@ -270,8 +284,8 @@ class RLTrainer:
             work_dir.mkdir(parents=True, exist_ok=True)
 
         self._work_dir = work_dir
-        auto_resume = auto_resume or (resume_config is not None and resume_config.auto_resume)
-        self._meta = self._init_xtuner_meta(work_dir, auto_resume)
+        self._auto_resume = auto_resume
+        self._meta = self._init_xtuner_meta(work_dir, self._auto_resume)
 
         if log_dir is None:
             log_dir = self.exp_dir
@@ -280,9 +294,7 @@ class RLTrainer:
 
         self.logger = self._init_logger(log_dir)
 
-        self.logger.warning(
-            "`resume_config` is deprecated, please use `auto_resume` and `load_checkpoint_cfg` instead"
-        )
+        self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(self._auto_resume, load_checkpoint_cfg)
 
         train_worker_cfg.log_dir = log_dir
         dataflow_config.worker_log_dir = log_dir
@@ -303,12 +315,32 @@ class RLTrainer:
         # inference engines know how much memory they can utilize.
         self._train_controller = self._build_train_controller(train_worker_cfg)
 
+        self._cur_step = 0
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            rollout_config.skip_load_weights = True
+            self.logger.info(
+                f"Skip load rollout weights due to resume from checkpoint {self._load_checkpoint_cfg.checkpoint_path}"
+            )
+
+            # resume train worker
+            ray.get(self._train_controller.resume.remote(self._load_checkpoint_cfg))
+
+            train_state_path = Path(self._load_checkpoint_cfg.checkpoint_path) / self._SAVE_TRAIN_STATE_PATH
+            with train_state_path.open("r") as f:
+                train_state = json.load(f)
+                self._cur_step = train_state["cur_step"]
+
         self._rollout_env_controller, self._rollout_dataflow = self._build_rollout_dataflow(
             dataflow_cfg=dataflow_config,
             rollout_cfg=rollout_config,
             judger_cfg=judger_config,
             replay_buffer_config=replay_buffer_config,
         )
+
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            # resume rollout dataflow
+            ray.get(self._rollout_dataflow.resume.remote(self._load_checkpoint_cfg.checkpoint_path))
+
         if self._enable_evaluate and evaluator_config:
             self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
             self._eval_step = evaluator_config.evaluate_step
@@ -349,6 +381,20 @@ class RLTrainer:
             with env_path.open("w") as f:
                 json.dump(environment_variables, f, indent=2)
 
+    def _resolve_load_checkpoint_cfg(
+        self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
+    ) -> LoadCheckpointConfig:
+        # auto_resume优先级高，如果有latest ckp，则说明走auto_resume逻辑
+        # 此时，覆盖load checkpoint path，并且加载optimizer states, optimizer args, dataset, scheduler
+        latest_checkpoint = self.meta.latest_exp.latest_checkpoint
+        if latest_checkpoint is not None and auto_resume:
+            load_checkpoint_cfg.checkpoint_path = Path(latest_checkpoint)
+            load_checkpoint_cfg.load_optimizer_states = True
+            load_checkpoint_cfg.load_optimizer_args = True
+            load_checkpoint_cfg.load_dataset = True
+            load_checkpoint_cfg.load_scheduler = True
+        return load_checkpoint_cfg
+
     @classmethod
     def from_config(cls, config: RLTrainerConfig) -> Self:
         """Create a Trainer instance from a TrainerConfig.
@@ -373,10 +419,11 @@ class RLTrainer:
             work_dir=config.work_dir,
             log_dir=config.log_dir,
             total_epochs=config.total_epochs,
-            resume_config=config.resume_config,
             auto_resume=config.auto_resume,
             load_checkpoint_cfg=config.load_checkpoint_cfg,
             strict_load=config.strict_load,
+            checkpoint_interval=config.checkpoint_interval,
+            checkpoint_maxkeep=config.checkpoint_maxkeep,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
             seed=config.seed,
@@ -423,13 +470,18 @@ class RLTrainer:
         evaluation.
         """
         self.logger.info("Start RL training")
+        if self._cur_step >= self._rollout_steps:
+            self.logger.info(f"Rollout steps {self._rollout_steps} reached, stop training")
+            return
+
         if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator:
             ray.get(self._rollout_env_controller.update_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
-        for rollout_idx in range(1, self._rollout_steps + 1):
+
+        for rollout_idx in range(self._cur_step + 1, self._rollout_steps + 1):
             timer_log_str = f"Rollout {rollout_idx} start \n"
             step_timer_dict = {}
             # 1. Rollout
@@ -465,6 +517,8 @@ class RLTrainer:
             with timer("saving and sync_weight", step_timer_dict):
                 ray.get(self._train_controller.offload.remote(target="optimizer"))
                 self._maybe_save_hf()
+                self._maybe_save_others()
+
                 bind_train_rollout(
                     train_controller=self._train_controller, env_controller=self._rollout_env_controller
                 )
@@ -485,7 +539,7 @@ class RLTrainer:
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
                 self._save_trajectories(eval_data_groups, trajectory_save_path)
                 self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
-            self._cur_step += 1
+            self._cur_step = rollout_idx
 
     def _log_data_info(self, rollout_idx: int, data_info: dict):
         """Formats and logs the data statistics dictionary."""
@@ -701,7 +755,7 @@ class RLTrainer:
             return
 
         save_hf_path = self.exp_dir / f"hf-{self.cur_step + 1}"
-        self.logger.info(f"Saving step {self.cur_step + 1} checkpoints to: {save_hf_path}")
+        self.logger.info(f"Saving step {self.cur_step + 1} hf checkpoints to: {save_hf_path}")
         self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
 
         if self._hf_max_keep is not None and len(self.meta.latest_exp.hf_checkpoint_list) > self._hf_max_keep:
@@ -713,10 +767,40 @@ class RLTrainer:
         ray.get(self._train_controller.save_hf.remote(str(save_hf_path)))
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
-        meta_path = self.work_dir / self.META_PATH
 
+    def _maybe_save_others(self):
+        ckp_interval = self._checkpoint_interval
+        if ckp_interval is None:
+            return
+
+        if ckp_interval == -1:
+            return
+        else:
+            if (self.cur_step + 1) % ckp_interval != 0 or (self.cur_step + 1) == self._rollout_steps:
+                return
+
+        checkpoint_path = self.exp_dir / self._CHECKPOINT_DIR / f"ckpt-step-{self.cur_step + 1}"
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
+
+        meta_path = self.work_dir / self.META_PATH
         with meta_path.open("w") as f:
             f.write(self.meta.model_dump_json(indent=2))
+
+        train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+        with train_state_path.open("w") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "cur_step": self.cur_step,
+                    }
+                )
+            )
+
+        self.logger.info(f"Saving step {self.cur_step + 1} rollout dataflow to: {checkpoint_path}")
+        ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)))
+        self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
+        ray.get(self._train_controller.save_dcp.remote(str(checkpoint_path)))
 
     def _init_logger(self, work_dir: Path):
         # Logging system maybe need better design

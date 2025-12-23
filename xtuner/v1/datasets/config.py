@@ -319,7 +319,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     def build(
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        dp_mesh: DeviceMesh,
+        dp_mesh: DeviceMesh | None,
         global_batch_size: int,
         micro_batch_size: int,
         seed: int,
