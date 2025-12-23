@@ -1,6 +1,6 @@
 import os
 from copy import deepcopy
-
+from pathlib import Path
 from transformers import AutoTokenizer
 from xtuner.v1.config import (
     AdamWConfig,
@@ -10,6 +10,7 @@ from xtuner.v1.config import (
 from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.model.dense.qwen2 import Qwen2Dense7BConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -131,7 +132,7 @@ replay_buffer_cfg = ReplayBufferConfig(
 )
 
 # 5. Train worker
-model_cfg = Qwen2Dense7BConfig()
+model_cfg = get_model_config_from_hf(Path(model_path))
 optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(

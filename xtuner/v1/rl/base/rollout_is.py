@@ -482,7 +482,7 @@ def compute_mismatch_metrics(
     metrics["mismatch_training_ppl"] = training_ppl.detach().item()
 
     # Also log log-ppl for easier analysis (avoids exponential scale)
-    metrics["mismatch_training_entropy"] = (-mean_log_prob_training).mean().detach().item()
+    metrics["mismatch_training_log_ppl"] = (-mean_log_prob_training).mean().detach().item()
 
     # 2. Compute rollout mismatch metrics (only if rollout_log_probs available)
     if rollout_log_prob is not None:
@@ -502,7 +502,7 @@ def compute_mismatch_metrics(
         mean_log_prob_rollout = masked_mean(rollout_log_prob, response_mask, axis=-1)  # (batch_size,)
         rollout_ppl = torch.exp(-mean_log_prob_rollout).mean()  # Batch mean of per-sequence PPL
         metrics["mismatch_rollout_ppl"] = rollout_ppl.detach().item()
-        metrics["mismatch_rollout_entropy"] = (-mean_log_prob_rollout).mean().detach().item()
+        metrics["mismatch_rollout_log_ppl"] = (-mean_log_prob_rollout).mean().detach().item()
 
         # 2d. Log PPL difference (sequence-level perplexity difference)
         # log_ppl_diff = mean_log_prob_rollout - mean_log_prob_training
