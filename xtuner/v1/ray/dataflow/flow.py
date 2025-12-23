@@ -349,14 +349,14 @@ class RawDataFlow:
         if resume:
             assert resume_path, "Resuming is enabled but no resume path is provided."
             self.logger.info(f"Resuming replay buffer from {resume_path}")
-            await self.replay_buffer.resume.remote(resume_path)
+            await self.replay_buffer.resume_storage.remote(resume_path)
 
         await self.concurrent_task_runner()
 
         if dump:
             assert dump_path, "Dumping is enabled but no dump path is provided."
             self.logger.info(f"Dump replay buffer from {dump_path}")
-            await self.replay_buffer.dump.remote(dump_path)
+            await self.replay_buffer.dump_storage.remote(dump_path)
 
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
 

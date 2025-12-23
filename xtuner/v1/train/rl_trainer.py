@@ -315,7 +315,6 @@ class RLTrainer:
         # inference engines know how much memory they can utilize.
         self._train_controller = self._build_train_controller(train_worker_cfg)
 
-        self._cur_step = 0
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             rollout_config.skip_load_weights = True
             self.logger.info(
@@ -339,6 +338,7 @@ class RLTrainer:
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             # resume rollout dataflow
+            self.logger.info(f"Resume rollout dataflow from checkpoint {self._load_checkpoint_cfg.checkpoint_path}")
             ray.get(self._rollout_dataflow.resume.remote(self._load_checkpoint_cfg.checkpoint_path))
 
         if self._enable_evaluate and evaluator_config:
@@ -781,7 +781,18 @@ class RLTrainer:
 
         checkpoint_path = self.exp_dir / self._CHECKPOINT_DIR / f"ckpt-step-{self.cur_step + 1}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+        self.logger.info(f"Saving step {self.cur_step + 1} rollout dataflow to: {checkpoint_path}")
+        ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)))
         self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
+        ray.get(self._train_controller.save_dcp.remote(str(checkpoint_path)))
+
+        # Update meta
+        current_exp = self.meta.latest_exp
+        ckp_list = current_exp.checkpoint_list
+        ckp_list.append(str(checkpoint_path))
+        current_exp.cur_step = self.cur_step + 1
+        current_exp.history[-1]["end"] = self.cur_step + 1
 
         meta_path = self.work_dir / self.META_PATH
         with meta_path.open("w") as f:
@@ -792,15 +803,19 @@ class RLTrainer:
             f.write(
                 json.dumps(
                     {
-                        "cur_step": self.cur_step,
+                        "cur_step": self.cur_step + 1,
                     }
                 )
             )
 
-        self.logger.info(f"Saving step {self.cur_step + 1} rollout dataflow to: {checkpoint_path}")
-        ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)))
-        self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
-        ray.get(self._train_controller.save_dcp.remote(str(checkpoint_path)))
+        # Delete checkpoints and update meta's checkpoint_list
+        ckp_maxkeep = self._checkpoint_maxkeep
+        if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
+            ckp_pop_num = len(ckp_list) - ckp_maxkeep
+            for _ in range(ckp_pop_num):
+                deleted_ckp = ckp_list.pop(0)
+                if Path(deleted_ckp).exists():
+                    rmtree(deleted_ckp, ignore_errors=True)
 
     def _init_logger(self, work_dir: Path):
         # Logging system maybe need better design

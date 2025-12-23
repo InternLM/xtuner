@@ -6,6 +6,7 @@ from xtuner.v1.utils import get_logger, get_torch_device_module
 
 logger = get_logger()
 
+
 @contextmanager
 def profile_time(desc):
     start_t = time.time()

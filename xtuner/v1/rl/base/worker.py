@@ -192,7 +192,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
 
-
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine | VisionComposeTrainEngine:
         if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
             engine = VisionComposeTrainEngine(

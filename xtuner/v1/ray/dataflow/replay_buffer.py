@@ -21,7 +21,6 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     is_valid_for_replaybuffer,
 )
-from xtuner.v1.datasets import build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.device import get_device
@@ -219,6 +218,8 @@ class Sampler:
         )
         self.storage = storage
         self.sample_count = 0
+        self._cur_epoch = 0
+        self.reduced_consumed_samples = 0
         self.logger = get_logger()
 
     def sample_from_datasets(self, env: str, repeat_prompt_k: int) -> List[RLDataFlowItem]:
@@ -234,11 +235,15 @@ class Sampler:
         root_id = uuid4().int
         action_id = uuid4().int
         group_data_item: List[RLDataFlowItem] = [RLDataFlowItem() for _ in range(repeat_prompt_k)]
+
         try:
             data = next(self.train_dataloader_iter)[0]
         except StopIteration:
+            self._cur_epoch += 1
+            self.train_dataloader.set_epoch(self._cur_epoch)
             self.train_dataloader_iter = iter(self.train_dataloader)
             data = next(self.train_dataloader_iter)[0]
+        self.reduced_consumed_samples += 1
 
         multimodal_train_info = data.pop("multimodal_train_info", {})
         if "pixel_values" in multimodal_train_info:
@@ -602,13 +607,24 @@ class ReplayBuffer:
         """Prints the current state of the replay buffer storage."""
         self.storage.print()
 
-    def dump(self, file_path: str):
+    def dump_storage(self, file_path: str):
         """Dumps the replay buffer's storage to a file.
 
         Args:
             file_path (str): The path to the file for saving the data.
         """
         self.storage.dump(file_path)
+
+    def resume_storage(self, file_path: Path | str):
+        """Resumes the replay buffer's storage from a file.
+
+        Args:
+            file_path (str): The path to the file from which to restore the
+                state.
+        """
+        self.storage.resume(file_path)
+        num = self.storage.get_prompt_num()
+        self.sampler.resume(num)
 
     def status(self):
         return self.storage.status()
@@ -621,11 +637,8 @@ class ReplayBuffer:
         """
         if isinstance(file_path, str):
             file_path = Path(file_path)
-        file_path.mkdir(parents=True, exist_ok=True)
-
-        fake_reduced_consumed_samples = 0
         dataloader_path = file_path / "dataloader"
-        dataloader_state = self._dataloader.get_state_dict(fake_reduced_consumed_samples)
+        dataloader_state = self._dataloader.get_state_dict(self.sampler.reduced_consumed_samples)
         torch.save(dataloader_state, dataloader_path)
 
     def resume(self, file_path: Path | str):
@@ -641,9 +654,12 @@ class ReplayBuffer:
         dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
         self._dataloader.load_state_dict(dataloader_state)
 
-        self.storage.resume(file_path)
-        num = self.storage.get_prompt_num()
-        self.sampler.resume(num)
+        self.sampler = Sampler(
+            self._dataloader,
+            self.tokenizer,
+            self.storage,
+        )
+        self.sampler.reduced_consumed_samples = dataloader_state["sampler"]["step"]
 
     def get_finished_samples(self):
         """Returns the number of finished sample groups in the storage."""
