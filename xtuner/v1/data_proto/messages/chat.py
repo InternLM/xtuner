@@ -72,6 +72,8 @@ class ChatMsg(BaseModel):
     content: ContentType
     loss: Optional[bool] = None
     thinking: Optional[str] = None  # only for assistant
+    name: Optional[str] = None
+    meta: Optional[Dict] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
