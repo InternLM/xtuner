@@ -426,6 +426,7 @@ class RLTrainer:
             checkpoint_no_save_optimizer=config.checkpoint_no_save_optimizer,
             hf_interval=config.hf_interval,
             hf_max_keep=config.hf_max_keep,
+            skip_checkpoint_validation=config.skip_checkpoint_validation,
             seed=config.seed,
             debug=config.debug,
             trainer_cfg=config,
