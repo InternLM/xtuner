@@ -237,6 +237,10 @@ class LMDeployWorker(RolloutWorker):
         extra_engine_config = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
+        if backend == "pytorch" and self.config.router_n_groups:
+            extra_engine_config["hf_overrides"] = dict(router_n_groups=self.config.router_n_groups)
+        if backend == "pytorch" and self.config.max_prefill_token_num:
+            extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
 
         dp_rank = 0
         if backend == "pytorch":

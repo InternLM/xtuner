@@ -61,9 +61,9 @@ class Float8Handler:
             )
             return
 
-        assert scaling_granularity_gemm in (ScalingGranularity.TILEWISE, ScalingGranularity.TENSORWISE), (
-            "scaling_granularity_gemm must be TILEWISE or TENSORWISE."
-        )
+        assert scaling_granularity_gemm in (ScalingGranularity.TILEWISE, ScalingGranularity.TENSORWISE) or (
+            scaling_granularity_gemm is None
+        ), "scaling_granularity_gemm must be TILEWISE or TENSORWISE."
         assert scaling_granularity_grouped_gemm in (ScalingGranularity.TILEWISE, ScalingGranularity.TENSORWISE), (
             "scaling_granularity_grouped_gemm must be TILEWISE or TENSORWISE."
         )
