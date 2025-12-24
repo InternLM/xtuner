@@ -451,6 +451,17 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         logger_msg = f"Rollout {rollout_idx}: "
 
+        sum_entropy = cast(torch.Tensor, sum_entropy)
+        dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
+        avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+        logger_msg += f"avg entropy: {avg_sum_entropy:.4f}"
+
+        if sum_rollout_entropy is not None:
+            sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
+            dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
+            avg_rollout_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+            logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
+
         if len(all_mismatch_metrics) > 0:
             mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
             if len(mismatch_metrics) > 0:
