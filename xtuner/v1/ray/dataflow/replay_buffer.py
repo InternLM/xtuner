@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
 import ray
+import torch
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from ray import ObjectRef
@@ -20,11 +21,12 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     is_valid_for_replaybuffer,
 )
-from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.device import get_device
 
 
+DEVICE = get_device()
 logger = get_logger()
 
 
@@ -199,16 +201,14 @@ class ReplayBufferConfig(BaseModel):
 class Sampler:
     """Sampler for drawing prompts from datasets or the replay buffer."""
 
-    def __init__(self, dataset, dataloader, tokenizer, storage):
+    def __init__(self, dataloader, tokenizer, storage):
         """Initializes the Sampler.
 
         Args:
-            dataset: The dataset to sample from.
             dataloader: The dataloader for the dataset.
             tokenizer: The tokenizer for processing text.
             storage: The ReplayBufferStorage instance.
         """
-        self.train_dataset = dataset
         self.train_dataloader = dataloader
         self.train_dataloader_iter = iter(self.train_dataloader)
         self.tokenizer = (
@@ -218,6 +218,8 @@ class Sampler:
         )
         self.storage = storage
         self.sample_count = 0
+        self.cur_epoch = 0
+        self.reduced_consumed_samples = 0
         self.logger = get_logger()
 
     def sample_from_datasets(self, env: str, repeat_prompt_k: int) -> List[RLDataFlowItem]:
@@ -233,11 +235,15 @@ class Sampler:
         root_id = uuid4().int
         action_id = uuid4().int
         group_data_item: List[RLDataFlowItem] = [RLDataFlowItem() for _ in range(repeat_prompt_k)]
+
         try:
             data = next(self.train_dataloader_iter)[0]
         except StopIteration:
+            self.cur_epoch += 1
+            self.train_dataloader.set_epoch(self.cur_epoch)
             self.train_dataloader_iter = iter(self.train_dataloader)
             data = next(self.train_dataloader_iter)[0]
+        self.reduced_consumed_samples += 1
 
         multimodal_train_info = data.pop("multimodal_train_info", {})
         if "pixel_values" in multimodal_train_info:
@@ -463,7 +469,7 @@ class ReplayBufferStorage:
             pickle.dump(all_data_items, f)
         self.logger.info(f"ReplayBufferStorage state dumped to {file_path}")
 
-    def resume(self, file_path: str):
+    def resume(self, file_path: Path | str):
         """Resumes the replay buffer storage from a single file.
 
         Args:
@@ -522,26 +528,21 @@ class ReplayBuffer:
         self.tokenizer = config.tokenizer
         if isinstance(self.tokenizer, str):
             self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer, trust_remote_code=True)
-        self.datasets = build_datasets(config.dataset_cfg, self.tokenizer)
 
         if config.dataloader_cfg is not None:
             self.dataloader_cfg = config.dataloader_cfg
+            self.dataloader_cfg.dataset_config_list = config.dataset_cfg
         else:
             self.dataloader_cfg = DataloaderConfig(
+                dataset_config_list=config.dataset_cfg,
                 collator="fake_collator",
                 pack_level="none",
             )
-        self.dataloader = build_dataloader(
-            dataloader_config=self.dataloader_cfg,
-            datasets=self.datasets,
-            global_batch_size=1,
-            micro_batch_size=1,
-            seed=1,
+        self._dataloader = self.dataloader_cfg.build(
+            tokenizer=self.tokenizer, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=1
         )
-
         self.sampler = Sampler(
-            self.datasets,
-            self.dataloader,
+            self._dataloader,
             self.tokenizer,
             self.storage,
         )
@@ -549,7 +550,7 @@ class ReplayBuffer:
 
     def get_train_dataset_length(self):
         """Returns the length of the training dataloader."""
-        return len(self.dataloader)
+        return len(self._dataloader)
 
     def post_processor(self, group_samples):
         """Applies a post-processing function to a group of samples.
@@ -606,7 +607,7 @@ class ReplayBuffer:
         """Prints the current state of the replay buffer storage."""
         self.storage.print()
 
-    def dump(self, file_path: str):
+    def dump_storage(self, file_path: str):
         """Dumps the replay buffer's storage to a file.
 
         Args:
@@ -614,10 +615,7 @@ class ReplayBuffer:
         """
         self.storage.dump(file_path)
 
-    def status(self):
-        return self.storage.status()
-
-    def resume(self, file_path: str):
+    def resume_storage(self, file_path: Path | str):
         """Resumes the replay buffer's storage from a file.
 
         Args:
@@ -627,6 +625,42 @@ class ReplayBuffer:
         self.storage.resume(file_path)
         num = self.storage.get_prompt_num()
         self.sampler.resume(num)
+
+    def status(self):
+        return self.storage.status()
+
+    def save(self, file_path: Path | str):
+        """Saves the replay buffer's storage to a file.
+
+        Args:
+            file_path (str): The path to the file for saving the data.
+        """
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+        dataloader_path = file_path / "dataloader"
+        dataloader_state = self._dataloader.get_state_dict(self.sampler.reduced_consumed_samples)
+        torch.save(dataloader_state, dataloader_path)
+
+    def resume(self, file_path: Path | str):
+        """Resumes the replay buffer's storage from a file.
+
+        Args:
+            file_path (str): The path to the file from which to restore the
+                state.
+        """
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+        dataloader_path = file_path / "dataloader"
+        dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
+        self._dataloader.load_state_dict(dataloader_state)
+
+        self.sampler = Sampler(
+            self._dataloader,
+            self.tokenizer,
+            self.storage,
+        )
+        self.sampler.reduced_consumed_samples = dataloader_state["sampler"]["step"]
+        self.sampler.cur_epoch = dataloader_state["sampler"]["epoch"]
 
     def get_finished_samples(self):
         """Returns the number of finished sample groups in the storage."""
