@@ -53,8 +53,8 @@ class LossLog(TypedDict):
 class OtherLog(TypedDict):
     __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
     maxvio: NotRequired[float]
-    consumed_tokens: float
-    consumed_img_tokens: NotRequired[float]
+    consumed_tokens: int
+    consumed_img_tokens: NotRequired[int]
     extra_info: ModelForwardExtraLogInfo
     efficient_attn_ratio: float
 
@@ -347,9 +347,20 @@ class TrainEngine:
             reduced_z_loss = step_z_loss
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
-        other_log["consumed_tokens"] = step_consumed_tokens.item()
+        other_log["consumed_tokens"] = int(step_consumed_tokens.item())
         other_log["extra_info"] = train_engine_extra_info
         other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
+
+        extra_info = other_log.get("extra_info", {})  # type: ignore
+
+        # TODO: @duanyanhui `extra_info` should be redesigned.
+        if not isinstance(extra_info, ModelForwardExtraLogInfo):
+            extra_info = ModelForwardExtraLogInfo(extra_info)
+        loss_log.update(extra_info.get())
+
+        if "maxvio" in other_log:
+            loss_log["maxvio"] = other_log["maxvio"]  # type: ignore
+        loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]  # type: ignore
         return loss_log, other_log
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
