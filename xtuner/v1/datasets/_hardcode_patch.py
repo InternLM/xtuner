@@ -25,7 +25,7 @@ from abc import ABC
 from transformers import PreTrainedTokenizer
 from xtuner.v1.utils import get_logger
 
-from .ftdp import FTDPTokenizeFnConfig
+from .ftdp import FtdpTokenizeFunction
 from .mllm_tokenize_fn import Qwen3VLTokenizeFunction
 from .pt_tokenize_fn import PretrainTokenizeFunction
 from .rl_tokenize_fn.rl_tokenize_fn import InternS1VLTokenizeFunction
@@ -111,6 +111,10 @@ def _label_processor_wrapper(fn):
     @functools.wraps(fn)
     def _wrapped(self, *args, **kwargs):
         ret = fn(self, *args, **kwargs)
+        # Cache phase will only return `num_tokens`
+        if "labels" not in ret or "input_ids" not in ret:
+            return ret
+
         ret["labels"] = self.process_labels(ret["input_ids"], ret["labels"])
         return ret
 
@@ -118,16 +122,14 @@ def _label_processor_wrapper(fn):
 
 
 if os.environ.get("XTUNER_SKIP_EMPTY_THINK", "0") == "1":
-    for tokenize_fn_class in [Qwen3VLTokenizeFunction, InternS1VLTokenizeFunction]:
+    for tokenize_fn_class in [
+        Qwen3VLTokenizeFunction,
+        InternS1VLTokenizeFunction,
+        OpenaiTokenizeFunction,
+        FtdpTokenizeFunction,
+        PretrainTokenizeFunction,
+    ]:
         if _SkipEmptyThink not in tokenize_fn_class.__mro__:
             tokenize_fn_class.__bases__ = (_SkipEmptyThink,) + tokenize_fn_class.__bases__
 
-        tokenize_fn_class.multi_modal_get_item = _label_processor_wrapper(tokenize_fn_class.multi_modal_get_item)
-        tokenize_fn_class.video_get_item = _label_processor_wrapper(tokenize_fn_class.video_get_item)
-        tokenize_fn_class.pure_text_get_item = _label_processor_wrapper(tokenize_fn_class.pure_text_get_item)
-
-    for text_tokenize_fn_class in [OpenaiTokenizeFunction, FTDPTokenizeFnConfig, PretrainTokenizeFunction]:
-        if _SkipEmptyThink not in text_tokenize_fn_class.__mro__:
-            text_tokenize_fn_class.__bases__ = (_SkipEmptyThink,) + text_tokenize_fn_class.__bases__
-
-        text_tokenize_fn_class.__call__ = _label_processor_wrapper(text_tokenize_fn_class.__call__)
+        tokenize_fn_class.__call__ = _label_processor_wrapper(tokenize_fn_class.__call__)
