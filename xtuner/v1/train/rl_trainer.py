@@ -388,14 +388,10 @@ class RLTrainer:
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
     ) -> LoadCheckpointConfig:
         # auto_resume优先级高，如果有latest ckp，则说明走auto_resume逻辑
-        # 此时，覆盖load checkpoint path，并且加载optimizer states, optimizer args, dataset, scheduler
+        # 此时，覆盖load checkpoint path
         latest_checkpoint = self.meta.latest_exp.latest_checkpoint
         if latest_checkpoint is not None and auto_resume:
             load_checkpoint_cfg.checkpoint_path = Path(latest_checkpoint)
-            load_checkpoint_cfg.load_optimizer_states = True
-            load_checkpoint_cfg.load_optimizer_args = True
-            load_checkpoint_cfg.load_dataset = True
-            load_checkpoint_cfg.load_scheduler = True
         return load_checkpoint_cfg
 
     @classmethod
