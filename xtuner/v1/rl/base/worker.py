@@ -451,16 +451,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                 continue
 
             if len(rollout_logprobs_list) > 0:
-                # calculate logprob diff
-                rollout_logprobs = rollout_logprobs_list[i][mask]  # type: ignore[index]
-                old_logprobs = loss_ctx_input.old_logprobs[mask]  # type: ignore[index]
-
-                assert len(rollout_logprobs.size()) == 1, (
-                    f"len(rollout_logprobs.size()): {len(rollout_logprobs.size())}"
-                )
-                assert rollout_logprobs.shape == old_logprobs.shape, (
-                    f"rollout_logprobs {rollout_logprobs.shape} vs old_logprobs {old_logprobs.shape}"
-                )
                 # calculate importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
