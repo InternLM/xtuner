@@ -218,7 +218,7 @@ class Sampler:
         )
         self.storage = storage
         self.sample_count = 0
-        self._cur_epoch = 0
+        self.cur_epoch = 0
         self.reduced_consumed_samples = 0
         self.logger = get_logger()
 
@@ -239,8 +239,8 @@ class Sampler:
         try:
             data = next(self.train_dataloader_iter)[0]
         except StopIteration:
-            self._cur_epoch += 1
-            self.train_dataloader.set_epoch(self._cur_epoch)
+            self.cur_epoch += 1
+            self.train_dataloader.set_epoch(self.cur_epoch)
             self.train_dataloader_iter = iter(self.train_dataloader)
             data = next(self.train_dataloader_iter)[0]
         self.reduced_consumed_samples += 1
@@ -660,6 +660,7 @@ class ReplayBuffer:
             self.storage,
         )
         self.sampler.reduced_consumed_samples = dataloader_state["sampler"]["step"]
+        self.sampler.cur_epoch = dataloader_state["sampler"]["epoch"]
 
     def get_finished_samples(self):
         """Returns the number of finished sample groups in the storage."""

@@ -518,7 +518,7 @@ class RLTrainer:
             with timer("saving and sync_weight", step_timer_dict):
                 ray.get(self._train_controller.offload.remote(target="optimizer"))
                 self._maybe_save_hf()
-                self._maybe_save_others()
+                self._maybe_save_checkpoint()
 
                 bind_train_rollout(
                     train_controller=self._train_controller, env_controller=self._rollout_env_controller
@@ -769,7 +769,7 @@ class RLTrainer:
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
 
-    def _maybe_save_others(self):
+    def _maybe_save_checkpoint(self):
         ckp_interval = self._checkpoint_interval
         if ckp_interval is None:
             return
@@ -795,10 +795,6 @@ class RLTrainer:
         current_exp.cur_step = self.cur_step + 1
         current_exp.history[-1]["end"] = self.cur_step + 1
 
-        meta_path = self.work_dir / self.META_PATH
-        with meta_path.open("w") as f:
-            f.write(self.meta.model_dump_json(indent=2))
-
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
         with train_state_path.open("w") as f:
             f.write(
@@ -817,6 +813,10 @@ class RLTrainer:
                 deleted_ckp = ckp_list.pop(0)
                 if Path(deleted_ckp).exists():
                     rmtree(deleted_ckp, ignore_errors=True)
+
+        meta_path = self.work_dir / self.META_PATH
+        with meta_path.open("w") as f:
+            f.write(self.meta.model_dump_json(indent=2))
 
     def _init_logger(self, work_dir: Path):
         # Logging system maybe need better design
