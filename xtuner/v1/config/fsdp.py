@@ -22,7 +22,7 @@ class FSDPConfig(BaseModel):
     # TODO: (caoweihan) Convert `torch.dtype` to `Annotated` for compatibility with cyclopts
     param_dtype: Annotated[torch.dtype, Parameter(help="Data type for model parameters")] = torch.bfloat16
     reduce_dtype: Annotated[torch.dtype, Parameter(help="Data type for reduction operations")] = torch.bfloat16
-    lm_head_fp32: Annotated[bool, Parameter(help="Use float32 for language model head")] = True
+    lm_head_fp32: Annotated[bool, Parameter(help="Use float32 for language model head")] = False
     torch_compile: Annotated[bool, Parameter(help="Enable model compilation for faster inference")] = False
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
