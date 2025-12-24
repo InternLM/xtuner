@@ -420,8 +420,8 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         # old logprobs are inplaced updated in compute_actor_logprobs
         if isinstance(self.config.model_cfg, BaseComposeConfig):
-            if self._engine.llm_float8_handler is not None and self._engine.llm_float8_handler.enabled:
-                self._engine.llm_float8_handler.precompute_float8_dynamic_scale_for_fsdp(
+            if self._engine.llm_float8_handler is not None and self._engine.llm_float8_handler.enabled:  # type: ignore [attr-defined]
+                self._engine.llm_float8_handler.precompute_float8_dynamic_scale_for_fsdp(  # type: ignore [attr-defined]
                     self._engine.model.language_model
                 )
         else:

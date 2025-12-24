@@ -234,7 +234,7 @@ class LMDeployWorker(RolloutWorker):
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
 
-        extra_engine_config = {}
+        extra_engine_config: dict[str, Any] = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
         if backend == "pytorch" and self.config.router_n_groups:
