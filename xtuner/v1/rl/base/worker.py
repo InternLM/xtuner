@@ -1,9 +1,8 @@
 import json
-import math
 import os
 from itertools import chain
 from pathlib import Path
-from typing import Dict, List, TypeAlias, TypedDict, cast
+from typing import Any, Dict, List, TypeAlias, TypedDict, cast
 
 import ray
 import requests
@@ -311,122 +310,81 @@ class TrainingWorker(SingleAcceleratorWorker):
         other_log["extra_info"] = extra_info_dict
         return other_log
 
-    @ray_method
-    def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
-        # NOTE: sglang会清除logger handle, 重新创建
-        self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
-        loss_cfg = self.config.loss_cfg
-        num_batches = len(data_batches)
-        iters_per_step = math.ceil(num_batches / self._optimizer_steps)
-        if num_batches < self._optimizer_steps:
-            self.logger.info(
-                f"Optimizer only step once because num_batches {num_batches} < optimizer_steps {self._optimizer_steps}."
-            )
+    def _resolve_ray_data(self, seq_ctx: SequenceContext, language_cfg) -> SequenceContext:
+        pixel_values = seq_ctx.pixel_values
+        if pixel_values is not None:
+            if not isinstance(pixel_values, torch.Tensor):
+                assert isinstance(pixel_values, list), (
+                    f"pixel_values should be list of tensor, got {type(pixel_values)}"
+                )
+                pixel_values = [ray.get(pixel_obf) for pixel_obf in pixel_values]
+                pixel_values = torch.cat(pixel_values, dim=0)
+                seq_ctx.pixel_values = pixel_values
 
-        seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_input_list: list[RLLossContextInputItem] = []
-        rollout_logprobs_list: list[torch.Tensor | None] = []
-        # convert dummy padding experts to real size
+        rollout_routed_experts = seq_ctx.rollout_routed_experts
+        if rollout_routed_experts is not None:
+            if isinstance(rollout_routed_experts, list):
+                # list[n,l,e]
+                out_rollout_routed_expert = []
+                for rollout_routed_expert in rollout_routed_experts:
+                    if isinstance(rollout_routed_expert, torch.Tensor):
+                        rollout_routed_experts_tensor = torch.randint(
+                            low=0,
+                            high=language_cfg.n_routed_experts,
+                            size=(
+                                rollout_routed_expert.size(0),
+                                language_cfg.num_hidden_layers,
+                                language_cfg.num_experts_per_tok,
+                            ),
+                        )
+                        out_rollout_routed_expert.append(rollout_routed_experts_tensor)
+                    else:
+                        rollout_routed_expert_refs = rollout_routed_expert
+                        rollout_routed_expert = ray.get(rollout_routed_expert_refs)
+                        # free obj store explicitly
+                        ray._private.internal_api.free(rollout_routed_expert_refs)
+                        out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
 
-        language_cfg = (
-            self.config.model_cfg.text_config
-            if isinstance(self.config.model_cfg, BaseComposeConfig)
-            else self.config.model_cfg
-        )
-
-        for data in data_batches:
-            seq_ctx = data["seq_ctx"]
-            pixel_values = seq_ctx.pixel_values
-            if pixel_values is not None:
-                if not isinstance(pixel_values, torch.Tensor):
-                    assert isinstance(pixel_values, list), (
-                        f"pixel_values should be list of tensor, got {type(pixel_values)}"
-                    )
-                    pixel_values = [ray.get(pixel_obf) for pixel_obf in pixel_values]
-                    pixel_values = torch.cat(pixel_values, dim=0)
-                    seq_ctx.pixel_values = pixel_values
-
-            rollout_routed_experts = seq_ctx.rollout_routed_experts
-            if rollout_routed_experts is not None:
-                if isinstance(rollout_routed_experts, list):
-                    # list[n,l,e]
-                    out_rollout_routed_expert = []
-                    for rollout_routed_expert in rollout_routed_experts:
-                        if isinstance(rollout_routed_expert, torch.Tensor):
-                            rollout_routed_experts_tensor = torch.randint(
-                                low=0,
-                                high=language_cfg.n_routed_experts,
-                                size=(
-                                    rollout_routed_expert.size(0),
-                                    language_cfg.num_hidden_layers,
-                                    language_cfg.num_experts_per_tok,
-                                ),
-                            )
-                            out_rollout_routed_expert.append(rollout_routed_experts_tensor)
-                        else:
-                            rollout_routed_expert_refs = rollout_routed_expert
-                            rollout_routed_expert = ray.get(rollout_routed_expert_refs)
-                            # free obj store explicitly
-                            ray._private.internal_api.free(rollout_routed_expert_refs)
-                            out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
-
-                    seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
-                else:
-                    assert isinstance(rollout_routed_experts, torch.Tensor), (
-                        f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
-                    )
-                    rollout_routed_experts_tensor = torch.randint(
-                        low=0,
-                        high=language_cfg.n_routed_experts,
-                        size=(
-                            self.config.pack_max_length,
-                            language_cfg.num_hidden_layers,
-                            language_cfg.num_experts_per_tok,
-                        ),
-                    )
-                    seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
+                seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
+            else:
+                assert isinstance(rollout_routed_experts, torch.Tensor), (
+                    f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
+                )
+                rollout_routed_experts_tensor = torch.randint(
+                    low=0,
+                    high=language_cfg.n_routed_experts,
+                    size=(
+                        self.config.pack_max_length,
+                        language_cfg.num_hidden_layers,
+                        language_cfg.num_experts_per_tok,
+                    ),
+                )
+                seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
 
                 assert seq_ctx.input_ids is not None, "input_ids is None"
                 assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
 
-            seq_ctx = data["seq_ctx"].to(DEVICE)
-            rollout_logprobs = data.get("rollout_logprobs", None)
-            if rollout_logprobs is not None:
-                rollout_logprobs = rollout_logprobs.to(DEVICE)
-                rollout_logprobs_list.append(rollout_logprobs)
-            loss_ctx_input = RLLossContextInputItem(
-                shifted_labels=data["shifted_labels"],
-                advantages=data["advantages"],
-                rollout_logprobs=rollout_logprobs,
-            ).to(DEVICE)
-            if self.sp_mesh.size() > 1:
-                seq_ctx = seq_ctx.split(self.sp_mesh)
-                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
-            seq_ctx_list.append(seq_ctx)
-            loss_ctx_input_list.append(loss_ctx_input)
+        return seq_ctx
 
-        del data_batches
-
-        rank_grad_tokens: torch.Tensor | None = None
-        for loss_ctx_input in loss_ctx_input_list:
-            mask = loss_ctx_input.shifted_labels != -100
-            grad_tokens = mask.sum()
-            rank_grad_tokens = grad_tokens if rank_grad_tokens is None else rank_grad_tokens + grad_tokens
-        rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
-        global_grad_tokens = rank_grad_tokens
-        dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
-
-        # old logprobs are inplaced updated in compute_actor_logprobs
-        loss_ctx_input_list = self.compute_actor_logprobs(seq_ctx_list, loss_ctx_input_list)
-        sum_entropy: torch.Tensor | None = None
-        sum_rollout_entropy: torch.Tensor | None = None
+    def _apply_rollout_is_correction(
+        self,
+        seq_ctx_list: list[SequenceContext],
+        loss_ctx_input_list: list[RLLossContextInputItem],
+        rollout_logprobs_list: list[torch.Tensor | None],
+        loss_cfg: BaseRLLossConfig,
+    ) -> tuple[list[RLLossContextInputItem], Dict[str, Any]]:
+        """Apply importance sampling corrections to the loss context, compute
+        metrics like entropy, and log them."""
         if len(rollout_logprobs_list) > 0:
             assert len(rollout_logprobs_list) == len(loss_ctx_input_list), (
                 f"rollout_logprobs_list {len(rollout_logprobs_list)} vs loss_ctx_input_list {len(loss_ctx_input_list)}"
             )
 
+        sum_entropy: torch.Tensor | None = None
+        sum_rollout_entropy: torch.Tensor | None = None
         all_rollout_is_metrics = []
         all_mismatch_metrics = []
+
         for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
@@ -446,10 +404,12 @@ class TrainingWorker(SingleAcceleratorWorker):
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
 
+                old_log_prob = cast(torch.Tensor, loss_ctx_input.old_logprobs)
+                rollout_log_prob = cast(torch.Tensor, rollout_logprobs_list[i])
                 rollout_is_weights, rollout_is_mask, mismatch_metrics, rollout_is_metrics = (
                     loss_cfg.rollout_is.compute_rollout_importance_weights_and_metrics(
-                        old_log_prob=loss_ctx_input.old_logprobs,
-                        rollout_log_prob=rollout_logprobs_list[i],
+                        old_log_prob=old_log_prob,
+                        rollout_log_prob=rollout_log_prob,
                         num_tokens=num_tokens,
                         response_mask=mask,
                     )
@@ -459,28 +419,98 @@ class TrainingWorker(SingleAcceleratorWorker):
                 all_rollout_is_metrics.append(rollout_is_metrics)
                 all_mismatch_metrics.append(mismatch_metrics)
 
-        logger_msg = f"Rollout {rollout_idx}: "
+        metrics = {
+            "sum_entropy": sum_entropy,
+            "sum_rollout_entropy": sum_rollout_entropy,
+            "all_mismatch_metrics": all_mismatch_metrics,
+            "all_rollout_is_metrics": all_rollout_is_metrics,
+        }
+        return loss_ctx_input_list, metrics
 
-        sum_entropy = cast(torch.Tensor, sum_entropy)
+    @ray_method
+    def fit(self, data_batches: list[list[WorkerInputItem]], rollout_idx: int):
+        # NOTE: sglang会清除logger handle, 重新创建
+        self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
+        loss_cfg = self.config.loss_cfg
+
+        num_batches = len(data_batches)
+        assert num_batches == self._optimizer_steps, (
+            f"Data batches length {num_batches} must be equal to optimizer_steps {self._optimizer_steps}."
+        )
+
+        packs_per_step = []
+        seq_ctx_list: list[SequenceContext] = []
+        loss_ctx_input_list: list[RLLossContextInputItem] = []
+        rollout_logprobs_list: list[torch.Tensor | None] = []
+        # convert dummy padding experts to real size
+
+        language_cfg = (
+            self.config.model_cfg.text_config
+            if isinstance(self.config.model_cfg, BaseComposeConfig)
+            else self.config.model_cfg
+        )
+
+        for step_idx, step_data_batches in enumerate(data_batches):
+            packs_per_step.append(len(step_data_batches))
+            for data in step_data_batches:
+                seq_ctx = self._resolve_ray_data(data["seq_ctx"], language_cfg)
+                rollout_logprobs = data.get("rollout_logprobs")
+                loss_ctx_input = RLLossContextInputItem(
+                    shifted_labels=data["shifted_labels"],
+                    advantages=data["advantages"],
+                    rollout_logprobs=rollout_logprobs,
+                )
+                seq_ctx = seq_ctx.to(DEVICE)
+                loss_ctx_input = loss_ctx_input.to(DEVICE)
+                if self.sp_mesh.size() > 1:
+                    seq_ctx = seq_ctx.split(self.sp_mesh)
+                    loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
+                seq_ctx_list.append(seq_ctx)
+                loss_ctx_input_list.append(loss_ctx_input)
+                rollout_logprobs_list.append(loss_ctx_input.rollout_logprobs)
+
+        del data_batches
+
+        # old logprobs are inplaced updated in compute_actor_logprobs
+        loss_ctx_input_list = self.compute_actor_logprobs(seq_ctx_list, loss_ctx_input_list)
+        loss_ctx_input_list, metrics = self._apply_rollout_is_correction(
+            seq_ctx_list, loss_ctx_input_list, rollout_logprobs_list, loss_cfg
+        )
+
+        rank_grad_tokens = sum((loss_ctx.shifted_labels != -100).sum() for loss_ctx in loss_ctx_input_list)
+        rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens).to(DEVICE)
+        global_grad_tokens = rank_grad_tokens.clone()
+        dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
+
+        log_parts = []
+
+        sum_entropy = cast(torch.Tensor, metrics["sum_entropy"])
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
         avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-        logger_msg += f"avg entropy: {avg_sum_entropy:.4f}"
+        log_parts.append(f"avg entropy: {avg_sum_entropy:.4f}")
 
+        sum_rollout_entropy = metrics.get("sum_rollout_entropy")
         if sum_rollout_entropy is not None:
-            sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
             dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
             avg_rollout_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
-            logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
+            log_parts.append(f"avg rollout entropy: {avg_rollout_entropy:.4f}")
 
-        if len(all_mismatch_metrics) > 0:
+        all_mismatch_metrics = metrics.get("all_mismatch_metrics", [])
+        if all_mismatch_metrics:
             mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
-            if len(mismatch_metrics) > 0:
-                logger_msg += f"\n rollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}"
+            if mismatch_metrics:
+                log_parts.append(f"\nrollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}")
 
-        if len(all_rollout_is_metrics) > 0:
+        all_rollout_is_metrics = metrics.get("all_rollout_is_metrics", [])
+        if all_rollout_is_metrics:
             rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
-            if len(rollout_is_metrics) > 0:
-                logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
+            if rollout_is_metrics:
+                log_parts.append(f"\nrollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}")
+
+        logger_msg = f"Rollout {rollout_idx}: " + ", ".join(part for part in log_parts if not part.startswith("\n"))
+        for part in log_parts:
+            if part.startswith("\n"):
+                logger_msg += part
         self.logger.info(logger_msg)
 
         if self._has_ref:
@@ -502,9 +532,13 @@ class TrainingWorker(SingleAcceleratorWorker):
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
-        for i in range(0, len(seq_ctx_list), iters_per_step):
-            batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
-            batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
+        start_idx = 0
+        for i in range(self._optimizer_steps):
+            num_packs_this_step = packs_per_step[i]
+            end_idx = start_idx + num_packs_this_step
+            batches_seq_ctx = seq_ctx_list[start_idx:end_idx]
+            batches_loss_ctx_input = loss_ctx_input_list[start_idx:end_idx]
+            start_idx = end_idx
 
             LossContext = loss_cfg.loss_ctx_cls
             batches_loss_kwargs = LossContext.build_batches_loss_kwargs(batches_loss_ctx_input, loss_cfg)
@@ -540,7 +574,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in log_info.items()
             )
-            log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
+            log_str = f"Rollout {rollout_idx} Step {i}: gradient_accumulation_steps={num_packs_this_step}, " + log_str
             self.logger.info(log_str)
 
     @ray_method
@@ -558,6 +592,10 @@ class TrainingWorker(SingleAcceleratorWorker):
     def get_model_cfg(self):
         model_cfg = self._engine.model_cfg
         return model_cfg
+
+    @ray_method
+    def get_worker_cfg(self):
+        return self.config
 
     @ray_method
     def offload_model(self):
