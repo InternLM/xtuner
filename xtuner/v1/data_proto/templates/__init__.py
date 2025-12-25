@@ -37,7 +37,7 @@ CHAT_TEMPLATE_MAP = {
         "\n</tools>\n\nFor each function call, return a json object with function name and arguments within "
         """<tool_call></tool_call> XML tags:\n<tool_call>\n{{"name": <function-name>, """
         """"arguments": <args-json-object>}}\n</tool_call>""",
-        tool_extractor="<|im_start|>user\n<tool_response>\n{tool_extractor}</tool_response><|im_end|>\n<|im_start|>assistant\n",
+        tool_extractor="<|im_start|>user\n<tool_response>\n{tool_extractor}\n</tool_response><|im_end|>\n<|im_start|>assistant\n",
         user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
         stop_words=["<|im_end|>", "<|endoftext|>"],
         assistant="{assistant}<|im_end|>",

@@ -78,16 +78,17 @@ def tool_formatter(tools: list[dict[str, Any]]) -> str:
 def function_formatter(functions: list[dict[str, Any]]) -> str:
     function_texts = []
     for function in functions:
-        name = function["name"]
-        arguments = function["arguments"]
-        function_texts.append(json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False))
-    return "\n".join([f"<tool_call>\n{text}\n</tool_call>" for text in function_texts])
+        name = function["function"]["name"]
+        arguments = function["function"]["arguments"]
+        function_texts.append(json.dumps({"name": name, "arguments": json.loads(arguments)}, ensure_ascii=False))
+    return "\n" + "\n".join([f"<tool_call>\n{text}\n</tool_call>" for text in function_texts])
 
 
 class ChatMsg(BaseModel):
     role: Literal["assistant", "user", "system", "developer", "pretrain", "tool"]
     model_config = ConfigDict(extra="forbid")
     content: ContentType
+    reasoning_content: Optional[str] = None  # TODO: 暂时无效
     tool_calls: Optional[List[Dict]] = None
     loss: Optional[bool] = None
     thinking: Optional[str] = None  # only for assistant
@@ -137,7 +138,7 @@ class ChatMsg(BaseModel):
             prompt = chat_template.decorate_tool_extractor(text)
         elif self.role == "assistant":
             if self.tool_calls is not None:
-                text = function_formatter(self.tool_calls)
+                text += function_formatter(self.tool_calls)
 
             prompt = ""
             if self.thinking is not None:
