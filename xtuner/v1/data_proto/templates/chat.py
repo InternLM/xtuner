@@ -19,6 +19,7 @@ class ChatTemplate(BaseModel):
     sep: str = "\n"
     thinking: str | None = None  # Thinking message format, not role
     default_system: str | None = None
+    tool_prompt: str | None = None  # Tool prompt format
 
     # only compute loss on the last assistant response ignoring the multiple rounds of assistant
     only_last_assistant_loss: bool = False  # gpt_oss is True

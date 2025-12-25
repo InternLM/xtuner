@@ -4,7 +4,6 @@ from datetime import datetime
 from .chat import ChatTemplate
 from .hybrid import HybridChatTemplate
 
-
 current_date = datetime.now().strftime("%Y-%m-%d")
 
 CHAT_TEMPLATE_MAP = {
@@ -32,6 +31,11 @@ CHAT_TEMPLATE_MAP = {
     ),
     "qwen3-vl": HybridChatTemplate(
         system="<|im_start|>system\n{system}<|im_end|>\n",
+        tool_prompt="\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
+                    "You are provided with function signatures within <tools></tools> XML tags:\n<tools>{tool_text}"
+                    "\n</tools>\n\nFor each function call, return a json object with function name and arguments within "
+                    """<tool_call></tool_call> XML tags:\n<tool_call>\n{{"name": <function-name>, """
+                    """"arguments": <args-json-object>}}\n</tool_call>""",
         user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
         stop_words=["<|im_end|>", "<|endoftext|>"],
         assistant="{assistant}<|im_end|>",

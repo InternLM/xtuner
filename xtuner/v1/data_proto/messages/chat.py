@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import copy
-from typing import Dict, List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union, Any
+import json
 
 from pydantic import BaseModel, ConfigDict
 
@@ -9,7 +10,6 @@ from xtuner.utils import IGNORE_INDEX
 from xtuner.v1.data_proto.messages.base import BaseMessages
 from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.utils import get_logger
-
 
 logger = get_logger()
 
@@ -129,9 +129,9 @@ class ChatMsg(BaseModel):
         return prompt
 
     def tokenize(
-        self,
-        tokenizer: PreTrainedTokenizer,
-        chat_template: ChatTemplate,
+            self,
+            tokenizer: PreTrainedTokenizer,
+            chat_template: ChatTemplate,
     ):
         decorated = self.get_prompt(chat_template)
 
@@ -148,7 +148,7 @@ class ChatMsg(BaseModel):
         }
 
 
-def process_message(messages: List[ChatMsg], chat_template: ChatTemplate):
+def process_message(messages: List[ChatMsg], chat_template: ChatTemplate, tools: Optional[List[Dict]] = None):
     if not messages:
         return messages
 
@@ -166,9 +166,27 @@ def process_message(messages: List[ChatMsg], chat_template: ChatTemplate):
             if msg.role == "assistant":
                 msg.loss = False
 
+    if tools is not None:
+        assert chat_template.tool_prompt is not None, "tool_prompt must be set in chat_template."
+        tool_text = tool_formatter(tools)
+        tool_text = chat_template.tool_prompt.format(tool_text=tool_text)
+        if messages[0].role != "system":
+            messages.insert(0, ChatMsg(role="system", content=tool_text, loss=False))
+        else:
+            messages[0].content += tool_text
+
+
+def tool_formatter(tools: list[dict[str, Any]]) -> str:
+    tool_text = ""
+    for tool in tools:
+        wrapped_tool = tool if tool.get("type") == "function" else {"type": "function", "function": tool}
+        tool_text += "\n" + json.dumps(wrapped_tool, ensure_ascii=False)
+    return tool_text
+
 
 class ChatMessages(BaseMessages):
     messages: List[ChatMsg]
+    tools: Optional[List[Dict]] = None
 
     def add(self, role, content, loss=False):
         self.messages.append(ChatMsg(role=role, content=content, loss=loss))
@@ -177,7 +195,7 @@ class ChatMessages(BaseMessages):
         return self.messages.pop()
 
     def get_prompt(self, chat_template: ChatTemplate) -> str:
-        process_message(self.messages, chat_template)
+        process_message(self.messages, chat_template, self.tools)
 
         prompt = ""
         for msg in self.messages:
@@ -190,7 +208,7 @@ class ChatMessages(BaseMessages):
         input_ids = tokenizer.encode("", add_special_tokens=False)
         labels = [IGNORE_INDEX for _ in input_ids]
 
-        process_message(self.messages, chat_template)
+        process_message(self.messages, chat_template, self.tools)
 
         for msg in self.messages:
             res = msg.tokenize(tokenizer, chat_template)
