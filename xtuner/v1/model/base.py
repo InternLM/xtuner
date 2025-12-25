@@ -1401,6 +1401,13 @@ class BaseModel(nn.Module):
             self._disable_compile_cfg(self.config)
             return {}
 
+        # torch.compile is not supported on NPU
+        if DEVICE == "npu":
+            if custom_cfg is not False:
+                logger.warning("torch.compile is not supported on NPU, disabling torch.compile.")
+            self._disable_compile_cfg(self.config)
+            return {}
+
         if custom_cfg is True or custom_cfg is None:
             compile_cfg = self.default_compile_cfg
         else:
