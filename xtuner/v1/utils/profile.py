@@ -1,6 +1,8 @@
 import time
 from contextlib import contextmanager
+from typing import Optional
 
+from xtuner.v1._writer import TensorboardWriter
 from xtuner.v1.utils import get_logger, get_torch_device_module
 
 
@@ -33,7 +35,12 @@ def profile_time_and_memory(desc):
 
 # Adapted from https://github.com/volcengine/verl/blob/main/verl/utils/profiler/performance.py
 @contextmanager
-def timer(name: str, timer_dict: dict[str, float]):
+def timer(
+    name: str,
+    timer_dict: dict[str, float],
+    writer: Optional[TensorboardWriter] = None,
+    global_step: Optional[int] = None,
+):
     # TODO: install codetiming in xtuner latest images
     from codetiming import Timer
 
@@ -42,6 +49,8 @@ def timer(name: str, timer_dict: dict[str, float]):
     if name not in timer_dict:
         timer_dict[name] = 0.0
     timer_dict[name] += t.last
+    if writer is not None and global_step is not None:
+        writer.add_scalar(tag=f"time/{name}", scalar_value=t.last, global_step=global_step)
 
 
 def timer_logger(time_dict: dict[str, float]):
