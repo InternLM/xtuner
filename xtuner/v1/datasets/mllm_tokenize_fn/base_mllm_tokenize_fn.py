@@ -169,7 +169,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         raise NotImplementedError
 
     def calc_num_tokens_pure_text_get_item(self, data_item) -> CacheItem:
-        messages = ChatMessages(messages=data_item["messages"])
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]

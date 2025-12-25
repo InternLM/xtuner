@@ -176,7 +176,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         return transform
 
     def pure_text_get_item(self, data_item: dict) -> InternS1DataItem:
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools", None))
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
 
         is_pretrain = False
         if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
@@ -223,7 +223,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
 
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
 
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools", None))
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
 
         try:
             replace_image_token(messages, self.chat_template, num_image_tokens)
@@ -293,7 +293,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
 
         # Preprocess the conversations and generate the return dictionary
         num_image_tokens = [self.num_image_token * num_tile for num_tile in num_tiles]
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools", None))
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         replace_image_token(messages, self.chat_template, num_image_tokens)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
@@ -345,7 +345,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             num_image_tokens_list.append(num_image_tokens)
         total_image_tokens = sum([sum(num_image_tokens) for num_image_tokens in num_image_tokens_list])
 
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools", None))
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
 
         try:
             replace_video_token(messages, self.chat_template, num_image_tokens_list)
@@ -420,7 +420,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             num_imgs_list.append(len(image_list))
 
         total_image_tokens = sum([sum(num_image_tokens) for num_image_tokens in num_image_tokens_list])
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools", None))
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         replace_video_token(messages, self.chat_template, num_image_tokens_list)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
