@@ -419,20 +419,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                         state=RolloutState.COMPLETED,
                     )
 
-            get_experts_task = None
-            if "routed_experts" in extra_info:
-                experts_ref = extra_info["routed_experts"]
-                if isinstance(experts_ref, ray.ObjectRef):
-
-                    async def _get_and_free_experts(ref):
-                        res = await ref
-                        ray._private.internal_api.free(ref)
-                        return res
-
-                    get_experts_task = asyncio.create_task(_get_and_free_experts(experts_ref))
-                else:
-                    get_experts_task = experts_ref
-
             http_result = await self._create_request(
                 endpoint_url,
                 openai_prompts,
@@ -446,7 +432,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             # Case 1: Request was successful
             if http_result.response is not None:  # 推理完成：completed状态：finish_reason为abort/stop/length, 退出
                 response = await self._handle_non_stream_response(
-                    root_id, action_id, sample_params, extra_params, http_result.response, get_experts_task
+                    root_id, action_id, sample_params, extra_params, http_result.response, extra_info
                 )
                 if response.state == RolloutState.SKIPPED:
                     # retry
@@ -563,7 +549,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         return rollout_response
 
     async def _handle_non_stream_response(
-        self, root_id, action_id, sample_params, extra_params, response, get_experts_task=None
+        self, root_id, action_id, sample_params, extra_params, response, input_extra_info
     ) -> RLRolloutResponseItem:
         response = response.json()
         uid = action_id
@@ -594,6 +580,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                     )
                     routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
+                    # 处理当前专家
                     if routed_experts is not None:
                         if isinstance(routed_experts, str):
                             import base64
@@ -604,16 +591,18 @@ class RolloutWorker(SingleAcceleratorWorker):
                             routed_experts = torch.tensor(routed_experts)  # n,layer,expert
                             routed_experts = ray.put(routed_experts)
 
-                        if get_experts_task is not None:
-                            exist_routed_experts = await get_experts_task  # [n, layer, expert]
+                        # 处理历史专家
+                        if "routed_experts" in input_extra_info and input_extra_info["routed_experts"] is not None:
+                            exist_routed_experts = await input_extra_info["routed_experts"]  # n, layer, expert
                             cur_routed_experts = await routed_experts  # [n, layer, expert]
                             ray._private.internal_api.free(routed_experts)
+                            ray._private.internal_api.free(input_extra_info["routed_experts"])
+                            del input_extra_info["routed_experts"]
                             assert (exist_routed_experts.shape[0] - 1) > 0 and exist_routed_experts.shape[
                                 0
                             ] - 1 <= cur_routed_experts.shape[0], (
                                 f"Existing routed_experts shape: {exist_routed_experts.shape}, current routed_experts shape: {cur_routed_experts.shape}"
                             )
-                            # self.logger.info(f"last_token_ids: {len(last_token_ids)} and len(cur_routed_experts): {cur_routed_experts[exist_routed_experts.shape[0] - 1 :, :,:].shape[0]}")
                             init_cur_roued_experts = cur_routed_experts.shape[0]
                             cur_routed_experts = cur_routed_experts[exist_routed_experts.shape[0] :, :, :]
                             concat_routed_experts = np.concatenate((exist_routed_experts, cur_routed_experts), axis=0)
