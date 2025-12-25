@@ -494,15 +494,16 @@ class RolloutWorker(SingleAcceleratorWorker):
                         "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                     )
                     routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
-                    if isinstance(routed_experts, str):
-                        import base64
+                    if routed_experts is not None:
+                        if isinstance(routed_experts, str):
+                            import base64
 
-                        data = base64.b64decode(routed_experts)
-                        routed_experts = ray.cloudpickle.loads(data)
-                    else:
-                        routed_experts = torch.tensor(routed_experts)  # n,layer,expert
-                        routed_experts = ray.put(routed_experts)
-                    extra_info = {"routed_experts": routed_experts}
+                            data = base64.b64decode(routed_experts)
+                            routed_experts = ray.cloudpickle.loads(data)
+                        else:
+                            routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                            routed_experts = ray.put(routed_experts)
+                        extra_info = {"routed_experts": routed_experts}
 
                 # NOTE: When set return_token_ids = True, the response must contain valid token_ids/logprobs.
                 # If not, we consider it as an invalid response and retry it.
