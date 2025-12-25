@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import copy
-from typing import Dict, List, Literal, Optional, Union, Any
 import json
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict
 
@@ -10,6 +10,7 @@ from xtuner.utils import IGNORE_INDEX
 from xtuner.v1.data_proto.messages.base import BaseMessages
 from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.utils import get_logger
+
 
 logger = get_logger()
 
@@ -66,14 +67,33 @@ MultModalContentType = Union[TextContentItem, ImageContentItem, VideoContentItem
 ContentType = Union[str, List[MultModalContentType]]
 
 
+def tool_formatter(tools: list[dict[str, Any]]) -> str:
+    tool_text = ""
+    for tool in tools:
+        wrapped_tool = tool if tool.get("type") == "function" else {"type": "function", "function": tool}
+        tool_text += "\n" + json.dumps(wrapped_tool, ensure_ascii=False)
+    return tool_text
+
+
+def function_formatter(functions: list[dict[str, Any]]) -> str:
+    function_texts = []
+    for function in functions:
+        name = function["name"]
+        arguments = function["arguments"]
+        function_texts.append(json.dumps({"name": name, "arguments": arguments}, ensure_ascii=False))
+    return "\n".join([f"<tool_call>\n{text}\n</tool_call>" for text in function_texts])
+
+
 class ChatMsg(BaseModel):
-    role: Literal["assistant", "user", "system", "developer", "pretrain"]
+    role: Literal["assistant", "user", "system", "developer", "pretrain", "tool"]
     model_config = ConfigDict(extra="forbid")
     content: ContentType
+    tool_calls: Optional[List[Dict]] = None
     loss: Optional[bool] = None
     thinking: Optional[str] = None  # only for assistant
     name: Optional[str] = None
     meta: Optional[Dict] = None
+    tool_call_id: Optional[str] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -90,6 +110,8 @@ class ChatMsg(BaseModel):
                 self.loss = True
             elif self.role == "pretrain":
                 self.loss = True
+            elif self.role == "tool":
+                self.loss = False
             else:
                 raise NotImplementedError
 
@@ -111,7 +133,12 @@ class ChatMsg(BaseModel):
             prompt = chat_template.decorate_user(text)
         elif self.role == "pretrain":
             prompt = text
+        elif self.role == "tool":
+            prompt = chat_template.decorate_tool_extractor(text)
         elif self.role == "assistant":
+            if self.tool_calls is not None:
+                text = function_formatter(self.tool_calls)
+
             prompt = ""
             if self.thinking is not None:
                 prompt = chat_template.decorate_thinking(self.thinking)
@@ -129,9 +156,9 @@ class ChatMsg(BaseModel):
         return prompt
 
     def tokenize(
-            self,
-            tokenizer: PreTrainedTokenizer,
-            chat_template: ChatTemplate,
+        self,
+        tokenizer: PreTrainedTokenizer,
+        chat_template: ChatTemplate,
     ):
         decorated = self.get_prompt(chat_template)
 
@@ -173,15 +200,8 @@ def process_message(messages: List[ChatMsg], chat_template: ChatTemplate, tools:
         if messages[0].role != "system":
             messages.insert(0, ChatMsg(role="system", content=tool_text, loss=False))
         else:
+            assert isinstance(messages[0].content, str), "system message content must be str."
             messages[0].content += tool_text
-
-
-def tool_formatter(tools: list[dict[str, Any]]) -> str:
-    tool_text = ""
-    for tool in tools:
-        wrapped_tool = tool if tool.get("type") == "function" else {"type": "function", "function": tool}
-        tool_text += "\n" + json.dumps(wrapped_tool, ensure_ascii=False)
-    return tool_text
 
 
 class ChatMessages(BaseMessages):

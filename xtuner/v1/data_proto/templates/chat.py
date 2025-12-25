@@ -19,6 +19,7 @@ class ChatTemplate(BaseModel):
     sep: str = "\n"
     thinking: str | None = None  # Thinking message format, not role
     default_system: str | None = None
+    tool_extractor: str | None = None  # Tool extractor format
     tool_prompt: str | None = None  # Tool prompt format
 
     # only compute loss on the last assistant response ignoring the multiple rounds of assistant
@@ -42,6 +43,12 @@ class ChatTemplate(BaseModel):
     def decorate_user(self, text: str) -> str:
         """Decorate text with the `user` template."""
         return self.user.format(user=text)
+
+    def decorate_tool_extractor(self, text: str) -> str:
+        """Decorate text with the `tool_extractor` template."""
+        if self.tool_extractor is None:
+            raise ValueError("tool_extractor template is not defined.")
+        return self.tool_extractor.format(tool_extractor=text)
 
     @field_validator("system")
     def check_system(cls, v: str) -> str:
