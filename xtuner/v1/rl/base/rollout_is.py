@@ -338,9 +338,6 @@ def compute_is_metrics(
     in sequence/geometric mode via log-space) and safety-clamped values (for mean/std/ESS)
     to balance accuracy with numerical stability and avoid overflow.
     """
-    # Validate that we have at least one valid sample
-    assert response_mask.any(), "Expected at least one valid sample in response_mask"
-
     metrics = {}
     device = rollout_is_weights.device
 
@@ -469,9 +466,6 @@ def compute_mismatch_metrics(
     Reference:
     - When Speed Kills Stability: https://yingru.notion.site/When-Speed-Kills-Stability-271211a558b7808d8b12d403fd15edda
     """
-    # Validate that we have at least one valid token
-    assert response_mask.any(), "Expected at least one valid token in response_mask"
-
     metrics = {}
 
     # 1. Training policy perplexity (always available)

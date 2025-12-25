@@ -437,10 +437,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                     rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
                 )
 
-            if not mask.any():  # all padding tokens, skip
-                self.logger.warning(f"Skip batch {i} as all tokens are padding.")
-                continue
-
             if len(rollout_logprobs_list) > 0:
                 # calculate importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
