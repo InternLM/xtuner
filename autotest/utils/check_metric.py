@@ -1,6 +1,10 @@
 import json
 import logging
 from statistics import mean
+from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+import os
 
 
 logging.basicConfig(
@@ -21,6 +25,46 @@ def extract_value(file, metrics):
 
     return total_step, metric_all
 
+def plot_all(case_name, check_metric, base_metrics, cur_metrics, output_root: Path):
+    metric_list = list(check_metric.keys())
+    n_plots = len(metric_list)
+    n_cols = int(np.ceil(np.sqrt(n_plots)))
+    n_rows = int(np.ceil(n_plots / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 3))
+    axes = np.array(axes).flatten()
+
+    for i, ax in enumerate(axes):
+        if i < n_plots:
+            x_base = np.arange(len(base_metrics[metric_list[i]]))
+            x_current = np.arange(len(cur_metrics[metric_list[i]]))
+            ax.plot(
+                x_base,
+                base_metrics[metric_list[i]],
+                "r--",
+                label="Base",
+                marker="x",
+                markersize=4,
+            )
+            ax.plot(
+                x_current,
+                cur_metrics[metric_list[i]],
+                "b-",
+                label="Current",
+                marker="o",
+                markersize=4,
+            )
+            ax.set_title(f"{metric_list[i].replace('/', '_')}_comparison")
+            ax.set_xlabel("Step")
+            ax.set_ylabel("Value")
+            ax.legend()
+            ax.grid(True, linestyle="--", alpha=0.7)
+        else:
+            ax.axis("off")
+    fig.suptitle(f"{case_name}_metrics_comparison", fontsize=16)
+    plt.tight_layout()
+    plt.savefig(output_root / f"{case_name}_comparison.png")
+    plt.close()
+
 
 def check_result(base_path, cur_path, check_metric):
     fail_metric = {}
@@ -31,6 +75,8 @@ def check_result(base_path, cur_path, check_metric):
     assert cur_steps == base_steps, (
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
+
+    plot_all(case_name, check_metric, base_metrics, cur_metrics, Path(f"../{os.environ['GITHUB_RUN_ID']}"))
 
     for metric, threshold in check_metric.items():
         max_error = 0.0
@@ -75,4 +121,4 @@ def check_result(base_path, cur_path, check_metric):
     return result, f"Some metric check failed,{fail_metric}"
 
 if __name__ == "__main__":
-    print(check_result("./base//tracker.jsonl","./current/tracker.jsonl",{"grad_norm":0.000001,"loss/reduced_llm_loss":0.000001,"lr":0,"memory/max_memory_GB":0.2,"runtime_info/tgs":0.05,"runtime_info/text_tokens":0}))
+    print(check_result("qwen3-sft", "./base/tracker.jsonl", "./current/tracker.jsonl",{"grad_norm":0.000001,"loss/reduced_llm_loss":0.000001,"lr":0,"memory/max_memory_GB":0.2,"runtime_info/tgs":0.05,"runtime_info/text_tokens":0}))

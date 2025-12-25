@@ -56,7 +56,7 @@ class Train:
         )
         cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/rank0/tracker.jsonl")
         check_metrics = config.get("assert_info", {}).get("check_metrics", {})
-        return check_result(base_path, cur_path, check_metrics)
+        return check_result(config["case_name"], base_path, cur_path, check_metrics)
 
     def pre_action(config=None):
         action_info = config.get("pre_action", None)
