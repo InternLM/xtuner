@@ -32,5 +32,5 @@ export DISTRIBUTED_TESTS_DEFAULT_TIMEOUT=600
 
 proxy_off
 pip install -e .[all]
-
+pip install -r requirements/test.txt
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
