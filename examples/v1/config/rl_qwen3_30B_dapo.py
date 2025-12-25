@@ -1,6 +1,6 @@
 import os
 from copy import deepcopy
-
+from pathlib import Path
 from transformers import AutoTokenizer
 from xtuner.v1.config import (
     AdamWConfig,
@@ -20,7 +20,7 @@ from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.rl_trainer import RLTrainerConfig
-
+from xtuner.v1.model import get_model_config_from_hf
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -130,7 +130,7 @@ replay_buffer_cfg = ReplayBufferConfig(
 )
 
 # 5. Train worker
-model_cfg = Qwen3MoE30BA3Config()
+model_cfg = get_model_config_from_hf(Path(model_path))
 optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(

@@ -349,14 +349,14 @@ class RawDataFlow:
         if resume:
             assert resume_path, "Resuming is enabled but no resume path is provided."
             self.logger.info(f"Resuming replay buffer from {resume_path}")
-            await self.replay_buffer.resume.remote(resume_path)
+            await self.replay_buffer.resume_storage.remote(resume_path)
 
         await self.concurrent_task_runner()
 
         if dump:
             assert dump_path, "Dumping is enabled but no dump path is provided."
             self.logger.info(f"Dump replay buffer from {dump_path}")
-            await self.replay_buffer.dump.remote(dump_path)
+            await self.replay_buffer.dump_storage.remote(dump_path)
 
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
 
@@ -379,6 +379,22 @@ class RawDataFlow:
         except Exception as e:
             self.logger.error(f"Failed to send abort request to {url}: {e}")
             return url, False
+
+    def save(self, save_path: Path | str):
+        """Saves the replay buffer to the specified path.
+
+        Args:
+            save_path (str): The path to the checkpoint file to save to.
+        """
+        ray.get(self.replay_buffer.save.remote(save_path))
+
+    def resume(self, resume_path: Path | str):
+        """Resumes the replay buffer from the specified path.
+
+        Args:
+            resume_path (str): The path to the checkpoint file to resume from.
+        """
+        ray.get(self.replay_buffer.resume.remote(resume_path))
 
 
 DataFlow = ray.remote(RawDataFlow)

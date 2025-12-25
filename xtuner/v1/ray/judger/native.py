@@ -3,7 +3,7 @@ from typing import Any, Callable, List, Optional
 
 import httpx
 import ray
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
@@ -13,7 +13,7 @@ from xtuner.v1.utils import get_logger
 class NativeJudgerConfig(BaseModel):
     """Base configuration class for judgers."""
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     judger_name: str
     num_ray_actors: int = 1
     reward_func: Optional[Callable] = None

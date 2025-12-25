@@ -706,6 +706,7 @@ class Trainer:
 
             time_before_train_step = time.time()
             data_time = time_before_train_step - time_before_get_data
+            cur_sample_num = len(data_batch)
 
             seq_ctx_list: list[SequenceContext] = []
             loss_ctx_input_list: list[CELossContextInputItem] = []
@@ -778,6 +779,7 @@ class Trainer:
 
             self._cur_step += 1
 
+            self._reduced_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
             reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
             self._reduced_consumed_tokens += reduced_step_consumed_tokens
 
@@ -1257,7 +1259,6 @@ class Trainer:
                 data_iter = iter(self._dataloader)
                 data = next(data_iter)
 
-            self._reduced_consumed_samples += self._reduce_number_across_rank(len(data))
             yield data
 
     def _get_checkpoint_path(self, epoch: int, step: int, is_snapshot: bool = False) -> Path:

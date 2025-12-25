@@ -26,6 +26,9 @@ from .utils import CachableTokenizeFunction, CacheObj, calculate_file_sha256, ca
 from .vlm_jsonl import VLMJsonlDataset
 
 
+from . import _hardcode_patch  # isort: skip
+
+
 __all__ = [
     "JsonlDataset",
     "CachableTokenizeFunction",
