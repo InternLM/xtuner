@@ -1,4 +1,4 @@
-#! /bin/bash
+#! /usr/bin/bash
 set -e
 
 export PYTHONPATH=$(dirname $0)/..
