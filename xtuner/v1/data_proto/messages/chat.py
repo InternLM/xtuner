@@ -81,7 +81,7 @@ def function_formatter(functions: list[dict[str, Any]]) -> str:
         name = function["function"]["name"]
         arguments = function["function"]["arguments"]
         function_texts.append(json.dumps({"name": name, "arguments": json.loads(arguments)}, ensure_ascii=False))
-    return "\n" + "\n".join([f"<tool_call>\n{text}\n</tool_call>" for text in function_texts])
+    return "\n".join([f"<tool_call>\n{text}\n</tool_call>" for text in function_texts])
 
 
 class ChatMsg(BaseModel):
@@ -138,7 +138,10 @@ class ChatMsg(BaseModel):
             prompt = chat_template.decorate_tool_extractor(text)
         elif self.role == "assistant":
             if self.tool_calls is not None:
-                text += function_formatter(self.tool_calls)
+                function_text = function_formatter(self.tool_calls)
+                if text is not None and text != "":
+                    function_text = "\n" + function_text
+                text += function_text
 
             prompt = ""
             if self.thinking is not None:
@@ -194,7 +197,7 @@ def process_message(messages: List[ChatMsg], chat_template: ChatTemplate, tools:
             if msg.role == "assistant":
                 msg.loss = False
 
-    if tools is not None:
+    if tools:
         assert chat_template.tool_prompt is not None, "tool_prompt must be set in chat_template."
         tool_text = tool_formatter(tools)
         tool_text = chat_template.tool_prompt.format(tool_text=tool_text)
