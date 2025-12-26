@@ -504,7 +504,12 @@ class RolloutWorker(SingleAcceleratorWorker):
                             routed_experts = torch.tensor(routed_experts)  # n,layer,expert
                             routed_experts = ray.put(routed_experts)
                         extra_info = {"routed_experts": routed_experts}
-
+                    else:
+                        # NOTE: If finish_reason is 'abort', some queries may not have entered the inference engine,
+                        # so the returned expert can be None. If finish_reason is 'completed', an expert must be returned.
+                        assert finish_reason == "abort", (
+                            f"routed_experts is None, finish_reason should be abort, but got {finish_reason}"
+                        )
                 # NOTE: When set return_token_ids = True, the response must contain valid token_ids/logprobs.
                 # If not, we consider it as an invalid response and retry it.
                 # NOTE: !!! When finish_reason is abort, some queries may not return token_ids or logprobs. !!!
