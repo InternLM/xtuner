@@ -65,7 +65,7 @@ class ModelForwardExtraLogInfo(dict):
     max_ratio: torch.Tensor
     # Tensor to store the ranking loss for logging.
     # Shape: `(intra_layer_micro_batch, 1)` if intra_layer_micro_batch > 1 else `(1,)`
-    log_rank_loss: torch.Tensor
+    local_base_loss: torch.Tensor
 
     def __init__(self, init_dict: dict[str, Any] = {}):
         super().__init__()
@@ -92,13 +92,13 @@ class ModelForwardExtraLogInfo(dict):
                 self["max_ratio"] = torch.max(self["max_ratio"], dim=-1).values
             max_ratio_value = self["max_ratio"].item()
             return_dict["max_ratio"] = max_ratio_value
-        if "log_rank_loss" in self:
-            while self["log_rank_loss"].dim() >= 1:
-                self["log_rank_loss"] = torch.sum(self["log_rank_loss"], dim=-1)
-            log_rank_loss_value = self["log_rank_loss"].item()
+        if "local_base_loss" in self:
+            while self["local_base_loss"].dim() >= 1:
+                self["local_base_loss"] = torch.sum(self["local_base_loss"], dim=-1)
+            local_base_loss_value = self["local_base_loss"].item()
             # vague keys such as `loss` should be avoided in extra_log_info,
             # otherwise it may cause confusion in exp-track logs.
-            return_dict["local_base_loss"] = log_rank_loss_value
+            return_dict["local_base_loss"] = local_base_loss_value
         return return_dict
 
 
