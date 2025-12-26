@@ -256,7 +256,8 @@ class RawTrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        ray.get(handles)
+        log_infos = ray.get(handles)
+        return log_infos
 
     @ray_method
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
@@ -315,6 +316,16 @@ class RawTrainingController:
     @ray_method
     def ready(self) -> bool:
         return True
+
+    def save_dcp(self, ckpt_dir: str):
+        handles = [worker.save_dcp.remote(ckpt_dir) for worker in self.workers]  # type: ignore
+        ray.get(handles)
+        return
+
+    def load_dcp(self, ckpt_dir: str):
+        handles = [worker.load_dcp.remote(ckpt_dir) for worker in self.workers]  # type: ignore
+        ray.get(handles)
+        return
 
 
 TrainingController = ray.remote(RawTrainingController)
