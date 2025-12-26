@@ -220,8 +220,8 @@ class VisionComposeTrainEngine(TrainEngine):
             reduced_z_loss = step_z_loss
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
-        other_log["consumed_tokens"] = cast(int, step_consumed_tokens.item())
+        other_log["step_consumed_tokens"] = cast(int, step_consumed_tokens.item())
         other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
         other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
-        other_log["consumed_img_tokens"] = step_consumed_img_tokens
+        other_log["step_consumed_img_tokens"] = step_consumed_img_tokens
         return loss_log, other_log

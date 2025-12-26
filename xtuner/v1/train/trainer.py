@@ -760,8 +760,8 @@ class Trainer:
             time_after_train_step = time.time()
             ProberList.after_step()
             step_time = time_after_train_step - time_before_train_step
-            step_consumed_tokens = other_log["consumed_tokens"]
-            step_consumed_img_tokens = other_log.get("consumed_img_tokens", None)
+            step_consumed_tokens = other_log["step_consumed_tokens"]
+            step_consumed_img_tokens = other_log.get("step_consumed_img_tokens", None)
 
             extra_info = other_log.get("extra_info", {})
             if isinstance(extra_info, ModelForwardExtraLogInfo):
