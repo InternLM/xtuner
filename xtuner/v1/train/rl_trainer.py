@@ -286,6 +286,7 @@ class RLTrainer:
         train_worker_cfg.log_dir = log_dir
         dataflow_config.worker_log_dir = log_dir
         rollout_config.worker_log_dir = log_dir
+        self._enable_return_routed_experts = rollout_config.enable_return_routed_experts
         self._enable_evaluate = False
         self._enable_initial_evaluate = False
         if evaluator_config:
@@ -661,11 +662,13 @@ class RLTrainer:
                     rollout_logprobs = None
                     all_rollout_logprobs.append(None)
 
-                if "router_experts" in group[i].env.rollout.extra_info:
+                if "routed_experts" in group[i].env.rollout.extra_info:
                     routed_experts = group[i].env.rollout.extra_info["routed_experts"]  # n,layer*expert
                     all_routed_experts.append(routed_experts)  # n,layer,expert
-
                 else:
+                    assert not self._enable_return_routed_experts, (
+                        "enable_return_routed_experts is True, but no routed_experts found in rollout extra_info."
+                    )
                     all_routed_experts.append(None)
 
         num_samples = len(all_input_ids)
