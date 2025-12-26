@@ -477,7 +477,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
             if len(rollout_is_metrics) > 0:
                 logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
-        self.logger.info(logger_msg)
+
+        if self.rank == 0:
+            self.logger.info(logger_msg)
 
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
