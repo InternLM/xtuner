@@ -159,7 +159,7 @@ def precompute_tilewise_float8_scale_for_fsdp(
             assert reduce_mesh.ndim == 1, (
                 f"Currently only reduce_mesh.ndim should equal to 1, got reduce_mesh.ndim = {reduce_mesh.ndim} for local_shape {local_shape}"
             )
-        weights_same_shape_stack = torch.stack(weights_same_shape, dim=0)  # type: ignore
+        weights_same_shape_stack = torch.stack(weights_same_shape, dim=0).bfloat16().float()  # type: ignore
         if dim >= 128 and dim % 128 == 64:
             assert reduce_mesh_devided_64 is not None, (
                 f"reduce_mesh_devided_64 should not be None for local_shape {local_shape}."
@@ -382,7 +382,7 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
         assert self._precomputed_scale is not None
         if self._tensor.shape[0] >= 128 and self._tensor.shape[0] % 128 == 64:
             w_fp8_data = cast_to_per_block_fp8_devided_64_with_scales(
-                tensor=self._tensor,
+                tensor=self._tensor.bfloat16().float(),
                 scales=self._precomputed_scale,
                 fsdp_mesh=mesh,
                 block_size=128,
@@ -390,7 +390,7 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
             )
         else:
             w_fp8_data = cast_to_per_block_fp8_with_scales(
-                tensor=self._tensor,
+                tensor=self._tensor.bfloat16().float(),
                 scales=self._precomputed_scale,
                 block_size=128,
                 float8_dtype=self._dtype,

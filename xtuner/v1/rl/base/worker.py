@@ -350,27 +350,29 @@ class TrainingWorker(SingleAcceleratorWorker):
             if rollout_routed_experts is not None:
                 if isinstance(rollout_routed_experts, list):
                     # list[n,l,e]
-                    out_rollout_routed_expert = []
+                    rollout_routed_experts_list = []
                     for rollout_routed_expert in rollout_routed_experts:
-                        if isinstance(rollout_routed_expert, torch.Tensor):
-                            rollout_routed_experts_tensor = torch.randint(
-                                low=0,
-                                high=language_cfg.n_routed_experts,
-                                size=(
-                                    rollout_routed_expert.size(0),
-                                    language_cfg.num_hidden_layers,
-                                    language_cfg.num_experts_per_tok,
-                                ),
-                            )
-                            out_rollout_routed_expert.append(rollout_routed_experts_tensor)
-                        else:
-                            rollout_routed_expert_refs = rollout_routed_expert
-                            rollout_routed_expert = ray.get(rollout_routed_expert_refs)
+                        if not isinstance(rollout_routed_expert, torch.Tensor):
+                            rollout_routed_expert_ref = rollout_routed_expert
+                            rollout_routed_expert = ray.get(rollout_routed_expert_ref)
                             # free obj store explicitly
-                            ray._private.internal_api.free(rollout_routed_expert_refs)
-                            out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
-
-                    seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
+                            ray._private.internal_api.free(rollout_routed_expert_ref)
+                            if not isinstance(rollout_routed_expert[0], torch.Tensor):
+                                rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
+                        else:
+                            if rollout_routed_expert.size(dim=-1) == 1:
+                                pad_len = rollout_routed_expert.size(dim=0)
+                                rollout_routed_expert = torch.randint(
+                                    low=0,
+                                    high=language_cfg.n_routed_experts,
+                                    size=(
+                                        pad_len,
+                                        language_cfg.num_hidden_layers,
+                                        language_cfg.num_experts_per_tok,
+                                    ),
+                                )
+                        rollout_routed_experts_list.append(rollout_routed_expert)
+                    seq_ctx.rollout_routed_experts = torch.cat(rollout_routed_experts_list, dim=0)  # max_len,l,e
                 else:
                     assert isinstance(rollout_routed_experts, torch.Tensor), (
                         f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
@@ -417,6 +419,14 @@ class TrainingWorker(SingleAcceleratorWorker):
         dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
 
         # old logprobs are inplaced updated in compute_actor_logprobs
+        if isinstance(self.config.model_cfg, BaseComposeConfig):
+            if self._engine.llm_float8_handler is not None and self._engine.llm_float8_handler.enabled:  # type: ignore [attr-defined]
+                self._engine.llm_float8_handler.precompute_float8_dynamic_scale_for_fsdp(  # type: ignore [attr-defined]
+                    self._engine.model.language_model
+                )
+        else:
+            if self._engine.float8_handler is not None and self._engine.float8_handler.enabled:
+                self._engine.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self._engine.model)
         loss_ctx_input_list = self.compute_actor_logprobs(seq_ctx_list, loss_ctx_input_list)
         sum_entropy: torch.Tensor | None = None
         sum_rollout_entropy: torch.Tensor | None = None
@@ -426,7 +436,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
 
         all_rollout_is_metrics = []
-        all_mismatch_metrics = []
         for i, loss_ctx_input in enumerate(loss_ctx_input_list):
             mask = loss_ctx_input.shifted_labels != -100
             entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
@@ -446,8 +455,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
 
-                rollout_is_weights, rollout_is_mask, mismatch_metrics, rollout_is_metrics = (
-                    loss_cfg.rollout_is.compute_rollout_importance_weights_and_metrics(
+                rollout_is_weights, rollout_is_mask, rollout_is_metrics = (
+                    loss_cfg.rollout_is.compute_rollout_importance_weights(
                         old_log_prob=loss_ctx_input.old_logprobs,
                         rollout_log_prob=rollout_logprobs_list[i],
                         num_tokens=num_tokens,
@@ -457,7 +466,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                 loss_ctx_input.shifted_labels[~rollout_is_mask.bool()] = -100  # update loss mask
                 loss_ctx_input.is_weights = rollout_is_weights
                 all_rollout_is_metrics.append(rollout_is_metrics)
-                all_mismatch_metrics.append(mismatch_metrics)
 
         logger_msg = f"Rollout {rollout_idx}: "
 
@@ -471,11 +479,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
             avg_rollout_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
             logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
-
-        if len(all_mismatch_metrics) > 0:
-            mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
-            if len(mismatch_metrics) > 0:
-                logger_msg += f"\n rollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}"
 
         if len(all_rollout_is_metrics) > 0:
             rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
@@ -623,24 +626,21 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rollout_cfg_info.get("backend") == "turbomind":
             self._update_weights_by_layer()
         else:
-            self._update_weights_hf_generator()
+            if isinstance(self.config.model_cfg, BaseComposeConfig):
+                self._update_weights_hf_generator(submodule="vision_tower", final_update=False)
+                self._update_weights_hf_generator(submodule="multi_modal_projector", final_update=False)
+                self._update_weights_hf_generator(submodule="language_model", final_update=True)
+            else:
+                self._update_weights_hf_generator()
 
-    def _update_weights_hf_generator(self):
+    def _update_weights_hf_generator(self, submodule=None, final_update=False):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
 
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
-
-        if isinstance(model.config, BaseComposeConfig):
-            dtype = torch.bfloat16
-        else:
-            if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
-                dtype = torch.float8_e4m3fn
-            else:
-                dtype = torch.bfloat16
-
+        dtype = torch.bfloat16
         bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
         same_gen = model._get_same_hf_param(
             model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE, bucket_size=bucket_size
@@ -663,7 +663,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                 # We can all gather them to get full fused param but it would lead to a larger memory usage.
                 # So we broadcast the part fused param from each ep rank in ep_group sequentially,
                 # and update the part of the fused param sequentially to reduce memory usage.
-                ep_mesh: DeviceMesh = model.ep_mesh
+                if isinstance(model.config, BaseComposeConfig):
+                    ep_mesh: DeviceMesh = model.language_model.ep_mesh
+                else:
+                    ep_mesh: DeviceMesh = model.ep_mesh
                 ep_group = ep_mesh.get_group()
                 global_rank = dist.get_rank()
                 for src_global_rank in dist.get_process_group_ranks(ep_group):
@@ -690,7 +693,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.request_update_params(state_dict, finished=False)
             del state_dict, name_list, param_list
 
-        if self.rollout_cfg_info["backend"] == "pytorch":
+        if self.rollout_cfg_info["backend"] == "pytorch" and final_update:
             self.request_update_params({}, finished=True)
 
         dist.barrier()

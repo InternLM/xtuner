@@ -228,6 +228,20 @@ class RolloutConfig(BaseModel):
             help="Maximum number of retries per sample before marking it as failed.",
         ),
     ] = 1
+    max_prefill_token_num: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="Maximum number of prefill token.",
+        ),
+    ] = None
+    router_n_groups: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="router_n_groups.",
+        ),
+    ] = None
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
     _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
 

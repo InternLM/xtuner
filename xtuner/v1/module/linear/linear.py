@@ -33,7 +33,7 @@ def build_linear(
     float8_cfg=None,
 ) -> nn.Module:
     """Build a linear layer with optional float8 support."""
-    if float8_cfg is None:
+    if float8_cfg is None or float8_cfg.scaling_granularity_gemm is None:
         return _Linear(in_features, out_features, bias=bias, device=device, dtype=dtype)
     elif float8_cfg.scaling_granularity_gemm is ScalingGranularity.TILEWISE:
         return TileWiseFloat8Linear(in_features, out_features, bias=bias, device=device, dtype=dtype)
