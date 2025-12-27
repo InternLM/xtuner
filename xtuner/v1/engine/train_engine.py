@@ -44,7 +44,7 @@ threading_lock = threading.Lock()
 
 class LossLog(TypedDict):
     __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
-    total_loss: float
+    local_loss: float
     reduced_llm_loss: float
     reduced_balancing_loss: NotRequired[float]
     reduced_z_loss: NotRequired[float]
@@ -53,8 +53,8 @@ class LossLog(TypedDict):
 class OtherLog(TypedDict):
     __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
     maxvio: NotRequired[float]
-    consumed_tokens: float
-    consumed_img_tokens: NotRequired[float]
+    step_consumed_tokens: int
+    step_consumed_img_tokens: NotRequired[float]
     extra_info: ModelForwardExtraLogInfo
     efficient_attn_ratio: float
 
@@ -253,7 +253,7 @@ class TrainEngine:
         step_llm_loss = torch.tensor(0.0, device=DEVICE)
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
-        step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
+        step_consumed_tokens = torch.tensor(0, device=DEVICE)
 
         if self._count == 0:
             logger.info(f"grad_accumulation_steps: {iters_per_step}")
@@ -337,7 +337,7 @@ class TrainEngine:
         reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
 
-        loss_log["total_loss"] = step_loss.item()
+        loss_log["local_loss"] = step_loss.item()
         loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
         if step_balancing_loss is not None:
             reduced_balancing_loss = step_balancing_loss
@@ -347,7 +347,7 @@ class TrainEngine:
             reduced_z_loss = step_z_loss
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
-        other_log["consumed_tokens"] = step_consumed_tokens.item()
+        other_log["step_consumed_tokens"] = cast(int, step_consumed_tokens.item())
         other_log["extra_info"] = train_engine_extra_info
         other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
         return loss_log, other_log
