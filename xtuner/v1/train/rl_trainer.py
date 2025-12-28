@@ -4,7 +4,7 @@ import random
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
-from typing import cast
+from typing import List, cast
 
 import ray
 import torch
@@ -16,8 +16,10 @@ from ray.util.placement_group import placement_group
 from typing_extensions import Self
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from xtuner.v1._writer import TensorboardWriter
 from xtuner.v1.data_proto.rl_data import is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.engine.train_engine import LossLog, OtherLog
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, AutoCPUWorkers, CPUResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -31,6 +33,7 @@ from xtuner.v1.rl.base import (
     TrainingWorkerClass,
     TrainingWorkerProxy,
     WorkerConfig,
+    WorkerLogItem,
 )
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
@@ -395,6 +398,8 @@ class RLTrainer:
             with env_path.open("w") as f:
                 json.dump(environment_variables, f, indent=2)
 
+        self._writer = TensorboardWriter(log_dir / "tb")
+
     def _resolve_load_checkpoint_cfg(
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
     ) -> LoadCheckpointConfig:
@@ -482,22 +487,36 @@ class RLTrainer:
             ray.get(self._rollout_env_controller.update_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
-            self._save_trajectories(eval_data_groups, trajectory_save_path)
+            self._save_trajectories(eval_data_groups, trajectory_save_path, is_eval=True)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
+            tb_scores = {f"eval/{k}": v for k, v in scores.items()}
+            self._writer.add_scalars(
+                tag_scalar_dict=tb_scores,
+                global_step=0,
+            )
 
     def _rollout_step(self, rollout_idx: int, step_timer_dict: dict):
         """Performs a single rollout step to generate experience."""
         with timer("generation", step_timer_dict):
             ray.get(self._rollout_env_controller.update_active_workers.remote())
             data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
+        self._writer.add_scalar(
+            tag="time/generation", scalar_value=step_timer_dict["generation"], global_step=rollout_idx
+        )
         with timer("save_trajectory", step_timer_dict):
             trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
             self._save_trajectories(data_groups, trajectory_save_path)
             self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
+        self._writer.add_scalar(
+            tag="time/save_trajectory", scalar_value=step_timer_dict["save_trajectory"], global_step=rollout_idx
+        )
         if not self._debug_rollout:
             with timer("rollout_offload", step_timer_dict):
                 ray.get(self._rollout_dataflow.pause.remote())
                 ray.get(self._rollout_env_controller.offload.remote())
+            self._writer.add_scalar(
+                tag="time/rollout_offload", scalar_value=step_timer_dict["rollout_offload"], global_step=rollout_idx
+            )
         return data_groups, multimodal_train_infos
 
     def _train_step(self, rollout_idx: int, data_groups, multimodal_train_infos, step_timer_dict: dict):
@@ -516,12 +535,72 @@ class RLTrainer:
             self.logger.info(f"Prepared {len(data_batches)} training data batches")
             self._log_data_info(rollout_idx, data_info)
 
+        self._writer.add_scalar(
+            tag="time/onload",
+            scalar_value=step_timer_dict["onload"],
+            global_step=rollout_idx,
+        )
+
+        self._writer.add_scalar(
+            tag="time/prepare_data",
+            scalar_value=step_timer_dict["prepare_data"],
+            global_step=rollout_idx,
+        )
+
         with timer("training", step_timer_dict):
-            ray.get(
+            workers_log_item: List[WorkerLogItem] = ray.get(
                 self._train_controller.fit.remote(
                     data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
                 )
             )
+        self._writer.add_scalar(tag="time/training", scalar_value=step_timer_dict["training"], global_step=rollout_idx)
+
+        rank0_log_item = workers_log_item[0]
+        rank0_rollout_is_metrics = rank0_log_item.get("rollout_is_metrics")
+        rank0_mismatch_metrics = rank0_log_item.get("mismatch_metrics")
+        rank0_rollout_entropy = rank0_log_item.get("rollout_entropy")
+        # These metrics are already aggregated across distributed workers and logging only the metrics from rank 0.
+        if rank0_rollout_is_metrics is not None:
+            tb_rollout_is_metrics = {f"rollout_is/{k}": v for k, v in rank0_rollout_is_metrics.items()}
+            self._writer.add_scalars(tag_scalar_dict=tb_rollout_is_metrics, global_step=rollout_idx)
+        if rank0_mismatch_metrics is not None:
+            tb_mismatch_metrics = {f"mismatch/{k}": v for k, v in rank0_mismatch_metrics.items()}
+            self._writer.add_scalars(tag_scalar_dict=tb_mismatch_metrics, global_step=rollout_idx)
+        if rank0_rollout_entropy is not None:
+            tb_rollout_entropy = {"entropy/rollout": rank0_rollout_entropy}
+            self._writer.add_scalars(tag_scalar_dict=tb_rollout_entropy, global_step=rollout_idx)
+        tb_entropy = {"entropy/train": rank0_log_item["train_entropy"]}
+        self._writer.add_scalars(tag_scalar_dict=tb_entropy, global_step=rollout_idx)
+
+        for worker_idx, log_item in enumerate(workers_log_item):
+            mini_batch_metrics: dict[str, List[float]] = {}
+            for mini_batch_log in log_item["train_metrics"]:
+                loss_log: LossLog = mini_batch_log["loss_log"]
+                other_log: OtherLog = mini_batch_log["other_log"]
+                # Aggregate logs for the mini-batch
+                for k, v in loss_log.items():
+                    v = v.item() if isinstance(v, torch.Tensor) else v
+                    v = cast(float, v)
+                    mini_batch_metrics.setdefault(k, []).append(v)
+
+                for k, v in other_log.items():
+                    if k == "extra_info" and isinstance(v, dict):
+                        for extra_k, extra_v in v.items():
+                            extra_v = extra_v.item() if isinstance(extra_v, torch.Tensor) else extra_v
+                            mini_batch_metrics.setdefault(extra_k, []).append(extra_v)
+                    else:
+                        v = v.item() if isinstance(v, torch.Tensor) else v
+                        v = cast(float, v)
+                        mini_batch_metrics.setdefault(k, []).append(v)
+
+            for key, value in mini_batch_metrics.items():
+                for i, v in enumerate(value):
+                    global_step = rollout_idx * len(value) + i
+                    self._writer.add_scalar(
+                        tag=f"train_metrics/worker_{worker_idx}/{key}",
+                        scalar_value=v,
+                        global_step=global_step,
+                    )
 
     def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):
         """Synchronizes weights and saves checkpoints."""
@@ -538,14 +617,30 @@ class RLTrainer:
             ray.get(self._train_controller.offload.remote(target="model"))
             ray.get(self._rollout_env_controller.onload_kvcache.remote())
 
+        self._writer.add_scalar(
+            tag="time/save_ckpt",
+            scalar_value=step_timer_dict["save_ckpt"],
+            global_step=rollout_idx,
+        )
+        self._writer.add_scalar(
+            tag="time/sync_weight",
+            scalar_value=step_timer_dict["sync_weight"],
+            global_step=rollout_idx,
+        )
+
     def _evaluate_step(self, rollout_idx: int, step_timer_dict: dict):
         """Performs an evaluation step."""
         if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
             with timer("evaluation", step_timer_dict):
                 scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
-                self._save_trajectories(eval_data_groups, trajectory_save_path)
+                self._save_trajectories(eval_data_groups, trajectory_save_path, is_eval=True)
                 self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
+            tb_scores = {f"eval/{k}": v for k, v in scores.items()}
+            self._writer.add_scalars(
+                tag_scalar_dict=tb_scores,
+                global_step=rollout_idx,
+            )
 
     def fit(self):
         """Run the RL training loop.
@@ -579,6 +674,11 @@ class RLTrainer:
                     self._evaluate_step(rollout_idx, step_timer_dict)
 
             # 5. Log timing information
+            self._writer.add_scalar(
+                tag="time/step",
+                scalar_value=step_timer_dict["step"],
+                global_step=rollout_idx,
+            )
             timer_log_str = f"Rollout {rollout_idx} training finished and timing listed: \n"
             timer_log_str += timer_logger(step_timer_dict)
             self.logger.info(timer_log_str)
@@ -697,7 +797,7 @@ class RLTrainer:
         }
         return data_batches, info_dict
 
-    def _save_trajectories(self, data_groups, save_path):
+    def _save_trajectories(self, data_groups, save_path, is_eval: bool = False):
         rewards = []
 
         rollout_response_len_list = []
@@ -750,6 +850,12 @@ class RLTrainer:
             }
             json.dump(item, f, ensure_ascii=False, indent=2)
             f.write("\n")
+            tb_prefix = "eval" if is_eval else "response"
+            tb_item = {f"{tb_prefix}/{k}": v for k, v in item.items() if isinstance(v, (int, float))}
+            self._writer.add_scalars(
+                tag_scalar_dict=tb_item,
+                global_step=self._cur_step,
+            )
             for group in data_groups:
                 if not is_valid_for_training(group):
                     self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
