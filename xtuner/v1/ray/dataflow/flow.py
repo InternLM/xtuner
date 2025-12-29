@@ -109,7 +109,7 @@ class RawDataFlow:
         self.env = env
         self.config = dataflow_cfg
         replay_buffer_cfg.worker_log_dir = self.config.worker_log_dir
-        self.replay_buffer = ReplayBuffer.remote(replay_buffer_cfg)  # type: ignore[attr-defined]
+        self.replay_buffer = ReplayBuffer(replay_buffer_cfg)  # type: ignore[attr-defined]
         self.env_controller = environment
         self.finished_samples_count = 0
         self.skipped_sample_count = 0
@@ -168,7 +168,7 @@ class RawDataFlow:
     @ray_method
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
-        return ray.get(self.replay_buffer.get_train_dataset_length.remote())
+        return self.replay_buffer.get_train_dataset_length()
 
     @ray_method
     async def worker_task(self, group_samples_for_retry: Optional[List[RLDataFlowItem]] = None):
@@ -192,7 +192,7 @@ class RawDataFlow:
         # step 1: sample
         # TODO(@duanyanhui): More fine-grained control over group data generation:
         # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency.
-        group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
+        group_data_items = self.replay_buffer.sample(  # type: ignore[attr-defined]
             self.env, self.enable_partial_rollout, self.config.prompt_repeat_k
         )
         assert len(group_data_items) > 0, "Sampled empty group data items from replay buffer."
@@ -206,12 +206,12 @@ class RawDataFlow:
         group_state = determine_group_state(group_data_items)
         self.logger.debug(f"Determined replay state for {action_id}: {group_state}")
         if group_state == RolloutState.COMPLETED:
-            group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
+            group_data_items = self.replay_buffer.post_processor(group_data_items)  # type: ignore[attr-defined]
             if len(group_data_items) > 0:
-                await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
+                self.replay_buffer.add(group_data_items)  # type: ignore[attr-defined]
             self.logger.debug(f"Worker task completed successfully for {action_id}.")
         elif group_state == RolloutState.ABORTED:
-            await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
+            self.replay_buffer.add(group_data_items)  # type: ignore[attr-defined]
             self.logger.debug(f"Adding aborted sample {action_id} to aborted storage")
         elif group_state == RolloutState.SKIPPED:
             self.skipped_sample_count += 1
@@ -267,7 +267,7 @@ class RawDataFlow:
                     waiting_tasks.add(task)
 
                 _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
-                self.finished_samples_count = ray.get(self.replay_buffer.get_finished_samples.remote())
+                self.finished_samples_count = self.replay_buffer.get_finished_samples()
                 waiting_tasks = pending_tasks
 
             pbar.n = self.finished_samples_count
@@ -349,25 +349,25 @@ class RawDataFlow:
         if resume:
             assert resume_path, "Resuming is enabled but no resume path is provided."
             self.logger.info(f"Resuming replay buffer from {resume_path}")
-            await self.replay_buffer.resume_storage.remote(resume_path)
+            self.replay_buffer.resume_storage(resume_path)
 
         await self.concurrent_task_runner()
 
         if dump:
             assert dump_path, "Dumping is enabled but no dump path is provided."
             self.logger.info(f"Dump replay buffer from {dump_path}")
-            await self.replay_buffer.dump_storage.remote(dump_path)
+            self.replay_buffer.dump_storage(dump_path)
 
-        return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
+        return self.replay_buffer.get_samples(self.target_batch_size)  # type: ignore[attr-defined]
 
     def logging_replaybuffer_state(self):
-        ray.get(self.replay_buffer.print.remote())
+        self.replay_buffer.print()
 
     def get_replaybuffer_status(self):
-        return ray.get(self.replay_buffer.status.remote())
+        return self.replay_buffer.status()
 
     def clear_replaybuffer(self):
-        return ray.get(self.replay_buffer.clear.remote())
+        return self.replay_buffer.clear()
 
     async def _send_abort_request(self, client, url, timeout):
         worker_url = f"{url}/abort_request"
@@ -386,7 +386,7 @@ class RawDataFlow:
         Args:
             save_path (str): The path to the checkpoint file to save to.
         """
-        ray.get(self.replay_buffer.save.remote(save_path))
+        self.replay_buffer.save(save_path)
 
     def resume(self, resume_path: Path | str):
         """Resumes the replay buffer from the specified path.
@@ -394,7 +394,7 @@ class RawDataFlow:
         Args:
             resume_path (str): The path to the checkpoint file to resume from.
         """
-        ray.get(self.replay_buffer.resume.remote(resume_path))
+        self.replay_buffer.resume(resume_path)
 
 
 DataFlow = ray.remote(RawDataFlow)
