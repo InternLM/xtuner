@@ -10,7 +10,7 @@ from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import ray_method
 
-from .worker import TrainingWorker
+from .worker import TrainingWorker, WorkerLogItem
 
 
 class ColateItem(TypedDict):
@@ -165,7 +165,7 @@ class RawTrainingController:
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
     @ray_method
-    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int):
+    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int) -> list[WorkerLogItem]:
         has_rollout_routed_experts = False
         language_cfg = None
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
@@ -256,7 +256,8 @@ class RawTrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        ray.get(handles)
+        log_infos = ray.get(handles)
+        return log_infos
 
     @ray_method
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
