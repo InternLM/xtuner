@@ -438,7 +438,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"Data batches length {num_batches} must be equal to optimizer_steps {self._optimizer_steps}."
         )
 
-        packs_per_step = []
+        packd_batch_num_per_step = []
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_input_list: list[RLLossContextInputItem] = []
         rollout_logprobs_list: list[torch.Tensor | None] = []
@@ -451,7 +451,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         for step_idx, step_data_batches in enumerate(data_batches):
-            packs_per_step.append(len(step_data_batches))
+            packd_batch_num_per_step.append(len(step_data_batches))
             for data in step_data_batches:
                 seq_ctx = self._resolve_ray_data(data["seq_ctx"], language_cfg)
                 rollout_logprobs = data.get("rollout_logprobs")
@@ -534,7 +534,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         start_idx = 0
         for i in range(self._optimizer_steps):
-            num_packs_this_step = packs_per_step[i]
+            num_packs_this_step = packd_batch_num_per_step[i]
             end_idx = start_idx + num_packs_this_step
             batches_seq_ctx = seq_ctx_list[start_idx:end_idx]
             batches_loss_ctx_input = loss_ctx_input_list[start_idx:end_idx]
