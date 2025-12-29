@@ -266,8 +266,8 @@ class RawDataFlow:
                     task = create_task(self.worker_task())
                     waiting_tasks.add(task)
 
-                _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
-                self.finished_samples_count = ray.get(self.replay_buffer.get_finished_samples.remote())
+                _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+                self.finished_samples_count = await self.replay_buffer.get_finished_samples.remote()
                 waiting_tasks = pending_tasks
 
             pbar.n = self.finished_samples_count
@@ -300,8 +300,11 @@ class RawDataFlow:
                 waiting_tasks = pending_tasks
             self.logger.info("All worker tasks have completed after pausing env controller.")
 
-        self.logging_replaybuffer_state()
-        self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))  # type: ignore[attr-defined]
+        replay_buffer_stats = await self.replay_buffer.print.remote()  # type: ignore[attr-defined]
+        rollout_stats = await self.env_controller.get_rollout_stats.remote()  # type: ignore[attr-defined]
+        self.logger.info(
+            f"Data generation completed. Replay Buffer Stats: {replay_buffer_stats}, Rollout Stats: {rollout_stats}"
+        )
 
     @ray_method
     async def pause(self, timeout: float = 60.0):
@@ -359,9 +362,6 @@ class RawDataFlow:
             await self.replay_buffer.dump_storage.remote(dump_path)
 
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
-
-    def logging_replaybuffer_state(self):
-        ray.get(self.replay_buffer.print.remote())
 
     def get_replaybuffer_status(self):
         return ray.get(self.replay_buffer.status.remote())

@@ -44,6 +44,7 @@ from .trainer import ExpHistory, ExpInfo, GitInfo, LoadCheckpointConfig, XTunerM
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
+TRAINER_RAY_GET_TIMEOUT = 5 * 3600  # 5 hour
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -384,6 +385,10 @@ class RLTrainer:
             with env_path.open("w") as f:
                 json.dump(environment_variables, f, indent=2)
 
+        self._ray_get_timeout = max(
+            TRAINER_RAY_GET_TIMEOUT, rollout_config.rollout_timeout, judger_config.judger_timeout
+        )
+
     def _resolve_load_checkpoint_cfg(
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
     ) -> LoadCheckpointConfig:
@@ -476,8 +481,10 @@ class RLTrainer:
             return
 
         if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator:
-            ray.get(self._rollout_env_controller.update_active_workers.remote())
-            scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
+            ray.get(self._rollout_env_controller.update_active_workers.remote(), timeout=self._ray_get_timeout)
+            scores, eval_data_groups = ray.get(
+                self._evaluator.run.remote(return_samples=True), timeout=self._ray_get_timeout
+            )
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
@@ -487,18 +494,20 @@ class RLTrainer:
             step_timer_dict = {}
             # 1. Rollout
             with timer("generation", step_timer_dict):
-                ray.get(self._rollout_env_controller.update_active_workers.remote())
-                data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
+                ray.get(self._rollout_env_controller.update_active_workers.remote(), timeout=self._ray_get_timeout)
+                data_groups, multimodal_train_infos = ray.get(
+                    self._rollout_dataflow.run.remote(), timeout=self._ray_get_timeout
+                )
             # 2. Offload rollout models and save trajectories
             with timer("offload_and_dump", step_timer_dict):
-                ray.get(self._rollout_env_controller.offload.remote())
+                ray.get(self._rollout_env_controller.offload.remote(), timeout=self._ray_get_timeout)
                 trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
                 self._save_trajectories(data_groups, trajectory_save_path)
                 self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
 
             # 3. Onload training models and prepare data
             with timer("onload_and_prepare_data", step_timer_dict):
-                ray.get(self._train_controller.onload.remote(target="all"))
+                ray.get(self._train_controller.onload.remote(target="all"), timeout=self._ray_get_timeout)
                 self.logger.info("Training controller loaded")
                 data_batches, data_info = self._prepare_train_data(
                     data_groups, self._train_worker_cfg.pack_max_length, multimodal_train_infos
@@ -511,23 +520,24 @@ class RLTrainer:
                 ray.get(
                     self._train_controller.fit.remote(
                         data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
-                    )
+                    ),
+                    timeout=self._ray_get_timeout,
                 )
 
             # 5. Saving and sync weights
             with timer("saving and sync_weight", step_timer_dict):
-                ray.get(self._train_controller.offload.remote(target="optimizer"))
+                ray.get(self._train_controller.offload.remote(target="optimizer"), timeout=self._ray_get_timeout)
                 self._maybe_save_hf()
                 self._maybe_save_checkpoint()
 
                 bind_train_rollout(
                     train_controller=self._train_controller, env_controller=self._rollout_env_controller
                 )
-                ray.get(self._rollout_env_controller.onload_weights.remote())
-                ray.get(self._train_controller.update_weights.remote())
+                ray.get(self._rollout_env_controller.onload_weights.remote(), timeout=self._ray_get_timeout)
+                ray.get(self._train_controller.update_weights.remote(), timeout=self._ray_get_timeout)
                 self.logger.info("Model weights synchronized successfully.")
-                ray.get(self._train_controller.offload.remote(target="model"))
-                ray.get(self._rollout_env_controller.onload_kvcache.remote())
+                ray.get(self._train_controller.offload.remote(target="model"), timeout=self._ray_get_timeout)
+                ray.get(self._rollout_env_controller.onload_kvcache.remote(), timeout=self._ray_get_timeout)
 
             timer_log_str = f"Rollout {rollout_idx} training finished and timing listed: \n"
             timer_log_str += timer_logger(step_timer_dict)
@@ -536,7 +546,9 @@ class RLTrainer:
 
             # evaluate
             if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
-                scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
+                scores, eval_data_groups = ray.get(
+                    self._evaluator.run.remote(return_samples=True), timeout=self._ray_get_timeout
+                )
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
                 self._save_trajectories(eval_data_groups, trajectory_save_path)
                 self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
@@ -765,7 +777,7 @@ class RLTrainer:
             for hf_dir in deleted_hf_checkpoints:
                 rmtree(hf_dir)
 
-        ray.get(self._train_controller.save_hf.remote(str(save_hf_path)))
+        ray.get(self._train_controller.save_hf.remote(str(save_hf_path)), timeout=self._ray_get_timeout)
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
 
@@ -784,9 +796,12 @@ class RLTrainer:
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
         self.logger.info(f"Saving step {self.cur_step + 1} rollout dataflow to: {checkpoint_path}")
-        ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)))
+        ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)), timeout=self._ray_get_timeout)
         self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
-        ray.get(self._train_controller.save_dcp.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer))
+        ray.get(
+            self._train_controller.save_dcp.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer),
+            timeout=self._ray_get_timeout,
+        )
 
         # Update meta
         current_exp = self.meta.latest_exp
