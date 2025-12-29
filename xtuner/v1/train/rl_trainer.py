@@ -20,7 +20,7 @@ from xtuner.v1._writer import TensorboardWriter
 from xtuner.v1.data_proto.rl_data import is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, AutoCPUWorkers, CPUResourcesConfig
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, CPUResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, DataFlowProxy, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment, SingleTurnEnvironmentProxy
@@ -318,11 +318,34 @@ class RLTrainer:
             self._enable_evaluate = evaluator_config.enable_evaluate
             self._enable_initial_evaluate = evaluator_config.enable_initial_evaluate
         self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
-        if cpu_resources is None:
-            self._cpu_pg = placement_group(bundles=[{"CPU": 1, "memory": 1024**3}], strategy="PACK")
-            ray.get(self._cpu_pg.ready(), timeout=PG_READY_TIMEOUT)
-        else:
-            self._cpu_pg = AutoCPUWorkers.build_placement_group(cpu_resources)
+
+        judger_total_bundles = [
+            {"CPU": cfg.num_cpus_per_actor, "memory": cfg.num_cpus_per_actor * 1024**3}
+            for cfg in judger_config.reward_judger_configs
+            for _ in range(cfg.num_ray_actors)
+        ]
+        judger_total_cpus = sum(
+            cfg.num_cpus_per_actor * cfg.num_ray_actors for cfg in judger_config.reward_judger_configs
+        )
+        judger_total_memory = sum(
+            cfg.num_cpus_per_actor * 1024**3 * cfg.num_ray_actors for cfg in judger_config.reward_judger_configs
+        )
+
+        if cpu_resources is not None:
+            # NOTE: Here we only check CPU and memory for judger actors because only judger actors use CPU resources currently.
+            assert judger_total_cpus <= cpu_resources.num_cpus_per_worker, (
+                f"Not enough CPU resources for judger actors, "
+                f"required {judger_total_cpus}, but got {cpu_resources.num_cpus_per_worker}."
+            )
+            assert judger_total_memory <= cpu_resources.cpu_memory_per_worker, (
+                f"Not enough memory resources for judger actors, "
+                f"required {judger_total_memory}, but got {cpu_resources.cpu_memory_per_worker}."
+            )
+
+        self.logger.info(f"Creating judger placement group with bundles: {judger_total_bundles}")
+        self._judger_cpu_pg = placement_group(bundles=judger_total_bundles, strategy="SPREAD")
+        ray.get(self._judger_cpu_pg.ready(), timeout=PG_READY_TIMEOUT)
+
         # We need to build train controller first, and then build rollout dataflow to make
         # inference engines know how much memory they can utilize.
         self._train_controller = self._build_train_controller(train_worker_cfg)
@@ -399,6 +422,12 @@ class RLTrainer:
 
         self._writer = TensorboardWriter(log_dir / "tb")
 
+    def __del__(self):
+        if hasattr(self, "_writer") and self._writer is not None:
+            self._writer.close()
+        if hasattr(self, "_rollout_env_controller"):
+            ray.get(self._rollout_env_controller.shutdown.remote())
+
     def _resolve_load_checkpoint_cfg(
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
     ) -> LoadCheckpointConfig:
@@ -444,6 +473,8 @@ class RLTrainer:
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             seed=config.seed,
             debug=config.debug,
+            debug_rollout=config.debug_rollout,
+            rollout_steps=config.rollout_steps,
             trainer_cfg=config,
         )
         return self
@@ -455,7 +486,7 @@ class RLTrainer:
         judger_cfg: JudgerConfig,
         replay_buffer_config: ReplayBufferConfig,
     ) -> tuple[SingleTurnEnvironmentProxy, DataFlowProxy]:
-        env = SingleTurnEnvironment.remote("grpo", self._pg, rollout_cfg, self._cpu_pg, judger_cfg)
+        env = SingleTurnEnvironment.remote("grpo", self._pg, rollout_cfg, self._judger_cpu_pg, judger_cfg)
         flow = DataFlow.remote("grpo", dataflow_cfg, replay_buffer_config, env)
         return env, flow
 
