@@ -144,8 +144,8 @@ class WorkerInputItem(TypedDict):
 
 class RLOtherLog(TypedDict):
     maxvio: NotRequired[float]
-    consumed_tokens: float
-    consumed_img_tokens: NotRequired[float]
+    step_consumed_tokens: int
+    step_consumed_img_tokens: NotRequired[float]
     efficient_attn_ratio: float
     max_ratio: NotRequired[float]
     loss: NotRequired[float]
@@ -323,7 +323,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device("cpu")
         return loss_ctx_input_list
 
-    def _update_other_log(self, other_log: OtherLog) -> RLOtherLog:
+    def _get_rl_other_log(self, other_log: OtherLog) -> RLOtherLog:
         from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 
         extra_info: ModelForwardExtraLogInfo | dict = other_log.get("extra_info", {})
@@ -339,9 +339,9 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         rl_other_log: RLOtherLog = {
             "maxvio": other_log.get("maxvio", 0.0),
-            "consumed_tokens": other_log.get("consumed_tokens", 0.0),
-            "consumed_img_tokens": other_log.get("consumed_img_tokens", 0.0),
-            "efficient_attn_ratio": other_log.get("efficient_attn_ratio", 0.0),
+            "step_consumed_tokens": other_log["step_consumed_tokens"],
+            "step_consumed_img_tokens": float(other_log.get("step_consumed_img_tokens", 0.0)),
+            "efficient_attn_ratio": other_log["efficient_attn_ratio"],
             "max_ratio": extra_info_dict.get("max_ratio", 0.0),
             "loss": extra_info_dict.get("loss", 0.0),
         }
@@ -569,7 +569,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
-            rl_other_log = self._update_other_log(other_log)  # type: ignore[arg-type]
+            rl_other_log = self._get_rl_other_log(other_log)  # type: ignore[arg-type]
             rl_other_log["grad_norm"] = grad_norm.item()
             worker_log_item["train_metrics"].append(WorkerTrainLogItem(loss_log=loss_log, rl_other_log=rl_other_log))
 

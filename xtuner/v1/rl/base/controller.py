@@ -1,5 +1,5 @@
 import math
-from typing import List, Literal, TypedDict
+from typing import Literal, TypedDict
 
 import ray
 import torch
@@ -165,7 +165,7 @@ class RawTrainingController:
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
     @ray_method
-    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int) -> List[WorkerLogItem]:
+    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int) -> list[WorkerLogItem]:
         has_rollout_routed_experts = False
         language_cfg = None
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:

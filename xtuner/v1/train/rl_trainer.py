@@ -486,7 +486,7 @@ class RLTrainer:
             ray.get(self._rollout_env_controller.update_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
-            self._save_trajectories(eval_data_groups, trajectory_save_path, is_eval=True)
+            self._save_trajectories(eval_data_groups, trajectory_save_path, 0, is_eval=True)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
             tb_scores = {f"eval/{k}": v for k, v in scores.items()}
             self._writer.add_scalars(
@@ -504,7 +504,7 @@ class RLTrainer:
         )
         with timer("save_trajectory", step_timer_dict):
             trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
-            self._save_trajectories(data_groups, trajectory_save_path)
+            self._save_trajectories(data_groups, trajectory_save_path, rollout_idx)
             self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
         self._writer.add_scalar(
             tag="time/save_trajectory", scalar_value=step_timer_dict["save_trajectory"], global_step=rollout_idx
@@ -620,7 +620,7 @@ class RLTrainer:
             with timer("evaluation", step_timer_dict):
                 scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
-                self._save_trajectories(eval_data_groups, trajectory_save_path, is_eval=True)
+                self._save_trajectories(eval_data_groups, trajectory_save_path, rollout_idx, is_eval=True)
                 self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
             tb_scores = {f"eval/{k}": v for k, v in scores.items()}
             self._writer.add_scalars(
@@ -783,7 +783,7 @@ class RLTrainer:
         }
         return data_batches, info_dict
 
-    def _save_trajectories(self, data_groups, save_path, is_eval: bool = False):
+    def _save_trajectories(self, data_groups, save_path, rollout_idx, is_eval: bool = False):
         rewards = []
 
         rollout_response_len_list = []
@@ -840,7 +840,7 @@ class RLTrainer:
             tb_item = {f"{tb_prefix}/{k}": v for k, v in item.items()}
             self._writer.add_scalars(
                 tag_scalar_dict=tb_item,
-                global_step=self._cur_step,
+                global_step=rollout_idx,
             )
             for group in data_groups:
                 if not is_valid_for_training(group):
