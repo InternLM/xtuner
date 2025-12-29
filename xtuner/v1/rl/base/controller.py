@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Literal, TypedDict
 
 import ray
@@ -13,7 +14,7 @@ from xtuner.v1.utils import ray_method
 from .worker import TrainingWorker
 
 
-TRAIN_RAY_GET_TIMEOUT = 5 * 3600  # 5 hours
+TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
 
 class ColateItem(TypedDict):

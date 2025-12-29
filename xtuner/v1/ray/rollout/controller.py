@@ -23,7 +23,7 @@ from xtuner.v1.utils import get_logger
 from .worker import RolloutWorker
 
 
-ROLLOUT_RAY_GET_TIMEOUT = 5 * 3600
+ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
 
 @dataclass
