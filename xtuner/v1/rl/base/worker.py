@@ -473,10 +473,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                     rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
                 )
 
-            if not mask.any():  # all padding tokens, skip
-                self.logger.warning(f"Skip batch {i} as all tokens are padding.")
-                continue
-
             if len(rollout_logprobs_list) > 0:
                 # calculate importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
@@ -526,7 +522,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             if len(rollout_is_metrics) > 0:
                 worker_log_item["rollout_is_metrics"] = rollout_is_metrics
                 logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
-        self.logger.info(logger_msg)
+
+        if self.rank == 0:
+            self.logger.info(logger_msg)
 
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
