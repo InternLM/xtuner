@@ -19,7 +19,6 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from xtuner.v1._writer import TensorboardWriter
 from xtuner.v1.data_proto.rl_data import is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.engine.train_engine import LossLog, OtherLog
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, AutoCPUWorkers, CPUResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
@@ -556,15 +555,15 @@ class RLTrainer:
         self._writer.add_scalar(tag="time/training", scalar_value=step_timer_dict["training"], global_step=rollout_idx)
 
         rank0_log_item = workers_log_item[0]
+        # These metrics are already aggregated across distributed workers and logging only the metrics from rank 0.
         rank0_rollout_is_metrics = rank0_log_item.get("rollout_is_metrics")
         rank0_mismatch_metrics = rank0_log_item.get("mismatch_metrics")
         rank0_rollout_entropy = rank0_log_item.get("rollout_entropy")
-        # These metrics are already aggregated across distributed workers and logging only the metrics from rank 0.
         if rank0_rollout_is_metrics is not None:
             tb_rollout_is_metrics = {f"rollout_is/{k}": v for k, v in rank0_rollout_is_metrics.items()}
             self._writer.add_scalars(tag_scalar_dict=tb_rollout_is_metrics, global_step=rollout_idx)
         if rank0_mismatch_metrics is not None:
-            tb_mismatch_metrics = {f"mismatch/{k}": v for k, v in rank0_mismatch_metrics.items()}
+            tb_mismatch_metrics = {f"{k}": v for k, v in rank0_mismatch_metrics.items()}
             self._writer.add_scalars(tag_scalar_dict=tb_mismatch_metrics, global_step=rollout_idx)
         if rank0_rollout_entropy is not None:
             tb_rollout_entropy = {"entropy/rollout": rank0_rollout_entropy}
@@ -575,27 +574,14 @@ class RLTrainer:
         for worker_idx, log_item in enumerate(workers_log_item):
             mini_batch_metrics: dict[str, List[float]] = {}
             for mini_batch_log in log_item["train_metrics"]:
-                loss_log: LossLog = mini_batch_log["loss_log"]
-                other_log: OtherLog = mini_batch_log["other_log"]
+                rl_worker_log = {**mini_batch_log["loss_log"], **mini_batch_log["rl_other_log"]}
                 # Aggregate logs for the mini-batch
-                for k, v in loss_log.items():
-                    v = v.item() if isinstance(v, torch.Tensor) else v
-                    v = cast(float, v)
-                    mini_batch_metrics.setdefault(k, []).append(v)
-
-                for k, v in other_log.items():
-                    if k == "extra_info" and isinstance(v, dict):
-                        for extra_k, extra_v in v.items():
-                            extra_v = extra_v.item() if isinstance(extra_v, torch.Tensor) else extra_v
-                            mini_batch_metrics.setdefault(extra_k, []).append(extra_v)
-                    else:
-                        v = v.item() if isinstance(v, torch.Tensor) else v
-                        v = cast(float, v)
-                        mini_batch_metrics.setdefault(k, []).append(v)
+                for k, v in rl_worker_log.items():
+                    mini_batch_metrics.setdefault(k, []).append(cast(float, v))
 
             for key, value in mini_batch_metrics.items():
                 for i, v in enumerate(value):
-                    global_step = rollout_idx * len(value) + i
+                    global_step = (rollout_idx - 1) * len(value) + i + 1
                     self._writer.add_scalar(
                         tag=f"train_metrics/worker_{worker_idx}/{key}",
                         scalar_value=v,
@@ -851,7 +837,7 @@ class RLTrainer:
             json.dump(item, f, ensure_ascii=False, indent=2)
             f.write("\n")
             tb_prefix = "eval" if is_eval else "response"
-            tb_item = {f"{tb_prefix}/{k}": v for k, v in item.items() if isinstance(v, (int, float))}
+            tb_item = {f"{tb_prefix}/{k}": v for k, v in item.items()}
             self._writer.add_scalars(
                 tag_scalar_dict=tb_item,
                 global_step=self._cur_step,

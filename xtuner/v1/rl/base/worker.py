@@ -142,9 +142,19 @@ class WorkerInputItem(TypedDict):
     rollout_logprobs: torch.Tensor | None
 
 
+class RLOtherLog(TypedDict):
+    maxvio: NotRequired[float]
+    consumed_tokens: float
+    consumed_img_tokens: NotRequired[float]
+    efficient_attn_ratio: float
+    max_ratio: NotRequired[float]
+    loss: NotRequired[float]
+    grad_norm: NotRequired[float]
+
+
 class WorkerTrainLogItem(TypedDict):
     loss_log: LossLog
-    other_log: OtherLog
+    rl_other_log: RLOtherLog
 
 
 class WorkerLogItem(TypedDict):
@@ -313,17 +323,29 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device("cpu")
         return loss_ctx_input_list
 
-    def _update_other_log(self, other_log: dict):
+    def _update_other_log(self, other_log: OtherLog) -> RLOtherLog:
         from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 
-        extra_info = other_log.get("extra_info", {})
+        extra_info: ModelForwardExtraLogInfo | dict = other_log.get("extra_info", {})
         if isinstance(extra_info, ModelForwardExtraLogInfo):
             extra_info_dict = extra_info.get()
         else:
             extra_info_updated = ModelForwardExtraLogInfo(extra_info)
             extra_info_dict = extra_info_updated.get()
-        other_log["extra_info"] = extra_info_dict
-        return other_log
+
+        for k, v in extra_info_dict.items():
+            if isinstance(v, torch.Tensor):
+                extra_info_dict[k] = v.item()
+
+        rl_other_log: RLOtherLog = {
+            "maxvio": other_log.get("maxvio", 0.0),
+            "consumed_tokens": other_log.get("consumed_tokens", 0.0),
+            "consumed_img_tokens": other_log.get("consumed_img_tokens", 0.0),
+            "efficient_attn_ratio": other_log.get("efficient_attn_ratio", 0.0),
+            "max_ratio": extra_info_dict.get("max_ratio", 0.0),
+            "loss": extra_info_dict.get("loss", 0.0),
+        }
+        return rl_other_log
 
     @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
@@ -547,20 +569,13 @@ class TrainingWorker(SingleAcceleratorWorker):
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,
             )
-            other_log = self._update_other_log(other_log)  # type: ignore[arg-type]
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
-            worker_log_item["train_metrics"].append(WorkerTrainLogItem(loss_log=loss_log, other_log=other_log))
+            rl_other_log = self._update_other_log(other_log)  # type: ignore[arg-type]
+            rl_other_log["grad_norm"] = grad_norm.item()
+            worker_log_item["train_metrics"].append(WorkerTrainLogItem(loss_log=loss_log, rl_other_log=rl_other_log))
 
-            log_info = dict()  # type: ignore[var-annotated]
-            log_info.update(loss_log)
-            for k, v in other_log.items():
-                if k == "extra_info":
-                    for extra_k, extra_v in v.items():
-                        log_info[extra_k] = extra_v.item() if isinstance(extra_v, torch.Tensor) else extra_v
-                else:
-                    log_info[k] = v.item() if isinstance(v, torch.Tensor) else v
-            log_info["grad_norm"] = grad_norm.item()
+            log_info = {**loss_log, **rl_other_log}
             log_str = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in log_info.items()
