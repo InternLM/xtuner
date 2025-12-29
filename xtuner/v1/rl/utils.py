@@ -75,7 +75,7 @@ def register_cleanup():
     atexit.register(cleanup_once)
 
 
-# Adapted from https://github.com/volcengine/verl/blob/main/verl/utils/seqlen_balancing.py
+# Adapted from https://github.com/volcengine/verl/blob/eb6991a622e15c494ee8403e2289708b2a3b278f/verl/utils/seqlen_balancing.py#L37
 def karmarkar_karp(seqlen_list: list[int], k_partitions: int, equal_size: bool):
     # see: https://en.wikipedia.org/wiki/Largest_differencing_method
     class Set:

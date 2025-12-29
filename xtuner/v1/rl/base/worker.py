@@ -568,7 +568,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"Data batches length {num_batches} must be equal to optimizer_steps {self._optimizer_steps}."
         )
 
-        packs_per_step = []
+        packd_batch_num_per_step = []
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_input_list: list[RLLossContextInputItem] = []
         rollout_logprobs_list: list[torch.Tensor | None] = []
@@ -581,7 +581,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         for step_idx, step_data_batches in enumerate(data_batches):
-            packs_per_step.append(len(step_data_batches))
+            packd_batch_num_per_step.append(len(step_data_batches))
             for data in step_data_batches:
                 seq_ctx = self._resolve_ray_data(data["seq_ctx"], language_cfg)
                 rollout_logprobs = data.get("rollout_logprobs")
@@ -612,11 +612,16 @@ class TrainingWorker(SingleAcceleratorWorker):
         global_grad_tokens = rank_grad_tokens.clone()
         dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
 
+        worker_log_item: WorkerLogItem = {
+            "train_entropy": 0.0,
+            "train_metrics": [],
+        }
         log_parts = []
 
         sum_entropy = cast(torch.Tensor, metrics["sum_entropy"])
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
-        avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+        avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else torch.tensor(0.0)
+        worker_log_item["train_entropy"] = avg_sum_entropy.item()
         log_parts.append(f"avg entropy: {avg_sum_entropy:.4f}")
 
         sum_rollout_entropy = metrics.get("sum_rollout_entropy")
@@ -626,24 +631,29 @@ class TrainingWorker(SingleAcceleratorWorker):
                 sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else torch.tensor(0.0)
             )
             worker_log_item["rollout_entropy"] = avg_rollout_entropy.item()
-            logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
+            log_parts.append(f"avg rollout entropy: {avg_rollout_entropy:.4f}")
 
         all_mismatch_metrics = metrics.get("all_mismatch_metrics", [])
-        if all_mismatch_metrics:
+        if len(all_mismatch_metrics) > 0:
             mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
             if len(mismatch_metrics) > 0:
                 worker_log_item["mismatch_metrics"] = mismatch_metrics
-                logger_msg += f"\n rollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}"
+                log_parts.append(f"\n rollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}")
 
         all_rollout_is_metrics = metrics.get("all_rollout_is_metrics", [])
-        if all_rollout_is_metrics:
+        if len(all_rollout_is_metrics) > 0:
             rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
             if len(rollout_is_metrics) > 0:
                 worker_log_item["rollout_is_metrics"] = rollout_is_metrics
-                logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
+                log_parts.append(
+                    f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
+                )
 
-        if self.rank == 0:
-            self.logger.info(logger_msg)
+        logger_msg = f"Rollout {rollout_idx}: " + ", ".join(part for part in log_parts if not part.startswith("\n"))
+        for part in log_parts:
+            if part.startswith("\n"):
+                logger_msg += part
+        self.logger.info(logger_msg)
 
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
@@ -666,7 +676,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         start_idx = 0
         for i in range(self._optimizer_steps):
-            num_packs_this_step = packs_per_step[i]
+            num_packs_this_step = packd_batch_num_per_step[i]
             end_idx = start_idx + num_packs_this_step
             batches_seq_ctx = seq_ctx_list[start_idx:end_idx]
             batches_loss_ctx_input = loss_ctx_input_list[start_idx:end_idx]

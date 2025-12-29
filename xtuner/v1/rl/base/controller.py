@@ -1,7 +1,8 @@
 import math
 import os
 import random
-from typing import Literal, TypedDict, cast
+from pathlib import Path
+from typing import Literal, cast
 
 import numpy as np
 import ray
@@ -14,17 +15,10 @@ from xtuner.v1.rl.utils import get_seqlen_balanced_partitions
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger, ray_method
 
-from .worker import TrainingWorker, WorkerLogItem
-
 
 TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
-
-class ColateItem(TypedDict):
-    seq_ctx: SequenceContext
-    shifted_labels: torch.Tensor
-    advantage: float
-    rollout_logprobs: torch.Tensor | None
+from .worker import TrainingWorker, WorkerInputItem, WorkerLogItem
 
 
 class RawTrainingController:
@@ -36,6 +30,17 @@ class RawTrainingController:
             self.workers[0].get_data_replicate_size.remote(),
         ]
         self.model_cfg, self.worker_cfg, self.data_replicate_size = ray.get(refs)
+        log_dir = self.worker_cfg.log_dir
+        self.log_dir = None
+        if log_dir is not None:
+            self.log_dir = Path(log_dir) if isinstance(log_dir, str) else log_dir
+            self.logger = get_logger(log_dir=self.log_dir, tag="TrainingController")
+        else:
+            self.logger = get_logger()
+        self.is_qwen3_vl = False
+        self.has_rollout_routed_experts = False
+        self.has_rollout_logprobs = False
+        self.n_routed_experts = None
 
     # TODO(hha): 这个逻辑不够通用，应该复用 sft 函数，从而支持 expand soft pack
     def _get_pack_infos(self, dataset, num_tokens, target, random=None):
@@ -100,7 +105,7 @@ class RawTrainingController:
             pad_len = pack_max_length - total_len
             seq_ctx_list = [data_batches[i]["seq_ctx"] for i in indices]
             label_list = [data_batches[i]["shifted_labels"] for i in indices]
-            advantage_list = [data_batches[i]["advantage"] for i in indices]
+            advantage_list = [data_batches[i]["advantages"] for i in indices]
 
             rollout_logprobs_list = None
             if "rollout_logprobs" in data_batches[0] and data_batches[0]["rollout_logprobs"] is not None:
@@ -177,10 +182,10 @@ class RawTrainingController:
         # 排序后这条 pack 会被放在最前面，导致 rank0 的第一个 step 消耗的有效 token 数往往少于其他 rank，是正常现象。
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
-    def _balance_split_batch(self, data_batches, partition_size):
+    def _balance_split_batch(self, data_batches: list[WorkerInputItem], partition_size) -> list[list[WorkerInputItem]]:
         """Reorder the data on single controller such that each dp rank gets
         similar total tokens."""
-        global_seqlen_lst = [data["seq_ctx"].input_ids.numel() for data in data_batches]
+        global_seqlen_lst = [data["seq_ctx"].input_ids.numel() for data in data_batches]  # type: ignore[union-attr]
         global_partition_lst = get_seqlen_balanced_partitions(
             global_seqlen_lst, k_partitions=partition_size, equal_size=True
         )
@@ -193,16 +198,12 @@ class RawTrainingController:
         get_logger().info(f"Balanced split into {partition_size} partitions with tokens: {tokens_in_partition}")
         return balanced_batches
 
-    def _create_padding_sample(
+    def _create_padding_item(
         self,
         pad_len: int,
         pack_max_length: int,
-        is_qwen3_vl: bool = False,
-        has_rollout_routed_experts: bool = False,
-        has_rollout_logprobs: bool = True,
-        n_routed_experts: int | None = None,
         split_size: int = 1024,
-    ):
+    ) -> WorkerInputItem:
         # padding input_ids
         pad_tokens = tuple(
             torch.zeros(1, split_size, dtype=torch.long, device="cpu") for _ in range(pad_len // split_size)
@@ -214,7 +215,7 @@ class RawTrainingController:
         pad_seq_ctx.num_padding = pad_len
 
         # padding mm positions_ids
-        if is_qwen3_vl:
+        if self.is_qwen3_vl:
             _position_ids_list = []
             for pad_token in pad_tokens:
                 _position_ids = torch.arange(pad_token.size(-1)).view(1, 1, -1).expand(3, 1, -1)
@@ -224,17 +225,17 @@ class RawTrainingController:
             pad_seq_ctx.position_ids = position_ids
 
         # padding rollout routed experts
-        if has_rollout_routed_experts:
-            assert n_routed_experts, "n_routed_experts must be provided when has_rollout_routed_experts is True"
+        if self.has_rollout_routed_experts:
+            assert self.n_routed_experts, "n_routed_experts must be provided when has_rollout_routed_experts is True"
             if pad_len == pack_max_length:
                 pad_rand_index = torch.randint(
                     low=0, high=1, size=(1, 1, 1)
                 )  # add dummy data, true data will be initialized in train worker.fit
             else:
-                pad_rand_index = torch.randint(low=0, high=n_routed_experts, size=(pad_len, 1, 1))
+                pad_rand_index = torch.randint(low=0, high=self.n_routed_experts, size=(pad_len, 1, 1))
             pad_seq_ctx.rollout_routed_experts = pad_rand_index
 
-        pad_labels = torch.full((1, pad_len), -100, dtype=torch.long, device="cpu")
+        pad_labels = cast(torch.LongTensor, torch.full((1, pad_len), -100, dtype=torch.int64, device="cpu"))
         pad_advantage_length = pack_max_length if pad_len == pack_max_length else math.ceil(pad_len / 1024)
         pad_advantage = torch.full(
             (1, pad_advantage_length),
@@ -243,24 +244,27 @@ class RawTrainingController:
             device="cpu",
         )
         pad_rollout_logprobs = (
-            torch.zeros(1, pad_len, dtype=torch.float32, device="cpu") if has_rollout_logprobs else None
+            torch.zeros(1, pad_len, dtype=torch.float32, device="cpu") if self.has_rollout_logprobs else None
         )
 
-        return {
+        padding_item: WorkerInputItem = {
             "seq_ctx": pad_seq_ctx,
             "shifted_labels": pad_labels,
             "advantages": pad_advantage,
             "rollout_logprobs": pad_rollout_logprobs,
         }
+        return padding_item
 
-    def _pack(self, mini_batch, pack_max_length):
+    def _rearrange_batch_for_pack(
+        self, mini_batch: list[WorkerInputItem], pack_max_length: int
+    ) -> list[list[WorkerInputItem]]:
         assert len(mini_batch) > 0, "mini_batch should not be empty"
         seqlen_list = []
         for data in mini_batch:
-            assert data["seq_ctx"].input_ids.numel() <= pack_max_length, (
-                f"Single sample seq len {data['seq_ctx'].input_ids.numel()} exceeds pack_max_length {pack_max_length}"
+            assert data["seq_ctx"].input_ids.numel() <= pack_max_length, (  # type: ignore[union-attr]
+                f"Single sample seq len {data['seq_ctx'].input_ids.numel()} exceeds pack_max_length {pack_max_length}"  # type: ignore[union-attr]
             )
-            seqlen_list.append(data["seq_ctx"].input_ids.numel())
+            seqlen_list.append(data["seq_ctx"].input_ids.numel())  # type: ignore[union-attr]
         total_length = sum(seqlen_list)
 
         if total_length <= pack_max_length:
@@ -277,15 +281,10 @@ class RawTrainingController:
             packed_mini_batches.append(packed_batch)
         return packed_mini_batches
 
-    def _get_data_batches_properties(self, data_batches: list[ColateItem]):
+    def _set_data_batches_properties(self, data_batches: list[WorkerInputItem]):
         """Extract properties from the first element of data_batches."""
         if not data_batches:
-            return {
-                "is_qwen3_vl": False,
-                "has_rollout_routed_experts": False,
-                "has_rollout_logprobs": False,
-                "n_routed_experts": None,
-            }
+            return
 
         first_item = data_batches[0]
         seq_ctx = first_item["seq_ctx"]
@@ -300,28 +299,83 @@ class RawTrainingController:
             if isinstance(self.model_cfg, BaseComposeConfig):
                 language_cfg = self.model_cfg.text_config
 
-        return {
-            "is_qwen3_vl": is_qwen3_vl,
-            "has_rollout_routed_experts": has_rollout_routed_experts,
-            "has_rollout_logprobs": has_rollout_logprobs,
-            "n_routed_experts": language_cfg.n_routed_experts if language_cfg is not None else None,
+        self.is_qwen3_vl = is_qwen3_vl
+        self.has_rollout_routed_experts = has_rollout_routed_experts
+        self.has_rollout_logprobs = has_rollout_logprobs
+        self.n_routed_experts = language_cfg.n_routed_experts if language_cfg is not None else None
+
+    def _pad_and_pack_batches(self, batch4pack: list[WorkerInputItem], pack_max_length: int) -> WorkerInputItem:
+        seq_ctx_list = [item["seq_ctx"] for item in batch4pack]
+        label_list = [item["shifted_labels"] for item in batch4pack]
+        advantage_list = [torch.tensor([item["advantages"]]).float().unsqueeze(0) for item in batch4pack]
+        rollout_logprobs_list = [
+            item["rollout_logprobs"] if self.has_rollout_logprobs else None for item in batch4pack
+        ]
+        cur_length = 0
+        for item in batch4pack:
+            cur_length += item["seq_ctx"].input_ids.numel()  # type: ignore[union-attr]
+        padding_len = pack_max_length - cur_length
+
+        if padding_len > 0:
+            padding_item = self._create_padding_item(padding_len, pack_max_length)
+            seq_ctx_list.append(padding_item["seq_ctx"])
+            label_list.append(padding_item["shifted_labels"])
+            advantage_list.append(padding_item["advantages"])
+            rollout_logprobs_list.append(padding_item["rollout_logprobs"])
+
+        packed_seq_ctx = SequenceContext.pack(seq_ctx_list)
+        packed_shifted_labels = torch.cat(label_list, dim=1)  # type: ignore[arg-type]
+        packed_shifted_labels = cast(torch.LongTensor, packed_shifted_labels)
+        cu_seq_lens_q = packed_seq_ctx.cu_seq_lens_q
+        packed_num_tokens = cu_seq_lens_q[1:] - cu_seq_lens_q[:-1]
+        packed_advantages = torch.cat(advantage_list, dim=1)
+        packed_advantages = torch.repeat_interleave(packed_advantages, packed_num_tokens, dim=1)
+        if self.has_rollout_logprobs:
+            cast_rollout_logprobs_list = [cast(torch.Tensor, item) for item in rollout_logprobs_list]
+            packed_rollout_logprobs = torch.cat(cast_rollout_logprobs_list, dim=1)
+        else:
+            packed_rollout_logprobs = None
+
+        optimizer_step_packs: WorkerInputItem = {
+            "seq_ctx": packed_seq_ctx,
+            "shifted_labels": packed_shifted_labels,
+            "advantages": packed_advantages,
+            "rollout_logprobs": packed_rollout_logprobs,
         }
+        return optimizer_step_packs
+
+    def _pad_to_max_packs_across_workes(
+        self,
+        packed_data_batches: list[list[list[WorkerInputItem]]],
+        step_idx: int,
+        max_packs: int,
+        pack_max_length: int,
+    ):
+        for dp_rank in range(len(packed_data_batches)):
+            num_current_packs = len(packed_data_batches[dp_rank][step_idx])
+            num_padding_packs = max_packs - num_current_packs
+
+            if num_padding_packs > 0:
+                padding_item = self._create_padding_item(pack_max_length, pack_max_length)
+                padding_items = [padding_item for _ in range(num_padding_packs)]
+                packed_data_batches[dp_rank][step_idx].extend(padding_items)
 
     @ray_method
     def fit(
-        self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int, enable_dp_balance: bool = True
-    ):
-        batch_props = self._get_data_batches_properties(data_batches)
-        is_qwen3_vl = batch_props["is_qwen3_vl"]
-        has_rollout_routed_experts = batch_props["has_rollout_routed_experts"]
-        has_rollout_logprobs = batch_props["has_rollout_logprobs"]
-        n_routed_experts = batch_props["n_routed_experts"]
+        self,
+        data_batches: list[WorkerInputItem],
+        pack_max_length: int,
+        rollout_idx: int,
+        enable_dp_balance: bool = True,
+    ) -> list[WorkerLogItem]:
+        self._set_data_batches_properties(data_batches)
 
         world_size = len(self.workers)
         dp_size = world_size // self.data_replicate_size
         assert world_size % self.data_replicate_size == 0, "world_size must be divisible by data_replicate_size"
         optimizer_steps = self.worker_cfg.optimizer_steps
 
+        batches_per_dp_group: list[list[WorkerInputItem]]
         if enable_dp_balance:
             # 按照 dp_size 对数据进行重新分配，保证每个 dp rank 上的 token 数量大致相同
             batches_per_dp_group = self._balance_split_batch(data_batches, dp_size)
@@ -329,85 +383,44 @@ class RawTrainingController:
             batches_per_dp_group = np.array_split(data_batches, dp_size)
             tokens_in_partition = []
             for batch in batches_per_dp_group:
-                tokens_in_partition.append(sum(data["seq_ctx"].input_ids.numel() for data in batch))
-            get_logger().info(f"default split into {dp_size} partitions with tokens: {tokens_in_partition}")
+                dp_group_total_tokens = 0
+                for data in batch:
+                    dp_group_total_tokens += data["seq_ctx"].input_ids.numel()  # type: ignore[union-attr]
+                tokens_in_partition.append(dp_group_total_tokens)
+            self.logger.info(f"default split into {dp_size} partitions with tokens: {tokens_in_partition}")
 
-        packed_data_batches: list[list[list[dict]]] = [[[] for _ in range(optimizer_steps)] for _ in range(dp_size)]
-        max_packs_per_card = [0] * optimizer_steps
+        packed_data_batches: list[list[list[WorkerInputItem]]] = [
+            [[] for _ in range(optimizer_steps)] for _ in range(dp_size)
+        ]
+        max_packs_per_step = [0] * optimizer_steps
 
         for dp_rank, dp_worker_data_batches in enumerate(batches_per_dp_group):
-            # 每个worker 内部按照optimizer_steps将token均分
+            # 每个worker内部按照optimizer_steps将token均分
             if enable_dp_balance:
                 random.shuffle(dp_worker_data_batches)
-            mini_batch_for_steps = self._balance_split_batch(dp_worker_data_batches, optimizer_steps)
+            mini_batch_for_steps: list[list[WorkerInputItem]] = self._balance_split_batch(
+                dp_worker_data_batches, optimizer_steps
+            )
 
             for step_idx, step_mini_batch in enumerate(mini_batch_for_steps):
-                # pack
-                pack_mini_batch = self._pack(step_mini_batch, pack_max_length)
-                if len(pack_mini_batch) > max_packs_per_card[step_idx]:
-                    max_packs_per_card[step_idx] = len(pack_mini_batch)
+                # rearrange mini batch to fit into packs of pack_max_length
+                batch4pack_list: list[list[WorkerInputItem]] = self._rearrange_batch_for_pack(
+                    step_mini_batch, pack_max_length
+                )
+                if len(batch4pack_list) > max_packs_per_step[step_idx]:
+                    max_packs_per_step[step_idx] = len(batch4pack_list)
 
-                for pack in pack_mini_batch:
-                    seq_ctx_list = [item["seq_ctx"] for item in pack]
-                    label_list = [item["shifted_labels"] for item in pack]
-                    advantage_list = [torch.tensor([item["advantage"]]).float().unsqueeze(0) for item in pack]
-                    rollout_logprobs_list = [
-                        item["rollout_logprobs"] if has_rollout_logprobs else None for item in pack
-                    ]
-                    padding_len = pack_max_length - sum([item["seq_ctx"].input_ids.numel() for item in pack])
-                    if padding_len > 0:
-                        padding_sample = self._create_padding_sample(
-                            padding_len,
-                            pack_max_length,
-                            is_qwen3_vl=is_qwen3_vl,
-                            has_rollout_routed_experts=has_rollout_routed_experts,
-                            has_rollout_logprobs=has_rollout_logprobs,
-                            n_routed_experts=n_routed_experts,
-                        )
-                        seq_ctx_list.append(padding_sample["seq_ctx"])
-                        label_list.append(padding_sample["shifted_labels"])
-                        advantage_list.append(padding_sample["advantages"])
-                        rollout_logprobs_list.append(padding_sample["rollout_logprobs"])
+                for batch4pack in batch4pack_list:
+                    # pad and pack batches into a single optimizer step pack
+                    step_pack = self._pad_and_pack_batches(batch4pack, pack_max_length)
+                    packed_data_batches[dp_rank][step_idx].append(step_pack)
 
-                    packed_seq_ctx = SequenceContext.pack(seq_ctx_list)
-                    packed_shifted_labels = torch.cat(label_list, dim=1)
-                    cu_seq_lens_q = packed_seq_ctx.cu_seq_lens_q
-                    packed_num_tokens = cu_seq_lens_q[1:] - cu_seq_lens_q[:-1]
-                    packed_advantages = torch.cat(advantage_list, dim=1)
-                    packed_advantages = torch.repeat_interleave(packed_advantages, packed_num_tokens, dim=1)
-                    if has_rollout_logprobs:
-                        cast_rollout_logprobs_list = [cast(torch.Tensor, item) for item in rollout_logprobs_list]
-                        packed_rollout_logprobs = torch.cat(cast_rollout_logprobs_list, dim=1)
-                    else:
-                        packed_rollout_logprobs = None
-                    packed_data_batches[dp_rank][step_idx].append(
-                        {
-                            "seq_ctx": packed_seq_ctx,
-                            "shifted_labels": packed_shifted_labels,
-                            "advantages": packed_advantages,
-                            "rollout_logprobs": packed_rollout_logprobs,
-                        }
-                    )
+        self.logger.info(f"Gradient accumulation for each optimizer steps: {max_packs_per_step}")
 
-        get_logger().info(f"Gradient accumulation steps: {max_packs_per_card}")
-        # padding for each worker to have same number of packs
-        for dp_rank in range(dp_size):
-            for step_idx in range(optimizer_steps):
-                max_packs = max_packs_per_card[step_idx]
-                num_current_packs = len(packed_data_batches[dp_rank][step_idx])
-                num_padding_packs = max_packs - num_current_packs
-
-                if num_padding_packs > 0:
-                    padding_sample = self._create_padding_sample(
-                        pack_max_length,
-                        pack_max_length,
-                        is_qwen3_vl=is_qwen3_vl,
-                        has_rollout_routed_experts=has_rollout_routed_experts,
-                        has_rollout_logprobs=has_rollout_logprobs,
-                        n_routed_experts=n_routed_experts,
-                    )
-                    padding_samples = [padding_sample for _ in range(num_padding_packs)]
-                    packed_data_batches[dp_rank][step_idx].extend(padding_samples)
+        # padding for each worker to have same number of packs in each optimizer step
+        for step_idx in range(optimizer_steps):
+            max_packs = max_packs_per_step[step_idx]
+            self._pad_to_max_packs_across_workes(packed_data_batches, step_idx, max_packs, pack_max_length)
 
         handles = []
         for worker_idx, worker in enumerate(self.workers):
