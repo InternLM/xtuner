@@ -7,9 +7,10 @@ from ray.actor import ActorProxy
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
+from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import ray_method
 
-from .worker import TrainingWorker
+from .worker import TrainingWorker, WorkerLogItem
 
 
 class ColateItem(TypedDict):
@@ -164,7 +165,7 @@ class RawTrainingController:
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
     @ray_method
-    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int):
+    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int) -> list[WorkerLogItem]:
         has_rollout_routed_experts = False
         language_cfg = None
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
@@ -255,7 +256,8 @@ class RawTrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        ray.get(handles)
+        log_infos = ray.get(handles)
+        return log_infos
 
     @ray_method
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
@@ -294,6 +296,20 @@ class RawTrainingController:
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         handles = [worker.save_hf.remote(hf_dir, save_dtype) for worker in self.workers]  # type: ignore
+        ray.get(handles)
+        return
+
+    @ray_method
+    def resume(self, load_checkpoint_cfg: LoadCheckpointConfig):
+        """Resume the training workers from the checkpoint."""
+        handles = [worker.resume.remote(load_checkpoint_cfg) for worker in self.workers]  # type: ignore
+        ray.get(handles)
+        return
+
+    @ray_method
+    def save_dcp(self, dcp_dir: str, no_save_optimizer: bool = False):
+        """Save the DCP checkpoint of the training workers."""
+        handles = [worker.save_dcp.remote(dcp_dir, no_save_optimizer) for worker in self.workers]  # type: ignore
         ray.get(handles)
         return
 

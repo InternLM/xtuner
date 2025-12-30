@@ -9,7 +9,7 @@ def native_dropout(input: Tensor, p: float, training: bool, inplace: bool) -> Te
 def npu_dropout(input: Tensor, p: float, training: bool, inplace: bool) -> Tensor:
     import torch_npu
 
-    return torch_npu._npu_dropout(input, p)
+    return torch_npu._npu_dropout(input, p)[0]  # _npu_dropout returns a tuple
 
 
 def get_dropout():

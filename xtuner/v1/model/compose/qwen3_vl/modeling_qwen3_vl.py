@@ -197,6 +197,7 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
                                        num_padding=seq_ctx.num_padding,
                                        sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
                                        inputs_embeds=inputs_embeds,
+                                       rollout_routed_experts=seq_ctx.rollout_routed_experts,
                                        deepstack_visual_embeds=deepstack_visual_embeds,
                                        visual_pos_masks=visual_pos_masks)
         outputs = self.language_model(

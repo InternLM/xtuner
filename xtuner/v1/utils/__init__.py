@@ -17,7 +17,7 @@ from .misc import (
     record_git_info,
 )
 from .pad import pad_to_max_length, pad_to_multiple_of
-from .profile import profile_time_and_memory, timer, timer_logger
+from .profile import profile_time, profile_time_and_memory, timer, timer_logger
 from .state import ForwardState
 from .type_helper import copy_method_signature, copy_signature, ray_method
 from .update_weights_utils import monkey_unpatch_torch_reductions
@@ -56,4 +56,5 @@ __all__ = [
     "IGNORE_INDEX",
     "monkey_unpatch_torch_reductions",
     "ray_method",
+    "profile_time",
 ]

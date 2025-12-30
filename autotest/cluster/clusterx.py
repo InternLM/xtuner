@@ -49,7 +49,6 @@ class ClusterTaskExecutor:
                 priority_preemptible=resource.get("preemptible", False),
                 num_nodes=resource.get("num_nodes", 1),
                 image=resource.get("image", None),
-                partition=resource.get("partition", "llmrazor_gpu"),
                 no_env=resource.get("no_env", True),
             )
 

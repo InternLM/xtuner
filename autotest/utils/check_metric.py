@@ -73,3 +73,6 @@ def check_result(base_path, cur_path, check_metric):
             logger.info(f"✓ {metric} check pass，the most relative error is {max_error:.2%} in {max_error_idx} step.")
     result = not fail_metric
     return result, f"Some metric check failed,{fail_metric}"
+
+if __name__ == "__main__":
+    print(check_result("./base//tracker.jsonl","./current/tracker.jsonl",{"grad_norm":0.000001,"loss/reduced_llm_loss":0.000001,"lr":0,"memory/max_memory_GB":0.2,"runtime_info/tgs":0.05,"runtime_info/text_tokens":0}))

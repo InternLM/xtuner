@@ -210,6 +210,7 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
                                        position_ids=seq_ctx.position_ids,
                                        num_padding=seq_ctx.num_padding,
                                        sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
+                                       rollout_routed_experts=seq_ctx.rollout_routed_experts,
                                        inputs_embeds=inputs_embeds)
 
         outputs = self.language_model(
