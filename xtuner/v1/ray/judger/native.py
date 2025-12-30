@@ -36,6 +36,7 @@ class NativeJudgerConfig(BaseModel):
     judger_name: str
     num_ray_actors: int = 1
     num_cpus_per_actor: int = 1
+    cpu_memory_per_actor: int = 1024**3
     reward_func: Optional[Callable] = Field(default=None, exclude=True)
     remote_url: Optional[str] = None
     preprocess_func: Optional[Callable] = None
@@ -60,9 +61,12 @@ class NativeJudgerConfig(BaseModel):
         workers_list = []
         for idx in range(self.num_ray_actors):
             bundle_idx = start_bundle_idx + idx
-            pg_options = {"num_cpus": self.num_cpus_per_actor}
+            pg_options = {"num_cpus": self.num_cpus_per_actor, "memory": self.cpu_memory_per_actor}
             assert pg.bundle_specs[bundle_idx].get("CPU", 1) >= self.num_cpus_per_actor, (
                 f"Placement group bundle {bundle_idx} does not have enough CPU resources."
+            )
+            assert pg.bundle_specs[bundle_idx].get("memory", 0) >= self.cpu_memory_per_actor, (
+                f"Placement group bundle {bundle_idx} does not have enough memory resources."
             )
             worker = (
                 ray.remote(NativeJudger)

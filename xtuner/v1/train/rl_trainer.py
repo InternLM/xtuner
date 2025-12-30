@@ -304,31 +304,18 @@ class RLTrainer:
             self._enable_initial_evaluate = evaluator_config.enable_initial_evaluate
         self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
 
-        judger_total_bundles = [
-            {"CPU": cfg.num_cpus_per_actor, "memory": cfg.num_cpus_per_actor * 1024**3}
-            for cfg in judger_config.reward_judger_configs
-            for _ in range(cfg.num_ray_actors)
-        ]
-        judger_total_cpus = sum(
-            cfg.num_cpus_per_actor * cfg.num_ray_actors for cfg in judger_config.reward_judger_configs
-        )
-        judger_total_memory = sum(
-            cfg.num_cpus_per_actor * 1024**3 * cfg.num_ray_actors for cfg in judger_config.reward_judger_configs
-        )
-
         if cpu_resources is not None:
             # NOTE: Here we only check CPU and memory for judger actors because only judger actors use CPU resources currently.
-            assert judger_total_cpus <= cpu_resources.num_cpus_per_worker, (
+            assert judger_config.total_cpus_needed <= cpu_resources.num_cpus_per_worker, (
                 f"Not enough CPU resources for judger actors, "
-                f"required {judger_total_cpus}, but got {cpu_resources.num_cpus_per_worker}."
+                f"required {judger_config.total_cpus_needed}, but got {cpu_resources.num_cpus_per_worker}."
             )
-            assert judger_total_memory <= cpu_resources.cpu_memory_per_worker, (
+            assert judger_config.total_memory_needed <= cpu_resources.cpu_memory_per_worker, (
                 f"Not enough memory resources for judger actors, "
-                f"required {judger_total_memory}, but got {cpu_resources.cpu_memory_per_worker}."
+                f"required {judger_config.total_memory_needed}, but got {cpu_resources.cpu_memory_per_worker}."
             )
 
-        self.logger.info(f"Creating judger placement group with bundles: {judger_total_bundles}")
-        self._judger_cpu_pg = placement_group(bundles=judger_total_bundles, strategy="SPREAD")
+        self._judger_cpu_pg = placement_group(bundles=judger_config.total_bundles_needed, strategy="SPREAD")
         ray.get(self._judger_cpu_pg.ready(), timeout=PG_READY_TIMEOUT)
 
         # We need to build train controller first, and then build rollout dataflow to make
