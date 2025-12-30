@@ -76,7 +76,9 @@ def check_result(base_path, cur_path, check_metric):
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
 
-    plot_all(case_name, check_metric, base_metrics, cur_metrics, Path(f"../{os.environ['GITHUB_RUN_ID']}"))
+    output_path = Path(f"../{os.environ['GITHUB_RUN_ID']}")
+    output_path.mkdir(parents=True, exist_ok=True)
+    plot_all(case_name, check_metric, base_metrics, cur_metrics, output_path)
 
     for metric, threshold in check_metric.items():
         max_error = 0.0

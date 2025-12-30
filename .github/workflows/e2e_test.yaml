@@ -34,3 +34,11 @@ jobs:
           conda env list
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
           pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          continue-on-error: true
+          path: ../${{ github.run_id }}
+          retention-days: 7
+          name: xtuner-e2e-${{ github.run_id }}
