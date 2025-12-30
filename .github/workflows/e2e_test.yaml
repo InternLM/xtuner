@@ -39,6 +39,7 @@ jobs:
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
           pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
           sleep 300
+          ls ./
           ls ../${{ github.run_id }}
 
       - name: Upload Artifacts
