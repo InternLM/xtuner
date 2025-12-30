@@ -221,7 +221,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._sft_dataloader: Dataloader | None = None
         self._sft_dataloader_iter: Iterable | None = None
         self._sft_loss_cfg: CELossConfig | None = None
-        self._num_sft_step_after_rl = worker_cfg.num_sft_step_after_rl
+        self._sft_num_step_after_rl = worker_cfg.sft_num_step_after_rl
 
         self._num_count_rl_step = 0
         self._sft_cur_epoch = 0
@@ -641,7 +641,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         # ====== SFT step ======
         self._num_count_rl_step += 1
-        if self._sft_dataloader is not None and self._num_count_rl_step % self._num_sft_step_after_rl == 0:
+        if self._sft_dataloader is not None and self._num_count_rl_step % self._sft_num_step_after_rl == 0:
             self.logger.info(f"Train SFT after {self._num_count_rl_step} RL steps")
             if self._sft_dataloader_iter is None:
                 self._sft_dataloader_iter = iter(self._sft_dataloader)
@@ -751,7 +751,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
 
         self.logger.info(
-            f"Step [{self._num_count_rl_step}] data_time: {data_time:.4f} time: {step_time:.4f} "
+            f"Step {self._num_count_rl_step}: data_time: {data_time:.4f} time: {step_time:.4f} "
             f"text_tokens: {local_step_consumed_tokens} "
             f"step_consumed_tokens: {step_consumed_tokens} "
             f"total_consumed_tokens: {total_consumed_tokens} "
