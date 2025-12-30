@@ -1,8 +1,10 @@
-from typing import Any, Dict, List, Optional, TypedDict
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, TypeAlias, TypedDict
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import Annotated
+from typing_extensions import Annotated, NotRequired
 
 from xtuner.v1.utils import StrEnum
 
@@ -11,6 +13,13 @@ from xtuner.v1.utils import StrEnum
 # ====================================
 from xtuner.v1.utils.logger import get_logger
 
+
+if TYPE_CHECKING:
+    import ray
+
+    RayObjectRef = ray.ObjectRef
+else:
+    RayObjectRef: TypeAlias = Any
 
 logger = get_logger()
 
@@ -46,7 +55,7 @@ class RolloutState(StrEnum):
     SKIPPED = "skipped"
 
     @staticmethod
-    def from_str(state_str: str) -> "RolloutState":
+    def from_str(state_str: str) -> RolloutState:
         for state in RolloutState:
             if state.value == state_str:
                 return state
@@ -72,6 +81,12 @@ class RLUIDItem(BaseModel):
     version: int = -1
 
 
+class MultimodalTrainInfo(TypedDict):
+    pixel_values: NotRequired[list[int] | RayObjectRef | None]  # type: ignore[valid-type]
+    image_grid_thw: NotRequired[list[int]]
+    position_ids: NotRequired[list[int]]
+
+
 class RLDatasetItem(BaseModel):
     """Represents the data structure output from the dataset.
 
@@ -86,14 +101,18 @@ class RLDatasetItem(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
-    messages: Optional[List[Dict[str, Any]]] = None
-    input_ids: Optional[List[int]] = None
-    num_tokens: Optional[int] = None
-    ability: Optional[str] = None
-    reward_model: Optional[Dict[str, Any]] = None
-    data_source: Optional[Dict[str, Any]] = None
-    extra_info: Dict[str, Any] = dict()
-    multimodal_train_info: Optional[Dict[str, Any]] = None
+    messages: list[dict[str, Any]] | None = None
+    input_ids: list[int] | None = None
+    num_tokens: int | None = None
+    ability: str | None = None
+    reward_model: dict[str, Any] | None = None
+    data_source: dict[str, Any] | None = None
+    extra_info: dict[str, Any] = dict()
+    multimodal_train_info: MultimodalTrainInfo | None = None
+
+
+class RolloutExtraInfo(TypedDict):
+    routed_experts: NotRequired[list[int] | RayObjectRef]  # type: ignore[valid-type]
 
 
 class RLRolloutResponseItem(BaseModel):
@@ -109,12 +128,12 @@ class RLRolloutResponseItem(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
-    response: Optional[str] = None
-    response_ids: Optional[List[int]] = None
-    num_return_tokens: Optional[int] = None
-    finish_reason: Optional[str] = None  # "stop", "length", "abort", "failed", "skipped"
-    logprobs: Optional[List[float]] = None
-    extra_info: Dict[str, Any] = dict()
+    response: str | None = None
+    response_ids: list[int] | None = None
+    num_return_tokens: int | None = None
+    finish_reason: str | None = None  # "stop", "length", "abort", "failed", "skipped"
+    logprobs: list[float] | None = None
+    extra_info: RolloutExtraInfo = Field(default_factory=dict)
     state: RolloutState = RolloutState.INIT
 
 
@@ -128,15 +147,15 @@ class RLJudgerResponseItem(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
-    uid: Optional[int] = None
-    reward: Dict[str, Any] = Field(default_factory=lambda: {"score": 0.0, "val": 0.0})
-    extra_info: Dict[str, Any] = dict()
+    uid: int | None = None
+    reward: dict[str, Any] = Field(default_factory=lambda: {"score": 0.0, "val": 0.0})
+    extra_info: dict[str, Any] = dict()
 
 
 class RLAgentDataItem(BaseModel):
     # todo: define agent output data structure
     model_config = ConfigDict(extra="forbid")
-    extra_info: Dict[str, Any] = dict()
+    extra_info: dict[str, Any] = dict()
 
 
 class RLEnvDataItem(BaseModel):
@@ -154,7 +173,7 @@ class RLEnvDataItem(BaseModel):
     rollout: RLRolloutResponseItem = RLRolloutResponseItem()
     judger: RLJudgerResponseItem = RLJudgerResponseItem()
     agent: RLAgentDataItem = RLAgentDataItem()
-    extra_info: Dict[str, Any] = dict()
+    extra_info: dict[str, Any] = dict()
 
 
 class RLExtraDataItem(BaseModel):
@@ -168,7 +187,7 @@ class RLExtraDataItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     retry_times: int = 0
-    extra_info: Dict[str, Any] = dict()
+    extra_info: dict[str, Any] = dict()
 
 
 class RLDataFlowItem(BaseModel):
@@ -191,7 +210,7 @@ class RLDataFlowItem(BaseModel):
     extra_info: RLExtraDataItem = RLExtraDataItem()
 
 
-def is_valid_for_replaybuffer(group_data_items: List[RLDataFlowItem]) -> bool:
+def is_valid_for_replaybuffer(group_data_items: list[RLDataFlowItem]) -> bool:
     """Checks if a group of data items is valid for insertion into the replay
     buffer.
 
@@ -220,7 +239,7 @@ def is_valid_for_replaybuffer(group_data_items: List[RLDataFlowItem]) -> bool:
     return True
 
 
-def is_valid_for_training(group_data_items: List[RLDataFlowItem]) -> bool:
+def is_valid_for_training(group_data_items: list[RLDataFlowItem]) -> bool:
     """Checks if a group of data items is valid for a training step.
 
     Args:
@@ -318,8 +337,8 @@ class SampleParams(BaseModel):
     frequency_penalty: Annotated[float, Parameter(help="The parameter for frequency penalty.")] = 0.0
     min_tokens: Annotated[int, Parameter(help="Minimum number of tokens to generate.")] = 0
     max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
-    stops: Annotated[List[str], Parameter(help="List of stop sequences.")] = []
-    stop_token_ids: Annotated[List[int], Parameter(help="List of stop token IDs.")] = []
+    stops: Annotated[list[str], Parameter(help="List of stop sequences.")] = []
+    stop_token_ids: Annotated[list[int], Parameter(help="List of stop token IDs.")] = []
     skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
 
 
@@ -337,8 +356,8 @@ class RolloutExtraParams(TypedDict):
 # 说明： 这里没定义API server情况数据格式，因为直接使用openai server的格式
 class RLRolloutRequestItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    messages: List[Dict[str, Any]]
-    tools: List = Field(default_factory=list)
+    messages: list[dict[str, Any]]
+    tools: list = Field(default_factory=list)
     tool_choice: str = "auto"
     sample_params: SampleParams = Field(default_factory=SampleParams)
-    extra_params: Dict[str, Any] = Field(default_factory=dict)
+    extra_params: dict[str, Any] = Field(default_factory=dict)

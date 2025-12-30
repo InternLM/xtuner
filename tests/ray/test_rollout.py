@@ -191,9 +191,60 @@ class TestRollout(unittest.TestCase):
 
         ray.get(self.test_flow.save.remote(save_dir))
         responses_old = ray.get(self.test_flow.run.remote(), timeout=300)
+        rb_status_old = ray.get(self.test_flow.get_replaybuffer_status.remote())
 
         ray.get(self.test_flow.resume.remote(save_dir))
         responses_new = ray.get(self.test_flow.run.remote(), timeout=300)
+        rl_status_new = ray.get(self.test_flow.get_replaybuffer_status.remote())
+
+        all_train_prompt_ids_old = []
+        for data_items in responses_old[0]:
+            for data_item in data_items:
+                all_train_prompt_ids_old.extend(data_item.data.input_ids)
+
+        all_train_prompt_ids_new = []
+        for data_items in responses_new[0]:
+            for data_item in data_items:
+                all_train_prompt_ids_new.extend(data_item.data.input_ids)
+
+        all_train_prompt_ids_old.sort()
+        all_train_prompt_ids_new.sort()
+        self.assertEqual(all_train_prompt_ids_old, all_train_prompt_ids_new)
+        for key in rb_status_old:
+            self.assertEqual(rb_status_old[key], rl_status_new[key])
+        ray.get(self.test_env.shutdown.remote(), timeout=300)
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_lmdeploy_dataflow_save_resume_with_partial_rollout(self):
+        rollout_cfg = self.rollout_cfg
+        self.test_env = SingleTurnEnvironment.remote(
+            "test_env",
+            self.pg,
+            rollout_cfg=rollout_cfg,
+        )
+        dataflow_cfg = self.dataflow_cfg
+        dataflow_cfg.max_concurrent = 4
+        dataflow_cfg.enable_partial_rollout = 1
+        self.test_flow = DataFlow.remote("test_env",
+                                         dataflow_cfg,
+                                         self.replay_buffer_cfg,
+                                         self.test_env
+                                         )
+        ray.get(self.test_flow.run.remote(), timeout=300)
+        rl_status_save = ray.get(self.test_flow.get_replaybuffer_status.remote())
+        save_dir = Path(self.temp_dir.name) / 'checkpoints' / 'ckpt-step-2'
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        ray.get(self.test_flow.save.remote(save_dir))
+        remain_paused_samples_old = rl_status_save["rollout_paused_count"]
+        responses_old = ray.get(self.test_flow.run.remote(num=remain_paused_samples_old, enable_partial_rollout=0), timeout=300)
+        rb_status_old = ray.get(self.test_flow.get_replaybuffer_status.remote())
+
+        ray.get(self.test_flow.resume.remote(save_dir))
+        rl_status_resume = ray.get(self.test_flow.get_replaybuffer_status.remote())
+        remain_paused_samples_new = rl_status_resume["rollout_paused_count"]
+        responses_new = ray.get(self.test_flow.run.remote(num=remain_paused_samples_new, enable_partial_rollout=0), timeout=300)
+        rb_status_new = ray.get(self.test_flow.get_replaybuffer_status.remote())
 
         all_train_prompt_ids_old = []
         for data_items in responses_old[0]:
@@ -209,44 +260,11 @@ class TestRollout(unittest.TestCase):
         all_train_prompt_ids_new.sort()
         self.assertEqual(all_train_prompt_ids_old, all_train_prompt_ids_new)
 
+        for key in rb_status_old:
+            self.assertEqual(rb_status_old[key], rb_status_new[key])
+        for key in rl_status_save:
+            self.assertEqual(rl_status_save[key], rl_status_resume[key])
         ray.get(self.test_env.shutdown.remote(), timeout=300)
-
-    @unittest.skip("skip lmdeploy async dataflow after lmdeploy support abort_request")
-    def test_lmdeploy_async_dataflow(self):
-        self.dataflow_cfg.enable_partial_rollout = 1
-        self.test_env = SingleTurnEnvironment.remote(
-            "test_env",
-            self.pg,
-            rollout_cfg=self.rollout_cfg,
-        )
-        self.test_flow = DataFlow.remote("test_env", 
-                                         self.dataflow_cfg,
-                                         self.replay_buffer_cfg,
-                                         self.test_env
-                                        )
-        extra_params = {"stream": False, "return_token_ids": True, "return_logprobs": True}
-        dump_path = os.path.join(self.temp_dir.name, "unfinished_buffer.pickle")
-        responses = ray.get(self.test_flow.run.remote(extra_params=extra_params, dump=True, dump_path=dump_path))
-        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
-        self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
-        status = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        finished_count = status["rollout_finished_count"] # 已经去掉了data_flow返回的数量
-        paused_count = status["rollout_paused_count"]
-        sample_count = status["action_count"]
-        self.assertEqual(len(responses) + finished_count + paused_count, sample_count)
-        self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
-
-        ray.get(self.test_flow.clear_replaybuffer.remote())
-        response_resume = ray.get(self.test_flow.run.remote(extra_params=extra_params, resume=True, resume_path=dump_path))
-        finished_resume_samples_count = sum(1 for data in response_resume[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
-        self.assertEqual(finished_resume_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
-        status = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        finished_count = status["rollout_finished_count"] 
-        paused_count = status["rollout_paused_count"]
-        sample_count = status["action_count"]
-        self.assertEqual(len(response_resume) + finished_count + paused_count, sample_count)
-        self.assertEqual(len(response_resume), self.dataflow_cfg.global_batch_size)
-        ray.get(self.test_env.shutdown.remote())
 
     @unittest.skip("skip lmdeploy turbomind generate test due to ci environment issue")
     def test_lmdeploy_turbomind_generate(self):
@@ -289,44 +307,6 @@ class TestRollout(unittest.TestCase):
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         print("responses: ", responses)
-    
-    @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "lmdeploy backend is not enabled")
-    def test_sglang_async_dataflow(self):
-        self.dataflow_cfg.enable_partial_rollout = 1
-        self.rollout_cfg.launch_server_method="multiprocessing"
-        self.test_env = SingleTurnEnvironment.remote(
-            "test_env",
-            self.pg,
-            rollout_cfg=self.rollout_cfg,
-        )
-        self.test_flow = DataFlow.remote("test_env",
-                                         self.dataflow_cfg,
-                                         self.replay_buffer_cfg,
-                                         self.test_env
-                                        )
-        extra_params = {"stream": True, "return_token_ids": True, "return_logprobs": True}
-        dump_path = os.path.join(self.temp_dir.name, "unfinished_buffer.pickle")
-        responses = ray.get(self.test_flow.run.remote(extra_params=extra_params, dump=False, dump_path=dump_path))
-        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
-        self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
-        status = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        finished_count = status["rollout_finished_count"] # 已经去掉了data_flow返回的数量
-        paused_count = status["rollout_paused_count"]
-        sample_count = status["action_count"]
-        self.assertEqual(len(responses) + finished_count + paused_count, sample_count)
-        self.assertEqual(len(responses), self.dataflow_cfg.global_batch_size)
-
-        ray.get(self.test_flow.clear_replaybuffer.remote())
-        response_resume = ray.get(self.test_flow.run.remote(extra_params=extra_params, resume=True, resume_path=dump_path))
-        finished_resume_samples_count = sum(1 for data in response_resume[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
-        self.assertEqual(finished_resume_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
-        status = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        finished_count = status["rollout_finished_count"] 
-        paused_count = status["rollout_paused_count"]
-        sample_count = status["action_count"]
-        self.assertEqual(len(response_resume) + finished_count + paused_count, sample_count)
-        self.assertEqual(len(response_resume), self.dataflow_cfg.global_batch_size)
-        ray.get(self.test_env.shutdown.remote())
 
 if __name__ == "__main__":
     unittest.main()
