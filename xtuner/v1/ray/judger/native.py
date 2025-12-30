@@ -3,7 +3,7 @@ from typing import Any, Callable, List, Optional
 
 import httpx
 import ray
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
@@ -36,7 +36,7 @@ class NativeJudgerConfig(BaseModel):
     judger_name: str
     num_ray_actors: int = 1
     num_cpus_per_actor: int = 1
-    reward_func: Optional[Callable] = None
+    reward_func: Optional[Callable] = Field(default=None, exclude=True)
     remote_url: Optional[str] = None
     preprocess_func: Optional[Callable] = None
     postprocess_func: Optional[Callable] = None

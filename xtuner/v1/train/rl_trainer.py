@@ -11,7 +11,7 @@ import torch
 from mmengine import load
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 from ray.util.placement_group import placement_group
 from typing_extensions import Self
 
@@ -96,21 +96,6 @@ class RLTrainerConfig(BaseModel):
         elif self.work_dir is None:
             self.work_dir = Path.cwd()
         return self
-
-    @field_serializer("replay_buffer_config")
-    def serialize_replay_buffer_cfg(self, replay_buffer_config: ReplayBufferConfig) -> str:
-        return replay_buffer_config.model_dump(include={"replay_ratio", "replay_weights"})
-
-    @field_serializer("evaluator_config")
-    def serialize_evaluator_cfg(self, evaluator_config: EvaluatorConfig) -> str:
-        if evaluator_config:
-            return evaluator_config.model_dump(exclude={"tokenizer", "dataset_cfg", "compute_metric_func"})
-        else:
-            return ""
-
-    @field_serializer("judger_config")
-    def serialize_judger_config(self, judger_config: JudgerConfig) -> str:
-        return judger_config.model_dump(exclude={"tokenizer", "reward_func"})
 
 
 def get_train_seq_ctx(

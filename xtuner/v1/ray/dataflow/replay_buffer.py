@@ -8,7 +8,7 @@ from uuid import uuid4
 import ray
 import torch
 from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from ray import ObjectRef
 from typing_extensions import Annotated
 
@@ -181,10 +181,12 @@ class ReplayBufferConfig(BaseModel):
 
     tokenizer: Annotated[
         Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str],
+        Field(exclude=True),
         Parameter(help="The tokenizer for processing text data, e.g., for partial rollouts."),
     ]
     postprocessor_func: Annotated[
         Optional[Callable],
+        Field(exclude=True),
         Parameter(help="An optional function to filter or modify data groups after they are generated."),
     ] = None
     replay_ratio: Annotated[
