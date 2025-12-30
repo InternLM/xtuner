@@ -361,9 +361,7 @@ class TrainerConfig(BaseModel):
     @field_validator("grad_norm_dtype", mode="before")
     @classmethod
     def deserialize_dtype(cls, value: str) -> torch.dtype:
-        if "bfloat16" in value:
-            return torch.bfloat16
-        elif "float32" in value:
+        if "float32" in value:
             return torch.float32
         elif "float64" in value:
             return torch.float64
