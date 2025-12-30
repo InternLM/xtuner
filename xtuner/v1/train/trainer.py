@@ -366,7 +366,7 @@ class TrainerConfig(BaseModel):
         elif "float64" in value:
             return torch.float64
         else:
-            raise ValueError()
+            raise ValueError(f"grad_norm_dtype {value} is not supported, must be 'float32' or 'float64'")
 
 
 class Trainer:
