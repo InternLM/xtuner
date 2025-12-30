@@ -1,33 +1,36 @@
 import json
 import math
 import os
+import time
 from itertools import chain
 from pathlib import Path
-from typing import Dict, List, TypeAlias, TypedDict, cast, Iterable
-import time
+from typing import Dict, Iterable, List, TypeAlias, TypedDict, cast
 
 import ray
 import requests
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader
 import tqdm
+from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 from typing_extensions import NotRequired
-from mmengine.runner import set_random_seed
+
 from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.datasets.config import DataloaderConfig
+from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.engine.train_engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import (
     VisionComposeTrainEngine,
 )
-from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.loss import CELossConfig
+from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
@@ -37,6 +40,7 @@ from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
+    XTUNER_DETERMINISTIC,
     ParallelConfigException,
     get_device,
     get_logger,
@@ -45,9 +49,6 @@ from xtuner.v1.utils import (
     ray_method,
 )
 from xtuner.v1.utils.load_spec import LoadEnum
-from xtuner.v1.datasets.config import DataloaderConfig
-from xtuner.v1.loss import CELossConfig
-from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig, RLLossContextInputItem
@@ -217,29 +218,32 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         # =======  sft code =====
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
-        self._sft_dataloader: DataLoader | None = None
+        self._sft_dataloader: Dataloader | None = None
         self._sft_dataloader_iter: Iterable | None = None
         self._sft_loss_cfg: CELossConfig | None = None
         self._num_sft_step_after_rl = worker_cfg.num_sft_step_after_rl
+
         self._num_count_rl_step = 0
         self._sft_cur_epoch = 0
-        self._sft_reduced_consumed_samples = 0
         self._sft_total_consumed_samples = 0
+        self._sft_total_consumed_tokens = 0
+
         if self._sft_dataloader_config is not None:
+            assert worker_cfg.sft_global_batch_size > 0, "sft_global_batch_size must be greater than 0"
+            assert worker_cfg.seed is not None, "seed must be set when sft_dataloader_config is not None"
             tokenizer = AutoTokenizer.from_pretrained(worker_cfg.load_from, trust_remote_code=True)
             self._sft_dataloader = self._sft_dataloader_config.build(
                 tokenizer=tokenizer,
                 dp_mesh=self.data_mesh["dp"],
                 global_batch_size=worker_cfg.sft_global_batch_size,
                 micro_batch_size=1,
-                seed=worker_cfg.seed
+                seed=worker_cfg.seed,
             )
 
             sft_loss_cfg = worker_cfg.sft_loss_cfg
             if worker_cfg.sft_loss_cfg is None:
                 sft_loss_cfg = CELossConfig()
             self._sft_loss_cfg = sft_loss_cfg
-
         # ======= sft code =====
 
         if not worker_cfg.fsdp_cfg.torch_compile:
@@ -270,7 +274,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
             torch.use_deterministic_algorithms(True, warn_only=True)
 
-    def _set_random_seed(self, seed: int):
+    def _set_random_seed(self, seed: None | int):
         set_random_seed(seed)
 
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine | VisionComposeTrainEngine:
@@ -548,11 +552,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 all_rollout_is_metrics.append(rollout_is_metrics)
                 all_mismatch_metrics.append(mismatch_metrics)
 
-        worker_log_item: WorkerLogItem = {
-            "train_entropy": 0.0,
-            "train_metrics": [],
-            "sft_train_metrics": {}
-        }
+        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
         logger_msg = f"Rollout {rollout_idx}: "
         sum_entropy = cast(torch.Tensor, sum_entropy)
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
@@ -667,7 +667,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 loss_log=loss_log,
                 local_step_consumed_tokens=step_consumed_tokens,
                 step_consumed_tokens=reduced_step_consumed_tokens,
-                total_consumed_tokens=self._sft_total_consumed_samples,
+                total_consumed_tokens=self._sft_total_consumed_tokens,
                 data_time=data_time,
                 step_time=step_time,
                 grad_norm=grad_norm,
@@ -675,10 +675,10 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
 
             # to return sft log
-            loss_log['grad_norm'] = grad_norm.item()
-            loss_log['data_time'] = data_time
-            loss_log['step_time'] = step_time
-            loss_log['tgs'] = step_consumed_tokens / step_time
+            loss_log["grad_norm"] = grad_norm.item()
+            loss_log["data_time"] = data_time
+            loss_log["step_time"] = step_time
+            loss_log["tgs"] = step_consumed_tokens / step_time
             worker_log_item["sft_train_metrics"] = loss_log
 
         return worker_log_item
@@ -732,16 +732,17 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._engine.step_optimizer(grad_norm)
         return loss_log, other_log, grad_norm
 
-    def _sft_log_step(self,
-                      loss_log: LossLog,
-                      local_step_consumed_tokens: int,
-                      step_consumed_tokens: int,
-                      total_consumed_tokens: int,
-                      data_time: float,
-                      step_time: float,
-                      grad_norm: float,
-                      efficient_attn_ratio: float,
-                      ):
+    def _sft_log_step(
+        self,
+        loss_log: LossLog,
+        local_step_consumed_tokens: int,
+        step_consumed_tokens: int,
+        total_consumed_tokens: int,
+        data_time: float,
+        step_time: float,
+        grad_norm: float,
+        efficient_attn_ratio: float,
+    ):
         tgs = local_step_consumed_tokens / step_time
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
         loss_log_str = ", ".join(loss_log_list)
@@ -757,8 +758,8 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"efficient_attn_ratio: {efficient_attn_ratio:.4f} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
-            f"max_memory: {max_memory / (1024 ** 3):.2f} GB "
-            f"reserved_memory: {reserved_memory / (1024 ** 3):.2f} GB "
+            f"max_memory: {max_memory / (1024**3):.2f} GB "
+            f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {tgs:.1f} "
         )
 
@@ -1393,6 +1394,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                             "cur_step": self._num_count_rl_step,
                             "cur_epoch": self._sft_cur_epoch,
                             "total_consumed_samples": self._sft_total_consumed_samples,
+                            "total_consumed_tokens": self._sft_total_consumed_tokens,
                         }
                     )
                 )
@@ -1440,6 +1442,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 self._num_count_rl_step = train_state["cur_step"]
                 self._sft_cur_epoch = train_state["cur_epoch"]
                 self._sft_total_consumed_samples = train_state["total_consumed_samples"]
+                self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
 
     @ray_method
     def ready(self) -> bool:

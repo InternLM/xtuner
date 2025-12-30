@@ -940,7 +940,9 @@ class RLTrainer:
         self.logger.info(f"Saving step {self.cur_step + 1} rollout dataflow to: {checkpoint_path}")
         ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)))
         self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
-        ray.get(self._train_controller.save_dcp_others.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer))
+        ray.get(
+            self._train_controller.save_dcp_others.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer)
+        )
 
         # Update meta
         current_exp = self.meta.latest_exp
