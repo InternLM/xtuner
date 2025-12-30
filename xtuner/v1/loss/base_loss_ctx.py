@@ -149,7 +149,7 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         else:
             loss, (logits, extra_info) = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
 
-        extra_info["log_rank_loss"] = loss.detach().clone()
+        extra_info["local_base_loss"] = loss.detach().clone()
 
         # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
         if dist.is_initialized():

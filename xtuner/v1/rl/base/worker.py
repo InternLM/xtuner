@@ -14,11 +14,12 @@ from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
+from typing_extensions import NotRequired
 
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.engine.train_engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import (
     VisionComposeTrainEngine,
 )
@@ -139,6 +140,29 @@ class WorkerInputItem(TypedDict):
     shifted_labels: torch.LongTensor
     advantages: torch.Tensor
     rollout_logprobs: torch.Tensor | None
+
+
+class RLOtherLog(TypedDict):
+    maxvio: NotRequired[float]
+    step_consumed_tokens: int
+    step_consumed_img_tokens: NotRequired[float]
+    efficient_attn_ratio: float
+    max_ratio: NotRequired[float]
+    loss: NotRequired[float]
+    grad_norm: NotRequired[float]
+
+
+class WorkerTrainLogItem(TypedDict):
+    loss_log: LossLog
+    rl_other_log: RLOtherLog
+
+
+class WorkerLogItem(TypedDict):
+    train_entropy: float
+    rollout_entropy: NotRequired[float]
+    mismatch_metrics: NotRequired[dict[str, float]]
+    rollout_is_metrics: NotRequired[dict[str, float]]
+    train_metrics: List[WorkerTrainLogItem]
 
 
 class TrainingWorker(SingleAcceleratorWorker):
@@ -299,20 +323,32 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device("cpu")
         return loss_ctx_input_list
 
-    def _update_other_log(self, other_log: dict):
+    def _get_rl_other_log(self, other_log: OtherLog) -> RLOtherLog:
         from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 
-        extra_info = other_log.get("extra_info", {})
+        extra_info: ModelForwardExtraLogInfo | dict = other_log.get("extra_info", {})
         if isinstance(extra_info, ModelForwardExtraLogInfo):
             extra_info_dict = extra_info.get()
         else:
             extra_info_updated = ModelForwardExtraLogInfo(extra_info)
             extra_info_dict = extra_info_updated.get()
-        other_log["extra_info"] = extra_info_dict
-        return other_log
+
+        for k, v in extra_info_dict.items():
+            if isinstance(v, torch.Tensor):
+                extra_info_dict[k] = v.item()
+
+        rl_other_log: RLOtherLog = {
+            "maxvio": other_log.get("maxvio", 0.0),
+            "step_consumed_tokens": other_log["step_consumed_tokens"],
+            "step_consumed_img_tokens": float(other_log.get("step_consumed_img_tokens", 0.0)),
+            "efficient_attn_ratio": other_log["efficient_attn_ratio"],
+            "max_ratio": extra_info_dict.get("max_ratio", 0.0),
+            "loss": extra_info_dict.get("loss", 0.0),
+        }
+        return rl_other_log
 
     @ray_method
-    def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
+    def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         loss_cfg = self.config.loss_cfg
@@ -437,10 +473,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                     rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
                 )
 
-            if not mask.any():  # all padding tokens, skip
-                self.logger.warning(f"Skip batch {i} as all tokens are padding.")
-                continue
-
             if len(rollout_logprobs_list) > 0:
                 # calculate importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
@@ -459,29 +491,40 @@ class TrainingWorker(SingleAcceleratorWorker):
                 all_rollout_is_metrics.append(rollout_is_metrics)
                 all_mismatch_metrics.append(mismatch_metrics)
 
+        worker_log_item: WorkerLogItem = {
+            "train_entropy": 0.0,
+            "train_metrics": [],
+        }
         logger_msg = f"Rollout {rollout_idx}: "
-
         sum_entropy = cast(torch.Tensor, sum_entropy)
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
-        avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+        avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else torch.tensor(0.0)
+        worker_log_item["train_entropy"] = avg_sum_entropy.item()
         logger_msg += f"avg entropy: {avg_sum_entropy:.4f}"
 
         if sum_rollout_entropy is not None:
             sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
             dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
-            avg_rollout_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+            avg_rollout_entropy = (
+                sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else torch.tensor(0.0)
+            )
+            worker_log_item["rollout_entropy"] = avg_rollout_entropy.item()
             logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
 
         if len(all_mismatch_metrics) > 0:
             mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
             if len(mismatch_metrics) > 0:
+                worker_log_item["mismatch_metrics"] = mismatch_metrics
                 logger_msg += f"\n rollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}"
 
         if len(all_rollout_is_metrics) > 0:
             rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
             if len(rollout_is_metrics) > 0:
+                worker_log_item["rollout_is_metrics"] = rollout_is_metrics
                 logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
-        self.logger.info(logger_msg)
+
+        if self.rank == 0:
+            self.logger.info(logger_msg)
 
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
@@ -524,24 +567,21 @@ class TrainingWorker(SingleAcceleratorWorker):
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,
             )
-            other_log = self._update_other_log(other_log)  # type: ignore[arg-type]
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
-            log_info = dict()  # type: ignore[var-annotated]
-            log_info.update(loss_log)
-            for k, v in other_log.items():
-                if k == "extra_info":
-                    for extra_k, extra_v in v.items():
-                        log_info[extra_k] = extra_v.item() if isinstance(extra_v, torch.Tensor) else extra_v
-                else:
-                    log_info[k] = v.item() if isinstance(v, torch.Tensor) else v
-            log_info["grad_norm"] = grad_norm.item()
+            rl_other_log = self._get_rl_other_log(other_log)  # type: ignore[arg-type]
+            rl_other_log["grad_norm"] = grad_norm.item()
+            worker_log_item["train_metrics"].append(WorkerTrainLogItem(loss_log=loss_log, rl_other_log=rl_other_log))
+
+            log_info = {**loss_log, **rl_other_log}
             log_str = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in log_info.items()
             )
             log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
+
+        return worker_log_item
 
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
