@@ -1,5 +1,9 @@
 name: ete_test
 on:
+  pull_request:
+    branches:
+      - "main"
+      - "refactor"
   workflow_dispatch:
     inputs:
       repo_org:
