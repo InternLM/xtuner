@@ -239,6 +239,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 micro_batch_size=1,
                 seed=worker_cfg.seed,
             )
+            self.logger.info(f"Sft Dataloader len: {len(self._sft_dataloader)}")
 
             sft_loss_cfg = worker_cfg.sft_loss_cfg
             if worker_cfg.sft_loss_cfg is None:
@@ -636,7 +637,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in log_info.items()
             )
-            log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
+            log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
 
         # ====== SFT step ======
@@ -751,7 +752,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
 
         self.logger.info(
-            f"Step {self._num_count_rl_step}: data_time: {data_time:.4f} time: {step_time:.4f} "
+            f"Rank{self.rank} Step {self._num_count_rl_step}: data_time: {data_time:.4f} time: {step_time:.4f} "
             f"text_tokens: {local_step_consumed_tokens} "
             f"step_consumed_tokens: {step_consumed_tokens} "
             f"total_consumed_tokens: {total_consumed_tokens} "
@@ -1428,11 +1429,12 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         # Resume sft dataloader
         sft_dataloader_path = resume_from / self._SAVE_SFT_DATALOADER_DIR
-        if self.rank == 0 and self._sft_dataloader is not None:
+        if self._sft_dataloader is not None:
             if not sft_dataloader_path.exists():
                 raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
             dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
             self._sft_dataloader.load_state_dict(dataloader_state)
+            self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
 
             train_state_path = resume_from / self._SAVE_SFT_TRAIN_STATE_PATH
             if not train_state_path.exists():
@@ -1443,6 +1445,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 self._sft_cur_epoch = train_state["cur_epoch"]
                 self._sft_total_consumed_samples = train_state["total_consumed_samples"]
                 self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
+                self.logger.info(f"Resume sft train state from {train_state_path}")
 
     @ray_method
     def ready(self) -> bool:
