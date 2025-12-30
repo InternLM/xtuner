@@ -307,9 +307,9 @@ class RawTrainingController:
         return
 
     @ray_method
-    def save_dcp(self, dcp_dir: str, no_save_optimizer: bool = False):
+    def save_dcp_others(self, dcp_dir: str, no_save_optimizer: bool = False):
         """Save the DCP checkpoint of the training workers."""
-        handles = [worker.save_dcp.remote(dcp_dir, no_save_optimizer) for worker in self.workers]  # type: ignore
+        handles = [worker.save_dcp_others.remote(dcp_dir, no_save_optimizer) for worker in self.workers]  # type: ignore
         ray.get(handles)
         return
 
