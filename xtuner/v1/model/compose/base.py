@@ -10,6 +10,7 @@ from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     FSDPModule,
     MixedPrecisionPolicy,
+    OffloadPolicy,
     fully_shard,
 )
 from typing_extensions import override
@@ -112,7 +113,7 @@ class BaseComposeModel(BaseModel):
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else OffloadPolicy(),
         )
 
         if isinstance(self.vision_tower.blocks[0], FSDPModule):
