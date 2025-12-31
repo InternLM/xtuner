@@ -686,6 +686,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         loss_log["data_time"] = data_time
         loss_log["step_time"] = step_time
         loss_log["tgs"] = step_consumed_tokens / step_time
+        loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
         return loss_log
 
     def _next_sft_data_batch(self):
