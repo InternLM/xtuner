@@ -513,6 +513,67 @@ class TestTrainerConfig(DeterministicDDPTestCase):
         assert trainer.config.model_cfg.ep_size == target_ep_size
         self.cleanup_trainer(trainer)
 
+    def test_print_training_config(self):
+        """Test that training config is printed on rank 0 only."""
+        import json
+
+        model_cfg = Qwen3Dense4BConfig()
+        trainer_cfg = self.build_trainer_cfg(model_cfg)
+
+        trainer = Trainer.from_config(trainer_cfg)
+
+        # Wait for all processes to finish logging
+        dist.barrier()
+
+        # Read the log file for each rank
+        rank = dist.get_rank()
+        log_file = trainer.log_dir / f"rank{rank}.log"
+
+        self.assertTrue(log_file.exists(), f"Log file should exist for rank {rank}")
+
+        with open(log_file, "r") as f:
+            log_content = f.read()
+
+        if rank == 0:
+            # Check that config was logged on rank 0
+            self.assertIn("Training config:", log_content, "Config should be logged on rank 0")
+
+            # Extract and verify the JSON content
+            # Find the start of the JSON config in the log content
+            config_marker = "Training config:"
+            config_start_pos = log_content.find(config_marker)
+            self.assertGreater(config_start_pos, -1, "Should find 'Training config:' in logs")
+
+            # Extract the JSON part (everything after "Training config: ")
+            json_start_pos = log_content.find("{", config_start_pos)
+            self.assertGreater(json_start_pos, -1, "Should find JSON object in log")
+
+            # Find the end of JSON by matching braces
+            brace_count = 0
+            json_end_pos = json_start_pos
+            for i in range(json_start_pos, len(log_content)):
+                if log_content[i] == "{":
+                    brace_count += 1
+                elif log_content[i] == "}":
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_end_pos = i + 1
+                        break
+
+            json_str = log_content[json_start_pos:json_end_pos]
+            config_dict = json.loads(json_str)
+
+            # Verify key fields are present in the logged config
+            self.assertIn("model_cfg", config_dict)
+            self.assertIn("optim_cfg", config_dict)
+            self.assertIn("global_batch_size", config_dict)
+            self.assertEqual(config_dict["global_batch_size"], 8)
+        else:
+            # On non-rank-0, config should not be logged
+            self.assertNotIn("Training config:", log_content, "Config should not be logged on non-rank-0")
+
+        self.cleanup_trainer(trainer)
+
     @property
     def world_size(self) -> int:
         return 8
