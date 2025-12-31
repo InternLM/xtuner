@@ -66,6 +66,34 @@ def plot_all(case_name, check_metric, base_metrics, cur_metrics, output_root: Pa
     plt.close()
 
 
+def write_to_summary(case_name, base_jsonl, cur_jsonl ):
+
+    summary_file = os.environ.get('GITHUB_STEP_SUMMARY', './tmp.md')
+    with open(summary_file, 'a') as f:
+        f.write(f"## {case_name}指标比较图\n")
+        f.write('<div align="center">\n')
+        f.write(f'<img src="https://{os.environ["GITHUB_REPOSITORY_OWNER"]}.github.io/xtuner/{os.environ["GITHUB_RUN_ID"]}/{case_name}_comparison.png"\n')
+        f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
+        f.write('</div>\n<div align=center>\n')
+        f.write(f'<details>\n<summary><strong>📊 点击查看用例{case_name}指标数据，依次为基线、当前版本数据</strong></summary>\n\n')
+
+    for json_f in [base_jsonl, cur_jsonl]:
+        with open(json_f, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        md_content = '```json\n'
+        for i, line in enumerate(lines, 1):
+            md_content += f'{line}\n'
+
+        md_content += '```\n\n'
+
+
+        with open(summary_file, 'a', encoding='utf-8') as f:
+            f.write(md_content)
+    with open(summary_file, 'a') as f:
+        f.write('</details>\n')
+
+
 def check_result(case_name, base_path, cur_path, check_metric):
     fail_metric = {}
     check_metric = check_metric
@@ -80,6 +108,7 @@ def check_result(case_name, base_path, cur_path, check_metric):
     output_path.mkdir(parents=True, exist_ok=True)
     plot_all(case_name, check_metric, base_metrics, cur_metrics, output_path)
     shutil.copytree(output_path, f"./{os.environ['GITHUB_RUN_ID']}", dirs_exist_ok=True)
+    write_to_summary(case_name, base_path, cur_path)
 
     for metric, threshold in check_metric.items():
         max_error = 0.0
