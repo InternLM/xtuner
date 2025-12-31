@@ -146,6 +146,7 @@ class RawDataFlow:
         global_batch_size: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
+        enable_partial_rollout: Optional[bool] = None,
     ):
         """Resets all internal state variables of DataFlow."""
         self.finished_samples_count = 0
@@ -156,6 +157,10 @@ class RawDataFlow:
         else:
             self.target_batch_size = self.config.global_batch_size
 
+        if enable_partial_rollout is not None:
+            self.enable_partial_rollout = enable_partial_rollout
+        else:
+            self.enable_partial_rollout = self.config.enable_partial_rollout
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
         logger_msg = (
@@ -256,10 +261,13 @@ class RawDataFlow:
                     pbar.n = self.finished_samples_count
                     pbar.refresh()
                     next_update_threshold += update_step
+                    self.logger.info(
+                        f"waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
+                    )
                 while len(waiting_tasks) < self.config.max_concurrent:
                     # In async mode, we keep spawning. In sync mode, we stop if we have enough tasks in flight.
                     if (
-                        not self.config.enable_partial_rollout
+                        not self.enable_partial_rollout
                         and self.finished_samples_count + len(waiting_tasks) >= self.target_batch_size
                     ):
                         break
@@ -331,10 +339,7 @@ class RawDataFlow:
         num: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
-        dump: bool = False,
-        dump_path: Optional[str] = None,
-        resume: bool = False,
-        resume_path: Optional[str] = None,
+        enable_partial_rollout: Optional[bool] = None,
     ):
         """Starts the data generation process.
 
@@ -344,20 +349,13 @@ class RawDataFlow:
         Returns:
             List[RLDataFlowItem]: A list of collected training samples.
         """
-        self._reset_internal_states(global_batch_size=num, sample_params=sample_params, extra_params=extra_params)
-
-        if resume:
-            assert resume_path, "Resuming is enabled but no resume path is provided."
-            self.logger.info(f"Resuming replay buffer from {resume_path}")
-            await self.replay_buffer.resume_storage.remote(resume_path)
-
+        self._reset_internal_states(
+            global_batch_size=num,
+            sample_params=sample_params,
+            extra_params=extra_params,
+            enable_partial_rollout=enable_partial_rollout,
+        )
         await self.concurrent_task_runner()
-
-        if dump:
-            assert dump_path, "Dumping is enabled but no dump path is provided."
-            self.logger.info(f"Dump replay buffer from {dump_path}")
-            await self.replay_buffer.dump_storage.remote(dump_path)
-
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
 
     def logging_replaybuffer_state(self):
