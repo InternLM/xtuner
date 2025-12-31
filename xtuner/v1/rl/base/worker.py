@@ -146,7 +146,7 @@ class WorkerConfig(BaseModel):
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
     sft_global_batch_size: int = -1
-    sft_num_step_after_rl: int = 1
+    rollout_steps_per_sft: int = 1
     sft_loss_cfg: CELossConfig = CELossConfig()
 
 
@@ -216,36 +216,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
         self.sp_mesh = self.data_mesh["sp"]
 
-        # =======  sft code =====
-        self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
-        self._sft_dataloader: Dataloader | None = None
-        self._sft_dataloader_iter: Iterable | None = None
-        self._sft_loss_cfg: CELossConfig | None = None
-        self._sft_num_step_after_rl = worker_cfg.sft_num_step_after_rl
-
-        self._num_count_rl_step = 0
-        self._sft_cur_epoch = 0
-        self._sft_total_consumed_samples = 0
-        self._sft_total_consumed_tokens = 0
-
-        if self._sft_dataloader_config is not None:
-            assert worker_cfg.sft_global_batch_size > 0, "sft_global_batch_size must be greater than 0"
-            assert worker_cfg.seed is not None, "seed must be set when sft_dataloader_config is not None"
-            tokenizer = AutoTokenizer.from_pretrained(worker_cfg.load_from, trust_remote_code=True)
-            self._sft_dataloader = self._sft_dataloader_config.build(
-                tokenizer=tokenizer,
-                dp_mesh=self.data_mesh["dp"],
-                global_batch_size=worker_cfg.sft_global_batch_size,
-                micro_batch_size=1,
-                seed=worker_cfg.seed,
-            )
-            self.logger.info(f"Sft Dataloader len: {len(self._sft_dataloader)}")
-
-            sft_loss_cfg = worker_cfg.sft_loss_cfg
-            if worker_cfg.sft_loss_cfg is None:
-                sft_loss_cfg = CELossConfig()
-            self._sft_loss_cfg = sft_loss_cfg
-        # ======= sft code =====
+        self._init_sft(worker_cfg)
 
         if not worker_cfg.fsdp_cfg.torch_compile:
             worker_cfg.model_cfg.compile_cfg = False
@@ -268,6 +239,36 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_cfg_info: dict = dict()
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
+
+    def _init_sft(self, worker_cfg):
+        self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
+        self._sft_dataloader: Dataloader | None = None
+        self._sft_dataloader_iter: Iterable | None = None
+        self._sft_loss_cfg: CELossConfig | None = None
+        self._rollout_steps_per_sft = worker_cfg.rollout_steps_per_sft
+
+        self._rollout_step = 0
+        self._sft_cur_epoch = 0
+        self._sft_total_consumed_samples = 0
+        self._sft_total_consumed_tokens = 0
+
+        if self._sft_dataloader_config is not None:
+            assert worker_cfg.sft_global_batch_size > 0, "sft_global_batch_size must be greater than 0"
+            assert worker_cfg.seed is not None, "seed must be set when sft_dataloader_config is not None"
+            tokenizer = AutoTokenizer.from_pretrained(worker_cfg.load_from, trust_remote_code=True)
+            self._sft_dataloader = self._sft_dataloader_config.build(
+                tokenizer=tokenizer,
+                dp_mesh=self.data_mesh["dp"],
+                global_batch_size=worker_cfg.sft_global_batch_size,
+                micro_batch_size=1,
+                seed=worker_cfg.seed,
+            )
+            self.logger.info(f"Sft Dataloader len: {len(self._sft_dataloader)}")
+
+            sft_loss_cfg = worker_cfg.sft_loss_cfg
+            if worker_cfg.sft_loss_cfg is None:
+                sft_loss_cfg = CELossConfig()
+            self._sft_loss_cfg = sft_loss_cfg
 
     def _set_deterministic(self):
         if XTUNER_DETERMINISTIC:
@@ -640,49 +641,52 @@ class TrainingWorker(SingleAcceleratorWorker):
             log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
 
-        # ====== SFT step ======
-        self._num_count_rl_step += 1
-        if self._sft_dataloader is not None and self._num_count_rl_step % self._sft_num_step_after_rl == 0:
-            self.logger.info(f"Train SFT after {self._num_count_rl_step} RL steps")
-            if self._sft_dataloader_iter is None:
-                self._sft_dataloader_iter = iter(self._sft_dataloader)
-
-            time_before_get_data = time.time()
-            data_batch = self._next_sft_data_batch()
-            time_before_train_step = time.time()
-            data_time = time_before_train_step - time_before_get_data
-            DEVICE_MODULE.reset_peak_memory_stats()
-            cur_sample_num = len(data_batch)
-
-            loss_log, other_log, grad_norm = self._train_one_step_sft(data_batch)
-
-            time_after_train_step = time.time()
-            step_time = time_after_train_step - time_before_train_step
-            step_consumed_tokens = other_log["step_consumed_tokens"]
-
-            self._sft_total_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
-            reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
-            self._sft_total_consumed_tokens += reduced_step_consumed_tokens
-
-            self._sft_log_step(
-                loss_log=loss_log,
-                local_step_consumed_tokens=step_consumed_tokens,
-                step_consumed_tokens=reduced_step_consumed_tokens,
-                total_consumed_tokens=self._sft_total_consumed_tokens,
-                data_time=data_time,
-                step_time=step_time,
-                grad_norm=grad_norm,
-                efficient_attn_ratio=other_log["efficient_attn_ratio"],
-            )
-
-            # to return sft log
-            loss_log["grad_norm"] = grad_norm.item()
-            loss_log["data_time"] = data_time
-            loss_log["step_time"] = step_time
-            loss_log["tgs"] = step_consumed_tokens / step_time
+        self._rollout_step += 1
+        if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
+            loss_log = self._fit_sft()
             worker_log_item["sft_train_metrics"] = loss_log
 
         return worker_log_item
+
+    def _fit_sft(self):
+        self.logger.info(f"Train SFT after {self._rollout_step} RL steps")
+        if self._sft_dataloader_iter is None:
+            self._sft_dataloader_iter = iter(self._sft_dataloader)
+
+        time_before_get_data = time.time()
+        data_batch = self._next_sft_data_batch()
+        time_before_train_step = time.time()
+        data_time = time_before_train_step - time_before_get_data
+        DEVICE_MODULE.reset_peak_memory_stats()
+        cur_sample_num = len(data_batch)
+
+        loss_log, other_log, grad_norm = self._train_one_step_sft(data_batch)
+
+        time_after_train_step = time.time()
+        step_time = time_after_train_step - time_before_train_step
+        step_consumed_tokens = other_log["step_consumed_tokens"]
+
+        self._sft_total_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
+        reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
+        self._sft_total_consumed_tokens += reduced_step_consumed_tokens
+
+        self._sft_log_step(
+            loss_log=loss_log,
+            local_step_consumed_tokens=step_consumed_tokens,
+            step_consumed_tokens=reduced_step_consumed_tokens,
+            total_consumed_tokens=self._sft_total_consumed_tokens,
+            data_time=data_time,
+            step_time=step_time,
+            grad_norm=grad_norm,
+            efficient_attn_ratio=other_log["efficient_attn_ratio"],
+        )
+
+        # to return sft log
+        loss_log["grad_norm"] = grad_norm.item()
+        loss_log["data_time"] = data_time
+        loss_log["step_time"] = step_time
+        loss_log["tgs"] = step_consumed_tokens / step_time
+        return loss_log
 
     def _next_sft_data_batch(self):
         try:
@@ -752,7 +756,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
 
         self.logger.info(
-            f"Rank{self.rank} Step {self._num_count_rl_step}: data_time: {data_time:.4f} time: {step_time:.4f} "
+            f"Rank{self.rank} Step {self._rollout_step}: data_time: {data_time:.4f} time: {step_time:.4f} "
             f"text_tokens: {local_step_consumed_tokens} "
             f"step_consumed_tokens: {step_consumed_tokens} "
             f"total_consumed_tokens: {total_consumed_tokens} "
@@ -1368,7 +1372,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         return
 
     @ray_method
-    def save_dcp_others(self, checkpoint_path: Path | str, no_save_optimizer: bool = False):
+    def save(self, checkpoint_path: Path | str, no_save_optimizer: bool = False):
         """Save the DCP checkpoint of the training worker."""
         if not isinstance(checkpoint_path, Path):
             checkpoint_path = Path(checkpoint_path)
@@ -1392,7 +1396,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f.write(
                     json.dumps(
                         {
-                            "cur_step": self._num_count_rl_step,
+                            "cur_step": self._rollout_step,
                             "cur_epoch": self._sft_cur_epoch,
                             "total_consumed_samples": self._sft_total_consumed_samples,
                             "total_consumed_tokens": self._sft_total_consumed_tokens,
@@ -1441,7 +1445,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 raise FileNotFoundError(f"Train state path {train_state_path} does not exist.")
             with train_state_path.open("r") as f:
                 train_state = json.loads(f.read())
-                self._num_count_rl_step = train_state["cur_step"]
+                self._rollout_step = train_state["cur_step"]
                 self._sft_cur_epoch = train_state["cur_epoch"]
                 self._sft_total_consumed_samples = train_state["total_consumed_samples"]
                 self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
