@@ -105,6 +105,7 @@ class JudgerController:
             ), "The provided placement group does not have enough bundles for all judger actors."
             self.pg = pg
         self.reward_judger: List[List[ray.actor.ActorHandle]] = []
+        self.reward_judger_names: List[str] = []
         self.judger_instance_count = 0
 
         for idx, config in enumerate(self.judger_config.reward_judger_configs):
@@ -112,6 +113,7 @@ class JudgerController:
             judger = config.build_actor(pg=self.pg, start_bundle_idx=self.judger_instance_count)
             # 同一类judger可能会有多个实例（例如多个Ray actor）,同一类的judger作为一行
             self.reward_judger.append(judger)
+            self.reward_judger_names.append(config.judger_name)
             self.judger_instance_count += len(judger)
         self.enable_weighted_judgers = (
             False if len(self.reward_judger) == 1 else self.judger_config.enable_weighted_judgers
@@ -146,6 +148,7 @@ class JudgerController:
     async def _call_custom_reward_judger(
         self,
         active_judgers: List[List[ray.actor.ActorHandle]],
+        active_reward_judger_names: List[str],
         group_data_item: List[RLDataFlowItem],
     ) -> List[RLJudgerResponseItem]:
         """Call custom reward judgers to calculate rewards.
@@ -162,12 +165,13 @@ class JudgerController:
         """
         active_judgers_len = len(active_judgers)
         task_len_list = [0]
-        judger_list = []
         all_tasks = []
+        assert active_judgers_len == len(active_reward_judger_names), (
+            f"Expected {active_judgers_len} active judgers, but got {len(active_reward_judger_names)}"
+        )
         for judger in active_judgers:
             tasks = await self._call_single_reward_judger(judger, group_data_item)
             all_tasks.extend(tasks)
-            judger_list.append(ray.get(judger[0].get_judger_name.remote()))
             task_len_list.append(task_len_list[-1] + len(tasks))
 
         all_results = await asyncio.gather(*all_tasks)
@@ -178,7 +182,7 @@ class JudgerController:
 
         active_judger_results = {}
         for i in range(active_judgers_len):
-            active_judger_results[judger_list[i]] = all_results[task_len_list[i] : task_len_list[i + 1]]
+            active_judger_results[active_reward_judger_names[i]] = all_results[task_len_list[i] : task_len_list[i + 1]]
 
         # 为每个样本创建一个 RLJudgerResponseItem，不同judger的结果放在同一个item中
         uid_list = [item.uid.observation_id for item in group_data_item]
@@ -213,17 +217,19 @@ class JudgerController:
             data_source = group_data_item[0].data.data_source
             # 如果要使用多个judger并且进行加权打分，则必须在数据集中指定data_source的分数
             assert data_source, "No data source found for the given datasets when multiple judgers are provided."
-            judger_names = []
             active_reward_judger = []
-            for judger in self.reward_judger:
-                judger_name = ray.get(judger[0].get_judger_name.remote())
-                judger_names.append(judger_name)
+            active_reward_judger_names = []
+            for idx, judger in enumerate(self.reward_judger):
+                judger_name = self.reward_judger_names[idx]
                 if judger_name in data_source:
                     active_reward_judger.append(judger)
+                    active_reward_judger_names.append(judger_name)
             assert active_reward_judger, (
-                f"No active reward judger in {judger_names} found for the given data source {data_source}."
+                f"No active reward judger in {self.reward_judger_names} found for the given data source {data_source}."
             )
-            judger_response_item = await self._call_custom_reward_judger(active_reward_judger, group_data_item)
+            judger_response_item = await self._call_custom_reward_judger(
+                active_reward_judger, active_reward_judger_names, group_data_item
+            )
 
             # NOTE: 只计算score的加权和
             for item in judger_response_item:
@@ -233,7 +239,9 @@ class JudgerController:
                         final_reward += item.reward[name]["score"] * weight
                 item.reward["weighted_score"] = final_reward
         else:
-            judger_response_item = await self._call_custom_reward_judger(self.reward_judger, group_data_item)
+            judger_response_item = await self._call_custom_reward_judger(
+                self.reward_judger, self.reward_judger_names, group_data_item
+            )
         if input_type_is_list is False:
             return judger_response_item[0]
         return judger_response_item
