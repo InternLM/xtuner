@@ -1,11 +1,11 @@
 import json
 import logging
-from statistics import mean
-from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
 import os
-
+import shutil
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+from statistics import mean
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
@@ -79,6 +79,7 @@ def check_result(case_name, base_path, cur_path, check_metric):
     output_path = Path(f"../{os.environ['GITHUB_RUN_ID']}")
     output_path.mkdir(parents=True, exist_ok=True)
     plot_all(case_name, check_metric, base_metrics, cur_metrics, output_path)
+    shutil.copytree(output_path, "./", dirs_exist_ok=True)
 
     for metric, threshold in check_metric.items():
         max_error = 0.0

@@ -38,7 +38,6 @@ jobs:
           conda env list
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
           pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
-          sleep 300
           ls ./
           ls ../${{ github.run_id }}
 
@@ -46,7 +45,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          path: ${{ github.workspace }}/../${{ github.run_id }}
+          path: ${{ github.workspace }}/${{ github.run_id }}
           if-no-files-found: ignore
           retention-days: 7
           name: xtuner-e2e-${{ github.run_id }}
