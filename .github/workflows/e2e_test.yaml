@@ -28,9 +28,9 @@ jobs:
         run: sudo git clean -ffdx
       - name: Clone repository
         uses: actions/checkout@v2
-        with:
-          repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
-          ref: ${{github.event.inputs.repo_ref || 'main'}}
+          #with:
+          #repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
+          #ref: ${{github.event.inputs.repo_ref || 'main'}}
       - name: run-test
         run: |
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
