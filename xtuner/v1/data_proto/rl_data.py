@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeAlias, TypedDict
 
+import torch
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Annotated, NotRequired
@@ -82,9 +83,9 @@ class RLUIDItem(BaseModel):
 
 
 class MultimodalTrainInfo(TypedDict):
-    pixel_values: NotRequired[list[int] | RayObjectRef | None]  # type: ignore[valid-type]
-    image_grid_thw: NotRequired[list[int]]
-    position_ids: NotRequired[list[int]]
+    pixel_values: NotRequired[torch.Tensor | RayObjectRef | None]  # type: ignore[valid-type]
+    image_grid_thw: NotRequired[torch.Tensor]
+    position_ids: NotRequired[torch.Tensor]
 
 
 class RLDatasetItem(BaseModel):
@@ -100,7 +101,7 @@ class RLDatasetItem(BaseModel):
         extra_info (Dict[str, Any]): Additional user-defined information.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     messages: list[dict[str, Any]] | None = None
     input_ids: list[int] | None = None
     num_tokens: int | None = None
