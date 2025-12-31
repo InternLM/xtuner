@@ -66,7 +66,7 @@ def plot_all(case_name, check_metric, base_metrics, cur_metrics, output_root: Pa
     plt.close()
 
 
-def check_result(base_path, cur_path, check_metric):
+def check_result(case_name, base_path, cur_path, check_metric):
     fail_metric = {}
     check_metric = check_metric
     metric_list = list(check_metric.keys())
