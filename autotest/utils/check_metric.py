@@ -79,7 +79,7 @@ def check_result(case_name, base_path, cur_path, check_metric):
     output_path = Path(f"../{os.environ['GITHUB_RUN_ID']}")
     output_path.mkdir(parents=True, exist_ok=True)
     plot_all(case_name, check_metric, base_metrics, cur_metrics, output_path)
-    shutil.copytree(output_path, "./", dirs_exist_ok=True)
+    shutil.copytree(output_path, f"./{os.environ['GITHUB_RUN_ID']}", dirs_exist_ok=True)
 
     for metric, threshold in check_metric.items():
         max_error = 0.0
