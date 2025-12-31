@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+import numpy
 import ray
 import torch
 from cyclopts import Parameter
@@ -316,7 +317,6 @@ class ReplayBufferStorage:
             list
         )  # action_id: [observation_id, observation_id, ...]
         self.logger = get_logger(log_dir=worker_log_dir, tag="ReplayBuffer")
-        self._multimodal_train_infos: Dict[int, Dict[str, Any]] = {}
 
     def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
@@ -477,6 +477,27 @@ class ReplayBufferStorage:
                 )
                 self.logger.info("Resolved routed_experts ObjectRef in rollout.extra_info")
 
+    def convert_to_ray_objref(self, data_item: RLDataFlowItem):
+        """Converts large tensors in RLDataFlowItem to ray.ObjectRefs.
+
+        Args:
+            data_item (RLDataFlowItem): The data item containing large tensors.
+        Returns:
+            RLDataFlowItem: The data item with large tensors converted to ray.ObjectRefs.
+        """
+        # convert data.multimodal_train_info to ray.ObjectRef
+        if hasattr(data_item.data, "multimodal_train_info"):
+            multimodal_info = data_item.data.multimodal_train_info
+            if multimodal_info and "pixel_values" in multimodal_info:
+                pixel_values_ref = ray.put(multimodal_info["pixel_values"])
+                del multimodal_info["pixel_values"]
+                data_item.data.multimodal_train_info = pixel_values_ref
+        # convert rollout.extra_info.router_experts to ray.ObjectRef
+        if "routed_experts" in data_item.env.rollout.extra_info:
+            routed_experts_ref = ray.put(data_item.env.rollout.extra_info["routed_experts"])
+            del data_item.env.rollout.extra_info["routed_experts"]
+            data_item.env.rollout.extra_info["routed_experts"] = routed_experts_ref
+
     def has_objectref(self, item: RLDataFlowItem) -> bool:
         def check(obj):
             if isinstance(obj, ray.ObjectRef):
@@ -487,7 +508,13 @@ class ReplayBufferStorage:
                 return any(check(x) for x in obj)
             if isinstance(obj, dict):
                 return any(check(v) for v in obj.values())
-            return False
+            if isinstance(obj, (str, int, float, bool, type(None), torch.Tensor, numpy.ndarray)):
+                return False
+            # 如果不满足以上类型，抛出错误，防止意想不到的问题
+            raise TypeError(
+                f"Unsupported type: {type(obj)} in {obj} "
+                f"Expected ray.ObjectRef, BaseModel, list/tuple/set, dict, or primitive types."
+            )
 
         return check(item)
 
@@ -515,7 +542,6 @@ class ReplayBufferStorage:
             "_observations2states": self._observations2states,
             "_states": dict(self._states),
             "_action2observations": dict(self._action2observations),
-            "_multimodal_train_infos": self._multimodal_train_infos,
         }
 
         torch.save(state, file_path)
@@ -540,11 +566,12 @@ class ReplayBufferStorage:
         self._observations2states = state["_observations2states"]
         self._states = defaultdict(list, state["_states"])
         self._action2observations = defaultdict(list, state["_action2observations"])
-        self._multimodal_train_infos = state["_multimodal_train_infos"]
 
         dump_actions = state["_actions"]
         # 重建 _actions 和 _observations: 与replaymeta相关
         for group_dataitem in dump_actions:
+            for data_item in group_dataitem:
+                self.convert_to_ray_objref(data_item)
             replay_meta = mapping_dataitem_to_replaymeta(group_dataitem)
             action_id = replay_meta.action_id
             self._actions[action_id] = replay_meta
@@ -671,7 +698,7 @@ class ReplayBuffer:
         torch.save(dataloader_state, dataloader_path)
 
         # save storage
-        rb_storage_path = file_path / "replay_buffer_storage.pkl"
+        rb_storage_path = file_path / "replay_buffer_storage.pth"
         self.storage.dump(rb_storage_path)
 
     def resume(self, file_path: Path | str):
@@ -699,7 +726,7 @@ class ReplayBuffer:
         else:
             self.logger.warning(f"Dataloader state file {dataloader_path} does not exist. Skipping dataloader resume.")
         # resume storage
-        rb_storage_path = file_path / "replay_buffer_storage.pkl"
+        rb_storage_path = file_path / "replay_buffer_storage.pth"
         if rb_storage_path.exists():
             self.storage.resume(rb_storage_path)
         else:
