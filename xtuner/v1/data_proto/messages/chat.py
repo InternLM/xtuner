@@ -139,7 +139,7 @@ class ChatMsg(BaseModel):
         elif self.role == "assistant":
             if self.tool_calls is not None:
                 function_text = function_formatter(self.tool_calls)
-                if text is not None and text != "":
+                if text is not None and text != "" and not text.endswith("\n\n"):
                     function_text = "\n" + function_text
                 text += function_text
 
