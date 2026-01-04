@@ -309,6 +309,10 @@ class RLTrainer:
 
         self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(self._auto_resume, load_checkpoint_cfg)
 
+        if train_worker_cfg.seed is None:
+            self.logger.warning(f"RLTrainer seed {seed} is used as train worker seed.")
+            train_worker_cfg.seed = seed
+
         train_worker_cfg.log_dir = log_dir
         dataflow_config.worker_log_dir = log_dir
         rollout_config.worker_log_dir = log_dir
@@ -591,6 +595,14 @@ class RLTrainer:
                         scalar_value=v,
                         global_step=global_step,
                     )
+
+            rank_sft_log = log_item["sft_train_metrics"]
+            for k, v in rank_sft_log.items():
+                self._writer.add_scalar(
+                    tag=f"sft_train_metrics/worker_{worker_idx}/{k}",
+                    scalar_value=v,
+                    global_step=rollout_idx,
+                )
 
     def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):
         """Synchronizes weights and saves checkpoints."""
@@ -933,7 +945,7 @@ class RLTrainer:
         ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)), timeout=self._ray_get_timeout)
         self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
         ray.get(
-            self._train_controller.save_dcp.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer),
+            self._train_controller.save.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer),
             timeout=self._ray_get_timeout,
         )
 
