@@ -65,6 +65,27 @@ class BaseLossKwargs(BaseModel):
             chunks.append(type(self)(**chunk_dict))
         return chunks
 
+    @classmethod
+    def cat(cls, chunks: list["BaseLossKwargs"]) -> "BaseLossKwargs":
+        assert len(chunks) > 0, "chunks must not be empty."
+
+        # 收集所有 tensor 字段名（按 chunk[0] 的字段为准；pydantic extra=forbid 也要求字段一致）
+        first = chunks[0]
+        tensor_field_names: list[str] = []
+        for field_name, field_value in first.__dict__.items():
+            if isinstance(field_value, torch.Tensor):
+                tensor_field_names.append(field_name)
+
+        assert len(tensor_field_names) > 0, "At least one field should be a tensor to cat."
+
+        cat_dict: dict[str, torch.Tensor] = {}
+        for field_name in tensor_field_names:
+            tensors = [getattr(c, field_name) for c in chunks]
+            # 与 chunk() 对应：按 dim=1 拼回去
+            cat_dict[field_name] = torch.cat(tensors, dim=1)
+
+        return cls(**cat_dict)
+
 
 class BaseLossConfig(BaseModel):
     model_config = ConfigDict(title="BaseLossConfig", extra="forbid", arbitrary_types_allowed=True)
@@ -156,3 +177,14 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
             loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
         return loss, (logits, extra_info)
+
+    @classmethod
+    def cat(cls, chunks: list["BaseLossContext"]) -> "BaseLossContext":
+        assert len(chunks) > 0, "chunks must not be empty."
+
+        first = chunks[0]
+        loss_cfg = first.loss_cfg
+        loss_kwargs_chunks = [c.loss_kwargs for c in chunks]
+        loss_kwargs = type(first.loss_kwargs).cat(loss_kwargs_chunks)
+
+        return cls(loss_cfg, loss_kwargs)

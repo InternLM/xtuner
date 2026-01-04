@@ -137,7 +137,7 @@ class RawTrainingController:
                     )
                     rollout_logprobs_list.append(pad_rollout_logprobs)
 
-            seq_ctx = SequenceContext.pack(seq_ctx_list)
+            seq_ctx = SequenceContext.cat(seq_ctx_list)
             shifted_labels = torch.cat(label_list, dim=1)  # (1, max_len)
             advantages = torch.tensor(advantage_list).float().unsqueeze(0)  # (1, num_samples)
             cu_seq_lens_q = seq_ctx.cu_seq_lens_q
