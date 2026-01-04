@@ -91,6 +91,7 @@ def replace_image_token(
     add_vision_id: bool = False,
 ):
     current_image_idx = 0
+    total_img_cnt = 0
     for msg in messages.messages:
         if msg.role == "pretrain":
             assert len(messages.messages) == 1, "pretrain message should only have one message"
@@ -104,9 +105,9 @@ def replace_image_token(
                         image_cnt = text.count(IMAGE_TOKEN_ALIAS)
                         for i in range(image_cnt):
                             image_tokens = f"{chat_template.image_start_token}{chat_template.image_context_token * num_image_token_list[current_image_idx]}{chat_template.image_end_token}"  # type: ignore
-                            if add_vision_id and image_cnt > 1:
-                                # add vision id for each image when there are multiple images
-                                image_tokens = f"Picture {i + 1}: " + image_tokens
+                            if add_vision_id:
+                                image_tokens = f"Picture {total_img_cnt + 1}: " + image_tokens
+                                total_img_cnt += 1
                             text = text.replace(IMAGE_TOKEN_ALIAS, image_tokens, 1)
                             current_image_idx += 1
                         c.text = text
