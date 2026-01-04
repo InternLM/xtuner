@@ -218,14 +218,18 @@ class TrainEngine:
         intra_layer_micro_batch = self.intra_layer_micro_batch
         return data_batches_len // intra_layer_micro_batch
 
+    # this method can be called outside, e.g., at the beginning of compute_actor_logprobs or compute_ref_logprobs during rl training
+    def maybe_precompute_float8_dynamic_scale_for_fsdp(self):
+        if self.float8_handler is not None and self.float8_handler.enabled:
+            self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
+
     def train_step(self, data_batches: list[ModelItem]) -> tuple[LossLog, OtherLog]:
         """Perform a training step with the given data batches and mesh.
 
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
         """
-        if self.float8_handler is not None and self.float8_handler.enabled:
-            self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
+        self.maybe_precompute_float8_dynamic_scale_for_fsdp()
 
         loss_log: LossLog = {}  # type: ignore[typeddict-item]
         other_log: OtherLog = {}  # type: ignore[typeddict-item]
