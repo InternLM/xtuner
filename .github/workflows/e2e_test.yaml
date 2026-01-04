@@ -23,6 +23,8 @@ jobs:
   ete_test:
     if: ${{!cancelled() }}
     runs-on: [h_cluster_ete]
+    permissions:
+      contents: write
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
