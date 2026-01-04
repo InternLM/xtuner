@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 import torch
 from pydantic import computed_field
@@ -34,7 +34,7 @@ class Qwen3DenseConfig(TransformerConfig):
     use_sliding_window: bool = False
     pad_token_id: int | None = None
     bos_token_id: int
-    saved_layer_types: list[Literal["full_attention", "sliding_attention"]] = []
+    hf_layer_types: Optional[list[Literal["full_attention", "sliding_attention"]]] = None
 
     def build(self) -> Qwen3Dense:
         return Qwen3Dense(self)
@@ -70,7 +70,7 @@ class Qwen3DenseConfig(TransformerConfig):
             ),
             use_sliding_window=hf_config.use_sliding_window,
             tie_word_embeddings=hf_config.tie_word_embeddings,
-            saved_layer_types=hf_config.layer_types,
+            hf_layer_types=hf_config.layer_types,
         )
 
         return config
@@ -104,7 +104,7 @@ class Qwen3DenseConfig(TransformerConfig):
 
     @computed_field
     def layers_type(self) -> list[Literal["full_attention", "sliding_attention"]]:
-        return self.saved_layer_types
+        return self.hf_layer_types if self.hf_layer_types is not None else TransformerConfig.layers_type.fget(self)
 
 
 # TODO: Unify the config name style
