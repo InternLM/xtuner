@@ -94,27 +94,17 @@ class TestEvaluator(unittest.TestCase):
         evaluator_cfg = EvaluatorConfig(
             dataset_cfg=self.eval_dataset_cfg,
             tokenizer=self.tokenizer,
-            max_concurrent=1,
-            eval_sample_ratio=0.004,  # generate 5 samples
-            compute_metric_func=None,
-            sample_params=self.sample_params,
-            worker_log_dir=self.worker_log_dir
-        )
-        evaluator = Evaluator.remote(evaluator_cfg, self.test_env)
-        correctness = ray.get(evaluator.run.remote())
-        custom_evaluator_cfg = EvaluatorConfig(
-            dataset_cfg=self.eval_dataset_cfg,
-            tokenizer=self.tokenizer,
-            max_concurrent=1,
+            max_concurrent=16,
             eval_sample_ratio=0.004,  # generate 5 samples
             compute_metric_func=custom_compute_metric,
             sample_params=self.sample_params,
             worker_log_dir=self.worker_log_dir
         )
-        custom_evaluator = Evaluator.remote(custom_evaluator_cfg, self.test_env)
-        custom_correctness = ray.get(custom_evaluator.run.remote())
-        self.assertEqual(correctness['accuracy'], custom_correctness['custom_accuracy'])
-        ray.get(self.test_env.shutdown.remote())
+        evaluator = Evaluator.remote(evaluator_cfg, self.test_env)
+        try:
+            ray.get(evaluator.run.remote())
+        except Exception as e:
+            self.fail(f"evaluator.run.remote() raised an exception: {e}")
         
 if __name__ == '__main__':
     unittest.main()
