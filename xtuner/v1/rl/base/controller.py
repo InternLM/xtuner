@@ -1,6 +1,7 @@
 import math
 import os
 import random
+import time
 from pathlib import Path
 from typing import Literal, cast
 
@@ -8,6 +9,7 @@ import numpy as np
 import ray
 import torch
 from ray.actor import ActorProxy
+from typing_extensions import TypedDict
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
@@ -19,6 +21,11 @@ from xtuner.v1.utils import get_logger, ray_method
 TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
 from .worker import TrainingWorker, WorkerInputItem, WorkerLogItem
+
+
+class TrainingStepTimeLog(TypedDict):
+    data_packing_time: float
+    worker_training_time: float
 
 
 class RawTrainingController:
@@ -367,7 +374,8 @@ class RawTrainingController:
         pack_max_length: int,
         rollout_idx: int,
         enable_dp_balance: bool = True,
-    ) -> list[WorkerLogItem]:
+    ) -> tuple[list[WorkerLogItem], TrainingStepTimeLog]:
+        pack_start_time = time.perf_counter()
         self._set_data_batches_properties(data_batches)
 
         world_size = len(self.workers)
@@ -422,6 +430,9 @@ class RawTrainingController:
             max_packs = max_packs_per_step[step_idx]
             self._pad_to_max_packs_across_workes(packed_data_batches, step_idx, max_packs, pack_max_length)
 
+        pack_end_time = time.perf_counter()
+        self.logger.info(f"Data packing took {pack_end_time - pack_start_time:.2f} seconds.")
+
         handles = []
         for worker_idx, worker in enumerate(self.workers):
             handles.append(
@@ -430,8 +441,14 @@ class RawTrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
-        return log_infos
+        worker_log_infos = ray.get(handles)
+        fit_end_time = time.perf_counter()
+        self.logger.info(f"Training step took {fit_end_time - pack_end_time:.2f} seconds.")
+        training_time: TrainingStepTimeLog = {
+            "data_packing_time": pack_end_time - pack_start_time,
+            "worker_training_time": fit_end_time - pack_end_time,
+        }
+        return worker_log_infos, training_time
 
     @ray_method
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
