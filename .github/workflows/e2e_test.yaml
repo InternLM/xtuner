@@ -25,6 +25,7 @@ jobs:
     runs-on: [h_cluster_ete]
     permissions:
       contents: write
+      pages: write
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
