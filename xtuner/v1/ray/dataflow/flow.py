@@ -342,8 +342,18 @@ class RawDataFlow:
         """Starts the data generation process.
 
         This method resets the internal state and runs the concurrent task
-        runner to collect a new batch of samples.
+        runner to collect a new batch of samples from the environment.
 
+         Args:
+            num (Optional[int]): The target number of samples to collect for this run.
+                Overrides the existing global_batch_size in DataFlowConfig if provided.
+            sample_params (Optional[SampleParams]): Parameters for model sampling.
+                Overrides the existing sample_params in DataFlowConfig if provided.
+            extra_params (Optional[Dict]): Additional parameters for rollout.
+                Overrides the existing extra_params in DataFlowConfig if provided.
+            enable_partial_rollout (Optional[bool]): Whether to enable partial rollout mode.
+                This is primarily intended for unit testing, allowing the dataflow to pause
+                and resume partway through a rollout for checkpointing and recovery tests.Returns:
         Returns:
             List[RLDataFlowItem]: A list of collected training samples.
         """
