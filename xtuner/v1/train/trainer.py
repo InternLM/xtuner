@@ -1786,6 +1786,7 @@ class Trainer:
             "XTUNER_USE_CUTLASS_GROUP_GEMM": os.getenv("XTUNER_USE_CUTLASS_GROUP_GEMM"),
             "GROUPED_GEMM_USE_CUTLASS": os.getenv("GROUPED_GEMM_USE_CUTLASS"),
             "XTUNER_USE_NATIVE_RMSNORM": os.getenv("XTUNER_USE_NATIVE_RMSNORM"),
+            "XTUNER_SM_MARGIN": os.getenv("XTUNER_SM_MARGIN"),
         }
 
         for k, v in env.items():

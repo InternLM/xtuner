@@ -1,10 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import os
 from typing import Optional
 
 import torch
 import triton
 import triton.language as tl
 from torch import Tensor
+
+
+SM_MARGIN = int(os.environ.get("XTUNER_SM_MARGIN", 0))
 
 
 def get_cuda_autotune_config():
@@ -245,9 +249,7 @@ def repeat_interleave(
 
 
 @torch.library.custom_op("moe::m_grouped_gemm", mutates_args=())
-def m_grouped_gemm(
-    A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False, numSM: int = -1
-) -> Tensor:
+def m_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False) -> Tensor:
     assert A.dim() == 2
     assert B.dim() == 3
 
@@ -280,7 +282,7 @@ def m_grouped_gemm(
     group_end = size_per_group.cumsum(0) - size_per_group + size_per_group
     group_start = size_per_group.cumsum(0) - size_per_group
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count if numSM <= 0 else numSM
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count - SM_MARGIN
 
     dtype_mapping = {torch.bfloat16: 0, torch.float16: 1}
     dtype_a = dtype_mapping.get(A.dtype, -1)
@@ -324,7 +326,7 @@ def m_grouped_gemm(
 
 
 @m_grouped_gemm.register_fake
-def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False, numSM: int = -1) -> Tensor:
+def _(A: Tensor, B: Tensor, size_per_group: torch.Tensor, trans_b: bool = False) -> Tensor:
     M, K = A.shape
     if trans_b:
         num_groups, N, BK = B.shape
