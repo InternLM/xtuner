@@ -1,9 +1,15 @@
+# Copyright (c) OpenMMLab. All rights reserved.
+import os
+
 import torch
 import triton
 import triton.language as tl
 from torch import Tensor
 
 from .utils import TmaAutoTuneHelper
+
+
+SM_MARGIN = int(os.environ.get("XTUNER_SM_MARGIN", 0))
 
 
 def get_cuda_autotune_config():
@@ -148,7 +154,7 @@ def k_grouped_gemm(A: Tensor, B: Tensor, size_per_group: torch.Tensor) -> Tensor
     assert dtype_b >= 0, f"data type {B.dtype} not supported"
     assert dtype_c >= 0, f"data type {C.dtype} not supported"
 
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count - SM_MARGIN
 
     desc_helper = TmaAutoTuneHelper()
     desc_helper.init_tma_descriptor("a")
