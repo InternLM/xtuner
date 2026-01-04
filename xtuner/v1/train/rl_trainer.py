@@ -306,13 +306,15 @@ class RLTrainer:
 
         if cpu_resources is not None:
             # NOTE: Here we only check CPU and memory for judger actors because only judger actors use CPU resources currently.
-            assert judger_config.total_cpus_needed <= cpu_resources.num_cpus_per_worker, (
+            assert judger_config.total_cpus_needed <= cpu_resources.num_cpus_per_worker * cpu_resources.num_workers, (
                 f"Not enough CPU resources for judger actors, "
-                f"required {judger_config.total_cpus_needed}, but got {cpu_resources.num_cpus_per_worker}."
+                f"required {judger_config.total_cpus_needed}, but got {cpu_resources.num_cpus_per_worker * cpu_resources.num_workers}."
             )
-            assert judger_config.total_memory_needed <= cpu_resources.cpu_memory_per_worker, (
+            assert (
+                judger_config.total_memory_needed <= cpu_resources.cpu_memory_per_worker * cpu_resources.num_workers
+            ), (
                 f"Not enough memory resources for judger actors, "
-                f"required {judger_config.total_memory_needed}, but got {cpu_resources.cpu_memory_per_worker}."
+                f"required {judger_config.total_memory_needed}, but got {cpu_resources.cpu_memory_per_worker * cpu_resources.num_workers}."
             )
 
         self._judger_cpu_pg = placement_group(bundles=judger_config.total_bundles_needed, strategy="SPREAD")
