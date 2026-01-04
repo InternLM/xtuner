@@ -1,10 +1,10 @@
-import itertools
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
+import numpy
 import ray
 import torch
 from cyclopts import Parameter
@@ -14,6 +14,7 @@ from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import (
+    MultimodalTrainInfo,
     RLDataFlowItem,
     RLDatasetItem,
     RLExtraDataItem,
@@ -122,7 +123,9 @@ def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowIt
         replay_meta.observation_ids, replay_meta.observation_refs, replay_meta.observation_versions
     ):
         env_data = ray.get(obs_ref)
-        ray._private.internal_api.free(obs_ref)
+        # NOTE: This mapping function used by both dump and get. ObjectRefs are kept during dump (for training continuity)
+        # but released during get (via del replaymeta) when no longer needed. So we do not free them manually here.
+        # ray._private.internal_api.free(obs_ref)
 
         item = RLDataFlowItem(
             uid=RLUIDItem(env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=version),
@@ -295,9 +298,6 @@ class Sampler:
             # note: Sample grouped sample at once. They share the same action_id
             return self.sample_from_datasets(env, prompt_repeat_k)
 
-    def resume(self, num: int) -> None:
-        self.train_dataloader_iter = itertools.islice(self.train_dataloader, num, None)
-
 
 class ReplayBufferStorage:
     """Handles the storage of experiences for the replay buffer."""
@@ -317,7 +317,6 @@ class ReplayBufferStorage:
             list
         )  # action_id: [observation_id, observation_id, ...]
         self.logger = get_logger(log_dir=worker_log_dir, tag="ReplayBuffer")
-        self._multimodal_train_infos: Dict[int, Dict[str, Any]] = {}
 
     def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
@@ -350,10 +349,12 @@ class ReplayBufferStorage:
 
         # observation
         for observation_id in replay_meta.observation_ids:
-            self._action2observations[action_id].append(observation_id)
             self._observations[observation_id] = replay_meta
             self._observations2states[observation_id] = replay_meta.state
-            self._states[replay_meta.state].append(observation_id)
+            if observation_id not in self._action2observations[action_id]:
+                self._action2observations[action_id].append(observation_id)
+            if observation_id not in self._states[replay_meta.state]:
+                self._states[replay_meta.state].append(observation_id)
 
     def clear(self):
         attrs_to_clear = [
@@ -369,7 +370,7 @@ class ReplayBufferStorage:
         for attr in attrs_to_clear:
             getattr(self, attr).clear()
 
-    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[Dict[str, Any] | None]]:
+    def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[MultimodalTrainInfo | None]]:
         """Retrieves a batch of finished sample groups from the buffer.
 
         Args:
@@ -397,6 +398,11 @@ class ReplayBufferStorage:
             remain_finished_list = self._returned[global_batch_size:]
             for action_id in target_finished_list:
                 replay_meta = self._actions.pop(action_id)
+                observation_ids = self._action2observations.pop(action_id)
+                for obs_id in observation_ids:
+                    self._observations.pop(obs_id)
+                    self._observations2states.pop(obs_id)
+
                 # todo: add an unified state management
                 replay_meta.state = RolloutState.ARCHIVED
                 group_samples = mapping_replaymeta_to_dataitem(replay_meta)
@@ -446,7 +452,73 @@ class ReplayBufferStorage:
         )
         self.logger.info(log_message)
 
-    def dump(self, file_path: str):
+    def resolve_ray_objects(self, data_item: RLDataFlowItem):
+        """Resolves ray.ObjectRefs in a RLDataFlowItem to their actual values.
+
+        Args:
+            data_item (RLDataFlowItem): The data item containing ray.ObjectRefs.
+        Returns:
+            RLDataFlowItem: The data item with ray.ObjectRefs resolved.
+        """
+
+        # Resolve data.multimodal_train_info
+        if hasattr(data_item.data, "multimodal_train_info"):
+            multimodal_info = data_item.data.multimodal_train_info
+            if multimodal_info and "pixel_values" in multimodal_info:
+                pixel_values_ref = multimodal_info["pixel_values"]
+                if isinstance(pixel_values_ref, ObjectRef):
+                    multimodal_info["pixel_values"] = ray.get(pixel_values_ref)
+                    data_item.data.multimodal_train_info = multimodal_info
+        # Resolve rollout.extra_info.router_experts
+        if "routed_experts" in data_item.env.rollout.extra_info:
+            if isinstance(data_item.env.rollout.extra_info["routed_experts"], ObjectRef):
+                data_item.env.rollout.extra_info["routed_experts"] = ray.get(
+                    data_item.env.rollout.extra_info["routed_experts"]
+                )
+                self.logger.info("Resolved routed_experts ObjectRef in rollout.extra_info")
+
+    def convert_to_ray_objref(self, data_item: RLDataFlowItem):
+        """Converts large tensors in RLDataFlowItem to ray.ObjectRefs.
+
+        Args:
+            data_item (RLDataFlowItem): The data item containing large tensors.
+        Returns:
+            RLDataFlowItem: The data item with large tensors converted to ray.ObjectRefs.
+        """
+        # convert data.multimodal_train_info to ray.ObjectRef
+        if hasattr(data_item.data, "multimodal_train_info"):
+            multimodal_info = data_item.data.multimodal_train_info
+            if multimodal_info and "pixel_values" in multimodal_info:
+                pixel_values_ref = ray.put(multimodal_info["pixel_values"])
+                del multimodal_info["pixel_values"]
+                data_item.data.multimodal_train_info = pixel_values_ref
+        # convert rollout.extra_info.router_experts to ray.ObjectRef
+        if "routed_experts" in data_item.env.rollout.extra_info:
+            routed_experts_ref = ray.put(data_item.env.rollout.extra_info["routed_experts"])
+            del data_item.env.rollout.extra_info["routed_experts"]
+            data_item.env.rollout.extra_info["routed_experts"] = routed_experts_ref
+
+    def has_objectref(self, item: RLDataFlowItem) -> bool:
+        def check(obj):
+            if isinstance(obj, ray.ObjectRef):
+                return True
+            if isinstance(obj, BaseModel):
+                return any(check(getattr(obj, f)) for f in obj.model_fields)
+            if isinstance(obj, (list, tuple, set)):
+                return any(check(x) for x in obj)
+            if isinstance(obj, dict):
+                return any(check(v) for v in obj.values())
+            if isinstance(obj, (str, int, float, bool, type(None), torch.Tensor, numpy.ndarray)):
+                return False
+            # 如果不满足以上类型，抛出错误，防止意想不到的问题
+            raise TypeError(
+                f"Unsupported type: {type(obj)} in {obj} "
+                f"Expected ray.ObjectRef, BaseModel, list/tuple/set, dict, or primitive types."
+            )
+
+        return check(item)
+
+    def dump(self, file_path: Path):
         """Dumps the entire state of the replay buffer storage to a single
         file, resolving all ray.ObjectRefs to their actual values.
 
@@ -454,59 +526,59 @@ class ReplayBufferStorage:
             file_path (str): The path to the file where the state will be
                 saved.
         """
-        import os
-        import pickle
+        all_data_items = [mapping_replaymeta_to_dataitem(replay_meta) for replay_meta in self._actions.values()]
 
-        self.logger.info(f"Starting to dump ReplayBufferStorage state to {file_path}...")
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        for data_items in all_data_items:
+            for item in data_items:
+                self.resolve_ray_objects(item)
+                res = self.has_objectref(item)
+                assert not res, "ReplayBufferStorage.dump found unresolved ray.ObjectRef in RLDataFlowItem"
 
-        all_data_items = []
-        for replay_meta in self._actions.values():
-            group_data_items = mapping_replaymeta_to_dataitem(replay_meta)
-            all_data_items.append(group_data_items)
+        state = {
+            "_paused": self._paused,
+            "_returned": self._returned,
+            "_actions": all_data_items,
+            "_root2actions": dict(self._root2actions),
+            "_observations2states": self._observations2states,
+            "_states": dict(self._states),
+            "_action2observations": dict(self._action2observations),
+        }
 
-        with open(file_path, "wb") as f:
-            pickle.dump(all_data_items, f)
+        torch.save(state, file_path)
         self.logger.info(f"ReplayBufferStorage state dumped to {file_path}")
 
-    def resume(self, file_path: Path | str):
+    def resume(self, file_path: Path):
         """Resumes the replay buffer storage from a single file.
 
         Args:
             file_path (str): The path to the file from which to restore the
                 state.
         """
-        import os
-        import pickle
+        if len(self._actions) > 0:
+            self.logger.warning("ReplayBufferStorage is not empty. Resuming will overwrite the existing state.")
+            self.clear()
 
-        self.logger.info(f"Starting to resume ReplayBufferStorage state from {file_path}...")
-        if not os.path.exists(file_path):
-            self.logger.error(f"State file not found: {file_path}. Cannot resume.")
-            return
+        state = torch.load(file_path, map_location="cpu", weights_only=False)
 
-        with open(file_path, "rb") as f:
-            all_data_items = pickle.load(f)
+        self._paused = state["_paused"]
+        self._returned = state["_returned"]
+        self._root2actions = defaultdict(list, state["_root2actions"])
+        self._observations2states = state["_observations2states"]
+        self._states = defaultdict(list, state["_states"])
+        self._action2observations = defaultdict(list, state["_action2observations"])
 
-        for group_data_items in all_data_items:
-            replay_meta = mapping_dataitem_to_replaymeta(group_data_items)
-            root_id = replay_meta.root_id
+        dump_actions = state["_actions"]
+        # 重建 _actions 和 _observations: 与replaymeta相关
+        for group_dataitem in dump_actions:
+            for data_item in group_dataitem:
+                self.convert_to_ray_objref(data_item)
+            replay_meta = mapping_dataitem_to_replaymeta(group_dataitem)
             action_id = replay_meta.action_id
-            state_str = replay_meta.state
-            if state_str == "abort":
-                self._paused.append(action_id)
-            elif state_str == "returned":
-                self._returned.append(action_id)
-            self._root2actions[root_id].append(action_id)
             self._actions[action_id] = replay_meta
-            for observation_id in replay_meta.observation_ids:
-                self._action2observations[action_id].append(observation_id)
+            for observation_id in self._action2observations[action_id]:
                 self._observations[observation_id] = replay_meta
-                self._observations2states[observation_id] = replay_meta.state
-                self._states[replay_meta.state].append(observation_id)
 
         self.logger.info(f"ReplayBufferStorage state successfully resumed from {file_path}")
-
-        self.print()
 
 
 @ray.remote
@@ -547,6 +619,7 @@ class ReplayBuffer:
             self.storage,
         )
         self.post_processor_func = config.postprocessor_func
+        self.logger = get_logger(log_dir=config.worker_log_dir, tag="ReplayBuffer")
 
     def get_train_dataset_length(self):
         """Returns the length of the training dataloader."""
@@ -607,25 +680,6 @@ class ReplayBuffer:
         """Prints the current state of the replay buffer storage."""
         self.storage.print()
 
-    def dump_storage(self, file_path: str):
-        """Dumps the replay buffer's storage to a file.
-
-        Args:
-            file_path (str): The path to the file for saving the data.
-        """
-        self.storage.dump(file_path)
-
-    def resume_storage(self, file_path: Path | str):
-        """Resumes the replay buffer's storage from a file.
-
-        Args:
-            file_path (str): The path to the file from which to restore the
-                state.
-        """
-        self.storage.resume(file_path)
-        num = self.storage.get_prompt_num()
-        self.sampler.resume(num)
-
     def status(self):
         return self.storage.status()
 
@@ -637,9 +691,15 @@ class ReplayBuffer:
         """
         if isinstance(file_path, str):
             file_path = Path(file_path)
+
+        # save dataloader
         dataloader_path = file_path / "dataloader"
         dataloader_state = self._dataloader.get_state_dict(self.sampler.reduced_consumed_samples)
         torch.save(dataloader_state, dataloader_path)
+
+        # save storage
+        rb_storage_path = file_path / "replay_buffer_storage.pth"
+        self.storage.dump(rb_storage_path)
 
     def resume(self, file_path: Path | str):
         """Resumes the replay buffer's storage from a file.
@@ -651,16 +711,28 @@ class ReplayBuffer:
         if isinstance(file_path, str):
             file_path = Path(file_path)
         dataloader_path = file_path / "dataloader"
-        dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
-        self._dataloader.load_state_dict(dataloader_state)
+        if dataloader_path.exists():
+            dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
+            self._dataloader.load_state_dict(dataloader_state)
 
-        self.sampler = Sampler(
-            self._dataloader,
-            self.tokenizer,
-            self.storage,
-        )
-        self.sampler.reduced_consumed_samples = dataloader_state["sampler"]["step"]
-        self.sampler.cur_epoch = dataloader_state["sampler"]["epoch"]
+            # resume dataloader
+            self.sampler = Sampler(
+                self._dataloader,
+                self.tokenizer,
+                self.storage,
+            )
+            self.sampler.reduced_consumed_samples = dataloader_state["sampler"]["step"]
+            self.sampler.cur_epoch = dataloader_state["sampler"]["epoch"]
+        else:
+            self.logger.warning(f"Dataloader state file {dataloader_path} does not exist. Skipping dataloader resume.")
+        # resume storage
+        rb_storage_path = file_path / "replay_buffer_storage.pth"
+        if rb_storage_path.exists():
+            self.storage.resume(rb_storage_path)
+        else:
+            self.logger.warning(
+                f"ReplayBufferStorage state file {rb_storage_path} does not exist. Skipping storage resume."
+            )
 
     def get_finished_samples(self):
         """Returns the number of finished sample groups in the storage."""
