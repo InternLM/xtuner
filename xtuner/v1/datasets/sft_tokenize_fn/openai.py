@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import hashlib
 import inspect
-from typing import Annotated
+from typing import Annotated, cast
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
@@ -37,8 +37,9 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         super().__init__(tokenizer)
 
     def __call__(self, item: dict | list, **kwargs) -> DataItem | CacheItem:
-        if isinstance(item, dict) and "messages" in item:
-            item = item["messages"]
+        if isinstance(item, dict) and ("messages" in item or "dialogs" in item):
+            value = item.get("messages") or item.get("dialogs") or []
+            item = cast(dict | list, value)
         messages = ChatMessages(messages=item)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
