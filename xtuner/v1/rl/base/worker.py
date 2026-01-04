@@ -864,7 +864,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             else:
                 self._update_weights_hf_generator()
 
-    def _update_weights_hf_generator(self, submodule=None, final_update=False):
+    def _update_weights_hf_generator(self, submodule=None, final_update=True):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
