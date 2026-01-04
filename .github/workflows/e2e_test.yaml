@@ -26,6 +26,7 @@ jobs:
     permissions:
       contents: write
       pages: write
+      id-token: write
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
