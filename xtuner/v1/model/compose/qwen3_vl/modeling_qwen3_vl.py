@@ -1,8 +1,6 @@
 import torch
 import types
 from .qwen3_vl_config import Qwen3VLBaseConfig
-from .modeling_vision import Qwen3VLVisionModel
-from .modeling_projector import Qwen3VLProjector
 from xtuner.v1.loss import CELossContext
 import torch.distributed as dist
 import torch.distributed.nn.functional as distF
