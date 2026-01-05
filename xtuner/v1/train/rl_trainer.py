@@ -45,6 +45,7 @@ from .trainer import ExpHistory, ExpInfo, GitInfo, LoadCheckpointConfig, XTunerM
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
+TRAINER_RAY_GET_TIMEOUT = 5 * 3600  # 5 hour
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -401,6 +402,9 @@ class RLTrainer:
             with env_path.open("w") as f:
                 json.dump(environment_variables, f, indent=2)
 
+        self._ray_get_timeout = max(
+            TRAINER_RAY_GET_TIMEOUT, rollout_config.rollout_timeout, judger_config.judger_timeout
+        )
         self._writer = TensorboardWriter(log_dir / "tb")
 
     def _resolve_load_checkpoint_cfg(
@@ -919,7 +923,7 @@ class RLTrainer:
             for hf_dir in deleted_hf_checkpoints:
                 rmtree(hf_dir)
 
-        ray.get(self._train_controller.save_hf.remote(str(save_hf_path)))
+        ray.get(self._train_controller.save_hf.remote(str(save_hf_path)), timeout=self._ray_get_timeout)
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
 
@@ -938,9 +942,12 @@ class RLTrainer:
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
         self.logger.info(f"Saving step {self.cur_step + 1} rollout dataflow to: {checkpoint_path}")
-        ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)))
+        ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)), timeout=self._ray_get_timeout)
         self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
-        ray.get(self._train_controller.save.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer))
+        ray.get(
+            self._train_controller.save.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer),
+            timeout=self._ray_get_timeout,
+        )
 
         # Update meta
         current_exp = self.meta.latest_exp
