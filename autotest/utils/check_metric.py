@@ -93,7 +93,7 @@ def write_to_summary(case_name, base_jsonl, cur_jsonl ):
         with open(summary_file, 'a', encoding='utf-8') as f:
             f.write(md_content)
     with open(summary_file, 'a') as f:
-        f.write('</details>\n')
+        f.write('</details>\n\n')
 
 
 def check_result(case_name, base_path, cur_path, check_metric):
