@@ -335,8 +335,7 @@ class Qwen3VLVisionModel(BaseModel):
         self.rotary_pos_emb = self.build_rotary_embedding(self.config)
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
-        recompute_ratio = 1.0
-        num_recompute_layers = int(len(self.blocks) * recompute_ratio)
+        num_recompute_layers = int(len(self.blocks) * fsdp_config.vision_recompute_ratio)
         for layer_idx in tqdm(list(range(len(self.blocks))), desc="[Vision Fully Shard]"):
             layer = self.blocks[layer_idx]
 
