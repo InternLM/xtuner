@@ -3,13 +3,9 @@ name: ete_test
 permissions:
   contents: write
   pages: write
-  id-token: write
 
 on:
-  pull_request:
-    branches:
-      - "main"
-      - "refactor"
+  push:
   workflow_dispatch:
     inputs:
       repo_org:
@@ -29,10 +25,6 @@ jobs:
   ete_test:
     if: ${{!cancelled() }}
     runs-on: [h_cluster_ete]
-    permissions:
-      contents: write
-      pages: write
-      id-token: write
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
