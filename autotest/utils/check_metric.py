@@ -69,13 +69,15 @@ def plot_all(case_name, check_metric, base_metrics, cur_metrics, output_root: Pa
 def write_to_summary(case_name, base_jsonl, cur_jsonl ):
 
     summary_file = os.environ.get('GITHUB_STEP_SUMMARY', './tmp.md')
+    repo_owner = os.environ.get('GITHUB_REPOSITORY_OWNER', 'internlm')
+    run_id = os.environ.get('GITHUB_RUN_ID', '0')
     with open(summary_file, 'a') as f:
         f.write(f"## {case_name}指标比较图\n")
         f.write('<div align="center">\n')
-        f.write(f'<img src="https://{os.environ["GITHUB_REPOSITORY_OWNER"]}.github.io/xtuner/{os.environ["GITHUB_RUN_ID"]}/{case_name}_comparison.png"\n')
+        f.write(f'<img src="https://{repo_owner}.github.io/xtuner/{run_id}/{case_name}_comparison.png"\n')
         f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
         f.write('</div>\n<div align=center>\n')
-        f.write(f'<details>\n<summary><strong>📊 点击查看用例{case_name}指标数据，依次为基线、当前版本数据</strong></summary>\n\n')
+        f.write(f'<details>\n<summary><strong style="text-align: left;">📊 点击查看用例{case_name}指标数据，依次为基线、当前版本数据</strong></summary>\n\n')
 
     for json_f in [base_jsonl, cur_jsonl]:
         with open(json_f, 'r', encoding='utf-8') as f:
@@ -104,7 +106,7 @@ def check_result(case_name, base_path, cur_path, check_metric):
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
 
-    output_path = Path(f"../{os.environ['GITHUB_RUN_ID']}")
+    output_path = Path(f"../{os.environ.get('GITHUB_RUN_ID','0')}")
     output_path.mkdir(parents=True, exist_ok=True)
     plot_all(case_name, check_metric, base_metrics, cur_metrics, output_path)
     shutil.copytree(output_path, f"./{os.environ['GITHUB_RUN_ID']}", dirs_exist_ok=True)
