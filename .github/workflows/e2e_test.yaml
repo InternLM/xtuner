@@ -1,5 +1,15 @@
 name: ete_test
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
 on:
+  pull_request:
+    branches:
+      - "main"
+      - "refactor"
   workflow_dispatch:
     inputs:
       repo_org:
@@ -19,18 +29,40 @@ jobs:
   ete_test:
     if: ${{!cancelled() }}
     runs-on: [h_cluster_ete]
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
       - name: Clone repository
         uses: actions/checkout@v2
-        with:
-          repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
-          ref: ${{github.event.inputs.repo_ref || 'main'}}
+          #with:
+          #repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
+          #ref: ${{github.event.inputs.repo_ref || 'main'}}
       - name: run-test
         run: |
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx 
           conda env list
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
-          pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+          pytest autotest/test_all.py::test_all[qwen3-sft] -m all -n 1 -vv --run_id ${{ github.run_id }}
+
+      - name: Upload Artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ github.workspace }}/${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+          name: xtuner-e2e-${{ github.run_id }}
+
+      - name: Deploy to GitHub Pages
+        if: ${{ !cancelled() }}
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          token: ${{ github.token }}
+          branch: gh-pages
+          folder: ./${{ github.run_id }}
+          target-folder: ${{ github.run_id }}

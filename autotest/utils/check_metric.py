@@ -1,7 +1,11 @@
 import json
 import logging
+import os
+import shutil
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
 from statistics import mean
-
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
@@ -21,8 +25,76 @@ def extract_value(file, metrics):
 
     return total_step, metric_all
 
+def plot_all(case_name, check_metric, base_metrics, cur_metrics, output_root: Path):
+    metric_list = list(check_metric.keys())
+    n_plots = len(metric_list)
+    n_cols = int(np.ceil(np.sqrt(n_plots)))
+    n_rows = int(np.ceil(n_plots / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 3))
+    axes = np.array(axes).flatten()
 
-def check_result(base_path, cur_path, check_metric):
+    for i, ax in enumerate(axes):
+        if i < n_plots:
+            x_base = np.arange(len(base_metrics[metric_list[i]]))
+            x_current = np.arange(len(cur_metrics[metric_list[i]]))
+            ax.plot(
+                x_base,
+                base_metrics[metric_list[i]],
+                "r--",
+                label="Base",
+                marker="x",
+                markersize=4,
+            )
+            ax.plot(
+                x_current,
+                cur_metrics[metric_list[i]],
+                "b-",
+                label="Current",
+                marker="o",
+                markersize=4,
+            )
+            ax.set_title(f"{metric_list[i].replace('/', '_')}_comparison")
+            ax.set_xlabel("Step")
+            ax.set_ylabel("Value")
+            ax.legend()
+            ax.grid(True, linestyle="--", alpha=0.7)
+        else:
+            ax.axis("off")
+    fig.suptitle(f"{case_name}_metrics_comparison", fontsize=16)
+    plt.tight_layout()
+    plt.savefig(output_root / f"{case_name}_comparison.png")
+    plt.close()
+
+
+def write_to_summary(case_name, base_jsonl, cur_jsonl ):
+
+    summary_file = os.environ.get('GITHUB_STEP_SUMMARY', './tmp.md')
+    with open(summary_file, 'a') as f:
+        f.write(f"## {case_name}指标比较图\n")
+        f.write('<div align="center">\n')
+        f.write(f'<img src="https://{os.environ["GITHUB_REPOSITORY_OWNER"]}.github.io/xtuner/{os.environ["GITHUB_RUN_ID"]}/{case_name}_comparison.png"\n')
+        f.write('  style="max-width: 90%; border: 1px solid #ddd; border-radius: 8px;">\n')
+        f.write('</div>\n<div align=center>\n')
+        f.write(f'<details>\n<summary><strong>📊 点击查看用例{case_name}指标数据，依次为基线、当前版本数据</strong></summary>\n\n')
+
+    for json_f in [base_jsonl, cur_jsonl]:
+        with open(json_f, 'r', encoding='utf-8') as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        md_content = '```json\n'
+        for i, line in enumerate(lines, 1):
+            md_content += f'{line}\n'
+
+        md_content += '```\n\n'
+
+
+        with open(summary_file, 'a', encoding='utf-8') as f:
+            f.write(md_content)
+    with open(summary_file, 'a') as f:
+        f.write('</details>\n')
+
+
+def check_result(case_name, base_path, cur_path, check_metric):
     fail_metric = {}
     check_metric = check_metric
     metric_list = list(check_metric.keys())
@@ -31,6 +103,12 @@ def check_result(base_path, cur_path, check_metric):
     assert cur_steps == base_steps, (
         f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
     )
+
+    output_path = Path(f"../{os.environ['GITHUB_RUN_ID']}")
+    output_path.mkdir(parents=True, exist_ok=True)
+    plot_all(case_name, check_metric, base_metrics, cur_metrics, output_path)
+    shutil.copytree(output_path, f"./{os.environ['GITHUB_RUN_ID']}", dirs_exist_ok=True)
+    write_to_summary(case_name, base_path, cur_path)
 
     for metric, threshold in check_metric.items():
         max_error = 0.0
@@ -75,4 +153,4 @@ def check_result(base_path, cur_path, check_metric):
     return result, f"Some metric check failed,{fail_metric}"
 
 if __name__ == "__main__":
-    print(check_result("./base//tracker.jsonl","./current/tracker.jsonl",{"grad_norm":0.000001,"loss/reduced_llm_loss":0.000001,"lr":0,"memory/max_memory_GB":0.2,"runtime_info/tgs":0.05,"runtime_info/text_tokens":0}))
+    print(check_result("qwen3-sft", "./base/tracker.jsonl", "./current/tracker.jsonl",{"grad_norm":0.000001,"loss/reduced_llm_loss":0.000001,"lr":0,"memory/max_memory_GB":0.2,"runtime_info/tgs":0.05,"runtime_info/text_tokens":0}))
