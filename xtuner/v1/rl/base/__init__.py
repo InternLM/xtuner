@@ -1,6 +1,13 @@
 from .controller import TrainingController, TrainingControllerProxy, TrainingStepTimeLog
 from .loss import BaseRLLossConfig, RLLossContextInputItem
-from .worker import TrainingWorker, TrainingWorkerClass, TrainingWorkerProxy, WorkerConfig, WorkerLogItem
+from .worker import (
+    TrainingWorker,
+    TrainingWorkerClass,
+    TrainingWorkerProxy,
+    WorkerConfig,
+    WorkerInputItem,
+    WorkerLogItem,
+)
 
 
 __all__ = [
@@ -14,4 +21,5 @@ __all__ = [
     "RLLossContextInputItem",
     "WorkerLogItem",
     "TrainingStepTimeLog",
+    "WorkerInputItem",
 ]

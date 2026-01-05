@@ -612,10 +612,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         global_grad_tokens = rank_grad_tokens.clone()
         dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
 
-        worker_log_item: WorkerLogItem = {
-            "train_entropy": 0.0,
-            "train_metrics": [],
-        }
+        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
         log_parts = []
 
         sum_entropy = cast(torch.Tensor, metrics["sum_entropy"])
@@ -711,7 +708,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in log_info.items()
             )
-            log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: gradient_accumulation_steps={num_packs_this_step}" + log_str
+            log_str = (
+                f"Rank{self.rank} Rollout {rollout_idx} Step {i}: gradient_accumulation_steps={num_packs_this_step}, "
+                + log_str
+            )
             self.logger.info(log_str)
 
         self._rollout_step += 1

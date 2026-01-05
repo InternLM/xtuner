@@ -17,10 +17,10 @@ from xtuner.v1.rl.utils import get_seqlen_balanced_partitions
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger, ray_method
 
+from .worker import TrainingWorker, WorkerInputItem, WorkerLogItem
+
 
 TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
-
-from .worker import TrainingWorker, WorkerInputItem, WorkerLogItem
 
 
 class TrainingStepTimeLog(TypedDict):
@@ -314,7 +314,10 @@ class RawTrainingController:
     def _pad_and_pack_batches(self, batch4pack: list[WorkerInputItem], pack_max_length: int) -> WorkerInputItem:
         seq_ctx_list = [item["seq_ctx"] for item in batch4pack]
         label_list = [item["shifted_labels"] for item in batch4pack]
-        advantage_list = [torch.tensor([item["advantages"]]).float().unsqueeze(0) for item in batch4pack]
+        advantage_list = []
+        for item in batch4pack:
+            advantages = item["advantages"].reshape(1, -1)
+            advantage_list.append(advantages)
         rollout_logprobs_list = [
             item["rollout_logprobs"] if self.has_rollout_logprobs else None for item in batch4pack
         ]
@@ -366,6 +369,7 @@ class RawTrainingController:
                 padding_item = self._create_padding_item(pack_max_length, pack_max_length)
                 padding_items = [padding_item for _ in range(num_padding_packs)]
                 packed_data_batches[dp_rank][step_idx].extend(padding_items)
+        return packed_data_batches
 
     @ray_method
     def fit(
@@ -428,7 +432,9 @@ class RawTrainingController:
         # padding for each worker to have same number of packs in each optimizer step
         for step_idx in range(optimizer_steps):
             max_packs = max_packs_per_step[step_idx]
-            self._pad_to_max_packs_across_workes(packed_data_batches, step_idx, max_packs, pack_max_length)
+            packed_data_batches = self._pad_to_max_packs_across_workes(
+                packed_data_batches, step_idx, max_packs, pack_max_length
+            )
 
         pack_end_time = time.perf_counter()
         self.logger.info(f"Data packing took {pack_end_time - pack_start_time:.2f} seconds.")

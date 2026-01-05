@@ -33,6 +33,7 @@ from xtuner.v1.rl.base import (
     TrainingWorkerClass,
     TrainingWorkerProxy,
     WorkerConfig,
+    WorkerInputItem,
     WorkerLogItem,
 )
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
@@ -774,10 +775,10 @@ class RLTrainer:
                     rollout_logprobs = None
 
                 seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids) - 1)
-                data_dict = {
+                data_dict: WorkerInputItem = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels,
-                    "advantage": advantages[i].item(),
+                    "advantages": advantages[i],
                     "rollout_logprobs": rollout_logprobs,
                 }
 
