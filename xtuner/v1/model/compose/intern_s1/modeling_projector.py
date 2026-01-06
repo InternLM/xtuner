@@ -53,7 +53,7 @@ class InternS1MultiModalProjector(BaseModel):
         self,
         fsdp_config: FSDPConfig,
         float8_handler: Float8Handler | None = None,
-    ):  
+    ):
         self.fsdp_config = fsdp_config
         assert float8_handler is None
         mp_policy = MixedPrecisionPolicy(
@@ -80,12 +80,3 @@ class InternS1MultiModalProjector(BaseModel):
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
         return self
-
-    @torch.no_grad()
-    def init_weights(self):
-        init_params(self.layer_norm.weight, nn.init.ones_)
-        init_params(self.layer_norm.bias, nn.init.zeros_)
-        init_params(self.linear_1.bias, nn.init.zeros_)
-        init_params(self.linear_1.weight, partial(nn.init.normal_, mean=0.0, std=0.02))
-        init_params(self.linear_2.bias, nn.init.zeros_)
-        init_params(self.linear_2.weight, partial(nn.init.normal_, mean=0.0, std=0.02))
