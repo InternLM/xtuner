@@ -3,7 +3,7 @@ import os
 import time
 from itertools import chain
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, TypeAlias, TypedDict, cast
+from typing import Any, Dict, Iterable, List, Literal, TypeAlias, TypedDict, cast
 
 import ray
 import requests
@@ -142,7 +142,7 @@ class WorkerConfig(BaseModel):
     log_dir: str | Path | None = None
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
     seed: None | int = None  # if None, use RLTrainer seed
-
+    pack_strategy: Literal["greedy", "balance", "native"] = "greedy"
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
     sft_global_batch_size: int = -1
@@ -564,16 +564,19 @@ class TrainingWorker(SingleAcceleratorWorker):
         loss_cfg = self.config.loss_cfg
 
         num_batches = len(data_batches)
+        if num_batches < self._optimizer_steps:
+            self._optimizer_steps = num_batches
+            self.logger.warning(
+                f"data_batches num {num_batches} is less than optimizer_steps {self._optimizer_steps}, "
+                f"set optimizer_steps to {num_batches}"
+            )
         assert num_batches == self._optimizer_steps, (
-            f"Data batches length {num_batches} must be equal to optimizer_steps {self._optimizer_steps}."
+            f"data_batches num {num_batches} must be equal to optimizer_steps {self._optimizer_steps}"
         )
-
         packd_batch_num_per_step = []
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_input_list: list[RLLossContextInputItem] = []
         rollout_logprobs_list: list[torch.Tensor | None] = []
-        # convert dummy padding experts to real size
-
         language_cfg = (
             self.config.model_cfg.text_config
             if isinstance(self.config.model_cfg, BaseComposeConfig)
@@ -581,6 +584,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         for step_idx, step_data_batches in enumerate(data_batches):
+            # number of packed batch num means the gradient accumulation steps
             packd_batch_num_per_step.append(len(step_data_batches))
             for data in step_data_batches:
                 seq_ctx = self._resolve_ray_data(data["seq_ctx"], language_cfg)
@@ -602,6 +606,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         del data_batches
 
         # old logprobs are inplaced updated in compute_actor_logprobs
+        # TODO: overlap compute_actor_logprobs with _resolve_ray_data
         loss_ctx_input_list = self.compute_actor_logprobs(seq_ctx_list, loss_ctx_input_list)
         loss_ctx_input_list, metrics = self._apply_rollout_is_correction(
             seq_ctx_list, loss_ctx_input_list, rollout_logprobs_list, loss_cfg
@@ -858,6 +863,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         # tp and pp will affect the data replicate size in engine
         # sp will affect the data replicate size in worker
         return self._engine.data_replicate_size * self.sp_mesh.size()
+
+    @ray_method
+    def get_dp_rank(self) -> int:
+        """Get the data parallel rank for this worker."""
+        return self.data_mesh["dp"].get_rank()
 
     @ray_method
     def get_model_cfg(self):
