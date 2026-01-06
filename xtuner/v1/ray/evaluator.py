@@ -4,7 +4,7 @@ from typing import Callable, List, Optional, Sized, TypeVar, Union
 
 import ray
 from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from ray.actor import ActorProxy
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
@@ -85,6 +85,7 @@ class EvaluatorConfig(BaseModel):
 
     tokenizer: Annotated[
         Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str],
+        Field(exclude=True),
         Parameter(help="Tokenizer for text processing."),
     ]
     max_concurrent: Annotated[
@@ -103,6 +104,7 @@ class EvaluatorConfig(BaseModel):
     evaluate_step: Annotated[int, Parameter(help="Step interval for evaluation.")] = 1
     compute_metric_func: Annotated[
         Optional[Callable],
+        Field(exclude=True),
         Parameter(help="An optional function to filter or modify data groups after they are generated."),
     ] = None
     sample_params: Annotated[

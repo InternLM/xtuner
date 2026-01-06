@@ -5,11 +5,13 @@ from typing import List, Optional
 
 import ray
 from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, computed_field
 from ray.util.placement_group import PlacementGroup, placement_group
 from typing_extensions import Annotated
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
+
+from .native import NativeJudgerConfig
 
 
 PG_READY_TIMEOUT = 30
@@ -70,11 +72,32 @@ class JudgerConfig(BaseModel):
         bool, Parameter(help="Whether to enable weighted reward calculation on multi judgers.")
     ] = False
     reward_judger_configs: Annotated[
-        List[BaseModel],
+        List[NativeJudgerConfig],
         Parameter(help="A custom Python function for computing reward given model output and label."),
     ] = []
     judger_timeout: Annotated[float, Parameter(help="Timeout for each judger request in seconds.")] = 1200.0
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
+
+    @computed_field
+    def total_bundles_needed(self) -> list[dict]:
+        judger_total_bundles = [
+            {"CPU": cfg.num_cpus_per_actor, "memory": cfg.num_cpus_per_actor * 1024**3}
+            for cfg in self.reward_judger_configs
+            for _ in range(cfg.num_ray_actors)
+        ]
+        return judger_total_bundles
+
+    @computed_field
+    def total_cpus_needed(self) -> int:
+        judger_total_cpus = sum(cfg.num_cpus_per_actor * cfg.num_ray_actors for cfg in self.reward_judger_configs)
+        return judger_total_cpus
+
+    @computed_field
+    def total_memory_needed(self) -> int:
+        judger_total_memory = sum(
+            cfg.num_cpus_per_actor * 1024**3 * cfg.num_ray_actors for cfg in self.reward_judger_configs
+        )
+        return judger_total_memory
 
 
 @ray.remote
