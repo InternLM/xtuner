@@ -1,13 +1,20 @@
 import math
+import os
 from typing import Literal, TypedDict
 
 import ray
 import torch
+from ray.actor import ActorProxy
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.engine.vision_compose_train_engine import VisionComposeConfigProtocol
+from xtuner.v1.model.compose.base import BaseComposeConfig
+from xtuner.v1.train.trainer import LoadCheckpointConfig
+from xtuner.v1.utils import ray_method
 
-from .worker import TrainingWorker
+from .worker import TrainingWorker, WorkerLogItem
+
+
+TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
 
 class ColateItem(TypedDict):
@@ -17,8 +24,7 @@ class ColateItem(TypedDict):
     rollout_logprobs: torch.Tensor | None
 
 
-@ray.remote
-class TrainingController:
+class RawTrainingController:
     def __init__(self, workers: list[TrainingWorker]) -> None:
         self.workers = workers
 
@@ -162,14 +168,15 @@ class TrainingController:
         # 排序后这条 pack 会被放在最前面，导致 rank0 的第一个 step 消耗的有效 token 数往往少于其他 rank，是正常现象。
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
-    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int):
+    @ray_method
+    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int) -> list[WorkerLogItem]:
         has_rollout_routed_experts = False
         language_cfg = None
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
             model_cfg = ray.get(self.workers[0].get_model_cfg.remote())  # type: ignore[attr-defined]
             has_rollout_routed_experts = True
             language_cfg = model_cfg
-            if isinstance(model_cfg, VisionComposeConfigProtocol):
+            if isinstance(model_cfg, BaseComposeConfig):
                 language_cfg = model_cfg.text_config
 
         packed_data_batches = self._packing(data_batches, pack_max_length, language_cfg)
@@ -253,40 +260,67 @@ class TrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        log_infos = ray.get(handles)
+        log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return log_infos
 
+    @ray_method
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
         if target == "model":
-            ray.get([worker.offload_model.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.offload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         elif target == "optimizer":
-            ray.get([worker.offload_optimizer.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.offload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         elif target == "all":
-            ray.get([worker.offload_model.remote() for worker in self.workers])  # type: ignore
-            ray.get([worker.offload_optimizer.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.offload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            ray.get([worker.offload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         return
 
+    @ray_method
     def onload(self, target: Literal["model", "optimizer", "all"] = "all"):
         """Onload the model or optimizer of the training workers."""
         if target == "model":
-            ray.get([worker.onload_model.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.onload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         elif target == "optimizer":
-            ray.get([worker.onload_optimizer.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.onload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         elif target == "all":
-            ray.get([worker.onload_model.remote() for worker in self.workers])  # type: ignore
-            ray.get([worker.onload_optimizer.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.onload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            ray.get([worker.onload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         return
 
+    @ray_method
     def update_rollout_info(self, info_dict):
         ray.get([worker.update_rollout_info.remote(**info_dict) for worker in self.workers])  # type: ignore[attr-defined]
 
+    @ray_method
     def update_weights(self):
         """Update the weights of the training workers."""
         handles = [worker.update_weights.remote() for worker in self.workers]
-        ray.get(handles)
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 
+    @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         handles = [worker.save_hf.remote(hf_dir, save_dtype) for worker in self.workers]  # type: ignore
-        ray.get(handles)
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
+
+    @ray_method
+    def resume(self, load_checkpoint_cfg: LoadCheckpointConfig):
+        """Resume the training workers from the checkpoint."""
+        handles = [worker.resume.remote(load_checkpoint_cfg) for worker in self.workers]  # type: ignore
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        return
+
+    @ray_method
+    def save(self, dcp_dir: str, no_save_optimizer: bool = False):
+        """Save the DCP checkpoint of the training workers."""
+        handles = [worker.save.remote(dcp_dir, no_save_optimizer) for worker in self.workers]  # type: ignore
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        return
+
+    @ray_method
+    def ready(self) -> bool:
+        return True
+
+
+TrainingController = ray.remote(RawTrainingController)
+TrainingControllerProxy = ActorProxy[RawTrainingController]

@@ -28,7 +28,13 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
-from xtuner.v1.model.base import BaseModel, ModelOutputs, TransformerConfig
+from xtuner.v1.model.base import (
+    DEFAULT_FLOAT8_CFG,
+    BaseModel,
+    ModelOutputs,
+    TorchCompileOption,
+    TransformerConfig,
+)
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo, checkpoint_wrapper, module_dict_repr
 from xtuner.v1.module import (
     GreedyRouterConfig,
@@ -46,11 +52,30 @@ from xtuner.v1.utils import (
     get_logger,
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
-from xtuner.v1.utils.compile import maybe_compile
 
 
 DEVICE = get_device()
 logger = get_logger()
+
+
+MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward": TorchCompileOption(
+        fullgraph=True
+    ),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._shared_experts_forward": TorchCompileOption(
+        fullgraph=True
+    ),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._post_moe_forward": TorchCompileOption(
+        fullgraph=True
+    ),
+    "xtuner.v1.module.decoder_layer.dense_decoder_layer.DenseDecoderLayer.forward": TorchCompileOption(fullgraph=True),
+    **DEFAULT_FLOAT8_CFG,
+}
+
+MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
+MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward")
 
 
 class MoEModelOutputs(ModelOutputs):
@@ -130,17 +155,16 @@ class MoE(BaseModel):
     ep_mesh: DeviceMesh | None = None
 
     def __init__(self, config: MoEConfig):
-        super().__init__()
+        super().__init__(config)
         if config.ep_size is not None and config.ep_size > 1:
             world_size = dist.get_world_size()
             self.ep_mesh = init_device_mesh(
                 DEVICE,
                 (world_size // config.ep_size, config.ep_size),
-                mesh_dim_names=("dp", "ep"),
-            )["ep"]
+                mesh_dim_names=(f"{self.config.mesh_prefix}.dp", f"{self.config.mesh_prefix}.ep"),
+            )[f"{self.config.mesh_prefix}.ep"]
         else:
             self.ep_mesh = None
-        self.config = config
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -154,7 +178,7 @@ class MoE(BaseModel):
         # TODO(@yehaochen): 把这两行移除 _maybe_compile_layers 要把 compile 相关的 setting 放到 fsdp_config 之外
         # _init_load_spec 放到 post init 里
         self._init_load_spec()
-        self._maybe_compile_layers()
+        self._maybe_enable_compile(self.compile_cfg)
 
         self.balancing_loss: BalancingLoss | None
         self.z_loss: ZLoss | None
@@ -663,12 +687,6 @@ class MoE(BaseModel):
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
         self._init_device_mesh(fsdp_config)
-        self._maybe_compile_layers()
-
-        # TODO: 一定不能少，因为在模型 init 时候会构建一套 ep_mesh，如果不重新构建，fsdp_mesh 和 ep_mesh 会没有任何联系
-        # fully_shard 时候会出现： AssertionError: FSDP requires the DP and TP mesh to have the same parent mesh
-        with torch.device("meta"):
-            self.layers = self.build_layers(self.config)
 
         if float8_handler is not None:
             # As we modify the shape of the model's parameters,
@@ -769,6 +787,14 @@ class MoE(BaseModel):
         self._to_empty_meta()
         return self
 
+    @property
+    @override
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        if self.config.ep_size > 1:
+            return MOE_EP_COMPILE_CFG
+        else:
+            return MOE_NON_EP_COMPILE_CFG
+
     @torch.no_grad  # type: ignore
     def scale_and_reduce_grad(self):
         for name, param in self.trainable_parameters():
@@ -801,40 +827,51 @@ class MoE(BaseModel):
             model_mesh = init_device_mesh(
                 device,
                 (experts_fsdp_size, self.fsdp_config.ep_size),
-                mesh_dim_names=(f"{self.fsdp_config.mesh_prefix}.fsdp", f"{self.fsdp_config.mesh_prefix}.ep"),
+                mesh_dim_names=(f"{self.config.mesh_prefix}.fsdp", f"{self.config.mesh_prefix}.ep"),
             )
             if self.ep_mesh is not None:
-                assert torch.equal(self.ep_mesh.mesh, model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"].mesh), (
+                # WARN: This assertion is **VERY** important.
+                # FSDP requires that `device_mesh` shares the same root mesh across all mesh dimensions.
+                # If not, it will raise an AssertionError:
+                # "FSDP requires the DP and TP mesh to have the same parent mesh but got:
+                #  DP's global mesh: {dp_global_mesh}\nTP's global mesh: {tp_global_mesh}"
+                # ...
+                # For MoE models that can perform inference independently without FSDP,
+                # they build their own `ep_mesh`, which may not initially share the same root mesh
+                # as `fsdp_mesh`. However, PyTorch's mesh management uses global logic: when a
+                # submesh with an existing name is accessed (e.g., `model_mesh[f"{self.config.mesh_prefix}.ep"]`),
+                # it creating a new submesh with the same **hash** as the existing `ep_mesh`
+                # ...
+                # FSDP's mesh manage the parent-child mapping by _mesh_resources, of which the key is the child mesh
+                # and the value is the parent mesh, then, something interesting happened:
+                # >>> print(id(old_ep_mesh), hash(old_ep_mesh))
+                # 9753864, 6644214454873602895
+                # >>> print(id(new_ep_mesh), hash(new_ep_mesh))
+                # 9753878, 6644214454873602895
+                # >>> _mesh_resources.get_root_mesh(old_ep_mesh) == _mesh_resources.get_root_mesh(new_ep_mesh)
+                # True
+                # Aha, although `old_ep_mesh` and `new_ep_mesh` are two different mesh, but `_mesh_resources` think
+                # they share the same root mesh, which follows FSDP's assumption.
+                # ...
+                # Although I think it is an unexpected behavior of PyTorch's mesh management, but we can take
+                # advantage of it to satisfy FSDP's requirement without changing the original `ep_mesh`.
+                _new_created_ep_mesh = model_mesh[f"{self.config.mesh_prefix}.ep"]
+                assert _new_created_ep_mesh.mesh_dim_names == self.ep_mesh.mesh_dim_names, (
+                    f"FSDP enabled, it requires the name of new created `ep_mesh`: {_new_created_ep_mesh.mesh_dim_names}"  # noqa: E501
+                    f"equals to the origin one: {self.ep_mesh.mesh_dim_names}"
+                )
+                assert torch.equal(self.ep_mesh.mesh, model_mesh[f"{self.config.mesh_prefix}.ep"].mesh), (
                     "FSDP enabled, it requires the `ep_size` of model config equals to the `ep_size` of FSDPConfig."
                 )
-            self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
-            self.fsdp_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.fsdp"]
+            else:
+                self.ep_mesh = model_mesh[f"{self.config.mesh_prefix}.ep"]
+
+            self.fsdp_mesh = model_mesh[f"{self.config.mesh_prefix}.fsdp"]
         else:
             assert self.fsdp_config.ep_size == 1, "Currently, HSDP requires expert parallel size to be 1"
-            # We can not init ep_mesh and fsdp_mesh like this.
-            # This will lead to "RuntimeError: Cannot create a submesh from a submesh."
-            # in FSDPParam.shard_mesh, as fsdp_mesh is not the root mesh. The root mesh is model_mesh.
-            # So we have to init the ep_mesh and fsdp_mesh separately.
-            # model_mesh = init_device_mesh(
-            #     device,
-            #     (
-            #         experts_fsdp_size // self.fsdp_config.hsdp_sharding_size,
-            #         self.fsdp_config.hsdp_sharding_size,
-            #         self.fsdp_config.ep_size,
-            #     ),
-            #     mesh_dim_names=(
-            #         f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
-            #         f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
-            #         f"{self.fsdp_config.mesh_prefix}.ep",
-            #     ),
-            # )
-            # self.ep_mesh = model_mesh[f"{self.fsdp_config.mesh_prefix}.ep"]
-            # self.fsdp_mesh = model_mesh[
-            #     (f"{self.fsdp_config.mesh_prefix}.hsdp_replicate", f"{self.fsdp_config.mesh_prefix}.hsdp_shard")
-            # ]
-            ep_mesh = init_device_mesh(
-                device, (world_size, 1), mesh_dim_names=("_", f"{self.fsdp_config.mesh_prefix}.ep")
-            )[f"{self.fsdp_config.mesh_prefix}.ep"]
+            ep_mesh = init_device_mesh(device, (world_size, 1), mesh_dim_names=("_", f"{self.config.mesh_prefix}.ep"))[
+                f"{self.config.mesh_prefix}.ep"
+            ]
             if self.ep_mesh is not None:
                 assert self.ep_mesh == ep_mesh, "ep_mesh should be the same as the previous one"
             self.ep_mesh = ep_mesh
@@ -845,11 +882,11 @@ class MoE(BaseModel):
                     self.fsdp_config.hsdp_sharding_size,
                 ),
                 mesh_dim_names=(
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_replicate",
-                    f"{self.fsdp_config.mesh_prefix}.hsdp_shard",
+                    f"{self.config.mesh_prefix}.hsdp_replicate",
+                    f"{self.config.mesh_prefix}.hsdp_shard",
                 ),
             )
-            self.fsdp_mesh = self.hsdp_mesh[f"{self.fsdp_config.mesh_prefix}.hsdp_shard"]
+            self.fsdp_mesh = self.hsdp_mesh[f"{self.config.mesh_prefix}.hsdp_shard"]
 
     def _replicate_other_params(self, model: nn.Module):
         def traverse(module):
@@ -862,35 +899,6 @@ class MoE(BaseModel):
                 traverse(child)
 
         traverse(model)
-
-    def _maybe_compile_layers(self):
-        if self.fsdp_config is not None:
-            if self.fsdp_config.torch_compile:
-                torch._dynamo.config.cache_size_limit = 256
-                if self.fsdp_config.compile_targets is None:
-                    if self.ep_mesh.size() > 1:
-                        # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False
-                        # ref: https://github.com/pytorch/pytorch/issues/155205
-                        # todo: decorate MoEDecoderLayer.forward with @torch.compile(fullgraph=False) when the bug is fixed
-                        # so that we do not need to remove the compile target
-                        maybe_compile.remove_compile_target(
-                            "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
-                        )
-                else:
-                    maybe_compile.clear_compile_targets()
-                    for target in self.fsdp_config.compile_targets:
-                        maybe_compile.set_compile_target(target)
-            else:
-                maybe_compile.clear_compile_targets()
-        else:
-            if self.ep_mesh is not None and self.ep_mesh.size() > 1:
-                # all_to_all_single_autograd in TorchAll2AllDispatcher.dispatch can not be compiled even if the fullgraph=False
-                # ref: https://github.com/pytorch/pytorch/issues/155205
-                # todo: decorate MoEDecoderLayer.forward with @torch.compile(fullgraph=False) when the bug is fixed
-                # so that we do not need to remove the compile target
-                maybe_compile.remove_compile_target(
-                    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward"
-                )
 
     @staticmethod
     def patched_emb_forward(self, input):

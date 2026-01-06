@@ -717,6 +717,7 @@ class FtdpTokenizeFunction(CachableTokenizeFunction):
         max_length: int | None = None,
         hash: str | None = None,
     ):
+        super().__init__(tokenizer, chat_template, tokenizer_hash, max_length, hash)
         self.tokenizer = tokenizer
         self.template_config = ROLE_CONFIG[chat_template]
         self._hash = hash

@@ -1,6 +1,5 @@
 import types
-from typing import cast, Callable
-from pathlib import Path
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -9,11 +8,10 @@ import torch.distributed.nn.functional as distF
 from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.utils import get_logger, get_padding_length, get_device
-from xtuner.v1.model import BaseModel
+from xtuner.v1.model import TorchCompileOption, DEFAULT_FLOAT8_CFG
 from xtuner.v1.rl.utils import sp_split
 
-from .modeling_vision import InternS1VisionModel, init_world_mesh
-from .modeling_projector import InternS1MultiModalProjector
+from .modeling_vision import init_world_mesh
 from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from .intern_s1_config import InternS1BaseConfig
@@ -24,9 +22,17 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
+from ..base import BaseComposeModel, to_hf_key_list_wrapper
 
 DEVICE = get_device()
 logger = get_logger()
+
+INTERNS1_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.model.compose.intern_s1.modeling_projector.InternS1MultiModalProjector.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.attention_pre_forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.model.compose.intern_s1.modeling_vision.InternS1VisionLayer.attention_post_forward": TorchCompileOption(fullgraph=True),
+    **DEFAULT_FLOAT8_CFG,
+}
 
 
 def pixel_shuffle(x, scale_factor=0.5):
@@ -41,30 +47,14 @@ def pixel_shuffle(x, scale_factor=0.5):
     return x
 
 
-def to_hf_key_list_wrapper(fn: Callable[[str], list[str]], convertor: Callable[[str], str]):
-    def wrapper(self, *args, **kwargs):
-        return [convertor(i) for i in fn(*args, **kwargs)]
-
-    return wrapper
-
-
-class InternS1ForConditionalGeneration(BaseModel):
+class InternS1ForConditionalGeneration(BaseComposeModel):
     config: InternS1BaseConfig
 
     def __init__(self, config: InternS1BaseConfig):
-        super().__init__()
-        self.config = config
+        super().__init__(config)  # type: ignore[arg-type]
+
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
-
-        vision_config = config.vision_config
-        text_config = config.text_config
-        projector_config = config.projector_config
-
-        self.vision_tower = InternS1VisionModel(vision_config)
-        self.multi_modal_projector = InternS1MultiModalProjector(projector_config)
-
-        self.language_model = text_config.build()
 
         # TODO(YHC): This is a hack to make the language model compatible with HF
         _hf_prefix = "model.language_model."
@@ -75,36 +65,7 @@ class InternS1ForConditionalGeneration(BaseModel):
         self.language_model._init_load_spec()
 
         self.img_context_token_id = config.image_token_id
-        self._hf_path: Path | None = None
         self.image_size = config.vision_config.image_size[0]
-
-        # Note: global load spec mapping for save_hf
-        self.load_spec_mapping = {}
-        for key, value in self.vision_tower.load_spec_mapping.items():
-            self.load_spec_mapping['vision_tower.' + key] = value
-        for key, value in self.multi_modal_projector.load_spec_mapping.items():
-            self.load_spec_mapping['multi_modal_projector.' + key] = value
-        for key, value in self.language_model.load_spec_mapping.items():
-            self.load_spec_mapping['language_model.' + key] = value
-
-        self._freeze_modules()
-
-    def _freeze_modules(self):
-        freeze_vision = self.config.freeze_vision
-        if freeze_vision:
-            self.vision_tower.requires_grad_(False)
-            self.vision_tower.eval()
-            logger.info("Freeze vision tower")
-        freeze_projector = self.config.freeze_projector
-        if freeze_projector:
-            self.multi_modal_projector.requires_grad_(False)
-            self.multi_modal_projector.eval()
-            logger.info("Freeze multi modal projector")
-        freeze_language = self.config.freeze_language
-        if freeze_language:
-            self.language_model.requires_grad_(False)
-            self.language_model.eval()
-            logger.info("Freeze language model")
 
     @override
     def fully_shard(
@@ -145,24 +106,6 @@ class InternS1ForConditionalGeneration(BaseModel):
 
         self._to_empty_meta()
         return self
-
-    def from_hf(self, hf_path: str | Path, strict=True):
-        self._hf_path = Path(hf_path)
-
-        if isinstance(hf_path, Path):
-            hf_path = str(hf_path)
-
-        _, _, missing_llm_keys = self.language_model.from_hf(hf_path, strict=False)
-        _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path, strict=False)
-        _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False)
-
-        missing = missing_llm_keys | missing_vision_keys | missing_project_keys
-        if strict:
-            if missing:
-                raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
-
-    def scale_and_reduce_grad(self):
-        self.language_model.scale_and_reduce_grad()
 
     def extract_feature(self, pixel_values):
         if self.select_layer == -1:
@@ -267,6 +210,7 @@ class InternS1ForConditionalGeneration(BaseModel):
                                        position_ids=seq_ctx.position_ids,
                                        num_padding=seq_ctx.num_padding,
                                        sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
+                                       rollout_routed_experts=seq_ctx.rollout_routed_experts,
                                        inputs_embeds=inputs_embeds)
 
         outputs = self.language_model(
@@ -275,8 +219,7 @@ class InternS1ForConditionalGeneration(BaseModel):
         )
         return outputs
 
+    @property
     @override
-    def init_weights(self) -> None:
-        self.vision_tower.init_weights()
-        self.language_model.init_weights()
-        self.multi_modal_projector.init_weights()
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        return INTERNS1_COMPILE_CFG

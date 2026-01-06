@@ -212,7 +212,6 @@ class Qwen3VLVisionLayer(nn.Module):
         self.attn = Qwen3VLVisionAttention(config=config)
         self.mlp = Qwen3VLVisionMLP(config=config)
 
-    @maybe_compile(fullgraph=True)
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -236,8 +235,7 @@ class Qwen3VLVisionModel(BaseModel):
     config: Qwen3VLVisionConfig
 
     def __init__(self, config: Qwen3VLVisionConfig) -> None:
-        super().__init__()
-        self.config = config
+        super().__init__(config)  # type: ignore[arg-type]
         self.spatial_merge_size = config.spatial_merge_size
         self.patch_size = config.patch_size
         self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
@@ -335,7 +333,6 @@ class Qwen3VLVisionModel(BaseModel):
                 param.requires_grad = False
 
         self.rotary_pos_emb = self.build_rotary_embedding(self.config)
-        self._maybe_compile_layers()
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         recompute_ratio = 1.0
@@ -347,7 +344,8 @@ class Qwen3VLVisionModel(BaseModel):
                 layer = checkpoint_wrapper(layer,
                                            preserve_rng_state=checkpoint_preserve_rng_state,
                                            checkpoint_impl=CheckpointImpl.REENTRANT)
-            layer.forward = maybe_compile(layer.forward, fullgraph=True)
+                if self.compile_cfg:
+                    layer.forward = torch.compile(layer.forward, fullgraph=True)
 
             self.blocks[layer_idx] = layer
 

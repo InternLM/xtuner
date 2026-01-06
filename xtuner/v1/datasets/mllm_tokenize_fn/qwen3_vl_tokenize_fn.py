@@ -1,15 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-import copy
+import io
 import math
 import os
-from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Optional, Union
 
 import numpy as np
 import torch
 from packaging import version
+from PIL import Image
 from pydantic import ConfigDict
 
 import transformers
@@ -135,6 +135,7 @@ def replace_video_token(
     add_vision_id: bool = False,
 ):
     current_image_idx = 0
+    total_video_cnt = 0
     n_video = len(num_image_token_list)
     n_image = sum([len(num_image_token_list[i]) for i in range(n_video)])
     if len(timestamps_list) > 0:
@@ -166,12 +167,13 @@ def replace_video_token(
                                 timestamps = f"<{start_time:.1f}-{end_time:.1f} seconds>"
                                 text = text.replace(IMAGE_TOKEN_ALIAS, f"<VIDEO_CONTEXT>{timestamps}", 1)
 
-                        if add_vision_id and video_cnt > 1:
+                        if add_vision_id:
                             # 标记每个视频
                             text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
                             for i in range(video_cnt):
-                                video_index = f"Video {i + 1}: "
+                                video_index = f"Video {total_video_cnt + 1}: "
                                 text = text.replace(IMAGE_TOKEN_ALIAS, f"{video_index}<VIDEO_CONTEXT>", 1)
+                                total_video_cnt += 1
 
                         text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
                         video_cnt = text.count(IMAGE_TOKEN_ALIAS)
@@ -212,6 +214,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         video_max_total_pixels: int | None = None,  # Max pixels within a frame
         video_min_total_pixels: int | None = None,  # Min pixels within a frame
         system_message: str | None = None,
+        enable_3d_rope: bool = True,
         add_vision_id: bool = True,
         max_length: int | None = None,
         oss_loader_cfg: OSSLoaderConfig | None = None,
@@ -225,6 +228,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.oss_loader = None
         self.debug = debug
         self.oss_time_log_thr = oss_time_log_thr
+        self.enable_3d_rope = enable_3d_rope
+
         if oss_loader_cfg is not None:
             self.oss_loader = Qwen3VLOSSLoader(
                 backend=oss_loader_cfg.backend,
@@ -236,7 +241,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if version.parse(version_str) < version.parse("4.57.0"):
             raise ValueError(f"请升级 transformers 到 4.57.0 及其以上版本，当前版本为 {version_str}")
 
-        _processor = AutoProcessor.from_pretrained(processor_path)
+        _processor = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
         self.image_processor = _processor.image_processor
         self.video_processor = _processor.video_processor
         # default min_pixels 4096=4x32x32=4x16x16x2x2 pix 一张图片 patch size=16x16，然后 merge size=2x2, 最终输出给 llm 占 4 个 token
@@ -286,11 +291,11 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
-        self._hash_str = (
+        _hash_str = (
             f"{self.image_processor.size['shortest_edge']}_{self.image_processor.size['longest_edge']}_"
             f"{self.video_processor.size['shortest_edge']}"
             f"_{self.video_processor.size['longest_edge']}_{self.video_processor.min_frames}_"
-            f"{self.video_processor.max_frames}_{self.video_processor.fps}_"
+            f"{self.video_processor.max_frames}_{self.video_processor.fps}_{self.enable_3d_rope}_"
             f"{self.add_vision_id}_{system_message}_{max_length}_{self.rand_video_max_frames}"
         )
 
@@ -307,7 +312,15 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.eos_token_id = tokenizer.convert_tokens_to_ids(tokenizer.eos_token)
 
         # 必须要最后调用
-        super().__init__(tokenizer, self.chat_template, max_length, tokenizer_hash, hash, data_name=self.data_name)
+        super().__init__(
+            tokenizer,
+            self.chat_template,
+            max_length,
+            tokenizer_hash,
+            hash,
+            hash_str=_hash_str,
+            data_name=self.data_name,
+        )
 
     def _truncated_data_item(
         self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
@@ -328,22 +341,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 position_ids = position_ids[..., : self.max_length]
         return input_ids, labels, position_ids
 
-    def process_image_unified(self, image_file: str, media_root: str = ""):
-        processor = copy.deepcopy(self.image_processor)
-        image_path_ = get_image_path(image_file, media_root)
-        if self.oss_loader is not None and "s3://" in image_path_:
-            image = self.oss_loader.client.get(image_path_)
-        else:
-            assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
-            image = load_image(image_path_)
-        image = apply_exif_orientation(image)
-        visual_processed = processor.preprocess(image, return_tensors="pt")
-        image_tensor = visual_processed["pixel_values"]
-        if isinstance(image_tensor, list):
-            image_tensor = image_tensor[0]
-        grid_thw = visual_processed["image_grid_thw"][0]
-        return image_tensor, grid_thw
-
     def pure_text_get_item(self, data_item: dict) -> QwenVL3DataItem:
         messages = ChatMessages(messages=data_item["messages"])
 
@@ -356,12 +353,13 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids = tokenized["input_ids"]
         labels: list[int] = tokenized["labels"]
 
-        position_ids: torch.Tensor
+        position_ids: torch.Tensor | None = None
 
-        position_ids = get_rope_index_3(
-            torch.tensor(input_ids).unsqueeze(0),
-            spatial_merge_size=self.image_processor.merge_size,
-        )
+        if self.enable_3d_rope:
+            position_ids = get_rope_index_3(
+                torch.tensor(input_ids).unsqueeze(0),
+                spatial_merge_size=self.image_processor.merge_size,
+            )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
@@ -418,7 +416,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_image_tokens_2 = sum_media_grid_thw.sum()
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
-                f"num_image_tokens_1.shape {num_image_tokens_1} != num_image_tokens_2.shape {num_image_tokens_2}, "
+                f"num_image_tokens of input_ids {num_image_tokens_1} != num_image_tokens of media_grid_thw {num_image_tokens_2}, "
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
             return {"num_tokens": 0}
@@ -426,14 +424,23 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return {"num_tokens": len(input_ids)}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
-        results = [self.process_image_unified(file, media_root) for file in self._image_path]
-        image, grid_thw = zip(*results)
+        image_data_list = []
+        for image_file in self._image_path:
+            image_path_ = get_image_path(image_file, media_root)
+            if self.oss_loader is not None and "s3://" in image_path_:
+                img_str = self.oss_loader.client.get(image_path_)
+                buff = io.BytesIO(img_str)
+                image = Image.open(buff).convert("RGB")
+            else:
+                assert "s3://" not in image_path_, "Please use oss_loader_cfg to load image from s3."
+                image = load_image(image_path_)
+            image = apply_exif_orientation(image)
+            image_data_list.append(image)
 
-        grid_thw_merged = copy.deepcopy(grid_thw)
-        if not isinstance(grid_thw, Sequence):
-            grid_thw_merged = [grid_thw_merged]
-            grid_thw = [grid_thw]
-        grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw_merged]  # type: ignore
+        visual_processed = self.image_processor.preprocess(image_data_list, return_tensors="pt")
+        image_tensor = visual_processed["pixel_values"]
+        grid_thw = visual_processed["image_grid_thw"]  # b,3
+        grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw]  # type: ignore
         messages = ChatMessages(messages=data_item["messages"])
         replace_image_token(messages, self.chat_template, grid_thw_merged, add_vision_id=self.add_vision_id)  # type: ignore
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
@@ -456,11 +463,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             np_labels[np_labels == self.img_end_token_id] = -100
             labels = np_labels.tolist()
 
-        position_ids = get_rope_index_3(
-            torch.tensor(input_ids).unsqueeze(0),
-            spatial_merge_size=self.image_processor.merge_size,
-            image_grid_thw=torch.stack(grid_thw, dim=0),
-        )
+        position_ids: torch.Tensor | None = None
+
+        if self.enable_3d_rope:
+            position_ids = get_rope_index_3(
+                torch.tensor(input_ids).unsqueeze(0),
+                spatial_merge_size=self.image_processor.merge_size,
+                image_grid_thw=grid_thw,
+            )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
@@ -468,8 +478,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()
         num_image_tokens_2 = torch.stack(grid_thw_merged, dim=0).sum()
         # assert 会被捕获，该数据会丢弃
-        assert num_image_tokens_1.shape == num_image_tokens_2.shape, (
-            f"num_image_tokens_1.shape {num_image_tokens_1.shape} != num_image_tokens_2.shape {num_image_tokens_2.shape}, "
+        assert num_image_tokens_1 == num_image_tokens_2, (
+            f"num_image_tokens of input_ids {num_image_tokens_1} != num_image_tokens of media_grid_thw {num_image_tokens_2}, "
             f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
         )
 
@@ -478,8 +488,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         ret = QwenVL3DataItem(
             input_ids=input_ids,
             labels=labels,
-            pixel_values=torch.cat(image, dim=0),  # (n,d)
-            image_grid_thw=torch.cat([_thw.unsqueeze(0) for _thw in grid_thw], dim=0),  # b,3
+            pixel_values=image_tensor,  # (n,d)
+            image_grid_thw=grid_thw,  # b,3
             position_ids=position_ids,
             num_tokens=len(input_ids),
             num_img_tokens=[num_img_tokens],
@@ -692,7 +702,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_image_tokens_2 = total_sum_media_grid_thw
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
-                f"num_video_tokens_1 {num_image_tokens_1} != num_video_tokens_2 {num_image_tokens_2}, "
+                f"num_video_tokens of input_ids {num_image_tokens_1} != num_video_tokens of media_grid_thw {num_image_tokens_2}, "
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
             return {"num_tokens": 0}
@@ -824,11 +834,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             np_labels[np_labels == self.img_end_token_id] = -100
             labels = np_labels.tolist()
 
-        position_ids = get_rope_index_3(
-            torch.tensor(input_ids).unsqueeze(0),
-            spatial_merge_size=self.image_processor.merge_size,
-            video_grid_thw=torch.cat(grid_thw_list),
-        )
+        position_ids: torch.Tensor | None = None
+
+        if self.enable_3d_rope:
+            position_ids = get_rope_index_3(
+                torch.tensor(input_ids).unsqueeze(0),
+                spatial_merge_size=self.image_processor.merge_size,
+                video_grid_thw=torch.cat(grid_thw_list),
+            )
 
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
@@ -837,7 +850,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         num_image_tokens_2 = total_sum_media_grid_thw
         # assert 会被捕获，该数据会丢弃
         assert num_image_tokens_1 == num_image_tokens_2, (
-            f"num_video_tokens_1 {num_image_tokens_1} != num_video_tokens_2 {num_image_tokens_2}, "
+            f"num_video_tokens of input_ids {num_image_tokens_1} != num_video_tokens of media_grid_thw {num_image_tokens_2}, "
             f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
         )
 
@@ -870,10 +883,10 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     fps: int | None = None
     rand_video_max_frames: int = 24
 
+    enable_3d_rope: bool = True
+
     # When handling multiple images or multiple videos,
     # it's helpful to add labels to the images and videos for better reference.
-    # 注意这个逻辑和 hf 官方不是完全一致。 hf 官方只要开启这个 flag 就一定追加，不管是单个图片还是单个视频
-    # xtuner 中做了优化，开启该 flag 且存在多图或者多视频才会追加
     add_vision_id: bool = True
 
     def build(
@@ -892,6 +905,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             video_max_frames=self.video_max_frames,
             rand_video_max_frames=self.rand_video_max_frames,
             fps=self.fps,
+            enable_3d_rope=self.enable_3d_rope,
             add_vision_id=self.add_vision_id,
             max_length=self.max_length,
             system_message=self.system_message,

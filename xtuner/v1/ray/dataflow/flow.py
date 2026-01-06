@@ -8,6 +8,7 @@ import httpx
 import ray
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
+from ray.actor import ActorProxy
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
@@ -15,7 +16,7 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RolloutState
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, ray_method
 
 from .replay_buffer import ReplayBuffer, ReplayBufferConfig, determine_group_state
 
@@ -54,7 +55,6 @@ class DataFlowConfig(BaseModel):
         str,
         Parameter(help="Environment name to set for the dataflow."),
     ] = ""
-    # NOTE: max_concurrent / max_retry_times 直接删了，还是兼容下逻辑比较好？
     max_concurrent: Annotated[
         Optional[int],
         Parameter(help="Maximum number of concurrent tasks."),
@@ -104,8 +104,7 @@ class DataFlowConfig(BaseModel):
             self.tail_batch_trigger_size = self.global_batch_size
 
 
-@ray.remote
-class DataFlow:
+class RawDataFlow:
     """A Ray actor that manages the data flow for reinforcement learning.
 
     This class is responsible for sampling prompts, interacting with the environment or to generate responses,
@@ -171,13 +170,18 @@ class DataFlow:
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
         self.cleanup_task_time = 5 * 60  # 5 minutes
 
-    def _prepare(
+    def _reset_internal_states(
         self,
         global_batch_size: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
+        enable_partial_rollout: Optional[bool] = None,
     ):
         """Resets all internal state variables of DataFlow."""
+        self.skipped_sample_count = 0
+        self.failed_sample_count = 0
+        self.filtered_samples_count = 0
+        self.tb_metrics = {}
         if global_batch_size and global_batch_size > 0:
             self.target_batch_size = global_batch_size
         else:
@@ -187,10 +191,6 @@ class DataFlow:
             self.replay_buffer.get_prerun_state.remote(self.target_batch_size)
         )
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
-        self.skipped_sample_count = 0
-        self.failed_sample_count = 0
-        self.filtered_samples_count = 0
-        self.tb_metrics = {}
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
         logger_msg = (
@@ -200,10 +200,12 @@ class DataFlow:
         )
         self.logger.info(logger_msg)
 
+    @ray_method
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
         return ray.get(self.replay_buffer.get_train_dataset_length.remote())
 
+    @ray_method
     async def worker_task(self, group_samples_for_retry: Optional[List[RLDataFlowItem]] = None):
         """A single worker task to generate and process a group of samples.
 
@@ -350,18 +352,19 @@ class DataFlow:
         if len(waiting_tasks) > 0:
             self.logger.info(f"Start pausing env controller for remaining worker tasks {len(waiting_tasks)}.")
             await self.pause()
+            cleanup_start_time = time.perf_counter()
             while len(waiting_tasks) > 0:
-                # elapsed_time = time.perf_counter() - cleanup_start_time
-                # if elapsed_time > self.cleanup_task_time:
-                #     self.logger.warning(
-                #         f"Cleanup timeout of {self.cleanup_task_time}s reached. "
-                #         f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
-                #     )
-                #     for task in waiting_tasks:
-                #         task.cancel()
-                #     # Wait for cancellations to complete
-                #     await asyncio.gather(*waiting_tasks, return_exceptions=True)
-                #     break  # Exit the cleanup loop
+                elapsed_time = time.perf_counter() - cleanup_start_time
+                if elapsed_time > self.cleanup_task_time:
+                    self.logger.warning(
+                        f"Cleanup timeout of {self.cleanup_task_time}s reached. "
+                        f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
+                    )
+                    for task in waiting_tasks:
+                        task.cancel()
+                    # Wait for cancellations to complete
+                    await asyncio.gather(*waiting_tasks, return_exceptions=True)
+                    break  # Exit the cleanup loop
                 # NOTE: Keep sending pause requests because the inference engine only marks currently running requests as aborted.
                 # When a waiting request starts running, it still needs another pause request to be marked as aborted.
                 _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
@@ -386,6 +389,7 @@ class DataFlow:
         for k, v in task_completion_dict.items():
             self.tb_metrics[f"task_time/{k}"] = v
 
+    @ray_method
     async def pause(self, timeout: float = 60.0):
         """Asynchronously sends abort requests to all rollout workers."""
         if not self.worker_url_list:
@@ -407,38 +411,36 @@ class DataFlow:
         else:
             self.logger.info(f"All {succeeded_count} abort requests sent successfully.")
 
+    @ray_method
     async def run(
         self,
         num: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
-        dump: bool = False,
-        dump_path: Optional[str] = None,
-        resume: bool = False,
-        resume_path: Optional[str] = None,
+        enable_partial_rollout: Optional[bool] = None,
     ):
         """Starts the data generation process.
 
         This method resets the internal state and runs the concurrent task
-        runner to collect a new batch of samples.
+        runner to collect a new batch of samples from the environment.
 
+         Args:
+            num (Optional[int]): The target number of samples to collect for this run.
+                Overrides the existing global_batch_size in DataFlowConfig if provided.
+            sample_params (Optional[SampleParams]): Parameters for model sampling.
+                Overrides the existing sample_params in DataFlowConfig if provided.
+            extra_params (Optional[Dict]): Additional parameters for rollout.
+                Overrides the existing extra_params in DataFlowConfig if provided.
+            enable_partial_rollout (Optional[bool]): Whether to enable partial rollout mode.
+                This is primarily intended for unit testing, allowing the dataflow to pause
+                and resume partway through a rollout for checkpointing and recovery tests.Returns:
         Returns:
             List[RLDataFlowItem]: A list of collected training samples.
         """
-        self._prepare(global_batch_size=num, sample_params=sample_params, extra_params=extra_params)
+        self._reset_internal_states(global_batch_size=num, sample_params=sample_params, extra_params=extra_params)
         self.logging_replaybuffer_state("DataFlow run started. ")
-        if resume:
-            assert resume_path, "Resuming is enabled but no resume path is provided."
-            self.logger.info(f"Resuming replay buffer from {resume_path}")
-            await self.replay_buffer.resume.remote(resume_path)
-
         await self.concurrent_task_runner()
         self.logging_replaybuffer_state("DataFlow run completed. ")
-
-        if dump:
-            assert dump_path, "Dumping is enabled but no dump path is provided."
-            self.logger.info(f"Dump replay buffer from {dump_path}")
-            await self.replay_buffer.dump.remote(dump_path)
 
         get_start_time = time.perf_counter()
         return_samples = await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
@@ -460,9 +462,6 @@ class DataFlow:
 
     def get_replaybuffer_status(self):
         return ray.get(self.replay_buffer.status.remote())
-
-    def clear_replaybuffer(self):
-        return ray.get(self.replay_buffer.clear.remote())
 
     async def _send_abort_request(self, client, url, timeout):
         worker_url = f"{url}/abort_request"
@@ -502,3 +501,23 @@ class DataFlow:
         logger_msg += task_completions_report
         self.logger.info(logger_msg)
         return stats_dict
+
+    def save(self, save_path: Path | str):
+        """Saves the replay buffer to the specified path.
+
+        Args:
+            save_path (str): The path to the checkpoint file to save to.
+        """
+        ray.get(self.replay_buffer.save.remote(save_path))
+
+    def resume(self, resume_path: Path | str):
+        """Resumes the replay buffer from the specified path.
+
+        Args:
+            resume_path (str): The path to the checkpoint file to resume from.
+        """
+        ray.get(self.replay_buffer.resume.remote(resume_path))
+
+
+DataFlow = ray.remote(RawDataFlow)
+DataFlowProxy = ActorProxy[RawDataFlow]

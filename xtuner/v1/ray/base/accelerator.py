@@ -5,13 +5,20 @@ import ray
 import torch
 import torch.distributed as dist
 from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict
-from ray.util.placement_group import PlacementGroup, placement_group, placement_group_table
+from pydantic import BaseModel, ConfigDict, field_validator
+from ray.actor import ActorClass, ActorProxy
+from ray.util.placement_group import (
+    VALID_PLACEMENT_GROUP_STRATEGIES,
+    PlacementGroup,
+    placement_group,
+    placement_group_table,
+)
 from typing_extensions import Annotated
 
 from ..utils import find_master_addr_and_port, get_accelerator_ids
 
 
+PG_READY_TIMEOUT = os.getenv("XTUNER_PG_READY_TIMEOUT", 30)  # default 30 seconds
 AcceleratorType = Literal["GPU", "NPU"]
 T = TypeVar("T")
 
@@ -63,6 +70,17 @@ class AcceleratorResourcesConfig(BaseModel):
         float,
         Parameter(help="Number of accelerators to allocate for each worker in the placement group."),
     ] = 1
+    pg_pack_strategy: Annotated[
+        str,
+        Parameter(help="Placement group packing strategy, options: " + ", ".join(VALID_PLACEMENT_GROUP_STRATEGIES)),
+    ] = "PACK"
+
+    @field_validator("pg_pack_strategy")
+    @classmethod
+    def check_pg_pack_strategy(cls, v):
+        if v not in VALID_PLACEMENT_GROUP_STRATEGIES:
+            raise ValueError(f"pg_pack_strategy must be one of {VALID_PLACEMENT_GROUP_STRATEGIES}")
+        return v
 
     def model_post_init(self, __context: Any) -> None:
         if self.accelerator == "NPU":
@@ -102,6 +120,7 @@ class AcceleratorResourcesConfig(BaseModel):
         total_cpus: float | int,
         total_memory: int,
         num_workers: int,
+        pg_pack_strategy: str = "PACK",
     ):
         """Create an AcceleratorResourcesConfig from total accelerator, CPU,
         and memory resources.
@@ -124,6 +143,7 @@ class AcceleratorResourcesConfig(BaseModel):
             num_accelerators_per_worker=total_accelerators / num_workers,
             num_cpus_per_worker=total_cpus / num_workers,
             cpu_memory_per_worker=total_memory / num_workers,
+            pg_pack_strategy=pg_pack_strategy,
         )
 
 
@@ -247,11 +267,15 @@ class AutoAcceleratorWorkers:
                 resources_config.accelerator: resources_config.num_accelerators_per_worker,
             }
         ] * resources_config.num_workers
-        if name in ray.util.placement_group_table().keys():
+
+        pg_info = ray.util.placement_group_table()
+        names = [i["name"] for i in pg_info.values()]
+
+        if name in names:
             pg = ray.util.get_placement_group(name)
         else:
-            pg = placement_group(bundles=bundles, strategy="PACK", name=name)
-            ray.get(pg.ready())
+            pg = placement_group(bundles=bundles, strategy=resources_config.pg_pack_strategy, name=name)
+            ray.get(pg.ready(), timeout=PG_READY_TIMEOUT)
         return pg
 
     @staticmethod
@@ -389,7 +413,9 @@ class AutoAcceleratorWorkers:
         return workers_list, rank_bundle_idx_list, pg
 
     @classmethod
-    def from_placement_group(cls, worker_cls, worker_config, pg: PlacementGroup):
+    def from_placement_group(
+        cls, worker_cls: ActorClass[T], worker_config, pg: PlacementGroup
+    ) -> tuple[list[ActorProxy[T]], list[tuple[int, int]]]:
         """Create workers from an existing placement group.
 
         Args:
@@ -406,8 +432,8 @@ class AutoAcceleratorWorkers:
         device_type = cls.get_device_type(pg)
         sorted_bundle_idxs, master_addr, master_port, world_size = cls.get_spmd_info(pg)
 
-        workers_list = []
-        rank_bundle_idx_list = []
+        workers_list: list[ActorProxy[T]] = []
+        rank_bundle_idx_list: list[tuple[int, int]] = []
         for rank, bundle_idx in enumerate(sorted_bundle_idxs):
             worker = worker_cls.options(
                 placement_group=pg,

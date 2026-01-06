@@ -78,6 +78,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.accelerator = accelerator
         self.server_func: Callable
         self.endpoints: dict[str, str] = dict()
+        self.engine_rank_mesh_array: list[list[int]]
         # http_concurrency is calculated based on the max batch size per engine and the total number of engines
         assert config.rollout_max_batch_size_per_instance, (
             "rollout_max_batch_size_per_instance must be set in RolloutConfig"
@@ -116,8 +117,12 @@ class RolloutWorker(SingleAcceleratorWorker):
             placement_group_capture_child_tasks=True,
             placement_group_bundle_index=self.engine_bundle_idxs[0],
         )
+        local_rank = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
+        start_port = self.config.dist_port_base + local_rank * 1024
         self.host, self.ports = ray.get(
-            find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(3)
+            find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(
+                nums=3, start_port=start_port, max_tries=1024
+            )
         )
         self.dist_port = self.ports[0]
         self.server_port = self.ports[1]
@@ -141,6 +146,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.receive_abort_request.clear()
         self.launch_server()
         return (self.rank, self.server_url)
+
+    def set_engine_rank_mesh_array(self, engine_rank_mesh_array: list[list[int]]):
+        self.engine_rank_mesh_array = engine_rank_mesh_array
 
     def set_engine_bundle_idxs(self, engine_bundle_idxs: list[int]):
         """Set the bundle indices for the inference engine.
@@ -327,37 +335,6 @@ class RolloutWorker(SingleAcceleratorWorker):
             r = await self.client.send(req)
             r.raise_for_status()
             return HttpRequestResult(response=r)
-
-            # send_task = asyncio.create_task(self.client.send(req))
-            # abort_wait_task = asyncio.create_task(self.receive_abort_request.wait())
-
-            # done, pending = await asyncio.wait(
-            #     {send_task, abort_wait_task}, timeout=self.config.rollout_timeout, return_when=asyncio.FIRST_COMPLETED
-            # )
-
-            # if send_task in done:
-            #     abort_wait_task.cancel()
-            #     r = await send_task
-            #     r.raise_for_status()
-            #     return HttpRequestResult(response=r)
-
-            # if abort_wait_task in done:
-            #     self.logger.debug(
-            #         f"Request to {url} was aborted. Waiting up to 5s for the request to gracefully finish."
-            #     )
-            # try:
-            #     # Wait for send_task for a short period before force-cancelling
-            #     r = await asyncio.wait_for(send_task, timeout=self.abort_timeout)
-            #     r.raise_for_status()
-            #     return HttpRequestResult(response=r)
-            # except asyncio.TimeoutError:
-            #     self.logger.debug(f"Request to {url} did not finish gracefully within 5s. Force cancelling.")
-            #     send_task.cancel()
-            # except asyncio.CancelledError:
-            #     pass
-            # # Ensure the task is awaited to suppress warnings, even if cancelled
-            # await asyncio.gather(send_task, return_exceptions=True)
-            # return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
 
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
@@ -608,7 +585,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                             concat_routed_experts = np.concatenate((exist_routed_experts, cur_routed_experts), axis=0)
                             prompt_tokens = response["meta_info"].get("prompt_tokens", 0)
                             response_tokens = response["meta_info"].get("completion_tokens", 0)
-                            self.logger.info(
+                            self.logger.debug(
                                 f"[{root_id}/{action_id}] Partial Rollout Stats: "
                                 f"Tokens(prompt={prompt_tokens}, response={response_tokens}, total={prompt_tokens + response_tokens}) | "
                                 f"Experts(exist={exist_routed_experts.shape}, init_cur={init_cur_roued_experts}, cur={cur_routed_experts.shape}, concat={concat_routed_experts.shape})"
@@ -617,6 +594,10 @@ class RolloutWorker(SingleAcceleratorWorker):
                         else:
                             extra_info["routed_experts"] = routed_experts
 
+                    else:
+                        assert finish_reason == "abort", (
+                            f"routed_experts is None, but finish_reason is {finish_reason}, expected abort. response: {response}"
+                        )
                 # NOTE: When set return_token_ids = True, the response must contain valid token_ids/logprobs.
                 # If not, we consider it as an invalid response and retry it.
                 # NOTE: !!! When finish_reason is abort, some queries may not return token_ids or logprobs. !!!

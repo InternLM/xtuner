@@ -34,8 +34,6 @@ class TestInternS1(DeterministicDDPTestCase):
     def test_interns1_text_run(self, device, tol):
         self.create_pg(device)
 
-        maybe_compile.clear_compile_targets()
-
         hf_config = AutoConfig.from_pretrained(
             INTERNS1_DENSE_PATH,
             trust_remote_code=True,
@@ -65,6 +63,7 @@ class TestInternS1(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
+            model_cfg.compile_cfg = False
             interns1_model = model_cfg.build().to(torch.bfloat16)
         
         interns1_model.from_hf(INTERNS1_DENSE_PATH)
@@ -105,7 +104,6 @@ class TestInternS1(DeterministicDDPTestCase):
     )
     def test_interns1_image_run(self, device, sp_size, tol):
         self.create_pg(device)
-        maybe_compile.clear_compile_targets()
 
         hf_config = AutoConfig.from_pretrained(
             INTERNS1_DENSE_PATH,
@@ -166,6 +164,7 @@ class TestInternS1(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
+            model_cfg.compile_cfg = False
             interns1_model = model_cfg.build().to(torch.bfloat16)
         
         interns1_model.from_hf(INTERNS1_DENSE_PATH)
@@ -220,7 +219,6 @@ class TestInternS1(DeterministicDDPTestCase):
     )
     def test_fsdp_text_accuracy(self, device, tol):
         self.create_pg(device)
-        maybe_compile.clear_compile_targets()
         hf_config = AutoConfig.from_pretrained(
             INTERNS1_DENSE_PATH,
             trust_remote_code=True,
@@ -250,6 +248,7 @@ class TestInternS1(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
+            model_cfg.compile_cfg = False
             interns1_model = model_cfg.build().to(torch.bfloat16)
         
         fsdp_config = FSDPConfig(
@@ -303,9 +302,6 @@ class TestInternS1(DeterministicDDPTestCase):
     )
     def test_fsdp_image_accuracy(self, device, sp_size, compile, tol):
         self.create_pg(device)
-        if not compile:
-            maybe_compile.clear_compile_targets()
-
         hf_config = AutoConfig.from_pretrained(
             INTERNS1_DENSE_PATH,
             trust_remote_code=True,
@@ -365,6 +361,8 @@ class TestInternS1(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
+            if not compile:
+                model_cfg.compile_cfg = False
             interns1_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(

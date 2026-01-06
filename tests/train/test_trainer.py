@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.testing._internal.common_distributed import DistributedTestBase
+import parametrize
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
@@ -54,7 +55,10 @@ class FakeEngine:
 
     def train_step(self, *args, **kwargs):
         self.train_step_calls += 1
-        return {"total_loss": 1.0, "reduced_llm_loss": 0.8}, {"consumed_tokens": 100, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5}
+        return (
+            {"local_loss": 1.0, "reduced_llm_loss": 0.8},
+            {"step_consumed_tokens": 100, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5}
+        )
 
     def save_hf(self, hf_path):
         self.save_hf_calls.append(hf_path)
@@ -388,11 +392,12 @@ class TestTrainerSaveHF(DistributedTestBase):
         return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "2"))
 
 
-class TestTrainerConfig(TestCase):
-    def setUp(self):
+class TestTrainerConfig(DeterministicDDPTestCase):
+    def prepare(self):
+        self.create_pg(DEVICE)
         self.dataset_config = [
             {
-                "dataset": DatasetConfig(name="alpaca", anno_path="", sample_ratio=1.0),
+                "dataset": DatasetConfig(name="alpaca", anno_path=os.environ["ALPACA_PATH"], sample_ratio=1.0),
                 "tokenize_fn": OpenaiTokenizeFunctionConfig(
                     max_length=16386, chat_template="qwen3"
                 ),
@@ -403,10 +408,21 @@ class TestTrainerConfig(TestCase):
 
         self.optim_cfg = AdamWConfig(lr=0.1, weight_decay=0.1)
         self.lr_cfg = LRConfig(lr_type="cosine", lr_min=0.001, warmup_ratio=0.03)
-
         self.fsdp_cfg = FSDPConfig(torch_compile=True)
+        temp_dir = tempfile.TemporaryDirectory()
+        if dist.get_rank() == 0:
+            temp_dir = [temp_dir.name]
+        else:
+            temp_dir = [None]
+        dist.broadcast_object_list(temp_dir, src=0)
+        self.temp_dir = temp_dir[0]
 
-    def build_trainer(self, model_cfg):
+    def cleanup_trainer(self, trainer: Trainer):
+        if dist.get_rank() == 0:
+            shutil.rmtree(trainer.work_dir, ignore_errors=True)
+        dist.barrier()
+
+    def build_trainer_cfg(self, model_cfg):
         return TrainerConfig(
             model_cfg=model_cfg,
             optim_cfg=self.optim_cfg,
@@ -414,14 +430,14 @@ class TestTrainerConfig(TestCase):
             dataloader_cfg=self.dataloader_config,
             lr_cfg=self.lr_cfg,
             loss_cfg=CELossConfig(mode="chunk", chunk_size=1024),
-            global_batch_size=1,
+            global_batch_size=8,
             sp_size=1,
             total_epoch=10,
-            load_from="",
             seed=42,
             checkpoint_interval=1,
-            tokenizer_path="",
-            work_dir="",
+            tokenizer_path=None,
+            fsdp_cfg=self.fsdp_cfg,
+            work_dir=self.temp_dir,
         )
 
     def test_dump_trainer_config(self):
@@ -437,13 +453,69 @@ class TestTrainerConfig(TestCase):
         ]
 
         for model_cfg in model_cfg_list:
-            trainer_cfg = self.build_trainer(model_cfg)
+            trainer_cfg = self.build_trainer_cfg(model_cfg)
             self._dump_trainer_config(trainer_cfg)
 
     def _dump_trainer_config(self, trainer_cfg: TrainerConfig):
         trainer_cfg.model_dump_json()
         trainer_cfg.model_dump()
         pickle.dumps(trainer_cfg)
+
+    @parametrize.parametrize(
+        "pack_to_max_length,compile_cfg,torch_compile,success",
+        [
+            # compile_cfg could be Any if pack_to_max_length is True
+            (True, None, True, True),
+            (True, {}, True, True),
+            # torch_compile could be Any if pack_to_max_length is True
+            (True, None, True, True),  # TODO: removed in version 1.1.0 (FSDPConfig.torch_compile is deprecated)
+            (True, None, False, True),
+            # compile_cfg must be False or {} when pack_to_max_length is False
+            (False, False, True, True),
+            (False, {}, True, True),
+            (False, None, True, False),
+            # torch_compile must be False when pack_to_max_length is False
+            (False, None, False, True),
+            (False, None, True, False),
+        ]
+    )
+    def test_resolve_compile(self, pack_to_max_length, compile_cfg, torch_compile, success: bool):
+        model_cfg = Qwen3Dense4BConfig()
+        trainer_cfg = self.build_trainer_cfg(model_cfg)
+
+        # `model_cfg.compile_cfg` should not be True when `pack_to_max_length` is False
+        trainer_cfg.model_cfg.compile_cfg = compile_cfg
+        trainer_cfg.dataloader_cfg.pack_to_max_length = pack_to_max_length
+        trainer_cfg.fsdp_cfg.torch_compile = torch_compile
+        if not success:
+            with self.assertRaises(RuntimeError):
+                trainer = Trainer.from_config(trainer_cfg)
+        else:
+            trainer = Trainer.from_config(trainer_cfg)
+            self.cleanup_trainer(trainer)
+
+    @parametrize.parametrize(
+        "model_ep_size,fsdp_ep_size,target_ep_size",
+        [
+            (1, 8, 8),
+            (8, 1, 8),
+        ]
+    )
+    def test_resolve_ep_size(self, model_ep_size, fsdp_ep_size, target_ep_size):
+        model_cfg = Qwen3MoE30BA3Config()
+        trainer_cfg = self.build_trainer_cfg(model_cfg)
+
+        # `model_cfg.compile_cfg` should not be True when `pack_to_max_length` is False
+        trainer_cfg.model_cfg.ep_size = model_ep_size
+        trainer_cfg.fsdp_cfg.ep_size = fsdp_ep_size
+        trainer_cfg.global_batch_size = target_ep_size
+        trainer = Trainer.from_config(trainer_cfg)
+        assert trainer.config.model_cfg.ep_size == target_ep_size
+        self.cleanup_trainer(trainer)
+
+    @property
+    def world_size(self) -> int:
+        return 8
 
 
 class CheckpointHookPickle:

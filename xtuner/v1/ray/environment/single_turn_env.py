@@ -2,9 +2,10 @@ import asyncio
 import copy
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, cast
 
 import ray
+from ray.actor import ActorClass, ActorProxy
 
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
@@ -15,12 +16,10 @@ from xtuner.v1.data_proto.rl_data import (
     update_rollout_item,
 )
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
-from xtuner.v1.ray.rollout.controller import SampleParams
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, ray_method
 
 
-@ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
-class SingleTurnEnvironment(BaseEnvironment):
+class RawSingleTurnEnvironment(BaseEnvironment):
     """A single-turn environment for handling generation and evaluation tasks.
 
     This class extends `BaseEnvironment` to provide a concrete implementation for
@@ -67,11 +66,8 @@ class SingleTurnEnvironment(BaseEnvironment):
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
 
-    async def generate(
-        self,
-        group_data_items: List[RLDataFlowItem],
-        sample_params: Optional[SampleParams] = None,
-        extra_params: Optional[Dict] = None,
+    async def generate(  # type: ignore[override]
+        self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
     ) -> List[RLDataFlowItem]:
         """Generate responses for a batch of RLTextDataItem using the rollout
         controller.
@@ -110,7 +106,7 @@ class SingleTurnEnvironment(BaseEnvironment):
                     update_sample_params.max_tokens = sample_params.max_tokens - (
                         current_partial_length - input_ids_length
                     )
-                    self.logger.info(
+                    self.logger.debug(
                         f"root_id: {sample.uid.root_id}, action_id {sample.uid.action_id} pass current_partial_length {current_partial_length}, input_ids_length {input_ids_length} to rollout and set max_tokens to {update_sample_params.max_tokens}"
                     )
                 else:
@@ -137,7 +133,8 @@ class SingleTurnEnvironment(BaseEnvironment):
             group_data_items = update_rollout_item(group_data_items, rollout_responses)
         return group_data_items
 
-    async def run(
+    @ray_method
+    async def run(  # type: ignore[override]
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
     ) -> List[RLDataFlowItem]:
         """Runs a full generation and judger cycle.
@@ -173,3 +170,10 @@ class SingleTurnEnvironment(BaseEnvironment):
                 ]
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
         return group_data_items
+
+
+SingleTurnEnvironment = cast(
+    ActorClass[RawSingleTurnEnvironment],
+    ray.remote(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))(RawSingleTurnEnvironment),
+)
+SingleTurnEnvironmentProxy = ActorProxy[RawSingleTurnEnvironment]

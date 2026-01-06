@@ -6,10 +6,9 @@ import unittest
 import tempfile
 import numpy as np
 from uuid import uuid4
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.judger.controller import JudgerController, JudgerConfig
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLEnvDataItem, RLRolloutResponseItem, RLUIDItem
-
+from xtuner.v1.ray.base import AutoCPUWorkers, CPUResourcesConfig
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 GEO_ROLLOUT_DATA_PATH = os.environ["GEO_ROLLOUT_DATA_PATH"]
@@ -182,7 +181,13 @@ class TestJudgerController(unittest.TestCase):
             enable_weighted_judgers=True,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_controller = JudgerController.remote(judger_cfg)
+        cpu_resources_config = CPUResourcesConfig.from_total(
+            total_cpus=2,
+            total_memory=2 * 1024**3,
+            num_workers=2
+        )
+        pg = AutoCPUWorkers.build_placement_group(cpu_resources_config)
+        judger_controller = JudgerController.remote(judger_cfg, pg)
         res3 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_SOURCE))
         self.assertEqual(res3.reward["weighted_score"], 1.0)  # weighted_score为固定字段，表示加权后的reward
 

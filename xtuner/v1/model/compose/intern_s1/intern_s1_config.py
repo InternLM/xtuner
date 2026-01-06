@@ -1,16 +1,17 @@
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Literal
 
 from mmengine import is_installed
-from pydantic import BaseModel, ConfigDict
+from pydantic import ConfigDict
 from typing_extensions import Self
 
-from xtuner.v1.float8 import Float8Config
 from xtuner.v1.model.base import XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE235BA22Config
 from xtuner.v1.utils import get_device, get_logger
+
+from ..base import BaseComposeConfig
 
 
 if TYPE_CHECKING:
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 
-class InternS1VisionConfig(BaseModel):
+class InternS1VisionConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -47,7 +48,6 @@ class InternS1VisionConfig(BaseModel):
     use_absolute_position_embeddings: bool = True
     use_mask_token: bool = False
     use_mean_pooling: bool = True
-    float8_cfg: Optional["Float8Config"] = None
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
@@ -61,8 +61,12 @@ class InternS1VisionConfig(BaseModel):
 
         return InternS1VisionModel(self)
 
+    @property
+    def hf_config(self) -> None:
+        return None
 
-class InternS1ProjectorConfig(BaseModel):
+
+class InternS1ProjectorConfig(XTunerBaseModelConfig):
     model_config = ConfigDict(
         extra="forbid",
     )
@@ -70,15 +74,18 @@ class InternS1ProjectorConfig(BaseModel):
     text_hidden_size: int = 4096
     downsample_ratio: float = 0.5
     hidden_act: str = "gelu"
-    float8_cfg: Optional["Float8Config"] = None
 
     def build(self):
         from .modeling_projector import InternS1MultiModalProjector
 
         return InternS1MultiModalProjector(self)
 
+    @property
+    def hf_config(self) -> None:
+        return None
 
-class InternS1BaseConfig(XTunerBaseModelConfig):
+
+class InternS1BaseConfig(BaseComposeConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -108,6 +115,17 @@ class InternS1BaseConfig(XTunerBaseModelConfig):
     def from_hf(cls, hf_path: str | Path) -> Self:
         raise NotImplementedError
 
+    @property
+    def hf_config(self):
+        # TODO(pppppM) Support saving HuggingFace format config
+        logger.warning(
+            f"{type(self)} does not support conversion to HuggingFace config format. "
+            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
+            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
+            "HuggingFace format checkpoint to not match the weights."
+        )
+        return None
+
 
 class InternS1Config(InternS1BaseConfig):
     vision_config: InternS1VisionConfig = InternS1VisionConfig(
@@ -122,30 +140,8 @@ class InternS1Config(InternS1BaseConfig):
     projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig(vision_hidden_size=3200, text_hidden_size=4096)
     text_config: MoEConfig = Qwen3MoE235BA22Config(vocab_size=153216)
 
-    @property
-    def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
-        return None
-
 
 class InternS1MiniConfig(InternS1BaseConfig):
     vision_config: InternS1VisionConfig = InternS1VisionConfig()
     projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig()
     text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig(vocab_size=153216)
-
-    @property
-    def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
-        return None

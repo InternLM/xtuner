@@ -1,4 +1,4 @@
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 
 import torch
 from cyclopts import Parameter
@@ -23,12 +23,6 @@ class FSDPConfig(BaseModel):
     param_dtype: Annotated[torch.dtype, Parameter(help="Data type for model parameters")] = torch.bfloat16
     reduce_dtype: Annotated[torch.dtype, Parameter(help="Data type for reduction operations")] = torch.bfloat16
     torch_compile: Annotated[bool, Parameter(help="Enable model compilation for faster inference")] = False
-    compile_targets: Annotated[
-        Optional[Tuple[str, ...]],
-        Parameter(
-            help="Specific targets for compilation, e.g. ('module.MyClass.method', 'module.function'). If None, all eligible functions will be compiled."
-        ),
-    ] = None
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
     )
@@ -47,8 +41,17 @@ class FSDPConfig(BaseModel):
 
     @field_validator("param_dtype", "reduce_dtype", mode="before")
     @classmethod
-    def deserialize_param_dtype(cls, value: str) -> torch.dtype:
-        if "bfloat16" in value:
-            return torch.bfloat16
+    def deserialize_param_dtype(cls, value: str | torch.dtype) -> torch.dtype:
+        if isinstance(value, torch.dtype):
+            return value
+        elif isinstance(value, str):
+            if "bfloat16" in value:
+                return torch.bfloat16
+            elif "float16" in value or "half" in value:
+                return torch.float16
+            elif "float32" in value or "float" in value:
+                return torch.float32
+            else:
+                raise ValueError()
         else:
-            raise ValueError()
+            return value

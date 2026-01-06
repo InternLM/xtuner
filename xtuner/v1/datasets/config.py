@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader as TorchDataLoader
 from typing_extensions import TypedDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.utils import get_logger, profile_time_and_memory
+from xtuner.v1.utils import get_logger, profile_time
 
 from ..datasets.collator import ColateItem
 from .collator import (
@@ -96,11 +96,15 @@ DatasetConfigListAdatper = TypeAdapter(DatasetConfigList, config=ConfigDict(arbi
 
 # TODO: (huanghaian) Fix the return type hint static check
 # TODO: (huanghaian) Moving arguments to dataset config
-def build_datasets(dataset_config: DatasetConfigList, tokenizer) -> list[JsonlDataset]:
+def build_datasets(
+    dataset_config: DatasetConfigList, tokenizer: PreTrainedTokenizer, tokenizer_hash: str | None = None
+) -> list[JsonlDataset]:
     datasets: list[JsonlDataset] = []
     assert len(dataset_config) > 0
 
-    tokenizer_hash = tokenizer_xxhash(tokenizer)[:16]
+    if tokenizer_hash is None:
+        tokenizer_hash = tokenizer_xxhash(tokenizer)[:16]
+
     for config in dataset_config:
         _dataset_config = config["dataset"]
         assert isinstance(_dataset_config, DatasetConfig)
@@ -284,6 +288,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     ] = 100
     num_workers: Annotated[int, Parameter(help="dataloader num workers")] = 0
     pad_token_id: Annotated[int | None, Parameter(help="padding token id")] = None
+    tokenizer_hash: Annotated[str | None, Parameter(help="tokenizer hash")] = None
 
     def build_collator(self):
         if self.collator == "sft_llm_collator":
@@ -314,7 +319,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     def build(
         self,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        dp_mesh: DeviceMesh,
+        dp_mesh: DeviceMesh | None,
         global_batch_size: int,
         micro_batch_size: int,
         seed: int,
@@ -324,8 +329,8 @@ class DataloaderConfig(BaseDataloaderConfig):
         if self.dataset_config_list is None:
             raise ValueError("dataset_config_list is required.")
 
-        with profile_time_and_memory("[Build Datasets]"):
-            datasets = build_datasets(self.dataset_config_list, tokenizer)
+        with profile_time("[Build Datasets]"):
+            datasets = build_datasets(self.dataset_config_list, tokenizer, tokenizer_hash=self.tokenizer_hash)
 
         assert isinstance(datasets, list), "datasets must be a list of datasets."
 
@@ -333,7 +338,7 @@ class DataloaderConfig(BaseDataloaderConfig):
             num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
             logger.debug(f"[Dataset] {num_tokens} tokens.")
 
-        with profile_time_and_memory("[Pack Datasets]"):
+        with profile_time("[Pack Datasets]"):
             dataset: (
                 ExpandSoftPackDataset
                 | _LegacySoftPackDataset

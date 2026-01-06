@@ -1,4 +1,5 @@
 set -ex
+ray stop --force
 # examples of usage:
 # qwen3_8B_grpo_gsm8k training: 
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen3_8B_grpo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
@@ -10,6 +11,17 @@ INFER_BACKEND=$2
 MODEL_PATH=$3
 DATA_PATH=$4
 EVAL_DATA_PATH=${5:-""}
+ACCELERATOR=${6:-"gpu"} # "gpu" or "npu"
+ACCELERATOR=$(echo "$ACCELERATOR" | tr '[:lower:]' '[:upper:]')
+if [ $ACCELERATOR != "GPU" ] && [ $ACCELERATOR != "NPU" ]; then
+  echo "Error: ACCELERATOR must be either 'gpu' or 'npu'!"
+  exit 1
+fi
+if [ "$ACCELERATOR" = "NPU" ]; then
+  ACCELERATOR_PER_NODE=${7:-16}
+else
+  ACCELERATOR_PER_NODE=${7:-8}
+fi
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
@@ -54,15 +66,31 @@ current_time=$(date "+%m%d%H")
 # 取模型路径的最后一级作为model_name，取数据路径的倒数第二级作为data_name
 model_dir_name=$(basename "$MODEL_PATH")
 data_dir_name=$(basename "$(dirname "$DATA_PATH")")
-export WORK_DIR="work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
-
+DIR=$(pwd)
+export WORK_DIR="${DIR}/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
+if [ ! -d "$WORK_DIR" ]; then
+  mkdir -p "$WORK_DIR"
+fi
+export LMDEPLOY_LOG_FILE="${WORK_DIR}/lmdeploy_log_${current_time}.txt"
+if [ "$ACCELERATOR" = "GPU" ]; then
+    # TODO: support NPU RL Memory Monitor
+    export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
+fi
 
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
-total_cpus=$((node_count * 128))
+if [ "$ACCELERATOR" = "GPU" ]; then
+  total_cpus=$((node_count * 128))
+elif [ "$ACCELERATOR" = "NPU" ]; then
+  total_cpus=$((node_count * 256))
+fi
 
 if [ "$RAY_RANK" -eq 0 ]; then
+  rm -rf /tmp/ray_log
+  export RAY_LOG_DIR="${WORK_DIR}/ray_${current_time}/"
+  mkdir -p ${RAY_LOG_DIR}
+  ln -sfn "${RAY_LOG_DIR}" /tmp/ray_log
   ray start --head \
     --node-ip-address="$RAY_MASTER_ADDR" \
     --port="$RAY_HEAD_PORT" \
@@ -70,7 +98,8 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --dashboard-port=$RAY_DASHBOARD_PORT \
     --include-dashboard=true \
     --disable-usage-stats \
-    --num-cpus=$total_cpus
+    --num-cpus=$total_cpus \
+    --temp-dir="/tmp/ray_log/"
 else
   while true; do
     if curl --connect-timeout 2 "http://${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT}" >/dev/null 2>&1; then
@@ -85,20 +114,15 @@ else
 fi
 
 while true; do
-  result=$(ray status | grep GPU | cut -d ' ' -f2 | cut -d '/' -f2)
-  expected_gpu_count=$((node_count * 8))
-  if [ "$result" = "$expected_gpu_count.0" ]; then
+  result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
+  expected_accelerator_count=$((node_count * ${ACCELERATOR_PER_NODE}))
+  if [ "$result" = "$expected_accelerator_count.0" ]; then
     break
   else
-    echo "Waiting for GPU count to be $expected_gpu_count, current: $result"
+    echo "Waiting for ${ACCELERATOR} count to be $expected_accelerator_count, current: $result"
     sleep 2
   fi
 done
-
-# 3. start training job
-if [ ! -d "$WORK_DIR" ]; then
-  mkdir -p "$WORK_DIR"
-fi
 
 SCRIPT_NAME=$(basename "$0")
 cp "$0" "${WORK_DIR}/${SCRIPT_NAME}"

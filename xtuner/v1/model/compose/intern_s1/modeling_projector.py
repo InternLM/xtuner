@@ -26,7 +26,7 @@ class InternS1MultiModalProjector(BaseModel):
     config: InternS1ProjectorConfig
 
     def __init__(self, config: InternS1ProjectorConfig):
-        super().__init__()
+        super().__init__(config)  # type: ignore[arg-type]
         self.layer_norm = nn.LayerNorm(config.vision_hidden_size * int(1 / config.downsample_ratio) ** 2)
         self.linear_1 = nn.Linear(
             config.vision_hidden_size * int(1 / config.downsample_ratio) ** 2, config.text_hidden_size
@@ -37,7 +37,6 @@ class InternS1MultiModalProjector(BaseModel):
         self._hf_prefix = "model.multi_modal_projector."
         self._init_load_spec()
 
-    @maybe_compile(fullgraph=True)
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.layer_norm(image_features)
         hidden_states = self.linear_1(hidden_states)
