@@ -341,7 +341,6 @@ class BaseModel(nn.Module):
         from xtuner.v1.utils import default_init_weights
 
         initialized_params = default_init_weights(self)
-
         if missing := {name for name, _ in self.named_parameters()} - initialized_params:
             raise RuntimeError(f"{missing} is not initialized")
 

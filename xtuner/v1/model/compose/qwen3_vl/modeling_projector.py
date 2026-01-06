@@ -13,8 +13,7 @@ from torch.distributed.fsdp import (
     fully_shard,
 )
 from .modeling_vision import init_world_mesh
-from xtuner.v1.utils import get_device, get_torch_device_module, init_params
-from functools import partial
+from xtuner.v1.utils import get_device, get_torch_device_module, default_init_weights
 
 
 DEVICE = get_device()
@@ -41,12 +40,9 @@ class Qwen3VLVisionPatchMerger(nn.Module):
 
     @torch.no_grad()
     def init_weights(self):
-        init_params(self.norm.weight, nn.init.ones_)
-        init_params(self.norm.bias, nn.init.zeros_)
-        init_params(self.linear_fc1.bias, nn.init.zeros_)
-        init_params(self.linear_fc1.weight, partial(nn.init.normal_, mean=0.0, std=0.02))
-        init_params(self.linear_fc2.bias, nn.init.zeros_)
-        init_params(self.linear_fc2.weight, partial(nn.init.normal_, mean=0.0, std=0.02))
+        initialized_params = default_init_weights(self)
+        if missing := {name for name, _ in self.named_parameters()} - initialized_params:
+            raise RuntimeError(f"{missing} is not initialized")
 
 
 class Qwen3VLProjector(BaseModel):
