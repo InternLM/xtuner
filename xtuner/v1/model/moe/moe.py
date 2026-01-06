@@ -327,12 +327,12 @@ class MoE(BaseModel):
 
         # Prepare input embeddings for all micro-batches
         if seq_ctx_list[0].input_ids is None:
-            cat_hidden_states = torch.cat([ctx.inputs_embeds for ctx in seq_ctx_list], dim=1)
+            cat_hidden_states = torch.cat([ctx.inputs_embeds for ctx in seq_ctx_list], dim=1)  # type: ignore
         else:
-            cat_input_ids = torch.cat([ctx.input_ids for ctx in seq_ctx_list], dim=1)
+            cat_input_ids = torch.cat([ctx.input_ids for ctx in seq_ctx_list], dim=1)  # type: ignore
             cat_hidden_states = self.embed_tokens(cat_input_ids)
-        cat_position_ids = torch.cat([ctx.position_ids for ctx in seq_ctx_list], dim=1)
-        cat_position_embeddings = self.rotary_emb(cat_hidden_states, cat_position_ids)
+        cat_position_ids = torch.cat([ctx.position_ids for ctx in seq_ctx_list], dim=1)  # type: ignore
+        cat_position_embeddings = self.rotary_emb(cat_hidden_states, cat_position_ids)  # type: ignore
         position_embeddings_list = list(
             zip(
                 cat_position_embeddings[0].chunk(len(seq_ctx_list), dim=1),
@@ -349,7 +349,7 @@ class MoE(BaseModel):
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
 
-        moe_forawrd = False
+        moe_forward = False
         for idx, decoder_layer in self.layers.items():
             layer_idx = int(idx)
 
@@ -363,14 +363,14 @@ class MoE(BaseModel):
                     seq_ctx=cat_seq_ctx,
                 )
             else:
-                if not moe_forawrd:
+                if not moe_forward:
                     # TODO: `i.clone()` here is weird. However, the current Implementation of
                     # `async_save_on_cpu` is not friendly with `chunk` op (maybe caused by shared storage? not sure),
                     # resulting in nan grad norm. So we have to clone the chunked tensors here to make sure each
                     # hidden state has its own storage. This workaround may introduce extra memory and time cost, and
                     # should be optimized in the future.
                     hidden_states_list = [i.clone() for i in cat_hidden_states.chunk(len(seq_ctx_list), dim=1)]
-                    moe_forawrd = True
+                    moe_forward = True
 
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     with async_save_on_cpu(
@@ -409,18 +409,14 @@ class MoE(BaseModel):
 
         # Process final outputs for each micro-batch
         cat_loss_ctx = CELossContext.cat(loss_ctx_list)
-        loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cat_loss_ctx)  # type: ignore
+        loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cat_loss_ctx)
 
         # Aggregate losses (mean across micro-batches)
-        loss: torch.Tensor
         output["loss"] = loss.sum()
         moe_extra_info = ModelForwardExtraLogInfo()
         if extra_info:
             moe_extra_info.append(extra_info)
         output["extra_info"] = moe_extra_info
-
-        # Return logits for all micro-batches
-        final_logits = logits
 
         # Handle router results for all micro-batches
         all_router_logits = []
@@ -481,7 +477,7 @@ class MoE(BaseModel):
 
             output["router_logits"] = router_logits_dict
 
-        return MoEModelOutputs(**output, logits=final_logits)  # type: ignore[typeddict-item]
+        return MoEModelOutputs(**output, logits=logits)  # type: ignore[typeddict-item]
 
     def _forward(
         self,
