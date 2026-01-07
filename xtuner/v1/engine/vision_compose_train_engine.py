@@ -98,18 +98,22 @@ class VisionComposeTrainEngine(TrainEngine):
         if self._processor is not None:
             self._processor.save_pretrained(hf_dir)
 
-    def train_step(self, data_batches: List[ModelItem]) -> tuple[LossLog, OtherLog]:
-        """Perform a training step with the given data batches and mesh.
-
-        Args:
-            data_batches (List[Dict]): The input data batches for the training step.
-        """
+    # this method can be called outside, e.g., at the beginning of compute_actor_logprobs or compute_ref_logprobs during rl training
+    def maybe_precompute_float8_dynamic_scale_for_fsdp(self):
         if self.llm_float8_handler is not None and self.llm_float8_handler.enabled:
             self.llm_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.language_model)
         if self.vision_float8_handler is not None and self.vision_float8_handler.enabled:
             self.vision_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.vision_tower)
         if self.projector_float8_handler is not None and self.projector_float8_handler.enabled:
             self.projector_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.multi_modal_projector)
+
+    def train_step(self, data_batches: List[ModelItem]) -> tuple[LossLog, OtherLog]:
+        """Perform a training step with the given data batches and mesh.
+
+        Args:
+            data_batches (List[Dict]): The input data batches for the training step.
+        """
+        self.maybe_precompute_float8_dynamic_scale_for_fsdp()
 
         loss_log: LossLog = {}  # type: ignore[typeddict-item]
         other_log: OtherLog = {}  # type: ignore[typeddict-item]
@@ -140,7 +144,7 @@ class VisionComposeTrainEngine(TrainEngine):
         step_llm_loss = torch.tensor(0.0, device=DEVICE)
         step_balancing_loss: torch.Tensor | None = None
         step_z_loss: torch.Tensor | None = None
-        step_consumed_tokens = torch.tensor(0.0, device=DEVICE)
+        step_consumed_tokens = torch.tensor(0, device=DEVICE)
         efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
         total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
 
@@ -210,7 +214,7 @@ class VisionComposeTrainEngine(TrainEngine):
         reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
 
-        loss_log["total_loss"] = step_loss.item()
+        loss_log["local_loss"] = step_loss.item()
         loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
         if step_balancing_loss is not None:
             reduced_balancing_loss = step_balancing_loss
@@ -220,8 +224,8 @@ class VisionComposeTrainEngine(TrainEngine):
             reduced_z_loss = step_z_loss
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
-        other_log["consumed_tokens"] = step_consumed_tokens.item()
+        other_log["step_consumed_tokens"] = cast(int, step_consumed_tokens.item())
         other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
         other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
-        other_log["consumed_img_tokens"] = step_consumed_img_tokens
+        other_log["step_consumed_img_tokens"] = step_consumed_img_tokens
         return loss_log, other_log

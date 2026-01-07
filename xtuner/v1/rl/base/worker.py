@@ -1,28 +1,36 @@
 import json
 import math
 import os
+import time
 from itertools import chain
 from pathlib import Path
-from typing import Dict, List, TypeAlias, TypedDict, cast
+from typing import Dict, Iterable, List, TypeAlias, TypedDict, cast
 
 import ray
 import requests
 import torch
 import torch.distributed as dist
 import tqdm
+from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
+from typing_extensions import NotRequired
 
+from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.engine.train_engine import TrainEngine
+from xtuner.v1.datasets.config import DataloaderConfig
+from xtuner.v1.datasets.dataloader import Dataloader
+from xtuner.v1.engine.train_engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import (
     VisionComposeTrainEngine,
 )
 from xtuner.v1.float8.float8_handler import Float8Handler
+from xtuner.v1.loss import CELossConfig
+from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
@@ -32,6 +40,7 @@ from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
+    XTUNER_DETERMINISTIC,
     ParallelConfigException,
     get_device,
     get_logger,
@@ -132,6 +141,13 @@ class WorkerConfig(BaseModel):
     ref_model_fsdp_cfg: FSDPConfig | None = None
     log_dir: str | Path | None = None
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
+    seed: None | int = None  # if None, use RLTrainer seed
+
+    # sft config
+    sft_dataloader_cfg: DataloaderConfig | None = None
+    sft_global_batch_size: int = -1
+    rollout_steps_per_sft: int = 1
+    sft_loss_cfg: CELossConfig = CELossConfig()
 
 
 class WorkerInputItem(TypedDict):
@@ -141,9 +157,35 @@ class WorkerInputItem(TypedDict):
     rollout_logprobs: torch.Tensor | None
 
 
+class RLOtherLog(TypedDict):
+    maxvio: NotRequired[float]
+    step_consumed_tokens: int
+    step_consumed_img_tokens: NotRequired[float]
+    efficient_attn_ratio: float
+    max_ratio: NotRequired[float]
+    loss: NotRequired[float]
+    grad_norm: NotRequired[float]
+
+
+class WorkerTrainLogItem(TypedDict):
+    loss_log: LossLog
+    rl_other_log: RLOtherLog
+
+
+class WorkerLogItem(TypedDict):
+    train_entropy: float
+    rollout_entropy: NotRequired[float]
+    mismatch_metrics: NotRequired[dict[str, float]]
+    rollout_is_metrics: NotRequired[dict[str, float]]
+    train_metrics: List[WorkerTrainLogItem]
+    sft_train_metrics: NotRequired[dict[str, float]]
+
+
 class TrainingWorker(SingleAcceleratorWorker):
     _SAVE_OPTIMIZER_DIR = "optimizer"
     _SAVE_MODEL_DIR = "model"
+    _SAVE_SFT_DATALOADER_DIR = "sft_dataloader"
+    _SAVE_SFT_TRAIN_STATE_PATH = "sft_train_state.json"
 
     def __init__(
         self,
@@ -168,6 +210,14 @@ class TrainingWorker(SingleAcceleratorWorker):
         else:
             self.logger = get_logger()
 
+        self._set_deterministic()
+        self._set_random_seed(worker_cfg.seed)
+
+        self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
+        self.sp_mesh = self.data_mesh["sp"]
+
+        self._init_sft(worker_cfg)
+
         if not worker_cfg.fsdp_cfg.torch_compile:
             worker_cfg.model_cfg.compile_cfg = False
         self._engine = self._build_engine(worker_cfg)
@@ -181,8 +231,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                 worker_cfg.model_cfg, worker_cfg.ref_load_from, worker_cfg.ref_model_fsdp_cfg
             )
 
-        self.data_mesh = self._init_data_mesh(sp_size=worker_cfg.sp_size)
-        self.sp_mesh = self.data_mesh["sp"]
         self._optimizer_steps = worker_cfg.optimizer_steps
 
         # Used to update weight to rollout engine
@@ -191,6 +239,45 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_cfg_info: dict = dict()
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
+
+    def _init_sft(self, worker_cfg):
+        self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
+        self._sft_dataloader: Dataloader | None = None
+        self._sft_dataloader_iter: Iterable | None = None
+        self._sft_loss_cfg: CELossConfig | None = None
+        self._rollout_steps_per_sft = worker_cfg.rollout_steps_per_sft
+
+        self._rollout_step = 0
+        self._sft_cur_epoch = 0
+        self._sft_total_consumed_samples = 0
+        self._sft_total_consumed_tokens = 0
+
+        if self._sft_dataloader_config is not None:
+            assert worker_cfg.sft_global_batch_size > 0, "sft_global_batch_size must be greater than 0"
+            assert worker_cfg.seed is not None, "seed must be set when sft_dataloader_config is not None"
+            tokenizer = AutoTokenizer.from_pretrained(worker_cfg.load_from, trust_remote_code=True)
+            self._sft_dataloader = self._sft_dataloader_config.build(
+                tokenizer=tokenizer,
+                dp_mesh=self.data_mesh["dp"],
+                global_batch_size=worker_cfg.sft_global_batch_size,
+                micro_batch_size=1,
+                seed=worker_cfg.seed,
+            )
+            self.logger.info(f"Sft Dataloader len: {len(self._sft_dataloader)}")
+
+            sft_loss_cfg = worker_cfg.sft_loss_cfg
+            if worker_cfg.sft_loss_cfg is None:
+                sft_loss_cfg = CELossConfig()
+            self._sft_loss_cfg = sft_loss_cfg
+
+    def _set_deterministic(self):
+        if XTUNER_DETERMINISTIC:
+            self.logger.info("Setting deterministic algorithms of TrainingWorker.")
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+            torch.use_deterministic_algorithms(True, warn_only=True)
+
+    def _set_random_seed(self, seed: None | int):
+        set_random_seed(seed)
 
     def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine | VisionComposeTrainEngine:
         if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
@@ -281,6 +368,8 @@ class TrainingWorker(SingleAcceleratorWorker):
     def compute_actor_logprobs(
         self, seq_ctx_list: list[SequenceContext], loss_ctx_input_list: list[RLLossContextInputItem]
     ) -> list[RLLossContextInputItem]:
+        # precompute float8 dynamic scale only once
+        self._engine.maybe_precompute_float8_dynamic_scale_for_fsdp()
         for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
             output = self._engine.forward_only(seq_ctx=seq_ctx)
             loss_ctx_input.old_logprobs = gather_logprobs(output["logits"], loss_ctx_input.shifted_labels)
@@ -299,20 +388,32 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._ref_model.to_device("cpu")
         return loss_ctx_input_list
 
-    def _update_other_log(self, other_log: dict):
+    def _get_rl_other_log(self, other_log: OtherLog) -> RLOtherLog:
         from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 
-        extra_info = other_log.get("extra_info", {})
+        extra_info: ModelForwardExtraLogInfo | dict = other_log.get("extra_info", {})
         if isinstance(extra_info, ModelForwardExtraLogInfo):
             extra_info_dict = extra_info.get()
         else:
             extra_info_updated = ModelForwardExtraLogInfo(extra_info)
             extra_info_dict = extra_info_updated.get()
-        other_log["extra_info"] = extra_info_dict
-        return other_log
+
+        for k, v in extra_info_dict.items():
+            if isinstance(v, torch.Tensor):
+                extra_info_dict[k] = v.item()
+
+        rl_other_log: RLOtherLog = {
+            "maxvio": other_log.get("maxvio", 0.0),
+            "step_consumed_tokens": other_log["step_consumed_tokens"],
+            "step_consumed_img_tokens": float(other_log.get("step_consumed_img_tokens", 0.0)),
+            "efficient_attn_ratio": other_log["efficient_attn_ratio"],
+            "max_ratio": extra_info_dict.get("max_ratio", 0.0),
+            "loss": extra_info_dict.get("loss", 0.0),
+        }
+        return rl_other_log
 
     @ray_method
-    def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int):
+    def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         loss_cfg = self.config.loss_cfg
@@ -437,10 +538,6 @@ class TrainingWorker(SingleAcceleratorWorker):
                     rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
                 )
 
-            if not mask.any():  # all padding tokens, skip
-                self.logger.warning(f"Skip batch {i} as all tokens are padding.")
-                continue
-
             if len(rollout_logprobs_list) > 0:
                 # calculate importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
@@ -459,29 +556,37 @@ class TrainingWorker(SingleAcceleratorWorker):
                 all_rollout_is_metrics.append(rollout_is_metrics)
                 all_mismatch_metrics.append(mismatch_metrics)
 
+        worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
         logger_msg = f"Rollout {rollout_idx}: "
-
         sum_entropy = cast(torch.Tensor, sum_entropy)
         dist.all_reduce(sum_entropy, op=dist.ReduceOp.SUM)
-        avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+        avg_sum_entropy = sum_entropy / global_grad_tokens if global_grad_tokens > 0 else torch.tensor(0.0)
+        worker_log_item["train_entropy"] = avg_sum_entropy.item()
         logger_msg += f"avg entropy: {avg_sum_entropy:.4f}"
 
         if sum_rollout_entropy is not None:
             sum_rollout_entropy = cast(torch.Tensor, sum_rollout_entropy)
             dist.all_reduce(sum_rollout_entropy, op=dist.ReduceOp.SUM)
-            avg_rollout_entropy = sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else 0
+            avg_rollout_entropy = (
+                sum_rollout_entropy / global_grad_tokens if global_grad_tokens > 0 else torch.tensor(0.0)
+            )
+            worker_log_item["rollout_entropy"] = avg_rollout_entropy.item()
             logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
 
         if len(all_mismatch_metrics) > 0:
             mismatch_metrics = merge_rollout_is_metrics(all_mismatch_metrics, DEVICE)
             if len(mismatch_metrics) > 0:
+                worker_log_item["mismatch_metrics"] = mismatch_metrics
                 logger_msg += f"\n rollout mismatch metrics:\n{json.dumps(mismatch_metrics, indent=4)}"
 
         if len(all_rollout_is_metrics) > 0:
             rollout_is_metrics = merge_rollout_is_metrics(all_rollout_is_metrics, DEVICE)
             if len(rollout_is_metrics) > 0:
+                worker_log_item["rollout_is_metrics"] = rollout_is_metrics
                 logger_msg += f"\n rollout importance sampling metrics:\n{json.dumps(rollout_is_metrics, indent=4)}"
-        self.logger.info(logger_msg)
+
+        if self.rank == 0:
+            self.logger.info(logger_msg)
 
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
@@ -524,24 +629,153 @@ class TrainingWorker(SingleAcceleratorWorker):
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,
             )
-            other_log = self._update_other_log(other_log)  # type: ignore[arg-type]
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
-            log_info = dict()  # type: ignore[var-annotated]
-            log_info.update(loss_log)
-            for k, v in other_log.items():
-                if k == "extra_info":
-                    for extra_k, extra_v in v.items():
-                        log_info[extra_k] = extra_v.item() if isinstance(extra_v, torch.Tensor) else extra_v
-                else:
-                    log_info[k] = v.item() if isinstance(v, torch.Tensor) else v
-            log_info["grad_norm"] = grad_norm.item()
+            rl_other_log = self._get_rl_other_log(other_log)  # type: ignore[arg-type]
+            rl_other_log["grad_norm"] = grad_norm.item()
+            worker_log_item["train_metrics"].append(WorkerTrainLogItem(loss_log=loss_log, rl_other_log=rl_other_log))
+
+            log_info = {**loss_log, **rl_other_log}
             log_str = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in log_info.items()
             )
-            log_str = f"Rollout {rollout_idx} Step {i}: " + log_str
+            log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
+
+        self._rollout_step += 1
+        if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
+            loss_log = self._fit_sft()
+            worker_log_item["sft_train_metrics"] = loss_log
+
+        return worker_log_item
+
+    def _fit_sft(self):
+        self.logger.info(f"Train SFT after {self._rollout_step} RL steps")
+        if self._sft_dataloader_iter is None:
+            self._sft_dataloader_iter = iter(self._sft_dataloader)
+
+        time_before_get_data = time.time()
+        data_batch = self._next_sft_data_batch()
+        time_before_train_step = time.time()
+        data_time = time_before_train_step - time_before_get_data
+        DEVICE_MODULE.reset_peak_memory_stats()
+        cur_sample_num = len(data_batch)
+
+        loss_log, other_log, grad_norm = self._train_one_step_sft(data_batch)
+
+        time_after_train_step = time.time()
+        step_time = time_after_train_step - time_before_train_step
+        step_consumed_tokens = other_log["step_consumed_tokens"]
+
+        self._sft_total_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
+        reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
+        self._sft_total_consumed_tokens += reduced_step_consumed_tokens
+
+        self._sft_log_step(
+            loss_log=loss_log,
+            local_step_consumed_tokens=step_consumed_tokens,
+            step_consumed_tokens=reduced_step_consumed_tokens,
+            total_consumed_tokens=self._sft_total_consumed_tokens,
+            data_time=data_time,
+            step_time=step_time,
+            grad_norm=grad_norm,
+            efficient_attn_ratio=other_log["efficient_attn_ratio"],
+        )
+
+        # to return sft log
+        loss_log["grad_norm"] = grad_norm.item()
+        loss_log["data_time"] = data_time
+        loss_log["step_time"] = step_time
+        loss_log["tgs"] = step_consumed_tokens / step_time
+        loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
+        return loss_log
+
+    def _next_sft_data_batch(self):
+        try:
+            data = next(self._sft_dataloader_iter)  # type: ignore[assignment]
+        except StopIteration:
+            self._sft_cur_epoch += 1
+            self._sft_dataloader.set_epoch(self._sft_cur_epoch)
+            self._sft_dataloader_iter = iter(self._sft_dataloader)
+            data = next(self._sft_dataloader_iter)
+        return data
+
+    def _train_one_step_sft(self, data_batch):
+        seq_ctx_list: list[SequenceContext] = []
+        loss_ctx_input_list: list[CELossContextInputItem] = []
+        for data in data_batch:
+            seq_ctx = data["seq_ctx"].to(DEVICE)
+            loss_ctx_input = CELossContextInputItem(shifted_labels=data["shifted_labels"]).to(DEVICE)
+            if self.sp_mesh.size() > 1:
+                seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
+                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
+            seq_ctx_list.append(seq_ctx)
+            loss_ctx_input_list.append(loss_ctx_input)
+
+        del data_batch
+
+        LossContext = self._sft_loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list,
+            self._sft_loss_cfg,
+            cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
+            sp_mesh=self.sp_mesh,
+        )
+        engine_input = []
+        for seq_ctx, loss_kwargs in zip(seq_ctx_list, batches_loss_kwargs):
+            loss_ctx = LossContext(
+                loss_cfg=self._sft_loss_cfg,
+                loss_kwargs=loss_kwargs,
+            )
+            engine_input.append(
+                ModelItem(
+                    seq_ctx=seq_ctx,
+                    loss_ctx=loss_ctx,
+                )
+            )
+
+        loss_log, other_log = self._engine.train_step(engine_input)
+        grad_norm = self._engine.clip_grad_norm()
+        self._engine.step_optimizer(grad_norm)
+        return loss_log, other_log, grad_norm
+
+    def _sft_log_step(
+        self,
+        loss_log: LossLog,
+        local_step_consumed_tokens: int,
+        step_consumed_tokens: int,
+        total_consumed_tokens: int,
+        data_time: float,
+        step_time: float,
+        grad_norm: float,
+        efficient_attn_ratio: float,
+    ):
+        tgs = local_step_consumed_tokens / step_time
+        loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
+        loss_log_str = ", ".join(loss_log_list)
+
+        max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
+        reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
+
+        self.logger.info(
+            f"Rank{self.rank} Step {self._rollout_step}: data_time: {data_time:.4f} time: {step_time:.4f} "
+            f"text_tokens: {local_step_consumed_tokens} "
+            f"step_consumed_tokens: {step_consumed_tokens} "
+            f"total_consumed_tokens: {total_consumed_tokens} "
+            f"efficient_attn_ratio: {efficient_attn_ratio:.4f} "
+            f"{loss_log_str} "
+            f"grad_norm: {grad_norm:.8f} "
+            f"max_memory: {max_memory / (1024**3):.2f} GB "
+            f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
+            f"tgs: {tgs:.1f} "
+        )
+
+    def _reduce_number_across_rank(self, rank_number: int) -> int:
+        _gathered_list = [None for _ in range(dist.get_world_size())]
+        dist.all_gather_object(_gathered_list, rank_number)
+        reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
+        return reduced_number
 
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
@@ -623,23 +857,26 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rollout_cfg_info.get("backend") == "turbomind":
             self._update_weights_by_layer()
         else:
-            self._update_weights_hf_generator()
+            if isinstance(self.config.model_cfg, BaseComposeConfig):
+                self._update_weights_hf_generator(submodule="vision_tower", final_update=False)
+                self._update_weights_hf_generator(submodule="multi_modal_projector", final_update=False)
+                self._update_weights_hf_generator(submodule="language_model", final_update=True)
+            else:
+                self._update_weights_hf_generator()
 
-    def _update_weights_hf_generator(self):
+    def _update_weights_hf_generator(self, submodule=None, final_update=True):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
 
         model = self._engine.model
+        if submodule:
+            model = getattr(model, submodule)
+
         DEVICE_MODULE.empty_cache()
 
-        if isinstance(model.config, BaseComposeConfig):
-            dtype = torch.bfloat16
-        else:
-            if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
-                dtype = torch.float8_e4m3fn
-            else:
-                dtype = torch.bfloat16
+        # TODO: force bfloat16 dtype for now
+        dtype = torch.bfloat16
 
         bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
         same_gen = model._get_same_hf_param(
@@ -663,7 +900,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                 # We can all gather them to get full fused param but it would lead to a larger memory usage.
                 # So we broadcast the part fused param from each ep rank in ep_group sequentially,
                 # and update the part of the fused param sequentially to reduce memory usage.
-                ep_mesh: DeviceMesh = model.ep_mesh
+                if isinstance(model.config, BaseComposeConfig):
+                    ep_mesh: DeviceMesh = model.language_model.ep_mesh
+                else:
+                    ep_mesh: DeviceMesh = model.ep_mesh
                 ep_group = ep_mesh.get_group()
                 global_rank = dist.get_rank()
                 for src_global_rank in dist.get_process_group_ranks(ep_group):
@@ -690,7 +930,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.request_update_params(state_dict, finished=False)
             del state_dict, name_list, param_list
 
-        if self.rollout_cfg_info["backend"] == "pytorch":
+        if self.rollout_cfg_info["backend"] == "pytorch" and final_update:
             self.request_update_params({}, finished=True)
 
         dist.barrier()
@@ -1141,7 +1381,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         return
 
     @ray_method
-    def save_dcp(self, checkpoint_path: Path | str, no_save_optimizer: bool = False):
+    def save(self, checkpoint_path: Path | str, no_save_optimizer: bool = False):
         """Save the DCP checkpoint of the training worker."""
         if not isinstance(checkpoint_path, Path):
             checkpoint_path = Path(checkpoint_path)
@@ -1153,6 +1393,25 @@ class TrainingWorker(SingleAcceleratorWorker):
             model_dir=model_path,
             optimizer_dir=None if no_save_optimizer else optimizer_path,
         )
+
+        # Save sft dataloader
+        if self.rank == 0 and self._sft_dataloader is not None:
+            sft_dataloader_path = checkpoint_path / self._SAVE_SFT_DATALOADER_DIR
+            dataloader_state = self._sft_dataloader.get_state_dict(self._sft_total_consumed_samples)
+            torch.save(dataloader_state, sft_dataloader_path)
+
+            train_state_path = checkpoint_path / self._SAVE_SFT_TRAIN_STATE_PATH
+            with train_state_path.open("w") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "cur_step": self._rollout_step,
+                            "cur_epoch": self._sft_cur_epoch,
+                            "total_consumed_samples": self._sft_total_consumed_samples,
+                            "total_consumed_tokens": self._sft_total_consumed_tokens,
+                        }
+                    )
+                )
 
     @ray_method
     def resume(self, load_checkpoint_cfg: LoadCheckpointConfig):
@@ -1180,6 +1439,26 @@ class TrainingWorker(SingleAcceleratorWorker):
             load_states=load_checkpoint_cfg.load_optimizer_states,
             load_args=load_checkpoint_cfg.load_optimizer_args,
         )
+
+        # Resume sft dataloader
+        sft_dataloader_path = resume_from / self._SAVE_SFT_DATALOADER_DIR
+        if self._sft_dataloader is not None:
+            if not sft_dataloader_path.exists():
+                raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
+            dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
+            self._sft_dataloader.load_state_dict(dataloader_state)
+            self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
+
+            train_state_path = resume_from / self._SAVE_SFT_TRAIN_STATE_PATH
+            if not train_state_path.exists():
+                raise FileNotFoundError(f"Train state path {train_state_path} does not exist.")
+            with train_state_path.open("r") as f:
+                train_state = json.loads(f.read())
+                self._rollout_step = train_state["cur_step"]
+                self._sft_cur_epoch = train_state["cur_epoch"]
+                self._sft_total_consumed_samples = train_state["total_consumed_samples"]
+                self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
+                self.logger.info(f"Resume sft train state from {train_state_path}")
 
     @ray_method
     def ready(self) -> bool:

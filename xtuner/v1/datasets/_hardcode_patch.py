@@ -46,9 +46,17 @@ class _SkipEmptyThink(ABC):
             self._skip_seq = [
                 tokenizer.added_tokens_encoder["<think>"],
                 tokenizer.added_tokens_encoder["</think>"],
+                *tokenizer.encode("\n\n"),
             ]
+            self._skip_seq_fallback = [
+                tokenizer.added_tokens_encoder["<think>"],
+                tokenizer.added_tokens_encoder["</think>"],
+            ]
+            self._think_token = tokenizer.added_tokens_encoder["<think>"]
         else:
             self._skip_seq = []
+            self._skip_seq_fallback = []
+            self._think_token = None
 
         if not self._skip_seq:
             logger.warning("`SkipEmptyThink` is disabled because <think> or </think> token is not found in tokenizer.")
@@ -75,7 +83,12 @@ class _SkipEmptyThink(ABC):
 
         for label_id, token_id in zip(labels, input_ids):
             buffer.append(token_id)
-            label_buffer.append(label_id)
+
+            # Since <think> is filled by chat template, never calculate loss on it
+            if label_id == self._think_token:
+                label_buffer.append(-100)
+            else:
+                label_buffer.append(label_id)
 
             # Check if buffer matches skip_seq
             if buffer == self._skip_seq:
@@ -88,6 +101,15 @@ class _SkipEmptyThink(ABC):
                 # Continue accumulating
                 pass
             else:
+                # Defensive programming to ensure that there are absolutely no empty <think></think> patterns in the
+                # data where the assistant calculates loss.
+                if buffer[:-1] == self._skip_seq_fallback:
+                    logger.error("Unexpected <think></think> pattern in data. ")
+                    new_labels.extend([-100] * (len(buffer) - 1))  # Add all except current
+                    buffer = [token_id]
+                    label_buffer = [label_id]
+                    continue
+
                 # No match, flush buffer and restart with current token
                 new_labels.extend(label_buffer[:-1])  # Add all except current
 
@@ -102,7 +124,12 @@ class _SkipEmptyThink(ABC):
 
         # Handle remaining buffer (partial match at end)
         if buffer:
-            new_labels.extend(label_buffer)
+            # Check if the remaining buffer is exactly <think></think>
+            if buffer == self._skip_seq_fallback:
+                logger.error("Unexpected <think></think> pattern at the end of sequence.")
+                new_labels.extend([-100] * len(self._skip_seq_fallback))
+            else:
+                new_labels.extend(label_buffer)
 
         return new_labels
 

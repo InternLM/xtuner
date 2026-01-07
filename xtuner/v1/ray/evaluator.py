@@ -4,7 +4,7 @@ from typing import Callable, List, Optional, Sized, TypeVar, Union
 
 import ray
 from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from ray.actor import ActorProxy
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
@@ -85,6 +85,7 @@ class EvaluatorConfig(BaseModel):
 
     tokenizer: Annotated[
         Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str],
+        Field(exclude=True),
         Parameter(help="Tokenizer for text processing."),
     ]
     max_concurrent: Annotated[
@@ -103,6 +104,7 @@ class EvaluatorConfig(BaseModel):
     evaluate_step: Annotated[int, Parameter(help="Step interval for evaluation.")] = 1
     compute_metric_func: Annotated[
         Optional[Callable],
+        Field(exclude=True),
         Parameter(help="An optional function to filter or modify data groups after they are generated."),
     ] = None
     sample_params: Annotated[
@@ -244,7 +246,8 @@ class RawEvaluator:
         if waiting_tasks:
             await asyncio.wait_for(asyncio.gather(*waiting_tasks, return_exceptions=True), timeout=10)
 
-        self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))  # type: ignore[attr-defined]
+        rollout_stats = await self.env_controller.get_rollout_stats.remote()  # type: ignore[attr-defined]
+        self.logger.info(rollout_stats)
 
     @ray_method
     async def run(self, return_samples=False):
@@ -264,7 +267,7 @@ class RawEvaluator:
                 the generated samples.
         """
         self.return_list = []
-        ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
+        await self.env_controller.restart.remote()  # type: ignore[attr-defined]
         await self.concurrent_eval_task_runner()
         if len(self.return_list) == 0:
             self.logger.warning("No valid samples were generated during evaluation.")

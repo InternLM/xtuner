@@ -65,6 +65,26 @@ class BaseLossKwargs(BaseModel):
             chunks.append(type(self)(**chunk_dict))
         return chunks
 
+    @classmethod
+    def cat(cls, chunks: list["BaseLossKwargs"]) -> "BaseLossKwargs":
+        assert len(chunks) > 0, "chunks must not be empty."
+
+        # Collect all tensor field names (based on chunk[0]'s fields; pydantic extra=forbid also requires fields to be consistent)
+        first = chunks[0]
+        tensor_field_names: list[str] = []
+        for field_name, field_value in first.__dict__.items():
+            if isinstance(field_value, torch.Tensor):
+                tensor_field_names.append(field_name)
+
+        assert len(tensor_field_names) > 0, "At least one field should be a tensor to cat."
+
+        cat_dict: dict[str, torch.Tensor] = {}
+        for field_name in tensor_field_names:
+            tensors = [getattr(c, field_name) for c in chunks]
+            cat_dict[field_name] = torch.cat(tensors, dim=1)
+
+        return cls(**cat_dict)
+
 
 class BaseLossConfig(BaseModel):
     model_config = ConfigDict(title="BaseLossConfig", extra="forbid", arbitrary_types_allowed=True)
@@ -78,6 +98,9 @@ class BaseLossConfig(BaseModel):
 
 
 LossContextInputItem = TypeVar("LossContextInputItem")
+
+# NOTE: Self type for BaseLossContext subclasses (F-bounded polymorphism)
+_BaseLossContextT = TypeVar("_BaseLossContextT", bound="BaseLossContext[Any]")
 
 
 class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
@@ -149,10 +172,21 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         else:
             loss, (logits, extra_info) = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
 
-        extra_info["log_rank_loss"] = loss.detach().clone()
+        extra_info["local_base_loss"] = loss.detach().clone()
 
         # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
         if dist.is_initialized():
             loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
         return loss, (logits, extra_info)
+
+    @classmethod
+    def cat(cls: type[_BaseLossContextT], chunks: list[_BaseLossContextT]) -> _BaseLossContextT:
+        assert len(chunks) > 0, "chunks must not be empty."
+
+        first = chunks[0]
+        loss_cfg = first.loss_cfg
+        loss_kwargs_chunks = [c.loss_kwargs for c in chunks]
+        loss_kwargs = type(first.loss_kwargs).cat(loss_kwargs_chunks)
+
+        return cls(loss_cfg, loss_kwargs)

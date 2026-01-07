@@ -3,7 +3,7 @@ from typing import Any, Callable, List, Optional
 
 import httpx
 import ray
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
@@ -11,12 +11,33 @@ from xtuner.v1.utils import get_logger
 
 
 class NativeJudgerConfig(BaseModel):
-    """Base configuration class for judgers."""
+    """Configuration class for NativeJudger.
+
+    This class defines the configuration options for initializing a NativeJudger,
+    including resource allocation (number of Ray actors and CPUs per actor),
+    reward function or remote judging service, optional pre/post-processing functions,
+    request timeout, and any extra information needed for judging.
+
+    Attributes:
+        judger_name (str): Name identifier for the judger.
+        num_ray_actors (int): Number of Ray actor instances to launch.
+        num_cpus_per_actor (int): Number of CPUs allocated per actor.
+        reward_func (Optional[Callable]): Local reward function for judging.
+            Exactly one of reward_func or remote_url must be provided.
+        remote_url (Optional[str]): Remote service URL for judging.
+            Exactly one of reward_func or remote_url must be provided.
+        preprocess_func (Optional[Callable]): Function to preprocess input data before judging.
+        postprocess_func (Optional[Callable]): Function to postprocess the judging result.
+        request_timeout (float): Timeout (in seconds) for remote requests.
+        extra_info (dict): Additional information to be passed to the judger or reward function.
+    """
 
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     judger_name: str
     num_ray_actors: int = 1
-    reward_func: Optional[Callable] = None
+    num_cpus_per_actor: int = 1
+    cpu_memory_per_actor: int = 1024**3
+    reward_func: Optional[Callable] = Field(default=None, exclude=True)
     remote_url: Optional[str] = None
     preprocess_func: Optional[Callable] = None
     postprocess_func: Optional[Callable] = None
@@ -40,7 +61,13 @@ class NativeJudgerConfig(BaseModel):
         workers_list = []
         for idx in range(self.num_ray_actors):
             bundle_idx = start_bundle_idx + idx
-            pg_options = {"num_cpus": pg.bundle_specs[bundle_idx].get("CPU", 1)}
+            pg_options = {"num_cpus": self.num_cpus_per_actor, "memory": self.cpu_memory_per_actor}
+            assert pg.bundle_specs[bundle_idx].get("CPU", 1) >= self.num_cpus_per_actor, (
+                f"Placement group bundle {bundle_idx} does not have enough CPU resources."
+            )
+            assert pg.bundle_specs[bundle_idx].get("memory", 0) >= self.cpu_memory_per_actor, (
+                f"Placement group bundle {bundle_idx} does not have enough memory resources."
+            )
             worker = (
                 ray.remote(NativeJudger)
                 .options(

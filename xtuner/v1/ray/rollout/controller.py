@@ -23,6 +23,9 @@ from xtuner.v1.utils import get_logger
 from .worker import RolloutWorker
 
 
+ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
+
+
 @dataclass
 class WorkerInfo:
     """A data class to hold all state information for a single worker."""
@@ -288,8 +291,8 @@ class RolloutController:
         worker_info.is_active = False
         self.router.update_active_workers(self._get_worker_status_for_router())
 
-        ray.get(worker_info.actor.offload.remote())  # type: ignore[attr-defined]
-        ray.get(worker_info.actor.shutdown.remote())  # type: ignore[attr-defined]
+        ray.get(worker_info.actor.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+        ray.get(worker_info.actor.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
 
     def update_active_workers(self):
         """Check the health of all active rollout workers.
@@ -305,7 +308,7 @@ class RolloutController:
         urls, infos = zip(*active_workers)
         actors = [info.actor for info in infos]
 
-        health_statuses = ray.get([actor.check_health.remote() for actor in actors])
+        health_statuses = ray.get([actor.check_health.remote() for actor in actors], timeout=ROLLOUT_RAY_GET_TIMEOUT)
 
         for url, is_healthy in zip(urls, health_statuses):
             if not is_healthy:
@@ -526,7 +529,7 @@ class RolloutController:
         if not block:
             return futures
 
-        results = ray.get(futures)
+        results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
         return results
 
     def pause(self, block=True):

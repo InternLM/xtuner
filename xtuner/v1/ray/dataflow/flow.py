@@ -146,6 +146,7 @@ class RawDataFlow:
         global_batch_size: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
+        enable_partial_rollout: Optional[bool] = None,
     ):
         """Resets all internal state variables of DataFlow."""
         self.finished_samples_count = 0
@@ -156,6 +157,10 @@ class RawDataFlow:
         else:
             self.target_batch_size = self.config.global_batch_size
 
+        if enable_partial_rollout is not None:
+            self.enable_partial_rollout = enable_partial_rollout
+        else:
+            self.enable_partial_rollout = self.config.enable_partial_rollout
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
         logger_msg = (
@@ -256,18 +261,21 @@ class RawDataFlow:
                     pbar.n = self.finished_samples_count
                     pbar.refresh()
                     next_update_threshold += update_step
+                    self.logger.info(
+                        f"waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
+                    )
                 while len(waiting_tasks) < self.config.max_concurrent:
                     # In async mode, we keep spawning. In sync mode, we stop if we have enough tasks in flight.
                     if (
-                        not self.config.enable_partial_rollout
+                        not self.enable_partial_rollout
                         and self.finished_samples_count + len(waiting_tasks) >= self.target_batch_size
                     ):
                         break
                     task = create_task(self.worker_task())
                     waiting_tasks.add(task)
 
-                _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
-                self.finished_samples_count = ray.get(self.replay_buffer.get_finished_samples.remote())
+                _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+                self.finished_samples_count = await self.replay_buffer.get_finished_samples.remote()
                 waiting_tasks = pending_tasks
 
             pbar.n = self.finished_samples_count
@@ -300,8 +308,11 @@ class RawDataFlow:
                 waiting_tasks = pending_tasks
             self.logger.info("All worker tasks have completed after pausing env controller.")
 
-        self.logging_replaybuffer_state()
-        self.logger.info(ray.get(self.env_controller.get_rollout_stats.remote()))  # type: ignore[attr-defined]
+        replay_buffer_stats = await self.replay_buffer.print.remote()  # type: ignore[attr-defined]
+        rollout_stats = await self.env_controller.get_rollout_stats.remote()  # type: ignore[attr-defined]
+        self.logger.info(
+            f"Data generation completed. Replay Buffer Stats: {replay_buffer_stats}, Rollout Stats: {rollout_stats}"
+        )
 
     @ray_method
     async def pause(self, timeout: float = 60.0):
@@ -331,37 +342,34 @@ class RawDataFlow:
         num: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
-        dump: bool = False,
-        dump_path: Optional[str] = None,
-        resume: bool = False,
-        resume_path: Optional[str] = None,
+        enable_partial_rollout: Optional[bool] = None,
     ):
         """Starts the data generation process.
 
         This method resets the internal state and runs the concurrent task
-        runner to collect a new batch of samples.
+        runner to collect a new batch of samples from the environment.
 
+         Args:
+            num (Optional[int]): The target number of samples to collect for this run.
+                Overrides the existing global_batch_size in DataFlowConfig if provided.
+            sample_params (Optional[SampleParams]): Parameters for model sampling.
+                Overrides the existing sample_params in DataFlowConfig if provided.
+            extra_params (Optional[Dict]): Additional parameters for rollout.
+                Overrides the existing extra_params in DataFlowConfig if provided.
+            enable_partial_rollout (Optional[bool]): Whether to enable partial rollout mode.
+                This is primarily intended for unit testing, allowing the dataflow to pause
+                and resume partway through a rollout for checkpointing and recovery tests.Returns:
         Returns:
             List[RLDataFlowItem]: A list of collected training samples.
         """
-        self._reset_internal_states(global_batch_size=num, sample_params=sample_params, extra_params=extra_params)
-
-        if resume:
-            assert resume_path, "Resuming is enabled but no resume path is provided."
-            self.logger.info(f"Resuming replay buffer from {resume_path}")
-            await self.replay_buffer.resume_storage.remote(resume_path)
-
+        self._reset_internal_states(
+            global_batch_size=num,
+            sample_params=sample_params,
+            extra_params=extra_params,
+            enable_partial_rollout=enable_partial_rollout,
+        )
         await self.concurrent_task_runner()
-
-        if dump:
-            assert dump_path, "Dumping is enabled but no dump path is provided."
-            self.logger.info(f"Dump replay buffer from {dump_path}")
-            await self.replay_buffer.dump_storage.remote(dump_path)
-
         return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
-
-    def logging_replaybuffer_state(self):
-        ray.get(self.replay_buffer.print.remote())
 
     def get_replaybuffer_status(self):
         return ray.get(self.replay_buffer.status.remote())

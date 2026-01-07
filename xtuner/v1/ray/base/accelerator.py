@@ -18,6 +18,7 @@ from typing_extensions import Annotated
 from ..utils import find_master_addr_and_port, get_accelerator_ids
 
 
+PG_READY_TIMEOUT = os.getenv("XTUNER_PG_READY_TIMEOUT", 30)  # default 30 seconds
 AcceleratorType = Literal["GPU", "NPU"]
 T = TypeVar("T")
 
@@ -274,7 +275,7 @@ class AutoAcceleratorWorkers:
             pg = ray.util.get_placement_group(name)
         else:
             pg = placement_group(bundles=bundles, strategy=resources_config.pg_pack_strategy, name=name)
-            ray.get(pg.ready())
+            ray.get(pg.ready(), timeout=PG_READY_TIMEOUT)
         return pg
 
     @staticmethod

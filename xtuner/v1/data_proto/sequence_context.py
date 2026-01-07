@@ -199,7 +199,7 @@ class SequenceContext:
             return self
 
     @classmethod
-    def pack(cls, sequence_context_list: list["SequenceContext"]):
+    def cat(cls, sequence_context_list: list["SequenceContext"]) -> "SequenceContext":
         packed_input_ids: list[torch.Tensor] = []
         cu_seq_lens_q: list[torch.IntTensor] = []
         cu_seq_lens_k: list[torch.IntTensor] = []

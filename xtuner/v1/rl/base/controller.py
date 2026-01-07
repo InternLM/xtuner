@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Literal, TypedDict
 
 import ray
@@ -10,7 +11,10 @@ from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import ray_method
 
-from .worker import TrainingWorker
+from .worker import TrainingWorker, WorkerLogItem
+
+
+TRAIN_RAY_GET_TIMEOUT = os.getenv("XTUNER_TRAIN_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
 
 class ColateItem(TypedDict):
@@ -137,7 +141,7 @@ class RawTrainingController:
                     )
                     rollout_logprobs_list.append(pad_rollout_logprobs)
 
-            seq_ctx = SequenceContext.pack(seq_ctx_list)
+            seq_ctx = SequenceContext.cat(seq_ctx_list)
             shifted_labels = torch.cat(label_list, dim=1)  # (1, max_len)
             advantages = torch.tensor(advantage_list).float().unsqueeze(0)  # (1, num_samples)
             cu_seq_lens_q = seq_ctx.cu_seq_lens_q
@@ -165,7 +169,7 @@ class RawTrainingController:
         return sorted(packed_data_batches, key=lambda x: x["seq_ctx"].max_length_q, reverse=True)
 
     @ray_method
-    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int):
+    def fit(self, data_batches: list[ColateItem], pack_max_length: int, rollout_idx: int) -> list[WorkerLogItem]:
         has_rollout_routed_experts = False
         language_cfg = None
         if data_batches[0]["seq_ctx"].rollout_routed_experts is not None:
@@ -256,29 +260,30 @@ class RawTrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        ray.get(handles)
+        log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        return log_infos
 
     @ray_method
     def offload(self, target: Literal["model", "optimizer", "all"] = "all"):
         if target == "model":
-            ray.get([worker.offload_model.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.offload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         elif target == "optimizer":
-            ray.get([worker.offload_optimizer.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.offload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         elif target == "all":
-            ray.get([worker.offload_model.remote() for worker in self.workers])  # type: ignore
-            ray.get([worker.offload_optimizer.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.offload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            ray.get([worker.offload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         return
 
     @ray_method
     def onload(self, target: Literal["model", "optimizer", "all"] = "all"):
         """Onload the model or optimizer of the training workers."""
         if target == "model":
-            ray.get([worker.onload_model.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.onload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         elif target == "optimizer":
-            ray.get([worker.onload_optimizer.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.onload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         elif target == "all":
-            ray.get([worker.onload_model.remote() for worker in self.workers])  # type: ignore
-            ray.get([worker.onload_optimizer.remote() for worker in self.workers])  # type: ignore
+            ray.get([worker.onload_model.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
+            ray.get([worker.onload_optimizer.remote() for worker in self.workers], timeout=TRAIN_RAY_GET_TIMEOUT)  # type: ignore
         return
 
     @ray_method
@@ -289,27 +294,27 @@ class RawTrainingController:
     def update_weights(self):
         """Update the weights of the training workers."""
         handles = [worker.update_weights.remote() for worker in self.workers]
-        ray.get(handles)
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 
     @ray_method
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
         handles = [worker.save_hf.remote(hf_dir, save_dtype) for worker in self.workers]  # type: ignore
-        ray.get(handles)
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 
     @ray_method
     def resume(self, load_checkpoint_cfg: LoadCheckpointConfig):
         """Resume the training workers from the checkpoint."""
         handles = [worker.resume.remote(load_checkpoint_cfg) for worker in self.workers]  # type: ignore
-        ray.get(handles)
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 
     @ray_method
-    def save_dcp(self, dcp_dir: str, no_save_optimizer: bool = False):
+    def save(self, dcp_dir: str, no_save_optimizer: bool = False):
         """Save the DCP checkpoint of the training workers."""
-        handles = [worker.save_dcp.remote(dcp_dir, no_save_optimizer) for worker in self.workers]  # type: ignore
-        ray.get(handles)
+        handles = [worker.save.remote(dcp_dir, no_save_optimizer) for worker in self.workers]  # type: ignore
+        ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
         return
 
     @ray_method

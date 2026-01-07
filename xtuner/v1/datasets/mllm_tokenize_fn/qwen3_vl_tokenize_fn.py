@@ -135,6 +135,7 @@ def replace_video_token(
     add_vision_id: bool = False,
 ):
     current_image_idx = 0
+    total_video_cnt = 0
     n_video = len(num_image_token_list)
     n_image = sum([len(num_image_token_list[i]) for i in range(n_video)])
     if len(timestamps_list) > 0:
@@ -166,12 +167,13 @@ def replace_video_token(
                                 timestamps = f"<{start_time:.1f}-{end_time:.1f} seconds>"
                                 text = text.replace(IMAGE_TOKEN_ALIAS, f"<VIDEO_CONTEXT>{timestamps}", 1)
 
-                        if add_vision_id and video_cnt > 1:
+                        if add_vision_id:
                             # 标记每个视频
                             text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
                             for i in range(video_cnt):
-                                video_index = f"Video {i + 1}: "
+                                video_index = f"Video {total_video_cnt + 1}: "
                                 text = text.replace(IMAGE_TOKEN_ALIAS, f"{video_index}<VIDEO_CONTEXT>", 1)
+                                total_video_cnt += 1
 
                         text = text.replace("<VIDEO_CONTEXT>", IMAGE_TOKEN_ALIAS)
                         video_cnt = text.count(IMAGE_TOKEN_ALIAS)
@@ -885,8 +887,6 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
 
     # When handling multiple images or multiple videos,
     # it's helpful to add labels to the images and videos for better reference.
-    # 注意这个逻辑和 hf 官方不是完全一致。 hf 官方只要开启这个 flag 就一定追加，不管是单个图片还是单个视频
-    # xtuner 中做了优化，开启该 flag 且存在多图或者多视频才会追加
     add_vision_id: bool = True
 
     def build(
