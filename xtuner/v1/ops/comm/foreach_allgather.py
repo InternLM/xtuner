@@ -1,3 +1,5 @@
+from functools import reduce
+from operator import mul
 from typing import cast
 
 import torch
@@ -9,6 +11,7 @@ import torch.distributed as dist
 def foreach_all_gather(
     params: list[torch.Tensor],
     group: dist.ProcessGroup | None,
+    params_shapes_across_group: list[list[tuple[int, ...]]] | None = None,
 ) -> list[list[torch.Tensor]]:
     if group is None:
         group = dist.group.WORLD
@@ -19,16 +22,23 @@ def foreach_all_gather(
     input_tensor_numels = [param.numel() for param in params]
     input_tensor_shapes = [param.shape for param in params]
 
+    global_input_tensor_numels: list[torch.Tensor]
+    if params_shapes_across_group is None:
+        input_tensor_numels_tensor = torch.tensor(input_tensor_numels, dtype=torch.int64, device=param0.device)
+        global_input_tensor_numels = [
+            torch.zeros_like(input_tensor_numels_tensor) for _ in range(dist.get_world_size(group))
+        ]
+        dist.all_gather(global_input_tensor_numels, input_tensor_numels_tensor, group=group)
+    else:
+        global_input_tensor_numels = [
+            torch.tensor([reduce(mul, shape) for shape in param_shapes], dtype=torch.int64, device="cpu")
+            for param_shapes in params_shapes_across_group  # each param_shapes represents all params shapes on one rank
+        ]
+
     flatten_copyin_tensor = torch.empty((sum(input_tensor_numels),), dtype=param0.dtype, device=param0.device)
     splits_copyin_tensor = torch.split(flatten_copyin_tensor, input_tensor_numels)
     torch._foreach_copy_(splits_copyin_tensor, [p.flatten() for p in params])
 
-    input_tensor_numels_tensor = torch.tensor(input_tensor_numels, dtype=torch.int64, device=param0.device)
-    global_input_tensor_numels = [
-        torch.zeros_like(input_tensor_numels_tensor) for _ in range(dist.get_world_size(group))
-    ]
-
-    dist.all_gather(global_input_tensor_numels, input_tensor_numels_tensor, group=group)
     copyout_size = int(sum(sum(i) for i in global_input_tensor_numels))
     flatten_copyout_tensor = torch.empty((copyout_size,), dtype=param0.dtype, device=param0.device)
 
