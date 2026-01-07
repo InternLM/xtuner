@@ -415,7 +415,12 @@ class TrainEngine:
             hf_dir (str): The directory to save the model.
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
-        self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+        try:
+            self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+        except Exception as e:
+            import traceback
+
+            logger.critical(f"Exception occurred while saving HF model: {e}\n{traceback.format_exc()}")
 
     # TODO: Support async save
     def save_dcp(

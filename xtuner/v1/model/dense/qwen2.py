@@ -60,7 +60,7 @@ class Qwen2DenseConfig(TransformerConfig):
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
                 num_key_value_heads=hf_config.num_key_value_heads,
-                head_dim=128,
+                head_dim=hf_config.hidden_size // hf_config.num_attention_heads,
                 sliding_window=hf_config.sliding_window,
                 qk_norm=False,
                 qkv_bias=True,
@@ -68,7 +68,6 @@ class Qwen2DenseConfig(TransformerConfig):
             use_sliding_window=hf_config.use_sliding_window,
             tie_word_embeddings=hf_config.tie_word_embeddings,
         )
-
         return config
 
     @property

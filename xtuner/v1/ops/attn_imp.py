@@ -232,7 +232,7 @@ def flash_attention(q, k, v, window_size=(-1, -1), s_aux=None, **kwargs) -> Attn
         if flash_attn_exception is not None:
             traceback.print_exception(flash_attn_exception)
             raise flash_attn_exception
-        fla_outputs = flash_attn_varlen_func(q, k, v, return_attn_probs=True, **kwargs)  # type: ignore
+        fla_outputs = flash_attn_varlen_func(q, k, v, return_attn_probs=True, window_size=window_size, **kwargs)  # type: ignore
         if isinstance(fla_outputs, tuple):
             raw_output = fla_outputs[0]
             softmax_lse = fla_outputs[1].detach()
