@@ -269,7 +269,7 @@ class AutoAcceleratorWorkers:
         ] * resources_config.num_workers
 
         pg_info = ray.util.placement_group_table()
-        names = [i["name"] for i in pg_info.values()]
+        names = [i["name"] for i in pg_info.values() if i.get("state") not in ["REMOVED", "REMOVING"]]
 
         if name in names:
             pg = ray.util.get_placement_group(name)
