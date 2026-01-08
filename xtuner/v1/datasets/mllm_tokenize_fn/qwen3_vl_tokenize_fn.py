@@ -342,7 +342,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return input_ids, labels, position_ids
 
     def pure_text_get_item(self, data_item: dict) -> QwenVL3DataItem:
-        messages = ChatMessages(messages=data_item["messages"])
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
 
         is_pretrain = False
         if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
@@ -395,7 +395,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             print(f"ERROR of {self._image_wh_list}: {e}, data_name: {self.data_name}")
             return {"num_tokens": 0}  # type: ignore
 
-        messages = ChatMessages(messages=data_item["messages"])
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         replace_image_token(messages, self.chat_template, sum_media_grid_thw, add_vision_id=self.add_vision_id)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
@@ -441,7 +441,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         image_tensor = visual_processed["pixel_values"]
         grid_thw = visual_processed["image_grid_thw"]  # b,3
         grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw]  # type: ignore
-        messages = ChatMessages(messages=data_item["messages"])
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         replace_image_token(messages, self.chat_template, grid_thw_merged, add_vision_id=self.add_vision_id)  # type: ignore
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
@@ -675,7 +675,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             num_image_token_list.append([frame_seqlen] * grid_t)
             total_sum_media_grid_thw += sum_media_grid_thw
 
-        messages = ChatMessages(messages=data_item["messages"])
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         replace_video_token(
             messages,
             self.chat_template,
@@ -806,7 +806,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             num_imgs_list.append(num_frames)
             total_sum_media_grid_thw += sum_media_grid_thw
 
-        messages = ChatMessages(messages=data_item["messages"])
+        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         replace_video_token(
             messages,
             self.chat_template,
