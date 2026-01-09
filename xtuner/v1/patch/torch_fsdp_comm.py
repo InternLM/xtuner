@@ -49,6 +49,9 @@ NUM_AG_BUFFERS = 2 if USE_CUSTOM_AG else 0
 NUM_RS_BUFFERS = 1 if USE_CUSTOM_RS else 0
 
 
+SELECT_COMM_SM_IN_FSDP = int(os.getenv("XTUNER_SELECT_COMM_SM_IN_FSDP", 0)) == 1
+
+
 class SymmBufferManager:
     """A manager class for symmetric buffer allocation and lifecycle
     management.
@@ -125,9 +128,12 @@ class SymmBufferManager:
             reason (str): Description of why the buffer is being created (for debugging)
         """
         print(f"{reason = }, {size / 2**30:.1f} GB")
+        torch.cuda.synchronize()
         self.symm_buf_contiguous = ib_wrapper.create_symm_buffer(
             size, alignment=self.alignment, local_rank=device.index
         )
+
+        self.symm_buf_contiguous.requires_grad_(False)
 
         # Calculate size per buffer with alignment
         size_per_buf = ((size // self.num_buffers) + self.alignment - 1) // self.alignment * self.alignment
@@ -142,6 +148,7 @@ class SymmBufferManager:
             self.symm_buf_ptrs[i] = self.symm_buf_contiguous[start_idx:end_idx]
 
         self._creation_count += 1
+        torch.cuda.synchronize()
 
     def resize(self, new_size, device):
         """Explicitly resize all buffers to a new size.
@@ -218,17 +225,15 @@ class AllGatherIBManager:
     Handles creation, caching, and rotation of communication buffers.
     """
 
-    def __init__(self, num_buffers: int = 2, use_custom_ag: bool = False, select_sm: bool = False):
+    def __init__(self, num_buffers: int = 2):
         self.num_buffers = num_buffers
         self.comm_buf_iter = 0
-        self.use_custom_ag = use_custom_ag
         self.ag_ib_dict: dict[int, list] = {}
-        self.select_sm = int(os.getenv("SELECT_COMM_SM_IN_FSDP", 0))
 
         self.comm_sm_list = None
 
     def prepare_allgather_objects(
-        self, send_bytes: int, group_size: int, world_size: int, device_count: int, all_gather_stream, mode: int = 0
+        self, send_bytes: int, group_size: int, world_size: int, device_count: int, all_gather_stream
     ):
         """Get or create ibgdaAllgather objects for the given byte size and
         group configuration.
@@ -241,7 +246,7 @@ class AllGatherIBManager:
             all_gather_stream: CUDA stream for all-gather operations
             mode: Operation mode for ibgdaAllgather
         """
-        if send_bytes not in self.ag_ib_dict and self.use_custom_ag:
+        if send_bytes not in self.ag_ib_dict:
             torch.cuda.synchronize()
             if self.comm_sm_list is None:
                 self.comm_sm_list, _ = ib_wrapper.init_comm_sm()
@@ -276,7 +281,7 @@ class AllGatherIBManager:
                             barrier_all=True,
                             vertical_group_ag=vertical_group_ag,
                             comm_sm_list=self.comm_sm_list,
-                            select_sm=self.select_sm,
+                            select_sm=SELECT_COMM_SM_IN_FSDP,
                         )
                     )
             torch.cuda.synchronize()
@@ -295,14 +300,12 @@ class AllGatherIBManager:
             all_gather_input: Input tensor for all-gather
             group: Process group for the operation
         """
-        if self.use_custom_ag:
-            if group_size == world_size or group_size == world_size // torch.cuda.device_count():
-                # Use cached ibgdaAllgather objects
-                self.ag_ib_dict[send_bytes][self.comm_buf_iter].all_gather_into_tensor(
-                    all_gather_output, all_gather_input, group=group
-                )
-                # Rotate buffer iterator
-                self.comm_buf_iter = (self.comm_buf_iter + 1) % self.num_buffers
+        # Use cached ibgdaAllgather objects
+        self.ag_ib_dict[send_bytes][self.comm_buf_iter].all_gather_into_tensor(
+            all_gather_output, all_gather_input, group=group
+        )
+        # Rotate buffer iterator
+        self.comm_buf_iter = (self.comm_buf_iter + 1) % self.num_buffers
 
     def clear_cache(self):
         """Clear all cached all-gather objects."""
@@ -316,15 +319,12 @@ class ReduceScatterIBManager:
     Handles creation, caching, and execution of reduce-scatter operations.
     """
 
-    def __init__(self, num_buffers: int = 2, use_custom_rs: bool = False):
+    def __init__(self, num_buffers: int = 2):
         self.num_buffers = num_buffers
         self.comm_buf_iter = 0
-        self.use_custom_rs = use_custom_rs
         self.rs_ib_dict: dict[int, list] = {}
-        # self.rdc_scale: dict[int, torch.Tensor] = {}
         self.copy_event_prev: torch.Event | None = None
         self.copy_event: torch.Event | None = None
-        self.select_sm = int(os.getenv("SELECT_COMM_SM_IN_FSDP", 0))
 
         self.comm_sm_list = None
 
@@ -341,7 +341,7 @@ class ReduceScatterIBManager:
             device_count: Number of CUDA devices per node
             reduce_scatter_stream: CUDA stream for reduce-scatter operations
         """
-        if recv_bytes_aligned not in self.rs_ib_dict and self.use_custom_rs:
+        if recv_bytes_aligned not in self.rs_ib_dict:
             torch.cuda.synchronize()
             if self.comm_sm_list is None:
                 self.comm_sm_list, _ = ib_wrapper.init_comm_sm()
@@ -361,7 +361,7 @@ class ReduceScatterIBManager:
                             mode=0,
                             barrier_all=True,
                             vertical_group_rs=False,
-                            select_sm=self.select_sm,
+                            select_sm=SELECT_COMM_SM_IN_FSDP,
                             comm_sm_list=self.comm_sm_list,
                         )
                     )
@@ -381,7 +381,6 @@ class ReduceScatterIBManager:
 
             torch.cuda.synchronize()
             self.rs_ib_dict[recv_bytes_aligned] = RSs
-            # self.rdc_scale[recv_bytes_aligned] = None
 
     def execute_reducescatter(
         self,
@@ -414,19 +413,16 @@ class ReduceScatterIBManager:
             device: Target device
         """
         with torch.cuda.stream(reduce_scatter_stream):
-            if self.use_custom_rs and (
-                group_size == world_size or group_size == world_size // torch.cuda.device_count()
-            ):
-                # Use cached ibReduceScatter objects with buffer swapping
-                reduce_output = reduce_scatter_input.new_empty((reduce_scatter_output_numel,))
-                # Execute reduce-scatter
-                self.rs_ib_dict[recv_bytes_aligned][self.comm_buf_iter].reduce_scatter_tensor(
-                    output=reduce_output,
-                    input=reduce_scatter_input_aligned,
-                    group=reduce_scatter_group,
-                    op=reduce_scatter_reduce_op,
-                )
-                self.comm_buf_iter = (self.comm_buf_iter + 1) % self.num_buffers
+            # Use cached ibReduceScatter objects with buffer swapping
+            reduce_output = reduce_scatter_input.new_empty((reduce_scatter_output_numel,))
+            # Execute reduce-scatter
+            self.rs_ib_dict[recv_bytes_aligned][self.comm_buf_iter].reduce_scatter_tensor(
+                output=reduce_output,
+                input=reduce_scatter_input_aligned,
+                group=reduce_scatter_group,
+                op=reduce_scatter_reduce_op,
+            )
+            self.comm_buf_iter = (self.comm_buf_iter + 1) % self.num_buffers
 
         return reduce_output
 
@@ -439,8 +435,8 @@ class ReduceScatterIBManager:
 ag_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=NUM_AG_BUFFERS)
 rs_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=NUM_RS_BUFFERS)
 
-ag_manager = AllGatherIBManager(num_buffers=NUM_AG_BUFFERS, use_custom_ag=USE_CUSTOM_AG)
-rs_manager = ReduceScatterIBManager(num_buffers=NUM_RS_BUFFERS, use_custom_rs=USE_CUSTOM_RS)
+ag_manager = AllGatherIBManager(num_buffers=NUM_AG_BUFFERS)
+rs_manager = ReduceScatterIBManager(num_buffers=NUM_RS_BUFFERS)
 
 
 def allocate_memory(
@@ -920,9 +916,6 @@ def foreach_reduce_pt28(
             group=reduce_scatter_group,
             from_process_group=allocate_memory_from_process_group,
         )
-        # reduce_scatter_input = torch.empty(
-        #     (reduce_scatter_input_numel,), dtype=reduce_dtype, device=device
-        # )
         reduce_scatter_input_aligned = reduce_scatter_input
     # ---------- end --------- #
 
@@ -969,7 +962,6 @@ def foreach_reduce_pt28(
                 group=reduce_scatter_group,
                 from_process_group=allocate_memory_from_process_group,
             )
-            # reduce_output = reduce_scatter_input.new_empty((reduce_scatter_output_numel,))
             dist.reduce_scatter_tensor(
                 output=reduce_output,
                 input=reduce_scatter_input,
