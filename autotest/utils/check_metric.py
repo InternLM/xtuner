@@ -89,7 +89,6 @@ def write_to_summary(case_name, base_jsonl, cur_jsonl ):
 
         md_content += '```\n\n'
 
-
         with open(summary_file, 'a', encoding='utf-8') as f:
             f.write(md_content)
     with open(summary_file, 'a') as f:
