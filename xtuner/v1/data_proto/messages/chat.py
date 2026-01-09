@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import copy
-from typing import Dict, List, Literal, Optional, Union
+import json
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict
 
@@ -66,14 +67,34 @@ MultModalContentType = Union[TextContentItem, ImageContentItem, VideoContentItem
 ContentType = Union[str, List[MultModalContentType]]
 
 
+def tool_formatter(tools: list[dict[str, Any]]) -> str:
+    tool_text = ""
+    for tool in tools:
+        wrapped_tool = tool if tool.get("type") == "function" else {"type": "function", "function": tool}
+        tool_text += "\n" + json.dumps(wrapped_tool, ensure_ascii=False)
+    return tool_text
+
+
+def function_formatter(functions: list[dict[str, Any]]) -> str:
+    function_texts = []
+    for function in functions:
+        name = function["function"]["name"]
+        arguments = function["function"]["arguments"]
+        function_texts.append(json.dumps({"name": name, "arguments": json.loads(arguments)}, ensure_ascii=False))
+    return "\n".join([f"<tool_call>\n{text}\n</tool_call>" for text in function_texts])
+
+
 class ChatMsg(BaseModel):
-    role: Literal["assistant", "user", "system", "developer", "pretrain"]
+    role: Literal["assistant", "user", "system", "developer", "pretrain", "tool"]
     model_config = ConfigDict(extra="forbid")
     content: ContentType
+    reasoning_content: Optional[str] = None  # TODO: 暂时无效
+    tool_calls: Optional[List[Dict]] = None
     loss: Optional[bool] = None
     thinking: Optional[str] = None  # only for assistant
     name: Optional[str] = None
     meta: Optional[Dict] = None
+    tool_call_id: Optional[str] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -90,6 +111,8 @@ class ChatMsg(BaseModel):
                 self.loss = True
             elif self.role == "pretrain":
                 self.loss = True
+            elif self.role == "tool":
+                self.loss = False
             else:
                 raise NotImplementedError
 
@@ -111,7 +134,15 @@ class ChatMsg(BaseModel):
             prompt = chat_template.decorate_user(text)
         elif self.role == "pretrain":
             prompt = text
+        elif self.role == "tool":
+            prompt = chat_template.decorate_tool_extractor(text)
         elif self.role == "assistant":
+            if self.tool_calls is not None:
+                function_text = function_formatter(self.tool_calls)
+                if text is not None and text != "" and not text.endswith("\n\n"):
+                    function_text = "\n" + function_text
+                text += function_text
+
             prompt = ""
             if self.thinking is not None:
                 prompt = chat_template.decorate_thinking(self.thinking)
@@ -148,7 +179,7 @@ class ChatMsg(BaseModel):
         }
 
 
-def process_message(messages: List[ChatMsg], chat_template: ChatTemplate):
+def process_message(messages: List[ChatMsg], chat_template: ChatTemplate, tools: Optional[List[Dict]] = None):
     if not messages:
         return messages
 
@@ -166,9 +197,20 @@ def process_message(messages: List[ChatMsg], chat_template: ChatTemplate):
             if msg.role == "assistant":
                 msg.loss = False
 
+    if tools:
+        assert chat_template.tool_prompt is not None, "tool_prompt must be set in chat_template."
+        tool_text = tool_formatter(tools)
+        tool_text = chat_template.tool_prompt.format(tool_text=tool_text)
+        if messages[0].role != "system":
+            messages.insert(0, ChatMsg(role="system", content=tool_text, loss=False))
+        else:
+            assert isinstance(messages[0].content, str), "system message content must be str."
+            messages[0].content += tool_text
+
 
 class ChatMessages(BaseMessages):
     messages: List[ChatMsg]
+    tools: Optional[List[Dict]] = None
 
     def add(self, role, content, loss=False):
         self.messages.append(ChatMsg(role=role, content=content, loss=loss))
@@ -177,7 +219,7 @@ class ChatMessages(BaseMessages):
         return self.messages.pop()
 
     def get_prompt(self, chat_template: ChatTemplate) -> str:
-        process_message(self.messages, chat_template)
+        process_message(self.messages, chat_template, self.tools)
 
         prompt = ""
         for msg in self.messages:
@@ -190,7 +232,7 @@ class ChatMessages(BaseMessages):
         input_ids = tokenizer.encode("", add_special_tokens=False)
         labels = [IGNORE_INDEX for _ in input_ids]
 
-        process_message(self.messages, chat_template)
+        process_message(self.messages, chat_template, self.tools)
 
         for msg in self.messages:
             res = msg.tokenize(tokenizer, chat_template)

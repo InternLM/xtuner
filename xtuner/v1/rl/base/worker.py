@@ -857,23 +857,26 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rollout_cfg_info.get("backend") == "turbomind":
             self._update_weights_by_layer()
         else:
-            self._update_weights_hf_generator()
+            if isinstance(self.config.model_cfg, BaseComposeConfig):
+                self._update_weights_hf_generator(submodule="vision_tower", final_update=False)
+                self._update_weights_hf_generator(submodule="multi_modal_projector", final_update=False)
+                self._update_weights_hf_generator(submodule="language_model", final_update=True)
+            else:
+                self._update_weights_hf_generator()
 
-    def _update_weights_hf_generator(self):
+    def _update_weights_hf_generator(self, submodule=None, final_update=True):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
 
         model = self._engine.model
+        if submodule:
+            model = getattr(model, submodule)
+
         DEVICE_MODULE.empty_cache()
 
-        if isinstance(model.config, BaseComposeConfig):
-            dtype = torch.bfloat16
-        else:
-            if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
-                dtype = torch.float8_e4m3fn
-            else:
-                dtype = torch.bfloat16
+        # TODO: force bfloat16 dtype for now
+        dtype = torch.bfloat16
 
         bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
         same_gen = model._get_same_hf_param(
@@ -897,7 +900,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                 # We can all gather them to get full fused param but it would lead to a larger memory usage.
                 # So we broadcast the part fused param from each ep rank in ep_group sequentially,
                 # and update the part of the fused param sequentially to reduce memory usage.
-                ep_mesh: DeviceMesh = model.ep_mesh
+                if isinstance(model.config, BaseComposeConfig):
+                    ep_mesh: DeviceMesh = model.language_model.ep_mesh
+                else:
+                    ep_mesh: DeviceMesh = model.ep_mesh
                 ep_group = ep_mesh.get_group()
                 global_rank = dist.get_rank()
                 for src_global_rank in dist.get_process_group_ranks(ep_group):
@@ -924,7 +930,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.request_update_params(state_dict, finished=False)
             del state_dict, name_list, param_list
 
-        if self.rollout_cfg_info["backend"] == "pytorch":
+        if self.rollout_cfg_info["backend"] == "pytorch" and final_update:
             self.request_update_params({}, finished=True)
 
         dist.barrier()

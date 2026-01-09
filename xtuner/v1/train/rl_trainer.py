@@ -11,7 +11,7 @@ import torch
 from mmengine import load
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 from ray.util.placement_group import placement_group
 from typing_extensions import Self
 
@@ -20,7 +20,7 @@ from xtuner.v1._writer import TensorboardWriter
 from xtuner.v1.data_proto.rl_data import is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, AutoCPUWorkers, CPUResourcesConfig
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, CPUResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, DataFlowProxy, ReplayBufferConfig
 from xtuner.v1.ray.environment import SingleTurnEnvironment, SingleTurnEnvironmentProxy
@@ -45,6 +45,7 @@ from .trainer import ExpHistory, ExpInfo, GitInfo, LoadCheckpointConfig, XTunerM
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
+TRAINER_RAY_GET_TIMEOUT = 5 * 3600  # 5 hour
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -96,21 +97,6 @@ class RLTrainerConfig(BaseModel):
         elif self.work_dir is None:
             self.work_dir = Path.cwd()
         return self
-
-    @field_serializer("replay_buffer_config")
-    def serialize_replay_buffer_cfg(self, replay_buffer_config: ReplayBufferConfig) -> str:
-        return replay_buffer_config.model_dump(include={"replay_ratio", "replay_weights"})
-
-    @field_serializer("evaluator_config")
-    def serialize_evaluator_cfg(self, evaluator_config: EvaluatorConfig) -> str:
-        if evaluator_config:
-            return evaluator_config.model_dump(exclude={"tokenizer", "dataset_cfg", "compute_metric_func"})
-        else:
-            return ""
-
-    @field_serializer("judger_config")
-    def serialize_judger_config(self, judger_config: JudgerConfig) -> str:
-        return judger_config.model_dump(exclude={"tokenizer", "reward_func"})
 
 
 def get_train_seq_ctx(
@@ -322,11 +308,23 @@ class RLTrainer:
             self._enable_evaluate = evaluator_config.enable_evaluate
             self._enable_initial_evaluate = evaluator_config.enable_initial_evaluate
         self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
-        if cpu_resources is None:
-            self._cpu_pg = placement_group(bundles=[{"CPU": 1, "memory": 1024**3}], strategy="PACK")
-            ray.get(self._cpu_pg.ready(), timeout=PG_READY_TIMEOUT)
-        else:
-            self._cpu_pg = AutoCPUWorkers.build_placement_group(cpu_resources)
+
+        if cpu_resources is not None:
+            # NOTE: Here we only check CPU and memory for judger actors because only judger actors use CPU resources currently.
+            assert judger_config.total_cpus_needed <= cpu_resources.num_cpus_per_worker * cpu_resources.num_workers, (
+                f"Not enough CPU resources for judger actors, "
+                f"required {judger_config.total_cpus_needed}, but got {cpu_resources.num_cpus_per_worker * cpu_resources.num_workers}."
+            )
+            assert (
+                judger_config.total_memory_needed <= cpu_resources.cpu_memory_per_worker * cpu_resources.num_workers
+            ), (
+                f"Not enough memory resources for judger actors, "
+                f"required {judger_config.total_memory_needed}, but got {cpu_resources.cpu_memory_per_worker * cpu_resources.num_workers}."
+            )
+
+        self._judger_cpu_pg = placement_group(bundles=judger_config.total_bundles_needed, strategy="SPREAD")
+        ray.get(self._judger_cpu_pg.ready(), timeout=PG_READY_TIMEOUT)
+
         # We need to build train controller first, and then build rollout dataflow to make
         # inference engines know how much memory they can utilize.
         self._train_controller = self._build_train_controller(train_worker_cfg)
@@ -401,7 +399,16 @@ class RLTrainer:
             with env_path.open("w") as f:
                 json.dump(environment_variables, f, indent=2)
 
+        self._ray_get_timeout = max(
+            TRAINER_RAY_GET_TIMEOUT, rollout_config.rollout_timeout, judger_config.judger_timeout
+        )
         self._writer = TensorboardWriter(log_dir / "tb")
+
+    def __del__(self):
+        if hasattr(self, "_writer") and self._writer is not None:
+            self._writer.close()
+        if hasattr(self, "_rollout_env_controller"):
+            ray.get(self._rollout_env_controller.shutdown.remote())
 
     def _resolve_load_checkpoint_cfg(
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
@@ -448,6 +455,8 @@ class RLTrainer:
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             seed=config.seed,
             debug=config.debug,
+            debug_rollout=config.debug_rollout,
+            rollout_steps=config.rollout_steps,
             trainer_cfg=config,
         )
         return self
@@ -459,7 +468,7 @@ class RLTrainer:
         judger_cfg: JudgerConfig,
         replay_buffer_config: ReplayBufferConfig,
     ) -> tuple[SingleTurnEnvironmentProxy, DataFlowProxy]:
-        env = SingleTurnEnvironment.remote("grpo", self._pg, rollout_cfg, self._cpu_pg, judger_cfg)
+        env = SingleTurnEnvironment.remote("grpo", self._pg, rollout_cfg, self._judger_cpu_pg, judger_cfg)
         flow = DataFlow.remote("grpo", dataflow_cfg, replay_buffer_config, env)
         return env, flow
 
@@ -919,7 +928,7 @@ class RLTrainer:
             for hf_dir in deleted_hf_checkpoints:
                 rmtree(hf_dir)
 
-        ray.get(self._train_controller.save_hf.remote(str(save_hf_path)))
+        ray.get(self._train_controller.save_hf.remote(str(save_hf_path)), timeout=self._ray_get_timeout)
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
 
@@ -938,9 +947,12 @@ class RLTrainer:
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
         self.logger.info(f"Saving step {self.cur_step + 1} rollout dataflow to: {checkpoint_path}")
-        ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)))
+        ray.get(self._rollout_dataflow.save.remote(str(checkpoint_path)), timeout=self._ray_get_timeout)
         self.logger.info(f"Saving step {self.cur_step + 1} dcp checkpoints to: {checkpoint_path}")
-        ray.get(self._train_controller.save.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer))
+        ray.get(
+            self._train_controller.save.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer),
+            timeout=self._ray_get_timeout,
+        )
 
         # Update meta
         current_exp = self.meta.latest_exp

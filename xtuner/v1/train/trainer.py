@@ -1649,6 +1649,13 @@ class Trainer:
             )
             dataloader_cfg.pad_token_id = pad_token_id
 
+        if self._sp_size > 1:
+            if dataloader_cfg.pack_to_max_length is False:
+                logger.warning(
+                    "pack_to_max_length must be True when using sequence parallel. Setting pack_to_max_length to True."
+                )
+                dataloader_cfg.pack_to_max_length = True
+
         # Resolve parallel config conlicts between model and fsdp configs
         self._resolve_deprecate_compile_cfg(model_cfg=model_cfg, fsdp_cfg=fsdp_cfg)  # TODO: Remove in version 1.1.0
 
@@ -1786,6 +1793,7 @@ class Trainer:
             "XTUNER_USE_CUTLASS_GROUP_GEMM": os.getenv("XTUNER_USE_CUTLASS_GROUP_GEMM"),
             "GROUPED_GEMM_USE_CUTLASS": os.getenv("GROUPED_GEMM_USE_CUTLASS"),
             "XTUNER_USE_NATIVE_RMSNORM": os.getenv("XTUNER_USE_NATIVE_RMSNORM"),
+            "XTUNER_SM_MARGIN": os.getenv("XTUNER_SM_MARGIN"),
         }
 
         for k, v in env.items():

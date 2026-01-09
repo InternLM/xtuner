@@ -9,6 +9,9 @@ import triton.language as tl
 from xtuner.v1.float8.float8_utils import to_fp8_saturated
 
 
+SM_MARGIN = int(os.environ.get("XTUNER_SM_MARGIN", 0))
+
+
 @triton.jit
 def get_group_id(m, group_offsets, g_start, num_experts):
     id = 0
@@ -123,7 +126,7 @@ def _trans_per_block_quant_expand_128x(
     finfo = torch.finfo(dtype)
     fmin = finfo.min
     fmax = finfo.max
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count - int(os.getenv("MinusSM", 0))
+    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count - SM_MARGIN
     grid = (NUM_SMS,)
     num_experts = size_per_group.shape[0]
     M, N = input_tensor.shape
