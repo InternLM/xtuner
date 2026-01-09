@@ -49,6 +49,11 @@ class SequenceContext:
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
 
+    # time series
+    time_series_signals: torch.FloatTensor | None = None
+    ts_lens: torch.Tensor | None = None
+    sr: torch.Tensor | None = None
+
     def __init__(
         self,
         input_ids: torch.LongTensor | None,  # shape (1, seq_len)

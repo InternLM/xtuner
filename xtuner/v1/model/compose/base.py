@@ -67,6 +67,11 @@ class BaseComposeModel(BaseModel):
         self.multi_modal_projector = config.projector_config.build()
         self.language_model = config.text_config.build()
 
+        self.time_series = None
+        if self.time_series_encoder_path is not None:
+            from .qwen3_vl.modeling_ts import Qwen3VLTimeSeriesModel
+            self.time_series = Qwen3VLTimeSeriesModel(self.time_series_encoder_path)
+
         self._maybe_enable_compile(self.compile_cfg)
         self._freeze_modules()
 
@@ -134,11 +139,15 @@ class BaseComposeModel(BaseModel):
         if isinstance(hf_path, Path):
             hf_path = str(hf_path)
 
+        missing_ts_keys = set()
+        if self.time_series is not None:
+            _, _, missing_ts_keys = self.time_series.from_hf(hf_path, strict=False)
+
         _, _, missing_llm_keys = self.language_model.from_hf(hf_path, strict=False)
         _, _, missing_vision_keys = self.vision_tower.from_hf(hf_path, strict=False)
         _, _, missing_project_keys = self.multi_modal_projector.from_hf(hf_path, strict=False)
 
-        missing = missing_llm_keys | missing_vision_keys | missing_project_keys
+        missing = missing_llm_keys | missing_vision_keys | missing_project_keys | missing_ts_keys
         if strict:
             if missing:
                 raise RuntimeError(f"Missing parameters from {hf_path}: {list(missing)}. ")
@@ -155,6 +164,10 @@ class BaseComposeModel(BaseModel):
 
         self.multi_modal_projector.save_hf(hf_dir, save_dtype, "model-projector")
         update_weight_map_from_safetensors_index(weight_map_dict, hf_dir)
+
+        if self.time_series is not None:
+            self.time_series.save_hf(hf_dir, save_dtype, "model-time_series")
+            update_weight_map_from_safetensors_index(weight_map_dict, hf_dir)
 
         if dist.get_rank() == 0:
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
