@@ -1,8 +1,6 @@
 import torch
 import types
 from .qwen3_vl_config import Qwen3VLBaseConfig
-from .modeling_vision import Qwen3VLVisionModel
-from .modeling_projector import Qwen3VLProjector
 from xtuner.v1.loss import CELossContext
 import torch.distributed as dist
 import torch.distributed.nn.functional as distF
@@ -165,8 +163,10 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
                 )
                 inputs_embeds[visual_pos_masks] = inputs_embeds[visual_pos_masks] * 0.0 + visual_features
             except Exception as e:
-                print(f"!!!Warning: {e}, but continue anyway!!!!")
+                logger.error(f"!!!Warning: {e}, but continue anyway!!!!")
                 inputs_embeds = inputs_embeds + visual_embeds.sum() * 0.0
+                for deepstack_visual_embed in deepstack_visual_embeds:
+                    inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
                 deepstack_visual_embeds = None
                 visual_pos_masks = None
         else:
