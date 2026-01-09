@@ -29,7 +29,7 @@ jobs:
         run: sudo git clean -ffdx
       - name: Clone repository
         uses: actions/checkout@v2
-          with:
+        with:
           repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
           ref: ${{github.event.inputs.repo_ref || 'main'}}
       - name: run-test
