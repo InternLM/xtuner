@@ -335,8 +335,7 @@ class Qwen3VLVisionModel(BaseModel):
         self.rotary_pos_emb = self.build_rotary_embedding(self.config)
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
-        recompute_ratio = 1.0
-        num_recompute_layers = int(len(self.blocks) * recompute_ratio)
+        num_recompute_layers = int(len(self.blocks) * fsdp_config.vision_recompute_ratio)
         for layer_idx in tqdm(list(range(len(self.blocks))), desc="[Vision Fully Shard]"):
             layer = self.blocks[layer_idx]
 
@@ -474,6 +473,23 @@ class Qwen3VLVisionModel(BaseModel):
     def forward(self, hidden_states: torch.Tensor,
                 grid_thw: torch.Tensor,
                 sequence_parallel_mesh: DeviceMesh | None = None) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
+            # To ensure that the sequence length after sp split is divisible by 4,
+            # we require that the sequence length before sp split is also divisible by 4.
+            assert hidden_states.size(0) % 4 == 0, f"pixel_values seqlen {hidden_states.size(0)} must be divisible by 4. " \
+                                                   f"Please check dataset setting."
+            div_num = sequence_parallel_mesh.size() * 4
+            if hidden_states.size(0) % div_num != 0:
+                pad_num = div_num - (hidden_states.size(0) % div_num)
+                assert pad_num % 2 == 0, f"pad_num {pad_num} must be divisible by 2."
+                pad_grid_thw = torch.tensor([[1, 2, pad_num//2]], device=grid_thw.device, dtype=grid_thw.dtype)
+                grid_thw = torch.cat((grid_thw, pad_grid_thw), dim=0)  # b, 3
+            total_pixels = torch.prod(grid_thw, dim=1).sum()
+            hidden_states = pad_to_multiple_of(hidden_states, 0, div_num, 0)
+            assert total_pixels == hidden_states.size(0), f"total_pixels {total_pixels} must be equal to " \
+                                                          f"hidden_states seqlen {hidden_states.size(0)}. "
+            hidden_states = split_for_sequence_parallel(hidden_states, dim=0, sp_mesh=sequence_parallel_mesh)
+
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
@@ -484,15 +500,10 @@ class Qwen3VLVisionModel(BaseModel):
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
         if sequence_parallel_mesh and sequence_parallel_mesh.size() > 1:
-            # To ensure that the sequence length after sp split is divisible by 4,
-            # we require that the sequence length before sp split is also divisible by 4.
-            assert max_seqlen % 4 == 0, f"max_seqlen {max_seqlen} must be divisible by 4. Please check dataset setting."
             div_num = sequence_parallel_mesh.size() * 4
-            hidden_states = pad_to_multiple_of(hidden_states, 0, div_num, 0)
-            hidden_states = split_for_sequence_parallel(hidden_states, dim=0, sp_mesh=sequence_parallel_mesh)
-            pos_embeds = pad_to_multiple_of(pos_embeds, 0, div_num, 0)
+            assert pos_embeds.size(0) % div_num == 0, f"pos_embeds seqlen {pos_embeds.size(0)} must be divisible by {div_num}."
+            assert rotary_pos_emb.size(0) % div_num == 0, f"rotary_pos_emb seqlen {rotary_pos_emb.size(0)} must be divisible by {div_num}."
             pos_embeds = split_for_sequence_parallel(pos_embeds, dim=0, sp_mesh=sequence_parallel_mesh)
-            rotary_pos_emb = pad_to_multiple_of(rotary_pos_emb, 0, div_num, 0)
             rotary_pos_emb = split_for_sequence_parallel(rotary_pos_emb, dim=0, sp_mesh=sequence_parallel_mesh)
 
         hidden_states = self.patch_embed(hidden_states)
