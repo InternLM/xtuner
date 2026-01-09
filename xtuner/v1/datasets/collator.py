@@ -292,6 +292,18 @@ def qwen3_vl_sft_collator(
         else:
             image_grid_thw = None
 
+        ts_values = [i["time_series_signals"] for i in instance if "time_series_signals" in i]
+        ts_lens = [i["ts_len"] for i in instance if "ts_len" in i]
+        ts_sr = [i["ts_sr"] for i in instance if "ts_sr" in i]
+        if ts_values:
+            ts_lens = torch.cat(ts_lens, dim=0)
+            sr = torch.cat(ts_sr, dim=0)
+            time_series_signals = torch.cat(ts_values, dim=0)
+        else:
+            time_series_signals = None
+            ts_lens = None
+            sr = None
+
         seq_ctx = SequenceContext(
             input_ids=input_ids,  # type: ignore
             cu_seq_lens_q=cu_seq_lens,  # type: ignore
@@ -303,6 +315,9 @@ def qwen3_vl_sft_collator(
             pixel_values=pixel_values,  # type: ignore
             image_grid_thw=image_grid_thw,
             num_img_tokens=num_img_tokens,
+            time_series_signals=time_series_signals,
+            ts_lens=ts_lens,
+            ts_sr=sr,
         )
         ret.append(
             {

@@ -52,7 +52,7 @@ class SequenceContext:
     # time series
     time_series_signals: torch.FloatTensor | None = None
     ts_lens: torch.Tensor | None = None
-    sr: torch.Tensor | None = None
+    ts_sr: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -75,9 +75,17 @@ class SequenceContext:
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[int] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
+        # time series
+        time_series_signals: torch.FloatTensor | None = None,
+        ts_lens: torch.Tensor | None = None,
+        ts_sr: torch.Tensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
+        self.time_series_signals = time_series_signals
+        self.ts_lens = ts_lens
+        self.ts_sr = ts_sr
+
         self.input_ids = input_ids
         self.cu_seq_lens_q = cu_seq_lens_q
         self.cu_seq_lens_k = cu_seq_lens_k

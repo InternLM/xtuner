@@ -196,6 +196,92 @@ def replace_video_token(
     assert current_image_idx == n_image, f"VIDEO ERROR: total_image_idx: {current_image_idx} != {n_image}"
 
 
+def build_ts_transform(do_normalize=True, do_truncate=True, max_len=240000):
+    def transform(ts_path, sr: str):
+        assert len(ts_path) == 1, "Currently only one ts signal is supported."
+        ts_path = ts_path[0]
+        ext = os.path.splitext(ts_path)[-1].lower()
+        try:
+            if ext in [".wav", '.mp3', '.flac']:
+                try:
+                    import librosa
+                except ImportError:
+                    raise ImportError("Please install librosa to process audio files.")
+                ts_input, sr = librosa.load(ts_path, sr=None)
+                ts_input = ts_input[:, None]  # [T, 1]
+            elif ext == ".csv":
+                try:
+                    import pandas as pd
+                except ImportError:
+                    raise ImportError("Please install pandas to process CSV files.")
+                df = pd.read_csv(ts_path, header=None)
+                ts_input = df.values  # [T, C]
+            elif ext == ".npy":
+                try:
+                    import numpy as np
+                except ImportError:
+                    raise ImportError("Please install numpy to process NPY files.")
+                ts_input = np.load(ts_path)  # [T, C]
+            else:
+                raise ValueError(f"Unsupported file format: {ext}")
+
+            ts_tensor = torch.from_numpy(ts_input)
+
+            if do_normalize:
+                mean = ts_tensor.mean(dim=0, keepdim=True)
+                std = ts_tensor.std(dim=0, keepdim=True)
+                ts_tensor = (ts_tensor - mean) / (std + 1e-8)
+
+            ts_tensor = ts_tensor.to(torch.bfloat16)
+
+            if do_truncate:
+                if len(ts_tensor) > 240000:  # truncate to 240k to avoid oom
+                    ts_tensor = ts_tensor[:240000, :]
+
+            if len(ts_tensor.size()) == 1:
+                ts_tensor = ts_tensor.unsqueeze(-1)
+
+            ts_len = ts_tensor.size(0)
+            if sr is None or sr == 0:  # if no sr provided
+                sr = ts_len / 4
+            else:
+                sr = sr[0]  # remove list
+
+            return ts_tensor, torch.tensor(ts_len), torch.tensor(sr)
+
+        except Exception as e:
+            print(f"Error processing time series file {ts_path}: {e}")
+            return None
+
+    return transform
+
+
+TS_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025-TS"
+
+
+def replace_ts_token(
+    messages: ChatMessages,
+    chat_template: HybridChatTemplate,
+    num_ts_tokens: int,
+):
+    for msg in messages.messages:
+        if msg.role == "pretrain":
+            assert len(messages.messages) == 1, "pretrain message should only have one message"
+        if msg.role == "user" or msg.role == "pretrain":
+            content = msg.content
+            if isinstance(content, list):
+                for c in content:
+                    if c.type == "text":
+                        text = c.text
+                        text = text.replace("<TS_CONTEXT>", TS_TOKEN_ALIAS)
+                        ts_cnt = text.count(TS_TOKEN_ALIAS)
+                        # import ipdb; ipdb.set_trace()
+                        for i in range(ts_cnt):
+                            ts_tokens = f"{chat_template.time_series_start_token}{chat_template.time_series_context_token * num_ts_tokens}{chat_template.time_series_end_token}"  # type: ignore
+                            text = text.replace(TS_TOKEN_ALIAS, ts_tokens)
+                        c.text = text
+
+
 class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
     def __init__(
         self,
@@ -290,6 +376,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         self.img_start_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_start_token)
         self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)
 
+        self.ts_start_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.time_series_start_token)
+        self.ts_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.time_series_context_token)
+        self.ts_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.time_series_end_token)
+
         # Note: 比较重要，防止改了参数但是没有重新 cache
         _hash_str = (
             f"{self.image_processor.size['shortest_edge']}_{self.image_processor.size['longest_edge']}_"
@@ -322,6 +412,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             data_name=self.data_name,
         )
 
+    def _get_ts_transform(self):
+        transform = build_ts_transform()
+        return transform
+
     def _truncated_data_item(
         self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
     ):
@@ -340,6 +434,63 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             if position_ids is not None:
                 position_ids = position_ids[..., : self.max_length]
         return input_ids, labels, position_ids
+
+    def calc_num_tokens_time_series_get_item(self, data_item) -> CacheItem:
+        transform = self._get_ts_transform()
+        _, ts_len, sampling_rate = transform(self._time_series_path, self._time_series_sampling_rate)
+        stride = torch.floor(160/((1+torch.exp(-sampling_rate/100))**6))
+        patch_size = stride * 2
+        embed_length = (torch.ceil((ts_len - patch_size) / stride) + 1).long()
+        num_ts_token = (embed_length // 2 + 1) // 2
+        return {"num_tokens": int(num_ts_token)}
+
+    def time_series_get_item(self, data_item, media_root="") -> QwenVL3DataItem:
+        transform = self._get_ts_transform()
+        ts_values, ts_len, sampling_rate = transform(self._time_series_path, self._time_series_sampling_rate)
+
+        stride = torch.floor(160 / ((1 + torch.exp(-sampling_rate / 100)) ** 6))
+        patch_size = stride * 2
+        embed_length = (torch.ceil((ts_len - patch_size) / stride) + 1).long()
+        num_ts_tokens = (embed_length // 2 + 1) // 2
+
+        messages = ChatMessages(messages=data_item["messages"])
+        replace_ts_token(messages, self.chat_template, int(num_ts_tokens))
+        tokenized = messages.tokenize(self.tokenizer, self.chat_template)
+        input_ids = tokenized["input_ids"]
+        labels = tokenized["labels"]
+
+        is_pretrain = False
+        if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
+            is_pretrain = True
+        if is_pretrain:
+            if self.add_bos_token:
+                input_ids = [self.bos_token_id] + input_ids
+                labels = [self.bos_token_id] + labels
+            if self.add_eos_token:
+                input_ids = input_ids + [self.eos_token_id]
+                labels = labels + [self.eos_token_id]
+            np_labels = np.array(labels)
+            np_labels[np_labels == self.ts_start_token_id] = -100
+            np_labels[np_labels == self.ts_context_token_id] = -100
+            np_labels[np_labels == self.ts_end_token_id] = -100
+            labels = np_labels.tolist()
+
+        input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
+        assert (torch.tensor(input_ids) == self.ts_context_token_id).sum() == num_ts_tokens, (
+            "ERROR: ts tokens are truncated"
+        )
+
+        ret = QwenVL3DataItem(
+            input_ids=input_ids,
+            labels=labels,
+            time_series_signals=ts_values,  # type: ignore
+            ts_len=ts_len,
+            ts_sr=sampling_rate,
+            num_tokens=len(input_ids),
+            num_img_tokens=[0],
+            num_imgs=[0],
+        )
+        return ret
 
     def pure_text_get_item(self, data_item: dict) -> QwenVL3DataItem:
         messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))

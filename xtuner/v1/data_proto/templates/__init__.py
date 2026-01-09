@@ -45,6 +45,9 @@ CHAT_TEMPLATE_MAP = {
         image_end_token="<|vision_end|>",
         image_context_token="<|image_pad|>",
         video_context_token="<|video_pad|>",
+        time_series_start_token="<|ts|>",
+        time_series_end_token="<|/ts|>",
+        time_series_context_token="<TS_CONTEXT>",
     ),
     "llama3": HybridChatTemplate(
         system="<|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|>",

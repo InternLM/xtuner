@@ -196,7 +196,7 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
 
         time_series_signals = seq_ctx.time_series_signals
         if time_series_signals is not None:
-            ts_features, ts_pad_mask = self.get_ts_feature(time_series_signals, seq_ctx.ts_lens, seq_ctx.sr)  # [B, T, C], [B, T]
+            ts_features, ts_pad_mask = self.get_ts_feature(time_series_signals, seq_ctx.ts_lens, seq_ctx.ts_sr)  # [B, T, C], [B, T]
             ts_features = ts_features[~ts_pad_mask].to(inputs_embeds.device,
                                                        inputs_embeds.dtype)  # [num_valid_ts_tokens, C]
             B, N, C = inputs_embeds.shape

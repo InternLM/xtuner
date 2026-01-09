@@ -30,6 +30,7 @@ class ImageURL(BaseModel):
     url: str
     detail: Optional[Literal["auto", "low", "high"]] = None
     image_wh: Optional[List[int]] = None  # width, height
+    sampling_rate: Optional[float] = None
 
 
 class ImageContentItem(BaseModel):
@@ -63,7 +64,16 @@ class VideoContentItem(BaseModel):
         return ""
 
 
-MultModalContentType = Union[TextContentItem, ImageContentItem, VideoContentItem]
+class TimeSeriesContentItem(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    type: Literal["time_series_url"] = "time_series_url"
+    time_series_url: ImageURL
+
+    def apply_chat_template(self, *args, **kwarg) -> str:
+        return ""
+
+
+MultModalContentType = Union[TextContentItem, ImageContentItem, VideoContentItem, TimeSeriesContentItem]
 ContentType = Union[str, List[MultModalContentType]]
 
 
