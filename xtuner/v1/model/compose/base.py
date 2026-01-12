@@ -70,6 +70,7 @@ class BaseComposeModel(BaseModel):
         self.time_series = None
         if config.time_series_encoder_path is not None:
             from .qwen3_vl.modeling_ts import Qwen3VLTimeSeriesModel
+
             self.time_series = Qwen3VLTimeSeriesModel(config.time_series_encoder_path)
 
         self._maybe_enable_compile(self.compile_cfg)

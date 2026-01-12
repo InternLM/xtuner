@@ -71,7 +71,7 @@ class VisionComposeTrainEngine(TrainEngine):
         model.vision_tower.fully_shard(self.fsdp_cfg, self.vision_float8_handler)
         model.multi_modal_projector.fully_shard(self.fsdp_cfg, self.projector_float8_handler)
 
-        if hasattr(model, 'time_series') and model.time_series is not None:
+        if hasattr(model, "time_series") and model.time_series is not None:
             model.time_series.fully_shard(self.fsdp_cfg)
 
         model = model.fully_shard(self.fsdp_cfg)

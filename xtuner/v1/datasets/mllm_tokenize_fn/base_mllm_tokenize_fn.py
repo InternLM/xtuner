@@ -141,6 +141,7 @@ def collect_time_series_paths_and_extra(messages: list[dict]):
         {"sampling_rate": sampling_rate_list},
     )
 
+
 def load_image(image_path: str):
     return Image.open(image_path).convert("RGB")
 
