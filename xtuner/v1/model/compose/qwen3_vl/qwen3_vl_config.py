@@ -71,18 +71,6 @@ class Qwen3VLProjectorConfig(XTunerBaseModelConfig):
         return None
 
 
-class IdentityConfig(XTunerBaseModelConfig):
-    model_config = ConfigDict(extra="forbid")
-
-    @property
-    def hf_config(self):
-        return None
-
-    def build(self):
-        from .modeling_projector import Identity
-        return Identity(self)
-
-
 class Qwen3VLBaseConfig(BaseComposeConfig):
     model_config = ConfigDict(
         title="Base model config for xtuner",
@@ -136,7 +124,7 @@ class Qwen3VLMoE30BA3TimeSeriesConfig(Qwen3VLBaseConfig):
     skip_vision: bool = True
     time_series_encoder_path: str | None = None
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
-    projector_config: Qwen3VLProjectorConfig = IdentityConfig()
+    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig()
     text_config: Qwen3MoE30BA3Config = Qwen3VLTextMoE30BA3Config(
         max_position_embeddings=262144,
         rope_theta=5000000,

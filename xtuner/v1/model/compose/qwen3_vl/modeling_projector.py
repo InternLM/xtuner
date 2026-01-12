@@ -13,7 +13,6 @@ from torch.distributed.fsdp import (
 )
 from .modeling_vision import init_world_mesh
 from xtuner.v1.utils import get_device, get_torch_device_module, default_init_weights
-from xtuner.v1.model.base import XTunerBaseModelConfig
 
 
 DEVICE = get_device()
@@ -118,35 +117,3 @@ class Qwen3VLProjector(BaseModel):
         self.merger.init_weights()
         for merger in self.deepstack_merger_list:
             merger.init_weights()
-
-
-class Identity(BaseModel):
-    def __init__(self, config: XTunerBaseModelConfig) -> None:
-        super().__init__(config)
-
-    def to_hf_key_list(self, key: str) -> list[str]:
-        return [key]
-
-    @override
-    def fully_shard(
-        self,
-        fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ):
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
-        )
-        self.fsdp_mesh = init_world_mesh()
-        assert self.fsdp_mesh is not None
-
-        fully_shard(
-            self,
-            mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=True,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
-        )
-        return self
-
-    def forward(self, *x):
-        return x

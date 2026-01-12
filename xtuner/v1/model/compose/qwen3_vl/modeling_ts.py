@@ -36,6 +36,9 @@ class Qwen3VLTimeSeriesModel(BaseModel):
     def __init__(self, path) -> None:
         hf_config = AutoConfig.from_pretrained(path, trust_remote_code=True)
         ts_config = hf_config.ts_config
+        from xtuner.v1.model.base import HFSaveCfg
+        ts_config.hf_save_cfg = HFSaveCfg()
+        ts_config.hf_config = None
         super().__init__(ts_config)  # type: ignore[arg-type]
 
         # ts_config.attn_implementation = "flash_attention_2"
