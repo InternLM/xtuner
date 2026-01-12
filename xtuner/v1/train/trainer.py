@@ -410,7 +410,7 @@ class Trainer:
         backend (str): Backend for distributed training.
     """
 
-    config: TrainerConfig | None
+    _config: TrainerConfig | None
     _META_PATH = ".xtuner"
     _PROFILE_TIME_PATH = "profiling_time"
     _PROFILE_MEMORY_PATH = "profiling_memory"
@@ -687,7 +687,8 @@ class Trainer:
             trainer_cfg=config,
             internal_metrics_cfg=config.internal_metrics_cfg,
         )
-        self.config = config
+        self._config = config
+        self._print_training_config()
         return self
 
     def fit(self):
@@ -935,6 +936,10 @@ class Trainer:
             int | None: Current epoch number or None if not applicable.
         """
         return self._cur_epoch
+
+    @property
+    def config(self) -> TrainerConfig | None:
+        return self._config
 
     def _init_logger(self, log_dir: Path):
         # Logging system maybe need better design
@@ -1800,6 +1805,11 @@ class Trainer:
             log_str += f"{k}: {v}\n"
         log_str += "=================================================="
         logger.info(log_str)
+
+    def _print_training_config(self):
+        if self._config is not None and self.rank == 0:
+            config_str = self._config.model_dump_json(indent=2)
+            logger.info(f"Training config: {config_str}")
 
     def _resolve_deprecate_compile_cfg(self, model_cfg: TransformerConfig | BaseComposeConfig, fsdp_cfg: FSDPConfig):
         if not fsdp_cfg.torch_compile:
