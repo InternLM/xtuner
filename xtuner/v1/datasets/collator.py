@@ -296,8 +296,8 @@ def qwen3_vl_sft_collator(
         ts_lens = [i["ts_len"] for i in instance if "ts_len" in i]
         ts_sr = [i["ts_sr"] for i in instance if "ts_sr" in i]
         if ts_values:
-            ts_lens = torch.cat(ts_lens, dim=0)
-            sr = torch.cat(ts_sr, dim=0)
+            ts_lens = torch.tensor(ts_lens)
+            sr = torch.tensor(ts_sr)
             time_series_signals = torch.cat(ts_values, dim=0)
         else:
             time_series_signals = None
