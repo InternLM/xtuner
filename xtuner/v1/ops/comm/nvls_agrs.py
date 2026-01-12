@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
 
+from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
@@ -15,6 +16,8 @@ except ImportError:
     ibgdaAllgather = None
     is_comm_opt_available = False
 
+
+logger = get_logger()
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
@@ -66,7 +69,7 @@ class SymmBufferManager:
 
         # Case 2: Existing contiguous buffer is too small - recreate with larger size
         elif self.symm_buf_contiguous.numel() < required_size:
-            print(f"Buffer resize required: {self.symm_buf_contiguous.numel()} -> {required_size}")
+            logger.info(f"Buffer resize required: {self.symm_buf_contiguous.numel()} -> {required_size}")
             del self.symm_buf_contiguous
             self.symm_buf_ptrs = [None] * self.num_buffers
             self._create_contiguous_buffer(required_size, device, "resize due to insufficient size")
@@ -95,7 +98,7 @@ class SymmBufferManager:
             device: Target device for buffer allocation
             reason (str): Description of why the buffer is being created (for debugging)
         """
-        print(f"{reason = }, {size / 2**30:.1f} GB")
+        logger.info(f"{reason = }, {size / 2**30:.1f} GB")
         DEVICE_MODULE.synchronize()
         self.symm_buf_contiguous = ib_wrapper.create_symm_buffer(
             size, alignment=self.alignment, local_rank=device.index

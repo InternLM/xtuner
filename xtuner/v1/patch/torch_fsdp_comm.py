@@ -25,6 +25,7 @@ from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.tensor import DTensor
 
 from xtuner.v1.ops.comm import AllGatherManager, ReduceScatterManager, SymmBufferManager
+from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
@@ -38,6 +39,9 @@ except ImportError:
     ibReduceScatter = None
     ibgdaAllgather = None
     is_comm_opt_available = False
+
+
+logger = get_logger()
 
 
 ag_event: torch.Event | None = None
@@ -706,4 +710,4 @@ def patch_fsdp_agrs() -> None:
         if changed:
             patched_modules.append(name)
 
-    print("[xtuner] patched fsdp collectives: foreach_all_gather/foreach_reduce")
+    logger.info("[xtuner] patched fsdp collectives: foreach_all_gather/foreach_reduce")
