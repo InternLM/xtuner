@@ -13,7 +13,7 @@ export GLOBAL_BATCH_SIZE=8
 export WORK_DIR="work_dir/qwen3vl_sft_ts"
 export PYTHONPATH="$(pwd)"
 
-CONFIG_PATH="examples/v1/sft_internts_g4_config.py"
+CONFIG_PATH="ci/sft_internts_g4_config.py"
 
 current_time=$(date "+%m%d%H%M")
 if [ ! -d "$WORK_DIR" ]; then
