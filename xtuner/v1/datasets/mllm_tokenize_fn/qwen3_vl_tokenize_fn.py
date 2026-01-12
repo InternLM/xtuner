@@ -196,66 +196,6 @@ def replace_video_token(
     assert current_image_idx == n_image, f"VIDEO ERROR: total_image_idx: {current_image_idx} != {n_image}"
 
 
-def build_ts_transform(do_normalize=True, do_truncate=True, max_len=240000):
-    def transform(ts_path, sr: str):
-        assert len(ts_path) == 1, "Currently only one ts signal is supported."
-        ts_path = ts_path[0]
-        ext = os.path.splitext(ts_path)[-1].lower()
-        try:
-            if ext in [".wav", '.mp3', '.flac']:
-                try:
-                    import librosa
-                except ImportError:
-                    raise ImportError("Please install librosa to process audio files.")
-                ts_input, sr = librosa.load(ts_path, sr=None)
-                ts_input = ts_input[:, None]  # [T, 1]
-            elif ext == ".csv":
-                try:
-                    import pandas as pd
-                except ImportError:
-                    raise ImportError("Please install pandas to process CSV files.")
-                df = pd.read_csv(ts_path, header=None)
-                ts_input = df.values  # [T, C]
-            elif ext == ".npy":
-                try:
-                    import numpy as np
-                except ImportError:
-                    raise ImportError("Please install numpy to process NPY files.")
-                ts_input = np.load(ts_path)  # [T, C]
-            else:
-                raise ValueError(f"Unsupported file format: {ext}")
-
-            ts_tensor = torch.from_numpy(ts_input)
-
-            if do_normalize:
-                mean = ts_tensor.mean(dim=0, keepdim=True)
-                std = ts_tensor.std(dim=0, keepdim=True)
-                ts_tensor = (ts_tensor - mean) / (std + 1e-8)
-
-            ts_tensor = ts_tensor.to(torch.bfloat16)
-
-            if do_truncate:
-                if len(ts_tensor) > 240000:  # truncate to 240k to avoid oom
-                    ts_tensor = ts_tensor[:240000, :]
-
-            if len(ts_tensor.size()) == 1:
-                ts_tensor = ts_tensor.unsqueeze(-1)
-
-            ts_len = ts_tensor.size(0)
-            if sr is None or sr == 0:  # if no sr provided
-                sr = ts_len / 4
-            else:
-                sr = sr[0]  # remove list
-
-            return ts_tensor, torch.tensor(ts_len), torch.tensor(sr)
-
-        except Exception as e:
-            print(f"Error processing time series file {ts_path}: {e}")
-            return None
-
-    return transform
-
-
 TS_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025-TS"
 
 
@@ -328,6 +268,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             raise ValueError(f"请升级 transformers 到 4.57.0 及其以上版本，当前版本为 {version_str}")
 
         _processor = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
+        self._processor = _processor
         self.image_processor = _processor.image_processor
         self.video_processor = _processor.video_processor
         # default min_pixels 4096=4x32x32=4x16x16x2x2 pix 一张图片 patch size=16x16，然后 merge size=2x2, 最终输出给 llm 占 4 个 token
@@ -412,10 +353,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             data_name=self.data_name,
         )
 
-    def _get_ts_transform(self):
-        transform = build_ts_transform()
-        return transform
-
     def _truncated_data_item(
             self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
     ):
@@ -436,8 +373,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return input_ids, labels, position_ids
 
     def calc_num_tokens_time_series_get_item(self, data_item) -> CacheItem:
-        transform = self._get_ts_transform()
-        _, ts_len, sampling_rate = transform(self._time_series_path, self._time_series_sampling_rate)
+        ts_out = self._processor.time_series_processor(self._time_series_path, self._time_series_sampling_rate)
+        ts_len = ts_out["ts_len"]
+        sampling_rate = ts_out["sampling_rate"]
+
         stride = torch.floor(160 / ((1 + torch.exp(-sampling_rate / 100)) ** 6))
         patch_size = stride * 2
         embed_length = (torch.ceil((ts_len - patch_size) / stride) + 1).long()
@@ -460,8 +399,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return {"num_tokens": len(input_ids)}
 
     def time_series_get_item(self, data_item, media_root="") -> QwenVL3DataItem:
-        transform = self._get_ts_transform()
-        ts_values, ts_len, sampling_rate = transform(self._time_series_path, self._time_series_sampling_rate)
+        ts_out = self._processor.time_series_processor(self._time_series_path, self._time_series_sampling_rate)
+        ts_values = ts_out["ts_values"]
+        ts_len = ts_out["ts_lens"]
+        sampling_rate = ts_out["sampling_rate"]
 
         stride = torch.floor(160 / ((1 + torch.exp(-sampling_rate / 100)) ** 6))
         patch_size = stride * 2
