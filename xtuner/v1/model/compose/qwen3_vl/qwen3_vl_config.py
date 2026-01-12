@@ -133,6 +133,7 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
 
 
 class Qwen3VLMoE30BA3TimeSeriesConfig(Qwen3VLBaseConfig):
+    skip_vision: bool = True
     time_series_encoder_path: str | None = None
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = IdentityConfig()

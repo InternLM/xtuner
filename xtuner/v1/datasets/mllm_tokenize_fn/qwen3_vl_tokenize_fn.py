@@ -33,7 +33,6 @@ from .base_mllm_tokenize_fn import (
 from .qwen3_vl_utils import Qwen3VLOSSLoader, read_qwen3_vl_video
 from .qwenvl_rope2d import get_rope_index_3
 
-
 logger = get_logger()
 
 
@@ -53,13 +52,13 @@ def smart_get_thw(image_size, image_processor):
 
 
 def video_smart_resize(
-    num_frames: int,
-    height: int,
-    width: int,
-    temporal_factor: int = 2,
-    factor: int = 32,
-    min_pixels: int = 128 * 128,
-    max_pixels: int = 16 * 16 * 2 * 2 * 2 * 6144,
+        num_frames: int,
+        height: int,
+        width: int,
+        temporal_factor: int = 2,
+        factor: int = 32,
+        min_pixels: int = 128 * 128,
+        max_pixels: int = 16 * 16 * 2 * 2 * 2 * 6144,
 ):
     if num_frames < temporal_factor:
         raise ValueError(f"t:{num_frames} must be larger than temporal_factor:{temporal_factor}")
@@ -86,12 +85,12 @@ def video_smart_resize(
 
 
 def sample_frames(
-    origin_total_num_frames: int,
-    origin_fps: Union[int, float],
-    num_frames: Optional[int] = None,
-    fps: Union[int, float] = 2,
-    min_frames: int = 4,
-    max_frames: int = 16,
+        origin_total_num_frames: int,
+        origin_fps: Union[int, float],
+        num_frames: Optional[int] = None,
+        fps: Union[int, float] = 2,
+        min_frames: int = 4,
+        max_frames: int = 16,
 ):
     total_num_frames = origin_total_num_frames
 
@@ -108,7 +107,8 @@ def sample_frames(
 
 
 def calculate_timestamps(
-    indices: Union[list[int], np.ndarray], video_fps: float, merge_size: int = 2, timestamps: list[float] | None = None
+        indices: Union[list[int], np.ndarray], video_fps: float, merge_size: int = 2,
+        timestamps: list[float] | None = None
 ):
     if not isinstance(indices, list):
         indices = indices.tolist()
@@ -128,11 +128,11 @@ def calculate_timestamps(
 
 
 def replace_video_token(
-    messages: ChatMessages,
-    chat_template: HybridChatTemplate,
-    num_image_token_list: list[list[int]],
-    timestamps_list: list[list[float]],
-    add_vision_id: bool = False,
+        messages: ChatMessages,
+        chat_template: HybridChatTemplate,
+        num_image_token_list: list[list[int]],
+        timestamps_list: list[list[float]],
+        add_vision_id: bool = False,
 ):
     current_image_idx = 0
     total_video_cnt = 0
@@ -260,9 +260,9 @@ TS_TOKEN_ALIAS = "XTUNER-ALIAS-ALIAS-XTUNER-2025-TS"
 
 
 def replace_ts_token(
-    messages: ChatMessages,
-    chat_template: HybridChatTemplate,
-    num_ts_tokens: int,
+        messages: ChatMessages,
+        chat_template: HybridChatTemplate,
+        num_ts_tokens: int,
 ):
     for msg in messages.messages:
         if msg.role == "pretrain":
@@ -284,32 +284,32 @@ def replace_ts_token(
 
 class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
     def __init__(
-        self,
-        tokenizer: PreTrainedTokenizer,
-        processor_path: str,
-        anno_name: str,
-        min_pixels: int | None = None,  # Max image pixels (H*W) for image
-        max_pixels: int | None = None,  # Min image pixels (H*W) for image
-        video_min_frames: int | None = None,  # Min frames per video
-        video_max_frames: int | None = None,  # Max frames per video
-        # Max frames per video for random sampling when origin_video_length is None
-        # 当用户没有提供 origin_video_length 和 origin_fps 时候，不能采用 video_max_frames 值
-        # 因为默认的 video_max_frames 太大了，会导致采样的视频帧太多，导致显存不足
-        rand_video_max_frames: int = 24,
-        fps: int | None = None,  # Sampling time interval (seconds) between frames
-        video_max_total_pixels: int | None = None,  # Max pixels within a frame
-        video_min_total_pixels: int | None = None,  # Min pixels within a frame
-        system_message: str | None = None,
-        enable_3d_rope: bool = True,
-        add_vision_id: bool = True,
-        max_length: int | None = None,
-        oss_loader_cfg: OSSLoaderConfig | None = None,
-        debug: bool = False,
-        oss_time_log_thr: int = 10,  # 10s
-        tokenizer_hash: str | None = None,
-        hash: str | None = None,
-        add_eos_token: bool = True,  # for mllm pretrain
-        add_bos_token: bool = False,  # for mllm pretrain
+            self,
+            tokenizer: PreTrainedTokenizer,
+            processor_path: str,
+            anno_name: str,
+            min_pixels: int | None = None,  # Max image pixels (H*W) for image
+            max_pixels: int | None = None,  # Min image pixels (H*W) for image
+            video_min_frames: int | None = None,  # Min frames per video
+            video_max_frames: int | None = None,  # Max frames per video
+            # Max frames per video for random sampling when origin_video_length is None
+            # 当用户没有提供 origin_video_length 和 origin_fps 时候，不能采用 video_max_frames 值
+            # 因为默认的 video_max_frames 太大了，会导致采样的视频帧太多，导致显存不足
+            rand_video_max_frames: int = 24,
+            fps: int | None = None,  # Sampling time interval (seconds) between frames
+            video_max_total_pixels: int | None = None,  # Max pixels within a frame
+            video_min_total_pixels: int | None = None,  # Min pixels within a frame
+            system_message: str | None = None,
+            enable_3d_rope: bool = True,
+            add_vision_id: bool = True,
+            max_length: int | None = None,
+            oss_loader_cfg: OSSLoaderConfig | None = None,
+            debug: bool = False,
+            oss_time_log_thr: int = 10,  # 10s
+            tokenizer_hash: str | None = None,
+            hash: str | None = None,
+            add_eos_token: bool = True,  # for mllm pretrain
+            add_bos_token: bool = False,  # for mllm pretrain
     ):
         self.oss_loader = None
         self.debug = debug
@@ -349,7 +349,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if fps is not None:  # default 2
             self.video_processor.fps = fps
 
-        self.merge_length = self.image_processor.merge_size**2
+        self.merge_length = self.image_processor.merge_size ** 2
         self.add_vision_id = add_vision_id
         self.rand_video_max_frames = rand_video_max_frames
         assert self.video_processor.min_frames <= rand_video_max_frames <= self.video_processor.max_frames, (
@@ -417,7 +417,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return transform
 
     def _truncated_data_item(
-        self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
+            self, input_ids: list[int], labels: list[int] | None = None, position_ids: torch.Tensor | None = None
     ):
         # 如果 input_ids 超过单条最大长度会被截断，那么 position_ids 也要被截断
         if position_ids is not None:
@@ -438,11 +438,21 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
     def calc_num_tokens_time_series_get_item(self, data_item) -> CacheItem:
         transform = self._get_ts_transform()
         _, ts_len, sampling_rate = transform(self._time_series_path, self._time_series_sampling_rate)
-        stride = torch.floor(160/((1+torch.exp(-sampling_rate/100))**6))
+        stride = torch.floor(160 / ((1 + torch.exp(-sampling_rate / 100)) ** 6))
         patch_size = stride * 2
         embed_length = (torch.ceil((ts_len - patch_size) / stride) + 1).long()
-        num_ts_token = (embed_length // 2 + 1) // 2
-        return {"num_tokens": int(num_ts_token)}
+        num_ts_tokens = (embed_length // 2 + 1) // 2
+
+        messages = ChatMessages(messages=data_item["messages"])
+        replace_ts_token(messages, self.chat_template, int(num_ts_tokens))
+        tokenized = messages.tokenize(self.tokenizer, self.chat_template)
+        input_ids = tokenized["input_ids"]
+
+        input_ids, _ = self._truncated_input_and_labels(input_ids)
+        assert (torch.tensor(input_ids) == self.ts_context_token_id).sum() == num_ts_tokens, (
+            "ERROR: ts tokens are truncated"
+        )
+        return {"num_tokens": len(input_ids)}
 
     def time_series_get_item(self, data_item, media_root="") -> QwenVL3DataItem:
         transform = self._get_ts_transform()
@@ -453,27 +463,16 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         embed_length = (torch.ceil((ts_len - patch_size) / stride) + 1).long()
         num_ts_tokens = (embed_length // 2 + 1) // 2
 
+        # 特殊处理
+        for _message in data_item["messages"]:
+            if _message["role"] == "assistant":
+                _message["content"] = "<think></think>\n\n" + _message["content"]
+
         messages = ChatMessages(messages=data_item["messages"])
         replace_ts_token(messages, self.chat_template, int(num_ts_tokens))
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
-
-        is_pretrain = False
-        if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
-            is_pretrain = True
-        if is_pretrain:
-            if self.add_bos_token:
-                input_ids = [self.bos_token_id] + input_ids
-                labels = [self.bos_token_id] + labels
-            if self.add_eos_token:
-                input_ids = input_ids + [self.eos_token_id]
-                labels = labels + [self.eos_token_id]
-            np_labels = np.array(labels)
-            np_labels[np_labels == self.ts_start_token_id] = -100
-            np_labels[np_labels == self.ts_context_token_id] = -100
-            np_labels[np_labels == self.ts_end_token_id] = -100
-            labels = np_labels.tolist()
 
         input_ids, labels = self._truncated_input_and_labels(input_ids, labels)
         assert (torch.tensor(input_ids) == self.ts_context_token_id).sum() == num_ts_tokens, (
@@ -593,7 +592,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         grid_thw = visual_processed["image_grid_thw"]  # b,3
         grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw]  # type: ignore
         messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
-        replace_image_token(messages, self.chat_template, grid_thw_merged, add_vision_id=self.add_vision_id)  # type: ignore
+        replace_image_token(messages, self.chat_template, grid_thw_merged,
+                            add_vision_id=self.add_vision_id)  # type: ignore
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
@@ -1041,7 +1041,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     add_vision_id: bool = True
 
     def build(
-        self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
+            self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> Qwen3VLTokenizeFunction:
         return Qwen3VLTokenizeFunction(
             tokenizer,

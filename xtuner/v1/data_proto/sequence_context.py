@@ -50,7 +50,7 @@ class SequenceContext:
     rollout_routed_experts: torch.Tensor | None
 
     # time series
-    time_series_signals: torch.FloatTensor | None = None
+    time_series_signals: list[torch.FloatTensor] | torch.FloatTensor | None = None
     ts_lens: torch.Tensor | None = None
     ts_sr: torch.Tensor | None = None
 
@@ -371,6 +371,16 @@ class SequenceContext:
 
         if self.rollout_routed_experts is not None and hasattr(self.rollout_routed_experts, "to"):
             self.rollout_routed_experts = self.rollout_routed_experts.to(device)  # type: ignore
+
+        if self.time_series_signals is not None:
+            if isinstance(self.time_series_signals, list):
+                self.time_series_signals = [ts.to(device) for ts in self.time_series_signals]  # type: ignore
+            else:
+                self.time_series_signals = self.time_series_signals.to(device)  # type: ignore
+        if self.ts_lens is not None and hasattr(self.ts_lens, "to"):
+            self.ts_lens = self.ts_lens.to(device)  # type: ignore
+        if self.ts_sr is not None and hasattr(self.ts_sr, "to"):
+            self.ts_sr = self.ts_sr.to(device)  # type: ignore
 
         self.device = device
 
