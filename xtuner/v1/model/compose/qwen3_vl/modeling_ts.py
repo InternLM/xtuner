@@ -16,7 +16,7 @@ from xtuner.v1.model.utils.checkpointing import checkpoint_wrapper
 from xtuner.v1.utils import get_device, get_torch_device_module
 from tqdm import tqdm
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
-from torch.distributed.device_mesh import DeviceMesh
+
 
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
@@ -40,7 +40,8 @@ class Qwen3VLTimeSeriesModel(BaseModel):
 
         # ts_config.attn_implementation = "flash_attention_2"
         ts_config.use_cache = False
-        self.time_series = AutoModel.from_pretrained(path, config=ts_config, trust_remote_code=True)
+        ts_config.name_or_path = path  # 必须要
+        self.time_series = AutoModel.from_config(ts_config, trust_remote_code=True)
 
         self._init_load_spec()
 
@@ -76,9 +77,9 @@ class Qwen3VLTimeSeriesModel(BaseModel):
                 param.requires_grad = False
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
-        num_recompute_layers = int(len(self.model.encoder.layers) * fsdp_config.vision_recompute_ratio)
-        for layer_idx in tqdm(list(range(len(self.model.encoder.layers))), desc="[TimeSeries Fully Shard]"):
-            layer = self.model.encoder.layers[layer_idx]
+        num_recompute_layers = int(len(self.time_series.encoder.layers) * fsdp_config.vision_recompute_ratio)
+        for layer_idx in tqdm(list(range(len(self.time_series.encoder.layers))), desc="[TimeSeries Fully Shard]"):
+            layer = self.time_series.encoder.layers[layer_idx]
 
             if layer_idx < num_recompute_layers:
                 layer = checkpoint_wrapper(layer,
@@ -87,7 +88,7 @@ class Qwen3VLTimeSeriesModel(BaseModel):
                 if self.compile_cfg:
                     layer.forward = torch.compile(layer.forward, fullgraph=True)
 
-            self.model.encoder.layers[layer_idx] = layer
+            self.time_series.encoder.layers[layer_idx] = layer
 
             fully_shard(
                 layer,
@@ -98,7 +99,7 @@ class Qwen3VLTimeSeriesModel(BaseModel):
                 if fsdp_config.cpu_offload
                 else None,
             )
-        for layer_cur, layer_next in zip(self.model.encoder.layers[:-1], self.model.encoder.layers[1:]):
+        for layer_cur, layer_next in zip(self.time_series.encoder.layers[:-1], self.time_series.encoder.layers[1:]):
             layer_cur.set_modules_to_forward_prefetch([layer_next])
 
         fully_shard(

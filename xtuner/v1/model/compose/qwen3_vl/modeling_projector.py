@@ -133,7 +133,20 @@ class Identity(BaseModel):
         fsdp_config: FSDPConfig,
         float8_handler: Float8Handler | None = None,
     ):
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        )
+        self.fsdp_mesh = init_world_mesh()
+        assert self.fsdp_mesh is not None
+
+        fully_shard(
+            self,
+            mesh=self.fsdp_mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=True,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+        )
         return self
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, *x):
         return x
