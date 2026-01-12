@@ -443,6 +443,11 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         embed_length = (torch.ceil((ts_len - patch_size) / stride) + 1).long()
         num_ts_tokens = (embed_length // 2 + 1) // 2
 
+        # 特殊处理
+        for _message in data_item["messages"]:
+            if _message["role"] == "assistant":
+                _message["content"] = "<think></think>\n\n" + _message["content"]
+
         messages = ChatMessages(messages=data_item["messages"])
         replace_ts_token(messages, self.chat_template, int(num_ts_tokens))
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
