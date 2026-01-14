@@ -1,3 +1,4 @@
+import os
 from typing import Literal, TypeAlias, cast
 
 import torch
@@ -14,6 +15,7 @@ from torch.distributed._functional_collectives import (
 from typing_extensions import override
 
 from xtuner.v1.ops import permute, unpermute
+from xtuner.v1.ops.comm import AllGatherManager, ReduceScatterManager, SymmBufferManager
 from xtuner.v1.utils import copy_method_signature, get_device, get_logger
 
 from . import XTUNER_DISPATCHER_DEBUG
@@ -30,6 +32,16 @@ from .base import (
 
 DEVICE = get_device()
 logger = get_logger()
+
+
+USE_CUSTOM_AG = int(os.getenv("XTUNER_USE_CUSTOM_AG_IN_DISPATCHER", 0)) == 1
+USE_CUSTOM_RS = int(os.getenv("XTUNER_USE_CUSTOM_RS_IN_DISPATCHER", 0)) == 1
+
+ag_symm = None
+rs_symm = None
+ag_manager = None
+rs_manager = None
+rs_event = None
 
 
 MoEAGRSHandle = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -107,9 +119,39 @@ class _AsyncDispatch(Function):
         with torch.cuda.stream(comm_stream):
             comm_stream.wait_event(forward_previous_event)
 
-            dispatched_hidden_states = all_gather_tensor_autograd(hidden_states, gather_dim=0, group=process_group)
-            if isinstance(dispatched_hidden_states, AsyncCollectiveTensor):
-                dispatched_hidden_states = dispatched_hidden_states.wait()
+            if USE_CUSTOM_AG:
+                global ag_manager, ag_symm
+                if ag_symm is None:
+                    ag_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=2)
+                if ag_manager is None:
+                    # agrs dispatcher do not need to select comm sm
+                    ag_manager = AllGatherManager(num_buffers=2, select_comm_sm=False)
+                send_bytes = hidden_states.element_size() * hidden_states.numel()
+                recv_bytes = send_bytes * process_group.size()
+                recv_numel = hidden_states.numel() * process_group.size()
+
+                ag_manager.prepare_allgather_objects(
+                    send_bytes=send_bytes,
+                    process_group=process_group,
+                    all_gather_stream=comm_stream,
+                    barrier_all=False,  # intra-node comm, no need to barrier across nodes
+                )
+                device = hidden_states.device
+                dtype = hidden_states.dtype
+                combined_grad_out_symm = ag_symm.get_buffer(bytes=recv_bytes, device=device)
+                combined_grad_out_symm = combined_grad_out_symm.view(dtype)[:recv_numel]
+
+                ag_manager.execute_allgather(
+                    send_bytes=send_bytes,
+                    all_gather_output=combined_grad_out_symm,
+                    all_gather_input=hidden_states,
+                    process_group=process_group,
+                )
+                dispatched_hidden_states = combined_grad_out_symm.view(-1, *hidden_states.shape[1:])
+            else:
+                dispatched_hidden_states = all_gather_tensor_autograd(hidden_states, gather_dim=0, group=process_group)
+                if isinstance(dispatched_hidden_states, AsyncCollectiveTensor):
+                    dispatched_hidden_states = dispatched_hidden_states.wait()
 
             # topk_ids (seq, topk)
             topk_ids = topk_ids.T.flatten()
@@ -149,12 +191,50 @@ class _AsyncDispatch(Function):
             return grad_output, None, None, None, None, None, None, None, None
 
         with torch.cuda.stream(ctx.comm_stream):
-            # ctx.comm_stream.wait_stream(compute_stream)
             if ctx.backward_previous_event is not None:
                 ctx.comm_stream.wait_event(ctx.backward_previous_event)
-            combined_grad_output = reduce_scatter_tensor(
-                grad_output, reduceOp="sum", scatter_dim=0, group=ctx.process_group
-            )
+
+            if USE_CUSTOM_RS:
+                global rs_manager, rs_symm
+                if rs_symm is None:
+                    rs_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=1)
+                if rs_manager is None:
+                    rs_manager = ReduceScatterManager(num_buffers=2, select_comm_sm=False)
+
+                process_group = ctx.process_group
+                comm_stream = ctx.comm_stream
+
+                send_bytes = grad_output.element_size() * grad_output.numel()
+                recv_bytes = send_bytes // process_group.size()
+                send_numel = grad_output.numel()
+
+                rs_manager.prepare_reducescatter_objects(
+                    recv_bytes=recv_bytes,
+                    process_group=process_group,
+                    reduce_scatter_stream=comm_stream,
+                    barrier_all=False,  # intra-node comm, no need to barrier across nodes
+                )
+                device = grad_output.device
+                dtype = grad_output.dtype
+                symm_input = rs_symm.get_buffer(bytes=send_bytes, device=device)
+                symm_input = symm_input.view(dtype)[:send_numel]
+                symm_input = symm_input.view(grad_output.shape)
+
+                reduce_scatter_output_numel = recv_bytes // symm_input.element_size()
+                reduce_output = symm_input.new_empty((reduce_scatter_output_numel,))
+                combined_grad_output = rs_manager.execute_reducescatter(
+                    recv_bytes=recv_bytes,
+                    reduce_scatter_output=reduce_output,
+                    reduce_scatter_input=symm_input,
+                    reduce_scatter_group=process_group,
+                    reduce_scatter_reduce_op=dist.ReduceOp.SUM,
+                )
+                combined_grad_output = combined_grad_output.view(-1, *grad_output.shape[1:])
+            else:
+                combined_grad_output = reduce_scatter_tensor(
+                    grad_output, reduceOp="sum", scatter_dim=0, group=ctx.process_group
+                )
+
             grad_output.record_stream(ctx.comm_stream)
             combined_grad_output.record_stream(ctx.comm_stream)
 
@@ -195,11 +275,46 @@ class _AsyncCombine(Function):
         with torch.cuda.stream(comm_stream):
             comm_stream.wait_event(forward_previous_event)
 
-            combined_hidden_states = reduce_scatter_tensor_autograd(
-                hidden_states, reduceOp="sum", scatter_dim=0, group=process_group
-            )
-            if isinstance(combined_hidden_states, AsyncCollectiveTensor):
-                combined_hidden_states = combined_hidden_states.wait()
+            if USE_CUSTOM_RS:
+                global rs_manager, rs_symm, rs_event
+                if rs_symm is None:
+                    rs_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=1)
+                if rs_manager is None:
+                    rs_manager = ReduceScatterManager(num_buffers=2, select_comm_sm=False)
+
+                send_bytes = hidden_states.element_size() * hidden_states.numel()
+                recv_bytes = send_bytes // process_group.size()
+                send_numel = hidden_states.numel()
+
+                rs_manager.prepare_reducescatter_objects(
+                    recv_bytes=recv_bytes,
+                    process_group=process_group,
+                    reduce_scatter_stream=comm_stream,
+                    barrier_all=False,  # intra-node comm, no need to barrier across nodes
+                )
+                device = hidden_states.device
+                dtype = hidden_states.dtype
+                symm_input = rs_symm.get_buffer(bytes=send_bytes, device=device)
+                symm_input = symm_input.view(dtype)[:send_numel]
+                symm_input = symm_input.view(hidden_states.shape)
+
+                reduce_scatter_output_numel = recv_bytes // symm_input.element_size()
+                reduce_output = symm_input.new_empty((reduce_scatter_output_numel,))
+                rs_manager.execute_reducescatter(
+                    recv_bytes=recv_bytes,
+                    reduce_scatter_output=reduce_output,
+                    reduce_scatter_input=symm_input,
+                    reduce_scatter_group=process_group,
+                    reduce_scatter_reduce_op=dist.ReduceOp.SUM,
+                )
+                combined_hidden_states = reduce_output.view(-1, *hidden_states.shape[1:])
+                rs_event = comm_stream.record_event()
+            else:
+                combined_hidden_states = reduce_scatter_tensor_autograd(
+                    hidden_states, reduceOp="sum", scatter_dim=0, group=process_group
+                )
+                if isinstance(combined_hidden_states, AsyncCollectiveTensor):
+                    combined_hidden_states = combined_hidden_states.wait()
 
             forward_finished_event.record(comm_stream)
 
@@ -221,7 +336,40 @@ class _AsyncCombine(Function):
         with torch.cuda.stream(ctx.comm_stream):
             if ctx.backward_previous_event is not None:
                 ctx.comm_stream.wait_event(ctx.backward_previous_event)
-            combined_grad_output = all_gather_tensor(grad_output, gather_dim=0, group=ctx.process_group)
+
+            if USE_CUSTOM_AG:
+                global ag_manager, ag_symm
+                if ag_symm is None:
+                    ag_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=2)
+                if ag_manager is None:
+                    # agrs dispatcher do not need to select comm sm
+                    ag_manager = AllGatherManager(num_buffers=2, select_comm_sm=False)
+
+                send_bytes = grad_output.element_size() * grad_output.numel()
+                recv_bytes = send_bytes * ctx.process_group.size()
+                recv_numel = grad_output.numel() * ctx.process_group.size()
+
+                ag_manager.prepare_allgather_objects(
+                    send_bytes=send_bytes,
+                    process_group=ctx.process_group,
+                    all_gather_stream=ctx.comm_stream,
+                    barrier_all=False,  # intra-node comm, no need to barrier across nodes
+                )
+                device = grad_output.device
+                dtype = grad_output.dtype
+                combined_grad_out_symm = ag_symm.get_buffer(bytes=recv_bytes, device=device)
+                combined_grad_out_symm = combined_grad_out_symm.view(dtype)[:recv_numel]
+
+                ag_manager.execute_allgather(
+                    send_bytes=send_bytes,
+                    all_gather_output=combined_grad_out_symm,
+                    all_gather_input=grad_output,
+                    process_group=ctx.process_group,
+                )
+                combined_grad_output = combined_grad_out_symm.view(-1, *grad_output.shape[1:])
+            else:
+                combined_grad_output = all_gather_tensor(grad_output, gather_dim=0, group=ctx.process_group)
+
             grad_output.record_stream(ctx.comm_stream)
             combined_grad_output.record_stream(ctx.comm_stream)
 
@@ -483,13 +631,12 @@ class MoEAGRSDispatcher(
         else:
             forward_finished_event = None
             backward_previous_event = None
-            hidden_states = pre_combined["hidden_states"]  # .float()
+            hidden_states = pre_combined["hidden_states"]
             combined_hidden_states = reduce_scatter_tensor_autograd(
                 hidden_states, reduceOp="sum", scatter_dim=0, group=self._process_group
             )
             if isinstance(combined_hidden_states, AsyncCollectiveTensor):
                 combined_hidden_states = combined_hidden_states.wait()
-            # combined_hidden_states = combined_hidden_states.bfloat16()
 
         return MoEAGRSCombineResult(
             hidden_states=combined_hidden_states,
