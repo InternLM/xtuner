@@ -7,6 +7,7 @@ from torch.distributed._functional_collectives import (
     AsyncCollectiveTensor,
     all_gather_tensor,
     all_gather_tensor_autograd,
+    all_to_all_single_autograd,
     reduce_scatter_tensor,
     reduce_scatter_tensor_autograd,
 )
@@ -141,8 +142,8 @@ class _AsyncDispatch(Function):
 
     @staticmethod
     def backward(
-        ctx, grad_output: torch.Tensor, *args
-    ) -> tuple[torch.Tensor | None, None, None, None, None, None, None, None, None]:
+        ctx, grad_output: torch.Tensor, grad_topk_ids: torch.Tensor | None, grad_topk_weights: torch.Tensor
+    ) -> tuple[torch.Tensor | None, None, torch.Tensor | None, None, None, None, None, None, None]:
         world_size = dist.get_world_size(group=ctx.process_group)
         if world_size == 1:
             return grad_output, None, None, None, None, None, None, None, None
@@ -156,9 +157,24 @@ class _AsyncDispatch(Function):
             )
             grad_output.record_stream(ctx.comm_stream)
             combined_grad_output.record_stream(ctx.comm_stream)
+
+            world_size = dist.get_world_size(group=ctx.process_group)
+            grad_topk_weights = grad_topk_weights.view(-1)
+            combined_grad_topk_weights = torch.empty_like(grad_topk_weights)
+            dist.all_to_all_single(
+                combined_grad_topk_weights,
+                grad_topk_weights,
+                group=ctx.process_group,
+            )
+            combined_grad_topk_weights = combined_grad_topk_weights.view(world_size, -1)
+            combined_grad_topk_weights = combined_grad_topk_weights.T.contiguous()
+
+            # grad_topk_weights and combined_grad_topk_weights must record_stream, this is very important
+            grad_topk_weights.record_stream(ctx.comm_stream)
+            combined_grad_topk_weights.record_stream(ctx.comm_stream)
             if ctx.backward_finished_event is not None:
                 ctx.backward_finished_event.record(ctx.comm_stream)
-        return combined_grad_output, None, None, None, None, None, None, None, None
+        return combined_grad_output, None, combined_grad_topk_weights, None, None, None, None, None, None
 
 
 _async_dispatch = copy_method_signature(_AsyncDispatch.forward)(_AsyncDispatch.apply)
@@ -313,10 +329,10 @@ class MoEAGRSDispatcher(
             )
             dispatched_topk_ids = dispatched_topk_ids.view(-1, 1)
             topk_weights = topk_weights.T.flatten()
-            dispatched_topk_weights = torch.empty_like(topk_weights)
-            dist.all_to_all_single(
-                dispatched_topk_weights,
+            dispatched_topk_weights = all_to_all_single_autograd(
                 topk_weights,
+                output_split_sizes=None,
+                input_split_sizes=None,
                 group=self._process_group,
             )
             dispatched_topk_weights = dispatched_topk_weights.view(-1, 1)
