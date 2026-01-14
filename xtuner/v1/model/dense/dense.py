@@ -89,6 +89,8 @@ class Dense(BaseModel):
         if self.config.return_hidden_states:
             output["hidden_states"] = []
 
+        self._mark_dynamic(seq_ctx)
+
         for idx, decoder_layer in self.layers.items():
             hidden_states = decoder_layer(
                 hidden_states,

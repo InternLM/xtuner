@@ -134,6 +134,8 @@ class Qwen3VLTextMoE(Qwen3MoE):
         output["router_logits"] = {}
         output["router_weights"] = {}
 
+        self._mark_dynamic(seq_ctx)
+
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds
         visual_pos_masks = seq_ctx.visual_pos_masks
