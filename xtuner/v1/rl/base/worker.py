@@ -32,6 +32,7 @@ from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
+from xtuner.v1.model.moe.moe import MoE
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
@@ -46,7 +47,7 @@ from xtuner.v1.utils import (
     monkey_unpatch_torch_reductions,
     ray_method,
 )
-from xtuner.v1.utils.load_spec import LoadEnum
+from xtuner.v1.utils.load_spec import LoadEnum, LoadSpec
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig
@@ -252,6 +253,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         else:
             mode = "eager"
         self.logprob_cfg = LogProbConfig(chunk_size=worker_cfg.loss_cfg.chunk_size, mode=mode)
+        self._global_hf_keys_mapping_cache: dict[str, list[str]] = dict()
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -863,7 +865,79 @@ class TrainingWorker(SingleAcceleratorWorker):
             else:
                 self._update_weights_hf_generator()
 
-    def _update_weights_hf_generator(self, submodule=None, final_update=True):
+    def _rl_get_fused_ep_hf_param(self, model: MoE, target_ep_rank: int, target_ep_size: int, bucket_size: int):
+        fused_param_groups: list[tuple[torch.Tensor, LoadSpec]] = model._group_param_by_load_spec(LoadEnum.FUSED)
+        model_ep_size = 1 if model.fsdp_config is None else model.fsdp_config.ep_size
+        if not fused_param_groups:
+            return
+
+        def _get_hf_params(
+            fsdp_tensor_list: list[tuple[torch.Tensor, LoadSpec]],
+        ) -> tuple[list[torch.Tensor], list[str]]:
+            hf_keys_list: list[str] = []
+            # Split the fused tensor into target hf tensors
+            hf_tensor_list: list[torch.Tensor] = []
+
+            for fsdp_tensor, load_spec in fsdp_tensor_list:
+                hf_keys = load_spec.hf_keys
+                if model_ep_size > 1 and model.ep_mesh is not None:
+                    if load_spec.name not in self._global_hf_keys_mapping_cache:
+                        global_hf_keys: list[list[str] | None] = [None] * model_ep_size
+                        dist.all_gather_object(global_hf_keys, hf_keys, group=model.ep_mesh.get_group())
+                        global_hf_keys_gathered = cast(list[list[str]], global_hf_keys)
+                        self._global_hf_keys_mapping_cache[load_spec.name] = list(
+                            chain.from_iterable(global_hf_keys_gathered)
+                        )
+                    hf_keys = self._global_hf_keys_mapping_cache[load_spec.name]
+
+                fused_full_tensor = fsdp_tensor.bfloat16()
+                if isinstance(fused_full_tensor, DTensor):
+                    fused_full_tensor = fused_full_tensor.full_tensor()
+                dim = cast(int, load_spec.dim)
+                num_split = len(hf_keys)
+                hf_tensor_size = fused_full_tensor.shape[dim] / num_split
+                assert hf_tensor_size.is_integer(), "Internal Error, hf_tensor_size is not integer"
+                hf_tensor_size = int(hf_tensor_size)
+
+                hf_tensor = fused_full_tensor.split([hf_tensor_size] * num_split, dim=dim)
+                # slice target ep rank
+                assert num_split % target_ep_size == 0, (
+                    f"len(hf_keys) of '{hf_keys}' is {num_split}, it must be divisible by target_ep_size {target_ep_size}"
+                )
+                start_idx = (num_split // target_ep_size) * target_ep_rank
+                end_idx = (num_split // target_ep_size) * (target_ep_rank + 1)
+
+                hf_keys_list.extend(hf_keys[start_idx:end_idx])
+                hf_tensor_list.extend(hf_tensor[start_idx:end_idx])
+
+            hf_tensor_list = [
+                model.param_to_safetensor(safetensor, name) for safetensor, name in zip(hf_tensor_list, hf_keys_list)
+            ]
+
+            return hf_tensor_list, hf_keys_list
+
+        safetensor_size = 0
+        dtype = torch.bfloat16  # hardcode bfloat16 for now
+        tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
+
+        for param, load_spec in fused_param_groups:
+            tensor_size = dtype.itemsize * param.numel() // target_ep_size
+            if safetensor_size + tensor_size > bucket_size and tensor_list:
+                hf_params, name_list = _get_hf_params(tensor_list)
+                yield name_list, hf_params
+                safetensor_size = tensor_size
+                name_list = load_spec.hf_keys.copy()
+                tensor_list = [(param, load_spec)]
+                continue
+            safetensor_size += tensor_size
+            tensor_list.append((param, load_spec))
+
+        if tensor_list:
+            hf_params, name_list = _get_hf_params(tensor_list)
+            yield name_list, hf_params
+
+    @torch.no_grad()
+    def _update_weights_hf_generator(self, submodule=None, final_update=False):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
         assert self.rollout_device_mesh is not None
@@ -881,20 +955,32 @@ class TrainingWorker(SingleAcceleratorWorker):
         same_gen = model._get_same_hf_param(
             model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE, bucket_size=bucket_size
         )
-        fused_gen = model._get_fused_hf_param(
-            model._group_param_by_load_spec(LoadEnum.FUSED),
-            dtype=dtype,
-            device=DEVICE,
-            bucket_size=bucket_size,
-            update_weights_for_rl=True,
-        )
+
+        train_enable_ep = model.fsdp_config is not None and model.fsdp_config.ep_size > 1
+        if train_enable_ep and self.rollout_cfg_info["ep"] > 1:
+            # rollout_device_mesh contains the coordinate info of rollout engine
+            # whose the coordinate is the same as training engine rank
+            fused_gen = self._rl_get_fused_ep_hf_param(
+                model,
+                target_ep_rank=self.rollout_device_mesh["engine_parallel"].get_coordinate()[0],
+                target_ep_size=self.rollout_device_mesh["engine_parallel"].size(),
+                bucket_size=bucket_size,
+            )
+        else:
+            fused_gen = model._get_fused_hf_param(
+                model._group_param_by_load_spec(LoadEnum.FUSED),
+                dtype=dtype,
+                device=DEVICE,
+                bucket_size=bucket_size,
+                update_weights_for_rl=True,
+            )
         shard_gen = model._get_shard_hf_param(
             model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE, bucket_size=bucket_size
         )
 
         for name_list, fused_param_list in fused_gen:
             state_dict = {name: param.detach() for name, param in zip(name_list, fused_param_list)}
-            if model.fsdp_config.ep_size > 1:
+            if train_enable_ep and self.rollout_cfg_info["tp"] > 1:
                 # When ep_size > 1, generator generates part of the fused param on each ep rank in one ep_group.
                 # We can all gather them to get full fused param but it would lead to a larger memory usage.
                 # So we broadcast the part fused param from each ep rank in ep_group sequentially,
