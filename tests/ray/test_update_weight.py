@@ -132,7 +132,15 @@ class TestUpdateWeight(unittest.TestCase):
         ray.get(train_controller.onload.remote(target="all"))
         ray.get(train_controller.offload.remote(["optimizer"]))
         ray.get(rollout_controller.onload_weights.remote())
+        import time
+        start_time = time.time()
         ray.get(train_controller.update_weights.remote())
+        end_time = time.time()
+        print(f"Update weights time 1: {end_time - start_time} seconds")
+        start_time = time.time()
+        ray.get(train_controller.update_weights.remote())
+        end_time = time.time()
+        print(f"Update weights time 2: {end_time - start_time} seconds")
         ray.get(train_controller.offload.remote(["model"]))
         ray.get(rollout_controller.onload_kvcache.remote())
 
