@@ -36,7 +36,7 @@ jobs:
       - name: run-test
         run: |
           echo ${GITHUB_ACTION_PATH},'or',${{ github.action_path }}
-          cp -r ../JamesIves ./
+          #cp -r ../JamesIves ./
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx 
           conda env list
@@ -52,9 +52,10 @@ jobs:
           retention-days: 7
           name: xtuner-e2e-${{ github.run_id }}
 
+      
       - name: Deploy to GitHub Pages
         if: ${{ !cancelled() }}
-        uses: ./JamesIves/github-pages-deploy-action/v4
+        uses: ../JamesIves/github-pages-deploy-action/v4
         with:
           token: ${{ github.token }}
           branch: gh-pages
