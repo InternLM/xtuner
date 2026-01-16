@@ -35,6 +35,8 @@ jobs:
           #ref: ${{github.event.inputs.repo_ref || 'main'}}
       - name: run-test
         run: |
+          echo ${GITHUB_ACTION_PATH},'or',${{ github.action_path }}
+          cp -r ../JamesIves ./
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx 
           conda env list
@@ -52,7 +54,7 @@ jobs:
 
       - name: Deploy to GitHub Pages
         if: ${{ !cancelled() }}
-        uses: JamesIves/github-pages-deploy-action@e28dece811c3ec29b89d2e5e7ff7112cd94f55c3
+        uses: ./JamesIves/github-pages-deploy-action/v4
         with:
           token: ${{ github.token }}
           branch: gh-pages
