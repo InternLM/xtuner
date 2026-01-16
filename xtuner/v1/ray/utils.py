@@ -94,18 +94,23 @@ def find_master_addr_and_port(nums=1, start_port=None, end_port=None):
     if start_port is None:
         for _ in range(nums):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # socket.SO_REUSEADDR can help avoid TIME_WAIT state issues
+            # if the port is binded and listened by this socket and then we close it,
+            # socket.SO_REUSEADDR would make the port be reusable even it's in TIME_WAIT state.
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sockets.append(s)
             if _is_port_available(check_socket=s, port=0):
                 ports.append(s.getsockname()[1])
     else:
-        assert isinstance(start_port, int)
-        assert isinstance(end_port, int)
+        assert isinstance(start_port, int), "If start_port isn't None, it must be an integer."
+        assert isinstance(end_port, int), "If start_port isn't None, end_port must be an integer."
+        assert end_port - start_port >= nums, (
+            "If start_port isn't None, the range between start_port and end_port must be at least nums."
+        )
 
         for candidate_port in range(start_port, end_port):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # socket.SO_REUSEADDR can help avoid TIME_WAIT state issues
+            # if the port is binded and listened by this socket and then we close it,
+            # socket.SO_REUSEADDR would make the port be reusable even it's in TIME_WAIT state.
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sockets.append(s)
             if _is_port_available(check_socket=s, port=candidate_port):
