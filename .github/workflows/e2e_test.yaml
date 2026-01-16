@@ -18,7 +18,7 @@ on:
         type: string
         default: 'main'
   schedule:
-    - cron:  '00 14 * * 0-4'
+    - cron:  '00 22 * * 0-4'
 
 jobs:
   ete_test:
