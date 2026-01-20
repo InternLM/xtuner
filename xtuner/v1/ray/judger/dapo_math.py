@@ -1,7 +1,7 @@
 import re
 from typing import Any, Callable, List, Optional, Tuple
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from .native import NativeJudgerConfig
 
@@ -300,8 +300,8 @@ class DapoMathJudgerConfig(NativeJudgerConfig):
     max_response_len: Optional[int] = None
     overlong_buffer_len: Optional[int] = None
     overlong_penalty_factor: Optional[float] = None
-    tokenizer: Any = None
-    reward_func: Callable = compute_reward
+    tokenizer: Any = Field(default=None, exclude=True)
+    reward_func: Callable = Field(default=compute_reward, exclude=True)
 
     def __init__(
         self,
