@@ -63,7 +63,8 @@ def bind_train_rollout(
 class RLTrainerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     load_from: str | Path
-    resources: AcceleratorResourcesConfig
+    rollout_resources: AcceleratorResourcesConfig
+    training_resources: AcceleratorResourcesConfig
     cpu_resources: CPUResourcesConfig | None = None
     rollout_config: RolloutConfig
     dataflow_config: DataFlowConfig
@@ -204,7 +205,8 @@ class RLTrainer:
         self,
         *,
         load_from: str | Path,  # Huggingface model path or saved trainer_path
-        resources: AcceleratorResourcesConfig,
+        rollout_resources: AcceleratorResourcesConfig,
+        training_resources: AcceleratorResourcesConfig,
         cpu_resources: CPUResourcesConfig | None = None,
         rollout_config: RolloutConfig,
         dataflow_config: DataFlowConfig,
@@ -250,6 +252,8 @@ class RLTrainer:
             patch_default_save_plan()
 
         self._rl_trainer_cfg = trainer_cfg
+        # import debugpy
+        # debugpy.connect(('10.103.23.59', 5680))
         self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
 
         is_hf_path, error_info = is_hf_model_path(load_from) if load_from is not None else False, ""
@@ -307,20 +311,11 @@ class RLTrainer:
             evaluator_config.worker_log_dir = log_dir
             self._enable_evaluate = evaluator_config.enable_evaluate
             self._enable_initial_evaluate = evaluator_config.enable_initial_evaluate
-        self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
+        self._rollout_pg = AutoAcceleratorWorkers.build_placement_group(rollout_resources, name="rollout")
+        self._training_pg= AutoAcceleratorWorkers.build_placement_group(training_resources, name="training")
 
         if cpu_resources is not None:
-            # NOTE: Here we only check CPU and memory for judger actors because only judger actors use CPU resources currently.
-            assert judger_config.total_cpus_needed <= cpu_resources.num_cpus_per_worker * cpu_resources.num_workers, (
-                f"Not enough CPU resources for judger actors, "
-                f"required {judger_config.total_cpus_needed}, but got {cpu_resources.num_cpus_per_worker * cpu_resources.num_workers}."
-            )
-            assert (
-                judger_config.total_memory_needed <= cpu_resources.cpu_memory_per_worker * cpu_resources.num_workers
-            ), (
-                f"Not enough memory resources for judger actors, "
-                f"required {judger_config.total_memory_needed}, but got {cpu_resources.cpu_memory_per_worker * cpu_resources.num_workers}."
-            )
+            raise NotImplementedError("CPU resources config is not supported yet.")
 
         self._judger_cpu_pg = placement_group(bundles=judger_config.total_bundles_needed, strategy="SPREAD")
         ray.get(self._judger_cpu_pg.ready(), timeout=PG_READY_TIMEOUT)
@@ -375,15 +370,16 @@ class RLTrainer:
         # update weights if rollout_config.skip_load_weights == True
         if rollout_config.skip_load_weights:
             self.logger.info("Rollout workers skip load weights, update weights from train workers.")
-            ray.get(self._train_controller.offload.remote(target="optimizer"))
-            ray.get(self._rollout_env_controller.offload.remote())
-            ray.get(self._rollout_env_controller.onload_weights.remote())
+            # ray.get(self._train_controller.offload.remote(target="optimizer"))
+            # ray.get(self._rollout_env_controller.offload.remote())
+            # ray.get(self._rollout_env_controller.onload_weights.remote())
             ray.get(self._train_controller.update_weights.remote())
-            ray.get(self._train_controller.offload.remote(target="model"))
-            ray.get(self._rollout_env_controller.onload_kvcache.remote())
+            # ray.get(self._train_controller.offload.remote(target="model"))
+            # ray.get(self._rollout_env_controller.onload_kvcache.remote())
             self.logger.info("Rollout workers has updated weights from train workers.")
         else:
-            ray.get(self._train_controller.offload.remote(target="all"))
+            # ray.get(self._train_controller.offload.remote(target="all"))
+            pass
 
         self._train_worker_cfg = train_worker_cfg
 
@@ -432,7 +428,8 @@ class RLTrainer:
         """
         self = cls(
             load_from=config.load_from,
-            resources=config.resources,
+            rollout_resources=config.rollout_resources,
+            training_resources=config.training_resources,
             cpu_resources=config.cpu_resources,
             rollout_config=config.rollout_config,
             dataflow_config=config.dataflow_config,
@@ -468,7 +465,7 @@ class RLTrainer:
         judger_cfg: JudgerConfig,
         replay_buffer_config: ReplayBufferConfig,
     ) -> tuple[SingleTurnEnvironmentProxy, DataFlowProxy]:
-        env = SingleTurnEnvironment.remote("grpo", self._pg, rollout_cfg, self._judger_cpu_pg, judger_cfg)
+        env = SingleTurnEnvironment.remote("grpo", self._rollout_pg, rollout_cfg, self._judger_cpu_pg, judger_cfg)
         flow = DataFlow.remote("grpo", dataflow_cfg, replay_buffer_config, env)
         return env, flow
 
@@ -486,7 +483,7 @@ class RLTrainer:
             )(BaseTrainingWorker),
         )
         train_workers: list[TrainingWorkerProxy]
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._training_pg)
         ray.wait([worker.ready.remote() for worker in train_workers])
         train_controller = TrainingController.remote(workers=train_workers)
         return train_controller
@@ -523,22 +520,23 @@ class RLTrainer:
             tag="time/save_trajectory", scalar_value=step_timer_dict["save_trajectory"], global_step=rollout_idx
         )
         if not self._debug_rollout:
-            with timer("rollout_offload", step_timer_dict):
-                ray.get(self._rollout_dataflow.pause.remote())
-                ray.get(self._rollout_env_controller.offload.remote())
-            self._writer.add_scalar(
-                tag="time/rollout_offload", scalar_value=step_timer_dict["rollout_offload"], global_step=rollout_idx
-            )
+            # with timer("rollout_offload", step_timer_dict):
+            #     ray.get(self._rollout_dataflow.pause.remote())
+            #     ray.get(self._rollout_env_controller.offload.remote())
+            # self._writer.add_scalar(
+            #     tag="time/rollout_offload", scalar_value=step_timer_dict["rollout_offload"], global_step=rollout_idx
+            # )
+            pass
         return data_groups, multimodal_train_infos
 
     def _train_step(self, rollout_idx: int, data_groups, multimodal_train_infos, step_timer_dict: dict):
         """Performs a single training step on the generated experience."""
-        with timer(
-            "onload",
-            step_timer_dict,
-        ):
-            ray.get(self._train_controller.onload.remote(target="all"))
-            self.logger.info("Training controller loaded")
+        # with timer(
+        #     "onload",
+        #     step_timer_dict,
+        # ):
+        #     ray.get(self._train_controller.onload.remote(target="all"))
+        #     self.logger.info("Training controller loaded")
 
         with timer("prepare_data", step_timer_dict):
             data_batches, data_info = self._prepare_train_data(
@@ -547,11 +545,11 @@ class RLTrainer:
             self.logger.info(f"Prepared {len(data_batches)} training data batches")
             self._log_data_info(rollout_idx, data_info)
 
-        self._writer.add_scalar(
-            tag="time/onload",
-            scalar_value=step_timer_dict["onload"],
-            global_step=rollout_idx,
-        )
+        # self._writer.add_scalar(
+        #     tag="time/onload",
+        #     scalar_value=step_timer_dict["onload"],
+        #     global_step=rollout_idx,
+        # )
 
         self._writer.add_scalar(
             tag="time/prepare_data",
@@ -612,17 +610,17 @@ class RLTrainer:
     def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):
         """Synchronizes weights and saves checkpoints."""
         with timer("save_ckpt", step_timer_dict):
-            ray.get(self._train_controller.offload.remote(target="optimizer"))
+            # ray.get(self._train_controller.offload.remote(target="optimizer"))
             self._maybe_save_hf()
             self._maybe_save_checkpoint()
 
         with timer("sync_weight", step_timer_dict):
             bind_train_rollout(train_controller=self._train_controller, env_controller=self._rollout_env_controller)
-            ray.get(self._rollout_env_controller.onload_weights.remote())
+            # ray.get(self._rollout_env_controller.onload_weights.remote())
             ray.get(self._train_controller.update_weights.remote())
             self.logger.info("Model weights synchronized successfully.")
-            ray.get(self._train_controller.offload.remote(target="model"))
-            ray.get(self._rollout_env_controller.onload_kvcache.remote())
+            # ray.get(self._train_controller.offload.remote(target="model"))
+            # ray.get(self._rollout_env_controller.onload_kvcache.remote())
 
         self._writer.add_scalar(
             tag="time/save_ckpt",

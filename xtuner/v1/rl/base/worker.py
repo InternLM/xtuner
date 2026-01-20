@@ -5,6 +5,7 @@ import time
 from itertools import chain
 from pathlib import Path
 from typing import Dict, Iterable, List, TypeAlias, TypedDict, cast
+import socket
 
 import ray
 import requests
@@ -182,6 +183,97 @@ class WorkerLogItem(TypedDict):
     sft_train_metrics: NotRequired[dict[str, float]]
 
 
+from datetime import timedelta
+from typing import Any
+
+import torch
+import torch.distributed as dist
+from torch.distributed.distributed_c10d import (
+    Backend,
+    PrefixStore,
+    Store,
+    _new_process_group_helper,
+    _world,
+    default_pg_timeout,
+    rendezvous,
+)
+
+# Copy from pytorch and OpenRLHF to allow creating multiple main groups.
+# https://github.com/pytorch/pytorch/blob/main/torch/distributed/distributed_c10d.py
+# https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/utils/distributed_util.py
+def init_custom_process_group(
+    backend=None,
+    init_method=None,
+    timeout=None,
+    world_size=-1,
+    rank=-1,
+    store=None,
+    group_name=None,
+    pg_options=None,
+    device_id=None,
+):
+    from torch.distributed.distributed_c10d import (
+        Backend,
+        PrefixStore,
+        _new_process_group_helper,
+        _world,
+        default_pg_timeout,
+        rendezvous,
+    )
+
+    assert (store is None) or (
+        init_method is None
+    ), "Cannot specify both init_method and store."
+
+    if store is not None:
+        assert world_size > 0, "world_size must be positive if using store"
+        assert rank >= 0, "rank must be non-negative if using store"
+    elif init_method is None:
+        init_method = "env://"
+
+    if backend:
+        backend = Backend(backend)
+    else:
+        backend = Backend("undefined")
+
+    if timeout is None:
+        timeout = default_pg_timeout
+
+    # backward compatible API
+    if store is None:
+        rendezvous_iterator = rendezvous(init_method, rank, world_size, timeout=timeout)
+        store, rank, world_size = next(rendezvous_iterator)
+        store.set_timeout(timeout)
+
+        # Use a PrefixStore to avoid accidental overrides of keys used by
+        # different systems (e.g. RPC) in case the store is multi-tenant.
+        store = PrefixStore(group_name, store)
+
+    # NOTE: The pg_options parameter was renamed into backend_options in PyTorch 2.6.0
+    # https://github.com/pytorch/pytorch/commit/a0c7029a75628cd5fa8df83c0de0ea98ee7fd844
+    # We need to determine the appropriate parameter name based on PyTorch version
+    pg_options_param_name = (
+        "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+    )
+    pg, _ = _new_process_group_helper(
+        world_size,
+        rank,
+        [],
+        backend,
+        store,
+        group_name=group_name,
+        **{pg_options_param_name: pg_options},
+        timeout=timeout,
+        device_id=device_id,
+    )
+
+    _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
+
+    return pg
+
+
+is_colocate = False
+
 class TrainingWorker(SingleAcceleratorWorker):
     _SAVE_OPTIMIZER_DIR = "optimizer"
     _SAVE_MODEL_DIR = "model"
@@ -240,6 +332,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_cfg_info: dict = dict()
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
+
+        self._model_update_groups = None
 
     def _init_sft(self, worker_cfg):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -858,31 +952,71 @@ class TrainingWorker(SingleAcceleratorWorker):
         server_url_dict: ServiceUrlMap,
         rollout_config: RolloutConfig,
         worker_server_urls_status: Dict[str, bool],
-    ):
-        """Update the rollout information for the training worker."""
-        tp = rollout_config.tensor_parallel_size
-        ep = rollout_config.expert_parallel_size
-        assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
-        if self.rollout_device_mesh is None:
-            self.rollout_device_mesh = DeviceMesh(
-                "cpu", mesh=engine_rank_mesh_array, mesh_dim_names=("engine_instance", "engine_parallel")
-            )
-        rollout_server_url = server_url_dict.get(self.rank, "")
-        if worker_server_urls_status.get(rollout_server_url, "False") is False:
-            self.logger.error(f"Rollout server url {rollout_server_url} is not available.")
-            self.rollout_url = None
+        rollout_workers: list[ray.actor.ActorHandle],
+    ):  
+        # import debugpy
+        # debugpy.connect(('10.103.23.59', 5680))
+        
+        if is_colocate:
+            """Update the rollout information for the training worker."""
+            tp = rollout_config.tensor_parallel_size
+            ep = rollout_config.expert_parallel_size
+            assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
+            if self.rollout_device_mesh is None:
+                self.rollout_device_mesh = DeviceMesh(
+                    "cpu", mesh=engine_rank_mesh_array, mesh_dim_names=("engine_instance", "engine_parallel")
+                )
+            rollout_server_url = server_url_dict.get(self.rank, "")
+            if worker_server_urls_status.get(rollout_server_url, "False") is False:
+                self.logger.error(f"Rollout server url {rollout_server_url} is not available.")
+                self.rollout_url = None
+            else:
+                self.rollout_url = rollout_server_url
+            self.rollout_cfg_info["tp"] = tp
+            self.rollout_cfg_info["ep"] = ep
+            self.rollout_cfg_info["api_key"] = rollout_config.api_key
+            if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
+                self.rollout_cfg_info["backend"] = "sglang"
+            else:
+                self.rollout_cfg_info["backend"] = (rollout_config.extra_rollout_config or dict()).get(
+                    "lmdeploy_backend", "pytorch"
+                )
         else:
-            self.rollout_url = rollout_server_url
-        self.rollout_cfg_info["tp"] = tp
-        self.rollout_cfg_info["ep"] = ep
-        self.rollout_cfg_info["api_key"] = rollout_config.api_key
-        if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
-            self.rollout_cfg_info["backend"] = "sglang"
-        else:
-            self.rollout_cfg_info["backend"] = (rollout_config.extra_rollout_config or dict()).get(
-                "lmdeploy_backend", "pytorch"
-            )
+            self.rollout_cfg_info["backend"] = 'sglang'
+            self.rollout_num_gpus_per_engine = rollout_config.tensor_parallel_size
+            self.rollout_workers = rollout_workers
+            self.rollout_num_gpus = len(rollout_workers)
 
+            _is_src_rank = dist.get_rank() == 0
+            if _is_src_rank and self._model_update_groups is None:
+                self._group_name = "xtuner"
+                master_address = ray._private.services.get_node_ip_address()
+                with socket.socket() as sock:
+                    sock.bind(("", 0))
+                    master_port = sock.getsockname()[1]
+                world_size = self.rollout_num_gpus + 1
+                refs = [
+                    engine.init_weights_update_group.remote(
+                        master_address,
+                        master_port,
+                        # 假设 rollout 是 4 张卡，那么 train rank0 和 rollout 的 rank0 1 2 3 组成一个 group, 这个应该是通信 rank
+                        i*self.rollout_num_gpus_per_engine + 1,
+                        world_size,
+                        self._group_name,
+                        backend="nccl", # nccl 报错，暂时没有解决
+                    )
+                    for i, engine in enumerate(rollout_workers)
+                ]
+
+                self._model_update_groups = init_custom_process_group(
+                    backend="nccl",
+                    init_method=f"tcp://{master_address}:{master_port}",
+                    world_size=world_size,
+                    rank=0,
+                    group_name=self._group_name,
+                )
+                ray.get(refs)
+        
     @ray_method
     def update_weights(self):
         """Update the model weights."""
@@ -899,7 +1033,7 @@ class TrainingWorker(SingleAcceleratorWorker):
     def _update_weights_hf_generator(self, submodule=None, final_update=True):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
-        assert self.rollout_device_mesh is not None
+        # assert self.rollout_device_mesh is not None
 
         model = self._engine.model
         if submodule:
@@ -972,7 +1106,7 @@ class TrainingWorker(SingleAcceleratorWorker):
     def _update_weights_by_layer(self):
         """Update the model weights."""
         self.endpoints["update_weights"] = "update_weights"
-        assert self.rollout_device_mesh is not None
+        # assert self.rollout_device_mesh is not None
 
         model = self._engine.model
         DEVICE_MODULE.empty_cache()
@@ -1264,6 +1398,39 @@ class TrainingWorker(SingleAcceleratorWorker):
             finished (bool): A flag indicating whether this is the final
                 batch of updates. Defaults to False.
         """
+        if is_colocate == False:
+            self._is_src_rank = dist.get_rank() == 0
+            if not self._is_src_rank or len(state_dict) == 0:
+                return
+
+            assert self._model_update_groups is not None
+            refs = [
+                engine.update_weights_from_distributed.remote(
+                    names=[name for name, _ in state_dict.items()],
+                    dtypes=[param.dtype for _, param in state_dict.items()],
+                    shapes=[param.shape for _, param in state_dict.items()],
+                    group_name=self._group_name,
+                )
+                for engine in self.rollout_workers
+            ]
+            
+            handles = []
+            # Broadcast parameters one by one with memory management
+            for _name, param in state_dict.items():
+                # torch.cuda.empty_cache()
+                # # Ensure tensor is contiguous and on the right device
+                param_data = param.data.contiguous()
+                # Synchronous broadcast to avoid memory buildup
+                handles.append(dist.broadcast(param_data, 0, group=self._model_update_groups, async_op=True))
+
+            for handle in handles:
+                handle.wait()
+
+            ray.get(refs)
+
+            torch.cuda.empty_cache()
+            return
+
         cpu_mesh = self.rollout_device_mesh["engine_parallel"]
         cpu_group = cpu_mesh.get_group()
         head_rank = cpu_mesh.mesh[0].item()
