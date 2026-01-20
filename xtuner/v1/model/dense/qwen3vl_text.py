@@ -55,6 +55,8 @@ class Qwen3VLTextDense(Qwen3Dense):
         if self.config.return_hidden_states:
             output["hidden_states"] = []
 
+        self._mark_dynamic(seq_ctx)
+
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds
         visual_pos_masks = seq_ctx.visual_pos_masks

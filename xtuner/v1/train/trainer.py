@@ -1462,7 +1462,7 @@ class Trainer:
         remaining_steps = self.total_step - self.cur_step
         avg_tokens_per_step = total_consumed_tokens_per_rank / self.cur_step
         remaining_tokens = remaining_steps * avg_tokens_per_step
-        eta_seconds = remaining_tokens / (tgs + 1e-12)
+        eta_seconds = remaining_tokens / max(tgs, 1)
         eta_hms = str(timedelta(seconds=int(eta_seconds)))
 
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]

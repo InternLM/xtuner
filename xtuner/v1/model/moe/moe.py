@@ -350,12 +350,17 @@ class MoE(BaseModel):
         cat_seq_ctx: SequenceContext | None = None
 
         moe_forward = False
+
+        for seq_ctx in seq_ctx_list:
+            self._mark_dynamic(seq_ctx)
+
         for idx, decoder_layer in self.layers.items():
             layer_idx = int(idx)
 
             if layer_idx < self.config.first_k_dense_replace:
                 if cat_seq_ctx is None:
                     cat_seq_ctx = SequenceContext.cat(seq_ctx_list)
+                    self._mark_dynamic(cat_seq_ctx)
                 # Dense decoder layer - process concated hidden states
                 cat_hidden_states = decoder_layer(
                     cat_hidden_states,
@@ -503,6 +508,8 @@ class MoE(BaseModel):
 
         output["router_logits"] = {}
         output["router_weights"] = {}
+
+        self._mark_dynamic(seq_ctx)
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
