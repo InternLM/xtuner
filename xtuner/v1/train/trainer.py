@@ -85,6 +85,20 @@ class ExpHistory(TypedDict):
     comment: NotRequired[str]
 
 
+class PerformanceStatistics(TypedDict):
+    local_step_consumed_tokens: int
+    local_step_consumed_img_tokens: int | None
+    step_consumed_tokens: int
+    total_consumed_tokens: int
+    total_consumed_tokens_per_rank: float
+    tgs: float
+    e2e_tgs: float
+    exp_tgs: float
+    eta_seconds: float
+    eta_hms: str
+    e2e_train_time: float
+
+
 class ExpInfo(BaseModel):
     model_config = ConfigDict(extra="forbid")
     history: list[ExpHistory]
@@ -739,16 +753,22 @@ class Trainer:
             self._total_consumed_samples += self._reduce_number_across_rank(consumed_samples)
             self._train_time = time_after_train_step - train_begin
 
+            # Compute training metrics
+            training_metrics = self._compute_performance_metrics(
+                local_step_consumed_tokens=other_log["step_consumed_tokens"],
+                local_step_consumed_img_tokens=other_log.get("step_consumed_img_tokens"),
+                step_consumed_tokens=reduced_step_consumed_tokens,
+                step_time=step_time,
+            )
+
             # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
             self._log_step(
                 loss_log=loss_log,
-                local_step_consumed_tokens=other_log["step_consumed_tokens"],
-                local_step_consumed_img_tokens=other_log["step_consumed_tokens"],
-                step_consumed_tokens=reduced_step_consumed_tokens,
+                training_metrics=training_metrics,
                 grad_norm=grad_norm.item(),
-                internal_metrics=internal_metrics,
                 data_time=data_time,
                 step_time=step_time,
+                internal_metrics=internal_metrics,
             )
 
             self._lr_scheduler.step()
@@ -1424,31 +1444,71 @@ class Trainer:
         else:
             yield
 
-    def _log_step(
+    def _compute_performance_metrics(
         self,
-        loss_log: LossLog,
-        step_consumed_tokens: int,
         local_step_consumed_tokens: int,
-        local_step_consumed_img_tokens: float | None,
-        grad_norm: float,
-        data_time: float,
+        local_step_consumed_img_tokens: int | None,
+        step_consumed_tokens: int,
         step_time: float,
-        internal_metrics: InternalMetrics | None = None,
-    ):
-        """Log the training step information."""
+    ) -> PerformanceStatistics:
+        """Compute training metrics including tokens and throughput statistics.
+
+        Args:
+            local_step_consumed_tokens (int): Tokens consumed in current step on current rank.
+            local_step_consumed_img_tokens (int | None): Image tokens consumed in current step on current rank.
+            step_consumed_tokens (int): Total tokens consumed in current step across all ranks.
+            step_time (float): Time spent on current training step in seconds.
+
+        Returns:
+            TrainingMetrics: Dictionary containing computed training metrics.
+        """
         e2e_train_time = self._train_time + self._train_time_offset
+        total_consumed_tokens_per_rank = self._total_consumed_tokens / self.world_size
 
         tgs = local_step_consumed_tokens / step_time
-        total_consumed_tokens_per_rank = self._total_consumed_tokens / self.world_size
         e2e_tgs = total_consumed_tokens_per_rank / e2e_train_time
-        exp_tgs = self._exp_consumed_tokens / self._train_time
-        lr = self._lr_scheduler.get_last_lr()[0]
+        exp_tgs = self._exp_consumed_tokens / self.world_size / self._train_time
 
         remaining_steps = self.total_step - self.cur_step
         avg_tokens_per_step = total_consumed_tokens_per_rank / self.cur_step
         remaining_tokens = remaining_steps * avg_tokens_per_step
         eta_seconds = remaining_tokens / max(tgs, 1)
         eta_hms = str(timedelta(seconds=int(eta_seconds)))
+
+        return PerformanceStatistics(
+            local_step_consumed_tokens=local_step_consumed_tokens,
+            local_step_consumed_img_tokens=local_step_consumed_img_tokens,
+            step_consumed_tokens=step_consumed_tokens,
+            total_consumed_tokens=self._total_consumed_tokens,
+            total_consumed_tokens_per_rank=total_consumed_tokens_per_rank,
+            tgs=tgs,
+            e2e_tgs=e2e_tgs,
+            exp_tgs=exp_tgs,
+            eta_seconds=eta_seconds,
+            eta_hms=eta_hms,
+            e2e_train_time=e2e_train_time,
+        )
+
+    def _log_step(
+        self,
+        loss_log: LossLog,
+        training_metrics: PerformanceStatistics,
+        grad_norm: float,
+        data_time: float,
+        step_time: float,
+        internal_metrics: InternalMetrics | None = None,
+    ):
+        """Log the training step information.
+
+        Args:
+            loss_log (LossLog): Loss values for the current step.
+            training_metrics (TrainingMetrics): Computed training metrics including tokens and throughput.
+            grad_norm (float): Gradient norm value.
+            data_time (float): Time spent loading data in seconds.
+            step_time (float): Time spent on training step in seconds.
+            internal_metrics (InternalMetrics | None): Internal metrics from the model.
+        """
+        lr = self._lr_scheduler.get_last_lr()[0]
 
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
         loss_log_str = ", ".join(loss_log_list)
@@ -1460,25 +1520,25 @@ class Trainer:
         if internal_metrics:
             flattened_internal_metrics = flatten_internal_metrics_for_logs(internal_metrics)
 
-        if local_step_consumed_img_tokens is not None:
-            img_tokens_str = f"img_tokens: {local_step_consumed_img_tokens} "
+        if training_metrics["local_step_consumed_img_tokens"] is not None:
+            img_tokens_str = f"img_tokens: {training_metrics['local_step_consumed_img_tokens']} "
         else:
             img_tokens_str = ""
 
         self.logger.info(
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
             f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
-            f"text_tokens: {local_step_consumed_tokens} {img_tokens_str}"
-            f"step_consumed_tokens: {step_consumed_tokens} "
-            f"total_consumed_tokens: {self._total_consumed_tokens} "
+            f"text_tokens: {training_metrics['local_step_consumed_tokens']} {img_tokens_str}"
+            f"step_consumed_tokens: {training_metrics['step_consumed_tokens']} "
+            f"total_consumed_tokens: {training_metrics['total_consumed_tokens']} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"tgs: {tgs:.1f} "
-            f"exp_tgs: {exp_tgs:.1f} "
-            f"e2e_tgs: {e2e_tgs:.1f} "
-            f"eta: {eta_hms} "
+            f"tgs: {training_metrics['tgs']:.1f} "
+            f"exp_tgs: {training_metrics['exp_tgs']:.1f} "
+            f"e2e_tgs: {training_metrics['e2e_tgs']:.1f} "
+            f"eta: {training_metrics['eta_hms']} "
         )
 
         log_scalars = {
@@ -1486,13 +1546,13 @@ class Trainer:
             "time/data_time": round(data_time, 4),
             "time/step_time": round(step_time, 4),
             "time/train_time": round(self._train_time, 4),
-            "time/eta_seconds": round(eta_seconds, 1),
-            "runtime_info/text_tokens": local_step_consumed_tokens,
-            "runtime_info/step_consumed_tokens": step_consumed_tokens,
-            "runtime_info/total_consumed_tokens": self._total_consumed_tokens,
-            "runtime_info/tgs": tgs,
-            "runtime_info/exp_tgs": exp_tgs,
-            "runtime_info/e2e_tgs": e2e_tgs,
+            "time/eta_seconds": round(training_metrics["eta_seconds"], 1),
+            "runtime_info/text_tokens": training_metrics["local_step_consumed_tokens"],
+            "runtime_info/step_consumed_tokens": training_metrics["step_consumed_tokens"],
+            "runtime_info/total_consumed_tokens": training_metrics["total_consumed_tokens"],
+            "runtime_info/tgs": training_metrics["tgs"],
+            "runtime_info/exp_tgs": training_metrics["exp_tgs"],
+            "runtime_info/e2e_tgs": training_metrics["e2e_tgs"],
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
