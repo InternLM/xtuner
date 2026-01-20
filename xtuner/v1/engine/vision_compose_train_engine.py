@@ -224,8 +224,20 @@ class VisionComposeTrainEngine(TrainEngine):
             reduced_z_loss = step_z_loss
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
             loss_log["reduced_z_loss"] = reduced_z_loss.item()
-        other_log["step_consumed_tokens"] = cast(int, step_consumed_tokens.item())
+
+        other_log["step_consumed_tokens"] = int(step_consumed_tokens.item())
         other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
         other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
-        other_log["step_consumed_img_tokens"] = step_consumed_img_tokens
+        other_log["step_consumed_img_tokens"] = int(step_consumed_img_tokens)
+
+        extra_info = other_log.get("extra_info", {})  # type: ignore
+
+        # TODO: @duanyanhui `extra_info` should be redesigned.
+        if not isinstance(extra_info, ModelForwardExtraLogInfo):
+            extra_info = ModelForwardExtraLogInfo(extra_info)
+        loss_log.update(extra_info.get())
+
+        if "maxvio" in other_log:
+            loss_log["maxvio"] = other_log["maxvio"]  # type: ignore
+        loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]  # type: ignore
         return loss_log, other_log
