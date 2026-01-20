@@ -38,7 +38,7 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig, XTunerBaseModelCo
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
-from xtuner.v1.patch import patch_default_save_plan
+from xtuner.v1.patch import patch_default_save_plan, patch_fsdp_agrs
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.profiler.prober_utils import setup_prober_list
@@ -483,6 +483,7 @@ class Trainer:
         self._micro_batch_size: int | None = None
         if skip_checkpoint_validation:
             patch_default_save_plan()
+        patch_fsdp_agrs()
 
         if isinstance(profile_step, int):
             profile_step = [profile_step]
@@ -633,6 +634,13 @@ class Trainer:
         setup_prober_list(self.exp_dir, self._profile_step, self._engine.model, prober_list)
 
         self._metrics_recorder = self._maybe_init_model_metrics_recorder(internal_metrics_cfg)
+
+        if int(os.getenv("XTUNER_ENABLE_CUSTOM_COMMUNICATION", 0)):
+            print("Using custom communication library")
+            import ib_wrapper
+
+            group = dist.new_group(list(range(dist.get_world_size())))
+            ib_wrapper.Buffer(group, master_rank=dist.get_world_size() - 1, explicitly_destroy=True)
 
     @classmethod
     def from_config(cls, config: TrainerConfig) -> Self:
