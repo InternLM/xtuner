@@ -8,7 +8,7 @@ import torch
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
-from xtuner.v1.rl.utils import get_seqlen_balanced_partitions
+from xtuner.v1.rl.utils import calculate_workload, get_seqlen_balanced_partitions
 from xtuner.v1.utils import get_logger
 
 from .worker import WorkerInputItem
@@ -29,6 +29,7 @@ class DataBatchPacker:
         self.world_size = world_size
         self.data_replicate_size = data_replicate_size
         self.optimizer_steps = optimizer_steps
+        self.split_size = 1024
         if worker_log_dir is not None:
             self.worker_log_dir = Path(worker_log_dir) if isinstance(worker_log_dir, str) else worker_log_dir
             self.logger = get_logger(log_dir=self.worker_log_dir, tag="TrainingController")
@@ -151,7 +152,7 @@ class DataBatchPacker:
             pad_num = self.dp_size - len(data_batches)
             for _ in range(pad_num):
                 data_batches.append(
-                    self._create_padding_item(data_batches[0]["seq_ctx"].input_ids.shape[1], self.pack_max_length)  # type: ignore[union-attr]
+                    self._create_padding_item(self.pack_max_length, self.pack_max_length)  # type: ignore[union-attr]
                 )
         batches_per_dp_group: list[list[WorkerInputItem]] = np.array_split(data_batches, self.dp_size)
         max_packs_per_step = [0] * self.optimizer_steps
@@ -222,23 +223,22 @@ class DataBatchPacker:
     def _balance_split_batch(self, data_batches: list[WorkerInputItem], partition_size) -> list[list[WorkerInputItem]]:
         """Reorder the data on single controller such that each dp rank gets
         similar total tokens."""
+        num_samples = len(data_batches)
+        remainder = num_samples % partition_size
+        if remainder != 0:  # or num_samples == 0:
+            pad_num = partition_size - remainder
+            for _ in range(pad_num):
+                data_batches.append(self._create_padding_item(self.pack_max_length, self.pack_max_length))
+
         global_seqlen_lst = [data["seq_ctx"].input_ids.numel() for data in data_batches]  # type: ignore[union-attr]
+
+        workloads = calculate_workload(global_seqlen_lst)
+        global_partition_lst = get_seqlen_balanced_partitions(workloads, k_partitions=partition_size, equal_size=True)
+
         balanced_batches: list[list[WorkerInputItem]] = []
-        if len(global_seqlen_lst) >= partition_size:
-            global_partition_lst = get_seqlen_balanced_partitions(
-                global_seqlen_lst, k_partitions=partition_size, equal_size=True
-            )
-            tokens_in_partition = []
-            for partition in global_partition_lst:
-                partition_batch = [data_batches[i] for i in partition]
-                tokens_in_partition.append(sum(data["seq_ctx"].input_ids.numel() for data in partition_batch))
-                balanced_batches.append(partition_batch)
-            self.logger.info(f"Balanced split into {partition_size} partitions with tokens: {tokens_in_partition}")
-        else:
-            balanced_batches = [data_batches]
-            pad_num = partition_size - len(global_seqlen_lst)
-            for i in range(pad_num):
-                balanced_batches.append([self._create_padding_item(global_seqlen_lst[0], self.pack_max_length)])
+        for partition in global_partition_lst:
+            partition_batch = [data_batches[i] for i in partition]
+            balanced_batches.append(partition_batch)
         return balanced_batches
 
     def _set_data_batch_properties(self, data_batches: list[WorkerInputItem]):
@@ -293,10 +293,10 @@ class DataBatchPacker:
         packed_seq_ctx = SequenceContext.cat(seq_ctx_list)
         packed_shifted_labels = torch.cat(label_list, dim=1)  # type: ignore[arg-type]
         packed_shifted_labels = cast(torch.LongTensor, packed_shifted_labels)
-        cu_seq_lens_q = packed_seq_ctx.cu_seq_lens_q
-        packed_num_tokens = cu_seq_lens_q[1:] - cu_seq_lens_q[:-1]
+        # cu_seq_lens_q = packed_seq_ctx.cu_seq_lens_q
+        # packed_num_tokens = cu_seq_lens_q[1:] - cu_seq_lens_q[:-1]
         packed_advantages = torch.cat(advantage_list, dim=1)
-        packed_advantages = torch.repeat_interleave(packed_advantages, packed_num_tokens, dim=1)
+        # packed_advantages = torch.repeat_interleave(packed_advantages, packed_num_tokens, dim=1)
         if self.data_batch_properties["has_rollout_logprobs"]:
             cast_rollout_logprobs_list = [cast(torch.Tensor, item) for item in rollout_logprobs_list]
             packed_rollout_logprobs = torch.cat(cast_rollout_logprobs_list, dim=1)
@@ -349,9 +349,8 @@ class DataBatchPacker:
         if total_length > pack_max_length:
             # balance mini batches across gradient accumulation steps
             num_packs = math.ceil(total_length / pack_max_length)
-            partitions_indices = get_seqlen_balanced_partitions(
-                seqlen_list=seqlen_list, k_partitions=num_packs, equal_size=False
-            )
+            workloads = calculate_workload(seqlen_list)
+            partitions_indices = get_seqlen_balanced_partitions(workloads, k_partitions=num_packs, equal_size=False)
             for partition in partitions_indices:
                 batch_list = [step_mini_batches[i] for i in partition]
                 batch_list_for_pack.append(batch_list)
@@ -406,13 +405,9 @@ class DataBatchPacker:
             pad_seq_ctx.rollout_routed_experts = pad_rand_index
 
         pad_labels = cast(torch.LongTensor, torch.full((1, pad_len), -100, dtype=torch.int64, device="cpu"))
-        pad_advantage_length = pack_max_length if pad_len == pack_max_length else math.ceil(pad_len / split_size)
-        pad_advantage = torch.full(
-            (1, pad_advantage_length),
-            -100,
-            dtype=torch.float32,
-            device="cpu",
-        )
+        # pad_advantage_length = pack_max_length if pad_len == pack_max_length else math.ceil(pad_len / split_size)
+
+        pad_advantage = torch.full((1, pad_len), -100, dtype=torch.float32, device="cpu")
         pad_rollout_logprobs = (
             torch.zeros(1, pad_len, dtype=torch.float32, device="cpu")
             if self.data_batch_properties["has_rollout_logprobs"]

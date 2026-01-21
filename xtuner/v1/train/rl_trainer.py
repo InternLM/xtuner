@@ -761,7 +761,8 @@ class RLTrainer:
 
                 prompt_len_list.append(len(prompt_ids))
                 response_len_list.append(len(response_ids))
-                advantages_list.extend([advantages[i]] * len(response_ids))
+                token_advantages = torch.repeat_interleave(advantages[i], len(input_ids))
+                advantages_list.extend(token_advantages)
 
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
@@ -780,7 +781,7 @@ class RLTrainer:
                 data_dict: WorkerInputItem = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels,
-                    "advantages": advantages[i],
+                    "advantages": token_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
 

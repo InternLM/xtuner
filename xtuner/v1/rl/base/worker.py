@@ -153,7 +153,7 @@ class WorkerConfig(BaseModel):
 class WorkerInputItem(TypedDict):
     seq_ctx: SequenceContext
     shifted_labels: torch.LongTensor
-    advantages: torch.Tensor
+    advantages: torch.Tensor  # token-level advantages
     rollout_logprobs: torch.Tensor | None
 
 
