@@ -621,6 +621,7 @@ class ReplayBuffer:
             self.storage,
         )
         self.post_processor_func = config.postprocessor_func
+        self._prev_total_finished_samples = 0
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="ReplayBuffer")
 
     def get_train_dataset_length(self):
@@ -743,6 +744,16 @@ class ReplayBuffer:
     def get_unfinished_samples(self):
         """Returns the number of unfinished sample groups in the storage."""
         return self.storage.get_unfinished_samples()
+    
+    # 返回当前一次 step 中完成的 sample 数量
+    def get_total_finished_samples(self):
+        """Returns the total number of sample groups in the storage."""
+        current_total_finished_samples = len(self.storage._root2actions) - self._prev_total_finished_samples
+        return current_total_finished_samples
+    
+    def reset_finished_samples(self):
+        """Sets the total number of sample groups in the storage to zero."""
+        self._prev_total_finished_samples = len(self.storage._root2actions)
 
     def clear(self):
         """Clears the replay buffer storage."""

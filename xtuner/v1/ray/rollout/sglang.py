@@ -8,6 +8,7 @@ from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
 
 from .worker import RolloutWorker
+import logging
 
 
 class SGLangWorker(RolloutWorker):
@@ -22,6 +23,12 @@ class SGLangWorker(RolloutWorker):
     ):
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         from sglang.srt.entrypoints.http_server import launch_server
+
+        # 禁用客户端 HTTP 请求日志
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("httpcore.connection").setLevel(logging.WARNING)
+        logging.getLogger("httpcore.http11").setLevel(logging.WARNING)
 
         self.server_func = launch_server
         self.endpoints["health_generate"] = "health_generate"

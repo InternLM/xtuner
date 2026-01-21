@@ -14,7 +14,7 @@ from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict, model_validator
 from ray.util.placement_group import placement_group
 from typing_extensions import Self
-
+import time 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import TensorboardWriter
 from xtuner.v1.data_proto.rl_data import is_valid_for_training
@@ -90,6 +90,7 @@ class RLTrainerConfig(BaseModel):
     debug: bool = False
     debug_rollout: bool = False
     rollout_steps: int | None = None
+    require_batches: int = 0
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -232,6 +233,7 @@ class RLTrainer:
         debug_rollout: bool = False,
         rollout_steps: int | None = None,
         trainer_cfg: RLTrainerConfig | None = None,
+        require_batches: int = 0,
     ):
         """Initialize the RL training system."""
         if os.environ.get("XTUNER_USE_FA3", "0") == "1":
@@ -247,6 +249,7 @@ class RLTrainer:
 
         self._total_epochs = total_epochs
         self._cur_step = 0
+        self.require_batches = require_batches
 
         if skip_checkpoint_validation:
             patch_default_save_plan()
@@ -455,6 +458,7 @@ class RLTrainer:
             debug_rollout=config.debug_rollout,
             rollout_steps=config.rollout_steps,
             trainer_cfg=config,
+            require_batches=config.require_batches,
         )
         return self
 
@@ -646,6 +650,57 @@ class RLTrainer:
                 tag_scalar_dict=tb_scores,
                 global_step=rollout_idx,
             )
+    
+    def async_fit(self):
+        self.logger.info("Start RL training")
+        self._real_step = 0
+        if self._real_step >= self._rollout_steps:
+            self.logger.info(f"Rollout steps {self._rollout_steps} reached, stop training")
+            return
+        
+        rollout_idx = 0
+
+        self._rollout_dataflow.run.remote(self._global_batch_size)
+        self._intern_global_size = self._global_batch_size // self.require_batches
+        self._intern_count = 0
+        self._real_step = 0
+
+        while True:
+            if self._real_step >= self._rollout_steps:
+                self.logger.info(f"Rollout steps {self._rollout_steps} reached, stop training")
+                break
+            step_timer_dict = {}
+            self._intern_count += 1
+            rollout_idx += 1
+            self._cur_step = rollout_idx
+
+            with timer("step", step_timer_dict):
+                data_groups, multimodal_train_infos = self._get_samples_from_dataflow()
+                self.logger.info(f"Get {len(data_groups)}/{self._intern_count} data groups from dataflow to train.")
+                self._train_step(rollout_idx, data_groups, multimodal_train_infos, step_timer_dict)
+                if self._intern_count % self.require_batches == 0:
+                    self.logger.info(f"Finish {self._intern_count}/{rollout_idx} training batches. start sync weights and save.")
+                    self._sync_weights_and_save(rollout_idx, step_timer_dict)
+
+            timer_log_str = f"Rollout {rollout_idx} training finished and timing listed: \n"
+            timer_log_str += timer_logger(step_timer_dict)
+            self.logger.info(timer_log_str)
+
+            if self._cur_step % self.require_batches == 0:
+                self._real_step += 1
+                # 整个一步训练完成，需要重新发送数据
+                self.logger.info(f"Start new rollout {self._real_step}/{self._rollout_steps}")
+                self._rollout_dataflow.run.remote(self._global_batch_size)
+
+        self.logger.info("RL training finished.")
+    
+    def _get_samples_from_dataflow(self):
+        finished_samples_count = 0
+        while finished_samples_count < self._intern_global_size:
+               finished_samples_count = ray.get(self._rollout_dataflow.get_finished_samples_count.remote())
+               time.sleep(1)
+        data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.get_async_data.remote(self._intern_global_size))
+        return data_groups, multimodal_train_infos
 
     def fit(self):
         """Run the RL training loop.

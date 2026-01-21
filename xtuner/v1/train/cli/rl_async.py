@@ -57,7 +57,14 @@ def main(
 
     trainer_cfg = Config.fromfile(config)["trainer"]
     trainer = RLTrainer.from_config(trainer_cfg)
-    trainer.fit()
+
+    require_batches = trainer_cfg.require_batches
+    if require_batches ==0:
+        print("Start fit")
+        trainer.fit()
+    else:
+        print(f"Start async fit, require_batches={require_batches}")
+        trainer.async_fit()
 
     if dist.is_initialized():
         dist.destroy_process_group()

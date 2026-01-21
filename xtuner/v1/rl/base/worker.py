@@ -1003,13 +1003,13 @@ class TrainingWorker(SingleAcceleratorWorker):
                         i*self.rollout_num_gpus_per_engine + 1,
                         world_size,
                         self._group_name,
-                        backend="nccl", # nccl 报错，暂时没有解决
+                        backend="gloo", # nccl 报错，暂时没有解决
                     )
                     for i, engine in enumerate(rollout_workers)
                 ]
 
                 self._model_update_groups = init_custom_process_group(
-                    backend="nccl",
+                    backend="gloo",
                     init_method=f"tcp://{master_address}:{master_port}",
                     world_size=world_size,
                     rank=0,
