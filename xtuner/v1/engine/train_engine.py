@@ -281,8 +281,8 @@ class TrainEngine:
                 step_consumed_tokens += seq_ctx.mask.sum()
 
                 num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
-                efficient_forward_tokens += (num_tokens**2).sum()
-                total_forward_tokens += (num_tokens.sum()) ** 2
+                efficient_forward_tokens += (num_tokens.long() ** 2).sum()
+                total_forward_tokens += (num_tokens.long().sum()) ** 2
 
             if self.intra_layer_micro_batch == 1:
                 output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])

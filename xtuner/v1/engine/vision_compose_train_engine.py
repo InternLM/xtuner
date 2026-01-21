@@ -167,8 +167,8 @@ class VisionComposeTrainEngine(TrainEngine):
                         step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
 
                 num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
-                efficient_forward_tokens += (num_tokens**2).sum()
-                total_forward_tokens += (num_tokens.sum()) ** 2
+                efficient_forward_tokens += (num_tokens.long() ** 2).sum()
+                total_forward_tokens += (num_tokens.long().sum()) ** 2
 
             # todo: support intra_layer_micro_batch
             output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
