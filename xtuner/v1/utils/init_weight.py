@@ -53,7 +53,7 @@ def default_init_weights(module: nn.Module) -> set[str]:
             init_params(bias, nn.init.zeros_)
             initialized_params.add(f"{name}.bias")
 
-        elif hasattr(module, "weight") and module.weight is not None:
+        if hasattr(module, "weight") and module.weight is not None:
             weight = cast(torch.Tensor, module.weight)
             if "norm" in name:
                 init_params(weight, nn.init.ones_)
