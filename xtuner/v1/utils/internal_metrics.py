@@ -8,9 +8,8 @@ from torch import nn
 from torch.utils.hooks import RemovableHandle
 from typing_extensions import TypedDict
 
-from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.model import MoE
-from xtuner.v1.model.base import ModelItem
+from xtuner.v1.model.base import BaseModel, ModelItem
 from xtuner.v1.module import LMHead, MHAConfig, MLAConfig, MultiHeadAttention, MultiLatentAttention
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
@@ -68,10 +67,9 @@ class InternalMetricsConfig(BaseModel):
 
 
 class InternalMetricsRecorder:
-    def __init__(self, internal_metrics_cfg: InternalMetricsConfig, engine: TrainEngine):
+    def __init__(self, internal_metrics_cfg: InternalMetricsConfig, model: BaseModel):
         self.internal_metrics_cfg = internal_metrics_cfg
-        self.model = engine.model
-        self.intra_layer_micro_batch = engine.intra_layer_micro_batch
+        self.model = model
         self.hooks: list[RemovableHandle] = []
         self._attn_monitor_type: str | None = None
         self.attn_max_lse: dict[str, torch.Tensor] = {}
@@ -169,25 +167,10 @@ class InternalMetricsRecorder:
 
         # do dummy forward to get metrics
         if self.need_dummy_forward:
-            for i in range(0, len(data_batches), self.intra_layer_micro_batch):
-                data_batch = data_batches[i : i + self.intra_layer_micro_batch]
-                seq_ctx_list = []
-                loss_ctx_list = []
-                for data in data_batch:
-                    seq_ctx = data["seq_ctx"]
-                    loss_ctx = data["loss_ctx"]
-                    seq_ctx_list.append(seq_ctx)
-                    loss_ctx_list.append(loss_ctx)
-                if self.intra_layer_micro_batch == 1:
-                    output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0], **additional_kwargs)
-                else:
-                    # although we dont need loss at this point, we still need loss_ctx for micro-batch forward
-                    output = self.model(
-                        seq_ctx=seq_ctx_list,
-                        loss_ctx=loss_ctx_list,
-                        **additional_kwargs,
-                    )
-
+            for i in range(0, len(data_batches)):
+                data_batch = data_batches[i]
+                seq_ctx = data_batch["seq_ctx"]
+                output = self.model(seq_ctx=seq_ctx, loss_ctx=None, **additional_kwargs)
                 if (
                     self.internal_metrics_cfg.monitor_moe_load_balance_stats
                     and (cur_tokens_per_expert := output.get("tokens_per_expert_global")) is not None
