@@ -832,7 +832,7 @@ class Trainer:
             torch._dynamo.config.skip_nnmodule_hook_guards = (
                 False  # otherwise the hook will be ignored for compiled modules
             )
-            return InternalMetricsRecorder(internal_metrics_cfg, self._engine)
+            return InternalMetricsRecorder(internal_metrics_cfg, self._engine.model)
 
         else:
             return None
