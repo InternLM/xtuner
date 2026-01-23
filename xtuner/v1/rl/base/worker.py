@@ -4,7 +4,7 @@ import os
 import time
 from itertools import chain
 from pathlib import Path
-from typing import Dict, Iterable, List, TypeAlias, TypedDict, cast
+from typing import Dict, Iterable, List, TypeAlias, cast
 
 import ray
 import requests
@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict
 
 from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig

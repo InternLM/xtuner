@@ -1,6 +1,5 @@
 import traceback
 from functools import lru_cache
-from typing import TypedDict
 
 import torch
 import torch.nn as nn
@@ -14,6 +13,7 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.flex_attention import (
     flex_attention as torch_flex_attention,
 )
+from typing_extensions import TypedDict
 
 from transformers.models.llama.modeling_llama import repeat_kv
 
