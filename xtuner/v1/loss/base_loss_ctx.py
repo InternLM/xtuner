@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, Generic, List, Literal, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -94,6 +94,9 @@ class BaseLossConfig(BaseModel):
 
     @property
     def loss_ctx_cls(self) -> type["BaseLossContext"]:
+        raise NotImplementedError
+
+    def build_batches(self, *args, **kwargs) -> List["BaseLossContext"]:
         raise NotImplementedError
 
 

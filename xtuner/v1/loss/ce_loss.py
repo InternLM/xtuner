@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, List, Literal, cast
 
 import torch
 import torch.distributed as dist
@@ -9,10 +9,15 @@ from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
+from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
+from xtuner.v1.utils.device import get_device
 
 # from xtuner.v1.profiler.prober import ProberList
 from .utils import sp_gather, sp_split
+
+
+DEVICE = get_device()
 
 
 class CELossConfig(BaseLossConfig):
@@ -38,6 +43,35 @@ class CELossConfig(BaseLossConfig):
     def model_post_init(self, __context: Any) -> None:
         if self.mode == "liger":
             assert self.loss_reduction == "token", "Currently, cannot use liger kernel with sample or square reduction"
+
+    def build_batches(  # type: ignore[override]
+        self,
+        seq_ctx_list: list[SequenceContext],
+        shifted_labels_list: list[torch.Tensor],
+        sp_mesh: DeviceMesh | None = None,
+    ) -> List["CELossContext"]:
+        loss_ctx_input_list: list[CELossContextInputItem] = []
+        for shifted_labels in shifted_labels_list:
+            loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels).to(DEVICE)
+            if sp_mesh is not None and sp_mesh.size() > 1:
+                loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
+            loss_ctx_input_list.append(loss_ctx_input)
+
+        LossContext = self.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list,
+            self,
+            cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
+            sp_mesh=sp_mesh,
+        )
+        loss_ctx_list = []
+        for loss_kwargs in batches_loss_kwargs:
+            loss_ctx = LossContext(
+                loss_cfg=self,
+                loss_kwargs=loss_kwargs,
+            )
+            loss_ctx_list.append(loss_ctx)
+        return loss_ctx_list
 
 
 class CELossKwargs(BaseLossKwargs):

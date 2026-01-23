@@ -33,7 +33,6 @@ from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, Da
 from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
 from xtuner.v1.loss import CELossConfig
-from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model.base import ModelItem, TransformerConfig, XTunerBaseModelConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.moe.moe import MoEConfig
@@ -791,39 +790,23 @@ class Trainer:
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
         seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_input_list: list[CELossContextInputItem] = []
+        shifted_labels_list: list[torch.Tensor] = []
 
         for data in data_batch:
-            seq_ctx = data["seq_ctx"].to(DEVICE)
-            loss_ctx_input = CELossContextInputItem(shifted_labels=data["shifted_labels"]).to(DEVICE)
+            seq_ctx = data.pop("seq_ctx").to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
-                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx_input_list.append(loss_ctx_input)
+            shifted_labels_list.append(data["shifted_labels"])
 
         # TODO: Consider moving data_batch deletion to the caller for better memory management.
         del data_batch
 
-        LossContext = self.loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list,
-            self.loss_cfg,
-            cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
-            sp_mesh=self.sp_mesh,
-        )
-        engine_input = []
-        for seq_ctx, loss_kwargs in zip(seq_ctx_list, batches_loss_kwargs):
-            loss_ctx = LossContext(
-                loss_cfg=self.loss_cfg,
-                loss_kwargs=loss_kwargs,
-            )
-            engine_input.append(
-                ModelItem(
-                    seq_ctx=seq_ctx,
-                    loss_ctx=loss_ctx,
-                )
-            )
+        loss_ctx_list = self.loss_cfg.build_batches(seq_ctx_list, shifted_labels_list, self.sp_mesh)
+
+        engine_input = [
+            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+        ]
         return engine_input
 
     def _reduce_number_across_rank(self, rank_number: int | float) -> int:
