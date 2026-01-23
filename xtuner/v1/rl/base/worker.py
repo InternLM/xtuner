@@ -52,7 +52,7 @@ from xtuner.v1.utils import (
 from xtuner.v1.utils.load_spec import LoadEnum
 
 from ..loss_fn import kl_penalty
-from .loss import BaseRLLossConfig, RLLossContextInputItem
+from .loss import BaseRLLossConfig
 from .rollout_is import merge_rollout_is_metrics
 
 
@@ -369,27 +369,30 @@ class TrainingWorker(SingleAcceleratorWorker):
     def compute_actor_logprobs(
         self,
         seq_ctx_list: list[SequenceContext],
-        loss_ctx_input_list: list[RLLossContextInputItem],
-    ) -> list[RLLossContextInputItem]:
+        shifted_labels_list: list[torch.Tensor],
+    ) -> list[torch.Tensor]:
         # precompute float8 dynamic scale only once
         self._engine.maybe_precompute_float8_dynamic_scale_for_fsdp()
-        for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
+        old_logprobs_list: list[torch.Tensor] = []
+        for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
             output = self._engine.forward_only(seq_ctx=seq_ctx)
-            loss_ctx_input.old_logprobs = gather_logprobs(output["logits"], loss_ctx_input.shifted_labels)
-        return loss_ctx_input_list
+            old_logprobs = gather_logprobs(output["logits"], shifted_labels)
+            old_logprobs_list.append(old_logprobs)
+        return old_logprobs_list
 
     def compute_ref_logprobs(
-        self, seq_ctx_list: list[SequenceContext], loss_ctx_input_list: list[RLLossContextInputItem]
-    ) -> list[RLLossContextInputItem]:
+        self, seq_ctx_list: list[SequenceContext], shifted_labels_list: list[torch.Tensor]
+    ) -> list[torch.Tensor]:
         assert self._has_ref
         self._ref_model.to_device(DEVICE)
-        for seq_ctx, loss_ctx_input in zip(seq_ctx_list, loss_ctx_input_list):
+        ref_logprobs_list: list[torch.Tensor] = []
+        for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
             with torch.no_grad():
                 ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
-            ref_logprobs = gather_logprobs(ref_output["logits"], loss_ctx_input.shifted_labels)
-            loss_ctx_input.ref_logprobs = ref_logprobs
+            ref_logprobs = gather_logprobs(ref_output["logits"], shifted_labels)
+            ref_logprobs_list.append(ref_logprobs)
         self._ref_model.to_device("cpu")
-        return loss_ctx_input_list
+        return ref_logprobs_list
 
     def _get_rl_other_log(self, other_log: OtherLog) -> RLOtherLog:
         from xtuner.v1.model.utils import ModelForwardExtraLogInfo
@@ -428,8 +431,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             )
 
         seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_input_list: list[RLLossContextInputItem] = []
-        rollout_logprobs_list: list[torch.Tensor | None] = []
+        # loss_ctx_input_list: list[RLLossContextInputItem] = []
         # convert dummy padding experts to real size
 
         language_cfg = (
@@ -438,6 +440,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             else self.config.model_cfg
         )
 
+        shifted_labels_list: list[torch.Tensor] = []
+        advantages_list: list[torch.Tensor] = []
+        rollout_logprobs_list: list[torch.Tensor | None] = []
         for data in data_batches:
             seq_ctx = data["seq_ctx"]
             pixel_values = seq_ctx.pixel_values
@@ -510,54 +515,61 @@ class TrainingWorker(SingleAcceleratorWorker):
             if rollout_logprobs is not None:
                 rollout_logprobs = rollout_logprobs.to(DEVICE)
                 rollout_logprobs_list.append(rollout_logprobs)
-            loss_ctx_input = RLLossContextInputItem(
-                shifted_labels=data["shifted_labels"],
-                advantages=data["advantages"],
-                rollout_logprobs=rollout_logprobs,
-            ).to(DEVICE)
+            else:
+                rollout_logprobs_list.append(None)
+
+            shifted_labels_list.append(data["shifted_labels"])
+            advantages_list.append(data["advantages"])
+            rollout_logprobs_list.append(rollout_logprobs)
+
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(self.sp_mesh)
-                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
+                # loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx_input_list.append(loss_ctx_input)
+            # loss_ctx_input_list.append(loss_ctx_input)
 
         del data_batches
 
         rank_grad_tokens: torch.Tensor | None = None
-        for loss_ctx_input in loss_ctx_input_list:
-            mask = loss_ctx_input.shifted_labels != -100
+        for shifted_labels in shifted_labels_list:
+            mask = shifted_labels != -100
             grad_tokens = mask.sum()
             rank_grad_tokens = grad_tokens if rank_grad_tokens is None else rank_grad_tokens + grad_tokens
         rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
-        global_grad_tokens = rank_grad_tokens
-        dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
+        dist.all_reduce(rank_grad_tokens, op=dist.ReduceOp.SUM)
+        global_grad_tokens = rank_grad_tokens / self.sp_mesh.size(0)
 
         # old logprobs are inplaced updated in compute_actor_logprobs
-        loss_ctx_input_list = self.compute_actor_logprobs(seq_ctx_list, loss_ctx_input_list)
+        old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
+
         sum_entropy: torch.Tensor | None = None
         sum_rollout_entropy: torch.Tensor | None = None
         if len(rollout_logprobs_list) > 0:
-            assert len(rollout_logprobs_list) == len(loss_ctx_input_list), (
-                f"rollout_logprobs_list {len(rollout_logprobs_list)} vs loss_ctx_input_list {len(loss_ctx_input_list)}"
+            assert len(rollout_logprobs_list) == len(shifted_labels_list), (
+                f"rollout_logprobs_list {len(rollout_logprobs_list)} vs shifted_labels_list {len(shifted_labels_list)}"
+            )
+            assert len(old_logprobs_list) == len(shifted_labels_list), (
+                f"old_logprobs_list {len(old_logprobs_list)} vs shifted_labels_list {len(shifted_labels_list)}"
             )
         all_rollout_is_metrics = []
         all_mismatch_metrics = []
-        for i, loss_ctx_input in enumerate(loss_ctx_input_list):
-            mask = loss_ctx_input.shifted_labels != -100
-            entropy = -(cast(torch.Tensor, loss_ctx_input.old_logprobs) * mask).sum()
+        rollout_is_weights_list: list[torch.Tensor | None] = []
+        for i, shifted_labels in enumerate(shifted_labels_list):
+            mask = shifted_labels != -100
+            entropy = -(cast(torch.Tensor, old_logprobs_list[i]) * mask).sum()
             sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
-            if loss_ctx_input.rollout_logprobs is not None:
-                rollout_entropy = -(cast(torch.Tensor, loss_ctx_input.rollout_logprobs) * mask).sum()
+            if rollout_logprobs_list[i] is not None:
+                rollout_entropy = -(cast(torch.Tensor, rollout_logprobs_list[i]) * mask).sum()
                 sum_rollout_entropy = (
                     rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
                 )
 
-            if len(rollout_logprobs_list) > 0:
+            if len(rollout_logprobs_list) > 0 and rollout_logprobs_list[i] is not None:
                 # calculate importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
 
-                old_logprobs = loss_ctx_input.old_logprobs
+                old_logprobs = old_logprobs_list[i]
                 if self.sp_mesh and self.sp_mesh.size() > 1:
                     old_logprobs = sp_gather(old_logprobs, self.sp_mesh, dim=1)
                     old_logprobs = old_logprobs[:, : rollout_logprobs_list[i].size(1)]  # type: ignore
@@ -574,20 +586,23 @@ class TrainingWorker(SingleAcceleratorWorker):
                 )
                 if self.sp_mesh and self.sp_mesh.size() > 1:
                     rollout_is_mask = sp_split(rollout_is_mask, self.sp_mesh, 1, 0)
-                    assert rollout_is_mask.size(1) == loss_ctx_input.shifted_labels.size(1), (
-                        f"rollout_is_mask {rollout_is_mask.size(1)} vs loss_ctx_input.shifted_labels {loss_ctx_input.shifted_labels.size(1)}"
+                    assert rollout_is_mask.size(1) == shifted_labels.size(1), (
+                        f"rollout_is_mask {rollout_is_mask.size(1)} vs shifted_labels {shifted_labels.size(1)}"
                     )
 
                     if rollout_is_weights is not None:
                         rollout_is_weights = sp_split(rollout_is_weights, self.sp_mesh, 1, 0)
-                        assert rollout_is_weights.size(1) == loss_ctx_input.shifted_labels.size(1), (
-                            f"rollout_is_weights {rollout_is_weights.size(1)} vs loss_ctx_input.shifted_labels {loss_ctx_input.shifted_labels.size(1)}"
+                        assert rollout_is_weights.size(1) == shifted_labels.size(1), (
+                            f"rollout_is_weights {rollout_is_weights.size(1)} vs shifted_labels {shifted_labels.size(1)}"
                         )
 
-                loss_ctx_input.shifted_labels[~rollout_is_mask.bool()] = -100  # update loss mask
-                loss_ctx_input.is_weights = rollout_is_weights
+                shifted_labels[~rollout_is_mask.bool()] = -100  # update loss mask
+                rollout_is_weights_list.append(rollout_is_weights)
                 all_rollout_is_metrics.append(rollout_is_metrics)
                 all_mismatch_metrics.append(mismatch_metrics)
+
+            else:
+                rollout_is_weights_list.append(None)
 
         worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
         logger_msg = f"Rollout {rollout_idx}: "
@@ -623,13 +638,13 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
-            loss_ctx_input_list = self.compute_ref_logprobs(seq_ctx_list, loss_ctx_input_list)
+            ref_logprobs_list = self.compute_ref_logprobs(seq_ctx_list, shifted_labels_list)
             kl_div_sum: torch.Tensor | None = None
-            for loss_ctx_input in loss_ctx_input_list:
-                mask = loss_ctx_input.shifted_labels != -100
+            for i, shifted_labels in enumerate(shifted_labels_list):
+                mask = shifted_labels != -100
                 kl_div = kl_penalty(
-                    cast(torch.Tensor, loss_ctx_input.old_logprobs),
-                    cast(torch.Tensor, loss_ctx_input.ref_logprobs),
+                    cast(torch.Tensor, old_logprobs_list[i]),
+                    cast(torch.Tensor, ref_logprobs_list[i]),
                     loss_weights=mask,
                     kl_penalty="low_var_kl",
                 )
@@ -642,21 +657,31 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         for i in range(0, len(seq_ctx_list), iters_per_step):
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
-            batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
-            LossContext = loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(batches_loss_ctx_input, loss_cfg)
-            engine_input = []
-            for seq_ctx, loss_kwargs in zip(batches_seq_ctx, batches_loss_kwargs):
-                loss_ctx = LossContext(
-                    loss_cfg=loss_cfg,
-                    loss_kwargs=loss_kwargs,
-                )
-                engine_input.append(
-                    ModelItem(
-                        seq_ctx=seq_ctx,
-                        loss_ctx=loss_ctx,
-                    )
-                )
+
+            batches_shifted_labels = shifted_labels_list[i : i + iters_per_step]
+            batches_advantages = advantages_list[i : i + iters_per_step]
+            batches_old_logprobs = old_logprobs_list[i : i + iters_per_step]
+            batches_ref_logprobs = ref_logprobs_list[i : i + iters_per_step]
+            batches_rollout_is_weights = rollout_is_weights_list[i : i + iters_per_step]
+            batches_rollout_logprobs = rollout_logprobs_list[i : i + iters_per_step]
+
+            # LossContext = loss_cfg.loss_ctx_cls
+            # batches_loss_kwargs = LossContext.build_batches_loss_kwargs(batches_loss_ctx_input, loss_cfg)
+
+            batches_loss_ctx = loss_cfg.build_batches(
+                sp_mesh=self.sp_mesh,
+                shifted_labels_list=batches_shifted_labels,
+                advantages_list=batches_advantages,
+                old_logprobs_list=batches_old_logprobs,
+                ref_logprobs_list=batches_ref_logprobs,
+                rollout_is_weights_list=batches_rollout_is_weights,
+                rollout_logprobs_list=batches_rollout_logprobs,
+            )
+
+            engine_input = [
+                ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+                for seq_ctx, loss_ctx in zip(batches_seq_ctx, batches_loss_ctx)
+            ]
 
             loss_log, other_log = self._engine.train_step(
                 data_batches=engine_input,

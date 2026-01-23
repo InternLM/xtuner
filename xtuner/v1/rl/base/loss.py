@@ -7,11 +7,13 @@ from typing_extensions import Self
 
 from xtuner.v1.loss import BaseLossConfig
 from xtuner.v1.loss.base_loss_ctx import BaseLossContext
+from xtuner.v1.utils.device import get_device
 
 from ..utils import sp_split
 from .rollout_is import RolloutImportanceSampling
 
 
+DEVICE = get_device()
 T = TypeVar("T")
 
 
@@ -80,6 +82,39 @@ class BaseRLLossConfig(BaseLossConfig):
     @property
     def loss_ctx_cls(self) -> type[BaseLossContext]:
         raise NotImplementedError
+
+    def build_batches(  # type: ignore[override]
+        self,
+        sp_mesh: DeviceMesh,
+        shifted_labels_list: list[torch.Tensor],
+        advantages_list: list[torch.Tensor],
+        old_logprobs_list: list[torch.Tensor],
+        ref_logprobs_list: list[torch.Tensor | None],
+        rollout_is_weights_list: list[torch.Tensor | None],
+        rollout_logprobs_list: list[torch.Tensor | None],
+    ) -> list[BaseLossContext["RLLossContextInputItem"]]:
+        batches_loss_ctx_input: list[RLLossContextInputItem] = []
+
+        n = len(shifted_labels_list)
+        for i in range(n):
+            loss_ctx_input = RLLossContextInputItem(
+                shifted_labels=shifted_labels_list[i],
+                advantages=advantages_list[i],
+                rollout_logprobs=rollout_logprobs_list[i],
+                old_logprobs=old_logprobs_list[i],  # 之前实现未对 old_logprobs 等 tensor 进行 sp_split?
+                is_weights=rollout_is_weights_list[i],
+                ref_logprobs=ref_logprobs_list[i],
+            ).to(DEVICE)
+
+            if self.sp_mesh.size() > 1:
+                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
+
+            batches_loss_ctx_input.append(loss_ctx_input)
+
+        LossContext = self.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(batches_loss_ctx_input, self)
+        batches_loss_ctx = [LossContext(self, loss_kwargs) for loss_kwargs in batches_loss_kwargs]
+        return batches_loss_ctx
 
 
 class RLLossContextInputItem(BaseModel):
