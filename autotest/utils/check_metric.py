@@ -117,14 +117,15 @@ def check_result(case_name, base_path, cur_path, check_metric):
         check_flag = True
         if metric == "runtime_info/tgs":
             if cur_steps > 10:
-                max_error = abs(mean(base_metrics[metric][10:-1]) - mean(cur_metrics[metric][10:-1])) / (
-                    mean(base_metrics[metric][10:-1])
+                relative_errors = abs(np.array(base_metrics[metric][10:-1]) - np.array(cur_metrics[metric][10:-1])) / (
+                    np.array(base_metrics[metric][10:-1])
                 )
+                max_error = np.percentile(relative_errors, 80)
                 if max_error > threshold:
                     mean_base_metrics = f"{mean(base_metrics[metric][10:-1]):.6f}"
                     mean_cur_metrics = f"{mean(cur_metrics[metric][10:-1]):.6f}"
                     fail_metric[metric] = (
-                        f"{metric} relative error bigger than {threshold} after 10 step, baseline: {mean_base_metrics}, now: {mean_cur_metrics}, relative error: {max_error}"
+                        f"{metric} relative error bigger than {threshold} after 10 step, baseline: {base_metrics[metric][10:-1]}, now: {cur_metrics[metric][10:-1]}, relative error: {relative_errors}"
                     )
                     check_flag = False
                 else:
