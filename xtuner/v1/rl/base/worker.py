@@ -511,18 +511,24 @@ class TrainingWorker(SingleAcceleratorWorker):
                     del to_free_routed_expert_refs
 
             seq_ctx = data["seq_ctx"].to(DEVICE)
+            shifted_labels = data["shifted_labels"].to(DEVICE)
+            advantages = data["advantages"].to(DEVICE)
             rollout_logprobs = data.get("rollout_logprobs", None)
             rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
-            rollout_logprobs_list.append(rollout_logprobs)
-
-            shifted_labels_list.append(data["shifted_labels"].to(DEVICE))
-            advantages_list.append(data["advantages"])
 
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(self.sp_mesh)
                 # loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
+                shifted_labels = sp_split(shifted_labels, self.sp_mesh, 1, -100)
+                advantages = sp_split(advantages, self.sp_mesh, 1, 0.0)
+                # Do not sp_split rollout_logprobs here, sp_split it finally in build_batches.
+                # Because IS compute use it before sp_split.
+
             seq_ctx_list.append(seq_ctx)
-            # loss_ctx_input_list.append(loss_ctx_input)
+
+            shifted_labels_list.append(shifted_labels)
+            advantages_list.append(advantages)
+            rollout_logprobs_list.append(rollout_logprobs)
 
         del data_batches
 
@@ -532,10 +538,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             grad_tokens = mask.sum()
             rank_grad_tokens = grad_tokens if rank_grad_tokens is None else rank_grad_tokens + grad_tokens
         rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
-        dist.all_reduce(rank_grad_tokens, op=dist.ReduceOp.SUM)
-        global_grad_tokens = rank_grad_tokens / self.sp_mesh.size(0)
+        global_grad_tokens = rank_grad_tokens
+        dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
 
-        # old logprobs are inplaced updated in compute_actor_logprobs
         old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
 
         sum_entropy: torch.Tensor | None = None
@@ -567,6 +572,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
                 old_logprobs = old_logprobs_list[i]
                 if self.sp_mesh and self.sp_mesh.size() > 1:
+                    # Temporarily sp_gather old_logprobs here, but not modify old_logprobs_list(still in sp_split state)
                     old_logprobs = sp_gather(old_logprobs, self.sp_mesh, dim=1)
                     old_logprobs = old_logprobs[:, : rollout_logprobs_list[i].size(1)]  # type: ignore
                     mask = sp_gather(mask, self.sp_mesh, dim=1)
@@ -599,6 +605,13 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             else:
                 rollout_is_weights_list.append(None)
+
+        if self.sp_mesh and self.sp_mesh.size() > 1:
+            # sp_split rollout_logprobs here After compute rollout_is_weights, because IS compute use it before sp_split.
+            rollout_logprobs_list = [
+                sp_split(rollout_logprobs, self.sp_mesh, 1, 0) if rollout_logprobs is not None else None
+                for rollout_logprobs in rollout_logprobs_list
+            ]
 
         worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
         logger_msg = f"Rollout {rollout_idx}: "
