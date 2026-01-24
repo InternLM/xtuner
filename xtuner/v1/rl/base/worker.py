@@ -512,15 +512,11 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             seq_ctx = data["seq_ctx"].to(DEVICE)
             rollout_logprobs = data.get("rollout_logprobs", None)
-            if rollout_logprobs is not None:
-                rollout_logprobs = rollout_logprobs.to(DEVICE)
-                rollout_logprobs_list.append(rollout_logprobs)
-            else:
-                rollout_logprobs_list.append(None)
-
-            shifted_labels_list.append(data["shifted_labels"])
-            advantages_list.append(data["advantages"])
+            rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
             rollout_logprobs_list.append(rollout_logprobs)
+
+            shifted_labels_list.append(data["shifted_labels"].to(DEVICE))
+            advantages_list.append(data["advantages"])
 
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(self.sp_mesh)
@@ -636,6 +632,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rank == 0:
             self.logger.info(logger_msg)
 
+        ref_logprobs_list: list[torch.Tensor] | None = None
         if self._has_ref:
             # ref logprobs are inplaced updated in compute_actor_logprobs
             ref_logprobs_list = self.compute_ref_logprobs(seq_ctx_list, shifted_labels_list)
@@ -661,7 +658,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             batches_shifted_labels = shifted_labels_list[i : i + iters_per_step]
             batches_advantages = advantages_list[i : i + iters_per_step]
             batches_old_logprobs = old_logprobs_list[i : i + iters_per_step]
-            batches_ref_logprobs = ref_logprobs_list[i : i + iters_per_step]
+            batches_ref_logprobs = ref_logprobs_list[i : i + iters_per_step] if ref_logprobs_list is not None else None
             batches_rollout_is_weights = rollout_is_weights_list[i : i + iters_per_step]
             batches_rollout_logprobs = rollout_logprobs_list[i : i + iters_per_step]
 

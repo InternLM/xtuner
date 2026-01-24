@@ -89,7 +89,7 @@ class BaseRLLossConfig(BaseLossConfig):
         shifted_labels_list: list[torch.Tensor],
         advantages_list: list[torch.Tensor],
         old_logprobs_list: list[torch.Tensor],
-        ref_logprobs_list: list[torch.Tensor | None],
+        ref_logprobs_list: list[torch.Tensor] | None,
         rollout_is_weights_list: list[torch.Tensor | None],
         rollout_logprobs_list: list[torch.Tensor | None],
     ) -> list[BaseLossContext["RLLossContextInputItem"]]:
@@ -103,11 +103,11 @@ class BaseRLLossConfig(BaseLossConfig):
                 rollout_logprobs=rollout_logprobs_list[i],
                 old_logprobs=old_logprobs_list[i],  # 之前实现未对 old_logprobs 等 tensor 进行 sp_split?
                 is_weights=rollout_is_weights_list[i],
-                ref_logprobs=ref_logprobs_list[i],
+                ref_logprobs=ref_logprobs_list[i] if ref_logprobs_list is not None else None,
             ).to(DEVICE)
 
-            if self.sp_mesh.size() > 1:
-                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
+            if sp_mesh.size() > 1:
+                loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
 
             batches_loss_ctx_input.append(loss_ctx_input)
 
