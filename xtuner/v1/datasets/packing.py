@@ -238,11 +238,11 @@ def get_pack_infos_by_expand_soft_split(
     dataset_id: int,
     num_tokens: np.ndarray,
     pack_max_length: int,
-    pack_workers: int,
-    pack_chunk_size: int,
-    flash_attn_block_size: int,
-    pack_len_type: str,
-    pack_extra_buffer_size: int,
+    pack_workers: int = 8,
+    pack_chunk_size: int = 10000,
+    flash_attn_block_size: int = 128,
+    pack_len_type: str = "total_block",
+    pack_extra_buffer_size: int = 1000,
 ):
     if pack_workers <= 1:
         pack_infos = []
@@ -414,7 +414,7 @@ def _hard_pack_chunk(
 
 
 def get_pack_infos_by_hard_split(
-    inds: list, dataset_id: int, num_tokens: np.ndarray, pack_max_length: int, pack_workers: int
+    inds: list[int], dataset_id: int, num_tokens: np.ndarray, pack_max_length: int, pack_workers: int = 1
 ):
     # number of packed samples
     shfl_inds = inds
