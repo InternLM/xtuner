@@ -326,7 +326,7 @@ class RLDataPacker:
             f"Packed seq ctx length {packed_input_ids.numel()} does not match pack_max_length {pack_max_length}"
             f"padding input_ids length: {padding_item['seq_ctx'].input_ids.shape if padding_item else 0}"  # type: ignore[union-attr]
         )
-        assert packed_seq_ctx.num_padding == (packed_advantages != -100).sum().item(), (
+        assert packed_seq_ctx.num_padding == (packed_advantages == -100).sum().item(), (
             f"Packed seq ctx num_padding {packed_seq_ctx.num_padding} and packed advantages num_padding "
             f"{(packed_advantages != -100).sum().item()} mismatch after packing."
         )

@@ -33,7 +33,7 @@ class TestDataBatchPacker(unittest.TestCase):
     def _run_strategy_test(self, strategy, world_size, optimizer_steps, lengths, pack_max_length, expected_padding = None):
         data_batches = [self._create_dummy_item(l, val=7) for l in lengths]
         total_data_tokens = sum(lengths)
-        
+
         packer = RLDataPacker(
             pack_max_length=pack_max_length,
             world_size=world_size,
@@ -41,9 +41,9 @@ class TestDataBatchPacker(unittest.TestCase):
             optimizer_steps=optimizer_steps,
             pack_strategy=strategy
         )
-        
+
         packed_res, padding_tokens = packer.pack(data_batches)
-        
+
         # 验证均衡性：理想情况下，balance 策略分配给各卡的 token 总数差异应该小于单个样本的最大长度
         if strategy == "balance":
             rank_token_counts = []
@@ -55,19 +55,19 @@ class TestDataBatchPacker(unittest.TestCase):
                         valid_tokens = (pack["seq_ctx"].input_ids != 0).sum().item()
                         rank_total_valid_tokens += valid_tokens
                 rank_token_counts.append(rank_total_valid_tokens)
-            
+
             max_tokens = max(rank_token_counts)
             min_tokens = min(rank_token_counts)
             diff = max_tokens - min_tokens
             max_sample_len = max(lengths) if lengths else 0
-            self.assertLessEqual(diff, max_sample_len, 
+            self.assertLessEqual(diff, max_sample_len,
                 f"Balance strategy failed: Token distribution is too skewed. "
                 f"Rank counts: {rank_token_counts}, Max diff: {diff}")
 
         # 对于固定输入，验证padding_tokens是否符合预期来验证pack逻辑正确性
-        if expected_padding is not None:    
+        if expected_padding is not None:
             self.assertEqual(padding_tokens, expected_padding, f"Strategy {strategy} padding mismatch. Expected {expected_padding}, got {padding_tokens}")
-            
+
         all_packs = []
         for rank_data in packed_res:
             for step_data in rank_data:
@@ -92,23 +92,23 @@ class TestDataBatchPacker(unittest.TestCase):
 
     def test_variable_packs(self):
         """随机tokens数输入, dp=2, optimizer_steps=2
-        - Native: 
+        - Native:
             1. 预处理，保证样本数量能被整除, padding到1024, 这样可以与有效的样本一起Pack
                [1500, 1000, 2800, 3000, 1500, 2000, 2100, 1000, 800] -> padding: [1500, 1000, 2800, 3000, 1500, 2000, 2100, 1000, 800, 1024]
-            2. DP Rank 切分： 
+            2. DP Rank 切分：
                 rank0: [1500, 1000, 2800, 3000, 1500]
                 rank1: [2000, 2100, 1000,  800, 1024]
             3. Optimizer steps切分：
                 rank0: [1500, 1000, 2800], [3000, 1500]
                 rank1: [2000, 2100, 1000], [ 800, 1024]
             4 pack and padding
-                rank0: step0: [2500 -> 3072], [2800 -> 3072],                 step1: [3000 -> 3072], [1500 -> 3072], 
+                rank0: step0: [2500 -> 3072], [2800 -> 3072],                 step1: [3000 -> 3072], [1500 -> 3072],
                 rank1: step0: [2000 -> 3072], [2100 -> 3072], [1000 -> 3072], step1: [1824 -> 3072]
-            5. 跨卡对齐pack数量： 
-                rank0: step0: [2500 -> 3072], [2800 -> 3072], [0 -> 3072]     step1: [3000 -> 3072], [1500 -> 3072], 
+            5. 跨卡对齐pack数量：
+                rank0: step0: [2500 -> 3072], [2800 -> 3072], [0 -> 3072]     step1: [3000 -> 3072], [1500 -> 3072],
                 rank1: step0: [2100 -> 3072], [2000 -> 3072], [1000 -> 3072], step1: [1824 -> 3072], [0 -> 3072]
             padding_tokens: 1024 + 3072 - 2500 + 3072 - 2800 + 3072 + 3072 - 3000 + 3072 - 1500 + 3072 - 2100 + 3072 - 2000 + 3072 - 1000 + 3072 - 1824 + 3072 = 15020
-        - Balance: 
+        - Balance:
             1. 对原始输入数据进行排序：
                 [1500, 1000, 2800, 3000, 1500, 2000, 2100, 1000, 800] -> [3000, 2800, 2100, 2000, 1500, 1500, 1000, 1000, 800]
             2. 相近长度的N个样本分到N张卡上, 每N个样本为作为N张卡的一次optimizer step的数据
