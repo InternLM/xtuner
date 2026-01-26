@@ -27,8 +27,8 @@ export PYTHONPATH=$(pwd):$PYTHONPATH
 
 # ray 环境变量
 export MASTER_PORT=6000
-export WORLD_SIZE=$NODE_COUNT
-export RANK=$NODE_RANK
+export WORLD_SIZE=${NODE_COUNT:-"1"}
+export RANK=${NODE_RANK:-"0"}
 export RAY_MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 export RAY_RANK=${RANK:-0} # 0 代表主节点, >0 代表工作节点
 export RAY_HEAD_PORT=${RAY_HEAD_PORT:-"6379"}
@@ -66,11 +66,18 @@ current_time=$(date "+%m%d%H")
 # 取模型路径的最后一级作为model_name，取数据路径的倒数第二级作为data_name
 model_dir_name=$(basename "$MODEL_PATH")
 data_dir_name=$(basename "$(dirname "$DATA_PATH")")
-DIR=$(pwd)
-export WORK_DIR="${DIR}/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
+
+if [ "x$WORK_DIR" = "x" ]; then
+  DIR=$(pwd)
+  export WORK_DIR="${DIR}/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
+else
+  export WORK_DIR=$WORK_DIR
+fi
+echo "WORK_DIR: $WORK_DIR"
 if [ ! -d "$WORK_DIR" ]; then
   mkdir -p "$WORK_DIR"
 fi
+
 export LMDEPLOY_LOG_FILE="${WORK_DIR}/lmdeploy_log_${current_time}.txt"
 if [ "$ACCELERATOR" = "GPU" ]; then
     # TODO: support NPU RL Memory Monitor
@@ -86,6 +93,7 @@ elif [ "$ACCELERATOR" = "NPU" ]; then
   total_cpus=$((node_count * 256))
 fi
 
+WORK_DIR=$(realpath "$WORK_DIR")
 if [ "$RAY_RANK" -eq 0 ]; then
   rm -rf /tmp/ray_log
   export RAY_LOG_DIR="${WORK_DIR}/ray_${current_time}/"

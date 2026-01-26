@@ -21,6 +21,41 @@ from .vlm_jsonl import VLMJsonlDataset
 logger = get_logger()
 
 
+def get_pack_infos_by_soft_split(inds: list[int], dataset_id: int, num_tokens: np.ndarray, pack_max_length: int):
+    item_buffer: list[int] = []
+    length_buffer: list[int] = []
+    longest = 0
+
+    pack_infos = []
+    for shfl_i in inds:
+        if num_tokens[shfl_i] + sum(length_buffer) <= pack_max_length:
+            item_buffer.append(shfl_i)
+            length_buffer.append(num_tokens[shfl_i])
+            longest = max(longest, num_tokens[shfl_i])
+        else:
+            if len(item_buffer) > 0:
+                info = {
+                    "dataset_id": dataset_id,
+                    "indices": item_buffer,
+                    "longest": int(longest),
+                }
+                pack_infos.append(info)
+
+            item_buffer = [shfl_i]
+            length_buffer = [num_tokens[shfl_i]]
+            longest = num_tokens[shfl_i]
+
+    if len(item_buffer) > 0:
+        info = {
+            "dataset_id": dataset_id,
+            "indices": item_buffer,
+            "longest": int(longest),
+        }
+
+        pack_infos.append(info)
+    return pack_infos
+
+
 class _LegacySoftPackDataset(torch.utils.data.Dataset):
     def __init__(self, datasets, pack_max_length=2048, global_pack=False, seed: int | None = None):
         self.random = random.Random()
@@ -52,37 +87,7 @@ class _LegacySoftPackDataset(torch.utils.data.Dataset):
         inds = list(range(len(dataset)))
         self.random.shuffle(inds)
 
-        item_buffer = []
-        length_buffer = []
-        longest = 0
-
-        pack_infos = []
-        for shfl_i in inds:
-            if num_tokens[shfl_i] + sum(length_buffer) <= self.pack_max_length:
-                item_buffer.append(shfl_i)
-                length_buffer.append(num_tokens[shfl_i])
-                longest = max(longest, num_tokens[shfl_i])
-            else:
-                if len(item_buffer) > 0:
-                    info = {
-                        "dataset_id": dataset_id,
-                        "indices": item_buffer,
-                        "longest": int(longest),
-                    }
-                    pack_infos.append(info)
-
-                item_buffer = [shfl_i]
-                length_buffer = [num_tokens[shfl_i]]
-                longest = num_tokens[shfl_i]
-
-        if len(item_buffer) > 0:
-            info = {
-                "dataset_id": dataset_id,
-                "indices": item_buffer,
-                "longest": int(longest),
-            }
-
-            pack_infos.append(info)
+        pack_infos = get_pack_infos_by_soft_split(inds, dataset_id, num_tokens, self.pack_max_length)
 
         pack_infos = Dataset.from_list(pack_infos)
 
@@ -228,6 +233,62 @@ def get_pack_chunk_infos(
     return pack_infos
 
 
+def get_pack_infos_by_expand_soft_split(
+    inds: list[int],
+    dataset_id: int,
+    num_tokens: np.ndarray,
+    pack_max_length: int,
+    pack_workers: int,
+    pack_chunk_size: int,
+    flash_attn_block_size: int,
+    pack_len_type: str,
+    pack_extra_buffer_size: int,
+):
+    if pack_workers <= 1:
+        pack_infos = []
+        for i in range(0, len(inds), pack_chunk_size):
+            chunk_inds = inds[i : i + pack_chunk_size]
+            chunk_pack_infos = get_pack_chunk_infos(
+                chunk_inds,
+                dataset_id,
+                pack_max_length,
+                flash_attn_block_size,
+                pack_len_type,
+                pack_extra_buffer_size,
+                num_tokens,
+            )
+            pack_infos.extend(chunk_pack_infos)
+    else:
+        chunks_inds = [inds[i : i + pack_chunk_size] for i in range(0, len(inds), pack_chunk_size)]
+
+        shm = shared_memory.SharedMemory(create=True, size=num_tokens.nbytes)
+        shm_array = np.ndarray(num_tokens.shape, dtype=num_tokens.dtype, buffer=shm.buf)
+        np.copyto(shm_array, num_tokens)
+
+        mp_context = multiprocessing.get_context("fork")
+        process_chunk_with_args = partial(
+            get_pack_chunk_infos,
+            dataset_id=dataset_id,
+            target=pack_max_length,
+            flash_attn_block_size=flash_attn_block_size,
+            pack_len_type=pack_len_type,
+            pack_extra_buffer_size=pack_extra_buffer_size,
+            shm_name=shm.name,
+            shape=num_tokens.shape,
+            dtype=num_tokens.dtype,
+        )
+        with ProcessPoolExecutor(max_workers=pack_workers, mp_context=mp_context) as executor:
+            results = list(tqdm(executor.map(process_chunk_with_args, chunks_inds)))
+
+        pack_infos = []
+        for result in results:
+            pack_infos.extend(result)
+
+        shm.close()
+        shm.unlink()
+    return pack_infos
+
+
 class ExpandSoftPackDataset(_LegacySoftPackDataset):
     def __init__(
         self,
@@ -259,65 +320,9 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
             seed=seed,
         )
 
-    @staticmethod
-    def get_pack_infos_staticmethod(
-        inds: list[int],
-        dataset_id: int,
-        num_tokens: np.ndarray,
-        pack_max_length: int,
-        pack_workers: int,
-        pack_chunk_size: int,
-        flash_attn_block_size: int,
-        pack_len_type: str,
-        pack_extra_buffer_size: int,
-    ):
-        if pack_workers <= 1:
-            pack_infos = []
-            for i in range(0, len(inds), pack_chunk_size):
-                chunk_inds = inds[i : i + pack_chunk_size]
-                chunk_pack_infos = get_pack_chunk_infos(
-                    chunk_inds,
-                    dataset_id,
-                    pack_max_length,
-                    flash_attn_block_size,
-                    pack_len_type,
-                    pack_extra_buffer_size,
-                    num_tokens,
-                )
-                pack_infos.extend(chunk_pack_infos)
-        else:
-            chunks_inds = [inds[i : i + pack_chunk_size] for i in range(0, len(inds), pack_chunk_size)]
-
-            shm = shared_memory.SharedMemory(create=True, size=num_tokens.nbytes)
-            shm_array = np.ndarray(num_tokens.shape, dtype=num_tokens.dtype, buffer=shm.buf)
-            np.copyto(shm_array, num_tokens)
-
-            mp_context = multiprocessing.get_context("fork")
-            process_chunk_with_args = partial(
-                get_pack_chunk_infos,
-                dataset_id=dataset_id,
-                target=pack_max_length,
-                flash_attn_block_size=flash_attn_block_size,
-                pack_len_type=pack_len_type,
-                pack_extra_buffer_size=pack_extra_buffer_size,
-                shm_name=shm.name,
-                shape=num_tokens.shape,
-                dtype=num_tokens.dtype,
-            )
-            with ProcessPoolExecutor(max_workers=pack_workers, mp_context=mp_context) as executor:
-                results = list(tqdm(executor.map(process_chunk_with_args, chunks_inds)))
-
-            pack_infos = []
-            for result in results:
-                pack_infos.extend(result)
-
-            shm.close()
-            shm.unlink()
-        return pack_infos
-
     def get_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray):
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
-        pack_infos = self.get_pack_infos_staticmethod(
+        pack_infos = get_pack_infos_by_expand_soft_split(
             inds,
             dataset_id,
             num_tokens,
@@ -408,6 +413,57 @@ def _hard_pack_chunk(
     return out
 
 
+def get_pack_infos_by_hard_split(
+    inds: list, dataset_id: int, num_tokens: np.ndarray, pack_max_length: int, pack_workers: int
+):
+    # number of packed samples
+    shfl_inds = inds
+    num_packed_samples = int(num_tokens.sum() / pack_max_length)
+
+    # shuffled cumulative lengths with leading 0
+    shfl_lens: np.ndarray = np.take(num_tokens, shfl_inds)
+    shfl_cu_lens = np.cumsum(shfl_lens, dtype=np.int64)
+    shfl_cu_lens = np.insert(shfl_cu_lens, 0, 0).astype(np.int64, copy=False)
+
+    # shared memory for cu and inds
+    cu_arr = np.asarray(shfl_cu_lens, dtype=np.int64).reshape(-1)
+    inds_arr = np.asarray(shfl_inds, dtype=np.int64).reshape(-1)
+
+    # chunk tasks
+    chunk_size = 10000
+    i_all = list(range(num_packed_samples))
+    chunks = [i_all[i : i + chunk_size] for i in range(0, len(i_all), chunk_size)]
+
+    pack_infos_list = []
+
+    if pack_workers > 1:
+        # Use fork to inherit read-only arrays; no extra shared memory copy needed
+        mp_context = multiprocessing.get_context("fork")
+        fn = partial(
+            _hard_pack_chunk_core,
+            dataset_id=dataset_id,
+            pack_max_length=pack_max_length,
+            cu=cu_arr,
+            inds_arr=inds_arr,
+        )
+        with ProcessPoolExecutor(max_workers=pack_workers, mp_context=mp_context) as ex:
+            for res in tqdm(ex.map(fn, chunks), total=len(chunks)):
+                pack_infos_list.extend(res)
+    else:
+        # single-process path, reuse the same core
+        for i_chunk in tqdm(chunks, total=len(chunks)):
+            pack_infos_list.extend(
+                _hard_pack_chunk_core(
+                    i_chunk,
+                    dataset_id=dataset_id,
+                    pack_max_length=pack_max_length,
+                    cu=cu_arr,
+                    inds_arr=inds_arr,
+                )
+            )
+    return pack_infos_list
+
+
 class HardPackDataset(_LegacySoftPackDataset):
     def __init__(
         self, datasets, pack_max_length=2048, global_pack=False, seed: int | None = None, pack_workers: int = 1
@@ -420,63 +476,12 @@ class HardPackDataset(_LegacySoftPackDataset):
             seed=seed,
         )
 
-    @staticmethod
-    def get_pack_infos_staticmethod(
-        inds: list, dataset_id: int, num_tokens: np.ndarray, pack_max_length: int, pack_workers: int
-    ):
-        # number of packed samples
-        shfl_inds = inds
-        num_packed_samples = int(num_tokens.sum() / pack_max_length)
-
-        # shuffled cumulative lengths with leading 0
-        shfl_lens: np.ndarray = np.take(num_tokens, shfl_inds)
-        shfl_cu_lens = np.cumsum(shfl_lens, dtype=np.int64)
-        shfl_cu_lens = np.insert(shfl_cu_lens, 0, 0).astype(np.int64, copy=False)
-
-        # shared memory for cu and inds
-        cu_arr = np.asarray(shfl_cu_lens, dtype=np.int64).reshape(-1)
-        inds_arr = np.asarray(shfl_inds, dtype=np.int64).reshape(-1)
-
-        # chunk tasks
-        chunk_size = 10000
-        i_all = list(range(num_packed_samples))
-        chunks = [i_all[i : i + chunk_size] for i in range(0, len(i_all), chunk_size)]
-
-        pack_infos_list = []
-
-        if pack_workers > 1:
-            # Use fork to inherit read-only arrays; no extra shared memory copy needed
-            mp_context = multiprocessing.get_context("fork")
-            fn = partial(
-                _hard_pack_chunk_core,
-                dataset_id=dataset_id,
-                pack_max_length=pack_max_length,
-                cu=cu_arr,
-                inds_arr=inds_arr,
-            )
-            with ProcessPoolExecutor(max_workers=pack_workers, mp_context=mp_context) as ex:
-                for res in tqdm(ex.map(fn, chunks), total=len(chunks)):
-                    pack_infos_list.extend(res)
-        else:
-            # single-process path, reuse the same core
-            for i_chunk in tqdm(chunks, total=len(chunks)):
-                pack_infos_list.extend(
-                    _hard_pack_chunk_core(
-                        i_chunk,
-                        dataset_id=dataset_id,
-                        pack_max_length=pack_max_length,
-                        cu=cu_arr,
-                        inds_arr=inds_arr,
-                    )
-                )
-        return pack_infos_list
-
     def get_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray):
         # shuffled indices
         inds = list(range(len(dataset)))
         self.random.shuffle(inds)
 
-        pack_infos_list = self.get_pack_infos_staticmethod(
+        pack_infos_list = get_pack_infos_by_hard_split(
             inds, dataset_id, num_tokens, pack_max_length=self.pack_max_length, pack_workers=self.pack_workers
         )
 
@@ -631,7 +636,7 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
         # shuffled indices
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
 
-        pack_infos_list = HardPackDataset.get_pack_infos_staticmethod(
+        pack_infos_list = get_pack_infos_by_hard_split(
             inds, dataset_id, num_tokens, pack_max_length=self.pack_max_length, pack_workers=self.pack_workers
         )
         return pack_infos_list
@@ -640,7 +645,7 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
         # shuffled indices
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
 
-        pack_infos_list = ExpandSoftPackDataset.get_pack_infos_staticmethod(
+        pack_infos_list = get_pack_infos_by_expand_soft_split(
             inds,
             dataset_id,
             num_tokens,
