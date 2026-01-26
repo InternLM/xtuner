@@ -1,6 +1,5 @@
 import json
 import os
-import random
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
@@ -29,10 +28,11 @@ from xtuner.v1.ray.judger import JudgerConfig
 from xtuner.v1.rl.base import (
     TrainingController,
     TrainingControllerProxy,
+    TrainingLogInfo,
     TrainingWorkerClass,
     TrainingWorkerProxy,
     WorkerConfig,
-    WorkerLogItem,
+    WorkerInputItem,
 )
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
@@ -560,13 +560,25 @@ class RLTrainer:
         )
 
         with timer("training", step_timer_dict):
-            workers_log_item: List[WorkerLogItem] = ray.get(
+            traning_log_info: TrainingLogInfo = ray.get(
                 self._train_controller.fit.remote(
                     data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
                 )
             )
-        self._writer.add_scalar(tag="time/training", scalar_value=step_timer_dict["training"], global_step=rollout_idx)
 
+        workers_log_item = traning_log_info["worker_log_infos"]
+        self._writer.add_scalar(tag="time/training", scalar_value=step_timer_dict["training"], global_step=rollout_idx)
+        self._writer.add_scalar(
+            tag="time/pack_time", scalar_value=traning_log_info["pack_time"], global_step=rollout_idx
+        )
+        self._writer.add_scalar(
+            tag="time/train_time", scalar_value=traning_log_info["train_time"], global_step=rollout_idx
+        )
+        self._writer.add_scalar(
+            tag="train_metrics/padding_tokens",
+            scalar_value=traning_log_info["padding_tokens"],
+            global_step=rollout_idx,
+        )
         rank0_log_item = workers_log_item[0]
         # These metrics are already aggregated across distributed workers and logging only the metrics from rank 0.
         rank0_rollout_is_metrics = rank0_log_item.get("rollout_is_metrics")
@@ -751,7 +763,8 @@ class RLTrainer:
 
                 prompt_len_list.append(len(prompt_ids))
                 response_len_list.append(len(response_ids))
-                advantages_list.extend([advantages[i]] * len(response_ids))
+                token_advantages = torch.repeat_interleave(advantages[i], len(input_ids))
+                advantages_list.extend(token_advantages)
 
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
@@ -767,10 +780,10 @@ class RLTrainer:
                     rollout_logprobs = None
 
                 seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids) - 1)
-                data_dict = {
+                data_dict: WorkerInputItem = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels,
-                    "advantage": advantages[i].item(),
+                    "advantages": token_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
 
@@ -779,7 +792,6 @@ class RLTrainer:
                     seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
 
                 data_batches.append(data_dict)
-        random.shuffle(data_batches)
 
         rewards_t = torch.tensor(rewards_list).float() if rewards_list else torch.tensor([0.0]).float()
         advantages_t = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
