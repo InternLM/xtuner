@@ -1,7 +1,7 @@
 import unittest
 import torch
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.rl.base.pack import RLDataPacker
+from xtuner.v1.rl.trainer.pack import RLDataPacker
 
 class TestDataBatchPacker(unittest.TestCase):
     def setUp(self):

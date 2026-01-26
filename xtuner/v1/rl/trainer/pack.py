@@ -10,7 +10,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.sampler import get_length_grouped_indices
 from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
-from xtuner.v1.rl.base.worker import WorkerInputItem
+from xtuner.v1.rl.trainer.worker import WorkerInputItem
 from xtuner.v1.utils import get_logger
 
 

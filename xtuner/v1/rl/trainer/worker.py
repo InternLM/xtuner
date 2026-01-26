@@ -1,6 +1,5 @@
 import contextlib
 import json
-import math
 import os
 import time
 from contextlib import contextmanager
@@ -9,6 +8,7 @@ from typing import (
     TYPE_CHECKING,
     Iterable,
     List,
+    Literal,
     Sequence,
     TypedDict,
     cast,
@@ -149,6 +149,7 @@ class WorkerConfig(BaseModel):
     log_dir: str | Path | None = None
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
     seed: None | int = None  # if None, use RLTrainer seed
+    pack_strategy: Literal["greedy", "balance", "native"] = "greedy"
     profile_step: list[int] | int | None = None  # 1-based global RL train_step ids to profile.
     profile_time: bool = True
     profile_memory: bool = False
@@ -585,16 +586,17 @@ class TrainingWorker(SingleAcceleratorWorker):
             yield
 
     @ray_method
-    def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
+    def fit(self, data_batches: list[list[WorkerInputItem]], rollout_idx: int) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         loss_cfg: BaseRLLossConfig = self.config.loss_cfg
-        num_batches = len(data_batches)
-        iters_per_step = math.ceil(num_batches / self._optimizer_steps)
-        if num_batches < self._optimizer_steps:
-            self.logger.info(
-                f"Optimizer only step once because num_batches {num_batches} < optimizer_steps {self._optimizer_steps}."
-            )
+        num_optimizer_steps = len(data_batches)
+        actual_optimizer_steps = min(num_optimizer_steps, self.config.optimizer_steps)
+        assert num_optimizer_steps == actual_optimizer_steps, (
+            f"data_batches num {num_optimizer_steps} must be equal to optimizer_steps {actual_optimizer_steps}"
+        )
+        packed_batch_num_per_step = [len(step_data_batches) for step_data_batches in data_batches]
+        flat_data_batches = [data for step_data_batches in data_batches for data in step_data_batches]
 
         # Update seq_ctx: pixel_values, rollout_routed_experts
         # Init loss_ctx: shifted_labels, advantages, rollout_logprobs
@@ -602,7 +604,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         loss_ctx_list: list[BaseRLLossContext] = []
         mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         prepare_inputs_begin = time.perf_counter()
-        for data in data_batches:
+        for data in flat_data_batches:
             # update seq_ctx
             seq_ctx = data["seq_ctx"]
             pixel_values = seq_ctx.pixel_values
@@ -669,6 +671,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         del data_batches
+        del flat_data_batches
 
         # When sp_mesh.size() > 1, get the sp_split shifted_labels and rollout_logprobs
         shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]
@@ -767,21 +770,23 @@ class TrainingWorker(SingleAcceleratorWorker):
         batched_loss_ctx_list: list[BaseRLLossContext] = []
         batched_mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         LossContext = loss_cfg.loss_ctx_cls
-        for i in range(0, len(loss_ctx_list), iters_per_step):
-            batches_loss_ctx = loss_ctx_list[i : i + iters_per_step]
+        start_idx = 0
+        for num_packs_this_step in packed_batch_num_per_step:
+            end_idx = start_idx + num_packs_this_step
+            batches_loss_ctx = loss_ctx_list[start_idx:end_idx]
             batched_loss_ctx_list.extend(
                 LossContext.build_batches(batches_loss_ctx)  # type: ignore[arg-type]
             )
 
             if self.mtp_config is not None:
-                batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
+                batches_seq_ctx = seq_ctx_list[start_idx:end_idx]
                 cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in batches_seq_ctx]
                 # mtp_loss_ctx_list: list[list[MTPLossContext]], outer=batch, inner=mtp_depth
                 num_mtp_depths = len(mtp_loss_ctx_list[0]) if mtp_loss_ctx_list else 0
                 for mtp_idx in range(num_mtp_depths):
                     depth_mtp_loss_ctxs: list[LMHeadLossContext] = [
                         mtp_loss_ctx_list[j][mtp_idx]
-                        for j in range(i, min(i + iters_per_step, len(mtp_loss_ctx_list)))
+                        for j in range(start_idx, min(end_idx, len(mtp_loss_ctx_list)))
                     ]
                     batched_mtp_depth_ctxs = cast(
                         list[MTPLossContext],
@@ -793,17 +798,20 @@ class TrainingWorker(SingleAcceleratorWorker):
                     )
                     # Append each depth's batched ctx to the corresponding batch index
                     for batch_offset, mtp_ctx in enumerate(batched_mtp_depth_ctxs):
-                        global_batch_idx = i + batch_offset
+                        global_batch_idx = start_idx + batch_offset
                         if global_batch_idx >= len(batched_mtp_loss_ctx_list):
                             batched_mtp_loss_ctx_list.append([mtp_ctx])
                         else:
                             batched_mtp_loss_ctx_list[global_batch_idx].append(mtp_ctx)
+            start_idx = end_idx
 
         # train optimizer steps
-        for i in range(0, len(seq_ctx_list), iters_per_step):
+        start_idx = 0
+        for step_idx, num_packs_this_step in enumerate(packed_batch_num_per_step):
+            end_idx = start_idx + num_packs_this_step
             global_train_step = self._global_train_step + 1
-            batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
-            batches_loss_ctx = batched_loss_ctx_list[i : i + iters_per_step]
+            batches_seq_ctx = seq_ctx_list[start_idx:end_idx]
+            batches_loss_ctx = batched_loss_ctx_list[start_idx:end_idx]
 
             engine_input = [
                 ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
@@ -811,7 +819,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             ]
 
             if self.mtp_config is not None:
-                batches_mtp_loss_ctxs = batched_mtp_loss_ctx_list[i : i + iters_per_step]
+                batches_mtp_loss_ctxs = batched_mtp_loss_ctx_list[start_idx:end_idx]
                 engine_input = [
                     ModelItem(
                         seq_ctx=seq_ctx,
@@ -833,7 +841,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 OffloadManager().clear()
             self.logger.debug(
                 f"Rank{self.rank} Rollout {rollout_idx} GlobalStep {global_train_step} "
-                f"train_step[{i}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
+                f"train_step[{step_idx}].engine_train_step elapsed={time.perf_counter() - train_step_begin:.4f}s"
             )
             mtp_grad_metrics: dict[str, float] = {}
             if self._mtp_trainable_parameters:
@@ -881,9 +889,10 @@ class TrainingWorker(SingleAcceleratorWorker):
                 for key, value in train_log_item.items()
                 if not key.startswith("reduced_train_policy_") and key != "max_ratio"
             )
-            log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
+            log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {step_idx}: " + log_str
             self.logger.info(log_str)
             self._global_train_step = global_train_step
+            start_idx = end_idx
 
         self._rollout_step += 1
         if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
@@ -1018,9 +1027,18 @@ class TrainingWorker(SingleAcceleratorWorker):
         return self._engine.data_replicate_size * self.sp_mesh.size()
 
     @ray_method
+    def get_dp_rank(self) -> int:
+        """Get the data parallel rank for this worker."""
+        return self.data_mesh["dp"].get_rank()
+
+    @ray_method
     def get_model_cfg(self):
         model_cfg = self._engine.model_cfg
         return model_cfg
+
+    @ray_method
+    def get_worker_cfg(self) -> WorkerConfig:
+        return self.config
 
     def _clear_cublas_workspaces(self) -> None:
         clear_fn = getattr(torch._C, "_cuda_clearCublasWorkspaces", None)
