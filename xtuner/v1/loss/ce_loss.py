@@ -64,13 +64,7 @@ class CELossConfig(BaseLossConfig):
             cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
             sp_mesh=sp_mesh,
         )
-        loss_ctx_list = []
-        for loss_kwargs in batches_loss_kwargs:
-            loss_ctx = LossContext(
-                loss_cfg=self,
-                loss_kwargs=loss_kwargs,
-            )
-            loss_ctx_list.append(loss_ctx)
+        loss_ctx_list = [LossContext(loss_cfg=self, loss_kwargs=loss_kwargs) for loss_kwargs in batches_loss_kwargs]
         return loss_ctx_list
 
 

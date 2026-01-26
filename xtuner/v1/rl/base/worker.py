@@ -443,6 +443,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         shifted_labels_list: list[torch.Tensor] = []
         advantages_list: list[torch.Tensor] = []
         rollout_logprobs_list: list[torch.Tensor | None] = []
+        # All inputs and outputs here are in sp_split state, unless those are denoted by `sp_gathered`.
+        sp_gathered_rollout_logprobs_list: list[torch.Tensor | None] = []
+
         for data in data_batches:
             seq_ctx = data["seq_ctx"]
             pixel_values = seq_ctx.pixel_values
@@ -515,20 +518,23 @@ class TrainingWorker(SingleAcceleratorWorker):
             advantages = data["advantages"].to(DEVICE)
             rollout_logprobs = data.get("rollout_logprobs", None)
             rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
+            sp_gathered_rollout_logprobs = rollout_logprobs
 
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(self.sp_mesh)
                 # loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
                 shifted_labels = sp_split(shifted_labels, self.sp_mesh, 1, -100)
                 advantages = sp_split(advantages, self.sp_mesh, 1, 0.0)
-                # Do not sp_split rollout_logprobs here, sp_split it finally in build_batches.
-                # Because IS compute use it before sp_split.
+                rollout_logprobs = (
+                    sp_split(rollout_logprobs, self.sp_mesh, 1, 0) if rollout_logprobs is not None else None
+                )
 
             seq_ctx_list.append(seq_ctx)
 
             shifted_labels_list.append(shifted_labels)
             advantages_list.append(advantages)
             rollout_logprobs_list.append(rollout_logprobs)
+            sp_gathered_rollout_logprobs_list.append(sp_gathered_rollout_logprobs)
 
         del data_batches
 
@@ -565,7 +571,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     rollout_entropy if sum_rollout_entropy is None else sum_rollout_entropy + rollout_entropy
                 )
 
-            if len(rollout_logprobs_list) > 0 and rollout_logprobs_list[i] is not None:
+            if sp_gathered_rollout_logprobs_list[i] is not None:
                 # calculate importance sampling weights
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
@@ -574,14 +580,14 @@ class TrainingWorker(SingleAcceleratorWorker):
                 if self.sp_mesh and self.sp_mesh.size() > 1:
                     # Temporarily sp_gather old_logprobs here, but not modify old_logprobs_list(still in sp_split state)
                     old_logprobs = sp_gather(old_logprobs, self.sp_mesh, dim=1)
-                    old_logprobs = old_logprobs[:, : rollout_logprobs_list[i].size(1)]  # type: ignore
+                    old_logprobs = old_logprobs[:, : sp_gathered_rollout_logprobs_list[i].size(1)]  # type: ignore
                     mask = sp_gather(mask, self.sp_mesh, dim=1)
-                    mask = mask[:, : rollout_logprobs_list[i].size(1)]  # type: ignore
+                    mask = mask[:, : sp_gathered_rollout_logprobs_list[i].size(1)]  # type: ignore
 
                 rollout_is_weights, rollout_is_mask, mismatch_metrics, rollout_is_metrics = (
                     loss_cfg.rollout_is.compute_rollout_importance_weights_and_metrics(
                         old_log_prob=old_logprobs,
-                        rollout_log_prob=rollout_logprobs_list[i],
+                        rollout_log_prob=sp_gathered_rollout_logprobs_list[i],
                         num_tokens=num_tokens,
                         response_mask=mask,
                     )
@@ -605,13 +611,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             else:
                 rollout_is_weights_list.append(None)
-
-        if self.sp_mesh and self.sp_mesh.size() > 1:
-            # sp_split rollout_logprobs here After compute rollout_is_weights, because IS compute use it before sp_split.
-            rollout_logprobs_list = [
-                sp_split(rollout_logprobs, self.sp_mesh, 1, 0) if rollout_logprobs is not None else None
-                for rollout_logprobs in rollout_logprobs_list
-            ]
 
         worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
         logger_msg = f"Rollout {rollout_idx}: "
