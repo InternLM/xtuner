@@ -32,7 +32,7 @@ class OrealLossConfig(BaseRLLossConfig):
         return OrealLossContext
 
     @property
-    def loss_kwargs_cls(self) -> type["OrealLossKwargs"]:
+    def _loss_kwargs_cls(self) -> type["OrealLossKwargs"]:
         return OrealLossKwargs
 
 

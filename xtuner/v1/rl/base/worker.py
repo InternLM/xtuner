@@ -437,6 +437,68 @@ class TrainingWorker(SingleAcceleratorWorker):
         }
         return rl_other_log
 
+    def _add_rollout_routed_experts(
+        self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
+    ):
+        language_cfg = (
+            self.config.model_cfg.text_config
+            if isinstance(self.config.model_cfg, BaseComposeConfig)
+            else self.config.model_cfg
+        )
+
+        to_free_routed_expert_refs: list[ray.ObjectRef] = []
+        if isinstance(rollout_routed_experts, list):
+            # list[n,l,e]
+            out_rollout_routed_expert = []
+            for rollout_routed_expert in rollout_routed_experts:
+                if isinstance(rollout_routed_expert, torch.Tensor):
+                    rollout_routed_experts_tensor = torch.randint(
+                        low=0,
+                        high=language_cfg.n_routed_experts,
+                        size=(
+                            rollout_routed_expert.size(0),
+                            language_cfg.num_hidden_layers,
+                            language_cfg.num_experts_per_tok,
+                        ),
+                    )
+                    out_rollout_routed_expert.append(rollout_routed_experts_tensor)
+                else:
+                    rollout_routed_expert_refs = rollout_routed_expert
+                    rollout_routed_expert = ray.get(rollout_routed_expert_refs)
+                    # free obj store explicitly
+                    if self.sp_mesh is None or self.sp_mesh.size() == 1:
+                        ray._private.internal_api.free(rollout_routed_expert_refs)
+                    else:
+                        if self.sp_mesh.get_local_rank() == 0:
+                            # only free once of sp mesh
+                            to_free_routed_expert_refs.append(rollout_routed_expert_refs)
+                    out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
+
+            seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
+        else:
+            assert isinstance(rollout_routed_experts, torch.Tensor), (
+                f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
+            )
+            rollout_routed_experts_tensor = torch.randint(
+                low=0,
+                high=language_cfg.n_routed_experts,
+                size=(
+                    self.config.pack_max_length,
+                    language_cfg.num_hidden_layers,
+                    language_cfg.num_experts_per_tok,
+                ),
+            )
+            seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
+
+        assert seq_ctx.input_ids is not None, "input_ids is None"
+        assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
+
+        if self.sp_mesh is not None and self.sp_mesh.size() > 1:
+            dist.barrier()
+            for free_routed_expert_refs in to_free_routed_expert_refs:
+                ray._private.internal_api.free(free_routed_expert_refs)
+            del to_free_routed_expert_refs
+
     @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
         # NOTE: sglang会清除logger handle, 重新创建
@@ -449,24 +511,12 @@ class TrainingWorker(SingleAcceleratorWorker):
                 f"Optimizer only step once because num_batches {num_batches} < optimizer_steps {self._optimizer_steps}."
             )
 
+        # Update seq_ctx: pixel_values, rollout_routed_experts
+        # Init loss_ctx: shifted_labels, advantages, rollout_logprobs
         seq_ctx_list: list[SequenceContext] = []
-        # loss_ctx_input_list: list[RLLossContextInputItem] = []
-        # convert dummy padding experts to real size
-
-        language_cfg = (
-            self.config.model_cfg.text_config
-            if isinstance(self.config.model_cfg, BaseComposeConfig)
-            else self.config.model_cfg
-        )
-
-        # shifted_labels_list: list[torch.Tensor] = []
-        # advantages_list: list[torch.Tensor] = []
-        # rollout_logprobs_list: list[torch.Tensor | None] = []
         loss_ctx_list: list[BaseRLLossContext] = []
-        # All inputs and outputs here are in sp_split state, unless those are denoted by `sp_gathered`.
-        # sp_gathered_rollout_logprobs_list: list[torch.Tensor | None] = []
-
         for data in data_batches:
+            # update seq_ctx
             seq_ctx = data["seq_ctx"]
             pixel_values = seq_ctx.pixel_values
             if pixel_values is not None:
@@ -480,61 +530,13 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts
             if rollout_routed_experts is not None:
-                to_free_routed_expert_refs: list[ray.ObjectRef] = []
-                if isinstance(rollout_routed_experts, list):
-                    # list[n,l,e]
-                    out_rollout_routed_expert = []
-                    for rollout_routed_expert in rollout_routed_experts:
-                        if isinstance(rollout_routed_expert, torch.Tensor):
-                            rollout_routed_experts_tensor = torch.randint(
-                                low=0,
-                                high=language_cfg.n_routed_experts,
-                                size=(
-                                    rollout_routed_expert.size(0),
-                                    language_cfg.num_hidden_layers,
-                                    language_cfg.num_experts_per_tok,
-                                ),
-                            )
-                            out_rollout_routed_expert.append(rollout_routed_experts_tensor)
-                        else:
-                            rollout_routed_expert_refs = rollout_routed_expert
-                            rollout_routed_expert = ray.get(rollout_routed_expert_refs)
-                            # free obj store explicitly
-                            if self.sp_mesh is None or self.sp_mesh.size() == 1:
-                                ray._private.internal_api.free(rollout_routed_expert_refs)
-                            else:
-                                if self.sp_mesh.get_local_rank() == 0:
-                                    # only free once of sp mesh
-                                    to_free_routed_expert_refs.append(rollout_routed_expert_refs)
-                            out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
-
-                    seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
-                else:
-                    assert isinstance(rollout_routed_experts, torch.Tensor), (
-                        f"padding experts should be a dummy tensor, bug got {type(rollout_routed_experts)}"
-                    )
-                    rollout_routed_experts_tensor = torch.randint(
-                        low=0,
-                        high=language_cfg.n_routed_experts,
-                        size=(
-                            self.config.pack_max_length,
-                            language_cfg.num_hidden_layers,
-                            language_cfg.num_experts_per_tok,
-                        ),
-                    )
-                    seq_ctx.rollout_routed_experts = rollout_routed_experts_tensor
-
-                assert seq_ctx.input_ids is not None, "input_ids is None"
-                assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
-
-                if self.sp_mesh is not None and self.sp_mesh.size() > 1:
-                    dist.barrier()
-                    for free_routed_expert_refs in to_free_routed_expert_refs:
-                        ray._private.internal_api.free(free_routed_expert_refs)
-                    del to_free_routed_expert_refs
+                self._add_rollout_routed_experts(seq_ctx, rollout_routed_experts)
 
             seq_ctx = data["seq_ctx"].to(DEVICE)
+            if self.sp_mesh.size() > 1:
+                seq_ctx = seq_ctx.split(self.sp_mesh)
 
+            # init loss_ctx
             shifted_labels = data["shifted_labels"].to(DEVICE)
             advantages = data["advantages"].to(DEVICE)
             rollout_logprobs = data.get("rollout_logprobs", None)
@@ -543,39 +545,16 @@ class TrainingWorker(SingleAcceleratorWorker):
                 self.sp_mesh, shifted_labels=shifted_labels, advantages=advantages, rollout_logprobs=rollout_logprobs
             )
 
-            # sp_gathered_rollout_logprobs = rollout_logprobs
-
-            if self.sp_mesh.size() > 1:
-                seq_ctx = seq_ctx.split(self.sp_mesh)
-                # loss_ctx = loss_ctx.sp_split(self.sp_mesh)  # already been sp_split in loss_cfg.build()
-
-                # shifted_labels = sp_split(shifted_labels, self.sp_mesh, 1, -100)
-                # advantages = sp_split(advantages, self.sp_mesh, 1, 0.0)
-                # rollout_logprobs = (
-                #     sp_split(rollout_logprobs, self.sp_mesh, 1, 0) if rollout_logprobs is not None else None
-                # )
-
             seq_ctx_list.append(seq_ctx)
             loss_ctx_list.append(loss_ctx)
 
-            # shifted_labels_list.append(shifted_labels)
-            # advantages_list.append(advantages)
-            # rollout_logprobs_list.append(rollout_logprobs)
-            # sp_gathered_rollout_logprobs_list.append(sp_gathered_rollout_logprobs)
-
         del data_batches
-
-        # for i in range(0, len(seq_ctx_list), iters_per_step):
-        #     batches_shifted_labels = shifted_labels_list[i : i + iters_per_step]
-        #     batches_advantages = advantages_list[i : i + iters_per_step]
-        #     batches_rollout_logprobs = rollout_logprobs_list[i : i + iters_per_step]
-        #     # When sp_mesh.size() > 1, sp_split will be done in build_batches
-        #     batches_loss_ctx = loss_cfg.build_batches(self.sp_mesh, batches_shifted_labels, batches_advantages, batches_rollout_logprobs)
 
         # When sp_mesh.size() > 1, get the sp_split shifted_labels and rollout_logprobs
         shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]
         rollout_logprobs_list = [loss_ctx.loss_kwargs.rollout_logprobs for loss_ctx in loss_ctx_list]
 
+        # compute old logprobs
         old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
         for old_logprobs, loss_ctx in zip(old_logprobs_list, loss_ctx_list):
             loss_ctx.loss_kwargs.old_logprobs = old_logprobs
@@ -583,6 +562,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         worker_log_item: WorkerLogItem = {"train_entropy": 0.0, "train_metrics": [], "sft_train_metrics": {}}
         logger_msg = f"Rollout {rollout_idx}: "
 
+        # compute entropy
         rank_grad_tokens: torch.Tensor | None = None
         for shifted_labels in shifted_labels_list:
             mask = shifted_labels != -100
@@ -602,10 +582,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             worker_log_item["rollout_entropy"] = avg_rollout_entropy.item()
             logger_msg += f", avg rollout entropy: {avg_rollout_entropy:.4f}"
 
+        # compute rollout importance sampling metrics
         all_rollout_is_metrics = []
         all_mismatch_metrics = []
-        # rollout_is_weights_list: list[torch.Tensor | None] = []
-
         for i, loss_ctx in enumerate(loss_ctx_list):
             if loss_ctx.loss_kwargs.rollout_logprobs is not None:
                 # calculate importance sampling weights
@@ -629,6 +608,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rank == 0:
             self.logger.info(logger_msg)
 
+        # compute reference logprobs
         ref_logprobs_list: list[torch.Tensor] | None = None
         if self._has_ref:
             ref_logprobs_list = self.compute_ref_logprobs(seq_ctx_list, shifted_labels_list)
@@ -652,6 +632,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             avg_kl_div = kl_div_sum / global_grad_tokens if global_grad_tokens > 0 else 0
             self.logger.info(f"Rollout {rollout_idx}: avg KL divergence: {avg_kl_div:.4f}")
 
+        # compute batched loss context
         batched_loss_ctx_list: list[BaseRLLossContext] = []
         LossContext = loss_cfg.loss_ctx_cls
         for i in range(0, len(loss_ctx_list), iters_per_step):
@@ -659,6 +640,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             batches_loss_ctx = LossContext.build_batches(batches_loss_ctx)
             batched_loss_ctx_list.extend(batches_loss_ctx)
 
+        # train optimizer steps
         for i in range(0, len(seq_ctx_list), iters_per_step):
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
             batches_loss_ctx = batched_loss_ctx_list[i : i + iters_per_step]

@@ -106,6 +106,13 @@ class BaseLossConfig(BaseModel):
     def loss_ctx_cls(self) -> type["BaseLossContext"]:
         raise NotImplementedError
 
+    @property
+    def _loss_kwargs_cls(self) -> type["BaseLossKwargs"]:
+        raise NotImplementedError
+
+    def build(self, *args, **kwargs) -> "BaseLossContext":
+        raise NotImplementedError
+
     def build_batches(self, *args, **kwargs) -> List["BaseLossContext"]:
         raise NotImplementedError
 

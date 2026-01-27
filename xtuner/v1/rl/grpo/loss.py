@@ -42,7 +42,7 @@ class GRPOLossConfig(BaseRLLossConfig):
         return GRPOLossContext
 
     @property
-    def loss_kwargs_cls(self) -> type["GRPOLossKwargs"]:
+    def _loss_kwargs_cls(self) -> type["GRPOLossKwargs"]:
         return GRPOLossKwargs
 
 

@@ -93,7 +93,7 @@ class BaseRLLossConfig(BaseLossConfig):
         raise NotImplementedError
 
     @property
-    def loss_kwargs_cls(self) -> type["BaseRLLossKwargs"]:
+    def _loss_kwargs_cls(self) -> type["BaseRLLossKwargs"]:
         raise NotImplementedError
 
     def build(
@@ -117,8 +117,7 @@ class BaseRLLossConfig(BaseLossConfig):
         if sp_mesh.size() > 1:
             loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
 
-        LossKwargs = self.loss_kwargs_cls
-        # loss_kwargs = LossContext.build_batches_loss_kwargs([loss_ctx_input], self)[0]
+        LossKwargs = self._loss_kwargs_cls
         loss_kwargs = LossKwargs(
             shifted_labels=loss_ctx_input.shifted_labels,
             old_logprobs=loss_ctx_input.old_logprobs,
@@ -130,38 +129,6 @@ class BaseRLLossConfig(BaseLossConfig):
 
         LossContext = self.loss_ctx_cls
         return LossContext(self, loss_kwargs)
-
-    # def build_batches(  # type: ignore[override]
-    #     self,
-    #     sp_mesh: DeviceMesh,
-    #     shifted_labels_list: list[torch.Tensor],
-    #     advantages_list: list[torch.Tensor] | None = None,
-    #     rollout_logprobs_list: list[torch.Tensor] | None = None,
-    #     old_logprobs_list: list[torch.Tensor] | None = None,
-    #     rollout_is_weights_list: list[torch.Tensor] | None = None,
-    #     ref_logprobs_list: list[torch.Tensor] | None = None,
-    # ) -> list["BaseRLLossContext"]:
-
-    #     n = len(shifted_labels_list)
-    #     for i in range(n):
-    #         loss_ctx_input = RLLossContextInputItem(
-    #             shifted_labels=shifted_labels_list[i],
-    #             advantages=advantages_list[i] if advantages_list is not None else None,
-    #             rollout_logprobs=rollout_logprobs_list[i] if rollout_logprobs_list is not None else None,
-    #             old_logprobs=old_logprobs_list[i] if old_logprobs_list is not None else None,
-    #             is_weights=rollout_is_weights_list[i] if rollout_is_weights_list is not None else None,
-    #             ref_logprobs=ref_logprobs_list[i] if ref_logprobs_list is not None else None,
-    #         ).to(DEVICE)
-
-    #         if sp_mesh.size() > 1:
-    #             loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
-
-    #         batches_loss_ctx_input.append(loss_ctx_input)
-
-    #     LossContext = self.loss_ctx_cls
-    #     batches_loss_kwargs = LossContext.build_batches_loss_kwargs(batches_loss_ctx_input, self)
-    #     batches_loss_ctx = [LossContext(self, loss_kwargs) for loss_kwargs in batches_loss_kwargs]
-    #     return batches_loss_ctx
 
 
 class RLLossContextInputItem(BaseModel):
@@ -260,7 +227,7 @@ class BaseRLLossContext(BaseLossContext[RLLossContextInputItem]):
         assert old_logprobs is not None
 
         if sp_mesh and sp_mesh.size() > 1:
-            # Temporarily sp_gather old_logprobs here, but not modify old_logprobs_list(still in sp_split state)
+            # Temporarily sp_gather old_logprobs here, but not modify loss_kwargs.old_logprobs(still in sp_split state)
             rollout_logprobs = sp_gather(rollout_logprobs, sp_mesh, dim=1)
             old_logprobs = sp_gather(old_logprobs, sp_mesh, dim=1)
             old_logprobs = old_logprobs[:, : rollout_logprobs.size(1)]  # type: ignore
@@ -290,9 +257,4 @@ class BaseRLLossContext(BaseLossContext[RLLossContextInputItem]):
         shifted_labels[~rollout_is_mask.bool()] = -100  # update loss mask
 
         self.loss_kwargs.is_weights = rollout_is_weights
-        # self.loss_kwargs.policy_loss_weight *= rollout_is_weights
-
         return mismatch_metrics, rollout_is_metrics
-
-    # def add_ref_logprobs(self, ref_logprobs: torch.Tensor) -> None:
-    #     self.loss_kwargs.ref_logprobs = ref_logprobs
