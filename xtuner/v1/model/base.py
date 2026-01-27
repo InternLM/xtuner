@@ -124,6 +124,13 @@ class TransformerConfig(XTunerBaseModelConfig):
         "default"
     )
 
+    @computed_field  # type: ignore[misc]
+    @property
+    def rope_scaling(self) -> dict | None:
+        if self.rope_scaling_cfg is not None:
+            return self.rope_scaling_cfg.model_dump()
+        return None
+
     @computed_field
     def num_attention_heads(self) -> int:
         return self.attention.num_attention_heads

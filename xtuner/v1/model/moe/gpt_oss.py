@@ -10,6 +10,7 @@ from transformers.models.gpt_oss import GptOssConfig as HFGptOssConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
+from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .moe import MoE
@@ -123,6 +124,9 @@ class GptOssConfig(MoEConfig):
     tie_word_embeddings: bool = False
     n_shared_experts: int = 0
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig(act_type="clipped_swiglu", clip_alpha=1.702, clip_limit=7)
+    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(
+        type="yarn", beta_fast=32.0, beta_slow=1.0, factor=32.0, original_max_position_embeddings=4096, truncate=False
+    )
 
     @computed_field
     def layers_type(self) -> list[Literal["full_attention", "sliding_attention"]]:
@@ -138,7 +142,6 @@ class GptOssConfig(MoEConfig):
         assert isinstance(cfg, HFGptOssConfig)
 
         config = cls(
-            hf_config=cfg,
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
             pad_token_id=cfg.pad_token_id,
@@ -168,8 +171,17 @@ class GptOssConfig(MoEConfig):
                 norm_topk_prob=True,
                 router_scaling_factor=1.0,
             ),
+            rope_scaling_cfg=RopeScalingConfig(
+                type=cfg.rope_scaling.get("rope_type", "yarn"),
+                beta_fast=cfg.rope_scaling.get("beta_fast", 32.0),
+                beta_slow=cfg.rope_scaling.get("beta_slow", 1.0),
+                factor=cfg.rope_scaling.get("factor", 32.0),
+                original_max_position_embeddings=cfg.rope_scaling.get("original_max_position_embeddings", 4096),
+                truncate=cfg.rope_scaling.get("truncate", False),
+            )
+            if cfg.rope_scaling is not None
+            else None,
         )
-
         return config
 
     @property
@@ -201,6 +213,16 @@ class GptOssConfig(MoEConfig):
             o_bias=True,
             dtype=torch.bfloat16,
             swiglu_limit=self.moe_act_fn_cfg.clip_limit,
+            rope_scaling={
+                "rope_type": self.rope_scaling_cfg.type,
+                "beta_fast": self.rope_scaling_cfg.beta_fast,
+                "beta_slow": self.rope_scaling_cfg.beta_slow,
+                "factor": self.rope_scaling_cfg.factor,
+                "original_max_position_embeddings": self.rope_scaling_cfg.original_max_position_embeddings,
+                "truncate": self.rope_scaling_cfg.truncate,
+            }
+            if self.rope_scaling_cfg is not None
+            else None,
         )
 
 
