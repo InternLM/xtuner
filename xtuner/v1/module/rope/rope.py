@@ -20,13 +20,12 @@ class RopeScalingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["default", "linear", "dynamic", "yarn", "longrope", "llama3", "qwen3_vl"] = "default"
 
-    max_position_embeddings: int | None = None  # TODO: 无用参数考虑删除
-    original_max_position_embeddings: int | None = None  # TODO: 无用参数考虑删除
+    max_position_embeddings: int | None = None
+    original_max_position_embeddings: int | None = None
 
     # For Qwen3VL
     mrope_section: list[int] | None = None  # e.g. [24, 20, 20]
 
-    # For inference
     factor: float | None = None
     beta_fast: float | None = None
     beta_slow: float | None = None
@@ -36,6 +35,7 @@ class RopeScalingConfig(BaseModel):
     high_freq_factor: float | None = None
     mscale: float | None = None
     mscale_all_dim: float | None = None
+    truncate: bool = False
 
     # For FoPE
     fope_init_factor: float | None = None
@@ -73,6 +73,14 @@ class RotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
         self.rope_type = "default"
         self.config = config
+
+        rope_scaling_cfg = config.rope_scaling_cfg
+        if rope_scaling_cfg is not None:
+            self.rope_type = rope_scaling_cfg.type
+        assert self.rope_type in ["default", "linear", "yarn", "llama3"], (
+            f"Unsupported rope_type: {self.rope_type}. Supported types are: 'default', 'linear', 'yarn', 'llama3'."
+        )
+
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
         inv_freq: torch.Tensor

@@ -13,7 +13,6 @@ from pathlib import Path
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.moe.gpt_oss import GptOss21BA3P6Config
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
 
 GPT_OSS_MINI_PATH = os.environ["GPT_OSS_MINI_PATH"]
@@ -45,7 +44,6 @@ class TestGptOss(DeterministicDDPTestCase):
         self.create_pg(device)
 
         hf_config = AutoConfig.from_pretrained(GPT_OSS_MINI_PATH)
-        hf_config.rope_scaling = None
 
         hf_model = AutoModelForCausalLM.from_pretrained(
             GPT_OSS_MINI_PATH,
@@ -108,7 +106,6 @@ class TestGptOss(DeterministicDDPTestCase):
         self.create_pg(device)
 
         hf_config = AutoConfig.from_pretrained(GPT_OSS_MINI_PATH)
-        hf_config.rope_scaling = None
         hf_model = AutoModelForCausalLM.from_pretrained(
             GPT_OSS_MINI_PATH,
             dtype=torch.bfloat16,
