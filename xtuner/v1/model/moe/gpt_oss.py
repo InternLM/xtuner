@@ -6,6 +6,7 @@ import torch
 from pydantic import computed_field
 from typing_extensions import Self
 
+from transformers import PretrainedConfig
 from transformers.models.gpt_oss import GptOssConfig as HFGptOssConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig
 from xtuner.v1.module.attention import MHAConfig
@@ -132,10 +133,13 @@ class GptOssConfig(MoEConfig):
         return GptOss(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
-        cfg = HFGptOssConfig.from_pretrained(hf_path)
-
-        assert isinstance(cfg, HFGptOssConfig)
+    def from_hf(cls, hf_path: str | Path | None = None, hf_config: PretrainedConfig | None = None) -> Self:
+        if hf_path is not None:
+            cfg = HFGptOssConfig.from_pretrained(hf_path)
+            assert isinstance(cfg, HFGptOssConfig)
+        else:
+            cfg = hf_config
+        assert hf_config is not None and isinstance(cfg, PretrainedConfig)
 
         config = cls(
             hf_config=cfg,
