@@ -30,7 +30,7 @@ from xtuner.v1.engine.vision_compose_train_engine import (
 )
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossConfig
-from xtuner.v1.loss.ce_loss import CELossContextInputItem
+from xtuner.v1.loss.ce_loss import CELossContext
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
@@ -260,7 +260,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
 
-    def _init_sft(self, worker_cfg):
+    def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
         self._sft_dataloader: Dataloader | None = None
         self._sft_dataloader_iter: Iterable | None = None
@@ -727,37 +727,26 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     def _train_one_step_sft(self, data_batch):
         seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_input_list: list[CELossContextInputItem] = []
+        loss_cfg: CELossConfig = self._sft_loss_cfg
+        loss_ctx_list: list[CELossContext] = []
         for data in data_batch:
             seq_ctx = data["seq_ctx"].to(DEVICE)
-            loss_ctx_input = CELossContextInputItem(shifted_labels=data["shifted_labels"]).to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
-                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx_input_list.append(loss_ctx_input)
+            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=self.sp_mesh)
+            loss_ctx_list.append(loss_ctx)
 
         del data_batch
 
-        LossContext = self._sft_loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list,
-            self._sft_loss_cfg,
-            cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
-            sp_mesh=self.sp_mesh,
+        cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
+        loss_ctx_list = CELossContext.build_batches(
+            loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=self.sp_mesh
         )
-        engine_input = []
-        for seq_ctx, loss_kwargs in zip(seq_ctx_list, batches_loss_kwargs):
-            loss_ctx = LossContext(
-                loss_cfg=self._sft_loss_cfg,
-                loss_kwargs=loss_kwargs,
-            )
-            engine_input.append(
-                ModelItem(
-                    seq_ctx=seq_ctx,
-                    loss_ctx=loss_ctx,
-                )
-            )
+
+        engine_input = [
+            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+        ]
 
         loss_log, other_log = self._engine.train_step(engine_input)
         grad_norm = self._engine.clip_grad_norm()
