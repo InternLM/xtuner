@@ -32,7 +32,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
 from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
-from xtuner.v1.loss import CELossConfig
+from xtuner.v1.loss import CELossConfig, CELossContext
 from xtuner.v1.model.base import ModelItem, TransformerConfig, XTunerBaseModelConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.moe.moe import MoEConfig
@@ -789,20 +789,28 @@ class Trainer:
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
+        loss_cfg: CELossConfig = self.loss_cfg
         seq_ctx_list: list[SequenceContext] = []
-        shifted_labels_list: list[torch.Tensor] = []
+        loss_ctx_list: list[CELossContext] = []
+        # shifted_labels_list: list[torch.Tensor] = []
 
         for data in data_batch:
             seq_ctx = data.pop("seq_ctx").to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            shifted_labels_list.append(data["shifted_labels"])
+            # shifted_labels_list.append(data["shifted_labels"])
+            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=self.sp_mesh)
+            loss_ctx_list.append(loss_ctx)
 
         # TODO: Consider moving data_batch deletion to the caller for better memory management.
         del data_batch
 
-        loss_ctx_list = self.loss_cfg.build_batches(seq_ctx_list, shifted_labels_list, self.sp_mesh)
+        # loss_ctx_list = self.loss_cfg.build_batches(seq_ctx_list, shifted_labels_list, self.sp_mesh)
+        cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
+        loss_ctx_list = CELossContext.build_batches(
+            loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=self.sp_mesh
+        )
 
         engine_input = [
             ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)

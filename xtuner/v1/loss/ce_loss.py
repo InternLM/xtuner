@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Annotated, Any, List, Literal, cast
+from typing import Annotated, Any, Literal, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
-from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from xtuner.v1.utils.device import get_device
 
@@ -44,28 +43,41 @@ class CELossConfig(BaseLossConfig):
         if self.mode == "liger":
             assert self.loss_reduction == "token", "Currently, cannot use liger kernel with sample or square reduction"
 
-    def build_batches(  # type: ignore[override]
+    def build(
         self,
-        seq_ctx_list: list[SequenceContext],
-        shifted_labels_list: list[torch.Tensor],
+        shifted_labels: torch.Tensor,
         sp_mesh: DeviceMesh | None = None,
-    ) -> List["CELossContext"]:
-        loss_ctx_input_list: list[CELossContextInputItem] = []
-        for shifted_labels in shifted_labels_list:
-            loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels).to(DEVICE)
-            if sp_mesh is not None and sp_mesh.size() > 1:
-                loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
-            loss_ctx_input_list.append(loss_ctx_input)
+    ) -> "CELossContext":
+        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels).to(DEVICE)
+        if sp_mesh is not None and sp_mesh.size() > 1:
+            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
 
-        LossContext = self.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list,
-            self,
-            cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
-            sp_mesh=sp_mesh,
-        )
-        loss_ctx_list = [LossContext(loss_cfg=self, loss_kwargs=loss_kwargs) for loss_kwargs in batches_loss_kwargs]
-        return loss_ctx_list
+        loss_kwargs = CELossKwargs(shifted_labels=shifted_labels)
+        loss_ctx = self.loss_ctx_cls(self, loss_kwargs)
+        return loss_ctx
+
+    # def build_batches(  # type: ignore[override]
+    #     self,
+    #     seq_ctx_list: list[SequenceContext],
+    #     shifted_labels_list: list[torch.Tensor],
+    #     sp_mesh: DeviceMesh | None = None,
+    # ) -> List["CELossContext"]:
+    #     loss_ctx_input_list: list[CELossContextInputItem] = []
+    #     for shifted_labels in shifted_labels_list:
+    #         loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels).to(DEVICE)
+    #         if sp_mesh is not None and sp_mesh.size() > 1:
+    #             loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
+    #         loss_ctx_input_list.append(loss_ctx_input)
+
+    #     LossContext = self.loss_ctx_cls
+    #     batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+    #         loss_ctx_input_list,
+    #         self,
+    #         cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
+    #         sp_mesh=sp_mesh,
+    #     )
+    #     loss_ctx_list = [LossContext(loss_cfg=self, loss_kwargs=loss_kwargs) for loss_kwargs in batches_loss_kwargs]
+    #     return loss_ctx_list
 
 
 class CELossKwargs(BaseLossKwargs):
@@ -77,7 +89,7 @@ class CELossKwargs(BaseLossKwargs):
     """
 
     shifted_labels: torch.Tensor
-    loss_weight: torch.Tensor
+    loss_weight: torch.Tensor | None = None
 
 
 class CELossContextInputItem(BaseModel):
@@ -122,6 +134,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
         else:
             self.liger_loss_fct = None
 
+    # TODO: Remove this method
     @classmethod
     def build_batches_loss_kwargs(
         cls,
@@ -192,6 +205,67 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             batches_loss_kwargs.append(loss_kwargs)
         return batches_loss_kwargs
 
+    @staticmethod
+    def build_batches(  # type: ignore[override]
+        loss_ctx_list: list["CELossContext"],
+        cu_seq_lens_list: Sequence[torch.IntTensor] | None = None,
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list["CELossContext"]:
+        assert len(loss_ctx_list) > 0, "loss_ctx_list can not be empty"
+        loss_cfg = loss_ctx_list[0].loss_cfg
+
+        loss_weight_list: list[torch.Tensor] = []
+        for i, loss_ctx in enumerate(loss_ctx_list):
+            shifted_labels = loss_ctx.loss_kwargs.shifted_labels
+            if loss_cfg.loss_reduction == "token":
+                loss_weight = torch.ones_like(shifted_labels, dtype=torch.float32)
+            else:
+                assert cu_seq_lens_list is not None, "cu_seq_lens_list must be provided for sample or square reduction"
+                cu_seq_lens = cu_seq_lens_list[i]
+                boundaries = cu_seq_lens[1:]
+                num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
+
+                if sp_mesh is not None:
+                    # gather shifted_labels from different sp ranks to compute the correct loss weight
+                    shifted_labels = sp_gather(shifted_labels, sp_mesh=sp_mesh, dim=1)
+
+                mask = (shifted_labels != loss_cfg.ignore_idx).int()
+                num_grad_tokens = torch.zeros_like(boundaries, dtype=torch.int32)
+                prev_idx = 0
+                for j, boundary in enumerate(boundaries):
+                    num_grad_tokens[j] = mask[0, prev_idx:boundary].sum()
+                    prev_idx = boundary
+                if loss_cfg.loss_reduction == "sample":
+                    loss_weight = 1.0 / num_grad_tokens
+                elif loss_cfg.loss_reduction == "square":
+                    loss_weight = 1.0 / torch.sqrt(num_grad_tokens.float())
+                else:
+                    raise NotImplementedError(loss_cfg.loss_reduction)
+                loss_weight = loss_weight.repeat_interleave(num_tokens).unsqueeze(0)
+
+                if sp_mesh is not None:
+                    loss_weight = sp_split(loss_weight, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
+                    shifted_labels = sp_split(shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
+
+            loss_weight[shifted_labels == loss_cfg.ignore_idx] = 0.0
+            if torch.isnan(loss_weight).any() or torch.isinf(loss_weight).any():
+                raise AssertionError(
+                    "loss_weight contains NaN or Inf values. Please filter out samples with no valid tokens."
+                )
+            loss_ctx.loss_kwargs.loss_weight = loss_weight
+            loss_weight_list.append(loss_weight)
+
+        # Compute the denominator used in the global calibration of the loss
+        rank_denominator = sum(loss_weight.sum() for loss_weight in loss_weight_list)
+        rank_denominator = cast(torch.Tensor, rank_denominator)
+        global_denominator = rank_denominator
+        if dist.is_initialized():
+            dist.all_reduce(global_denominator, op=dist.ReduceOp.SUM)
+
+        for loss_ctx in loss_ctx_list:
+            loss_ctx.loss_kwargs.loss_weight /= global_denominator + 1e-12
+        return loss_ctx_list
+
     def loss_fn(
         self,
         hidden_states: torch.Tensor,
@@ -205,6 +279,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
 
         shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
         loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
+        assert loss_weight is not None, "loss_weight can not be None"
 
         logits = logits.reshape(-1, logits.size(-1))  # (bs * seq_len, vocab_size)
         shifted_labels = shifted_labels.flatten()
@@ -233,6 +308,7 @@ class CELossContext(BaseLossContext[CELossContextInputItem]):
             assert self.liger_loss_fct is not None, "liger_loss_fct must be initialized in liger mode"
             shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
             loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
+            assert loss_weight is not None, "loss_weight can not be None"
 
             bs, seq, dim = hidden_states.shape
             hidden_states = hidden_states.reshape(bs * seq, dim)

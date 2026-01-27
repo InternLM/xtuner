@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Generic, List, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -113,9 +113,6 @@ class BaseLossConfig(BaseModel):
     def build(self, *args, **kwargs) -> "BaseLossContext":
         raise NotImplementedError
 
-    def build_batches(self, *args, **kwargs) -> List["BaseLossContext"]:
-        raise NotImplementedError
-
 
 LossContextInputItem = TypeVar("LossContextInputItem")
 
@@ -150,7 +147,7 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
 
     @staticmethod
     @abstractmethod
-    def build_batches(loss_ctx_list: list[_BaseLossContextT]) -> list[_BaseLossContextT]: ...
+    def build_batches(loss_ctx_list: list[_BaseLossContextT], *args, **kwargs) -> list[_BaseLossContextT]: ...
 
     @abstractmethod
     def loss_fn(
