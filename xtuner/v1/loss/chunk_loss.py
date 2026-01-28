@@ -42,7 +42,6 @@ class ChunkLoss(torch.autograd.Function):
                 chunk_loss, (_, extra_info) = loss_forward(
                     hidden_states_chunk, head_weight, None, loss_kwargs_chunks[i]
                 )
-                torch.distributed.breakpoint()
                 if head_weight.requires_grad:
                     chunk_grad_input, chunk_grad_weight = grad(
                         chunk_loss, (hidden_states_chunk, head_weight), allow_unused=True
