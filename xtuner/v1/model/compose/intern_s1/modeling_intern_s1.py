@@ -20,6 +20,7 @@ from xtuner.v1.loss import CELossContext
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
+    OffloadPolicy,
     fully_shard,
 )
 from ..base import BaseComposeModel, to_hf_key_list_wrapper
@@ -94,7 +95,7 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else OffloadPolicy(),
         )
 
         self.language_model.embed_tokens.set_modules_to_forward_prefetch(   # type: ignore
