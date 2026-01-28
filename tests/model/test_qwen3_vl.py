@@ -278,9 +278,6 @@ class TestQwen3VL(DeterministicDDPTestCase):
             syncdir = [tmpdir]
             dist.broadcast_object_list(syncdir, src=0)
             tmpdir = Path(syncdir[0])
-            qwen3vl_model.language_model.fully_shard(fsdp_config=fsdp_config)
-            qwen3vl_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
-            qwen3vl_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
             qwen3vl_model.fully_shard(fsdp_config=fsdp_config)
             qwen3vl_model.from_hf(QWEN3_VL_MOE_PATH)
             qwen3vl_model.save_hf(tmpdir)
