@@ -20,8 +20,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.12
+      - name: Install pre-commit hook
+        run: |
+          pip install pre-commit
+          pre-commit install
+      - name: Linting
+        run: pre-commit run --files $(find xtuner/v1)
+
   unit_test:
     runs-on: [h_cluster]
+    needs: lint
     steps:
     - name: mask env
       run: |
