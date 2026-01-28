@@ -402,3 +402,30 @@ class SequenceContext:
         self.device = device
 
         return self
+
+    @property
+    def data(self) -> dict:
+        """Export all attributes as a dictionary.
+
+        Returns:
+            dict: A dictionary containing all attributes of the SequenceContext.
+        """
+        return {
+            "input_ids": self.input_ids,
+            "cu_seq_lens_q": self.cu_seq_lens_q,
+            "cu_seq_lens_k": self.cu_seq_lens_k,
+            "max_length_q": self.max_length_q,
+            "max_length_k": self.max_length_k,
+            "num_padding": self.num_padding,
+            "sequence_parallel_mesh": self.sequence_parallel_mesh,
+            "block_table": self.block_table,
+            "device": self.device,
+            "position_ids": self.position_ids,
+            "image_grid_thw": self.image_grid_thw,
+            "deepstack_visual_embeds": self.deepstack_visual_embeds,
+            "visual_pos_masks": self.visual_pos_masks,
+            "pixel_values": self.pixel_values,
+            "inputs_embeds": self.inputs_embeds,
+            "num_img_tokens": self.num_img_tokens,
+            "rollout_routed_experts": self.rollout_routed_experts,
+        }
