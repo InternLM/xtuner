@@ -5,7 +5,8 @@ import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, distribute_tensor
 
-from xtuner.v1.utils import get_device
+from .device import get_device
+from .misc import clean_param_name
 
 
 DEVICE = get_device()
@@ -51,7 +52,7 @@ def default_init_weights(module: nn.Module) -> set[str]:
         if hasattr(module, "bias") and module.bias is not None:
             bias = cast(torch.Tensor, module.bias)
             init_params(bias, nn.init.zeros_)
-            initialized_params.add(f"{name}.bias")
+            initialized_params.add(clean_param_name(f"{name}.bias"))
 
         if hasattr(module, "weight") and module.weight is not None:
             weight = cast(torch.Tensor, module.weight)
@@ -59,7 +60,7 @@ def default_init_weights(module: nn.Module) -> set[str]:
                 init_params(weight, nn.init.ones_)
             else:
                 init_params(weight, partial(nn.init.normal_, mean=0.0, std=0.02))
-            initialized_params.add(f"{name}.weight")
+            initialized_params.add(clean_param_name(f"{name}.weight"))
 
     _init_weights_recursive("", module)
     return initialized_params

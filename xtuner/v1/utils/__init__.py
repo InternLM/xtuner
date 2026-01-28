@@ -11,6 +11,7 @@ from .misc import (
     XTUNER_DETERMINISTIC,
     FunctionEnum,
     SharedMemory,
+    clean_param_name,
     get_function_type,
     get_padding_length,
     is_hf_model_path,
@@ -57,4 +58,5 @@ __all__ = [
     "monkey_unpatch_torch_reductions",
     "ray_method",
     "profile_time",
+    "clean_param_name",
 ]
