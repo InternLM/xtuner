@@ -27,7 +27,7 @@ from typing_extensions import NotRequired, TypedDict
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
+from xtuner.v1.model.base import BaseModel, ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.profiler.prober import ProberList
@@ -142,7 +142,7 @@ class TrainEngine:
 
     def __init__(
         self,
-        model_cfg: TransformerConfig,
+        model_cfg: XTunerBaseModelConfig,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,

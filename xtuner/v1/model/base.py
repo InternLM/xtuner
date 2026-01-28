@@ -80,9 +80,36 @@ class XTunerBaseModelConfig(PydanticBaseModel):
         ),
     ] = None
     hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
+    dcp_ignore_frozen_params: bool = True
 
     @property
     def hf_config(self) -> PretrainedConfig | None:
+        return None
+
+    def save_hf(self, hf_path: str | Path):
+        if self.hf_config is None:
+            raise NotImplementedError("The `hf_config` property must be implemented to save in HuggingFace format.")
+
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        """Build a `TransformerConfig` from a pre-trained HuggingFace model.
+
+        This method creates a configuration object based on a `PretrainedConfig` loaded from the specified HuggingFace model path.
+        If you want to use this method, you must implement it in a subclass to correctly extract and map configuration parameters.
+
+        Note:
+            The `hf_config` field needs to be set to the `PretrainedConfig` object loaded from `hf_path`,
+            otherwise it cannot be saved in HuggingFace format.
+
+        Args:
+            hf_path (str | Path): Path to the HuggingFace model.
+
+        Returns:
+            TransformerConfig: A configuration object populated with values from the pre-trained model.
+
+        Raises:
+            NotImplementedError: This method must be implemented by subclasses.
+        """
         raise NotImplementedError
 
     def build(self):
@@ -123,7 +150,6 @@ class TransformerConfig(XTunerBaseModelConfig):
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
-    dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
     )
@@ -158,48 +184,6 @@ class TransformerConfig(XTunerBaseModelConfig):
                 "sliding_attention" if i >= self.max_window_layers else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
-
-    def build(self) -> "BaseModel":
-        raise NotImplementedError
-
-    @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
-        """Build a `TransformerConfig` from a pre-trained HuggingFace model.
-
-        This method creates a configuration object based on a `PretrainedConfig` loaded from the specified HuggingFace model path.
-        If you want to use this method, you must implement it in a subclass to correctly extract and map configuration parameters.
-
-        Note:
-            The `hf_config` field needs to be set to the `PretrainedConfig` object loaded from `hf_path`,
-            otherwise it cannot be saved in HuggingFace format.
-
-        Args:
-            hf_path (str | Path): Path to the HuggingFace model.
-
-        Returns:
-            TransformerConfig: A configuration object populated with values from the pre-trained model.
-
-        Raises:
-            NotImplementedError: This method must be implemented by subclasses.
-        """
-        raise NotImplementedError
-
-    @property
-    def hf_config(self) -> PretrainedConfig | None:
-        """HuggingFace configuration."""
-        return None
-
-    def save_hf(self, hf_path: str | Path):
-        """Save the configuration to a HuggingFace-compatible format.
-
-        Args:
-            hf_path (str | Path): Path where the configuration should be saved.
-        """
-
-        if self.hf_config is None:
-            raise NotImplementedError("The `hf_config` property must be implemented to save in HuggingFace format.")
-
-        self.hf_config.save_pretrained(hf_path)
 
 
 class ModelOutputs(TypedDict):
