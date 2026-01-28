@@ -275,7 +275,10 @@ class RawDataFlow:
                     waiting_tasks.add(task)
 
                 _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED)
-                self.finished_samples_count = await self.replay_buffer.get_finished_samples.remote()
+                if self._is_async_run is False:
+                    self.finished_samples_count = await self.replay_buffer.get_finished_samples.remote()
+                else:
+                    self.finished_samples_count = await self.replay_buffer.get_total_finished_samples.remote()
                 waiting_tasks = pending_tasks
 
             pbar.n = self.finished_samples_count
@@ -313,6 +316,16 @@ class RawDataFlow:
         self.logger.info(
             f"Data generation completed. Replay Buffer Stats: {replay_buffer_stats}, Rollout Stats: {rollout_stats}"
         )
+        await self.replay_buffer.reset_finished_samples.remote()  # type: ignore[attr-defined]
+    
+    # 在全异步场景下，一旦 get 完成数据 finished_samples_count 就会改变，导致一直无法退出
+    async def get_finished_samples_count(self):
+        """Gets the number of finished samples."""
+        return await self.replay_buffer.get_finished_samples.remote()
+    
+    async def get_async_data(self, target_batch_size):
+        """Gets all data from the replay buffer."""
+        return await self.replay_buffer.get_samples.remote(target_batch_size)
 
     @ray_method
     async def pause(self, timeout: float = 60.0):
@@ -362,6 +375,10 @@ class RawDataFlow:
         Returns:
             List[RLDataFlowItem]: A list of collected training samples.
         """
+        if num is None:
+            self._is_async_run = False
+        else:
+            self._is_async_run = True
         self._reset_internal_states(
             global_batch_size=num,
             sample_params=sample_params,
@@ -369,7 +386,8 @@ class RawDataFlow:
             enable_partial_rollout=enable_partial_rollout,
         )
         await self.concurrent_task_runner()
-        return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
+        if self._is_async_run is False:
+            return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
 
     def get_replaybuffer_status(self):
         return ray.get(self.replay_buffer.status.remote())

@@ -8,6 +8,7 @@ from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
 
 from .worker import RolloutWorker
+import logging
 
 
 class SGLangWorker(RolloutWorker):
@@ -23,6 +24,12 @@ class SGLangWorker(RolloutWorker):
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         from sglang.srt.entrypoints.http_server import launch_server
 
+        # 禁用客户端 HTTP 请求日志
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("httpcore.connection").setLevel(logging.WARNING)
+        logging.getLogger("httpcore.http11").setLevel(logging.WARNING)
+
         self.server_func = launch_server
         self.endpoints["health_generate"] = "health_generate"
         self.endpoints["generate"] = "generate"
@@ -31,6 +38,36 @@ class SGLangWorker(RolloutWorker):
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
+    
+    def init_weights_update_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
+        return self._make_request(
+            "init_weights_update_group",
+            {
+                "master_address": master_address,
+                "master_port": master_port,
+                "rank_offset": rank_offset,
+                "world_size": world_size,
+                "group_name": group_name,
+                "backend": backend,
+            },
+        )
+    
+    def update_weights_from_distributed(
+        self, names, dtypes, shapes, group_name, flush_cache=False, weight_version: str | None = None
+    ):
+        payload = {
+            "names": names,
+            "dtypes": [str(dtype).replace("torch.", "") for dtype in dtypes],
+            "shapes": shapes,
+            "group_name": group_name,
+            "flush_cache": flush_cache,
+        }
+        if weight_version is not None:
+            payload["weight_version"] = weight_version
+        return self._make_request(
+            "update_weights_from_distributed",
+            payload,
+        )
 
     async def _create_request(
         self,

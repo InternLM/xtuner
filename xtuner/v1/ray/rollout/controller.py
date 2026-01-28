@@ -220,6 +220,7 @@ class RolloutController:
             server_url_dict=self.worker_server_urls_map,
             rollout_config=self.config,
             worker_server_urls_status=worker_server_urls_status,
+            rollout_workers=[info.actor for info in self.workers_info.values()],
         )
 
     def init_workers(self):
