@@ -42,9 +42,13 @@ class ChunkLoss(torch.autograd.Function):
                 chunk_loss, (_, extra_info) = loss_forward(
                     hidden_states_chunk, head_weight, None, loss_kwargs_chunks[i]
                 )
-                chunk_grad_input, chunk_grad_weight = grad(
-                    chunk_loss, (hidden_states_chunk, head_weight), allow_unused=True
-                )
+                if head_weight.requires_grad:
+                    chunk_grad_input, chunk_grad_weight = grad(
+                        chunk_loss, (hidden_states_chunk, head_weight), allow_unused=True
+                    )
+                else:
+                    chunk_grad_input = grad(chunk_loss, (hidden_states_chunk,), allow_unused=True)[0]
+                    chunk_grad_weight = torch.zeros_like(head_weight)
 
             accumulated_loss.add_(chunk_loss)
             grad_inputs_chunk.copy_(chunk_grad_input)
