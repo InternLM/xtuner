@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Generic, Literal, Self, TypeVar
+from typing import Annotated, Any, Literal, Self, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -124,16 +124,14 @@ class BaseLossConfig(BaseModel):
         raise NotImplementedError
 
 
-LossContextInputItem = TypeVar("LossContextInputItem")
-
 # NOTE: Self type for BaseLossContext subclasses (F-bounded polymorphism)
-_BaseLossContextT = TypeVar("_BaseLossContextT", bound="BaseLossContext[Any]")
+_BaseLossContextT = TypeVar("_BaseLossContextT", bound="BaseLossContext")
 
 
-class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
+class BaseLossContext(nn.Module, ABC):
     def __init__(self, loss_cfg: BaseLossConfig, loss_kwargs: BaseLossKwargs):
         # LossContext需要负责几个功能：
-        # 1. sequence parallel, 借助LossContextInputItem.sp_split 实现
+        # 1. sequence parallel, 借助LossKwargs.sp_split 实现
         # 2. batch内的loss全局校准, 借助 LossContext.build_batches 实现
         # 3. chunk loss计算，借助 LossKwargs.chunk 实现
         # 其中，因为LossContext负责batch内的loss 全局校准，提供 build_batches接口，
@@ -141,19 +139,6 @@ class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
         super().__init__()
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
-
-    @classmethod
-    @abstractmethod
-    def build_batches_loss_kwargs(
-        cls,
-        data_batches: list[LossContextInputItem],
-        loss_cfg: BaseLossConfig,
-        # The following two parameters need to be passed in only when sp is enabled
-        # and calculating loss_kwargs requires the complete shifted_labels.
-        # (For example, the sample-wise loss)
-        cu_seq_lens_list: list[torch.Tensor] | None = None,
-        sp_mesh: DeviceMesh | None = None,
-    ) -> list[BaseLossKwargs]: ...
 
     @staticmethod
     @abstractmethod

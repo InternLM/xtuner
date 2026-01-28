@@ -4,13 +4,11 @@ from typing import Any, Literal, cast
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from torch.distributed.device_mesh import DeviceMesh
 
 from ..base import (
     BaseRLLossConfig,
     BaseRLLossContext,
     BaseRLLossKwargs,
-    RLLossContextInputItem,
     compute_kl_loss_weight,
 )
 from ..loss_fn import get_policy_loss_fn, kl_penalty, sft_loss_fn
@@ -47,86 +45,6 @@ class OrealLossContext(BaseRLLossContext):
     def __init__(self, loss_cfg: OrealLossConfig, loss_kwargs: OrealLossKwargs):
         super().__init__(loss_cfg, loss_kwargs)
         self.policy_loss_fn = get_policy_loss_fn(self.loss_cfg.policy_loss_cfg.get("loss_type", "vanilla"))
-
-    # TODO: this function is not used anymore, we should remove it later
-    @classmethod
-    def build_batches_loss_kwargs(
-        cls,
-        data_batches: list[RLLossContextInputItem],
-        loss_cfg: OrealLossConfig,
-        cu_seq_lens_list: list[torch.Tensor] | None = None,
-        sp_mesh: DeviceMesh | None = None,
-    ) -> list[OrealLossKwargs]:
-        shifted_labels_list = [item.shifted_labels for item in data_batches]
-        advantages_list = [item.advantages for item in data_batches]
-
-        # Compute the denominator used in the global calibration of the loss
-        rank_grad_tokens = sum((labels != loss_cfg.ignore_idx).sum() for labels in shifted_labels_list)
-        rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
-        rank_positive_tokens = sum(
-            ((labels != loss_cfg.ignore_idx) & (adv > 0)).sum()
-            for labels, adv in zip(shifted_labels_list, advantages_list)
-        )
-        global_grad_tokens = rank_grad_tokens
-        global_positive_tokens = rank_positive_tokens
-        if dist.is_initialized():
-            dist.all_reduce(global_grad_tokens, op=dist.ReduceOp.SUM)
-            dist.all_reduce(global_positive_tokens, op=dist.ReduceOp.SUM)
-        global_negative_tokens = global_grad_tokens - global_positive_tokens
-
-        batches_loss_kwargs = []
-        for i, item in enumerate(data_batches):
-            shifted_labels = shifted_labels_list[i]
-            advantages = advantages_list[i]
-            assert item.old_logprobs is not None, "old_logprobs can not be None"
-            # compute sft loss_weights
-            # TODO: oreal 官方实现里 sft loss weights 要乘两个 loss factor，需要进一步 check 下
-            sft_loss_weights = (
-                torch.ones_like(shifted_labels, dtype=torch.float32)
-                * loss_cfg.pos_sft_loss_weight
-                * loss_cfg.positive_loss_factor
-                / global_positive_tokens
-            )
-            sft_loss_weights[shifted_labels == loss_cfg.ignore_idx] = 0.0
-            sft_loss_weights[advantages <= 0] = 0.0  # only positive advantages tokens contribute to sft loss
-
-            # compute policy loss_weights
-            policy_loss_weights = torch.ones_like(shifted_labels, dtype=torch.float32)
-            policy_loss_weights[shifted_labels == loss_cfg.ignore_idx] = 0.0
-            policy_loss_weights[advantages > 0] *= (
-                loss_cfg.pos_policy_loss_weight * loss_cfg.positive_loss_factor / global_positive_tokens
-            )
-            policy_loss_weights[advantages <= 0] *= loss_cfg.negative_loss_factor / global_negative_tokens
-
-            if item.is_weights is not None:
-                policy_loss_weights = policy_loss_weights * item.is_weights
-
-            # compute kl loss weights
-            if loss_cfg.use_kl_loss and item.ref_logprobs is not None:
-                # Maybe get ref_logprobs after init
-                ref_logprobs = item.ref_logprobs
-                kl_loss_weight = compute_kl_loss_weight(
-                    shifted_labels,
-                    global_grad_tokens,
-                    loss_cfg.kl_loss_coef,
-                    loss_cfg.ignore_idx,
-                )
-            else:
-                ref_logprobs = None
-                kl_loss_weight = None
-
-            loss_kwargs = OrealLossKwargs(
-                old_logprobs=item.old_logprobs,
-                shifted_labels=shifted_labels,
-                advantages=advantages,
-                sft_loss_weight=sft_loss_weights,
-                policy_loss_weight=policy_loss_weights,
-                ref_logprobs=ref_logprobs,
-                kl_loss_weight=kl_loss_weight,
-                global_grad_tokens=global_grad_tokens,
-            )
-            batches_loss_kwargs.append(loss_kwargs)
-        return batches_loss_kwargs
 
     @staticmethod
     def build_batches(loss_ctx_list: list["OrealLossContext"]) -> list["OrealLossContext"]:  # type: ignore[override]

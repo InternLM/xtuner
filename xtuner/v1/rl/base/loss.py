@@ -1,7 +1,6 @@
 from typing import Any, Literal
 
 import torch
-from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
@@ -105,17 +104,6 @@ class BaseRLLossConfig(BaseLossConfig):
         rollout_is_weights: torch.Tensor | None = None,
         ref_logprobs: torch.Tensor | None = None,
     ) -> "BaseRLLossContext":
-        # loss_ctx_input = RLLossContextInputItem(
-        #     shifted_labels=shifted_labels,
-        #     advantages=advantages,
-        #     rollout_logprobs=rollout_logprobs,
-        #     old_logprobs=old_logprobs,
-        #     is_weights=rollout_is_weights,
-        #     ref_logprobs=ref_logprobs,
-        # ).to(DEVICE)
-        # if sp_mesh.size() > 1:
-        #     loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
-
         LossKwargs = self._loss_kwargs_cls
         loss_kwargs = LossKwargs(
             shifted_labels=shifted_labels,
@@ -130,62 +118,6 @@ class BaseRLLossConfig(BaseLossConfig):
 
         LossContext = self.loss_ctx_cls
         return LossContext(self, loss_kwargs)
-
-
-class RLLossContextInputItem(BaseModel):
-    """Input item for reinforcement learning loss context.
-
-    Args:
-        shifted_labels (torch.Tensor): The shifted labels for the input sequences.
-        advantages (torch.Tensor): Advantage estimates for the actions taken.
-        old_logprobs (torch.Tensor | None): Log probabilities from the old policy.
-        ref_logprobs (torch.Tensor | None): Reference log probabilities for KL penalty, if used.
-        rollout_logprobs (torch.Tensor | None): Rollout log probabilities from inference engine, used for importance sampling.
-        is_weights (torch.Tensor | None): Importance sampling weights. If None, importance sampling is not used.
-    """
-
-    model_config = ConfigDict(title="RLLossContextInputItem", extra="forbid", arbitrary_types_allowed=True)
-    shifted_labels: torch.Tensor
-    advantages: torch.Tensor
-    old_logprobs: torch.Tensor | None = None
-    ref_logprobs: torch.Tensor | None = None
-    rollout_logprobs: torch.Tensor | None = None
-    is_weights: torch.Tensor | None = None
-
-    def sp_split(self, sp_mesh: DeviceMesh) -> Self:
-        shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
-        advantages = sp_split(self.advantages, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
-        if self.rollout_logprobs is not None:
-            rollout_logprobs = sp_split(self.rollout_logprobs, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
-        else:
-            rollout_logprobs = None
-        if self.is_weights is not None:
-            is_weights = sp_split(self.is_weights, sp_mesh=sp_mesh, split_dim=1, padding_value=1.0)
-        else:
-            is_weights = None
-        # 这里不用对old_logprobs和ref_logprobs进行sp_split，因为他是模型 fwd 生成的
-        # 模型 fwd 前一定会对 seq_ctx 进行 sp_split
-        return type(self)(
-            shifted_labels=shifted_labels,
-            advantages=advantages,
-            old_logprobs=self.old_logprobs,
-            ref_logprobs=self.ref_logprobs,
-            rollout_logprobs=rollout_logprobs,
-            is_weights=is_weights,
-        )
-
-    def to(self, device: torch.device | str) -> Self:
-        self.shifted_labels = self.shifted_labels.to(device)
-        self.advantages = self.advantages.to(device)
-        if self.old_logprobs is not None:
-            self.old_logprobs = self.old_logprobs.to(device)
-        if self.ref_logprobs is not None:
-            self.ref_logprobs = self.ref_logprobs.to(device)
-        if self.rollout_logprobs is not None:
-            self.rollout_logprobs = self.rollout_logprobs.to(device)
-        if self.is_weights is not None:
-            self.is_weights = self.is_weights.to(device)
-        return self
 
 
 class BaseRLLossKwargs(BaseLossKwargs):
@@ -245,7 +177,7 @@ class BaseRLLossKwargs(BaseLossKwargs):
         return self
 
 
-class BaseRLLossContext(BaseLossContext[RLLossContextInputItem]):
+class BaseRLLossContext(BaseLossContext):
     loss_cfg: BaseRLLossConfig
     loss_kwargs: BaseRLLossKwargs
 
