@@ -67,7 +67,7 @@ class TestRLTrainWithSFT(unittest.TestCase):
                     dict(
                         seq_ctx=SequenceContext.from_input_ids((input_ids,), device="cpu"),
                         shifted_labels=shifted_labels,
-                        advantage=advantages[i].item(),
+                        advantages=advantages[i].item(),
                     )
                 )
         self.data_batches = data_batches
@@ -156,10 +156,10 @@ class TestRLTrainWithSFT(unittest.TestCase):
         ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=1024, rollout_idx=0))
         ray.get(train_controller.save.remote(os.path.join(self.temp_dir, "save_test"), no_save_optimizer=True))
 
-        log_infos = ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=1024, rollout_idx=1))
+        train_log_infos = ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=1024, rollout_idx=1))
         efficient_attn_ratio_list = []
-        for log_info in log_infos:
-            efficient_attn_ratio_list.append(log_info['sft_train_metrics']['efficient_attn_ratio'])
+        for log_info in train_log_infos['worker_log_infos']:
+            efficient_attn_ratio_list.append(log_info["sft_train_metrics"]['efficient_attn_ratio'])
         assert all([efficient_attn_ratio > 0 for efficient_attn_ratio in efficient_attn_ratio_list])
 
         ray.kill(train_controller)
@@ -170,10 +170,10 @@ class TestRLTrainWithSFT(unittest.TestCase):
                                                    )
         ray.get(train_controller.resume.remote(load_checkpoint_cfg))
 
-        log_infos = ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=1024, rollout_idx=1))
+        train_log_infos = ray.get(train_controller.fit.remote(self.data_batches, pack_max_length=1024, rollout_idx=1))
         new_efficient_attn_ratio_list = []
-        for log_info in log_infos:
-            new_efficient_attn_ratio_list.append(log_info['sft_train_metrics']['efficient_attn_ratio'])
+        for log_info in train_log_infos['worker_log_infos']:
+            new_efficient_attn_ratio_list.append(log_info["sft_train_metrics"]['efficient_attn_ratio'])
 
         efficient_attn_ratio_list.sort()
         new_efficient_attn_ratio_list.sort()
