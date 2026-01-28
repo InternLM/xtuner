@@ -85,6 +85,9 @@ class XTunerBaseModelConfig(PydanticBaseModel):
     def hf_config(self) -> PretrainedConfig | None:
         raise NotImplementedError
 
+    def build(self):
+        raise NotImplementedError
+
 
 DEFAULT_FLOAT8_CFG = {
     "xtuner.v1.float8.fsdp_utils.tensor_to_per_block_fp8_scales": TorchCompileOption(fullgraph=True),
@@ -250,7 +253,11 @@ class BaseModel(nn.Module):
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
 
-    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
+    def from_hf(
+        self, hf_path: str | Path, strict: bool = True
+    ) -> tuple[
+        Annotated[set[str], "loaded keys"], Annotated[set[str], "unloaded keys"], Annotated[set[str], "missing keys"]
+    ]:
         self._hf_path = Path(hf_path)
 
         if isinstance(hf_path, Path):
@@ -348,7 +355,7 @@ class BaseModel(nn.Module):
         from xtuner.v1.utils import default_init_weights
 
         initialized_params = default_init_weights(self)
-        if missing := {name for name, _ in self.named_parameters()} - initialized_params:
+        if missing := {self._clean_param_name(name) for name, _ in self.named_parameters()} - initialized_params:
             raise RuntimeError(f"{missing} is not initialized")
 
     def _init_load_spec(self) -> None:
@@ -795,11 +802,12 @@ class BaseModel(nn.Module):
         if buffer_tensor_list:
             yield buffer_name_list, buffer_tensor_list
 
+    # TODO: Using `xtuenr.v1.utils.misc.clean_param_name`
     def _clean_param_name(self, name: str) -> str:
-        if "._checkpoint_wrapped_module." in name:
-            name = name.replace("._checkpoint_wrapped_module.", ".")
-        if "._orig_mod." in name:
-            name = name.replace("._orig_mod.", ".")
+        if "_checkpoint_wrapped_module." in name:
+            name = name.replace("_checkpoint_wrapped_module.", "")
+        if "_orig_mod." in name:
+            name = name.replace("_orig_mod.", "")
         return name
 
     def _group_param_by_load_spec(self, load_enum: LoadEnum):
