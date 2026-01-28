@@ -11,8 +11,7 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 import torch.nn as nn
 import torch.nn.functional as F
-from xtuner.v1.rl.oreal.loss import OrealLossConfig
-from xtuner.v1.rl.base import RLLossContextInputItem
+from xtuner.v1.rl.oreal.loss import OrealLossConfig, OrealLossContext
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.rl.utils import sp_split, gather_logprobs
 from xtuner.v1.rl.loss_fn import kl_penalty
@@ -209,40 +208,36 @@ class TestOrealLoss(DistributedTestBase):
             advantages_list_rank[iter_idx] = advantages
         
         seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_input_list: list[RLLossContextInputItem] = []
+        loss_ctx_list: list[OrealLossContext] = []
         for iter_idx in range(grad_acc):
             input_ids = input_ids_list_rank[iter_idx]
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=device)
-            loss_ctx_input = RLLossContextInputItem(
-                shifted_labels=shifted_labels_list_rank[iter_idx],
-                advantages=advantages_list_rank[iter_idx],
-            )
             if sp_size > 1:
                 seq_ctx = seq_ctx.split(sp_mesh)
-                loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx_input_list.append(loss_ctx_input)
+            loss_ctx = loss_cfg.build(
+                shifted_labels=shifted_labels_list_rank[iter_idx], 
+                advantages=advantages_list_rank[iter_idx], 
+                sp_mesh=sp_mesh,
+            )
+            loss_ctx_list.append(loss_ctx)
 
         with torch.no_grad():
             for iter_idx in range(grad_acc):
                 seq_ctx = seq_ctx_list[iter_idx]
-                loss_ctx_input = loss_ctx_input_list[iter_idx]
+                loss_ctx = loss_ctx_list[iter_idx]
                 logits = lm_head2_old(emb2_old(seq_ctx.input_ids)).float()
-                old_logprobs = gather_logprobs(logits, loss_ctx_input.shifted_labels)
-                loss_ctx_input.old_logprobs = old_logprobs
+                old_logprobs = gather_logprobs(logits, loss_ctx.loss_kwargs.shifted_labels)
+                loss_ctx.loss_kwargs.old_logprobs = old_logprobs
                 if kl_loss_coef > 0:
-                    loss_ctx_input.ref_logprobs = old_logprobs.clone()
+                    loss_ctx.loss_kwargs.ref_logprobs = old_logprobs.clone()
         
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
 
         for iter_idx in range(grad_acc):
             seq_ctx = seq_ctx_list[iter_idx]
-            loss_kwargs = batches_loss_kwargs[iter_idx]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_ctx_list[iter_idx]
 
             hidden_states = emb2(seq_ctx.input_ids)
             head_weight = lm_head2.weight
