@@ -273,16 +273,20 @@ def is_valid_for_training(group_data_items: list[RLDataFlowItem]) -> bool:
         rollout_info = item.env.rollout
         response_valid = True if rollout_info.response is not None and len(rollout_info.response) > 0 else False
         ids_valid = True if rollout_info.response_ids is not None and len(rollout_info.response_ids) > 0 else False
-        if not ids_valid:
+        if not ids_valid and not response_valid:
             # NOTE: `response_ids` is the critical field for token-in-token-out mode, so we ensure it's not empty.
-            logger.warning(
-                "Invalid dataflow item found during training: no response or response_ids and skip this item."
+            logger.error(
+                "Invalid dataflow item found during training: no response_ids and no response and skip this item."
             )
             return False
-        if not response_valid:
-            # NOTE: check valid response string for judger inputs
-            logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
-            return False
+        elif not ids_valid:
+            logger.warning(
+                "Dataflow item has no response_ids during training, but still use it based on response text."
+            )
+        elif not response_valid:
+            logger.warning(
+                "Dataflow item has no response text during training, but still use it based on response_ids."
+            )
     return True
 
 

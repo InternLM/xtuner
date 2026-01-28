@@ -207,6 +207,7 @@ class TestRLTrainer(unittest.TestCase):
             work_dir=self.worker_log_dir,
             tokenizer_path=MODEL_PATH,
             total_epochs=1,
+            debug_train=True,
             rollout_steps=1,
         )
         trainer = RLTrainer.from_config(trainer_config)
