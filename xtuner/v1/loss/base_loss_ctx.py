@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, Self, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -9,6 +9,8 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.nn.functional import all_reduce
+
+from xtuner.v1.loss.utils import sp_split
 
 from .chunk_loss import ChunkLoss
 
@@ -47,6 +49,14 @@ class BaseLossKwargs(BaseModel):
 
     model_config = ConfigDict(title="loss keyword arguments", extra="forbid", arbitrary_types_allowed=True)
     shifted_labels: torch.Tensor
+
+    def sp_split(self, sp_mesh: DeviceMesh) -> Self:
+        self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
+        return self
+
+    def to(self, device: torch.device | str) -> Self:
+        self.shifted_labels = self.shifted_labels.to(device)
+        return self
 
     def chunk(self, chunk_size) -> list["BaseLossKwargs"]:
         tensor_fields: dict[str, tuple[torch.Tensor, ...]] = {}

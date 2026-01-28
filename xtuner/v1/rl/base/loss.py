@@ -98,7 +98,7 @@ class BaseRLLossConfig(BaseLossConfig):
 
     def build(
         self,
-        sp_mesh: DeviceMesh,
+        sp_mesh: DeviceMesh | None,
         shifted_labels: torch.Tensor,
         advantages: torch.Tensor,
         rollout_logprobs: torch.Tensor | None = None,
@@ -106,26 +106,28 @@ class BaseRLLossConfig(BaseLossConfig):
         rollout_is_weights: torch.Tensor | None = None,
         ref_logprobs: torch.Tensor | None = None,
     ) -> "BaseRLLossContext":
-        loss_ctx_input = RLLossContextInputItem(
-            shifted_labels=shifted_labels,
-            advantages=advantages,
-            rollout_logprobs=rollout_logprobs,
-            old_logprobs=old_logprobs,
-            is_weights=rollout_is_weights,
-            ref_logprobs=ref_logprobs,
-        ).to(DEVICE)
-        if sp_mesh.size() > 1:
-            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
+        # loss_ctx_input = RLLossContextInputItem(
+        #     shifted_labels=shifted_labels,
+        #     advantages=advantages,
+        #     rollout_logprobs=rollout_logprobs,
+        #     old_logprobs=old_logprobs,
+        #     is_weights=rollout_is_weights,
+        #     ref_logprobs=ref_logprobs,
+        # ).to(DEVICE)
+        # if sp_mesh.size() > 1:
+        #     loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
 
         LossKwargs = self._loss_kwargs_cls
         loss_kwargs = LossKwargs(
-            shifted_labels=loss_ctx_input.shifted_labels,
-            old_logprobs=loss_ctx_input.old_logprobs,
-            advantages=loss_ctx_input.advantages,
-            rollout_logprobs=loss_ctx_input.rollout_logprobs,
-            is_weights=loss_ctx_input.is_weights,
-            ref_logprobs=loss_ctx_input.ref_logprobs,
+            shifted_labels=shifted_labels,
+            old_logprobs=old_logprobs,
+            advantages=advantages,
+            rollout_logprobs=rollout_logprobs,
+            is_weights=rollout_is_weights,
+            ref_logprobs=ref_logprobs,
         )
+        if sp_mesh is not None and sp_mesh.size() > 1:
+            loss_kwargs = loss_kwargs.sp_split(sp_mesh)
 
         LossContext = self.loss_ctx_cls
         return LossContext(self, loss_kwargs)
@@ -209,6 +211,39 @@ class BaseRLLossKwargs(BaseLossKwargs):
     kl_loss_weight: torch.Tensor | None = None
     global_grad_tokens: torch.Tensor | None = None
     is_weights: torch.Tensor | None = None
+
+    def sp_split(self, sp_mesh: DeviceMesh) -> Self:
+        self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
+        self.advantages = sp_split(self.advantages, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
+        if self.rollout_logprobs is not None:
+            self.rollout_logprobs = sp_split(self.rollout_logprobs, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
+        if self.is_weights is not None:
+            self.is_weights = sp_split(self.is_weights, sp_mesh=sp_mesh, split_dim=1, padding_value=1.0)
+        # 1. 这里不用对old_logprobs和ref_logprobs进行sp_split，因为他是模型 fwd 生成的，
+        # 因为模型 fwd 前一定会对 seq_ctx 进行 sp_split。
+        # 2. global_grad_tokens 是scalar Tensor, 不用进行sp_split。
+        # 3. 这里也不用对各种weight(policy_loss_weight, kl_loss_weight, is_weights)进行sp_split，
+        # 因为他们在LossContext.build_batches()中生成时也保证是sp_split的。
+        return self
+
+    def to(self, device: torch.device | str) -> Self:
+        self.shifted_labels = self.shifted_labels.to(device)
+        self.advantages = self.advantages.to(device)
+        if self.old_logprobs is not None:
+            self.old_logprobs = self.old_logprobs.to(device)
+        if self.ref_logprobs is not None:
+            self.ref_logprobs = self.ref_logprobs.to(device)
+        if self.rollout_logprobs is not None:
+            self.rollout_logprobs = self.rollout_logprobs.to(device)
+        if self.is_weights is not None:
+            self.is_weights = self.is_weights.to(device)
+        if self.global_grad_tokens is not None:
+            self.global_grad_tokens = self.global_grad_tokens.to(device)
+        if self.policy_loss_weight is not None:
+            self.policy_loss_weight = self.policy_loss_weight.to(device)
+        if self.kl_loss_weight is not None:
+            self.kl_loss_weight = self.kl_loss_weight.to(device)
+        return self
 
 
 class BaseRLLossContext(BaseLossContext[RLLossContextInputItem]):

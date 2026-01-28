@@ -48,36 +48,15 @@ class CELossConfig(BaseLossConfig):
         shifted_labels: torch.Tensor,
         sp_mesh: DeviceMesh | None = None,
     ) -> "CELossContext":
-        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels).to(DEVICE)
-        if sp_mesh is not None and sp_mesh.size() > 1:
-            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
+        # loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels).to(DEVICE)
+        # if sp_mesh is not None and sp_mesh.size() > 1:
+        #     loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
 
-        loss_kwargs = CELossKwargs(shifted_labels=loss_ctx_input.shifted_labels)
+        loss_kwargs = CELossKwargs(shifted_labels=shifted_labels)
+        if sp_mesh is not None and sp_mesh.size() > 1:
+            loss_kwargs = loss_kwargs.sp_split(sp_mesh)
         loss_ctx = self.loss_ctx_cls(self, loss_kwargs)
         return loss_ctx
-
-    # def build_batches(  # type: ignore[override]
-    #     self,
-    #     seq_ctx_list: list[SequenceContext],
-    #     shifted_labels_list: list[torch.Tensor],
-    #     sp_mesh: DeviceMesh | None = None,
-    # ) -> List["CELossContext"]:
-    #     loss_ctx_input_list: list[CELossContextInputItem] = []
-    #     for shifted_labels in shifted_labels_list:
-    #         loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels).to(DEVICE)
-    #         if sp_mesh is not None and sp_mesh.size() > 1:
-    #             loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
-    #         loss_ctx_input_list.append(loss_ctx_input)
-
-    #     LossContext = self.loss_ctx_cls
-    #     batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-    #         loss_ctx_input_list,
-    #         self,
-    #         cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
-    #         sp_mesh=sp_mesh,
-    #     )
-    #     loss_ctx_list = [LossContext(loss_cfg=self, loss_kwargs=loss_kwargs) for loss_kwargs in batches_loss_kwargs]
-    #     return loss_ctx_list
 
 
 class CELossKwargs(BaseLossKwargs):
