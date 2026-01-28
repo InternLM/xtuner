@@ -27,7 +27,7 @@ from typing_extensions import NotRequired, TypedDict
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import BaseModel, ModelItem, TransformerConfig
+from xtuner.v1.model.base import BaseModel, ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
 from xtuner.v1.profiler.prober import ProberList
@@ -142,7 +142,7 @@ class TrainEngine:
 
     def __init__(
         self,
-        model_cfg: TransformerConfig,
+        model_cfg: XTunerBaseModelConfig,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,
@@ -174,7 +174,7 @@ class TrainEngine:
                 scaling_granularity_gemm=self.model_cfg.float8_cfg.scaling_granularity_gemm,
                 scaling_granularity_grouped_gemm=self.model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
             )
-        model = model.fully_shard(self.fsdp_cfg, self.float8_handler)
+        model = model.fully_shard(self.fsdp_cfg)
 
         if dist.get_rank() == 0:
             logger.info(model)
@@ -220,7 +220,7 @@ class TrainEngine:
 
     # this method can be called outside, e.g., at the beginning of compute_actor_logprobs or compute_ref_logprobs during rl training
     def maybe_precompute_float8_dynamic_scale_for_fsdp(self):
-        if self.float8_handler is not None and self.float8_handler.enabled:
+        if self.float8_handler is not None:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
 
     def train_step(self, data_batches: list[ModelItem]) -> tuple[LossLog, OtherLog]:
@@ -411,12 +411,13 @@ class TrainEngine:
             self.optimizer.zero_grad()
         return grad_norm
 
+    # TODO: Should be removed
     @staticmethod
     def clean_param_name(name: str) -> str:
-        if "._checkpoint_wrapped_module." in name:
-            name = name.replace("._checkpoint_wrapped_module.", ".")
-        if "._orig_mod." in name:
-            name = name.replace("._orig_mod.", ".")
+        if "_checkpoint_wrapped_module." in name:
+            name = name.replace("_checkpoint_wrapped_module.", "")
+        if "_orig_mod." in name:
+            name = name.replace("_orig_mod.", "")
         return name
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):

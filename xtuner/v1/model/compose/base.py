@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Self
 
 import torch
 import torch.distributed as dist
@@ -15,7 +15,6 @@ from torch.distributed.fsdp import (
 from typing_extensions import override
 
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model import BaseModel
 from xtuner.v1.model.base import XTunerBaseModelConfig
 from xtuner.v1.utils import get_device, get_logger
@@ -39,7 +38,6 @@ class BaseComposeConfig(XTunerBaseModelConfig):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
-    dcp_ignore_frozen_params: bool = True
 
 
 def init_world_mesh():
@@ -96,9 +94,12 @@ class BaseComposeModel(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ):
+    ) -> Self:
         self.fsdp_config = fsdp_config
+        self.language_model.fully_shard(self.fsdp_config)
+        self.vision_tower.fully_shard(self.fsdp_config)
+        self.multi_modal_projector.fully_shard(self.fsdp_config)
+
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
         mp_policy = MixedPrecisionPolicy(param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype)

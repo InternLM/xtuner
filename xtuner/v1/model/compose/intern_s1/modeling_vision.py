@@ -1,7 +1,7 @@
 from functools import partial
 from torch import nn
 import torch
-from typing import Union, Optional, Callable
+from typing import Union, Optional, Callable, Self
 from typing_extensions import override
 import numpy as np
 
@@ -343,11 +343,8 @@ class InternS1VisionModel(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ):
+    ) -> Self:
         self.fsdp_config = fsdp_config
-        assert float8_handler is None
-
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         if not checkpoint_preserve_rng_state and self.config.drop_path_rate > 0.0:
             checkpoint_preserve_rng_state = True

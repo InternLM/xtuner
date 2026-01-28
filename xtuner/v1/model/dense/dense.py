@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from pathlib import Path
-from typing import cast
+from typing import Self, cast
 
 import torch
 import torch.distributed as dist
@@ -169,17 +169,14 @@ class Dense(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ) -> "Dense":
+    ) -> Self:
         self.fsdp_config = fsdp_config
         self._init_device_mesh(fsdp_config)
 
-        if float8_handler is not None:
+        if self.config.float8_cfg is not None:
             # As we modify the shape of the model's parameters,
             # we need to reinitialize the load spec mapping.
-            float8_handler.pad_for_fsdp(
-                self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec
-            )
+            Float8Handler.pad_for_fsdp(self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec)
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         if not checkpoint_preserve_rng_state and self.config.attention.dropout > 0.0:
