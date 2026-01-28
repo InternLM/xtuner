@@ -174,7 +174,7 @@ class TrainEngine:
                 scaling_granularity_gemm=self.model_cfg.float8_cfg.scaling_granularity_gemm,
                 scaling_granularity_grouped_gemm=self.model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
             )
-        model = model.fully_shard(self.fsdp_cfg, self.float8_handler)
+        model = model.fully_shard(self.fsdp_cfg)
 
         if dist.get_rank() == 0:
             logger.info(model)
@@ -220,7 +220,7 @@ class TrainEngine:
 
     # this method can be called outside, e.g., at the beginning of compute_actor_logprobs or compute_ref_logprobs during rl training
     def maybe_precompute_float8_dynamic_scale_for_fsdp(self):
-        if self.float8_handler is not None and self.float8_handler.enabled:
+        if self.float8_handler is not None:
             self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
 
     def train_step(self, data_batches: list[ModelItem]) -> tuple[LossLog, OtherLog]:
