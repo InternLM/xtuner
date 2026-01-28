@@ -1,6 +1,7 @@
 import json
 import math
 import pydoc
+import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import reduce
 from importlib import import_module
@@ -79,6 +80,7 @@ class XTunerBaseModelConfig(PydanticBaseModel):
             "`dict[str, TorchCompileOption]`: Customize the compile option",
         ),
     ] = None
+    hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
 
     @property
     def hf_config(self) -> PretrainedConfig | None:
@@ -381,10 +383,34 @@ class BaseModel(nn.Module):
             return
 
         load_spec_mapping: dict[str, LoadSpec] = {}
+        hf_key_mapping_missing: set[str] = set()
 
         for name, param in self.state_dict().items():
             name = self._clean_param_name(name)
-            hf_keys = self.to_hf_key_list(name)
+            _hf_keys = self.to_hf_key_list(name)
+
+            if not self.config.hf_key_mapping:
+                hf_keys = _hf_keys
+            else:
+                hf_keys = []
+                for key in _hf_keys:
+                    max_matched_pattern = None
+                    max_match_len = -1
+                    for pattern in self.config.hf_key_mapping:
+                        if (matched := re.search(pattern, key)) is not None:
+                            matched_len = matched.end() - matched.start()
+
+                            if matched_len > max_match_len:
+                                max_match_len = matched_len
+                                max_matched_pattern = pattern
+
+                    if max_matched_pattern is None:
+                        hf_key_mapping_missing.add(key)
+                        hf_keys.append(key)
+                    else:
+                        repl = self.config.hf_key_mapping[max_matched_pattern]
+                        hf_keys.append(re.sub(max_matched_pattern, repl, key))
+
             if isinstance(param, DTensor) and (placement := get_shard_placement(param.placements)) is not None:
                 dim = placement.dim
                 _, _offset = compute_local_shape_and_global_offset(param.shape, param.device_mesh, param.placements)
@@ -462,6 +488,10 @@ class BaseModel(nn.Module):
                         load_enum=LoadEnum.FUSED,
                     )
             load_spec_mapping[name] = load_spec
+
+        if hf_key_mapping_missing:
+            logger.info("These hf keys will not be influenced by `hf_key_mapping`:")
+            logger.info(json.dumps(list(hf_key_mapping_missing), indent=2))
 
         self.load_spec_mapping = load_spec_mapping
 

@@ -139,10 +139,14 @@ class InternS1Config(InternS1BaseConfig):
         norm_type="rms_norm",
     )
     projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig(vision_hidden_size=3200, text_hidden_size=4096)
-    text_config: MoEConfig = Qwen3MoE235BA22Config(vocab_size=153216)
+    text_config: MoEConfig = Qwen3MoE235BA22Config(
+        vocab_size=153216, hf_key_mapping={r"^model.": "model.language_model."}
+    )
 
 
 class InternS1MiniConfig(InternS1BaseConfig):
     vision_config: InternS1VisionConfig = InternS1VisionConfig()
     projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig()
-    text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig(vocab_size=153216)
+    text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig(
+        vocab_size=153216, hf_key_mapping={r"^model.": "model.language_model."}
+    )
