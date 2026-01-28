@@ -411,12 +411,13 @@ class TrainEngine:
             self.optimizer.zero_grad()
         return grad_norm
 
+    # TODO: Should be removed
     @staticmethod
     def clean_param_name(name: str) -> str:
-        if "._checkpoint_wrapped_module." in name:
-            name = name.replace("._checkpoint_wrapped_module.", ".")
-        if "._orig_mod." in name:
-            name = name.replace("._orig_mod.", ".")
+        if "_checkpoint_wrapped_module." in name:
+            name = name.replace("_checkpoint_wrapped_module.", "")
+        if "_orig_mod." in name:
+            name = name.replace("_orig_mod.", "")
         return name
 
     def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
