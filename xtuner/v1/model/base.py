@@ -1,6 +1,7 @@
 import json
 import math
 import pydoc
+import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import reduce
 from importlib import import_module
@@ -27,7 +28,6 @@ from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
-from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
     WeightWithDynamicTilewiseFloat8CastTensor,
@@ -79,9 +79,40 @@ class XTunerBaseModelConfig(PydanticBaseModel):
             "`dict[str, TorchCompileOption]`: Customize the compile option",
         ),
     ] = None
+    hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
+    dcp_ignore_frozen_params: bool = True
 
     @property
     def hf_config(self) -> PretrainedConfig | None:
+        return None
+
+    def save_hf(self, hf_path: str | Path):
+        if self.hf_config is None:
+            raise NotImplementedError("The `hf_config` property must be implemented to save in HuggingFace format.")
+
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        """Build a `TransformerConfig` from a pre-trained HuggingFace model.
+
+        This method creates a configuration object based on a `PretrainedConfig` loaded from the specified HuggingFace model path.
+        If you want to use this method, you must implement it in a subclass to correctly extract and map configuration parameters.
+
+        Note:
+            The `hf_config` field needs to be set to the `PretrainedConfig` object loaded from `hf_path`,
+            otherwise it cannot be saved in HuggingFace format.
+
+        Args:
+            hf_path (str | Path): Path to the HuggingFace model.
+
+        Returns:
+            TransformerConfig: A configuration object populated with values from the pre-trained model.
+
+        Raises:
+            NotImplementedError: This method must be implemented by subclasses.
+        """
+        raise NotImplementedError
+
+    def build(self):
         raise NotImplementedError
 
 
@@ -119,7 +150,6 @@ class TransformerConfig(XTunerBaseModelConfig):
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
-    dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
     )
@@ -154,48 +184,6 @@ class TransformerConfig(XTunerBaseModelConfig):
                 "sliding_attention" if i >= self.max_window_layers else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
-
-    def build(self) -> "BaseModel":
-        raise NotImplementedError
-
-    @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
-        """Build a `TransformerConfig` from a pre-trained HuggingFace model.
-
-        This method creates a configuration object based on a `PretrainedConfig` loaded from the specified HuggingFace model path.
-        If you want to use this method, you must implement it in a subclass to correctly extract and map configuration parameters.
-
-        Note:
-            The `hf_config` field needs to be set to the `PretrainedConfig` object loaded from `hf_path`,
-            otherwise it cannot be saved in HuggingFace format.
-
-        Args:
-            hf_path (str | Path): Path to the HuggingFace model.
-
-        Returns:
-            TransformerConfig: A configuration object populated with values from the pre-trained model.
-
-        Raises:
-            NotImplementedError: This method must be implemented by subclasses.
-        """
-        raise NotImplementedError
-
-    @property
-    def hf_config(self) -> PretrainedConfig | None:
-        """HuggingFace configuration."""
-        return None
-
-    def save_hf(self, hf_path: str | Path):
-        """Save the configuration to a HuggingFace-compatible format.
-
-        Args:
-            hf_path (str | Path): Path where the configuration should be saved.
-        """
-
-        if self.hf_config is None:
-            raise NotImplementedError("The `hf_config` property must be implemented to save in HuggingFace format.")
-
-        self.hf_config.save_pretrained(hf_path)
 
 
 class ModelOutputs(TypedDict):
@@ -249,7 +237,11 @@ class BaseModel(nn.Module):
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
 
-    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
+    def from_hf(
+        self, hf_path: str | Path, strict: bool = True
+    ) -> tuple[
+        Annotated[set[str], "loaded keys"], Annotated[set[str], "unloaded keys"], Annotated[set[str], "missing keys"]
+    ]:
         self._hf_path = Path(hf_path)
 
         if isinstance(hf_path, Path):
@@ -272,8 +264,7 @@ class BaseModel(nn.Module):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ) -> "BaseModel":
+    ) -> Self:
         """Fully shard the model parameters."""
         raise NotImplementedError
 
@@ -348,7 +339,7 @@ class BaseModel(nn.Module):
         from xtuner.v1.utils import default_init_weights
 
         initialized_params = default_init_weights(self)
-        if missing := {name for name, _ in self.named_parameters()} - initialized_params:
+        if missing := {self._clean_param_name(name) for name, _ in self.named_parameters()} - initialized_params:
             raise RuntimeError(f"{missing} is not initialized")
 
     def _init_load_spec(self) -> None:
@@ -381,10 +372,32 @@ class BaseModel(nn.Module):
             return
 
         load_spec_mapping: dict[str, LoadSpec] = {}
+        hf_key_mapping_missing: set[str] = set()
 
         for name, param in self.state_dict().items():
             name = self._clean_param_name(name)
-            hf_keys = self.to_hf_key_list(name)
+            _hf_keys = self.to_hf_key_list(name)
+            hf_keys = []
+
+            if self.config.hf_key_mapping:
+                for key in _hf_keys:
+                    max_matched_pattern = None
+                    max_match_len = -1
+                    for pattern in self.config.hf_key_mapping:
+                        if (matched := re.search(pattern, key)) is not None:
+                            matched_len = matched.end() - matched.start()
+
+                            if matched_len > max_match_len:
+                                max_match_len = matched_len
+                                max_matched_pattern = pattern
+
+                    if max_matched_pattern is None:
+                        hf_key_mapping_missing.add(key)
+                        hf_keys.append(key)
+                    else:
+                        repl = self.config.hf_key_mapping[max_matched_pattern]
+                        hf_keys.append(re.sub(max_matched_pattern, repl, key))
+
             if isinstance(param, DTensor) and (placement := get_shard_placement(param.placements)) is not None:
                 dim = placement.dim
                 _, _offset = compute_local_shape_and_global_offset(param.shape, param.device_mesh, param.placements)
@@ -462,6 +475,12 @@ class BaseModel(nn.Module):
                         load_enum=LoadEnum.FUSED,
                     )
             load_spec_mapping[name] = load_spec
+
+        if hf_key_mapping_missing:
+            logger.info(f"These hf keys will not be influenced by `hf_key_mapping`:")
+            logger.info(
+                json.dumps(list(hf_key_mapping_missing), indent=2)
+            )
 
         self.load_spec_mapping = load_spec_mapping
 
@@ -769,11 +788,12 @@ class BaseModel(nn.Module):
         if buffer_tensor_list:
             yield buffer_name_list, buffer_tensor_list
 
+    # TODO: Using `xtuenr.v1.utils.misc.clean_param_name`
     def _clean_param_name(self, name: str) -> str:
-        if "._checkpoint_wrapped_module." in name:
-            name = name.replace("._checkpoint_wrapped_module.", ".")
-        if "._orig_mod." in name:
-            name = name.replace("._orig_mod.", ".")
+        if "_checkpoint_wrapped_module." in name:
+            name = name.replace("_checkpoint_wrapped_module.", "")
+        if "_orig_mod." in name:
+            name = name.replace("_orig_mod.", "")
         return name
 
     def _group_param_by_load_spec(self, load_enum: LoadEnum):
