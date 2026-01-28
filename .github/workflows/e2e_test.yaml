@@ -49,9 +49,11 @@ jobs:
           retention-days: 7
           name: xtuner-e2e-${{ github.run_id }}
 
+      - name: Copy deploy action
+        run: cp -r ../JamesIves ./
       - name: Deploy to GitHub Pages
         if: ${{ !cancelled() }}
-        uses: JamesIves/github-pages-deploy-action@v4
+        uses: ./JamesIves/github-pages-deploy-action/v4
         with:
           token: ${{ github.token }}
           branch: gh-pages
