@@ -9,6 +9,7 @@ from pathlib import Path
 from shutil import copy, copytree
 from typing import Annotated, Generator, Iterable, Literal, Mapping, cast
 
+from typing import overload
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -157,9 +158,19 @@ class TransformerConfig(XTunerBaseModelConfig):
 
     def build(self) -> "BaseModel":
         raise NotImplementedError
+    
+    @overload
+    @classmethod
+    def from_hf(cls, hf_path: str | Path):
+        ...
+
+    @overload
+    @classmethod
+    def from_hf(cls, hf_config: PretrainedConfig):
+        ...
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
+    def from_hf(cls, hf_path: str | Path | None = None, hf_config: PretrainedConfig | None = None) -> Self:
         """Build a `TransformerConfig` from a pre-trained HuggingFace model.
 
         This method creates a configuration object based on a `PretrainedConfig` loaded from the specified HuggingFace model path.
@@ -168,9 +179,11 @@ class TransformerConfig(XTunerBaseModelConfig):
         Note:
             The `hf_config` field needs to be set to the `PretrainedConfig` object loaded from `hf_path`,
             otherwise it cannot be saved in HuggingFace format.
+            The `hf_config` parameter is provided to avoid redundant loading of the configuration. Only for Compose model.
 
         Args:
-            hf_path (str | Path): Path to the HuggingFace model.
+            hf_path (str | Path | None): Path to the HuggingFace model.
+            hf_config (PretrainedConfig | None): Optional pre-loaded HuggingFace configuration. Only for Compose model.
 
         Returns:
             TransformerConfig: A configuration object populated with values from the pre-trained model.
@@ -179,7 +192,7 @@ class TransformerConfig(XTunerBaseModelConfig):
             NotImplementedError: This method must be implemented by subclasses.
         """
         raise NotImplementedError
-
+    
     @property
     def hf_config(self) -> PretrainedConfig | None:
         """HuggingFace configuration."""
