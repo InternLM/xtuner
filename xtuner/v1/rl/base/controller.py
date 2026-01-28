@@ -1,10 +1,11 @@
 import math
 import os
-from typing import Literal, TypedDict
+from typing import Literal
 
 import ray
 import torch
 from ray.actor import ActorProxy
+from typing_extensions import TypedDict
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
