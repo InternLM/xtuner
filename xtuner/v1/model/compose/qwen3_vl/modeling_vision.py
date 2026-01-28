@@ -309,10 +309,8 @@ class Qwen3VLVisionModel(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
-        assert float8_handler is None
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
