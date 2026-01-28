@@ -792,21 +792,18 @@ class Trainer:
         loss_cfg: CELossConfig = self.loss_cfg
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[CELossContext] = []
-        # shifted_labels_list: list[torch.Tensor] = []
 
         for data in data_batch:
             seq_ctx = data.pop("seq_ctx").to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            # shifted_labels_list.append(data["shifted_labels"])
             loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=self.sp_mesh)
             loss_ctx_list.append(loss_ctx)
 
         # TODO: Consider moving data_batch deletion to the caller for better memory management.
         del data_batch
 
-        # loss_ctx_list = self.loss_cfg.build_batches(seq_ctx_list, shifted_labels_list, self.sp_mesh)
         cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
         loss_ctx_list = CELossContext.build_batches(
             loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=self.sp_mesh
