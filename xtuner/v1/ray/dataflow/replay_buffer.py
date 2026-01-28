@@ -205,23 +205,6 @@ class ReplayBufferConfig(BaseModel):
         dict,
         Parameter(help="Weights for different states in the replay buffer."),
     ] = {}
-    # async rollout related configs, assigned from dataflow cfg
-    enable_partial_rollout: Annotated[
-        bool,
-        Parameter(help="Whether to enable partial rollout for asynchronous data generation."),
-    ] = False
-    tail_batch_candidate_steps: Annotated[
-        int,
-        Parameter(
-            help="Number of rollout steps after which a sample becomes a candidate for the tail batch. Set to 0 to disable."
-        ),
-    ] = 0
-    tail_batch_trigger_size: Annotated[
-        Optional[int],
-        Parameter(
-            help="Number of candidate samples needed in the queue to trigger a tail batch operation. Set to 0 to disable."
-        ),
-    ] = None
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
@@ -255,6 +238,7 @@ class DatasetSampler:
                 dataset_config_list=dataset_cfg,
                 collator="fake_collator",
                 pack_level="none",
+                num_workers=1,
             )
         self.dataloader = self.dataloader_cfg.build(
             tokenizer=self.tokenizer, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=1
@@ -315,9 +299,9 @@ class ReplayBufferStorage:
 
     def __init__(self, replay_buffer_cfg):
         """Initializes the data structures for storing replay data."""
-        self.enable_partial_rollout = replay_buffer_cfg.enable_partial_rollout
-        self.tail_batch_candidate_steps = replay_buffer_cfg.tail_batch_candidate_steps
-        self.tail_batch_trigger_size = replay_buffer_cfg.tail_batch_trigger_size
+        self.enable_partial_rollout: bool = False
+        self.tail_batch_candidate_steps: int = 0
+        self.tail_batch_trigger_size: int = 0
 
         self._completed_actions: Dict[int, List[int]] = defaultdict(list)
         self._aborted_actions: Dict[int, List[int]] = defaultdict(list)
@@ -615,6 +599,7 @@ class ReplayBufferStorage:
         for sample in group_samples:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
             if "routed_experts" in sample.env.rollout.extra_info:
+                ray._private.internal_api.free(sample.env.rollout.extra_info["routed_experts"])
                 del sample.env.rollout.extra_info["routed_experts"]
             del sample.env
             sample.env = RLEnvDataItem()  # 重置env数据
@@ -652,6 +637,7 @@ class ReplayBufferStorage:
             if not self.enable_partial_rollout:
                 # 清除上次的response_ids等env数据
                 if "routed_experts" in sample.env.rollout.extra_info:
+                    ray._private.internal_api.free(sample.env.rollout.extra_info["routed_experts"])
                     del sample.env.rollout.extra_info["routed_experts"]
                 del sample.env
                 sample.env = RLEnvDataItem()
@@ -791,7 +777,9 @@ class ReplayBufferStorage:
             self._completed_actions[replay_meta.version].append(action_id)
             self.logger.debug(f"Add sample with root_id: {root_id}, action_id: {action_id} to finished_actions.")
         else:
-            assert False, f"Unsupported rollout state {state} for action_id {action_id} in ReplayBufferStorage."
+            raise AssertionError(
+                f"Unsupported rollout state {state} for action_id {action_id} in ReplayBufferStorage."
+            )
 
 
 @ray.remote
@@ -816,23 +804,33 @@ class ReplayBuffer:
         self.sample_from_dataset_count = 0
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="ReplayBuffer")
 
-    def get_prerun_state(self, target_batch_size: int):
-        remain_size = target_batch_size - self.storage.completed_samples_count
-        if remain_size <= 0:
-            self.sample_from_expired_states = False
-        else:
-            expired_threshold = (
-                min(remain_size, self.config.tail_batch_trigger_size)
-                if self.config.tail_batch_trigger_size
-                else remain_size
+    def setup_storage_config(
+        self, enable_partial_rollout: bool, tail_batch_candidate_steps: int, tail_batch_trigger_size: int
+    ):
+        """Sets up the storage configuration for the replay buffer.
+
+        Args:
+            enable_partial_rollout (bool): Flag to enable partial rollouts.
+            tail_batch_candidate_steps (int): Number of steps to consider for
+                tail batch sampling.
+            tail_batch_trigger_size (int): Threshold size to trigger tail batch
+                sampling.
+        """
+        self.storage.enable_partial_rollout = enable_partial_rollout
+        self.storage.tail_batch_candidate_steps = tail_batch_candidate_steps
+        self.storage.tail_batch_trigger_size = tail_batch_trigger_size
+
+    def get_prerun_state(self) -> Tuple[bool, int]:
+        if (
+            self.storage.tail_batch_trigger_size > 0
+            and self.storage.expired_samples_count > self.storage.tail_batch_trigger_size
+        ):
+            self.sample_from_expired_states = True
+            self.logger.info(
+                f"Enable sampling from expired states. Expired samples: {self.storage.expired_samples_count}, threshold: {self.storage.tail_batch_trigger_size}"
             )
-            if self.storage.expired_samples_count > expired_threshold:
-                self.sample_from_expired_states = True
-                self.logger.info(
-                    f"Enable sampling from expired states. Expired samples: {self.storage.expired_samples_count}, threshold: {expired_threshold}, remain_size: {remain_size}"
-                )
-            else:
-                self.sample_from_expired_states = False
+        else:
+            self.sample_from_expired_states = False
         return self.sample_from_expired_states, self.storage.completed_samples_count
 
     def get_train_dataset_length(self):

@@ -159,7 +159,7 @@ class TestRollout(unittest.TestCase):
 
         ray.get(self.test_flow.save.remote(save_dir))
         remain_paused_samples_old = rl_status_save["rollout_paused_count"]
-        responses_old = ray.get(self.test_flow.run.remote(num=remain_paused_samples_old, enable_partial_rollout=0), timeout=300)
+        responses_old = ray.get(self.test_flow.run.remote(num=remain_paused_samples_old, staleness_threshold=0), timeout=300)
         rb_status_old = ray.get(self.test_flow.get_replaybuffer_status.remote())
         
         mm_info_old = []
@@ -170,7 +170,7 @@ class TestRollout(unittest.TestCase):
         ray.get(self.test_flow.resume.remote(save_dir))
         rl_status_resume = ray.get(self.test_flow.get_replaybuffer_status.remote())
         remain_paused_samples_new = rl_status_resume["rollout_paused_count"]
-        responses_new = ray.get(self.test_flow.run.remote(num=remain_paused_samples_new, enable_partial_rollout=0), timeout=300)
+        responses_new = ray.get(self.test_flow.run.remote(num=remain_paused_samples_new, staleness_threshold=0), timeout=300)
         rb_status_new = ray.get(self.test_flow.get_replaybuffer_status.remote())
 
         mm_info_new = []

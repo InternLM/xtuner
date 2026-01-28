@@ -77,14 +77,6 @@ class SGLangWorker(RolloutWorker):
             payload.pop("max_new_tokens", None)
             payload.pop("min_new_tokens", None)
 
-        if "partial_rollout_input_ids" in extra_info:
-            assert "return_token_ids" in extra_params and extra_params["return_token_ids"], (
-                "concat response_ids and input_ids is only compatible with return_token_ids=True."
-            )
-            payload["input_ids"] = extra_info["partial_rollout_input_ids"]
-            assert len(payload["input_ids"]) <= self.config.context_length, (
-                f"Total input length {len(payload['input_ids'])} exceeds context length {self.config.context_length}."
-            )
         return await self._safe_post_request(url, headers, payload)
 
     def _make_request(self, endpoint: str, payload=None):

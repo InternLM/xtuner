@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 import torch
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import Annotated, NotRequired, TypedDict
+from typing_extensions import Annotated, NotRequired, Self, TypedDict
 
 from xtuner.v1.utils import StrEnum
 
@@ -143,7 +143,7 @@ class RLRolloutResponseItem(BaseModel):
     extra_info: RolloutExtraInfo = Field(default_factory=dict)
     state: RolloutState = RolloutState.INIT
 
-    def _update_by_append(self, other: RLRolloutResponseItem) -> None:
+    def _update_by_append(self, other: Self) -> None:
         other_ids_copy = copy.deepcopy(other.response_ids)
         other_logprobs_copy = copy.deepcopy(other.logprobs)
         other_response_copy = copy.deepcopy(other.response)
@@ -169,7 +169,7 @@ class RLRolloutResponseItem(BaseModel):
         self.state = other.state
         return
 
-    def update(self, other: RLRolloutResponseItem) -> None:
+    def update(self, other: Self) -> None:
         """Updates this RLRolloutResponseItem with data from another one.
 
         If partial_rollout is True, concat other response to this RLRolloutResponseItem's response.

@@ -562,9 +562,12 @@ class RolloutWorker(SingleAcceleratorWorker):
                     assert "routed_experts" in response["meta_info"], (
                         "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                     )
+                    exist_history_routed_experts = (
+                        "routed_experts" in input_extra_info and input_extra_info["routed_experts"] is not None
+                    )
                     routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
-                    # 处理当前专家
-                    if routed_experts is not None:
+                    if routed_experts is not None and not exist_history_routed_experts:
+                        # 不存在历史专家，先把当前专家存起来
                         if isinstance(routed_experts, str):
                             import base64
 
@@ -573,33 +576,43 @@ class RolloutWorker(SingleAcceleratorWorker):
                         else:
                             routed_experts = torch.tensor(routed_experts)  # n,layer,expert
                             routed_experts = ray.put(routed_experts)
+                        extra_info["routed_experts"] = routed_experts
+                    elif routed_experts is not None and exist_history_routed_experts:
+                        # 存在历史专家，则不进行put 操作，直接进行concat
+                        if isinstance(routed_experts, str):
+                            import base64
 
-                        # 处理历史专家
-                        if "routed_experts" in input_extra_info and input_extra_info["routed_experts"] is not None:
-                            exist_routed_experts = await input_extra_info["routed_experts"]  # n, layer, expert
-                            cur_routed_experts = await routed_experts  # [n, layer, expert]
+                            data = base64.b64decode(routed_experts)
+                            routed_experts = ray.cloudpickle.loads(data)
+                            cur_routed_experts = await routed_experts  # n,layer,expert
                             ray._private.internal_api.free(routed_experts)
-                            ray._private.internal_api.free(input_extra_info["routed_experts"])
-                            del input_extra_info["routed_experts"]
-                            assert (exist_routed_experts.shape[0] - 1) > 0 and exist_routed_experts.shape[
-                                0
-                            ] - 1 <= cur_routed_experts.shape[0], (
-                                f"Existing routed_experts shape: {exist_routed_experts.shape}, current routed_experts shape: {cur_routed_experts.shape}"
-                            )
-                            init_cur_roued_experts = cur_routed_experts.shape[0]
-                            cur_routed_experts = cur_routed_experts[exist_routed_experts.shape[0] :, :, :]
-                            concat_routed_experts = np.concatenate((exist_routed_experts, cur_routed_experts), axis=0)
-                            prompt_tokens = response["meta_info"].get("prompt_tokens", 0)
-                            response_tokens = response["meta_info"].get("completion_tokens", 0)
-                            self.logger.debug(
-                                f"[{root_id}/{action_id}] Partial Rollout Stats: "
-                                f"Tokens(prompt={prompt_tokens}, response={response_tokens}, total={prompt_tokens + response_tokens}) | "
-                                f"Experts(exist={exist_routed_experts.shape}, init_cur={init_cur_roued_experts}, cur={cur_routed_experts.shape}, concat={concat_routed_experts.shape})"
-                            )
-                            extra_info["routed_experts"] = ray.put(concat_routed_experts)
                         else:
-                            extra_info["routed_experts"] = routed_experts
+                            routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                            cur_routed_experts = routed_experts
 
+                        history_routed_experts = await input_extra_info["routed_experts"]  # n, layer, expert
+                        ray._private.internal_api.free(input_extra_info["routed_experts"])
+                        del input_extra_info["routed_experts"]
+
+                        assert (history_routed_experts.shape[0] - 1) > 0 and history_routed_experts.shape[
+                            0
+                        ] - 1 <= cur_routed_experts.shape[0], (
+                            f"Existing routed_experts shape: {history_routed_experts.shape}, current routed_experts shape: {cur_routed_experts.shape}"
+                        )
+                        init_cur_roued_experts = cur_routed_experts.shape[0]
+                        cur_routed_experts = cur_routed_experts[history_routed_experts.shape[0] :, :, :]
+                        concat_routed_experts = np.concatenate((history_routed_experts, cur_routed_experts), axis=0)
+                        prompt_tokens = response["meta_info"].get("prompt_tokens", 0)
+                        response_tokens = response["meta_info"].get("completion_tokens", 0)
+                        assert concat_routed_experts.shape[0] == prompt_tokens + response_tokens - 1, (
+                            f"Routed experts shape {concat_routed_experts.shape[0]} does not match total tokens {prompt_tokens + response_tokens - 1}"
+                        )
+                        self.logger.debug(
+                            f"[{root_id}/{action_id}] Partial Rollout Stats: "
+                            f"Tokens(prompt={prompt_tokens}, response={response_tokens}, total={prompt_tokens + response_tokens}) | "
+                            f"Experts(exist={history_routed_experts.shape}, init_cur={init_cur_roued_experts}, cur={cur_routed_experts.shape}, concat={concat_routed_experts.shape})"
+                        )
+                        extra_info["routed_experts"] = ray.put(concat_routed_experts)
                     else:
                         assert finish_reason == "abort", (
                             f"routed_experts is None, but finish_reason is {finish_reason}, expected abort. response: {response}"

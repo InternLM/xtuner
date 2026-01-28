@@ -134,10 +134,13 @@ class RawDataFlow:
         self.env = env
         self.config = dataflow_cfg
         replay_buffer_cfg.worker_log_dir = self.config.worker_log_dir
-        replay_buffer_cfg.enable_partial_rollout = self.config.enable_partial_rollout
-        replay_buffer_cfg.tail_batch_candidate_steps = self.config.tail_batch_candidate_steps
-        replay_buffer_cfg.tail_batch_trigger_size = self.config.tail_batch_trigger_size
         self.replay_buffer = ReplayBuffer.remote(replay_buffer_cfg)  # type: ignore[attr-defined]
+        self.replay_buffer.setup_storage_config.remote(  # type: ignore[attr-defined]
+            enable_partial_rollout=self.config.enable_partial_rollout,
+            tail_batch_candidate_steps=self.config.tail_batch_candidate_steps,
+            tail_batch_trigger_size=self.config.tail_batch_trigger_size,
+        )
+        self.staleness_threshold = self.config.staleness_threshold
         self.env_controller = environment
         self.finished_samples_count = 0
         self.skipped_sample_count = 0
@@ -175,7 +178,7 @@ class RawDataFlow:
         global_batch_size: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
-        enable_partial_rollout: Optional[bool] = None,
+        staleness_threshold: Optional[float] = None,
     ):
         """Resets all internal state variables of DataFlow."""
         self.skipped_sample_count = 0
@@ -187,8 +190,13 @@ class RawDataFlow:
         else:
             self.target_batch_size = self.config.global_batch_size
 
+        if staleness_threshold is not None:
+            self.staleness_threshold = staleness_threshold
+        else:
+            self.staleness_threshold = self.config.staleness_threshold
+
         self.sample_from_expired_storage, self.finished_samples_count = ray.get(
-            self.replay_buffer.get_prerun_state.remote(self.target_batch_size)
+            self.replay_buffer.get_prerun_state.remote()
         )
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
         self.sample_params = sample_params if sample_params else self.config.sample_params
@@ -294,9 +302,9 @@ class RawDataFlow:
         waiting_tasks = set()
         dataflow_start_time = time.perf_counter()
         task_completion_times = []
-        with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
-            update_step = max(1, int(self.target_batch_size * 0.1))
-            next_update_threshold = update_step
+        with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples", miniters=10) as pbar:
+            last_pbar_n = self.finished_samples_count
+            init_finished_samples_count = self.finished_samples_count
 
             if self.sample_from_expired_storage:
                 # 如果是从过期的存储中采样数据，需要禁用staleness_threshold
@@ -319,15 +327,6 @@ class RawDataFlow:
                 waiting_tasks.add(task)
 
             while self.finished_samples_count < self.target_batch_size:
-                # 每生成10%数据，打印一次状态日志，并且判断waiting_tasks的数量，补充新的task
-                if self.finished_samples_count >= next_update_threshold:
-                    pbar.n = self.finished_samples_count
-                    pbar.refresh()
-                    next_update_threshold += update_step
-                    self.logger.info(
-                        f"waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
-                    )
-
                 done_tasks, pending_tasks = await asyncio.wait(
                     waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -337,9 +336,14 @@ class RawDataFlow:
                     task_completion_times.append(task_time)
 
                 self.finished_samples_count = await self.replay_buffer.get_completed_samples_count.remote()
+                pbar.update(self.finished_samples_count - last_pbar_n)
+                last_pbar_n = self.finished_samples_count
+
                 waiting_tasks = pending_tasks
 
-                while len(waiting_tasks) + self.finished_samples_count < max(data_concurrency, self.target_batch_size):
+                while (
+                    len(waiting_tasks) + self.finished_samples_count < data_concurrency + init_finished_samples_count
+                ):
                     task = create_task(self.worker_task())
                     waiting_tasks.add(task)
 
@@ -417,7 +421,7 @@ class RawDataFlow:
         num: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
-        enable_partial_rollout: Optional[bool] = None,
+        staleness_threshold: Optional[float] = None,
     ):
         """Starts the data generation process.
 
@@ -437,7 +441,12 @@ class RawDataFlow:
         Returns:
             List[RLDataFlowItem]: A list of collected training samples.
         """
-        self._reset_internal_states(global_batch_size=num, sample_params=sample_params, extra_params=extra_params)
+        self._reset_internal_states(
+            global_batch_size=num,
+            sample_params=sample_params,
+            extra_params=extra_params,
+            staleness_threshold=staleness_threshold,
+        )
         self.logging_replaybuffer_state("DataFlow run started. ")
         await self.concurrent_task_runner()
         self.logging_replaybuffer_state("DataFlow run completed. ")

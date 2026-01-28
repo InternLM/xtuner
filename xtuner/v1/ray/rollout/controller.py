@@ -131,7 +131,6 @@ class RolloutController:
         self.workers, self.rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
             self._get_worker_cls(), infer_config, placement_group
         )
-        self.dist_init_addrs: Optional[List[str]] = None
         self.engine_rank_mesh_array, self.worker_server_urls_map = self.init_workers()
         self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
@@ -262,15 +261,13 @@ class RolloutController:
             [worker.set_engine_rank_mesh_array.remote(engine_rank_mesh_array) for worker in active_rollout_workers]
         )  # type: ignore[attr-defined]
         # init dist_init_addr for each worker according to parallel settings
-        if self.dist_init_addrs is None:
-            # 记录dist_init_addr,保证重启的时候还是启动在同一个端口，对于trainer/controller不需要更新rollout info
-            init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in active_rollout_workers])  # type: ignore[attr-defined]
-            self.dist_init_addrs = self._update_dist_init_addr(
-                nodes_per_engine, server_urls_per_engine, init_dist_init_addrs, self.num_gpus_per_engine
-            )
+        init_dist_init_addrs = ray.get([worker.init_dist_port.remote() for worker in active_rollout_workers])  # type: ignore[attr-defined]
+        dist_init_addrs = self._update_dist_init_addr(
+            nodes_per_engine, server_urls_per_engine, init_dist_init_addrs, self.num_gpus_per_engine
+        )
         # launch rollout servers
         worker_server_urls_map = dict(  # rank -> url
-            ray.get([worker.init.remote(self.dist_init_addrs[i]) for i, worker in enumerate(active_rollout_workers)])
+            ray.get([worker.init.remote(dist_init_addrs[i]) for i, worker in enumerate(active_rollout_workers)])
         )
         active_rollout_workers, worker_server_urls_map = self._update_active_workers_and_urls_map(
             active_rollout_workers, worker_server_urls_map
@@ -297,9 +294,6 @@ class RolloutController:
         ray.get(worker_info.actor.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
         ray.get(worker_info.actor.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
 
-        if all(not info.is_active for info in self.workers_info.values()):
-            self._restart_active_workers()
-
     def update_active_workers(self):
         """Check the health of all active rollout workers.
 
@@ -309,7 +303,6 @@ class RolloutController:
         """
         active_workers = [(url, info) for url, info in self.workers_info.items() if info.is_active]
         if not active_workers:
-            self._restart_active_workers()
             return
 
         urls, infos = zip(*active_workers)
@@ -321,16 +314,6 @@ class RolloutController:
             if not is_healthy:
                 self.logger.warning(f"Rollout worker {url} is unhealthy.")
                 self._deactivate_worker(url)
-
-    def _restart_active_workers(self):
-        self.logger.critical("All rollout workers are inactive. Attempting to restart all inference engines.")
-        try:
-            self.engine_mesh_list, self.worker_server_urls_map = self.init_workers()
-            self.router.update_active_workers(self._get_worker_status_for_router())
-            self.logger.info("Successfully re-initialized all rollout workers.")
-        except Exception as e:
-            self.logger.error(f"Failed to restart rollout workers: {e}", exc_info=True)
-            raise RuntimeError("Failed to recover rollout workers after all of them went down.") from e
 
     def deactivate_worker_by_url(self, url: str):
         """Deactivates a worker identified by its URL after it exceeds the

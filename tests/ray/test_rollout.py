@@ -214,7 +214,7 @@ class TestRollout(unittest.TestCase):
             if is_partial_rollout:
                 remain = status_ref["rollout_paused_count"] + status_ref["rollout_finished_count"]
                 # Finish the remaining paused samples
-                return ray.get(self.test_flow.run.remote(num=remain, enable_partial_rollout=0), timeout=300)
+                return ray.get(self.test_flow.run.remote(num=remain, staleness_threshold=0), timeout=300)
             else:
                 # Normal run
                 return ray.get(self.test_flow.run.remote(), timeout=300)
@@ -259,7 +259,7 @@ class TestRollout(unittest.TestCase):
     def test_lmdeploy_dataflow_save_resume_with_partial_rollout(self):
         rollout_cfg = self.rollout_cfg
         dataflow_cfg = self.dataflow_cfg
-        dataflow_cfg.max_concurrent = 4
+        dataflow_cfg.staleness_threshold = 1
         dataflow_cfg.enable_partial_rollout = 1
         self._run_dataflow_save_resume_test(rollout_cfg, dataflow_cfg)
 
@@ -286,7 +286,7 @@ class TestRollout(unittest.TestCase):
             prompt_repeat_k=2,
             global_batch_size=2,
             enable_partial_rollout=1,
-            max_concurrent=4,
+            staleness_threshold=1,
             worker_log_dir=self.worker_log_dir,
         )
         self._run_dataflow_save_resume_test(rollout_cfg, dataflow_cfg)
