@@ -52,7 +52,7 @@ class CELossConfig(BaseLossConfig):
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
 
-        loss_kwargs = CELossKwargs(shifted_labels=shifted_labels)
+        loss_kwargs = CELossKwargs(shifted_labels=loss_ctx_input.shifted_labels)
         loss_ctx = self.loss_ctx_cls(self, loss_kwargs)
         return loss_ctx
 
