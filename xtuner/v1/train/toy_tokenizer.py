@@ -71,6 +71,7 @@ class UTF8ByteTokenizer:
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.pad_token_id = pad_token_id
+        self.eos_token = "<end>"
 
         self.image_start_str = list(image_start_id_map.keys())[0]
         self.image_context_str = list(image_context_id_map.keys())[0]
