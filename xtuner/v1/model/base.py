@@ -386,9 +386,11 @@ class BaseModel(nn.Module):
         for name, param in self.state_dict().items():
             name = self._clean_param_name(name)
             _hf_keys = self.to_hf_key_list(name)
-            hf_keys = []
 
-            if self.config.hf_key_mapping:
+            if not self.config.hf_key_mapping:
+                hf_keys = _hf_keys
+            else:
+                hf_keys = []
                 for key in _hf_keys:
                     max_matched_pattern = None
                     max_match_len = -1
