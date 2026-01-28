@@ -928,7 +928,7 @@ class BaseModel(nn.Module):
                 self.config.save_hf(hf_dir)
             else:  # if self._hf_path is not None:
                 for file in cast(Path, self._hf_path).iterdir():
-                    if file.suffix != ".safetensors":
+                    if file.suffix != ".safetensors" and not file.name.startswith("."):
                         # Copy the model config and tokenizer files to the save path
                         target_path = hf_dir / file.name
                         if file.is_file():

@@ -120,7 +120,21 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     )
 
 
+class Qwen3VLMoE30BA3TimeSeriesConfig(Qwen3VLBaseConfig):
+    skip_vision: bool = True
+    time_series_encoder_path: str | None = None
+    vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
+    projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig()
+    text_config: Qwen3MoE30BA3Config = Qwen3VLTextMoE30BA3Config(
+        max_position_embeddings=262144,
+        rope_theta=5000000,
+        rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
+    )
+    ts_token_id: int = 151685
+
+
 class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
+    time_series_encoder_path: str | None = None
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
     text_config: Qwen3MoE235BA22Config = Qwen3VLTextMoE235BA22Config(

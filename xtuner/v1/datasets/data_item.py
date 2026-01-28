@@ -24,6 +24,9 @@ class QwenVL3DataItem(BaseMLLMDataItem, total=False):
     pixel_values: torch.Tensor
     image_grid_thw: torch.Tensor
     position_ids: torch.Tensor
+    time_series_signals: torch.Tensor
+    ts_len: torch.Tensor
+    ts_sr: torch.Tensor
 
 
 class OmniDataItem(BaseMLLMDataItem, total=False):
