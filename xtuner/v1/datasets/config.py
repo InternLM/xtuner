@@ -1,5 +1,6 @@
 import copy
 import os
+import pydoc
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Iterable, Literal, Optional, Protocol, Union, runtime_checkable
@@ -271,7 +272,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     dataset_config_list: DatasetConfigList | None = None
 
     collator: Annotated[
-        Literal["sft_llm_collator", "intern_s1_vl_sft_collator", "qwen3_vl_sft_collator", "fake_collator"],
+        Literal["sft_llm_collator", "intern_s1_vl_sft_collator", "qwen3_vl_sft_collator", "fake_collator"] | str,
         Parameter(help="collator func name"),
     ] = "sft_llm_collator"
     pack_to_max_length: Annotated[bool, Parameter(help="whether to pack to max length")] = True
@@ -300,7 +301,10 @@ class DataloaderConfig(BaseDataloaderConfig):
         elif self.collator == "fake_collator":
             return fake_collator  # for RL
         else:
-            raise ValueError(f"Unsupported collator: {self.collator}")
+            collator = pydoc.locate(self.collator)
+            if collator is None:
+                raise ImportError(f"Cannot locate collator: {self.collator}")
+            return collator
 
     @model_validator(mode="before")
     @classmethod
