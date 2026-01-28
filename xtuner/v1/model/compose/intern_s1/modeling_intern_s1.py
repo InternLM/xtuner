@@ -56,14 +56,6 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
 
-        # TODO(YHC): This is a hack to make the language model compatible with HF
-        _hf_prefix = "model.language_model."
-        self.language_model.to_hf_key_list = types.MethodType(to_hf_key_list_wrapper(  # type: ignore
-            fn=self.language_model.to_hf_key_list,
-            convertor=lambda x: x.replace('model.', _hf_prefix)),
-            self.language_model)
-        self.language_model._init_load_spec()
-
         self.img_context_token_id = config.image_token_id
         self.image_size = config.vision_config.image_size[0]
 
