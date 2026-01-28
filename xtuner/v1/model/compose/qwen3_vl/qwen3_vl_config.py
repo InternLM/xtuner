@@ -87,7 +87,6 @@ class Qwen3VLBaseConfig(BaseComposeConfig):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
-    dcp_ignore_frozen_params: bool = True
 
     def build(self):
         from .modeling_qwen3_vl import Qwen3VLForConditionalGeneration

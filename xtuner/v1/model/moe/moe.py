@@ -2,7 +2,7 @@
 import os
 import types
 from pathlib import Path
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Self, cast
 
 import torch
 import torch.distributed as dist
@@ -664,8 +664,7 @@ class MoE(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ) -> "MoE":
+    ) -> Self:
         self.fsdp_config = fsdp_config
         assert self.fsdp_config.ep_size == self.config.ep_size
         self.mp_policy = MixedPrecisionPolicy(
@@ -673,12 +672,10 @@ class MoE(BaseModel):
         )
         self._init_device_mesh(fsdp_config)
 
-        if float8_handler is not None:
+        if self.config.float8_cfg is not None:
             # As we modify the shape of the model's parameters,
             # we need to reinitialize the load spec mapping.
-            float8_handler.pad_for_fsdp(
-                self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec
-            )
+            Float8Handler.pad_for_fsdp(self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec)
 
         # Just for narrowing the type of self.fsdp_mesh and self.ep_mesh
         assert self.fsdp_mesh is not None

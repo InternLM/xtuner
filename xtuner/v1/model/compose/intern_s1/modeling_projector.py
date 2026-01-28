@@ -1,4 +1,4 @@
-from typing_extensions import override
+from typing_extensions import override, Self
 from torch import nn
 import torch
 
@@ -52,10 +52,8 @@ class InternS1MultiModalProjector(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ):
+    ) -> Self:
         self.fsdp_config = fsdp_config
-        assert float8_handler is None
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
