@@ -60,8 +60,17 @@ def load_function(path):
     return getattr(module, attr)
 
 
+def _is_port_available(check_socket: socket.socket, port: int) -> bool:
+    try:
+        check_socket.bind(("", port))
+        check_socket.listen(1)
+        return True
+    except OSError:
+        return False
+
+
 @ray.remote
-def find_master_addr_and_port(nums=1, start_port=None, max_tries=1024):
+def find_master_addr_and_port(nums=1, start_port=None, end_port=None):
     """Finds an available master address and a specified number of ports.
 
     This remote function gets the node's IP address and binds to one or more
@@ -71,48 +80,51 @@ def find_master_addr_and_port(nums=1, start_port=None, max_tries=1024):
         nums (int): The number of ports to find. Defaults to 1.
         start_port (Optional[int]): The starting port to search from.
             If None, random available ports will be used. Defaults to None.
-        max_tries (int): The maximum number of attempts to find available ports.
-            Defaults to 1024.
+        end_port (Optional[int]): The ending port to search to (exclusive).
+            If start_port is None, this parameter is ignored. Defaults to None.
 
     Returns:
         A tuple containing the address and a single port if `nums` is 1,
         or a list of ports if `nums` is greater than 1.
     """
     addr = ray.util.get_node_ip_address()
-    ports = []
-    sockets = []
-    try:
-        if start_port is None:
-            for _ in range(nums):
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.bind(("", 0))
-                s.listen(1)
+    ports: list[int] = []
+    sockets: list[socket.socket] = []
+
+    if start_port is None:
+        for _ in range(nums):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # if the port is binded and listened by this socket and then we close it,
+            # socket.SO_REUSEADDR would make the port be reusable even it's in TIME_WAIT state.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sockets.append(s)
+            if _is_port_available(check_socket=s, port=0):
                 ports.append(s.getsockname()[1])
-                sockets.append(s)
-        else:
-            candidate_port = start_port
-            tries = 0
-            while len(ports) < nums and tries < max_tries:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                try:
-                    s.bind(("", candidate_port))
-                    s.listen(1)
-                except OSError:
-                    tries += 1
-                    candidate_port += 1
-                    s.close()
-                    continue
-                ports.append(s.getsockname()[1])
-                sockets.append(s)
-                tries += 1
-                candidate_port += 1
-            if len(ports) < nums:
-                raise RuntimeError(
-                    f"Could not find {nums} available ports starting from port {start_port} after {max_tries} tries."
-                )
-    finally:
-        for s in sockets:
-            s.close()
+    else:
+        assert isinstance(start_port, int), "If start_port isn't None, it must be an integer."
+        assert isinstance(end_port, int), "If start_port isn't None, end_port must be an integer."
+        assert end_port - start_port >= nums, (
+            "If start_port isn't None, the range between start_port and end_port must be at least nums."
+        )
+
+        for candidate_port in range(start_port, end_port):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # if the port is binded and listened by this socket and then we close it,
+            # socket.SO_REUSEADDR would make the port be reusable even it's in TIME_WAIT state.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sockets.append(s)
+            if _is_port_available(check_socket=s, port=candidate_port):
+                ports.append(candidate_port)
+            # enough ports found
+            if len(ports) >= nums:
+                break
+
+        if len(ports) < nums:
+            raise RuntimeError(f"Could not find {nums} available ports starting from port {start_port} to {end_port}.")
+
+    # close all sockets, no matter available or not
+    for s in sockets:
+        s.close()
 
     if len(ports) == 1:
         return addr, ports[0]

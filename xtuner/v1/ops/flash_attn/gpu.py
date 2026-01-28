@@ -1,3 +1,4 @@
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -56,7 +57,7 @@ try:
             None,  # scheduler_metadata
             1,  # num_splits
             None,  # pack_gqa
-            0,  # sm_margin
+            int(os.environ.get("XTUNER_SM_MARGIN", 0)),  # sm_margin
         )
         return out, softmax_lse
 
@@ -127,7 +128,7 @@ try:
             window_size_right,
             softcap,
             deterministic,
-            0,  # sm_margin
+            int(os.environ.get("XTUNER_SM_MARGIN", 0)),  # sm_margin
         )
 
     @torch.library.register_fake("flash_attn::_flash_attn_varlen_backward_v3")

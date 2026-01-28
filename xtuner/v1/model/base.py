@@ -341,7 +341,6 @@ class BaseModel(nn.Module):
         from xtuner.v1.utils import default_init_weights
 
         initialized_params = default_init_weights(self)
-
         if missing := {name for name, _ in self.named_parameters()} - initialized_params:
             raise RuntimeError(f"{missing} is not initialized")
 
@@ -1433,3 +1432,12 @@ class BaseModel(nn.Module):
 
         for target, option in compile_cfg.items():
             self._compile_overwrite(target, option)
+
+    def _mark_dynamic(self, seq_ctx: SequenceContext, dim=0):
+        """`cu_seq_lens_q` and `cu_seq_lens_k` are dynamic shapes in each
+        fwd/bwd pass.
+
+        Mark them as dynamic explicitly to avoid recompilation.
+        """
+        torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q, dim)
+        torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_k, dim)

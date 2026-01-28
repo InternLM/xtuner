@@ -31,13 +31,14 @@ from xtuner.v1.engine.vision_compose_train_engine import (
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContextInputItem
+from xtuner.v1.loss.utils import sp_gather
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
-from xtuner.v1.rl.utils import gather_logprobs
+from xtuner.v1.rl.utils import gather_logprobs, sp_split
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -366,7 +367,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         return data_mesh
 
     def compute_actor_logprobs(
-        self, seq_ctx_list: list[SequenceContext], loss_ctx_input_list: list[RLLossContextInputItem]
+        self,
+        seq_ctx_list: list[SequenceContext],
+        loss_ctx_input_list: list[RLLossContextInputItem],
     ) -> list[RLLossContextInputItem]:
         # precompute float8 dynamic scale only once
         self._engine.maybe_precompute_float8_dynamic_scale_for_fsdp()
@@ -449,6 +452,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts
             if rollout_routed_experts is not None:
+                to_free_routed_expert_refs: list[ray.ObjectRef] = []
                 if isinstance(rollout_routed_experts, list):
                     # list[n,l,e]
                     out_rollout_routed_expert = []
@@ -468,7 +472,12 @@ class TrainingWorker(SingleAcceleratorWorker):
                             rollout_routed_expert_refs = rollout_routed_expert
                             rollout_routed_expert = ray.get(rollout_routed_expert_refs)
                             # free obj store explicitly
-                            ray._private.internal_api.free(rollout_routed_expert_refs)
+                            if self.sp_mesh is None or self.sp_mesh.size() == 1:
+                                ray._private.internal_api.free(rollout_routed_expert_refs)
+                            else:
+                                if self.sp_mesh.get_local_rank() == 0:
+                                    # only free once of sp mesh
+                                    to_free_routed_expert_refs.append(rollout_routed_expert_refs)
                             out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
 
                     seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
@@ -489,6 +498,12 @@ class TrainingWorker(SingleAcceleratorWorker):
 
                 assert seq_ctx.input_ids is not None, "input_ids is None"
                 assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
+
+                if self.sp_mesh is not None and self.sp_mesh.size() > 1:
+                    dist.barrier()
+                    for free_routed_expert_refs in to_free_routed_expert_refs:
+                        ray._private.internal_api.free(free_routed_expert_refs)
+                    del to_free_routed_expert_refs
 
             seq_ctx = data["seq_ctx"].to(DEVICE)
             rollout_logprobs = data.get("rollout_logprobs", None)
@@ -525,7 +540,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             assert len(rollout_logprobs_list) == len(loss_ctx_input_list), (
                 f"rollout_logprobs_list {len(rollout_logprobs_list)} vs loss_ctx_input_list {len(loss_ctx_input_list)}"
             )
-
         all_rollout_is_metrics = []
         all_mismatch_metrics = []
         for i, loss_ctx_input in enumerate(loss_ctx_input_list):
@@ -543,14 +557,33 @@ class TrainingWorker(SingleAcceleratorWorker):
                 cu_seq_lens = seq_ctx_list[i].cu_seq_lens_q
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
 
+                old_logprobs = loss_ctx_input.old_logprobs
+                if self.sp_mesh and self.sp_mesh.size() > 1:
+                    old_logprobs = sp_gather(old_logprobs, self.sp_mesh, dim=1)
+                    old_logprobs = old_logprobs[:, : rollout_logprobs_list[i].size(1)]  # type: ignore
+                    mask = sp_gather(mask, self.sp_mesh, dim=1)
+                    mask = mask[:, : rollout_logprobs_list[i].size(1)]  # type: ignore
+
                 rollout_is_weights, rollout_is_mask, mismatch_metrics, rollout_is_metrics = (
                     loss_cfg.rollout_is.compute_rollout_importance_weights_and_metrics(
-                        old_log_prob=loss_ctx_input.old_logprobs,
+                        old_log_prob=old_logprobs,
                         rollout_log_prob=rollout_logprobs_list[i],
                         num_tokens=num_tokens,
                         response_mask=mask,
                     )
                 )
+                if self.sp_mesh and self.sp_mesh.size() > 1:
+                    rollout_is_mask = sp_split(rollout_is_mask, self.sp_mesh, 1, 0)
+                    assert rollout_is_mask.size(1) == loss_ctx_input.shifted_labels.size(1), (
+                        f"rollout_is_mask {rollout_is_mask.size(1)} vs loss_ctx_input.shifted_labels {loss_ctx_input.shifted_labels.size(1)}"
+                    )
+
+                    if rollout_is_weights is not None:
+                        rollout_is_weights = sp_split(rollout_is_weights, self.sp_mesh, 1, 0)
+                        assert rollout_is_weights.size(1) == loss_ctx_input.shifted_labels.size(1), (
+                            f"rollout_is_weights {rollout_is_weights.size(1)} vs loss_ctx_input.shifted_labels {loss_ctx_input.shifted_labels.size(1)}"
+                        )
+
                 loss_ctx_input.shifted_labels[~rollout_is_mask.bool()] = -100  # update loss mask
                 loss_ctx_input.is_weights = rollout_is_weights
                 all_rollout_is_metrics.append(rollout_is_metrics)
@@ -610,7 +643,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         for i in range(0, len(seq_ctx_list), iters_per_step):
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
             batches_loss_ctx_input = loss_ctx_input_list[i : i + iters_per_step]
-
             LossContext = loss_cfg.loss_ctx_cls
             batches_loss_kwargs = LossContext.build_batches_loss_kwargs(batches_loss_ctx_input, loss_cfg)
             engine_input = []

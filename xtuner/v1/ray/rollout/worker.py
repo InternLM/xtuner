@@ -117,13 +117,19 @@ class RolloutWorker(SingleAcceleratorWorker):
             placement_group_capture_child_tasks=True,
             placement_group_bundle_index=self.engine_bundle_idxs[0],
         )
+
         local_rank = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
-        start_port = self.config.dist_port_base + local_rank * 1024
+        interval = 1024
+        start_port = self.config.dist_port_base + local_rank * interval
+        end_port = start_port + interval
         self.host, self.ports = ray.get(
             find_master_addr_and_port.options(scheduling_strategy=scheduling_strategy).remote(
-                nums=3, start_port=start_port, max_tries=1024
+                nums=3,
+                start_port=start_port,
+                end_port=end_port,
             )
         )
+
         self.dist_port = self.ports[0]
         self.server_port = self.ports[1]
         self.nccl_port = self.ports[2]

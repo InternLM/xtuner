@@ -212,7 +212,7 @@ class TestRollout(unittest.TestCase):
         # Define run logic based on mode
         def run_continuation(status_ref):
             if is_partial_rollout:
-                remain = status_ref["rollout_paused_count"]
+                remain = status_ref["rollout_paused_count"] + status_ref["rollout_finished_count"]
                 # Finish the remaining paused samples
                 return ray.get(self.test_flow.run.remote(num=remain, enable_partial_rollout=0), timeout=300)
             else:

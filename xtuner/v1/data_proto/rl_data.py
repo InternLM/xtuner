@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import Annotated, NotRequired
+from typing_extensions import Annotated, NotRequired, TypedDict
 
 from xtuner.v1.utils import StrEnum
 

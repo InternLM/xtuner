@@ -37,7 +37,6 @@ from xtuner.v1.loss.ce_loss import CELossContextInputItem
 from xtuner.v1.model.base import ModelItem, TransformerConfig, XTunerBaseModelConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.moe.moe import MoEConfig
-from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.profiler.prober import ProberList
@@ -84,6 +83,20 @@ class ExpHistory(TypedDict):
     git_info: GitInfo
     end: NotRequired[int]
     comment: NotRequired[str]
+
+
+class PerformanceStatistics(TypedDict):
+    local_step_consumed_tokens: int
+    local_step_consumed_img_tokens: int | None
+    step_consumed_tokens: int
+    total_consumed_tokens: int
+    total_consumed_tokens_per_rank: float
+    tgs: float
+    e2e_tgs: float
+    exp_tgs: float
+    eta_seconds: float
+    eta_hms: str
+    e2e_train_time: float
 
 
 class ExpInfo(BaseModel):
@@ -410,7 +423,7 @@ class Trainer:
         backend (str): Backend for distributed training.
     """
 
-    config: TrainerConfig | None
+    _config: TrainerConfig | None
     _META_PATH = ".xtuner"
     _PROFILE_TIME_PATH = "profiling_time"
     _PROFILE_MEMORY_PATH = "profiling_memory"
@@ -687,7 +700,8 @@ class Trainer:
             trainer_cfg=config,
             internal_metrics_cfg=config.internal_metrics_cfg,
         )
-        self.config = config
+        self._config = config
+        self._print_training_config()
         return self
 
     def fit(self):
@@ -699,45 +713,13 @@ class Trainer:
         train_begin = time.time()
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
+            consumed_samples = len(data_batch)
+            time_before_train_step = time.time()
+
             ProberList.set_step(self._cur_step + 1)
             DEVICE_MODULE.reset_peak_memory_stats()
 
-            time_before_train_step = time.time()
-            data_time = time_before_train_step - time_before_get_data
-            cur_sample_num = len(data_batch)
-
-            seq_ctx_list: list[SequenceContext] = []
-            loss_ctx_input_list: list[CELossContextInputItem] = []
-            for data in data_batch:
-                seq_ctx = data["seq_ctx"].to(DEVICE)
-                loss_ctx_input = CELossContextInputItem(shifted_labels=data["shifted_labels"]).to(DEVICE)
-                if self.sp_mesh.size() > 1:
-                    seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
-                    loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
-                seq_ctx_list.append(seq_ctx)
-                loss_ctx_input_list.append(loss_ctx_input)
-
-            del data_batch
-
-            LossContext = self.loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-                loss_ctx_input_list,
-                self.loss_cfg,
-                cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
-                sp_mesh=self.sp_mesh,
-            )
-            engine_input = []
-            for seq_ctx, loss_kwargs in zip(seq_ctx_list, batches_loss_kwargs):
-                loss_ctx = LossContext(
-                    loss_cfg=self.loss_cfg,
-                    loss_kwargs=loss_kwargs,
-                )
-                engine_input.append(
-                    ModelItem(
-                        seq_ctx=seq_ctx,
-                        loss_ctx=loss_ctx,
-                    )
-                )
+            engine_input = self._prepare_model_input(data_batch)
 
             with self._maybe_profiling():
                 loss_log, other_log = self._engine.train_step(engine_input)
@@ -755,45 +737,37 @@ class Trainer:
 
             grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
             self._engine.step_optimizer(grad_norm)
+
             time_after_train_step = time.time()
             ProberList.after_step()
+
+            data_time = time_before_train_step - time_before_get_data
             step_time = time_after_train_step - time_before_train_step
-            step_consumed_tokens = other_log["step_consumed_tokens"]
-            step_consumed_img_tokens = other_log.get("step_consumed_img_tokens", None)
-
-            extra_info = other_log.get("extra_info", {})
-            if isinstance(extra_info, ModelForwardExtraLogInfo):
-                extra_info_dict = extra_info.get()
-            else:
-                extra_info_updated = ModelForwardExtraLogInfo(extra_info)
-                extra_info_dict = extra_info_updated.get()
-            loss_log.update(extra_info_dict)
-
-            loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
 
             internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
 
             self._cur_step += 1
-
-            self._total_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
-            reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
+            reduced_step_consumed_tokens = self._reduce_number_across_rank(other_log["step_consumed_tokens"])
             self._total_consumed_tokens += reduced_step_consumed_tokens
             self._exp_consumed_tokens += reduced_step_consumed_tokens
+            self._total_consumed_samples += self._reduce_number_across_rank(consumed_samples)
             self._train_time = time_after_train_step - train_begin
+
+            # Compute training metrics
+            training_metrics = self._compute_performance_metrics(
+                local_step_consumed_tokens=other_log["step_consumed_tokens"],
+                local_step_consumed_img_tokens=other_log.get("step_consumed_img_tokens"),
+                step_consumed_tokens=reduced_step_consumed_tokens,
+                step_time=step_time,
+            )
 
             # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
             self._log_step(
                 loss_log=loss_log,
-                local_step_consumed_tokens=step_consumed_tokens,
-                step_consumed_tokens=reduced_step_consumed_tokens,
-                exp_consumed_tokens=self._exp_consumed_tokens,
-                total_consumed_tokens=self._total_consumed_tokens,
+                training_metrics=training_metrics,
+                grad_norm=grad_norm.item(),
                 data_time=data_time,
                 step_time=step_time,
-                train_time=self._train_time,
-                train_time_offset=self._train_time_offset,
-                grad_norm=grad_norm.item(),
-                local_step_consumed_img_tokens=step_consumed_img_tokens,
                 internal_metrics=internal_metrics,
             )
 
@@ -815,7 +789,44 @@ class Trainer:
             self._metrics_recorder.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
-    def _reduce_number_across_rank(self, rank_number: int) -> int:
+    def _prepare_model_input(self, data_batch) -> list[ModelItem]:
+        seq_ctx_list: list[SequenceContext] = []
+        loss_ctx_input_list: list[CELossContextInputItem] = []
+
+        for data in data_batch:
+            seq_ctx = data["seq_ctx"].to(DEVICE)
+            loss_ctx_input = CELossContextInputItem(shifted_labels=data["shifted_labels"]).to(DEVICE)
+            if self.sp_mesh.size() > 1:
+                seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
+                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
+            seq_ctx_list.append(seq_ctx)
+            loss_ctx_input_list.append(loss_ctx_input)
+
+        # TODO: Consider moving data_batch deletion to the caller for better memory management.
+        del data_batch
+
+        LossContext = self.loss_cfg.loss_ctx_cls
+        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
+            loss_ctx_input_list,
+            self.loss_cfg,
+            cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
+            sp_mesh=self.sp_mesh,
+        )
+        engine_input = []
+        for seq_ctx, loss_kwargs in zip(seq_ctx_list, batches_loss_kwargs):
+            loss_ctx = LossContext(
+                loss_cfg=self.loss_cfg,
+                loss_kwargs=loss_kwargs,
+            )
+            engine_input.append(
+                ModelItem(
+                    seq_ctx=seq_ctx,
+                    loss_ctx=loss_ctx,
+                )
+            )
+        return engine_input
+
+    def _reduce_number_across_rank(self, rank_number: int | float) -> int:
         _gathered_list = [None for _ in range(self.world_size)]
         dist.all_gather_object(_gathered_list, rank_number)
         reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
@@ -935,6 +946,10 @@ class Trainer:
             int | None: Current epoch number or None if not applicable.
         """
         return self._cur_epoch
+
+    @property
+    def config(self) -> TrainerConfig | None:
+        return self._config
 
     def _init_logger(self, log_dir: Path):
         # Logging system maybe need better design
@@ -1429,36 +1444,71 @@ class Trainer:
         else:
             yield
 
-    def _log_step(
+    def _compute_performance_metrics(
         self,
-        loss_log: LossLog,
         local_step_consumed_tokens: int,
+        local_step_consumed_img_tokens: int | None,
         step_consumed_tokens: int,
-        exp_consumed_tokens: int,
-        total_consumed_tokens: int,
-        data_time: float,
         step_time: float,
-        train_time: float,
-        train_time_offset: float,
-        grad_norm: float,
-        local_step_consumed_img_tokens: float | None,
-        internal_metrics: InternalMetrics | None = None,
-    ):
-        """Log the training step information."""
-        e2e_train_time = train_time + train_time_offset
-        total_consumed_tokens_per_rank = total_consumed_tokens / self.world_size
-        exp_consumed_tokens_per_rank = exp_consumed_tokens / self.world_size
+    ) -> PerformanceStatistics:
+        """Compute training metrics including tokens and throughput statistics.
+
+        Args:
+            local_step_consumed_tokens (int): Tokens consumed in current step on current rank.
+            local_step_consumed_img_tokens (int | None): Image tokens consumed in current step on current rank.
+            step_consumed_tokens (int): Total tokens consumed in current step across all ranks.
+            step_time (float): Time spent on current training step in seconds.
+
+        Returns:
+            TrainingMetrics: Dictionary containing computed training metrics.
+        """
+        e2e_train_time = self._train_time + self._train_time_offset
+        total_consumed_tokens_per_rank = self._total_consumed_tokens / self.world_size
 
         tgs = local_step_consumed_tokens / step_time
         e2e_tgs = total_consumed_tokens_per_rank / e2e_train_time
-        exp_tgs = exp_consumed_tokens_per_rank / train_time
-        lr = self._lr_scheduler.get_last_lr()[0]
+        exp_tgs = self._exp_consumed_tokens / self.world_size / self._train_time
 
         remaining_steps = self.total_step - self.cur_step
         avg_tokens_per_step = total_consumed_tokens_per_rank / self.cur_step
         remaining_tokens = remaining_steps * avg_tokens_per_step
-        eta_seconds = remaining_tokens / (tgs + 1e-12)
+        eta_seconds = remaining_tokens / max(tgs, 1)
         eta_hms = str(timedelta(seconds=int(eta_seconds)))
+
+        return PerformanceStatistics(
+            local_step_consumed_tokens=local_step_consumed_tokens,
+            local_step_consumed_img_tokens=local_step_consumed_img_tokens,
+            step_consumed_tokens=step_consumed_tokens,
+            total_consumed_tokens=self._total_consumed_tokens,
+            total_consumed_tokens_per_rank=total_consumed_tokens_per_rank,
+            tgs=tgs,
+            e2e_tgs=e2e_tgs,
+            exp_tgs=exp_tgs,
+            eta_seconds=eta_seconds,
+            eta_hms=eta_hms,
+            e2e_train_time=e2e_train_time,
+        )
+
+    def _log_step(
+        self,
+        loss_log: LossLog,
+        training_metrics: PerformanceStatistics,
+        grad_norm: float,
+        data_time: float,
+        step_time: float,
+        internal_metrics: InternalMetrics | None = None,
+    ):
+        """Log the training step information.
+
+        Args:
+            loss_log (LossLog): Loss values for the current step.
+            training_metrics (TrainingMetrics): Computed training metrics including tokens and throughput.
+            grad_norm (float): Gradient norm value.
+            data_time (float): Time spent loading data in seconds.
+            step_time (float): Time spent on training step in seconds.
+            internal_metrics (InternalMetrics | None): Internal metrics from the model.
+        """
+        lr = self._lr_scheduler.get_last_lr()[0]
 
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
         loss_log_str = ", ".join(loss_log_list)
@@ -1470,39 +1520,39 @@ class Trainer:
         if internal_metrics:
             flattened_internal_metrics = flatten_internal_metrics_for_logs(internal_metrics)
 
-        if local_step_consumed_img_tokens is not None:
-            img_tokens_str = f"img_tokens: {local_step_consumed_img_tokens} "
+        if training_metrics["local_step_consumed_img_tokens"] is not None:
+            img_tokens_str = f"img_tokens: {training_metrics['local_step_consumed_img_tokens']} "
         else:
             img_tokens_str = ""
 
         self.logger.info(
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
             f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
-            f"text_tokens: {local_step_consumed_tokens} {img_tokens_str}"
-            f"step_consumed_tokens: {step_consumed_tokens} "
-            f"total_consumed_tokens: {total_consumed_tokens} "
+            f"text_tokens: {training_metrics['local_step_consumed_tokens']} {img_tokens_str}"
+            f"step_consumed_tokens: {training_metrics['step_consumed_tokens']} "
+            f"total_consumed_tokens: {training_metrics['total_consumed_tokens']} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"tgs: {tgs:.1f} "
-            f"exp_tgs: {exp_tgs:.1f} "
-            f"e2e_tgs: {e2e_tgs:.1f} "
-            f"eta: {eta_hms} "
+            f"tgs: {training_metrics['tgs']:.1f} "
+            f"exp_tgs: {training_metrics['exp_tgs']:.1f} "
+            f"e2e_tgs: {training_metrics['e2e_tgs']:.1f} "
+            f"eta: {training_metrics['eta_hms']} "
         )
 
         log_scalars = {
             "lr": lr,
             "time/data_time": round(data_time, 4),
             "time/step_time": round(step_time, 4),
-            "time/train_time": round(train_time, 4),
-            "time/eta_seconds": round(eta_seconds, 1),
-            "runtime_info/text_tokens": local_step_consumed_tokens,
-            "runtime_info/step_consumed_tokens": step_consumed_tokens,
-            "runtime_info/total_consumed_tokens": total_consumed_tokens,
-            "runtime_info/tgs": tgs,
-            "runtime_info/exp_tgs": exp_tgs,
-            "runtime_info/e2e_tgs": e2e_tgs,
+            "time/train_time": round(self._train_time, 4),
+            "time/eta_seconds": round(training_metrics["eta_seconds"], 1),
+            "runtime_info/text_tokens": training_metrics["local_step_consumed_tokens"],
+            "runtime_info/step_consumed_tokens": training_metrics["step_consumed_tokens"],
+            "runtime_info/total_consumed_tokens": training_metrics["total_consumed_tokens"],
+            "runtime_info/tgs": training_metrics["tgs"],
+            "runtime_info/exp_tgs": training_metrics["exp_tgs"],
+            "runtime_info/e2e_tgs": training_metrics["e2e_tgs"],
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
@@ -1649,6 +1699,13 @@ class Trainer:
             )
             dataloader_cfg.pad_token_id = pad_token_id
 
+        if self._sp_size > 1:
+            if dataloader_cfg.pack_to_max_length is False:
+                logger.warning(
+                    "pack_to_max_length must be True when using sequence parallel. Setting pack_to_max_length to True."
+                )
+                dataloader_cfg.pack_to_max_length = True
+
         # Resolve parallel config conlicts between model and fsdp configs
         self._resolve_deprecate_compile_cfg(model_cfg=model_cfg, fsdp_cfg=fsdp_cfg)  # TODO: Remove in version 1.1.0
 
@@ -1793,6 +1850,11 @@ class Trainer:
             log_str += f"{k}: {v}\n"
         log_str += "=================================================="
         logger.info(log_str)
+
+    def _print_training_config(self):
+        if self._config is not None and self.rank == 0:
+            config_str = self._config.model_dump_json(indent=2)
+            logger.info(f"Training config: {config_str}")
 
     def _resolve_deprecate_compile_cfg(self, model_cfg: TransformerConfig | BaseComposeConfig, fsdp_cfg: FSDPConfig):
         if not fsdp_cfg.torch_compile:

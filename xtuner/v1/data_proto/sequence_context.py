@@ -176,6 +176,16 @@ class SequenceContext:
                 )
                 self.position_ids = position_ids
 
+            if self.rollout_routed_experts is not None:
+                assert isinstance(self.rollout_routed_experts, torch.Tensor), (
+                    f"rollout_routed_experts must be a tensor, but got {type(self.rollout_routed_experts)}"
+                )
+                pad_rollout_routed_experts = pad_to_multiple_of(self.rollout_routed_experts, 0, multiple_of, 0)
+                rollout_routed_experts = split_for_sequence_parallel(
+                    pad_rollout_routed_experts, dim=0, sp_mesh=sequence_parallel_mesh
+                )
+                self.rollout_routed_experts = rollout_routed_experts
+
             sp_seq_ctx = self.__class__(
                 input_ids=sp_input_ids,
                 cu_seq_lens_q=new_cu_seq_lens,
@@ -199,7 +209,7 @@ class SequenceContext:
             return self
 
     @classmethod
-    def pack(cls, sequence_context_list: list["SequenceContext"]):
+    def cat(cls, sequence_context_list: list["SequenceContext"]) -> "SequenceContext":
         packed_input_ids: list[torch.Tensor] = []
         cu_seq_lens_q: list[torch.IntTensor] = []
         cu_seq_lens_k: list[torch.IntTensor] = []
