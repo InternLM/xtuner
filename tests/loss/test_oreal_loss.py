@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from xtuner.v1.rl.oreal.loss import OrealLossConfig, OrealLossContext
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.rl.utils import sp_split, gather_logprobs
+from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.rl.loss_fn import kl_penalty
 from xtuner.v1.data_proto.utils import unpack_sequence
 from xtuner.v1.utils.test_utils import init_data_mesh
