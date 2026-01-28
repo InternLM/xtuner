@@ -47,7 +47,6 @@ class Float8Handler:
         scaling_granularity_gemm: Optional[ScalingGranularity] = None,
         scaling_granularity_grouped_gemm: Optional[ScalingGranularity] = None,
     ) -> None:
-        self.enabled = False
         torch.serialization.add_safe_globals(
             [
                 WeightWithDynamicTilewiseFloat8CastTensor,
@@ -77,7 +76,6 @@ class Float8Handler:
             or scaling_granularity_grouped_gemm == ScalingGranularity.TILEWISE
         )
         self.is_tensorwise_fp8 = scaling_granularity_gemm == ScalingGranularity.TENSORWISE
-        self.enabled = True
 
     @staticmethod
     def get_num_features_after_pad(tensor_size, fsdp_shard_dim, num_chunks):
@@ -107,14 +105,11 @@ class Float8Handler:
                     break
         return chunk_size * num_chunks
 
-    def pad_for_fsdp(self, model: nn.Module, fsdp_mesh: DeviceMesh, callback_after_pad: Callable | None = None):
+    @staticmethod
+    def pad_for_fsdp(model: nn.Module, fsdp_mesh: DeviceMesh, callback_after_pad: Callable | None = None):
         from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
         from xtuner.v1.float8.float8_linear_tensor_wise import TensorWiseFloat8Linear
         from xtuner.v1.float8.float8_linear_tile_wise import TileWiseFloat8Linear
-
-        if not self.enabled:
-            logger.warning("Float8 training is not enabled.")
-            return
 
         for module in model.modules():
             if isinstance(module, (TileWiseFloat8Linear, TileWiseFloat8GroupedLinear, TensorWiseFloat8Linear)):
@@ -129,7 +124,7 @@ class Float8Handler:
                 else:
                     tensor_size = module.weight.size()
                     parallel_size = 1
-                padded_out_features = self.get_num_features_after_pad(tensor_size, 0, fsdp_mesh.size(-1))
+                padded_out_features = Float8Handler.get_num_features_after_pad(tensor_size, 0, fsdp_mesh.size(-1))
                 padded_out_features *= parallel_size
                 module.pad_for_fsdp(padded_out_features=padded_out_features)
 
@@ -137,10 +132,6 @@ class Float8Handler:
             callback_after_pad()
 
     def build_reduce_mesh(self, model: nn.Module, fsdp_mesh: DeviceMesh):
-        if not self.enabled:
-            logger.warning("Float8 training is not enabled.")
-            return
-
         self.fsdp_mesh = fsdp_mesh
         if self.is_tilewise_fp8:
             if fsdp_mesh.size(-1) >= 2:
@@ -151,9 +142,6 @@ class Float8Handler:
         # 为了支持 moe 参数被 fsdp 和 ep 切成 dout = n * 128 + 64 (n >= 1) 的情况
         # fsdp rank 0 的后 64 个 dim 要跟 fsdp rank 1 的前 64 个 dim 共同组成一个 block
         # 计算 absmax 的时候要 reduce max
-        if not self.enabled:
-            logger.warning("Float8 training is not enabled.")
-            return
         if not self.is_tilewise_fp8:
             logger.warning("Scaling granularity is not TILEWISE, no need to build reduce group.")
             return
@@ -174,9 +162,6 @@ class Float8Handler:
         self.tilewise_reduce_mesh_devided_64 = device_mesh
 
     def _build_reduce_mesh_mapping(self, model: nn.Module, fsdp_mesh: DeviceMesh):
-        if not self.enabled:
-            logger.warning("Float8 training is not enabled.")
-            return
         if not self.is_tilewise_fp8:
             logger.warning("Scaling granularity is not TILEWISE, no need to build reduce group.")
             return
@@ -225,9 +210,6 @@ class Float8Handler:
         self.tilewise_reduce_mesh_mapping = tilewise_reduce_mesh_mapping
 
     def precompute_float8_dynamic_scale_for_fsdp(self, model: Union[nn.Module, List[nn.Module]]):
-        if not self.enabled:
-            return
-
         models = [model] if isinstance(model, nn.Module) else model
 
         for m in models:

@@ -1,5 +1,5 @@
 import types
-from typing import cast
+from typing import cast, Self
 
 import torch
 import torch.distributed as dist
@@ -63,9 +63,11 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
-    ):
+    ) -> Self:
         self.fsdp_config = fsdp_config
+        self.language_model.fully_shard(self.fsdp_config)
+        self.vision_tower.fully_shard(self.fsdp_config)
+        self.multi_modal_projector.fully_shard(self.fsdp_config)
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
         # NOTE: 暂时只能在这个地方进行 checkpoint_wrapper
