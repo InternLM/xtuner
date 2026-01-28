@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 from typing import Callable, List, Optional, Sized, TypeVar, Union
+from uuid import uuid4
 
 import ray
 from cyclopts import Parameter
@@ -10,7 +11,7 @@ from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLUIDItem, SampleParams
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
@@ -229,7 +230,8 @@ class RawEvaluator:
                         data_iter = iter(self.dataloader)
                         data = next(data_iter)
                         self.logger.warning("Restarting the evaluation dataset.")
-                    data_item = RLDataFlowItem(data=RLDatasetItem(**data[0]))
+                    uid = RLUIDItem(action_id=uuid4().int, observation_id=uuid4().int)
+                    data_item = RLDataFlowItem(data=RLDatasetItem(**data[0]), uid=uid)
                     task = create_task(self.eval_worker_task(data_item))
                     waiting_tasks.add(task)
 

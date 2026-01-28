@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import Annotated, NotRequired, TypedDict
+from typing_extensions import Annotated, NotRequired, Self, TypedDict
 
 from xtuner.v1.utils import StrEnum
 
@@ -79,7 +80,7 @@ class RLUIDItem(BaseModel):
     root_id: int = -1
     action_id: int = -1
     observation_id: int = -1
-    version: int = -1
+    version: int = 0
 
 
 class MultimodalTrainInfo(TypedDict):
@@ -114,6 +115,7 @@ class RLDatasetItem(BaseModel):
 
 class RolloutExtraInfo(TypedDict):
     routed_experts: NotRequired[list[int] | RayObjectRef]  # type: ignore[valid-type]
+    partial_rollout_input_ids: NotRequired[list[int]]
 
 
 class RLRolloutResponseItem(BaseModel):
@@ -131,11 +133,70 @@ class RLRolloutResponseItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     response: str | None = None
     response_ids: list[int] | None = None
-    num_return_tokens: int | None = None
-    finish_reason: str | None = None  # "stop", "length", "abort", "failed", "skipped"
     logprobs: list[float] | None = None
+    num_return_tokens: int | None = None
+    versioned_response: list[str] = Field(default_factory=list)
+    versioned_response_ids: list[list[int]] = Field(default_factory=list)
+    versioned_logprobs: list[list[float]] = Field(default_factory=list)
+    versioned_num_return_tokens: list[int] = Field(default_factory=list)
+    finish_reason: str | None = None  # "stop", "length", "abort", "failed", "skipped"
     extra_info: RolloutExtraInfo = Field(default_factory=dict)
     state: RolloutState = RolloutState.INIT
+
+    def _update_by_append(self, other: Self) -> None:
+        other_ids_copy = copy.deepcopy(other.response_ids)
+        other_logprobs_copy = copy.deepcopy(other.logprobs)
+        other_response_copy = copy.deepcopy(other.response)
+        if other_response_copy is not None:
+            assert self.response is not None, "response must not be None when updating partial data."
+            self.response += other_response_copy
+            self.versioned_response.append(other_response_copy)
+
+        if other_ids_copy is not None:
+            assert self.response_ids is not None, "response_ids must not be None when updating partial data."
+            self.response_ids.extend(other_ids_copy.copy())
+            self.versioned_response_ids.append(other_ids_copy)
+            self.versioned_num_return_tokens.append(len(other_ids_copy))
+
+        if other_logprobs_copy is not None:
+            assert self.logprobs is not None, "logprobs must not be None when updating partial data."
+            self.logprobs.extend(other_logprobs_copy.copy())
+            self.versioned_logprobs.append(other_logprobs_copy)
+
+        self.num_return_tokens = len(self.response_ids) if self.response_ids is not None else 0
+        self.finish_reason = other.finish_reason
+        self.extra_info.update(other.extra_info)
+        self.state = other.state
+        return
+
+    def update(self, other: Self) -> None:
+        """Updates this RLRolloutResponseItem with data from another one.
+
+        If partial_rollout is True, concat other response to this RLRolloutResponseItem's response.
+        """
+        if not isinstance(other, RLRolloutResponseItem):
+            raise TypeError("Can only update with another RLRolloutResponseItem instance.")
+
+        if other.response_ids is None and other.logprobs is None and other.response is None:
+            self.finish_reason = other.finish_reason
+            self.state = other.state
+            self.extra_info.update(other.extra_info)
+            return
+
+        if self.response_ids is None:
+            assert self.response is None and self.logprobs is None, (
+                "Inconsistent state: if response_ids is None, response and logprobs must also be None."
+            )
+            self.response = ""
+            self.response_ids = []
+            self.logprobs = []
+            self.num_return_tokens = 0
+        else:
+            assert self.response is not None and self.logprobs is not None, (
+                "Inconsistent state: if response_ids is not None, response and logprobs must also be not None."
+            )
+
+        self._update_by_append(other)
 
 
 class RLJudgerResponseItem(BaseModel):
@@ -265,8 +326,8 @@ def is_valid_for_training(group_data_items: list[RLDataFlowItem]) -> bool:
     is_skipped = any(item.env.rollout.state == RolloutState.SKIPPED for item in group_data_items)
     is_failed = any(item.env.rollout.state == RolloutState.FAILED for item in group_data_items)
     if is_skipped or is_failed or is_abort:
-        logger.warning(
-            "Invalid dataflow group found during training, rollout state skipped: {is_skipped}, failed: {is_failed}, aborted: {is_abort}."
+        logger.debug(
+            f"Invalid dataflow group found during training, rollout state skipped: {is_skipped}, failed: {is_failed}, aborted: {is_abort}."
         )
         return False
     for item in group_data_items:
@@ -284,6 +345,31 @@ def is_valid_for_training(group_data_items: list[RLDataFlowItem]) -> bool:
             logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
             return False
     return True
+
+
+def update_rollout_item(group_data_items, target_value):
+    """Update a list of RLDataFlowItem objects by merging another
+    RLRolloutResponseItem into each item's env.rollout attribute.
+
+    Args:
+        group_data_items (List[RLDataFlowItem]): List of data items to update.
+        target_value (List[RLRolloutResponseItem]): The rollout response item to merge into each data item.
+
+    Returns:
+        List[RLDataFlowItem]: The updated list of data items.
+
+    Example:
+        >>> # Suppose you want to update the rollout response for each item
+        >>> items = [RLDataFlowItem(), RLDataFlowItem()]
+        >>> rollout_response = RLRolloutResponseItem(response="new response", response_ids=[1,2,3])
+        >>> update_rollout_item(items, rollout_response)
+        # Now each item's env.rollout has been updated with the new response and response_ids
+    """
+
+    for idx, item in enumerate(group_data_items):
+        item.env.rollout.update(target_value[idx])
+
+    return group_data_items
 
 
 def update_dataflow_item(group_data_items, target_key, target_value):
