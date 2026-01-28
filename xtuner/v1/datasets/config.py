@@ -287,6 +287,7 @@ class DataloaderConfig(BaseDataloaderConfig):
         int, Parameter(help="pack extra buffer size when pack_level is expand_soft model")
     ] = 100
     num_workers: Annotated[int, Parameter(help="dataloader num workers")] = 0
+    prefetch_factor: Annotated[int | None, Parameter(help="number of batches loaded in advance by each worker")] = None
     pad_token_id: Annotated[int | None, Parameter(help="padding token id")] = None
     tokenizer_hash: Annotated[str | None, Parameter(help="tokenizer hash")] = None
 
@@ -431,6 +432,7 @@ class DataloaderConfig(BaseDataloaderConfig):
             dataset,
             batch_size=micro_batch_size,
             num_workers=self.num_workers,
+            prefetch_factor=self.prefetch_factor,
             # Ensure to round up or drop last based on the `global_batch_size`,
             # if you want to replace a custom sampler.
             sampler=sampler,
