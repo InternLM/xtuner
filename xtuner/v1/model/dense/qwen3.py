@@ -100,6 +100,11 @@ class Qwen3DenseConfig(TransformerConfig):
             sliding_window=self.attention.sliding_window,
             use_sliding_window=self.use_sliding_window,
             tie_word_embeddings=self.tie_word_embeddings,
+            rope_scaling={
+                'rope_type': 'default',
+                'mrope_section': self.rope_scaling_cfg.mrope_section,
+                "mrope_interleaved": True
+            } if self.rope_scaling_cfg is not None else None,
             dtype=torch.bfloat16,
         )
 

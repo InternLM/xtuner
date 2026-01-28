@@ -14,7 +14,8 @@ from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLT
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.utils import get_device, get_logger
 from transformers import AutoConfig, PretrainedConfig
-
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig,Qwen3VLTextConfig, Qwen3VLVisionConfig
+from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeConfig, Qwen3VLMoeTextConfig, Qwen3VLMoeVisionConfig
 from ..base import BaseComposeConfig
 
 
@@ -51,7 +52,8 @@ class Qwen3VLVisionConfig(XTunerBaseModelConfig):
         from .modeling_vision import Qwen3VLVisionModel
 
         return Qwen3VLVisionModel(self)
-
+    
+    # Only the outermost module needs to support hf_config, the internal vision and projector modules do not need it.
     @property
     def hf_config(self):
         return None
@@ -68,7 +70,8 @@ class Qwen3VLProjectorConfig(XTunerBaseModelConfig):
         from .modeling_projector import Qwen3VLProjector
 
         return Qwen3VLProjector(self)
-
+    
+    # Only the outermost module needs to support hf_config, the internal vision and projector modules do not need it.
     @property
     def hf_config(self):
         return None
@@ -130,16 +133,44 @@ class Qwen3VLBaseConfig(BaseComposeConfig):
         return config
 
     @property
-    def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
-        return None
-
+    def hf_config(self) -> Qwen3VLConfig | Qwen3VLMoeConfig:
+        text_config = self.text_config.hf_config
+        if isinstance(self.text_config, Qwen3VLTextMoEBaseConfig):
+            vision_config = Qwen3VLMoeVisionConfig(
+                depth=self.vision_config.depth,
+                hidden_size=self.vision_config.hidden_size,
+                intermediate_size=self.vision_config.intermediate_size,
+                num_heads=self.vision_config.num_attention_heads,
+                deepstack_visual_indexes=self.vision_config.deepstack_visual_indexes,
+            )
+            return Qwen3VLMoeConfig(
+                architectures=['Qwen3VLMoeForConditionalGeneration'],
+                image_token_id=self.image_token_id,
+                video_token_id=self.video_token_id,
+                vision_start_token_id=self.vision_start_token_id,
+                vision_end_token_id=self.vision_end_token_id,
+                tie_word_embeddings=self.text_config.tie_word_embeddings,
+                text_config=text_config.to_dict(),
+                vision_config=vision_config.to_dict(),
+                )
+        else:
+            vision_config = Qwen3VLVisionConfig(
+                depth=self.vision_config.depth,
+                hidden_size=self.vision_config.hidden_size,
+                intermediate_size=self.vision_config.intermediate_size,
+                num_heads=self.vision_config.num_attention_heads,
+                deepstack_visual_indexes=self.vision_config.deepstack_visual_indexes,
+            )
+            return Qwen3VLConfig(
+                architectures=['Qwen3VLForConditionalGeneration'],
+                image_token_id=self.image_token_id,
+                video_token_id=self.video_token_id,
+                vision_start_token_id=self.vision_start_token_id,
+                vision_end_token_id=self.vision_end_token_id,
+                tie_word_embeddings=self.text_config.tie_word_embeddings,
+                text_config=text_config,
+                vision_config=vision_config,
+                )
 
 class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
