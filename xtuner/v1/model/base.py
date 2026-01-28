@@ -515,10 +515,8 @@ class BaseModel(nn.Module):
             load_spec_mapping[name] = load_spec
 
         if hf_key_mapping_missing:
-            logger.info(f"These hf keys will not be influenced by `hf_key_mapping`:")
-            logger.info(
-                json.dumps(list(hf_key_mapping_missing), indent=2)
-            )
+            logger.info("These hf keys will not be influenced by `hf_key_mapping`:")
+            logger.info(json.dumps(list(hf_key_mapping_missing), indent=2))
 
         self.load_spec_mapping = load_spec_mapping
 
