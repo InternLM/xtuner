@@ -13,7 +13,7 @@ from pathlib import Path
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.moe.gpt_oss import GptOss21BA3P6Config
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner.v1.loss.ce_loss import CELossConfig
 
 GPT_OSS_MINI_PATH = os.environ["GPT_OSS_MINI_PATH"]
 
@@ -77,14 +77,11 @@ class TestGptOss(DeterministicDDPTestCase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         loss_cfg = CELossConfig()
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx_list = [loss_ctx]
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+        loss_ctx = loss_ctx_list[0]
         seq_ctx = seq_ctx_list[0]
         gpt_oss_model.from_hf(GPT_OSS_MINI_PATH)
         with torch.no_grad():
@@ -143,14 +140,11 @@ class TestGptOss(DeterministicDDPTestCase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         loss_cfg = CELossConfig()
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx_list = [loss_ctx]
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+        loss_ctx = loss_ctx_list[0]
         seq_ctx = seq_ctx_list[0]
         gpt_oss_model.fully_shard(fsdp_config=fsdp_config)
         gpt_oss_model.from_hf(GPT_OSS_MINI_PATH)
