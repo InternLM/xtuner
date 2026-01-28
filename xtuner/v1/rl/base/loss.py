@@ -1,4 +1,4 @@
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal
 
 import torch
 from pydantic import BaseModel, ConfigDict
@@ -15,7 +15,6 @@ from .rollout_is import RolloutImportanceSampling
 
 
 DEVICE = get_device()
-T = TypeVar("T")
 
 
 def compute_kl_loss_weight(
@@ -125,7 +124,7 @@ class BaseRLLossConfig(BaseLossConfig):
             rollout_logprobs=rollout_logprobs,
             is_weights=rollout_is_weights,
             ref_logprobs=ref_logprobs,
-        )
+        ).to(DEVICE)
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
 
