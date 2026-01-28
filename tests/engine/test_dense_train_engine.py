@@ -11,7 +11,7 @@ from transformers import AutoTokenizer
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner.v1.loss.ce_loss import CELossConfig 
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from torch.optim.lr_scheduler import LambdaLR
@@ -71,24 +71,25 @@ class TestDenseEngine(DeterministicDDPTestCase):
         labels = pad_to_max_length(labels, -100, max_length=8192)
         losses = []
 
-        data_mesh = None
+        sp_mesh = None
         if sp_size > 1:
             data_mesh = init_data_mesh(str(DEVICE), sp_size)
+            sp_mesh = data_mesh['sp']
 
         for _ in range(10):
             seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
+            if sp_mesh is not None:
+                seq_ctx = seq_ctx.split(sequence_parallel_mesh=sp_mesh)
             seq_ctx_list = [seq_ctx]
-            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=labels)]
             LossContext = loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-                loss_ctx_input_list, 
-                loss_cfg,
-            )
-            loss_kwargs = batches_loss_kwargs[0]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=sp_mesh)
+            loss_ctx_list = [loss_ctx]
+            loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+
             seq_ctx = seq_ctx_list[0]
+            loss_ctx = loss_ctx_list[0]
             engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
             loss_log, _ = engine.train_step(engine_input)
             grad_norm = engine.clip_grad_norm()

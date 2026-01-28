@@ -1,7 +1,7 @@
 from unittest import TestCase
 import torch
 import torch.nn as nn
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner.v1.loss.ce_loss import CELossConfig, CELossContext
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.utils.test_utils import assert_verbose_allclose
 from xtuner.v1.loss.utils import cal_global_grad_tokens, cal_global_sum_loss_weight, len2weight
@@ -67,16 +67,14 @@ class TestCELoss(TestCase):
         global_grad_tokens = cal_global_grad_tokens(targets)
 
         loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction="token")
-        LossContext = loss_cfg.loss_ctx_cls
         seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_input_list: list[CELossContextInputItem] = []
+        loss_ctx_list: list[CELossContext] = []
         for data in data_batch:
             seq_ctx = data["seq_ctx"]
-            loss_ctx_input = CELossContextInputItem(shifted_labels=data["shifted_labels"])
             seq_ctx_list.append(seq_ctx)
-            loss_ctx_input_list.append(loss_ctx_input)
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, loss_cfg, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list])
+            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=None)
+            loss_ctx_list.append(loss_ctx)
+        loss_ctx_list = CELossContext.build_batches(loss_ctx_list, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list])
 
         for i in range(grad_accumulation_steps):
             _tensor = torch.randn(B, S, D, device=self.device, dtype=self.dtype) * 2
@@ -91,8 +89,7 @@ class TestCELoss(TestCase):
             loss1 = torch_ce(logits.float().view(-1, self.vocab_size), target.view(-1))
             loss1 = loss1 * (target >= 0).sum() / global_grad_tokens
 
-            loss_kwargs = batches_loss_kwargs[i]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_ctx_list[i]
             out = loss_ctx.forward(_input2, self.lm_head2.weight)
             loss2 = out[0]
 
@@ -170,16 +167,14 @@ class TestCELoss(TestCase):
             batch_loss_weights[i] = batch_loss_weights[i] / (global_grad_tokens + 1e-8)
 
         loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction=loss_reduction)
-        LossContext = loss_cfg.loss_ctx_cls
         seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_input_list: list[CELossContextInputItem] = []
+        loss_ctx_list: list[CELossContext] = []
         for data in data_batch:
             seq_ctx = data["seq_ctx"]
-            loss_ctx_input = CELossContextInputItem(shifted_labels=data["shifted_labels"])
             seq_ctx_list.append(seq_ctx)
-            loss_ctx_input_list.append(loss_ctx_input)
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, loss_cfg, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list])
+            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=None)
+            loss_ctx_list.append(loss_ctx)
+        loss_ctx_list = CELossContext.build_batches(loss_ctx_list, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list])
 
         for i in range(grad_accumulation_steps):
             _tensor = torch.randn(B, S, D, device=self.device, dtype=self.dtype) * 2
@@ -197,8 +192,7 @@ class TestCELoss(TestCase):
             loss1 = loss1 * batch_loss_weights[i]
             loss1 = loss1.sum()
 
-            loss_kwargs = batches_loss_kwargs[i]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_ctx_list[i]
             out = loss_ctx.forward(_input2_, self.lm_head2.weight)
             loss2 = out[0]
 
@@ -311,32 +305,23 @@ class TestCELossWithSP(DistributedTestBase):
                                   )
         seq_ctx.to(self.device)
 
+        loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction="token")
         data_mesh = init_data_mesh(self.device, sp_size=sp_size)
         sp_mesh = data_mesh['sp']
         seq_ctx.sequence_parallel_mesh = sp_mesh
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=target)]
+        loss_ctx = loss_cfg.build(shifted_labels=target, sp_mesh=sp_mesh)
+        loss_ctx_list = [loss_ctx]
         if sp_size > 1:
             seq_ctx_list[0] = seq_ctx_list[0].split(sequence_parallel_mesh=sp_mesh)
-            loss_ctx_input_list[0] = loss_ctx_input_list[0].sp_split(sp_mesh=sp_mesh)
-
-        loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction="token")
-        LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-            cu_seq_lens_list=[cu_seq_lens_q],
-            sp_mesh=sp_mesh,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx_list = CELossContext.build_batches(loss_ctx_list, cu_seq_lens_list=[cu_seq_lens_q], sp_mesh=sp_mesh)
 
         multiple_of = sp_mesh.size()
         if sp_size > 1:
             pad_input = pad_to_multiple_of(_input2_, 0, multiple_of, 1)
             _input2_ = split_for_sequence_parallel(pad_input, dim=1, sp_mesh=sp_mesh)
         
-        out = loss_ctx.forward(_input2_, self.lm_head2.weight)
+        out = loss_ctx_list[0].forward(_input2_, self.lm_head2.weight)
         loss2 = out[0]
         assert_verbose_allclose(loss1, loss2, atol=atol, rtol=rtol)
 
@@ -407,31 +392,23 @@ class TestCELossWithSP(DistributedTestBase):
                                   )
         seq_ctx.to(self.device)
 
+        loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction="token")
         data_mesh = init_data_mesh(self.device, sp_size=sp_size)
         sp_mesh = data_mesh['sp']
         seq_ctx.sequence_parallel_mesh = sp_mesh
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=target)]
+        loss_ctx = loss_cfg.build(shifted_labels=target, sp_mesh=sp_mesh)
+        loss_ctx_list = [loss_ctx]
         if sp_size > 1:
             seq_ctx_list[0] = seq_ctx_list[0].split(sequence_parallel_mesh=sp_mesh)
-            loss_ctx_input_list[0] = loss_ctx_input_list[0].sp_split(sp_mesh=sp_mesh)
 
-        loss_cfg = CELossConfig(mode=loss_mode, chunk_size=chunk_size, loss_reduction="token")
-        LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-            cu_seq_lens_list=[cu_seq_lens_q],
-            sp_mesh=sp_mesh,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx_list = CELossContext.build_batches(loss_ctx_list, cu_seq_lens_list=[cu_seq_lens_q], sp_mesh=sp_mesh)
 
         multiple_of = sp_mesh.size()
         if sp_size > 1:
             pad_input = pad_to_multiple_of(_input2_, 0, multiple_of, 1)
             _input2_ = split_for_sequence_parallel(pad_input, dim=1, sp_mesh=sp_mesh)
-        loss2, _ = loss_ctx.forward(_input2_, self.lm_head2.weight)
+        loss2, _ = loss_ctx_list[0].forward(_input2_, self.lm_head2.weight)
         assert_verbose_allclose(loss1, loss2, atol=atol, rtol=rtol)
 
     @property

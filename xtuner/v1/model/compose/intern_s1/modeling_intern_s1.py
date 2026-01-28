@@ -9,7 +9,7 @@ from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.utils import get_logger, get_padding_length, get_device
 from xtuner.v1.model import TorchCompileOption, DEFAULT_FLOAT8_CFG
-from xtuner.v1.rl.utils import sp_split
+from xtuner.v1.loss.utils import sp_split
 
 from .modeling_vision import init_world_mesh
 from typing_extensions import override
