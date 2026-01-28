@@ -18,7 +18,7 @@ on:
 
 jobs:
   publish_docker_image:
-    runs-on: [self-hosted, docker-inner]
+    runs-on: [docker-inner]
     env:
       IMAGE_NAME: 'registry.h.pjlab.org.cn/ailab-llmrazor/xtuner'
       IMAGE_TAG: ${{ inputs.image_tag || 'auto' }}
