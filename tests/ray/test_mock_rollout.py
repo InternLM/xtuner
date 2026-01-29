@@ -113,11 +113,9 @@ class TestMockRollout(unittest.TestCase):
         self.test_env = SingleTurnEnvironment.remote("env", self.pg, self.rollout_cfg, rollout_controller=rollout_controller)
         self.test_dataflow = DataFlow.remote("dataflow", self.dataflow_cfg, self.replay_buffer_cfg, self.test_env)
         
-        completed_rollouts = ray.get(self.test_dataflow.run.remote(num=3))
-
+        completed_rollouts = ray.get(self.test_dataflow.run.remote(num=3))["data_groups"]
         status = ray.get(self.test_dataflow.get_replaybuffer_status.remote())
-        print(f"[{error_name}] Completed rollouts: {completed_rollouts}, Status: {status}")
-        self.assertEqual(len(completed_rollouts[0]), 0, f"[{error_name}] Expected no rollouts to complete successfully.")
+        self.assertEqual(len(completed_rollouts), 0, f"[{error_name}] Expected no rollouts to complete successfully.")
         self.assertEqual(status["remain_completed_samples_count"], 0, f"[{error_name}] Completed count in buffer should be 0.")
         self.assertEqual(status["remain_aborted_samples_count"], 0, f"[{error_name}] Expected no rollouts to be interrupted.")
         ray.get(self.test_env.shutdown.remote())

@@ -512,7 +512,10 @@ class RLTrainer:
         """Performs a single rollout step to generate experience."""
         with timer("generation", step_timer_dict):
             ray.get(self._rollout_env_controller.update_active_workers.remote())
-            (data_groups, multimodal_train_infos), dataflow_tb_metrics = ray.get(self._rollout_dataflow.run.remote())
+            dataflow_result = ray.get(self._rollout_dataflow.run.remote())
+            data_groups = dataflow_result["data_groups"]
+            multimodal_train_infos = dataflow_result.get("mm_train_infos", None)
+            dataflow_tb_metrics = dataflow_result.get("metrics", {})
             replay_buffer_status = ray.get(self._rollout_dataflow.get_replaybuffer_status.remote())
 
         self._writer.add_scalar(

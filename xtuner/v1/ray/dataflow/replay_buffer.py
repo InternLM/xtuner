@@ -244,7 +244,6 @@ class DatasetSampler:
             tokenizer=self.tokenizer, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=1
         )
         self.dataloader_iter = iter(self.dataloader)
-        self.sample_count = 0
         self.cur_epoch = 0
         self.reduced_consumed_samples = 0
         self.logger = get_logger()
@@ -292,6 +291,13 @@ class DatasetSampler:
             data_item.extra_info = RLExtraDataItem(retry_times=0)
         self.logger.debug(f"Sampling new prompt with action_id: {action_id} in env: {env}")
         return group_data_item
+
+    def resume(self, dataloader_path):
+        dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
+        self.dataloader.load_state_dict(dataloader_state)
+        self.dataloader_iter = iter(self.dataloader)
+        self.reduced_consumed_samples = dataloader_state["sampler"]["step"]
+        self.cur_epoch = dataloader_state["sampler"]["epoch"]
 
 
 class ReplayBufferStorage:
@@ -402,8 +408,9 @@ class ReplayBufferStorage:
             task_end_time = time.perf_counter()
             task_time.append(task_end_time - task_start_time)
         # 检查completed_samples中是否还有剩余的数据，并且检查其是否过期
+        avg_time = sum(task_time) / len(task_time) if len(task_time) > 0 else 0
         self.logger.info(
-            f"Remaining completed samples in buffer: {self.completed_samples_count}, task_time: {sum(task_time)}s, avg_time: {sum(task_time) / len(task_time)}s"
+            f"Remaining completed samples in buffer: {self.completed_samples_count}, task_time: {sum(task_time)}s, avg_time: {avg_time}s"
         )
         self._check_completed_samples_expired()
         self._check_completed_samples_aborted()
@@ -432,6 +439,8 @@ class ReplayBufferStorage:
         ]
         for attr in attrs_to_clear:
             getattr(self, attr).clear()
+        self.sample_from_aborted_count = 0
+        self.sample_from_expired_count = 0
 
     def resolve_ray_objects(self, data_item: RLDataFlowItem):
         """Resolves ray.ObjectRefs in a RLDataFlowItem to their actual values.
@@ -470,9 +479,11 @@ class ReplayBufferStorage:
         if hasattr(data_item.data, "multimodal_train_info"):
             multimodal_info = data_item.data.multimodal_train_info
             if multimodal_info and "pixel_values" in multimodal_info:
-                pixel_values_ref = ray.put(multimodal_info["pixel_values"])
-                del multimodal_info["pixel_values"]
-                data_item.data.multimodal_train_info = pixel_values_ref
+                # 一组数据共享同一个data_item.data，所以只需要转换一次
+                if not isinstance(multimodal_info["pixel_values"], ray.ObjectRef):
+                    pixel_values_ref = ray.put(multimodal_info["pixel_values"])
+                    del multimodal_info["pixel_values"]
+                    data_item.data.multimodal_train_info["pixel_values"] = pixel_values_ref  # type: ignore[index]
         # convert rollout.extra_info.router_experts to ray.ObjectRef
         if "routed_experts" in data_item.env.rollout.extra_info:
             routed_experts_ref = ray.put(data_item.env.rollout.extra_info["routed_experts"])
@@ -536,9 +547,8 @@ class ReplayBufferStorage:
             file_path (str): The path to the file from which to restore the
                 state.
         """
-        if len(self._actions) > 0:
-            self.logger.warning("ReplayBufferStorage is not empty. Resuming will overwrite the existing state.")
-            self.clear()
+
+        self.clear()
 
         state = torch.load(file_path, map_location="cpu", weights_only=False)
 
@@ -931,10 +941,11 @@ class ReplayBuffer:
             file_path = Path(file_path)
         dataloader_path = file_path / "dataloader"
         if dataloader_path.exists():
-            dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
-            self.sampler.dataloader.load_state_dict(dataloader_state)
-            self.sampler.reduced_consumed_samples = dataloader_state["sampler"]["step"]
-            self.sampler.cur_epoch = dataloader_state["sampler"]["epoch"]
+            self.sampler.resume(dataloader_path)
+            self.sample_from_dataset_count = self.sampler.reduced_consumed_samples
+            self.logger.info(
+                f"Dataloader state successfully resumed from {dataloader_path} and set to epoch {self.sampler.cur_epoch} and step {self.sampler.reduced_consumed_samples}."
+            )
         else:
             self.logger.warning(f"Dataloader state file {dataloader_path} does not exist. Skipping dataloader resume.")
         # resume storage

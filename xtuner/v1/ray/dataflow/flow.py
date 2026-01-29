@@ -2,7 +2,7 @@ import asyncio
 import math
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 import httpx
 import ray
@@ -12,13 +12,19 @@ from ray.actor import ActorProxy
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RolloutState
+from xtuner.v1.data_proto.rl_data import MultimodalTrainInfo, RLDataFlowItem, RolloutState
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger, ray_method
 
 from .replay_buffer import ReplayBuffer, ReplayBufferConfig, determine_group_state
+
+
+class DataFlowResult(TypedDict):
+    data_groups: List[List[RLDataFlowItem]]
+    mm_train_infos: List[MultimodalTrainInfo]
+    metrics: Dict[str, Any]
 
 
 class DataFlowConfig(BaseModel):
@@ -232,7 +238,7 @@ class RawDataFlow:
             Optional[List[RLDataFlowItem]]: The group of samples if the task
             fails and needs to be retried, otherwise None.
         """
-        tast_start_time = time.perf_counter()
+        task_start_time = time.perf_counter()
         # step 1: sample
         # TODO(@duanyanhui): More fine-grained control over group data generation:
         # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency.
@@ -270,7 +276,7 @@ class RawDataFlow:
         else:
             self.logger.error(f"Unexpected group state '{group_state}' for action_id {action_id}.")
 
-        return time.perf_counter() - tast_start_time
+        return time.perf_counter() - task_start_time
 
     async def concurrent_task_runner(self):
         """Orchestrates the concurrent execution of worker tasks.
@@ -309,24 +315,26 @@ class RawDataFlow:
             if self.sample_from_expired_storage:
                 # 如果是从过期的存储中采样数据，需要禁用staleness_threshold
                 data_concurrency = self.target_batch_size - self.finished_samples_count
-                staleness_threshold = 0.0  # disable staleness when sampling from expired storage
                 self.logger.info(
                     f"Sampling from expired storage, starting {data_concurrency} worker tasks from expired samples."
                 )
             else:
                 data_concurrency = math.ceil(
-                    (1 + self.config.staleness_threshold) * (self.target_batch_size - self.finished_samples_count)
+                    (1 + self.staleness_threshold) * (self.target_batch_size - self.finished_samples_count)
                 )
-                staleness_threshold = self.config.staleness_threshold
                 self.logger.info(
-                    f"Starting dataflow concurrent task runner with data_concurrency: {data_concurrency}, target_batch_size: {self.target_batch_size}, finished_samples_count: {self.finished_samples_count}, staleness_threshold: {staleness_threshold}"
+                    f"Starting dataflow concurrent task runner with data_concurrency: {data_concurrency}, target_batch_size: {self.target_batch_size}, finished_samples_count: {self.finished_samples_count}, staleness_threshold: {self.staleness_threshold}"
                 )
 
             for _ in range(data_concurrency):
                 task = create_task(self.worker_task())
                 waiting_tasks.add(task)
 
-            while self.finished_samples_count < self.target_batch_size:
+            while (
+                self.finished_samples_count < self.target_batch_size
+                and self.failed_sample_count < self.target_batch_size
+                and self.skipped_sample_count < self.target_batch_size
+            ):
                 done_tasks, pending_tasks = await asyncio.wait(
                     waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
                 )
@@ -344,12 +352,25 @@ class RawDataFlow:
                 while (
                     len(waiting_tasks) + self.finished_samples_count < data_concurrency + init_finished_samples_count
                 ):
+                    # 当存在被filter掉的样本时，需要补数据
                     task = create_task(self.worker_task())
                     waiting_tasks.add(task)
 
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
+        if self.finished_samples_count >= self.target_batch_size:
+            self.logger.info(
+                f"Target batch size {self.target_batch_size} reached with finished_samples_count: {self.finished_samples_count}."
+            )
+        elif self.skipped_sample_count >= self.target_batch_size:
+            self.logger.info(
+                f"Stopping data generation as skipped samples {self.skipped_sample_count} reached target batch size {self.target_batch_size}."
+            )
+        elif self.failed_sample_count >= self.target_batch_size:
+            self.logger.info(
+                f"Stopping data generation as failed samples {self.failed_sample_count} reached target batch size {self.target_batch_size}."
+            )
         generation_time = time.perf_counter() - dataflow_start_time
         pause_start_time = time.perf_counter()
 
@@ -422,7 +443,7 @@ class RawDataFlow:
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
         staleness_threshold: Optional[float] = None,
-    ):
+    ) -> DataFlowResult:
         """Starts the data generation process.
 
         This method resets the internal state and runs the concurrent task
@@ -457,7 +478,12 @@ class RawDataFlow:
             f"Getting {self.target_batch_size} samples from replay buffer took {time.perf_counter() - get_start_time:.2f}s"
         )
         self.tb_metrics["time/get_samples_time"] = time.perf_counter() - get_start_time
-        return return_samples, self.tb_metrics
+        dataflow_result = DataFlowResult(
+            data_groups=return_samples[0],
+            mm_train_infos=return_samples[1],
+            metrics=self.tb_metrics,
+        )
+        return dataflow_result
 
     def logging_replaybuffer_state(self, logging_msg: Optional[str] = None):
         status = self.get_replaybuffer_status()
