@@ -276,6 +276,7 @@ class Qwen3VLVisionModel(BaseModel):
 
         for layer_idx, layer in enumerate(self.blocks):
             for name, module in layer.named_modules():
+                name = self._clean_param_name(name)
                 if isinstance(module, nn.Linear):
                     init_params(module.weight,
                                 partial(torch.nn.init.normal_, mean=0.0, std=self.config.initializer_range))
