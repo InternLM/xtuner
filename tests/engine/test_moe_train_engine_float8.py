@@ -18,7 +18,7 @@ from xtuner.v1.utils import pad_to_max_length
 from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.model.base import ModelItem
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig
 
 
@@ -87,14 +87,11 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
-            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=labels)]
             LossContext = loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-                loss_ctx_input_list, 
-                loss_cfg,
-            )
-            loss_kwargs = batches_loss_kwargs[0]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx_list = [loss_ctx]
+            loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+            loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
             engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
             loss_log, _ = engine.train_step(engine_input)
@@ -169,14 +166,11 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             labels = labels.to(DEVICE)
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
-            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=labels)]
             LossContext = loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-                loss_ctx_input_list, 
-                loss_cfg,
-            )
-            loss_kwargs = batches_loss_kwargs[0]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx_list = [loss_ctx]
+            loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+            loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
             engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
             loss_log, _ = engine.train_step(engine_input)
@@ -272,14 +266,11 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             seq_ctx.num_padding = pad_len
             seq_ctx.to('cuda')
             seq_ctx_list = [seq_ctx]
-            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=labels)]
             LossContext = loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-                loss_ctx_input_list, 
-                loss_cfg,
-            )
-            loss_kwargs = batches_loss_kwargs[0]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx_list = [loss_ctx]
+            loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+            loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
             engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
             loss_log, _ = engine.train_step(engine_input)
