@@ -16,7 +16,7 @@ from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
 from xtuner.v1.model import get_model_config_from_hf, Qwen3MoEConfig
 from xtuner.v1.utils.misc import HF_PATCH_MODULES_CACHE_PREFIX
@@ -97,14 +97,11 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
             loss_cfg = CELossConfig(mode=loss_mode)
             seq_ctx_list = [seq_ctx]
-            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
             LossContext = loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-                loss_ctx_input_list, 
-                loss_cfg,
-            )
-            loss_kwargs = batches_loss_kwargs[0]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx_list = [loss_ctx]
+            loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+            loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
 
             with torch.no_grad():
@@ -183,14 +180,11 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
             loss_cfg = CELossConfig()
             seq_ctx_list = [seq_ctx]
-            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
             LossContext = loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-                loss_ctx_input_list,
-                loss_cfg,
-            )
-            loss_kwargs = batches_loss_kwargs[0]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx_list = [loss_ctx]
+            loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+            loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
 
             with torch.no_grad():
@@ -262,14 +256,11 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             shifted_labels = input_ids[:, 1:]
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
             seq_ctx_list = [seq_ctx]
-            loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
             LossContext = loss_cfg.loss_ctx_cls
-            batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-                loss_ctx_input_list, 
-                loss_cfg,
-            )
-            loss_kwargs = batches_loss_kwargs[0]
-            loss_ctx = LossContext(loss_cfg, loss_kwargs)
+            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx_list = [loss_ctx]
+            loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+            loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
             qwen_model.fully_shard(fsdp_config=fsdp_config)
             qwen_model.from_hf(QWEN3_MOE_PATH, strict=False)
