@@ -32,8 +32,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
 from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
 from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
-from xtuner.v1.loss import CELossConfig
-from xtuner.v1.loss.ce_loss import CELossContextInputItem
+from xtuner.v1.loss import CELossConfig, CELossContext
 from xtuner.v1.model.base import ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.moe.moe import MoEConfig
@@ -790,40 +789,29 @@ class Trainer:
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
+        loss_cfg: CELossConfig = self.loss_cfg
         seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_input_list: list[CELossContextInputItem] = []
+        loss_ctx_list: list[CELossContext] = []
 
         for data in data_batch:
-            seq_ctx = data["seq_ctx"].to(DEVICE)
-            loss_ctx_input = CELossContextInputItem(shifted_labels=data["shifted_labels"]).to(DEVICE)
+            seq_ctx = data.pop("seq_ctx").to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
-                loss_ctx_input = loss_ctx_input.sp_split(self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx_input_list.append(loss_ctx_input)
+            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=self.sp_mesh)
+            loss_ctx_list.append(loss_ctx)
 
         # TODO: Consider moving data_batch deletion to the caller for better memory management.
         del data_batch
 
-        LossContext = self.loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list,
-            self.loss_cfg,
-            cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list],
-            sp_mesh=self.sp_mesh,
+        cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
+        loss_ctx_list = CELossContext.build_batches(
+            loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=self.sp_mesh
         )
-        engine_input = []
-        for seq_ctx, loss_kwargs in zip(seq_ctx_list, batches_loss_kwargs):
-            loss_ctx = LossContext(
-                loss_cfg=self.loss_cfg,
-                loss_kwargs=loss_kwargs,
-            )
-            engine_input.append(
-                ModelItem(
-                    seq_ctx=seq_ctx,
-                    loss_ctx=loss_ctx,
-                )
-            )
+
+        engine_input = [
+            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+        ]
         return engine_input
 
     def _reduce_number_across_rank(self, rank_number: int | float) -> int:
