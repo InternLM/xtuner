@@ -5,7 +5,7 @@ from xtuner.v1.module.attention import MHAConfig
 from torch.distributed.device_mesh import init_device_mesh
 import os
 from copy import deepcopy
-from xtuner.v1.loss.ce_loss import CELossContext, CELossConfig, CELossContextInputItem
+from xtuner.v1.loss.ce_loss import CELossContext, CELossConfig
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.utils.compile import maybe_compile
@@ -61,14 +61,11 @@ class TestMoE:
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
 
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx_list = [loss_ctx]
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+        loss_ctx = loss_ctx_list[0]
         seq_ctx = seq_ctx_list[0]
         model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
 
@@ -137,14 +134,11 @@ class TestDistributedMoE(DeterministicDDPTestCase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
 
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx_list = [loss_ctx]
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+        loss_ctx = loss_ctx_list[0]
         seq_ctx = seq_ctx_list[0]
 
         loss_parallel = parallel_model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)["loss"]

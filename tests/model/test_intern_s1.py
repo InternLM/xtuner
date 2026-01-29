@@ -12,7 +12,7 @@ from safetensors import safe_open
 from PIL import Image
 
 from xtuner.v1.model import InternS1MiniConfig
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
@@ -77,14 +77,11 @@ class TestInternS1(DeterministicDDPTestCase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to(device),))
         
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [CELossContextInputItem(shifted_labels=shifted_labels)]
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx_list = [loss_ctx]
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+        loss_ctx = loss_ctx_list[0]
         seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
@@ -184,23 +181,15 @@ class TestInternS1(DeterministicDDPTestCase):
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
         seq_ctx.pixel_values = pixel_values
         seq_ctx.to('cuda')
-        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
-        loss_ctx_input = loss_ctx_input.to('cuda')
-
         if sp_size > 1:
             seq_ctx = seq_ctx.split(sp_mesh)
-            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
 
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
-
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=sp_mesh)
+        loss_ctx_list = [loss_ctx]
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+        loss_ctx = loss_ctx_list[0]
         seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
@@ -267,20 +256,13 @@ class TestInternS1(DeterministicDDPTestCase):
         shift_input_ids = input_ids[:, :-1]
         shifted_labels = input_ids[:, 1:]
         seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
-        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
-        loss_ctx_input = loss_ctx_input.to('cuda')
-
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
-
         loss_cfg = CELossConfig()
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx_list = [loss_ctx]
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+        loss_ctx = loss_ctx_list[0]
         seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
@@ -388,24 +370,16 @@ class TestInternS1(DeterministicDDPTestCase):
         seq_ctx.image_flags = image_flags
         seq_ctx.pixel_values = pixel_values
         seq_ctx.to('cuda')
-        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
-        loss_ctx_input = loss_ctx_input.to('cuda')
-
         if sp_size > 1:
             seq_ctx = seq_ctx.split(sp_mesh)
-            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
 
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
-
         loss_cfg = CELossConfig()
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list, 
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=sp_mesh)
+        loss_ctx_list = [loss_ctx]
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+        loss_ctx = loss_ctx_list[0]
         seq_ctx = seq_ctx_list[0]
 
         with torch.no_grad():
