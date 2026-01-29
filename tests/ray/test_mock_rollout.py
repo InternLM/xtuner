@@ -1,4 +1,5 @@
 import os
+import asyncio
 import unittest
 import ray
 from transformers import AutoTokenizer
@@ -47,7 +48,6 @@ class TestMockRollout(unittest.TestCase):
     def setUpClass(cls):
         os.environ["XTUNER_USE_FA3"] = "1"
 
-
     @classmethod
     def tearDownClass(cls):
         del os.environ["XTUNER_USE_FA3"]
@@ -61,15 +61,6 @@ class TestMockRollout(unittest.TestCase):
         self.max_retry_times = 3
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
-        
-        self.resources_cfg = AcceleratorResourcesConfig(
-            accelerator=resource_map[torch.accelerator.current_accelerator().type],
-            num_workers=8,
-            num_cpus_per_worker=8,
-            cpu_memory_per_worker=16 * 1024**3,  # 16 GB
-        )
-        self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
-
         self.rollout_cfg = RolloutConfig(
             env="test_mock_rollout",
             model_path=MODEL_PATH,
@@ -108,33 +99,40 @@ class TestMockRollout(unittest.TestCase):
         ray.shutdown()
         self.temp_dir.cleanup()
 
-    def _run_mock_test(self, mock_controller_cls, error_name: str):
-        rollout_controller = mock_controller_cls.remote(self.rollout_cfg, self.pg)
-        self.test_env = SingleTurnEnvironment.remote("env", self.pg, self.rollout_cfg, rollout_controller=rollout_controller)
+    async def _run_mock_test(self, mock_controller_cls, error_name, pg):
+        rollout_controller = mock_controller_cls.remote(self.rollout_cfg, pg)
+        self.test_env = SingleTurnEnvironment.remote("env", pg, self.rollout_cfg, rollout_controller=rollout_controller)
         self.test_dataflow = DataFlow.remote("dataflow", self.dataflow_cfg, self.replay_buffer_cfg, self.test_env)
         
-        completed_rollouts = ray.get(self.test_dataflow.run.remote(num=3))["data_groups"]
-        status = ray.get(self.test_dataflow.get_replaybuffer_status.remote())
+        result = await self.test_dataflow.run.remote(num=3)
+        completed_rollouts = result["data_groups"]
+        status = await self.test_dataflow.get_replaybuffer_status.remote()
         self.assertEqual(len(completed_rollouts), 0, f"[{error_name}] Expected no rollouts to complete successfully.")
         self.assertEqual(status["remain_completed_samples_count"], 0, f"[{error_name}] Completed count in buffer should be 0.")
         self.assertEqual(status["remain_aborted_samples_count"], 0, f"[{error_name}] Expected no rollouts to be interrupted.")
-        ray.get(self.test_env.shutdown.remote())
+        await self.test_env.shutdown.remote()
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_rollout_with_timeout_mock(self):
-        self._run_mock_test(MockTimeoutRolloutController, "timeout")
+    def test_parallel_mock_rollout(self):
+        async def run_parallel():
+            res_cfg_small = AcceleratorResourcesConfig(
+                accelerator=resource_map[torch.accelerator.current_accelerator().type],
+                num_workers=2,
+                num_cpus_per_worker=2,
+            )
+            
+            pgs = [AutoAcceleratorWorkers.build_placement_group(res_cfg_small, name=f"pg_{i}") for i in range(4)]
+            await asyncio.gather(*[pg.ready() for pg in pgs])
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")  
-    def test_rollout_with_request_error_mock(self):
-        self._run_mock_test(MockRequestErrorRolloutController, "request error")
-    
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_rollout_with_client_error_mock(self):
-        self._run_mock_test(MockClientErrorRolloutController, "client error")
-    
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_rollout_with_server_error_mock(self):
-        self._run_mock_test(MockServerErrorRolloutController, "server error")
+            tasks = [
+                self._run_mock_test(MockTimeoutRolloutController, "timeout", pgs[0]),
+                self._run_mock_test(MockRequestErrorRolloutController, "request_error", pgs[1]),
+                self._run_mock_test(MockClientErrorRolloutController, "client_error", pgs[2]),
+                self._run_mock_test(MockServerErrorRolloutController, "server_error", pgs[3]),
+            ]
+            await asyncio.gather(*tasks)
+
+        asyncio.run(run_parallel())
 
 if __name__ == "__main__":
     unittest.main()

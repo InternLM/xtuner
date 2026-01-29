@@ -35,11 +35,13 @@ class TestRollout(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ["XTUNER_USE_FA3"] = "1"
+        os.environ["LMD_SKIP_WARMUP"] = "1"
 
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
-
+        del os.environ["LMD_SKIP_WARMUP"]
+        
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator=resource_map[torch.accelerator.current_accelerator().type],

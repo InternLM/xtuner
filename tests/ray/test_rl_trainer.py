@@ -38,11 +38,13 @@ class TestRLTrainer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         os.environ["XTUNER_USE_FA3"] = "1"
+        os.environ["LMD_SKIP_WARMUP"] = "1"
 
     @classmethod
     def tearDownClass(cls):
         del os.environ["XTUNER_USE_FA3"]
-
+        del os.environ["LMD_SKIP_WARMUP"]
+        
     def init_traine_worker_config(self, train_optimizer_steps, pack_max_length):
         model_cfg = get_model_config_from_hf(Path(MODEL_PATH))
         optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)

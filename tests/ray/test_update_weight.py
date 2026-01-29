@@ -25,11 +25,13 @@ class TestUpdateWeight(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ["XTUNER_USE_FA3"] = "1"
+        os.environ["LMD_SKIP_WARMUP"] = "1"
 
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
-
+        del os.environ["LMD_SKIP_WARMUP"]
+        
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
         self.model_path = MODEL_PATH
