@@ -276,6 +276,7 @@ class Qwen3VLVisionModel(BaseModel):
 
         for layer_idx, layer in enumerate(self.blocks):
             for name, module in layer.named_modules():
+                name = self._clean_param_name(name)
                 if isinstance(module, nn.Linear):
                     init_params(module.weight,
                                 partial(torch.nn.init.normal_, mean=0.0, std=self.config.initializer_range))
@@ -309,10 +310,8 @@ class Qwen3VLVisionModel(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
-        assert float8_handler is None
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
