@@ -11,7 +11,7 @@ import json
 from safetensors import safe_open
 from xtuner.v1.model import Qwen3VLMoE30BA3Config, Qwen3VLDense4BConfig
 from xtuner.v1.model.compose.qwen3_vl.modeling_vision import init_world_mesh
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem
+from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
@@ -138,23 +138,15 @@ class TestQwen3VL(DeterministicDDPTestCase):
         if position_ids is not None:
             seq_ctx.position_ids = position_ids
         seq_ctx.to('cuda')
-        loss_ctx_input = CELossContextInputItem(shifted_labels=shifted_labels)
-        loss_ctx_input = loss_ctx_input.to('cuda')
-
         if sp_size > 1:
             seq_ctx = seq_ctx.split(sp_mesh)
-            loss_ctx_input = loss_ctx_input.sp_split(sp_mesh)
 
         seq_ctx_list = [seq_ctx]
-        loss_ctx_input_list: list[CELossContextInputItem] = [loss_ctx_input]
-
         LossContext = loss_cfg.loss_ctx_cls
-        batches_loss_kwargs = LossContext.build_batches_loss_kwargs(
-            loss_ctx_input_list,
-            loss_cfg,
-        )
-        loss_kwargs = batches_loss_kwargs[0]
-        loss_ctx = LossContext(loss_cfg, loss_kwargs)
+        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=sp_mesh)
+        loss_ctx_list = [loss_ctx]
+        loss_ctx_list = LossContext.build_batches(loss_ctx_list)
+        loss_ctx = loss_ctx_list[0]
         seq_ctx = seq_ctx_list[0]
 
         qwen3vl_model.to(device)
