@@ -24,6 +24,7 @@ from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
     fully_shard,
+    FSDPModule,
 )
 from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
@@ -1514,3 +1515,18 @@ class BaseModel(nn.Module):
         # TODO: Support hsdp_sharding_size
         fsdp_mesh = init_device_mesh(device, (world_size,))
         return fsdp_mesh
+
+    def _collect_full_state_dict(self, module: FSDPModule | nn.Module):
+        assert isinstance(module, (nn.Module, FSDPModule))
+
+        if not isinstance(module, FSDPModule):
+            return module.state_dict()
+        else:
+            ret = {}
+            for name, param in module.state_dict():
+                if isinstance(param, DTensor):
+                    param = param.full_tensor()
+                ret[name] = param
+            return ret
+
+
