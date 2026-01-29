@@ -189,6 +189,8 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
 
         # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
         lang_seq_ctx = seq_ctx.copy(
+            input_ids=None,
+            inputs_embeds=inputs_embeds,
             deepstack_visual_embeds=deepstack_visual_embeds,
             visual_pos_masks=visual_pos_masks,
         )
