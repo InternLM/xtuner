@@ -601,6 +601,8 @@ class RLTrainer:
                     mini_batch_metrics.setdefault(k, []).append(cast(float, v))
 
             for key, value in mini_batch_metrics.items():
+                if len(value) == 0:
+                    continue
                 avg_value = sum(value) / len(value)
                 self._writer.add_scalar(
                     tag=f"train_metrics/worker_{worker_idx}/step_avg_{key}",
