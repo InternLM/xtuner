@@ -7,6 +7,21 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, computed_field, Field, model_validator
 
 
+class Mem(BaseModel):
+    name: str = ""
+    params_num: int = 0
+    params: float = 0
+    grads: float = 0
+    opt_states: float = 0
+    master_params: float = 0
+    master_grads: float = 0
+    acts: float = 0
+
+    @computed_field
+    def mem(self) -> float:
+        return self.params + self.grads + self.opt_states + self.master_params + self.master_grads + self.acts
+
+
 class Config(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,              # 允许使用别名
@@ -226,6 +241,15 @@ class Config(BaseModel):
         return self
 
 
+def mem_list2df(mem_list: list[Mem]) -> pd.DataFrame:
+    data = []
+    for mem in mem_list:
+        data.append({"name": mem.name, "params": mem.params / 1024**3, "grads": mem.grads / 1024**3, "opt_states": mem.opt_states / 1024**3, "master_params": mem.master_params / 1024**3, "master_grads": mem.master_grads / 1024**3, "acts": mem.acts / 1024**3})
+    df = pd.DataFrame(data, columns=["name", "params", "grads", "opt_states", "master_params", "master_grads", "acts"])
+    df = df.set_index("name")
+    return df
+
+
 class Calculator:
     """
     显存由几部分组成：
@@ -255,44 +279,22 @@ class Calculator:
     参考： https://readpaper.com/pdf-annotate/note?pdfId=4622673296512524289&noteId=1750465888039326720 论文中4.1节
     """
     def __init__(self):
+        self.embed = Mem(name="embed")
+        self.in_layernorm = Mem(name="in_layernorm")
+
+        self.perlayer_attn = Mem(name="perlayer_attn")
+        self.all_attn = Mem(name="all_attn")  # 用于统计 opt_states, master_params, master_grads
+
+        self.perlayer_mlp = Mem(name="perlayer_mlp")
+        self.all_mlp = Mem(name="all_mlp")  # 用于统计 opt_states, master_params, master_grads
+
+        self.head = Mem(name="head")
+
+        # 用于统计全量模型参数
         self.embed_params_num = 0
-        self.embed_params = 0
-        self.embed_grads = 0
-        self.embed_opt_states = 0
-        self.embed_master_params = 0
-        self.embed_master_grads = 0
-        self.embed_acts = 0
-
         self.attn_params_num = 0
-        self.attn_params_num_per_layer = 0
-        self.perlayer_attn_params = 0
-        self.perlayer_attn_grads = 0
-        self.attn_opt_states = 0
-        self.attn_master_params = 0
-        self.attn_master_grads = 0
-        self.perlayer_attn_master_grads = 0
-        self.perlayer_attn_acts = 0
-
-        self.perlayer_ckp_acts = 0
-
         self.mlp_params_num = 0
-        self.mlp_params_num_per_layer = 0
-        self.post_attn_ln_params_num_per_layer = 0
-        self.perlayer_mlp_params = 0
-        self.perlayer_mlp_grads = 0
-        self.mlp_opt_states = 0
-        self.mlp_master_params = 0
-        self.mlp_master_grads = 0
-        self.perlayer_mlp_master_grads = 0
-        self.perlayer_mlp_acts = 0
-
         self.head_params_num = 0
-        self.head_params = 0
-        self.head_grads = 0
-        self.head_opt_states = 0
-        self.head_master_params = 0
-        self.head_master_grads = 0
-        self.head_acts = 0
 
         assert C.zero_stage in [1, 3], "only support zero stage 1, 3"
         self.param_denom = self.grad_denom = self.os_denom = 1
@@ -341,128 +343,137 @@ class Calculator:
         self.mlp_residual()
 
         # head: final layer norm, lm_head, softmax
-        self.head()
+        self.lm_head()
 
     def embed_tokens(self):
         # 参数量
-        self.embed_params_num = C.vocab_size * C.D / C.tp
+        self.embed_params_num = C.vocab_size * C.D
+        self.embed.params_num = C.vocab_size * C.D / C.tp
         # 1. 模型参数
-        self.embed_params = self.embed_params_num * C.param_type  # type: ignore
+        self.embed.params = self.embed.params_num * C.param_type  # type: ignore
 
         # 2. 本地梯度
-        self.embed_grads = self.embed_params_num * C.grad_type  # type: ignore
+        self.embed.grads = self.embed.params_num * C.grad_type  # type: ignore
 
         # 3. 优化器状态
-        self.embed_opt_states = 2 * self.embed_params_num * C.os_type / self.os_denom  # type: ignore
-        self.embed_master_params = self.embed_params_num * C.master_type / self.os_denom  # type: ignore
-        self.embed_master_grads = self.embed_params_num * C.master_grad_type / self.os_denom  # type: ignore
+        self.embed.opt_states = 2 * self.embed.params_num * C.os_type / self.os_denom  # type: ignore
+        self.embed.master_params = self.embed.params_num * C.master_type / self.os_denom  # type: ignore
+        self.embed.master_grads = self.embed.params_num * C.master_grad_type / self.os_denom  # type: ignore
 
         # 4. 中间激活值：[MBS, L]
         # todo: recompute 时是否保留？
-        self.embed_acts = C.MBS * C.L / C.tp * C.act_type  # type: ignore
+        self.embed.acts = C.MBS * C.L / C.tp * C.act_type  # type: ignore
     
     def input_layernorm(self):
         # 参数量
-        self.attn_params_num_per_layer += C.D
+        self.perlayer_attn.params_num += C.D
 
         # 中间激活值：主要考虑反向计算时需要用到的中间结果, 并且假设输出的梯度已经存在，不需要计算空间。
         #    这是因为: 1)如果某些中间结果反向计算时不需要，那么在前向计算时，这些中间结果的显存占用可以被释放。
         #             2)输出梯度在计算完梯度后，可以被释放。
-        # 如果开启recompute，则每个layer只保留这1个输入的hidden_states
-        self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+        # input_layernorm反向时需要用到输入的 hidden_states [L, MBS, D]
+        input_layernorm_acts = C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+        self.perlayer_attn.acts += input_layernorm_acts
 
-        self.perlayer_ckp_acts = C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+        # 如果开启recompute，则每个layer只保留这1个输入的hidden_states
+        self.in_layernorm.acts = input_layernorm_acts
     
     def self_attn(self):
         # 模型参数量
         if C.attn_type == "mha":
             # for mha:Q_W=D*qD, K_W=D*kvD, V_W=D*kvD, O_W=D*qD
-            self.attn_params_num_per_layer += (C.D * C.qD + C.D * C.kvD + C.D * C.kvD + C.D * C.qD) / C.tp  # type: ignore
-        else: #if C.attn_type == "mla":
+            self.perlayer_attn.params_num += (C.D * C.qD + C.D * C.kvD + C.D * C.kvD + C.D * C.qD) / C.tp  # type: ignore
+        else:  # This is: C.attn_type == "mla"
             # for mla: D for down, U for up, R for rope
             # W_DQ=D*q_lora_rank, W_UQ=q_lora_rank*qn*qk_nope_head_dim, W_QR=q_lora_rank*qn*qk_rope_head_dim, 注意 W_QR有qn个，是多头的
-            self.attn_params_num_per_layer += (C.D * C.q_lora_rank + C.q_lora_rank * C.qn * C.qk_nope_head_dim + C.q_lora_rank * C.qn * C.qk_rope_head_dim) / C.tp  # type: ignore
+            self.perlayer_attn.params_num += (C.D * C.q_lora_rank + C.q_lora_rank * C.qn * C.qk_nope_head_dim + C.q_lora_rank * C.qn * C.qk_rope_head_dim) / C.tp  # type: ignore
             # W_DKV=D*kv_lora_rank
-            self.attn_params_num_per_layer += C.D * C.kv_lora_rank / C.tp  # type: ignore
+            self.perlayer_attn.params_num += C.D * C.kv_lora_rank / C.tp  # type: ignore
             # W_UK=kv_lora_rank*kvn*qk_nope_head_dim, W_KR=D*qk_rope_head_dim  注意 W_KR只有1个，不是多头的
-            self.attn_params_num_per_layer += (C.kv_lora_rank * C.kvn * C.qk_nope_head_dim + C.D * C.qk_rope_head_dim) / C.tp  # type: ignore
+            self.perlayer_attn.params_num += (C.kv_lora_rank * C.kvn * C.qk_nope_head_dim + C.D * C.qk_rope_head_dim) / C.tp  # type: ignore
             # W_UV=kv_lora_rank*kvn*v_head_dim
-            self.attn_params_num_per_layer += (C.kv_lora_rank * C.kvn * C.v_head_dim) / C.tp  # type: ignore
+            self.perlayer_attn.params_num += (C.kv_lora_rank * C.kvn * C.v_head_dim) / C.tp  # type: ignore
             # W_O=vD*D=kvn*v_head_dim*D
-            self.attn_params_num_per_layer += C.kvn * C.v_head_dim * C.D / C.tp  # type: ignore
+            self.perlayer_attn.params_num += C.kvn * C.v_head_dim * C.D / C.tp  # type: ignore
+        
+        # self.all_attn.params_num = self.perlayer_attn.params_num * C.LN_per_gpu
+        self.attn_params_num = self.perlayer_attn.params_num * C.tp * C.LN
 
-        self.attn_params_num = self.attn_params_num_per_layer * C.LN
         # 1. 模型参数
-        self.perlayer_attn_params += self.attn_params_num_per_layer * C.param_type
+        self.perlayer_attn.params = self.perlayer_attn.params_num * C.param_type
         # 2. 本地梯度
-        self.perlayer_attn_grads += self.attn_params_num_per_layer * C.grad_type
+        self.perlayer_attn.grads = self.perlayer_attn.params_num * C.grad_type
         # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片: Q_S=D*qD, K_S=D*kvD, V_S=D*kvD, O_S=D*qD
-        self.attn_opt_states += 2 * self.attn_params_num_per_layer * C.LN_per_gpu * C.os_type / self.os_denom
-        self.attn_master_params += self.attn_params_num_per_layer * C.LN_per_gpu * C.master_type / self.os_denom
-        self.perlayer_attn_master_grads = self.attn_params_num_per_layer* C.master_grad_type / self.os_denom
-        self.attn_master_grads += self.attn_params_num_per_layer * C.LN_per_gpu * C.master_grad_type / self.os_denom
+        self.perlayer_attn.opt_states = 2 * self.perlayer_attn.params_num * C.os_type / self.os_denom
+        self.all_attn.opt_states = C.LN_per_gpu * self.perlayer_attn.opt_states
+
+        self.perlayer_attn.master_params = self.perlayer_attn.params_num * C.master_type / self.os_denom
+        self.all_attn.master_params = C.LN_per_gpu * self.perlayer_attn.master_params
+
+        self.perlayer_attn.master_grads = self.perlayer_attn.params_num* C.master_grad_type / self.os_denom
+        self.all_attn.master_grads = C.LN_per_gpu * self.perlayer_attn.master_grads
 
         # 4. 激活值
         # QKV Linear的共同输入tensor: input_layernorm的输出 hidden_states [L,MBS,D]
         if C.recompute_norm:
             pass
         else:
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.D * C.linear_act_type  # type: ignore    
+            self.perlayer_attn.acts += C.L / C.tp * C.MBS * C.D * C.linear_act_type  # type: ignore    
 
         if C.attn_type == "mha":
             if C.qk_norm:
                 # QKnorm的输入tensor: q [L, MBS, qn, H] 和 k [L, MBS, kvn, H], 其中 qn*H=qD, kvn*H=kvD
-                self.perlayer_attn_acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
+                self.perlayer_attn.acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
             # rope的QK输入tensor: norm后或未norm的 q 和 k
-            self.perlayer_attn_acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
             # core attn的计算
             # Q@K^T的输入: q 和 k
-            self.perlayer_attn_acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
         else: #if C.attn_type == "mla":
             assert C.qk_norm == False, "qk_norm is not supported for mla now"
             # q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states))).view(query_shape).transpose(1, 2)
             # q_pass, q_rot = torch.split(q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
             # q_a_layernorm的输入: q_a_proj的输出 [L, MBS, q_lora_rank]
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.q_lora_rank * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.L / C.tp * C.MBS * C.q_lora_rank * C.act_type  # type: ignore
             # q_b_proj的输入： q_a_layernorm输出 
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.q_lora_rank * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.L / C.tp * C.MBS * C.q_lora_rank * C.act_type  # type: ignore
 
             # compressed_kv = self.kv_a_proj_with_mqa(hidden_states)  # [L, MBS, kv_lora_rank + qk_rope_head_dim]
             # k_pass, k_rot = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
             # k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(key_shape).transpose(1, 2)
             # k_pass, value_states = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             # kv_a_layernorm 的输入：kv_a_proj_with_mqa 的输出 [L, MBS, kv_lora_rank + qk_rope_head_dim]
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.kv_lora_rank * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.L / C.tp * C.MBS * C.kv_lora_rank * C.act_type  # type: ignore
             # kv_b_proj 的输入：kv_a_layernorm输出  [L, MBS, kv_lora_rank + qk_rope_head_dim]
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.kv_lora_rank * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.L / C.tp * C.MBS * C.kv_lora_rank * C.act_type  # type: ignore
 
             # q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, cos, sin)
             # rope的输入： q_rot 为 [L, MBS, qn, qk_rope_head_dim], q_rot是多头的，有 C.qn 个
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.qn * C.qk_rope_head_dim * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.L / C.tp * C.MBS * C.qn * C.qk_rope_head_dim * C.act_type  # type: ignore
             # rope的输入： k_rot 为 [L, MBS, qk_rope_head_dim] ，注意k_rot只有1个，不是多头的
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.qk_rope_head_dim * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.L / C.tp * C.MBS * C.qk_rope_head_dim * C.act_type  # type: ignore
 
             # Q@K^T的输入: q [L, MBS, qn, qk_nope_head_dim+qk_rope_head_dim] 和 k [L, MBS, kvn, qk_nope_head_dim+qk_rope_head_dim)]
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * (C.qn * (C.qk_nope_head_dim + C.qk_rope_head_dim) + C.kvn * (C.qk_nope_head_dim + C.qk_rope_head_dim)) * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.L / C.tp * C.MBS * (C.qn * (C.qk_nope_head_dim + C.qk_rope_head_dim) + C.kvn * (C.qk_nope_head_dim + C.qk_rope_head_dim)) * C.act_type  # type: ignore
 
         if not C.flash_attn:
             # softmax的反向需要它自己的输出 softmax_out [MBS, qn, L, L]
-            self.perlayer_attn_acts += C.MBS * C.qn / C.tp * C.L * C.L * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.MBS * C.qn / C.tp * C.L * C.L * C.act_type  # type: ignore
         else:
             # 如果开启flash attn v2，则将上面O(L^2)的空间优化到 O(L)。具体地，需要存储 logsumexp= [MBS, qn, L]
             # 参考 flash attn v1 https://zhuanlan.zhihu.com/p/669926191 的6.3节，以及 flash attn v2 https://zhuanlan.zhihu.com/p/691067658 的1.2 节
-            self.perlayer_attn_acts += C.MBS * C.qn / C.tp * C.L * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.MBS * C.qn / C.tp * C.L * C.act_type  # type: ignore
 
         # attn over values需要softmax的输出（上面已经计算，不需要重复计算），以及V输入
         if C.attn_type == "mha":
             # v [L, MBS, kvn, H], 其中 kvn*H=kvD
-            self.perlayer_attn_acts += C.MBS * C.L * C.kvD / C.tp * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.MBS * C.L * C.kvD / C.tp * C.act_type  # type: ignore
         else: #if C.attn_type == "mla":
             # v [L, MBS, kvn, v_head_dim]
-            self.perlayer_attn_acts += C.MBS * C.L * C.kvn * C.v_head_dim / C.tp * C.act_type  # type: ignore
+            self.perlayer_attn.acts += C.MBS * C.L * C.kvn * C.v_head_dim / C.tp * C.act_type  # type: ignore
 
         # Output Linear的输入: hidden_states [L, MBS, qn, H] = [L, MBS, qD]
-        self.perlayer_attn_acts += C.MBS * C.L/C.tp * C.qD * C.act_type  # type: ignore
+        self.perlayer_attn.acts += C.MBS * C.L/C.tp * C.qD * C.act_type  # type: ignore
     
     def attn_residual(self):
         # residual反向时不需要保存激活值
@@ -473,7 +484,7 @@ class Calculator:
         self.post_attn_ln_params_num_per_layer = C.D
 
         # 反向需要输入的激活值
-        self.perlayer_mlp_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+        self.perlayer_mlp.acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
 
     def mlp(self):
         # 模型参数量: fc1_W=D*mH*le*mlp_act_dim, fc2_W=mH*D*le, 
@@ -485,81 +496,89 @@ class Calculator:
         router_params_num_per_layer = C.D * C.e  # type: ignore
         nonfc_params_num_per_layer = router_params_num_per_layer + self.post_attn_ln_params_num_per_layer + shared_params_num_per_layer
 
-        self.mlp_params_num_per_layer = fc_params_num_per_layer + nonfc_params_num_per_layer
+        self.perlayer_mlp.params_num = fc_params_num_per_layer + nonfc_params_num_per_layer
+        # self.all_mlp.params_num = (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.LN_per_gpu
         self.mlp_params_num = (fc_params_num_per_layer * C.ep + nonfc_params_num_per_layer) * C.LN
 
         # 1. 模型参数: 
-        self.perlayer_mlp_params += (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.param_type  # type: ignore
+        self.perlayer_mlp.params += (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.param_type  # type: ignore
         # 2. 本地梯度: fc1_G=D*mH*le*mlp_act_dim, fc2_G=mH*D*le, gate_G=D*e
-        self.perlayer_mlp_grads += (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.grad_type  # type: ignore
+        self.perlayer_mlp.grads += (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.grad_type  # type: ignore
         # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片
         # 2 for adam's momentum and variance
-        self.mlp_opt_states += 2 * (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.os_type  # type: ignore
-        self.mlp_master_params += (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.master_type  # type: ignore
-        self.perlayer_mlp_master_grads = (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.master_grad_type # type: ignore
-        self.mlp_master_grads += (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.master_grad_type  # type: ignore
+        self.perlayer_mlp.opt_states = 2 * (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.os_type
+        self.all_mlp.opt_states = C.LN_per_gpu * self.perlayer_mlp.opt_states
+
+        self.perlayer_mlp.master_params = (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.master_type
+        self.all_mlp.master_params = C.LN_per_gpu * self.perlayer_mlp.master_params
+
+        self.perlayer_mlp.master_grads = (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.master_grad_type # type: ignore
+        self.all_mlp.master_grads = C.LN_per_gpu * self.perlayer_mlp.master_grads
 
         # 4. 激活值
         # router的输入 hidden_states [L, MBS, D]
         if C.recompute_norm:
             pass
         else:
-            self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.D * C.act_type  # type: ignore
+            self.perlayer_mlp.acts += C.L/C.tp * C.MBS * C.D * C.act_type  # type: ignore
         # permute 和 unpermute 在计算梯度时，需要保留 sorted_indices [bsk], 其中bsk=MBS*L*topk
-        self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.topk * 1 * C.act_type  # type: ignore
+        self.perlayer_mlp.acts += C.L/C.tp * C.MBS * C.topk * 1 * C.act_type  # type: ignore
         # router's permutated_probs [bsk, 1]
-        self.perlayer_mlp_acts += C.capacity * C.L/C.tp * C.MBS * C.topk * 1 * C.linear_act_type  # type: ignore
+        self.perlayer_mlp.acts += C.capacity * C.L/C.tp * C.MBS * C.topk * 1 * C.linear_act_type  # type: ignore
         # 假设路由均衡，fc1中le个expert的总体输入 permuted_hidden_states [bsk, h]，其中bsk个token会被平均分到le个expert中
-        self.perlayer_mlp_acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.D * C.linear_act_type  # type: ignore
+        # 通过 moe_capacity 来控制不均衡时，每个expert处理token比平均值的倍数
+        self.perlayer_mlp.acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.D * C.linear_act_type  # type: ignore
         # swiglu的输入: le个expert的总体输出 gate [bsk, mH] 和 up_proj [bsk, mH]
-        self.perlayer_mlp_acts += 2 * C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
+        self.perlayer_mlp.acts += 2 * C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
         if C.recompute_swiglu:
             pass
         else:
             # fc2中le个expert的总体输入 intermediate_states [bsk, mH]
-            self.perlayer_mlp_acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
+            self.perlayer_mlp.acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
         if C.topk_weights_position == "after_fc2":
             # 如果topk_weights(probs)在fc2的输出之后相乘，则反向计算要求保存fc2的输出 [bsk, D]
-            self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.topk * C.D * C.act_type  # type: ignore
+            self.perlayer_mlp.acts += C.L/C.tp * C.MBS * C.topk * C.D * C.act_type  # type: ignore
         
         # shared experts
         # fc1 的输入和permute共享，不再重复计算
         # swiglu的输入: fc1的输出 gate [bs, mH*n_shared_experts] 和 up_proj [bs, mH*n_shared_experts]
-        self.perlayer_mlp_acts += 2 * C.L/C.tp * C.MBS * C.mH * C.n_shared_experts * C.linear_act_type  # type: ignore
+        self.perlayer_mlp.acts += 2 * C.L/C.tp * C.MBS * C.mH * C.n_shared_experts * C.linear_act_type  # type: ignore
         # fc2 的输入：swiglu的输出 [bs, mH*n_shared_experts]
         if C.recompute_swiglu:
             pass
         else:
-            self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.mH * C.n_shared_experts * C.linear_act_type  # type: ignore
+            self.perlayer_mlp.acts += C.L/C.tp * C.MBS * C.mH * C.n_shared_experts * C.linear_act_type  # type: ignore
     
     def mlp_residual(self):
         # 由于probs提前到fc2之前，residual反向时不需要保存激活值
         pass
     
-    def head(self):
+    def lm_head(self):
         # 参数量
         self.head_params_num += C.D  # final layer norm
         self.head_params_num += C.D * C.vocab_size # lm_head
 
+        self.head.params_num = self.head_params_num / C.tp
+
         # 1. 模型参数
-        self.head_params = self.head_params_num * C.param_type  # type: ignore
+        self.head.params = self.head.params_num * C.param_type  # type: ignore
         # 2. 本地梯度
-        self.head_grads = self.head_params_num * C.grad_type  # type: ignore
+        self.head.grads = self.head.params_num * C.grad_type  # type: ignore
         # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片
-        self.head_opt_states = 2 * self.head_params_num * C.os_type / self.os_denom  # type: ignore
-        self.head_master_params = self.head_params_num * C.master_type / self.os_denom  # type: ignore
-        self.head_master_grads = self.head_params_num * C.master_grad_type / self.os_denom  # type: ignore
+        self.head.opt_states = 2 * self.head.params_num * C.os_type / self.os_denom  # type: ignore
+        self.head.master_params = self.head.params_num * C.master_type / self.os_denom  # type: ignore
+        self.head.master_grads = self.head.params_num * C.master_grad_type / self.os_denom  # type: ignore
         # 4. 中间激活值：
         # todo: 需要考虑recompute?
         # todo: 需要考虑chunked loss?
-        self.head_acts = 0
+        self.head.acts = 0
         # final layer norm的输入: [L, MBS, D]
-        self.head_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+        self.head.acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
         # lm_head的输入: [L, MBS, D]
-        self.head_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+        self.head.acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
         # softmax的反向需要输入和输出: 2个[L, MBS, vocab_size]
         vocab_size = C.vocab_size if C.chunk_loss_size <= 0 else C.chunk_loss_size
-        self.head_acts += 2 * C.L / C.tp * C.MBS * vocab_size * C.act_type  # type: ignore
+        self.head.acts += 2 * C.L / C.tp * C.MBS * vocab_size * C.act_type  # type: ignore
     
     # ================================ 聚合显存 ================================
     def aggregate(self, output_path):
@@ -572,7 +591,7 @@ class Calculator:
         if C.zero_stage == 1:
             self._zero1_aggregate(output_path)
         else:  # C.zero_stage == 2 or C.zero_stage == 3
-            self._zero3_aggregate()
+            self._zero3_aggregate(output_path)
 
         # 控制台柱状图（占比）
         # # Memory category breakdown
@@ -608,34 +627,36 @@ class Calculator:
         # }
         # self._print_bars("MLP memory breakdown", mlp_parts, mlp_mem)
     
-    def _zero3_aggregate(self):
+    def _zero3_aggregate(self, output_path):
+        # convert to df and GiB format
+        df = mem_list2df([self.embed, self.head, self.perlayer_attn, self.perlayer_mlp, self.all_attn, self.all_mlp, self.in_layernorm])
+        if output_path is not None:
+            df.to_excel(output_path)
+
         ########## 第1个micro batch前向最后一个layer时的显存 ##########
         # 静态显存: master参数，优化器状态
-        static_mem = self.embed_master_params + self.embed_opt_states + self.head_master_params + self.head_opt_states
-        static_mem += self.attn_master_params + self.attn_opt_states + self.mlp_master_params + self.mlp_opt_states
+        static_mem = df.loc[['embed', 'head', 'all_attn', 'all_mlp'], ['master_params', 'opt_states']].sum().sum()
         # 最后一个layer和head的全部参数和激活
         forward_last = 0
-        perlayer_params = self.perlayer_attn_params + self.perlayer_mlp_params
-        perlayer_acts = self.perlayer_attn_acts + self.perlayer_mlp_acts
-        forward_last += perlayer_params + self.head_params
-        forward_last += perlayer_acts + self.head_acts
+        perlayer_params_acts = df.loc[['perlayer_attn', 'perlayer_mlp'], ['params', 'acts']].sum().sum()
+        forward_last += perlayer_params_acts + df.loc['head', ['params', 'acts']].sum().sum()
         if C.recompute:
             # 全部剩余layer激活值的checkpoint
             # todo: 是否加上 embed_acts? 即 embed_layer是否重计算 ?
-            forward_last += self.perlayer_ckp_acts * (C.LN_per_gpu - 1)  # type: ignore
+            forward_last += df.loc['in_layernorm', 'acts'] * (C.LN_per_gpu - 1)  # type: ignore
         else:
-            forward_last += self.embed_acts + perlayer_acts * (C.LN_per_gpu - 1)  # type: ignore
+            perlayer_acts = df.loc[['perlayer_attn', 'perlayer_mlp'], ['acts']].sum().sum()
+            forward_last += df.loc['embed', 'acts'] + perlayer_acts * (C.LN_per_gpu - 1)  # type: ignore
         micro1_forward_last = static_mem + forward_last
 
         ########## 第1个micro batch反向最后时(第1个layer)的显存 ##########
         # 静态显存: 增加master梯度
-        static_grad_mem = self.attn_master_grads + self.mlp_master_grads + self.embed_master_grads + self.head_master_grads
+        static_grad_mem = df.loc[['all_attn', 'all_mlp', 'embed', 'head'], ['master_grads']].sum().sum()
         micro1_backward_last = static_mem + static_grad_mem
         # 第一个layer和embed的全部参数和激活
-        micro1_backward_last += perlayer_params + self.embed_params
-        micro1_backward_last += perlayer_acts + self.embed_acts
+        micro1_backward_last += perlayer_params_acts + df.loc['embed', ['params', 'acts']].sum().sum()
         # 上一个layer正在Reduce Scatter的梯度
-        perlayer_grads = self.perlayer_attn_grads + self.perlayer_mlp_grads
+        perlayer_grads = df.loc[['perlayer_attn', 'perlayer_mlp'], ['grads']].sum().sum()
         micro1_backward_last += perlayer_grads
 
         ########## 第2个micro batch前向最后一个layer时的显存 ##########
@@ -643,49 +664,70 @@ class Calculator:
         micro2_forward_last = static_mem + static_grad_mem + forward_last
 
         ####### show memory ##########
-        total_ckp = self.perlayer_ckp_acts * C.LN_per_gpu  # type: ignore
-        print(f"static_mem: {static_mem / 1024**3} GiB, total_ckp: {total_ckp / 1024**3} GiB, static_grad_mem: {static_grad_mem / 1024**3} GiB")
-        print(f"embed_params: {self.embed_params / 1024**3} GiB, embed_grads: {self.embed_grads / 1024**3} GiB, embed_opt_states: {self.embed_opt_states / 1024**3} GiB, embed_master_params: {self.embed_master_params / 1024**3} GiB, embed_master_grads: {self.embed_master_grads / 1024**3} GiB, embed_acts: {self.embed_acts / 1024**3} GiB")
-        print(f"head_params: {self.head_params / 1024**3} GiB, head_acts: {self.head_acts / 1024**3} GiB")
-        print(f"perlayer_params: {perlayer_params / 1024**3} GiB, perlayer_acts: {perlayer_acts / 1024**3} GiB, perlayer_grads: {perlayer_grads / 1024**3} GiB")
-        print(f"per_layer_attn_params: {self.perlayer_attn_params / 1024**3} GiB, per_layer_attn_acts: {self.perlayer_attn_acts / 1024**3} GiB, per_layer_attn_grads: {self.perlayer_attn_grads / 1024**3} GiB")
-        print(f"per_layer_mlp_params: {self.perlayer_mlp_params / 1024**3} GiB, per_layer_mlp_acts: {self.perlayer_mlp_acts / 1024**3} GiB, per_layer_mlp_grads: {self.perlayer_mlp_grads / 1024**3} GiB")
-        print(f"per_layer_attn_master_grads: {self.perlayer_attn_master_grads / 1024**3} GiB, per_layer_mlp_master_grads: {self.perlayer_mlp_master_grads / 1024**3} GiB")
-        print(f"head_params: {self.head_params / 1024**3} GiB, head_acts: {self.head_acts / 1024**3} GiB, head_grads: {self.head_grads / 1024**3} GiB, head_opt_states: {self.head_opt_states / 1024**3} GiB, head_master_params: {self.head_master_params / 1024**3} GiB, head_master_grads: {self.head_master_grads / 1024**3} GiB")
         max_mem1 = max(micro1_forward_last, micro1_backward_last)
-        print(f"Max_mem for microbatch=1: {max_mem1 / 1024**3} GiB. micro1_forward_last: {micro1_forward_last / 1024**3} GiB, micro1_backward_last: {micro1_backward_last / 1024**3} GiB")
+        print(f"Max_mem for microbatch=1: {max_mem1} GiB. micro1_forward_last: {micro1_forward_last} GiB, micro1_backward_last: {micro1_backward_last} GiB")
         max_mem = max(micro1_forward_last, micro1_backward_last, micro2_forward_last)
-        print(f"Max_mem for microbatch>1: {max_mem / 1024**3} GiB. micro1_forward_last: {micro1_forward_last / 1024**3} GiB, micro1_backward_last: {micro1_backward_last / 1024**3} GiB, micro2_forward_last: {micro2_forward_last / 1024**3} GiB")
+        print(f"Max_mem for microbatch>1: {max_mem} GiB. micro1_forward_last: {micro1_forward_last} GiB, micro1_backward_last: {micro1_backward_last} GiB, micro2_forward_last: {micro2_forward_last} GiB")
+        print("memory parts".center(150, '-'))
+        print(df.to_string())
+        print()
+        print(f"micro1_forward_last: {micro1_forward_last} GiB".center(150, '-'))
+        # print(f"master_params and opt_states: {static_mem / 1024**3} GiB")
+        print(f"  [Static OS&Param] embed, all_attn, all_mlp, head: master_params, opt_states = {df.loc[['embed', 'all_attn', 'all_mlp', 'head'], ['master_params', 'opt_states']].sum().sum()} GiB")
+        print(f"  [Allgathered Last Layer] perlayer_attn, perlayer_mlp: params, acts = {df.loc[['perlayer_attn', 'perlayer_mlp'], ['params', 'acts']].sum().sum()} GiB")
+        print(f"  [Allgathered Head] head: params, acts = {df.loc['head', ['params', 'acts']].sum().sum()} GiB")
+        print(f"  [Recompute Checkpoint] in_layernorm.acts * (LN - 1) = {df.loc['in_layernorm', 'acts'] * (C.LN_per_gpu - 1)} GiB")
+        print()
+        print(f"micro1_backward_last: {micro1_backward_last} GiB".center(150, '-'))
+        print(f"  [Static OS&Param] embed, all_attn, all_mlp, head: master_params, opt_states = {df.loc[['embed', 'all_attn', 'all_mlp', 'head'], ['master_params', 'opt_states']].sum().sum()} GiB")
+        print(f"  [Static Grad] embed, all_attn, all_mlp, head: master_grads = {df.loc[['embed', 'all_attn', 'all_mlp', 'head'], ['master_grads']].sum().sum()} GiB")
+        print(f"  [Allgathered First Layer] perlayer_attn, perlayer_mlp: params, acts = {df.loc[['perlayer_attn', 'perlayer_mlp'], ['params', 'acts']].sum().sum()} GiB")
+        print(f"  [Allgathered Embed] embed: params, acts = {df.loc['embed', ['params', 'acts']].sum().sum()} GiB")
+        print(f"  [Previous Layer Grad ReduceScatering] perlayer_attn, perlayer_mlp: grads = {df.loc[['perlayer_attn', 'perlayer_mlp'], ['grads']].sum().sum()} GiB")
+        print(f"  [Recompute Checkpoint] None = {0} GiB")
+        print()
+        print(f"micro2_forward_last: {micro2_forward_last} GiB".center(150, '-'))
+        print(f"  [Static OS&Param] embed, all_attn, all_mlp, head: master_params, opt_states = {df.loc[['embed', 'all_attn', 'all_mlp', 'head'], ['master_params', 'opt_states']].sum().sum()} GiB")
+        print(f"  [Static Grad] embed, all_attn, all_mlp, head: master_grads = {df.loc[['embed', 'all_attn', 'all_mlp', 'head'], ['master_grads']].sum().sum()} GiB")
+        print(f"  [Allgathered Last Layer] perlayer_attn, perlayer_mlp: params, acts = {df.loc[['perlayer_attn', 'perlayer_mlp'], ['params', 'acts']].sum().sum()} GiB")
+        print(f"  [Allgathered Head] head: params, acts = {df.loc['head', ['params', 'acts']].sum().sum()} GiB")
+        print(f"  [Recompute Checkpoint] in_layernorm.acts * (LN - 1) = {df.loc['in_layernorm', 'acts'] * (C.LN_per_gpu - 1)} GiB")
 
     def _zero1_aggregate(self, output_path):
         if C.pp > 1:
             # todo: 目前只计算了第1个stage的显存占用，后续考虑计算每个stage的显存占用，然后取最大值
             # 同时将embed的act和grad置零，因为峰值一般出现在第一个stage，并且 LN_for_pp_first_stage已经考虑多考虑了1个layer来替代
-            self.embed_params = self.embed_grads = self.embed_opt_states = self.embed_master_params = self.embed_master_grads = self.embed_acts = 0
+            # self.embed_params = self.embed_grads = self.embed_opt_states = self.embed_master_params = self.embed_master_grads = self.embed_acts = 0
+            self.embed = Mem()
             # deprecated: 如果开启pp将head相关置零，因为峰值出现在第一个stage，所以只考虑embed，不考虑head部分
-            self.head_params = self.head_grads = self.head_opt_states = self.head_master_params = self.head_master_grads = self.head_acts = 0
-        embed_mem = self.embed_params + self.embed_grads + self.embed_opt_states + self.embed_master_params + self.embed_master_grads + self.embed_acts  # type: ignore
-        head_mem = self.head_params + self.head_grads + self.head_opt_states + self.head_master_params + self.head_master_grads + self.head_acts  # type: ignore
+            # self.head_params = self.head_grads = self.head_opt_states = self.head_master_params = self.head_master_grads = self.head_acts = 0
+            self.head = Mem()
+        embed_mem = self.embed.mem  # type: ignore
+        head_mem = self.head.mem  # type: ignore
 
         # LN_per_gpu = C.LN_per_gpu - C.LN_add_for_pp_first_stage
         LN_per_gpu = C.LN_per_gpu  # type: ignore
-        attn_params = self.perlayer_attn_params * LN_per_gpu  # type: ignore
-        attn_grads = self.perlayer_attn_grads * LN_per_gpu  # type: ignore
+        attn_params = self.perlayer_attn.params * LN_per_gpu  # type: ignore
+        attn_grads = self.perlayer_attn.grads * LN_per_gpu  # type: ignore
         if not C.recompute:
-            attn_acts = self.perlayer_attn_acts * LN_per_gpu  # type: ignore
+            attn_acts = self.perlayer_attn.acts * LN_per_gpu  # type: ignore
         else:
-            attn_acts = self.perlayer_attn_acts + self.perlayer_ckp_acts * (LN_per_gpu - 1)  # type: ignore
-        attn_mem = attn_params + attn_grads + self.attn_opt_states + self.attn_master_params + self.attn_master_grads + attn_acts * C.pp_flying_batches  # type: ignore
-        print(f"Attn_mem: {attn_mem / 1024**3} GiB. attn_params: {attn_params / 1024**3} GiB, attn_grads: {attn_grads / 1024**3} GiB, attn_opt_states: {self.attn_opt_states / 1024**3} GiB, attn_master_params: {self.attn_master_params / 1024**3} GiB, attn_master_grads: {self.attn_master_grads / 1024**3} GiB, attn_acts: {attn_acts / 1024**3} GiB, flying_attn_acts: {attn_acts * C.pp_flying_batches / 1024**3} GiB")
+            attn_acts = self.perlayer_attn.acts + self.perlayer_ckp_acts * (LN_per_gpu - 1)  # type: ignore
+        attn_mem = attn_params + attn_grads + self.all_attn.opt_states + self.all_attn.master_params + self.all_attn.master_grads + attn_acts * C.pp_flying_batches  # type: ignore
+        print(f"Attn_mem: {attn_mem / 1024**3} GiB. attn_params: {attn_params / 1024**3} GiB, attn_grads: {attn_grads / 1024**3} GiB, attn_opt_states: {self.attn_opt_states / 1024**3} GiB, "
+              f"attn_master_params: {self.attn_master_params / 1024**3} GiB, attn_master_grads: {self.attn_master_grads / 1024**3} GiB, attn_acts: {attn_acts / 1024**3} GiB, "
+              f"flying_attn_acts: {attn_acts * C.pp_flying_batches / 1024**3} GiB")
 
-        mlp_params = self.perlayer_mlp_params * LN_per_gpu  # type: ignore
-        mlp_grads = self.perlayer_mlp_grads * LN_per_gpu  # type: ignore
+        mlp_params = self.perlayer_mlp.params * LN_per_gpu  # type: ignore
+        mlp_grads = self.perlayer_mlp.grads * LN_per_gpu  # type: ignore
         if not C.recompute:
-            mlp_acts = self.perlayer_mlp_acts * LN_per_gpu  # type: ignore
+            mlp_acts = self.perlayer_mlp.acts * LN_per_gpu  # type: ignore
         else:
-            mlp_acts = self.perlayer_mlp_acts  # type: ignore
-        mlp_mem = mlp_params + mlp_grads + self.mlp_opt_states + self.mlp_master_params + self.mlp_master_grads + mlp_acts * C.pp_flying_batches  # type: ignore
-        print(f"Mlp_mem: {mlp_mem / 1024**3} GiB. mlp_params: {mlp_params / 1024**3} GiB, mlp_grads: {mlp_grads / 1024**3} GiB, mlp_opt_states: {self.mlp_opt_states / 1024**3} GiB, mlp_master_params: {self.mlp_master_params / 1024**3} GiB, mlp_master_grads: {self.mlp_master_grads / 1024**3} GiB, mlp_acts: {mlp_acts / 1024**3} GiB, flying_mlp_acts: {mlp_acts * C.pp_flying_batches / 1024**3} GiB")  # type: ignore
+            mlp_acts = self.perlayer_mlp.acts  # type: ignore
+        mlp_mem = mlp_params + mlp_grads + self.all_mlp.opt_states + self.all_mlp.master_params + self.all_mlp.master_grads + mlp_acts * C.pp_flying_batches  # type: ignore
+        print(f"Mlp_mem: {mlp_mem / 1024**3} GiB. mlp_params: {mlp_params / 1024**3} GiB, mlp_grads: {mlp_grads / 1024**3} GiB, mlp_opt_states: {self.all_mlp.opt_states / 1024**3} GiB, "
+              f"mlp_master_params: {self.all_mlp.master_params / 1024**3} GiB, mlp_master_grads: {self.all_mlp.master_grads / 1024**3} GiB, mlp_acts: {mlp_acts / 1024**3} GiB, "
+              f"flying_mlp_acts: {mlp_acts * C.pp_flying_batches / 1024**3} GiB")  # type: ignore
 
         total_mem = embed_mem + attn_mem + mlp_mem + head_mem
         print(f"Total_mem: {total_mem / 1024**3} GiB. embed_mem: {embed_mem / 1024**3} GiB, attn_mem: {attn_mem / 1024**3} GiB, mlp_mem: {mlp_mem / 1024**3} GiB, head_mem: {head_mem / 1024**3} GiB")
@@ -699,47 +741,48 @@ class Calculator:
         #  total_col行 act 列的值为 所有模块的中间激活值，相当于对act列所有行的求和，单位 GiB，即 (embed_acts + attn_acts + mlp_acts + head_acts) / 1024**3
         #  total_col行 total_row列的值为所有模块在单卡上的所有显存占用，相当于对所有行所有列的求和，单位 GiB，即 total_mem / 1024**3
         df = pd.DataFrame(index=["embed", "attn", "mlp", "head", "total_col"], columns=["act", "param", "grad", "os", "master_param", "master_grad", "total_row"])
-        df.loc["embed", "act"] = self.embed_acts / 1024**3
-        df.loc["embed", "param"] = self.embed_params / 1024**3
-        df.loc["embed", "grad"] = self.embed_grads / 1024**3
-        df.loc["embed", "os"] = self.embed_opt_states / 1024**3
-        df.loc["embed", "master_param"] = self.embed_master_params / 1024**3
-        df.loc["embed", "master_grad"] = self.embed_master_grads / 1024**3
+        df.loc["embed", "act"] = self.embed.acts / 1024**3
+        df.loc["embed", "param"] = self.embed.params / 1024**3
+        df.loc["embed", "grad"] = self.embed.grads / 1024**3
+        df.loc["embed", "os"] = self.embed.opt_states / 1024**3
+        df.loc["embed", "master_param"] = self.embed.master_params / 1024**3
+        df.loc["embed", "master_grad"] = self.embed.master_grads / 1024**3
         df.loc["embed", "total_row"] = embed_mem / 1024**3
 
         df.loc["attn", "act"] = attn_acts * C.pp_flying_batches / 1024**3
         df.loc["attn", "param"] = attn_params / 1024**3
         df.loc["attn", "grad"] = attn_grads / 1024**3
-        df.loc["attn", "os"] = self.attn_opt_states / 1024**3
-        df.loc["attn", "master_param"] = self.attn_master_params / 1024**3
-        df.loc["attn", "master_grad"] = self.attn_master_grads / 1024**3
+        df.loc["attn", "os"] = self.all_attn.opt_states / 1024**3
+        df.loc["attn", "master_param"] = self.all_attn.master_params / 1024**3
+        df.loc["attn", "master_grad"] = self.all_attn.master_grads / 1024**3
         df.loc["attn", "total_row"] = attn_mem / 1024**3
 
         df.loc["mlp", "act"] = mlp_acts * C.pp_flying_batches / 1024**3
         df.loc["mlp", "param"] = mlp_params / 1024**3
         df.loc["mlp", "grad"] = mlp_grads / 1024**3
-        df.loc["mlp", "os"] = self.mlp_opt_states / 1024**3
-        df.loc["mlp", "master_param"] = self.mlp_master_params / 1024**3
-        df.loc["mlp", "master_grad"] = self.mlp_master_grads / 1024**3
+        df.loc["mlp", "os"] = self.all_mlp.opt_states / 1024**3
+        df.loc["mlp", "master_param"] = self.all_mlp.master_params / 1024**3
+        df.loc["mlp", "master_grad"] = self.all_mlp.master_grads / 1024**3
         df.loc["mlp", "total_row"] = mlp_mem / 1024**3
 
-        df.loc["head", "act"] = self.head_acts / 1024**3
-        df.loc["head", "param"] = self.head_params / 1024**3
-        df.loc["head", "grad"] = self.head_grads / 1024**3
-        df.loc["head", "os"] = self.head_opt_states / 1024**3
-        df.loc["head", "master_param"] = self.head_master_params / 1024**3
-        df.loc["head", "master_grad"] = self.head_master_grads / 1024**3
+        df.loc["head", "act"] = self.head.acts / 1024**3
+        df.loc["head", "param"] = self.head.params / 1024**3
+        df.loc["head", "grad"] = self.head.grads / 1024**3
+        df.loc["head", "os"] = self.head.opt_states / 1024**3
+        df.loc["head", "master_param"] = self.head.master_params / 1024**3
+        df.loc["head", "master_grad"] = self.head.master_grads / 1024**3
         df.loc["head", "total_row"] = head_mem / 1024**3
 
-        df.loc["total_col", "act"] = (self.embed_acts + attn_acts * C.pp_flying_batches + mlp_acts * C.pp_flying_batches + self.head_acts) / 1024**3
-        df.loc["total_col", "param"] = (self.embed_params + attn_params + mlp_params + self.head_params) / 1024**3
-        df.loc["total_col", "grad"] = (self.embed_grads + attn_grads + mlp_grads + self.head_grads) / 1024**3
-        df.loc["total_col", "os"] = (self.embed_opt_states + self.attn_opt_states + self.mlp_opt_states + self.head_opt_states) / 1024**3
-        df.loc["total_col", "master_param"] = (self.embed_master_params + self.attn_master_params + self.mlp_master_params + self.head_master_params) / 1024**3
-        df.loc["total_col", "master_grad"] = (self.embed_master_grads + self.attn_master_grads + self.mlp_master_grads + self.head_master_grads) / 1024**3
+        df.loc["total_col", "act"] = (self.embed.acts + attn_acts * C.pp_flying_batches + mlp_acts * C.pp_flying_batches + self.head.acts) / 1024**3
+        df.loc["total_col", "param"] = (self.embed.params + attn_params + mlp_params + self.head.params) / 1024**3
+        df.loc["total_col", "grad"] = (self.embed.grads + attn_grads + mlp_grads + self.head.grads) / 1024**3
+        df.loc["total_col", "os"] = (self.embed.opt_states + self.all_attn.opt_states + self.all_mlp.opt_states + self.head.opt_states) / 1024**3
+        df.loc["total_col", "master_param"] = (self.embed.master_params + self.all_attn.master_params + self.all_mlp.master_params + self.head.master_params) / 1024**3
+        df.loc["total_col", "master_grad"] = (self.embed.master_grads + self.all_attn.master_grads + self.all_mlp.master_grads + self.head.master_grads) / 1024**3
         df.loc["total_col", "total_row"] = total_mem / 1024**3
         print(df)
-        df.to_excel(output_path)
+        if output_path is not None:
+            df.to_excel(output_path)
     
     def _print_bars(self, title, parts_dict, total_bytes, width=120, char="█"):
         """在控制台打印简单的柱状图来表示占比。
@@ -777,7 +820,7 @@ def load_config(config_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--config", type=str, help="path to llm_calc_config.yaml")
-    parser.add_argument("-o", "--output", type=str, help="path to df excel file")
+    parser.add_argument("-o", "--output", type=str, help="path to excel file to save memory parts information, eg: `mem_result.xlsx` or just `mem_result` (default: None, not save to file)", default=None)
     args = parser.parse_args()
 
     C = load_config(args.config)
@@ -788,4 +831,8 @@ if __name__ == "__main__":
     print("-" * 100)
 
     calc = Calculator()
-    calc.run(args.output)
+    output = args.output
+    if output is not None:
+        if not output.endswith(".xlsx"):
+            output += ".xlsx"
+    calc.run(output)
