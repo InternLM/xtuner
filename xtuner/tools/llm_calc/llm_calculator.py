@@ -147,13 +147,22 @@ class Config(BaseModel):
     def qk_head_dim(self) -> int:
         return self.qk_nope_head_dim + self.qk_rope_head_dim
 
+    # Dense MLP
+    intermediate_size: int | None = Field(None, )  # dense ffn hidden size
+
+    # MoE MLP
     n_shared_experts: int = Field(0)  # moe shared experts num
     mH: int = Field(1536, alias="moe_intermediate_size")  # moe ffn hidden size
     topk: int = Field(8, alias="num_experts_per_tok")  # topk for moe
     mlp_act_dim: int = 2  # 2 for swiglu, 因为需要gate_proj和up_proj两个tensor
     e: int = Field(128, alias="num_experts")  # expert num
     topk_weights_position: str = "after_fc2"  # "before_fc2" or "after_fc2"
+
     chunk_loss_size: int = 0  # chunked loss size
+
+    @computed_field
+    def is_dense_model(self) -> bool:
+        return self.intermediate_size is not None
 
     @computed_field
     def LN_per_gpu(self) -> int:
@@ -213,6 +222,9 @@ class Config(BaseModel):
         assert (LN2 // self.pp) % self.vpp == 0, f"LN2/pp:{LN2 // self.pp} must be divisible by vpp:{self.vpp}"
         if self.tp > 1:
             assert self.L % self.tp == 0, f"L:{self.L} must be divisible by tp:{self.tp}"
+
+        if self.intermediate_size is not None:
+            assert self.ep == 1, "only support ep=1 when intermediate_size is not None(Dense Model)"
         return self
 
     ################## recompute params ##################
@@ -481,24 +493,33 @@ class Calculator:
 
     def post_attention_layernorm(self):
         # 参数量
-        self.post_attn_ln_params_num_per_layer = C.D
+        if C.is_dense_model:  # dense model
+            self.post_attn_ln_params_num_per_layer = C.D / C.tp
+        else:
+            self.post_attn_ln_params_num_per_layer = C.D
 
         # 反向需要输入的激活值
         self.perlayer_mlp.acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
 
     def mlp(self):
-        # 模型参数量: fc1_W=D*mH*le*mlp_act_dim, fc2_W=mH*D*le, 
-        fc_params_num_per_layer = C.D * C.mH * C.le * C.mlp_act_dim + C.mH * C.D * C.le  # type: ignore
+        if C.is_dense_model:
+            # 模型参数量: fc1_W=D*H*mlp_act_dim, fc2_W=H*D, 
+            fc_params_num_per_layer = (C.D * C.intermediate_size * C.mlp_act_dim + C.intermediate_size * C.D) / C.tp
+            nonfc_params_num_per_layer = self.post_attn_ln_params_num_per_layer
+            self.mlp_params_num = (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.LN
+        else:
+            # 模型参数量: fc1_W=D*mH*le*mlp_act_dim, fc2_W=mH*D*le, 
+            fc_params_num_per_layer = C.D * C.mH * C.le * C.mlp_act_dim + C.mH * C.D * C.le  # type: ignore
 
-        # shared experts params: fc1=D*mH*n_shared_experts*mlp_act_dim, fc2=mH*D*n_shared_experts
-        shared_params_num_per_layer = C.D * C.mH * C.n_shared_experts * C.mlp_act_dim + C.mH * C.D * C.n_shared_experts
-        # gate_W=D*e
-        router_params_num_per_layer = C.D * C.e  # type: ignore
-        nonfc_params_num_per_layer = router_params_num_per_layer + self.post_attn_ln_params_num_per_layer + shared_params_num_per_layer
+            # shared experts params: fc1=D*mH*n_shared_experts*mlp_act_dim, fc2=mH*D*n_shared_experts
+            shared_params_num_per_layer = C.D * C.mH * C.n_shared_experts * C.mlp_act_dim + C.mH * C.D * C.n_shared_experts
+            # gate_W=D*e
+            router_params_num_per_layer = C.D * C.e  # type: ignore
+            nonfc_params_num_per_layer = router_params_num_per_layer + self.post_attn_ln_params_num_per_layer + shared_params_num_per_layer
+
+            self.mlp_params_num = (fc_params_num_per_layer * C.ep + nonfc_params_num_per_layer) * C.LN
 
         self.perlayer_mlp.params_num = fc_params_num_per_layer + nonfc_params_num_per_layer
-        # self.all_mlp.params_num = (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.LN_per_gpu
-        self.mlp_params_num = (fc_params_num_per_layer * C.ep + nonfc_params_num_per_layer) * C.LN
 
         # 1. 模型参数: 
         self.perlayer_mlp.params += (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.param_type  # type: ignore
@@ -516,6 +537,32 @@ class Calculator:
         self.all_mlp.master_grads = C.LN_per_gpu * self.perlayer_mlp.master_grads
 
         # 4. 激活值
+        if C.is_dense_model:
+            self._mlp_dense_acts()
+        else:
+            self._mlp_moe_acts()
+
+    def _mlp_dense_acts(self):
+        # fc1(gate_proj和up_proj)的输入: [L, MBS, D]
+        if C.recompute_norm:
+            pass
+        else:
+            self.perlayer_mlp.acts += C.L / C.tp * C.MBS * C.D * C.linear_act_type   # type: ignore
+
+        # swiglu最开始的输入: [L, MBS, D]
+        self.perlayer_mlp.acts += C.L / C.tp * C.MBS * C.D * C.linear_act_type  # type: ignore
+        if C.recompute_swiglu:
+            # swiglu中dot的一个输入: [L, MBS, H]
+            self.perlayer_mlp.acts += C.L / C.tp * C.MBS * C.intermediate_size * C.linear_act_type  # type: ignore
+        else:
+            # swiglu中dot的两个输入: 2 * [L, MBS, H]
+            self.perlayer_mlp.acts += 2 * C.L / C.tp * C.MBS * C.intermediate_size * C.linear_act_type  # type: ignore
+
+        # fc2的输入: [L, MBS, D]
+        self.perlayer_mlp.acts += C.L / C.tp * C.MBS * C.D * C.linear_act_type  # type: ignore
+
+    def _mlp_moe_acts(self):
+        ########################## router and dispatch ##########################
         # router的输入 hidden_states [L, MBS, D]
         if C.recompute_norm:
             pass
@@ -525,21 +572,28 @@ class Calculator:
         self.perlayer_mlp.acts += C.L/C.tp * C.MBS * C.topk * 1 * C.act_type  # type: ignore
         # router's permutated_probs [bsk, 1]
         self.perlayer_mlp.acts += C.capacity * C.L/C.tp * C.MBS * C.topk * 1 * C.linear_act_type  # type: ignore
+
+        ########################## fc1, swiglu, fc2 ##########################
         # 假设路由均衡，fc1中le个expert的总体输入 permuted_hidden_states [bsk, h]，其中bsk个token会被平均分到le个expert中
         # 通过 moe_capacity 来控制不均衡时，每个expert处理token比平均值的倍数
         self.perlayer_mlp.acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.D * C.linear_act_type  # type: ignore
-        # swiglu的输入: le个expert的总体输出 gate [bsk, mH] 和 up_proj [bsk, mH]
+        # swiglu最开始的输入: le个expert的总体输出 gate [bsk, mH] 和 up_proj [bsk, mH]
         self.perlayer_mlp.acts += 2 * C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
         if C.recompute_swiglu:
-            pass
-        else:
-            # fc2中le个expert的总体输入 intermediate_states [bsk, mH]
+            # swiglu中dot的一个输入: [bsk, mH]
             self.perlayer_mlp.acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
+        else:
+            # swiglu中dot的两个输入: 2*[bsk, mH]
+            self.perlayer_mlp.acts += 2 * C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
+        # fc2中le个expert的总体输入 intermediate_states [bsk, mH]
+        self.perlayer_mlp.acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
+
+        ########################## combine: topk_weights_position ##########################
         if C.topk_weights_position == "after_fc2":
             # 如果topk_weights(probs)在fc2的输出之后相乘，则反向计算要求保存fc2的输出 [bsk, D]
             self.perlayer_mlp.acts += C.L/C.tp * C.MBS * C.topk * C.D * C.act_type  # type: ignore
         
-        # shared experts
+        ########################## shared experts ##########################
         # fc1 的输入和permute共享，不再重复计算
         # swiglu的输入: fc1的输出 gate [bs, mH*n_shared_experts] 和 up_proj [bs, mH*n_shared_experts]
         self.perlayer_mlp.acts += 2 * C.L/C.tp * C.MBS * C.mH * C.n_shared_experts * C.linear_act_type  # type: ignore
