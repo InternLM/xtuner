@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Literal, Self, TypeVar
+from typing import Annotated, Any, Literal, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -9,6 +9,7 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.nn.functional import all_reduce
+from typing_extensions import Self
 
 from xtuner.v1.loss.utils import sp_split
 

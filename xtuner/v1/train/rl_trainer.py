@@ -245,6 +245,7 @@ class RLTrainer:
 
         self._total_epochs = total_epochs
         self._cur_step = 0
+        self._train_mini_step = 1
 
         if skip_checkpoint_validation:
             patch_default_save_plan()
@@ -600,8 +601,16 @@ class RLTrainer:
                     mini_batch_metrics.setdefault(k, []).append(cast(float, v))
 
             for key, value in mini_batch_metrics.items():
+                avg_value = sum(value) / len(value)
+                self._writer.add_scalar(
+                    tag=f"train_metrics/worker_{worker_idx}/step_avg_{key}",
+                    scalar_value=avg_value,
+                    global_step=rollout_idx,
+                )
+
+            for key, value in mini_batch_metrics.items():
                 for i, v in enumerate(value):
-                    global_step = (rollout_idx - 1) * len(value) + i + 1
+                    global_step = self._train_mini_step + i
                     self._writer.add_scalar(
                         tag=f"train_metrics/worker_{worker_idx}/{key}",
                         scalar_value=v,
@@ -615,6 +624,8 @@ class RLTrainer:
                     scalar_value=v,
                     global_step=rollout_idx,
                 )
+
+        self._train_mini_step += len(workers_log_item[0]["train_metrics"])
 
     def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):
         """Synchronizes weights and saves checkpoints."""
