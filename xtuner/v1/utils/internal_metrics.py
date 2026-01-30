@@ -9,7 +9,8 @@ from torch.utils.hooks import RemovableHandle
 from typing_extensions import TypedDict
 
 from xtuner.v1.model import MoE
-from xtuner.v1.model.base import BaseModel, ModelItem
+from xtuner.v1.model.base import BaseModel as XTunerBaseModel
+from xtuner.v1.model.base import ModelItem
 from xtuner.v1.module import LMHead, MHAConfig, MLAConfig, MultiHeadAttention, MultiLatentAttention
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
@@ -67,7 +68,7 @@ class InternalMetricsConfig(BaseModel):
 
 
 class InternalMetricsRecorder:
-    def __init__(self, internal_metrics_cfg: InternalMetricsConfig, model: BaseModel):
+    def __init__(self, internal_metrics_cfg: InternalMetricsConfig, model: XTunerBaseModel):
         self.internal_metrics_cfg = internal_metrics_cfg
         self.model = model
         self.hooks: list[RemovableHandle] = []
