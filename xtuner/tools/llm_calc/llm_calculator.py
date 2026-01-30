@@ -326,6 +326,7 @@ class Calculator:
         self.aggregate(output_path)
         # self.show()
     
+    # ================================ 计算各部分显存 ================================
     def calc_part_info(self):
         self.embed_tokens()
 
@@ -342,6 +343,225 @@ class Calculator:
         # head: final layer norm, lm_head, softmax
         self.head()
 
+    def embed_tokens(self):
+        # 参数量
+        self.embed_params_num = C.vocab_size * C.D / C.tp
+        # 1. 模型参数
+        self.embed_params = self.embed_params_num * C.param_type  # type: ignore
+
+        # 2. 本地梯度
+        self.embed_grads = self.embed_params_num * C.grad_type  # type: ignore
+
+        # 3. 优化器状态
+        self.embed_opt_states = 2 * self.embed_params_num * C.os_type / self.os_denom  # type: ignore
+        self.embed_master_params = self.embed_params_num * C.master_type / self.os_denom  # type: ignore
+        self.embed_master_grads = self.embed_params_num * C.master_grad_type / self.os_denom  # type: ignore
+
+        # 4. 中间激活值：[MBS, L]
+        # todo: recompute 时是否保留？
+        self.embed_acts = C.MBS * C.L / C.tp * C.act_type  # type: ignore
+    
+    def input_layernorm(self):
+        # 参数量
+        self.attn_params_num_per_layer += C.D
+
+        # 中间激活值：主要考虑反向计算时需要用到的中间结果, 并且假设输出的梯度已经存在，不需要计算空间。
+        #    这是因为: 1)如果某些中间结果反向计算时不需要，那么在前向计算时，这些中间结果的显存占用可以被释放。
+        #             2)输出梯度在计算完梯度后，可以被释放。
+        # 如果开启recompute，则每个layer只保留这1个输入的hidden_states
+        self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+
+        self.perlayer_ckp_acts = C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+    
+    def self_attn(self):
+        # 模型参数量
+        if C.attn_type == "mha":
+            # for mha:Q_W=D*qD, K_W=D*kvD, V_W=D*kvD, O_W=D*qD
+            self.attn_params_num_per_layer += (C.D * C.qD + C.D * C.kvD + C.D * C.kvD + C.D * C.qD) / C.tp  # type: ignore
+        else: #if C.attn_type == "mla":
+            # for mla: D for down, U for up, R for rope
+            # W_DQ=D*q_lora_rank, W_UQ=q_lora_rank*qn*qk_nope_head_dim, W_QR=q_lora_rank*qn*qk_rope_head_dim, 注意 W_QR有qn个，是多头的
+            self.attn_params_num_per_layer += (C.D * C.q_lora_rank + C.q_lora_rank * C.qn * C.qk_nope_head_dim + C.q_lora_rank * C.qn * C.qk_rope_head_dim) / C.tp  # type: ignore
+            # W_DKV=D*kv_lora_rank
+            self.attn_params_num_per_layer += C.D * C.kv_lora_rank / C.tp  # type: ignore
+            # W_UK=kv_lora_rank*kvn*qk_nope_head_dim, W_KR=D*qk_rope_head_dim  注意 W_KR只有1个，不是多头的
+            self.attn_params_num_per_layer += (C.kv_lora_rank * C.kvn * C.qk_nope_head_dim + C.D * C.qk_rope_head_dim) / C.tp  # type: ignore
+            # W_UV=kv_lora_rank*kvn*v_head_dim
+            self.attn_params_num_per_layer += (C.kv_lora_rank * C.kvn * C.v_head_dim) / C.tp  # type: ignore
+            # W_O=vD*D=kvn*v_head_dim*D
+            self.attn_params_num_per_layer += C.kvn * C.v_head_dim * C.D / C.tp  # type: ignore
+
+        self.attn_params_num = self.attn_params_num_per_layer * C.LN
+        # 1. 模型参数
+        self.perlayer_attn_params += self.attn_params_num_per_layer * C.param_type
+        # 2. 本地梯度
+        self.perlayer_attn_grads += self.attn_params_num_per_layer * C.grad_type
+        # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片: Q_S=D*qD, K_S=D*kvD, V_S=D*kvD, O_S=D*qD
+        self.attn_opt_states += 2 * self.attn_params_num_per_layer * C.LN_per_gpu * C.os_type / self.os_denom
+        self.attn_master_params += self.attn_params_num_per_layer * C.LN_per_gpu * C.master_type / self.os_denom
+        self.perlayer_attn_master_grads = self.attn_params_num_per_layer* C.master_grad_type / self.os_denom
+        self.attn_master_grads += self.attn_params_num_per_layer * C.LN_per_gpu * C.master_grad_type / self.os_denom
+
+        # 4. 激活值
+        # QKV Linear的共同输入tensor: input_layernorm的输出 hidden_states [L,MBS,D]
+        if C.recompute_norm:
+            pass
+        else:
+            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.D * C.linear_act_type  # type: ignore    
+
+        if C.attn_type == "mha":
+            if C.qk_norm:
+                # QKnorm的输入tensor: q [L, MBS, qn, H] 和 k [L, MBS, kvn, H], 其中 qn*H=qD, kvn*H=kvD
+                self.perlayer_attn_acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
+            # rope的QK输入tensor: norm后或未norm的 q 和 k
+            self.perlayer_attn_acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
+            # core attn的计算
+            # Q@K^T的输入: q 和 k
+            self.perlayer_attn_acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
+        else: #if C.attn_type == "mla":
+            assert C.qk_norm == False, "qk_norm is not supported for mla now"
+            # q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states))).view(query_shape).transpose(1, 2)
+            # q_pass, q_rot = torch.split(q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            # q_a_layernorm的输入: q_a_proj的输出 [L, MBS, q_lora_rank]
+            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.q_lora_rank * C.act_type  # type: ignore
+            # q_b_proj的输入： q_a_layernorm输出 
+            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.q_lora_rank * C.act_type  # type: ignore
+
+            # compressed_kv = self.kv_a_proj_with_mqa(hidden_states)  # [L, MBS, kv_lora_rank + qk_rope_head_dim]
+            # k_pass, k_rot = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            # k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(key_shape).transpose(1, 2)
+            # k_pass, value_states = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            # kv_a_layernorm 的输入：kv_a_proj_with_mqa 的输出 [L, MBS, kv_lora_rank + qk_rope_head_dim]
+            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.kv_lora_rank * C.act_type  # type: ignore
+            # kv_b_proj 的输入：kv_a_layernorm输出  [L, MBS, kv_lora_rank + qk_rope_head_dim]
+            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.kv_lora_rank * C.act_type  # type: ignore
+
+            # q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, cos, sin)
+            # rope的输入： q_rot 为 [L, MBS, qn, qk_rope_head_dim], q_rot是多头的，有 C.qn 个
+            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.qn * C.qk_rope_head_dim * C.act_type  # type: ignore
+            # rope的输入： k_rot 为 [L, MBS, qk_rope_head_dim] ，注意k_rot只有1个，不是多头的
+            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.qk_rope_head_dim * C.act_type  # type: ignore
+
+            # Q@K^T的输入: q [L, MBS, qn, qk_nope_head_dim+qk_rope_head_dim] 和 k [L, MBS, kvn, qk_nope_head_dim+qk_rope_head_dim)]
+            self.perlayer_attn_acts += C.L / C.tp * C.MBS * (C.qn * (C.qk_nope_head_dim + C.qk_rope_head_dim) + C.kvn * (C.qk_nope_head_dim + C.qk_rope_head_dim)) * C.act_type  # type: ignore
+
+        if not C.flash_attn:
+            # softmax的反向需要它自己的输出 softmax_out [MBS, qn, L, L]
+            self.perlayer_attn_acts += C.MBS * C.qn / C.tp * C.L * C.L * C.act_type  # type: ignore
+        else:
+            # 如果开启flash attn v2，则将上面O(L^2)的空间优化到 O(L)。具体地，需要存储 logsumexp= [MBS, qn, L]
+            # 参考 flash attn v1 https://zhuanlan.zhihu.com/p/669926191 的6.3节，以及 flash attn v2 https://zhuanlan.zhihu.com/p/691067658 的1.2 节
+            self.perlayer_attn_acts += C.MBS * C.qn / C.tp * C.L * C.act_type  # type: ignore
+
+        # attn over values需要softmax的输出（上面已经计算，不需要重复计算），以及V输入
+        if C.attn_type == "mha":
+            # v [L, MBS, kvn, H], 其中 kvn*H=kvD
+            self.perlayer_attn_acts += C.MBS * C.L * C.kvD / C.tp * C.act_type  # type: ignore
+        else: #if C.attn_type == "mla":
+            # v [L, MBS, kvn, v_head_dim]
+            self.perlayer_attn_acts += C.MBS * C.L * C.kvn * C.v_head_dim / C.tp * C.act_type  # type: ignore
+
+        # Output Linear的输入: hidden_states [L, MBS, qn, H] = [L, MBS, qD]
+        self.perlayer_attn_acts += C.MBS * C.L/C.tp * C.qD * C.act_type  # type: ignore
+    
+    def attn_residual(self):
+        # residual反向时不需要保存激活值
+        pass
+
+    def post_attention_layernorm(self):
+        # 参数量
+        self.post_attn_ln_params_num_per_layer = C.D
+
+        # 反向需要输入的激活值
+        self.perlayer_mlp_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+
+    def mlp(self):
+        # 模型参数量: fc1_W=D*mH*le*mlp_act_dim, fc2_W=mH*D*le, 
+        fc_params_num_per_layer = C.D * C.mH * C.le * C.mlp_act_dim + C.mH * C.D * C.le  # type: ignore
+
+        # shared experts params: fc1=D*mH*n_shared_experts*mlp_act_dim, fc2=mH*D*n_shared_experts
+        shared_params_num_per_layer = C.D * C.mH * C.n_shared_experts * C.mlp_act_dim + C.mH * C.D * C.n_shared_experts
+        # gate_W=D*e
+        router_params_num_per_layer = C.D * C.e  # type: ignore
+        nonfc_params_num_per_layer = router_params_num_per_layer + self.post_attn_ln_params_num_per_layer + shared_params_num_per_layer
+
+        self.mlp_params_num_per_layer = fc_params_num_per_layer + nonfc_params_num_per_layer
+        self.mlp_params_num = (fc_params_num_per_layer * C.ep + nonfc_params_num_per_layer) * C.LN
+
+        # 1. 模型参数: 
+        self.perlayer_mlp_params += (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.param_type  # type: ignore
+        # 2. 本地梯度: fc1_G=D*mH*le*mlp_act_dim, fc2_G=mH*D*le, gate_G=D*e
+        self.perlayer_mlp_grads += (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.grad_type  # type: ignore
+        # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片
+        # 2 for adam's momentum and variance
+        self.mlp_opt_states += 2 * (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.os_type  # type: ignore
+        self.mlp_master_params += (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.master_type  # type: ignore
+        self.perlayer_mlp_master_grads = (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.master_grad_type # type: ignore
+        self.mlp_master_grads += (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.master_grad_type  # type: ignore
+
+        # 4. 激活值
+        # router的输入 hidden_states [L, MBS, D]
+        if C.recompute_norm:
+            pass
+        else:
+            self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.D * C.act_type  # type: ignore
+        # permute 和 unpermute 在计算梯度时，需要保留 sorted_indices [bsk], 其中bsk=MBS*L*topk
+        self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.topk * 1 * C.act_type  # type: ignore
+        # router's permutated_probs [bsk, 1]
+        self.perlayer_mlp_acts += C.capacity * C.L/C.tp * C.MBS * C.topk * 1 * C.linear_act_type  # type: ignore
+        # 假设路由均衡，fc1中le个expert的总体输入 permuted_hidden_states [bsk, h]，其中bsk个token会被平均分到le个expert中
+        self.perlayer_mlp_acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.D * C.linear_act_type  # type: ignore
+        # swiglu的输入: le个expert的总体输出 gate [bsk, mH] 和 up_proj [bsk, mH]
+        self.perlayer_mlp_acts += 2 * C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
+        if C.recompute_swiglu:
+            pass
+        else:
+            # fc2中le个expert的总体输入 intermediate_states [bsk, mH]
+            self.perlayer_mlp_acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
+        if C.topk_weights_position == "after_fc2":
+            # 如果topk_weights(probs)在fc2的输出之后相乘，则反向计算要求保存fc2的输出 [bsk, D]
+            self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.topk * C.D * C.act_type  # type: ignore
+        
+        # shared experts
+        # fc1 的输入和permute共享，不再重复计算
+        # swiglu的输入: fc1的输出 gate [bs, mH*n_shared_experts] 和 up_proj [bs, mH*n_shared_experts]
+        self.perlayer_mlp_acts += 2 * C.L/C.tp * C.MBS * C.mH * C.n_shared_experts * C.linear_act_type  # type: ignore
+        # fc2 的输入：swiglu的输出 [bs, mH*n_shared_experts]
+        if C.recompute_swiglu:
+            pass
+        else:
+            self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.mH * C.n_shared_experts * C.linear_act_type  # type: ignore
+    
+    def mlp_residual(self):
+        # 由于probs提前到fc2之前，residual反向时不需要保存激活值
+        pass
+    
+    def head(self):
+        # 参数量
+        self.head_params_num += C.D  # final layer norm
+        self.head_params_num += C.D * C.vocab_size # lm_head
+
+        # 1. 模型参数
+        self.head_params = self.head_params_num * C.param_type  # type: ignore
+        # 2. 本地梯度
+        self.head_grads = self.head_params_num * C.grad_type  # type: ignore
+        # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片
+        self.head_opt_states = 2 * self.head_params_num * C.os_type / self.os_denom  # type: ignore
+        self.head_master_params = self.head_params_num * C.master_type / self.os_denom  # type: ignore
+        self.head_master_grads = self.head_params_num * C.master_grad_type / self.os_denom  # type: ignore
+        # 4. 中间激活值：
+        # todo: 需要考虑recompute?
+        # todo: 需要考虑chunked loss?
+        self.head_acts = 0
+        # final layer norm的输入: [L, MBS, D]
+        self.head_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+        # lm_head的输入: [L, MBS, D]
+        self.head_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
+        # softmax的反向需要输入和输出: 2个[L, MBS, vocab_size]
+        vocab_size = C.vocab_size if C.chunk_loss_size <= 0 else C.chunk_loss_size
+        self.head_acts += 2 * C.L / C.tp * C.MBS * vocab_size * C.act_type  # type: ignore
+    
+    # ================================ 聚合显存 ================================
     def aggregate(self, output_path):
         # calc total params num
         self.params_num = self.embed_params_num + self.attn_params_num + self.mlp_params_num + self.head_params_num
@@ -520,223 +740,6 @@ class Calculator:
         df.loc["total_col", "total_row"] = total_mem / 1024**3
         print(df)
         df.to_excel(output_path)
-    
-    def embed_tokens(self):
-        # 参数量
-        self.embed_params_num = C.vocab_size * C.D / C.tp
-        # 1. 模型参数
-        self.embed_params = self.embed_params_num * C.param_type  # type: ignore
-
-        # 2. 本地梯度
-        self.embed_grads = self.embed_params_num * C.grad_type  # type: ignore
-
-        # 3. 优化器状态
-        self.embed_opt_states = 2 * self.embed_params_num * C.os_type / self.os_denom  # type: ignore
-        self.embed_master_params = self.embed_params_num * C.master_type / self.os_denom  # type: ignore
-        self.embed_master_grads = self.embed_params_num * C.master_grad_type / self.os_denom  # type: ignore
-
-        # 4. 中间激活值：[MBS, L]
-        # todo: recompute 时是否保留？
-        self.embed_acts = C.MBS * C.L / C.tp * C.act_type  # type: ignore
-    
-    def head(self):
-        # 参数量
-        self.head_params_num += C.D  # final layer norm
-        self.head_params_num += C.D * C.vocab_size # lm_head
-
-        # 1. 模型参数
-        self.head_params = self.head_params_num * C.param_type  # type: ignore
-        # 2. 本地梯度
-        self.head_grads = self.head_params_num * C.grad_type  # type: ignore
-        # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片
-        self.head_opt_states = 2 * self.head_params_num * C.os_type / self.os_denom  # type: ignore
-        self.head_master_params = self.head_params_num * C.master_type / self.os_denom  # type: ignore
-        self.head_master_grads = self.head_params_num * C.master_grad_type / self.os_denom  # type: ignore
-        # 4. 中间激活值：
-        # todo: 需要考虑recompute?
-        # todo: 需要考虑chunked loss?
-        self.head_acts = 0
-        # final layer norm的输入: [L, MBS, D]
-        self.head_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
-        # lm_head的输入: [L, MBS, D]
-        self.head_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
-        # softmax的反向需要输入和输出: 2个[L, MBS, vocab_size]
-        vocab_size = C.vocab_size if C.chunk_loss_size <= 0 else C.chunk_loss_size
-        self.head_acts += 2 * C.L / C.tp * C.MBS * vocab_size * C.act_type  # type: ignore
-    
-    def input_layernorm(self):
-        # 参数量
-        self.attn_params_num_per_layer += C.D
-
-        # 中间激活值：主要考虑反向计算时需要用到的中间结果, 并且假设输出的梯度已经存在，不需要计算空间。
-        #    这是因为: 1)如果某些中间结果反向计算时不需要，那么在前向计算时，这些中间结果的显存占用可以被释放。
-        #             2)输出梯度在计算完梯度后，可以被释放。
-        # 如果开启recompute，则每个layer只保留这1个输入的hidden_states
-        self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
-
-        self.perlayer_ckp_acts = C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
-    
-    def self_attn(self):
-        # 模型参数量
-        if C.attn_type == "mha":
-            # for mha:Q_W=D*qD, K_W=D*kvD, V_W=D*kvD, O_W=D*qD
-            self.attn_params_num_per_layer += (C.D * C.qD + C.D * C.kvD + C.D * C.kvD + C.D * C.qD) / C.tp  # type: ignore
-        else: #if C.attn_type == "mla":
-            # for mla: D for down, U for up, R for rope
-            # W_DQ=D*q_lora_rank, W_UQ=q_lora_rank*qn*qk_nope_head_dim, W_QR=q_lora_rank*qn*qk_rope_head_dim, 注意 W_QR有qn个，是多头的
-            self.attn_params_num_per_layer += (C.D * C.q_lora_rank + C.q_lora_rank * C.qn * C.qk_nope_head_dim + C.q_lora_rank * C.qn * C.qk_rope_head_dim) / C.tp  # type: ignore
-            # W_DKV=D*kv_lora_rank
-            self.attn_params_num_per_layer += C.D * C.kv_lora_rank / C.tp  # type: ignore
-            # W_UK=kv_lora_rank*kvn*qk_nope_head_dim, W_KR=D*qk_rope_head_dim  注意 W_KR只有1个，不是多头的
-            self.attn_params_num_per_layer += (C.kv_lora_rank * C.kvn * C.qk_nope_head_dim + C.D * C.qk_rope_head_dim) / C.tp  # type: ignore
-            # W_UV=kv_lora_rank*kvn*v_head_dim
-            self.attn_params_num_per_layer += (C.kv_lora_rank * C.kvn * C.v_head_dim) / C.tp  # type: ignore
-            # W_O=vD*D=kvn*v_head_dim*D
-            self.attn_params_num_per_layer += C.kvn * C.v_head_dim * C.D / C.tp  # type: ignore
-
-        self.attn_params_num = self.attn_params_num_per_layer * C.LN
-        # 1. 模型参数
-        self.perlayer_attn_params += self.attn_params_num_per_layer * C.param_type
-        # 2. 本地梯度
-        self.perlayer_attn_grads += self.attn_params_num_per_layer * C.grad_type
-        # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片: Q_S=D*qD, K_S=D*kvD, V_S=D*kvD, O_S=D*qD
-        self.attn_opt_states += 2 * self.attn_params_num_per_layer * C.LN_per_gpu * C.os_type / self.os_denom
-        self.attn_master_params += self.attn_params_num_per_layer * C.LN_per_gpu * C.master_type / self.os_denom
-        self.perlayer_attn_master_grads = self.attn_params_num_per_layer* C.master_grad_type / self.os_denom
-        self.attn_master_grads += self.attn_params_num_per_layer * C.LN_per_gpu * C.master_grad_type / self.os_denom
-
-        # 4. 激活值
-        # QKV Linear的共同输入tensor: hidden_states [L,MBS,D]
-        if C.recompute_norm:
-            pass
-        else:
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.D * C.linear_act_type  # type: ignore    
-
-        if C.attn_type == "mha":
-            if C.qk_norm:
-                # QKnorm的输入tensor: q [L, MBS, qn, H] 和 k [L, MBS, kvn, H], 其中 qn*H=qD, kvn*H=kvD
-                self.perlayer_attn_acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
-            # rope的QK输入tensor: norm后或未norm的 q 和 k
-            self.perlayer_attn_acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
-            # core attn的计算
-            # Q@K^T的输入: q 和 k
-            self.perlayer_attn_acts += C.L * C.MBS * (C.qD + C.kvD) / C.tp * C.act_type  # type: ignore
-        else: #if C.attn_type == "mla":
-            # q_states = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(hidden_states))).view(query_shape).transpose(1, 2)
-            # q_pass, q_rot = torch.split(q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            # q_a_layernorm的输入: q_a_proj的输出 [L, MBS, q_lora_rank]
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.q_lora_rank * C.act_type  # type: ignore
-            # q_b_proj的输入： q_a_layernorm输出 
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.q_lora_rank * C.act_type  # type: ignore
-
-            # compressed_kv = self.kv_a_proj_with_mqa(hidden_states)  # [L, MBS, kv_lora_rank + qk_rope_head_dim]
-            # k_pass, k_rot = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-            # k_pass = self.kv_b_proj(self.kv_a_layernorm(k_pass)).view(key_shape).transpose(1, 2)
-            # k_pass, value_states = torch.split(k_pass, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            # kv_a_layernorm 的输入：kv_a_proj_with_mqa 的输出 [L, MBS, kv_lora_rank + qk_rope_head_dim]
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.kv_lora_rank * C.act_type  # type: ignore
-            # kv_b_proj 的输入：kv_a_layernorm输出  [L, MBS, kv_lora_rank + qk_rope_head_dim]
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.kv_lora_rank * C.act_type  # type: ignore
-
-            # q_rot, k_rot = apply_rotary_pos_emb(q_rot, k_rot, cos, sin)
-            # rope的输入： q_rot 为 [L, MBS, qn, qk_rope_head_dim], q_rot是多头的，有 C.qn 个
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.qn * C.qk_rope_head_dim * C.act_type  # type: ignore
-            # rope的输入： k_rot 为 [L, MBS, qk_rope_head_dim] ，注意k_rot只有1个，不是多头的
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * C.qk_rope_head_dim * C.act_type  # type: ignore
-
-            # Q@K^T的输入: q [L, MBS, qn, qk_nope_head_dim+qk_rope_head_dim] 和 k [L, MBS, kvn, qk_nope_head_dim+qk_rope_head_dim)]
-            self.perlayer_attn_acts += C.L / C.tp * C.MBS * (C.qn * (C.qk_nope_head_dim + C.qk_rope_head_dim) + C.kvn * (C.qk_nope_head_dim + C.qk_rope_head_dim)) * C.act_type  # type: ignore
-
-        if not C.flash_attn:
-            # softmax的反向需要它自己的输出 softmax_out [MBS, qn, L, L]
-            self.perlayer_attn_acts += C.MBS * C.qn / C.tp * C.L * C.L * C.act_type  # type: ignore
-        else:
-            # 如果开启flash attn v2，则将上面O(L^2)的空间优化到 O(L)。具体地，需要存储 logsumexp= [MBS, qn, L]
-            # 参考 flash attn v1 https://zhuanlan.zhihu.com/p/669926191 的6.3节，以及 flash attn v2 https://zhuanlan.zhihu.com/p/691067658 的1.2 节
-            self.perlayer_attn_acts += C.MBS * C.qn / C.tp * C.L * C.act_type  # type: ignore
-
-        # attn over values需要softmax的输出（上面已经计算，不需要重复计算），以及V输入
-        if C.attn_type == "mha":
-            # v [L, MBS, kvn, H], 其中 kvn*H=kvD
-            self.perlayer_attn_acts += C.MBS * C.L * C.kvD / C.tp * C.act_type  # type: ignore
-        else: #if C.attn_type == "mla":
-            # v [L, MBS, kvn, v_head_dim]
-            self.perlayer_attn_acts += C.MBS * C.L * C.kvn * C.v_head_dim / C.tp * C.act_type  # type: ignore
-
-        # Output Linear的输入: hidden_states [L, MBS, qn, H] = [L, MBS, qD]
-        self.perlayer_attn_acts += C.MBS * C.L/C.tp * C.qD * C.act_type  # type: ignore
-    
-    def attn_residual(self):
-        # residual反向时不需要保存激活值
-        pass
-
-    def post_attention_layernorm(self):
-        # 参数量
-        self.post_attn_ln_params_num_per_layer = C.D
-
-        # 反向需要输入的激活值
-        self.perlayer_mlp_acts += C.L / C.tp * C.MBS * C.D * C.act_type  # type: ignore
-
-    def mlp(self):
-        # 模型参数量: fc1_W=D*mH*le*mlp_act_dim, fc2_W=mH*D*le, 
-        fc_params_num_per_layer = C.D * C.mH * C.le * C.mlp_act_dim + C.mH * C.D * C.le  # type: ignore
-
-        # shared experts params: fc1=D*mH*n_shared_experts*mlp_act_dim, fc2=mH*D*n_shared_experts
-        shared_params_num_per_layer = C.D * C.mH * C.n_shared_experts * C.mlp_act_dim + C.mH * C.D * C.n_shared_experts
-        # gate_W=D*e
-        router_params_num_per_layer = C.D * C.e  # type: ignore
-        nonfc_params_num_per_layer = router_params_num_per_layer + self.post_attn_ln_params_num_per_layer + shared_params_num_per_layer
-
-        self.mlp_params_num_per_layer = fc_params_num_per_layer + nonfc_params_num_per_layer
-        self.mlp_params_num = (fc_params_num_per_layer * C.ep + nonfc_params_num_per_layer) * C.LN
-
-        # 1. 模型参数: 
-        self.perlayer_mlp_params += (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.param_type  # type: ignore
-        # 2. 本地梯度: fc1_G=D*mH*le*mlp_act_dim, fc2_G=mH*D*le, gate_G=D*e
-        self.perlayer_mlp_grads += (fc_params_num_per_layer + nonfc_params_num_per_layer) * C.grad_type  # type: ignore
-        # 3. 优化器状态及因为混合精度训练而维护的master参数和梯度分片
-        # 2 for adam's momentum and variance
-        self.mlp_opt_states += 2 * (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.os_type  # type: ignore
-        self.mlp_master_params += (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.master_type  # type: ignore
-        self.perlayer_mlp_master_grads = (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.master_grad_type # type: ignore
-        self.mlp_master_grads += (fc_params_num_per_layer / self.mlp_os_denom + nonfc_params_num_per_layer / self.os_denom) * C.LN_per_gpu * C.master_grad_type  # type: ignore
-
-        # 4. 激活值
-        # router的输入 hidden_states [L, MBS, D]
-        if C.recompute_norm:
-            pass
-        else:
-            self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.D * C.act_type  # type: ignore
-        # permute 和 unpermute 在计算梯度时，需要保留 sorted_indices [bsk], 其中bsk=MBS*L*topk
-        self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.topk * 1 * C.act_type  # type: ignore
-        # router's permutated_probs [bsk, 1]
-        self.perlayer_mlp_acts += C.capacity * C.L/C.tp * C.MBS * C.topk * 1 * C.linear_act_type  # type: ignore
-        # 假设路由均衡，fc1中le个expert的总体输入 permuted_hidden_states [bsk, h]，其中bsk个token会被平均分到le个expert中
-        self.perlayer_mlp_acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.D * C.linear_act_type  # type: ignore
-        # swiglu的输入: le个expert的总体输出 gate [bsk, mH] 和 up_proj [bsk, mH]
-        self.perlayer_mlp_acts += 2 * C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
-        if C.recompute_swiglu:
-            pass
-        else:
-            # fc2中le个expert的总体输入 intermediate_states [bsk, mH]
-            self.perlayer_mlp_acts += C.capacity * C.L/C.tp * C.MBS * C.topk * C.mH * C.linear_act_type  # type: ignore
-        if C.topk_weights_position == "after_fc2":
-            # 如果topk_weights(probs)在fc2的输出之后相乘，则反向计算要求保存fc2的输出 [bsk, D]
-            self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.topk * C.D * C.act_type  # type: ignore
-        
-        # shared experts
-        # fc1 的输入和permute共享，不再重复计算
-        # swiglu的输入: fc1的输出 gate [bs, mH*n_shared_experts] 和 up_proj [bs, mH*n_shared_experts]
-        self.perlayer_mlp_acts += 2 * C.L/C.tp * C.MBS * C.mH * C.n_shared_experts * C.linear_act_type  # type: ignore
-        # fc2 的输入：swiglu的输出 [bs, mH*n_shared_experts]
-        if C.recompute_swiglu:
-            pass
-        else:
-            self.perlayer_mlp_acts += C.L/C.tp * C.MBS * C.mH * C.n_shared_experts * C.linear_act_type  # type: ignore
-    
-    def mlp_residual(self):
-        # 由于probs提前到fc2之前，residual反向时不需要保存激活值
-        pass
     
     def _print_bars(self, title, parts_dict, total_bytes, width=120, char="█"):
         """在控制台打印简单的柱状图来表示占比。
