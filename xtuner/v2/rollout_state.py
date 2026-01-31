@@ -4,6 +4,7 @@ from xtuner.v1.data_proto.rl_data import SampleParams
 from transformers import AutoTokenizer, AutoProcessor, PreTrainedTokenizerBase
 from transformers.image_processing_utils import ProcessorMixin
 from xtuner.v1.ray.rollout.controller import SampleParams
+from dataclasses import field
 
 
 class Status(Enum):
@@ -18,6 +19,10 @@ class Status(Enum):
 
 @dataclass
 class RolloutState:
+    # dataset 输出必须
+    message: list
+    tokens: list[int]
+    
     uid: int
     session_id: int | None = None
     prompt_ids: list[int]
@@ -25,18 +30,19 @@ class RolloutState:
     response_ids: list[int] 
     logprobs: list[float] 
     routed_experts: list[int] | None = None
+    reward: float | list[float] | list[dict] | None = None
+    loss_mask: list[int] | None = None
     state: Status = Status.INIT
     sample_parms: SampleParams | None = None
     tools: list | None = None
     tool_choice: str | None = None
 
 
+# TODO: 这个对象存在的意义是啥？暂时不用，否则会导致内部循环对象不一致, partial rollout 也不好弄
 @dataclass
 class Trajectory:
-    uid: str
-    env: str
+    env: str = 'default'
     rollout_state: RolloutState | list[RolloutState] 
-    reward: float | list[float] | list[dict]
 
 
 def load_tokenizer(name_or_path: str, **kwargs):

@@ -7,7 +7,7 @@ os.environ["XTUNER_USE_LMDEPLOY"] = "1"
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v2.rollout_controller import RolloutController
-from xtuner.v2.base_env_runner import BaseEnvRunner
+from xtuner.v2.simple_env_runner import SimpleEnvRunner
 from xtuner.v2.rollout_state import ProcessorUtilState, RolloutState
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.judger.gsm8k import compute_reward
@@ -39,17 +39,8 @@ if __name__ == '__main__':
 
     rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg) 
     
-    async def gsm8k_generate(data_item, processor_utils_state: ProcessorUtilState, rollout_controller: RolloutController, judger):
-        input_ids = processor_utils_state.tokenizer.apply_chat_template(data_item["prompt"], return_tensors="pt")["input_ids"][0].tolist()
-        rollout_state = RolloutState(uid=uuid4().int, input_ids=input_ids)
-        rollout_state = await rollout_controller.generate.remote(rollout_state)
-        
-        # reward = compute_reward(processor_utils_state, data_item, rollout_state)
-        # rollout_state.rewards = reward
-        return rollout_state
-    
     processor_utils_state = ProcessorUtilState(hf_checkpoint=model_path, sample_params=SampleParams())
-    gsm8k_env_runner = ray.remote(BaseEnvRunner).remote(rollout_controller, processor_utils_state=processor_utils_state, generate_external=gsm8k_generate)
+    simple_env_runner = ray.remote(SimpleEnvRunner).remote(rollout_controller, processor_utils_state=processor_utils_state)
     
     # prompt = [{"content": [{"image_url": {"image_wh": [404, 162],
     #                                       "url": "images/test_2.jpg"},
@@ -62,7 +53,22 @@ if __name__ == '__main__':
 
     prompt = [{"role": "user", "content": 'Calculate 13+24=', "type": "text"}]
     data_item = {'prompt': prompt}
+
+    input_ids = processor_utils_state.tokenizer.apply_chat_template(data_item["prompt"], return_tensors="pt")["input_ids"][0].tolist()
+    rollout_state = RolloutState(uid=uuid4().int, tokens=input_ids)
     
-    res1 = ray.get(gsm8k_env_runner.generate.remote(data_item))
-    print("Response from SGLang infer:", res1)
+    # 生成单条
+    res1 = ray.get(simple_env_runner.generate.remote(rollout_state))
+    print("Response from infer:", res1)
+
+    # 生成一组
+    res1 = ray.get(simple_env_runner.generate_group.remote(rollout_state))
+    print("Response from infer:", res1)
+
+    # 生成多条
+    res1 = ray.get(simple_env_runner.generate_batch.remote(batch_size=64))
+    print("Response from infer:", res1)
+
     ray.get(rollout_controller.shutdown.remote(), timeout=300)
+
+

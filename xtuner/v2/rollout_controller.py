@@ -13,7 +13,7 @@ class RolloutController(V1RolloutController):
     async def generate(self, rollout_state: RolloutState):
 
         # 简单包一层
-        input_ids = rollout_state.input_ids
+        input_ids = rollout_state.tokens
         sample_params = rollout_state.sample_params
         session_id = rollout_state.session_id
         
