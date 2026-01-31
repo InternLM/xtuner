@@ -276,6 +276,7 @@ class Qwen3VLVisionModel(BaseModel):
 
         for layer_idx, layer in enumerate(self.blocks):
             for name, module in layer.named_modules():
+                name = self._clean_param_name(name)
                 if isinstance(module, nn.Linear):
                     init_params(module.weight,
                                 partial(torch.nn.init.normal_, mean=0.0, std=self.config.initializer_range))
@@ -309,13 +310,14 @@ class Qwen3VLVisionModel(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-        float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
-        assert float8_handler is None
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
+        )
+        decoder_layer_mp_policy = MixedPrecisionPolicy(
+            param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype, cast_forward_inputs=False
         )
 
         # NOTE: 在 cpu_offload 模式下，mesh 应该是 cuda 的，在 meta fully_shard 后在调用 .to_empty(device=cpu)
@@ -351,7 +353,7 @@ class Qwen3VLVisionModel(BaseModel):
             fully_shard(
                 layer,
                 mesh=self.fsdp_mesh,
-                mp_policy=mp_policy,
+                mp_policy=decoder_layer_mp_policy,
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy()
                 if fsdp_config.cpu_offload
