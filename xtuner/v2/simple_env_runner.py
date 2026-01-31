@@ -51,8 +51,9 @@ class SimpleEnvRunner:
     # 生成一条样本
     async def generate_sample(self, rollout_state: RolloutState) -> RolloutState:
         # 默认走最简单的单轮模式
+        # 如果有被打断的样本，则有 state 可以表征
         rollout_state = await self.rollout_controller.generate(rollout_state)
-            
+        
         reward = 0.0
         if self.judger is not None:
             if asyncio.iscoroutinefunction(self.judger):
@@ -70,7 +71,6 @@ class SimpleEnvRunner:
 
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         if self.generate_external is not None:
-            # TODO: 如果走这个分支，估计没有走 partial rollout
             return await self.generate_external(rollout_state, self.processor_utils_state, self.rollout_controller, self.judger)
         else:
             return await self.generate_sample(rollout_state)
@@ -118,8 +118,6 @@ class SimpleEnvRunner:
         return batch_trajectories
     
     # =====================================================================
-    # 以下接口都是异步 rollout 相关的接口
-
     # 用于可中断生成场景
     async def async_generate_batch(self, 
                                     batch_size: int, 

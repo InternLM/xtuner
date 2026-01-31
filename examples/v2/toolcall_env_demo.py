@@ -29,12 +29,15 @@ TOOL_CONFIGS = {
     "force_cleanup_threshold": 9216,  # 9GB
 }
 
-# 一旦自定义函数，partial rollout 不太好做。
+# 一旦自定义函数，partial rollout 不太好做。不对，好像 partial rollout 很容易就支持了。因为输入的 rollout_state 有 state
+# 有了这个 state 就可以判断当前应该走啥流程，是进行 rollout 还是调用工具等等。因为这个是一个状态机，是可以复源的。
 async def gsm8k_with_tools_generate(rollout_state: RolloutState, 
                                     processor_utils_state: ProcessorUtilState, 
                                     rollout_controller:RolloutController, 
                                     judger) -> RolloutState:
     # 可以自己用 tokens，也可以用 message + tools
+
+    # 可以基于输入的 state 判断当前处于什么状态，从而决定接下来的动作。只要输入 state 不是 init 说明肯定开启了 partial rollout
     prompt = processor_utils_state.tokenizernizer.apply_chat_template(
          rollout_state.messages,
          tools=rollout_state.tools if hasattr(rollout_state, "tools") else None,
