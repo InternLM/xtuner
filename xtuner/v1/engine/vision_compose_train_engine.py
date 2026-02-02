@@ -67,23 +67,20 @@ class VisionComposeTrainEngine(TrainEngine):
                 scaling_granularity_grouped_gemm=self.model_cfg.projector_config.float8_cfg.scaling_granularity_grouped_gemm,
             )
 
-        model.language_model.fully_shard(self.fsdp_cfg, self.llm_float8_handler)
-        model.vision_tower.fully_shard(self.fsdp_cfg, self.vision_float8_handler)
-        model.multi_modal_projector.fully_shard(self.fsdp_cfg, self.projector_float8_handler)
         model = model.fully_shard(self.fsdp_cfg)
 
         if dist.get_rank() == 0:
             logger.info(model)
 
-        if self.llm_float8_handler:
+        if self.llm_float8_handler is not None:
             self.llm_float8_handler.build_reduce_mesh(
                 model.language_model, cast(DeviceMesh, model.language_model.fsdp_mesh)
             )
-        if self.vision_float8_handler:
+        if self.vision_float8_handler is not None:
             self.vision_float8_handler.build_reduce_mesh(
                 model.vision_tower, cast(DeviceMesh, model.vision_tower.fsdp_mesh)
             )
-        if self.projector_float8_handler:
+        if self.projector_float8_handler is not None:
             self.projector_float8_handler.build_reduce_mesh(
                 model.multi_modal_projector, cast(DeviceMesh, model.multi_modal_projector.fsdp_mesh)
             )
@@ -100,11 +97,13 @@ class VisionComposeTrainEngine(TrainEngine):
 
     # this method can be called outside, e.g., at the beginning of compute_actor_logprobs or compute_ref_logprobs during rl training
     def maybe_precompute_float8_dynamic_scale_for_fsdp(self):
-        if self.llm_float8_handler is not None and self.llm_float8_handler.enabled:
+        if self.llm_float8_handler is not None:
             self.llm_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.language_model)
-        if self.vision_float8_handler is not None and self.vision_float8_handler.enabled:
+
+        if self.vision_float8_handler:
             self.vision_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.vision_tower)
-        if self.projector_float8_handler is not None and self.projector_float8_handler.enabled:
+
+        if self.projector_float8_handler:
             self.projector_float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model.multi_modal_projector)
 
     def train_step(self, data_batches: List[ModelItem]) -> tuple[LossLog, OtherLog]:
