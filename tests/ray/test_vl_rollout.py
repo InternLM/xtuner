@@ -145,8 +145,9 @@ class TestRollout(unittest.TestCase):
             rollout_cfg=rollout_cfg,
         )
         dataflow_cfg = self.dataflow_cfg
-        dataflow_cfg.max_concurrent = 4
-        dataflow_cfg.enable_partial_rollout = 0
+        dataflow_cfg.global_batch_size = 2
+        dataflow_cfg.staleness_threshold = 1
+        dataflow_cfg.enable_partial_rollout = 1
         self.test_flow = DataFlow.remote("test_env",
                                          dataflow_cfg,
                                          self.replay_buffer_cfg,
@@ -158,33 +159,33 @@ class TestRollout(unittest.TestCase):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         ray.get(self.test_flow.save.remote(save_dir))
-        remain_paused_samples_old = rl_status_save["rollout_paused_count"]
-        responses_old = ray.get(self.test_flow.run.remote(num=remain_paused_samples_old, enable_partial_rollout=0), timeout=300)
+        remain_paused_samples_old = rl_status_save["remain_aborted_samples_count"] + rl_status_save["remain_completed_samples_count"]
+        responses_old = ray.get(self.test_flow.run.remote(num=remain_paused_samples_old, staleness_threshold=0), timeout=300)
         rb_status_old = ray.get(self.test_flow.get_replaybuffer_status.remote())
         
         mm_info_old = []
-        for multimodal_train_infos in responses_old[1]:
+        for multimodal_train_infos in responses_old["mm_train_infos"]:
             image_grid_thw = multimodal_train_infos["image_grid_thw"].numpy().flatten()
             mm_info_old.extend(image_grid_thw)
 
         ray.get(self.test_flow.resume.remote(save_dir))
         rl_status_resume = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        remain_paused_samples_new = rl_status_resume["rollout_paused_count"]
-        responses_new = ray.get(self.test_flow.run.remote(num=remain_paused_samples_new, enable_partial_rollout=0), timeout=300)
+        remain_paused_samples_new = rl_status_resume["remain_aborted_samples_count"] + rl_status_resume["remain_completed_samples_count"]
+        responses_new = ray.get(self.test_flow.run.remote(num=remain_paused_samples_new, staleness_threshold=0), timeout=300)
         rb_status_new = ray.get(self.test_flow.get_replaybuffer_status.remote())
 
         mm_info_new = []
-        for multimodal_train_infos in responses_new[1]:
+        for multimodal_train_infos in responses_new["mm_train_infos"]:
             image_grid_thw = multimodal_train_infos["image_grid_thw"].numpy().flatten()
             mm_info_new.extend(image_grid_thw)
             
         all_train_prompt_ids_old = []
-        for data_items in responses_old[0]:
+        for data_items in responses_old["data_groups"]:
             for data_item in data_items:
                 all_train_prompt_ids_old.extend(data_item.data.input_ids)
 
         all_train_prompt_ids_new = []
-        for data_items in responses_new[0]:
+        for data_items in responses_new["data_groups"]:
             for data_item in data_items:
                 all_train_prompt_ids_new.extend(data_item.data.input_ids)
 
