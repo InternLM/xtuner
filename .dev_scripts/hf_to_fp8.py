@@ -1,3 +1,10 @@
+"""Example:
+
+```console
+python .dev_scripts/hf_to_fp8.py <bf16-path>  <fp8-path> '(model\.language_model\.layers\.\d+\.mlp\.experts\.\d+.(gate_proj|down_proj|up_proj)|model\.language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|o_proj))'
+```
+"""
+
 import torch
 from pathlib import Path
 import re
@@ -11,6 +18,7 @@ import shutil
 
 
 import argparse
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='bf16 convert fp8')
@@ -128,7 +136,7 @@ def convert(source: Path, target: Path, pattern: re.Pattern):
         else:
             modules_to_not_convert.add(module_name)
 
-    index["quantization_config"] = {
+    quantization_config = {
         "activation_scheme": "dynamic",
         "fmt": "e4m3",
         "quant_method": "fp8",
@@ -173,6 +181,14 @@ def convert(source: Path, target: Path, pattern: re.Pattern):
 
     with open(target_model_index_path, "w") as f:
         json.dump(index, f, indent=2)
+
+    with open(source / "config.json") as f:
+        hf_config = json.load(f)
+        hf_config["quantization_config"] = quantization_config
+
+    target_hf_config_path = target / "config.json"
+    with open(target_hf_config_path, "w") as f:
+        json.dump(hf_config, f, indent=2)
 
 
 def main():
