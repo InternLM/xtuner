@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 from typing_extensions import Self
-
+from transformers import PretrainedConfig
 from transformers.models.deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import MLAConfig
@@ -103,10 +103,13 @@ class DeepSeekV3Config(MoEConfig):
         return DeepSeekV3(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
-        cfg = HFDeepseekV3Config.from_pretrained(hf_path)
-
-        assert isinstance(cfg, HFDeepseekV3Config)
+    def from_hf(cls, hf_path: str | Path | None = None, hf_config: PretrainedConfig | None = None) -> Self:
+        if hf_path is not None:
+            cfg = HFDeepseekV3Config.from_pretrained(hf_path)
+            assert isinstance(cfg, HFDeepseekV3Config)
+        else:
+            cfg = hf_config
+        assert cfg is not None and isinstance(cfg, PretrainedConfig)
 
         config = cls(
             vocab_size=cfg.vocab_size,

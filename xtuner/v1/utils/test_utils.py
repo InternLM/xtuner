@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
-
+from pydantic import BaseModel
 import transformers
 from xtuner.v1.datasets.mllm_tokenize_fn.qwen3_vl_utils import sort_frames
 
@@ -267,3 +267,57 @@ def add_video_root(messages: list[dict], video_root: Path | str):
                 content["path"] = new_image_list
             else:
                 content["path"] = str(content_path)
+
+
+def _compare_dicts(d1, d2, path, differences):
+    """Recursively compare two dictionaries."""
+    all_keys = set(d1.keys()) | set(d2.keys())
+    
+    for key in all_keys:
+        current_path = f"{path}.{key}" if path else key
+        
+        if key not in d1:
+            differences.append(f"{current_path}: missing in first model")
+        elif key not in d2:
+            differences.append(f"{current_path}: missing in second model")
+        elif type(d1[key]) != type(d2[key]):
+            differences.append(f"{current_path}: type mismatch ({type(d1[key]).__name__} vs {type(d2[key]).__name__})")
+        elif isinstance(d1[key], dict):
+            _compare_dicts(d1[key], d2[key], current_path, differences)
+        elif isinstance(d1[key], (list, tuple)):
+            _compare_sequences(d1[key], d2[key], current_path, differences)
+        elif d1[key] != d2[key]:
+            differences.append(f"{current_path}: {d1[key]} != {d2[key]}")
+
+
+def _compare_sequences(seq1, seq2, path, differences):
+    """Compare two sequences (lists or tuples)."""
+    if len(seq1) != len(seq2):
+        differences.append(f"{path}: length mismatch ({len(seq1)} vs {len(seq2)})")
+        return
+    
+    for i, (item1, item2) in enumerate(zip(seq1, seq2)):
+        current_path = f"{path}[{i}]"
+        if isinstance(item1, dict) and isinstance(item2, dict):
+            _compare_dicts(item1, item2, current_path, differences)
+        elif item1 != item2:
+            differences.append(f"{current_path}: {item1} != {item2}")
+
+
+def compare_pydantic_models(model1: BaseModel, model2: BaseModel):
+    """Compare two Pydantic models by their __dict__ attributes."""
+    dict1 = model1.model_dump()
+    dict2 = model2.model_dump()
+    
+    # diff = DeepDiff(dict1, dict2, ignore_order=True)
+
+    differences = []
+    _compare_dicts(dict1, dict2, "", differences)
+
+    if not differences:
+        return True
+    else:
+        print('Differences found:')
+        for diff in differences:
+            print(f"  {diff}")
+        return False

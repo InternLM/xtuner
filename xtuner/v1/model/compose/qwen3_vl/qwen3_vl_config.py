@@ -4,14 +4,18 @@ from typing import Literal
 from mmengine import is_installed
 from pydantic import ConfigDict
 from typing_extensions import Self
+from pydantic import SerializeAsAny
 
 from xtuner.v1.model.base import TransformerConfig, XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextDense4BConfig, Qwen3VLTextDense8BConfig
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
-from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config, Qwen3MoEConfig
+from xtuner.v1.model.dense.qwen3vl_text import Qwen3VLTextBaseConfig
+from xtuner.v1.model.moe.qwen3vl_text import Qwen3VLTextMoE30BA3Config, Qwen3VLTextMoE235BA22Config, Qwen3VLTextMoEBaseConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.utils import get_device, get_logger
-
+from transformers import AutoConfig, PretrainedConfig
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig,Qwen3VLTextConfig, Qwen3VLVisionConfig
+from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeConfig, Qwen3VLMoeTextConfig, Qwen3VLMoeVisionConfig
 from ..base import BaseComposeConfig
 
 
@@ -48,7 +52,8 @@ class Qwen3VLVisionConfig(XTunerBaseModelConfig):
         from .modeling_vision import Qwen3VLVisionModel
 
         return Qwen3VLVisionModel(self)
-
+    
+    # Only the outermost module needs to support hf_config, the internal vision and projector modules do not need it.
     @property
     def hf_config(self):
         return None
@@ -65,7 +70,8 @@ class Qwen3VLProjectorConfig(XTunerBaseModelConfig):
         from .modeling_projector import Qwen3VLProjector
 
         return Qwen3VLProjector(self)
-
+    
+    # Only the outermost module needs to support hf_config, the internal vision and projector modules do not need it.
     @property
     def hf_config(self):
         return None
@@ -78,7 +84,7 @@ class Qwen3VLBaseConfig(BaseComposeConfig):
     )
     vision_config: Qwen3VLVisionConfig
     projector_config: Qwen3VLProjectorConfig
-    text_config: TransformerConfig
+    text_config: SerializeAsAny[TransformerConfig]
 
     image_token_id: int = 151655
     video_token_id: int = 151656
@@ -95,25 +101,82 @@ class Qwen3VLBaseConfig(BaseComposeConfig):
         return Qwen3VLForConditionalGeneration(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
-        raise NotImplementedError
+    def from_hf(cls, hf_path: str | Path | None = None, hf_config: PretrainedConfig | None = None) -> Self:
+        hf_config = AutoConfig.from_pretrained(hf_path,trust_remote_code=True)
+        
+        hf_vision_config = hf_config.vision_config
+        vision_config = Qwen3VLVisionConfig(
+            depth=hf_vision_config.depth,
+            hidden_size=hf_vision_config.hidden_size,
+            intermediate_size=hf_vision_config.intermediate_size,
+            num_attention_heads=hf_vision_config.num_heads,
+            deepstack_visual_indexes=hf_vision_config.deepstack_visual_indexes, 
+        )
+        projector_config = Qwen3VLProjectorConfig(
+            vision_hidden_size=hf_vision_config.hidden_size,
+            text_hidden_size=hf_config.text_config.hidden_size,
+            deepstack_visual_indexes=hf_vision_config.deepstack_visual_indexes,
+        )
+
+        if hf_config.model_type == "qwen3_vl_moe":
+            text_config = Qwen3VLTextMoEBaseConfig.from_hf(hf_config=hf_config.text_config)
+        elif hf_config.model_type == "qwen3_vl":
+            text_config = Qwen3VLTextBaseConfig.from_hf(hf_config=hf_config.text_config)
+
+        config = cls(vision_config=vision_config, 
+                     projector_config=projector_config, 
+                     text_config=text_config,
+                     image_token_id=hf_config.image_token_id,
+                     video_token_id=hf_config.video_token_id,
+                     vision_start_token_id=hf_config.vision_start_token_id,
+                     vision_end_token_id=hf_config.vision_end_token_id)
+        return config
 
     @property
-    def hf_config(self):
-        # TODO(pppppM) Support saving HuggingFace format config
-        logger.warning(
-            f"{type(self)} does not support conversion to HuggingFace config format. "
-            "Only the original HuggingFace config will be retained in the saved HuggingFace format checkpoint. "
-            f"If you have changed the default values in {type(self)}, it may cause the config in the saved "
-            "HuggingFace format checkpoint to not match the weights."
-        )
-        return None
-
+    def hf_config(self) -> Qwen3VLConfig | Qwen3VLMoeConfig:
+        text_config = self.text_config.hf_config
+        if isinstance(self.text_config, Qwen3VLTextMoEBaseConfig):
+            vision_config = Qwen3VLMoeVisionConfig(
+                depth=self.vision_config.depth,
+                hidden_size=self.vision_config.hidden_size,
+                intermediate_size=self.vision_config.intermediate_size,
+                num_heads=self.vision_config.num_attention_heads,
+                deepstack_visual_indexes=self.vision_config.deepstack_visual_indexes,
+            )
+            return Qwen3VLMoeConfig(
+                architectures=['Qwen3VLMoeForConditionalGeneration'],
+                image_token_id=self.image_token_id,
+                video_token_id=self.video_token_id,
+                vision_start_token_id=self.vision_start_token_id,
+                vision_end_token_id=self.vision_end_token_id,
+                tie_word_embeddings=self.text_config.tie_word_embeddings,
+                text_config=text_config.to_dict(),
+                vision_config=vision_config.to_dict(),
+                )
+        else:
+            vision_config = Qwen3VLVisionConfig(
+                depth=self.vision_config.depth,
+                hidden_size=self.vision_config.hidden_size,
+                intermediate_size=self.vision_config.intermediate_size,
+                num_heads=self.vision_config.num_attention_heads,
+                deepstack_visual_indexes=self.vision_config.deepstack_visual_indexes,
+            )
+            return Qwen3VLConfig(
+                architectures=['Qwen3VLForConditionalGeneration'],
+                image_token_id=self.image_token_id,
+                video_token_id=self.video_token_id,
+                vision_start_token_id=self.vision_start_token_id,
+                vision_end_token_id=self.vision_end_token_id,
+                tie_word_embeddings=self.text_config.tie_word_embeddings,
+                text_config=text_config,
+                vision_config=vision_config,
+                )
 
 class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig()
     text_config: Qwen3MoE30BA3Config = Qwen3VLTextMoE30BA3Config(
+        model_type="qwen3_vl_moe_text",
         max_position_embeddings=262144,
         rope_theta=5000000,
         rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
@@ -124,6 +187,7 @@ class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
     text_config: Qwen3MoE235BA22Config = Qwen3VLTextMoE235BA22Config(
+        model_type="qwen3_vl_moe_text",
         max_position_embeddings=262144,
         rope_theta=5000000,
         rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
@@ -138,6 +202,7 @@ class Qwen3VLDense4BConfig(Qwen3VLBaseConfig):
         vision_hidden_size=1024, text_hidden_size=2560, deepstack_visual_indexes=[5, 11, 17]
     )
     text_config: Qwen3VLTextDense4BConfig = Qwen3VLTextDense4BConfig(
+        model_type="qwen3_vl_text",
         max_position_embeddings=262144,
         rope_theta=5000000,
         rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),
@@ -148,6 +213,7 @@ class Qwen3VLDense8BConfig(Qwen3VLBaseConfig):
     vision_config: Qwen3VLVisionConfig = Qwen3VLVisionConfig()
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
     text_config: Qwen3VLTextDense8BConfig = Qwen3VLTextDense8BConfig(
+        model_type="qwen3_vl_text",
         max_position_embeddings=262144,
         rope_theta=5000000,
         rope_scaling_cfg=RopeScalingConfig(type="qwen3_vl", mrope_section=[24, 20, 20]),

@@ -12,13 +12,14 @@ from .compose.internvl import (
     InternVLBaseConfig,
 )
 from .compose.qwen3_vl import (
+    Qwen3VLBaseConfig,
     Qwen3VLDense4BConfig,
     Qwen3VLDense8BConfig,
     Qwen3VLMoE30BA3Config,
     Qwen3VLMoE235BA22Config,
 )
 from .dense.dense import Dense
-from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
+from .dense.qwen2 import Qwen2DenseConfig
 from .dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.deepseek_v3 import DeepSeekV3Config
 from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
@@ -61,6 +62,8 @@ def get_model_config_from_hf(model_path: Path):
         return GptOssConfig.from_hf(model_path)
     elif cfg.model_type == "deepseek_v3":
         return DeepSeekV3Config.from_hf(model_path)
+    elif cfg.model_type == "qwen3_vl_moe" or cfg.model_type == "qwen3_vl":
+        return Qwen3VLBaseConfig.from_hf(model_path)
     else:
         raise ValueError(f"Unsupported model type: {cfg.model_type}")
 

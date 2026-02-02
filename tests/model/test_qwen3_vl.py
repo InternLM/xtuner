@@ -21,6 +21,8 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
+from xtuner.v1.model import get_model_config_from_hf
+from xtuner.v1.utils.test_utils import compare_pydantic_models
 
 QWEN3_VL_MOE_PATH = os.environ["QWEN3_VL_MOE_PATH"]
 QWEN3_VL_DENSE_PATH = os.environ["QWEN3_VL_DENSE_PATH"]
@@ -178,9 +180,14 @@ class TestQwen3VL(DeterministicDDPTestCase):
             device_map="cpu"
         ).eval()
         patch_hf_rms_norm(hf_model)
-
+        
         with torch.device("meta"):
-            model_cfg = Qwen3VLDense4BConfig(compile_cfg=False)
+            model_cfg = get_model_config_from_hf(QWEN3_VL_DENSE_PATH)
+            model_cfg.compile_cfg = False
+
+            model_cfg_origin = Qwen3VLDense4BConfig(compile_cfg=False)
+            self.assertTrue(compare_pydantic_models(model_cfg, model_cfg_origin))
+
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
@@ -212,9 +219,12 @@ class TestQwen3VL(DeterministicDDPTestCase):
         patch_hf_rms_norm(hf_model)
 
         with torch.device("meta"):
-            model_cfg = Qwen3VLDense4BConfig()
+            model_cfg = get_model_config_from_hf(QWEN3_VL_DENSE_PATH)
+            model_cfg_origin = Qwen3VLDense4BConfig()
             if compile is False:
                 model_cfg.compile_cfg = False
+                model_cfg_origin.compile_cfg = False
+            self.assertTrue(compare_pydantic_models(model_cfg, model_cfg_origin))
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(
@@ -257,7 +267,9 @@ class TestQwen3VL(DeterministicDDPTestCase):
     def test_save_hf(self, device, tp_size):
         self.create_pg(device)
         with torch.device("meta"):
-            model_cfg = Qwen3VLMoE30BA3Config()
+            model_cfg = get_model_config_from_hf(QWEN3_VL_MOE_PATH)
+            model_cfg_origin = Qwen3VLMoE30BA3Config()
+            self.assertTrue(compare_pydantic_models(model_cfg, model_cfg_origin))
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(

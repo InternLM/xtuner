@@ -56,10 +56,11 @@ class Qwen3MoEConfig(MoEConfig):
         return Qwen3MoE(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
-        hf_config = HFQwen3MoeConfig.from_pretrained(hf_path)
-
-        assert isinstance(hf_config, HFQwen3MoeConfig)
+    def from_hf(cls, hf_path: str | Path | None = None, hf_config: PretrainedConfig | None = None) -> Self:
+        if hf_path is not None:
+            hf_config = HFQwen3MoeConfig.from_pretrained(hf_path)
+            assert isinstance(hf_config, HFQwen3MoeConfig)
+        assert hf_config is not None and isinstance(hf_config, PretrainedConfig)
 
         config = cls(
             vocab_size=hf_config.vocab_size,
@@ -68,7 +69,7 @@ class Qwen3MoEConfig(MoEConfig):
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
-            max_window_layers=getattr(hf_config, "max_window_layers"),
+            max_window_layers=hf_config.max_window_layers if hasattr(hf_config, "max_window_layers") else hf_config.num_hidden_layers,
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
@@ -79,10 +80,10 @@ class Qwen3MoEConfig(MoEConfig):
                 num_attention_heads=hf_config.num_attention_heads,
                 num_key_value_heads=hf_config.num_key_value_heads,
                 head_dim=hf_config.head_dim,
-                sliding_window=hf_config.sliding_window,
+                sliding_window=hf_config.sliding_window if hasattr(hf_config, "sliding_window") else 1024,
                 qk_norm=True,
             ),
-            use_sliding_window=hf_config.use_sliding_window,
+            use_sliding_window=hf_config.use_sliding_window if hasattr(hf_config, "use_sliding_window") else False,
             tie_word_embeddings=hf_config.tie_word_embeddings,
             n_routed_experts=hf_config.num_experts,
             n_shared_experts=0,
@@ -93,11 +94,15 @@ class Qwen3MoEConfig(MoEConfig):
                 norm_topk_prob=hf_config.norm_topk_prob,
                 router_scaling_factor=1.0,
             ),
+            rope_scaling_cfg = RopeScalingConfig(
+                                    type="qwen3_vl", 
+                                    mrope_section=hf_config.rope_scaling['mrope_section']) 
+                                    if hasattr(hf_config, "rope_scaling") else None,
             balancing_loss_cfg=BalancingLossConfig(),
         )
 
         return config
-
+    
     @property
     def hf_config(self) -> HFQwen3MoeConfig:
         """HuggingFace configuration."""
@@ -117,7 +122,6 @@ class Qwen3MoEConfig(MoEConfig):
             rms_norm_eps=self.rms_norm_eps,
             model_type=self.model_type,
             rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling_cfg.model_dump() if self.rope_scaling_cfg is not None else None,
             hidden_act=self.hidden_act,
             num_attention_heads=self.attention.num_attention_heads,
             num_key_value_heads=self.attention.num_key_value_heads,
@@ -128,6 +132,11 @@ class Qwen3MoEConfig(MoEConfig):
             num_experts=self.n_routed_experts,
             num_experts_per_tok=self.num_experts_per_tok,
             norm_topk_prob=self.router.norm_topk_prob,
+            rope_scaling={
+                'rope_type': 'default',
+                'mrope_section': self.rope_scaling_cfg.mrope_section,
+                "mrope_interleaved": True
+            } if self.rope_scaling_cfg is not None else None,
             torch_dtype=torch.bfloat16,  # TODO: update all outdated hf `dtype` kwarg @jayhenry
         )
 
@@ -201,7 +210,7 @@ class Qwen3MoE235BA22Config(Qwen3MoEConfig):
 
 class Qwen3MoEFoPEConfig(Qwen3MoEConfig):
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
+    def from_hf(cls, hf_path: str | Path | None = None, hf_config: PretrainedConfig | None = None) -> Self:
         hf_config = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
 
         assert isinstance(hf_config, PretrainedConfig) and hf_config.model_type == "qwen3_moe_fope"

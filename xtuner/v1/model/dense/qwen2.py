@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 from typing_extensions import Self
 
+from transformers import PretrainedConfig
 from transformers.models.qwen2 import Qwen2Config as HFQwen2DenseConfig
 from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.module.attention import MHAConfig
@@ -36,13 +37,13 @@ class Qwen2DenseConfig(TransformerConfig):
         return Qwen2Dense(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
-        from transformers import AutoConfig
-        from transformers.models.qwen2 import Qwen2Config as HFConfig
-
-        hf_config = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
-
-        assert isinstance(hf_config, HFConfig)
+    def from_hf(cls, hf_path: str | Path | None = None, hf_config: PretrainedConfig | None = None) -> Self:
+        if hf_path is not None:
+            from transformers import AutoConfig
+            from transformers.models.qwen2 import Qwen2Config as HFConfig
+            hf_config = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+            assert isinstance(hf_config, HFConfig)
+        assert hf_config is not None and isinstance(hf_config, PretrainedConfig)
 
         config = cls(
             vocab_size=hf_config.vocab_size,

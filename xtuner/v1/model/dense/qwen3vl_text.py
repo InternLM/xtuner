@@ -6,7 +6,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import ModelOutputs
 
-from .qwen3 import Qwen3Dense, Qwen3Dense4BConfig, Qwen3Dense8BConfig
+from .qwen3 import Qwen3Dense, Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
 
 
 class Qwen3VLTextDense(Qwen3Dense):
@@ -83,6 +83,11 @@ class Qwen3VLTextDense(Qwen3Dense):
         output["logits"] = logits
         output["extra_info"] = extra_info
         return ModelOutputs(**output)  # type: ignore[typeddict-item]
+
+
+class Qwen3VLTextBaseConfig(Qwen3DenseConfig):
+    def build(self) -> Qwen3VLTextDense:
+        return Qwen3VLTextDense(self)
 
 
 class Qwen3VLTextDense4BConfig(Qwen3Dense4BConfig):

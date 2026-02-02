@@ -5,6 +5,7 @@ from mmengine import is_installed
 from pydantic import ConfigDict
 from typing_extensions import Self
 
+from transformers import PretrainedConfig
 from xtuner.v1.model.base import XTunerBaseModelConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.model.moe.moe import MoEConfig, TransformerConfig
@@ -113,7 +114,7 @@ class InternS1BaseConfig(BaseComposeConfig):
         return InternS1ForConditionalGeneration(self)
 
     @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
+    def from_hf(cls, hf_path: str | Path | None = None, hf_config: PretrainedConfig | None = None) -> Self:
         raise NotImplementedError
 
     @property
