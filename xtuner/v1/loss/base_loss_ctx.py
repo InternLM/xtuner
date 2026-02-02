@@ -129,7 +129,7 @@ _BaseLossContextT = TypeVar("_BaseLossContextT", bound="BaseLossContext")
 
 
 class BaseLossContext(nn.Module, ABC):
-    def __init__(self, loss_cfg: BaseLossConfig, loss_kwargs: BaseLossKwargs):
+    def __init__(self, loss_cfg: BaseLossConfig, loss_kwargs: BaseLossKwargs, sp_mesh: DeviceMesh | None = None):
         # LossContext需要负责几个功能：
         # 1. sequence parallel, 借助LossKwargs.sp_split 实现
         # 2. batch内的loss全局校准, 借助 LossContext.build_batches 实现
@@ -139,6 +139,7 @@ class BaseLossContext(nn.Module, ABC):
         super().__init__()
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
+        self.sp_mesh = sp_mesh
 
     @staticmethod
     @abstractmethod
@@ -151,6 +152,7 @@ class BaseLossContext(nn.Module, ABC):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: BaseLossKwargs,
+        enable_chunk_linear: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         """Step 2.a and 2.b in the loss calculation."""
         ...
@@ -179,6 +181,18 @@ class BaseLossContext(nn.Module, ABC):
         )
         return loss, (None, extra_info)
 
+    def _run_mode(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: BaseLossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        if self.loss_cfg.mode == "eager":
+            return self.eager_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+        else:
+            return self.chunk_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -189,10 +203,7 @@ class BaseLossContext(nn.Module, ABC):
         if head_bias is not None:
             raise NotImplementedError("Loss does not support head_bias yet.")
 
-        if self.loss_cfg.mode == "eager":
-            loss, (logits, extra_info) = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
-        else:
-            loss, (logits, extra_info) = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+        loss, (logits, extra_info) = self._run_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
 
         extra_info["local_base_loss"] = loss.detach().clone()
 

@@ -13,19 +13,19 @@ DEVICE = get_device()
 
 def sp_split(
     tensor,
-    sp_mesh: DeviceMesh,
+    sp_mesh: DeviceMesh | None,
     split_dim: int,
     padding_value: Any,
 ):
-    if sp_mesh.size() == 1:
+    if sp_mesh is None or sp_mesh.size() == 1:
         return tensor
     tensor = pad_to_multiple_of(tensor, padding_value, sp_mesh.size(), split_dim)
     tensor = split_for_sequence_parallel(tensor, dim=split_dim, sp_mesh=sp_mesh)
     return tensor
 
 
-def sp_gather(tensor, sp_mesh: DeviceMesh, dim: int):
-    if sp_mesh.size() == 1:
+def sp_gather(tensor, sp_mesh: DeviceMesh | None, dim: int):
+    if sp_mesh is None or sp_mesh.size() == 1:
         return tensor
     tensor_list = dist.all_gather(tensor, group=sp_mesh.get_group())
     return torch.cat(tensor_list, dim=dim)

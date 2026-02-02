@@ -117,7 +117,7 @@ class BaseRLLossConfig(BaseLossConfig):
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
 
         LossContext = self.loss_ctx_cls
-        return LossContext(self, loss_kwargs)
+        return LossContext(self, loss_kwargs, sp_mesh=sp_mesh)
 
 
 class BaseRLLossKwargs(BaseLossKwargs):
@@ -224,3 +224,27 @@ class BaseRLLossContext(BaseLossContext):
 
         self.loss_kwargs.is_weights = rollout_is_weights
         return mismatch_metrics, rollout_is_metrics
+
+    def _run_mode(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: BaseRLLossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        if self.loss_cfg.mode == "eager":
+            return self.eager_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+        elif self.loss_cfg.mode == "chunk":
+            return self.chunk_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+        else:
+            assert self.loss_cfg.mode == "chunk_linear", "Unsupported loss mode"
+            return self._chunk_linear_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+
+    def _chunk_linear_mode(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: BaseRLLossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        return self.loss_fn(hidden_states, head_weight, head_bias, loss_kwargs, enable_chunk_linear=True)

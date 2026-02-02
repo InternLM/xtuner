@@ -49,7 +49,7 @@ class CELossConfig(BaseLossConfig):
         loss_kwargs = CELossKwargs(shifted_labels=shifted_labels).to(DEVICE)
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
-        loss_ctx = self.loss_ctx_cls(self, loss_kwargs)
+        loss_ctx = self.loss_ctx_cls(self, loss_kwargs, sp_mesh=sp_mesh)
         return loss_ctx
 
 
@@ -76,8 +76,8 @@ class CELossContext(BaseLossContext):
     loss_cfg: CELossConfig
     loss_kwargs: CELossKwargs
 
-    def __init__(self, loss_cfg: CELossConfig, loss_kwargs: CELossKwargs):
-        super().__init__(loss_cfg, loss_kwargs)
+    def __init__(self, loss_cfg: CELossConfig, loss_kwargs: CELossKwargs, sp_mesh: DeviceMesh | None = None):
+        super().__init__(loss_cfg, loss_kwargs, sp_mesh=sp_mesh)
 
         if loss_cfg.mode == "liger":
             from liger_kernel.transformers.fused_linear_cross_entropy import (
@@ -155,6 +155,7 @@ class CELossContext(BaseLossContext):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: CELossKwargs,
+        enable_chunk_linear: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         # We do linear forward here to simplify the implementation of chunk loss (saving memory).
         logits = F.linear(hidden_states, head_weight, head_bias)
@@ -178,29 +179,41 @@ class CELossContext(BaseLossContext):
 
         return loss, (logits, {})
 
-    def chunk_mode(
+    def _run_mode(
         self,
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: CELossKwargs,
-    ):
-        if self.loss_cfg.mode == "chunk":
-            return super().chunk_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        if self.loss_cfg.mode == "eager":
+            return self.eager_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+        elif self.loss_cfg.mode == "chunk":
+            return self.chunk_mode(hidden_states, head_weight, head_bias, loss_kwargs)
         else:
-            assert self.liger_loss_fct is not None, "liger_loss_fct must be initialized in liger mode"
-            shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
-            loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
-            assert loss_weight is not None, "loss_weight can not be None"
+            assert self.loss_cfg.mode == "liger", "Unsupported loss mode"
+            return self._liger_mode(hidden_states, head_weight, head_bias, loss_kwargs)
 
-            bs, seq, dim = hidden_states.shape
-            hidden_states = hidden_states.reshape(bs * seq, dim)
-            shifted_labels = shifted_labels.flatten()
-            # liger kernel dont support reduction=="none"
-            # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
-            loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
-            # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
-            mask = loss_weight != 0
-            w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
-            loss = loss * w
-            return loss, (None, {})
+    def _liger_mode(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: CELossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        assert self.liger_loss_fct is not None, "liger_loss_fct must be initialized in liger mode"
+        shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
+        loss_weight = loss_kwargs.loss_weight  # (bs, seq_len)
+        assert loss_weight is not None, "loss_weight can not be None"
+
+        bs, seq, dim = hidden_states.shape
+        hidden_states = hidden_states.reshape(bs * seq, dim)
+        shifted_labels = shifted_labels.flatten()
+        # liger kernel dont support reduction=="none"
+        # step 2.b in the loss calculation: sum the loss over all tokens, then multiply the loss weight (i.e. divide by the global_denominator)
+        loss = self.liger_loss_fct(head_weight, hidden_states, shifted_labels)
+        # ProberList.record_tensor(loss, "[lm_head.ce_loss][before calibration]loss")
+        mask = loss_weight != 0
+        w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
+        loss = loss * w
+        return loss, (None, {})
