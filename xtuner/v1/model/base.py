@@ -90,6 +90,8 @@ class XTunerBaseModelConfig(PydanticBaseModel):
         if self.hf_config is None:
             raise NotImplementedError("The `hf_config` property must be implemented to save in HuggingFace format.")
 
+        self.hf_config.save_pretrained(hf_path)
+
     @classmethod
     def from_hf(cls, hf_path: str | Path) -> Self:
         """Build a `TransformerConfig` from a pre-trained HuggingFace model.
