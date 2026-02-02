@@ -245,9 +245,6 @@ class TestInternS1(DeterministicDDPTestCase):
         )
         data_mesh = None
 
-        interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
         interns1_model.fully_shard(fsdp_config=fsdp_config)
         
         interns1_model.from_hf(INTERNS1_DENSE_PATH)
@@ -356,9 +353,6 @@ class TestInternS1(DeterministicDDPTestCase):
             data_mesh = init_data_mesh(device, sp_size=sp_size)
             sp_mesh = data_mesh["sp"]
         
-        interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
-        interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
         interns1_model.fully_shard(fsdp_config=fsdp_config)
 
         interns1_model.from_hf(INTERNS1_DENSE_PATH)
@@ -412,9 +406,6 @@ class TestInternS1(DeterministicDDPTestCase):
             syncdir = [tmpdir]
             dist.broadcast_object_list(syncdir, src=0)
             tmpdir = Path(syncdir[0])
-            interns1_model.language_model.fully_shard(fsdp_config=fsdp_config)
-            interns1_model.vision_tower.fully_shard(fsdp_config=fsdp_config)
-            interns1_model.multi_modal_projector.fully_shard(fsdp_config=fsdp_config)
             interns1_model.fully_shard(fsdp_config=fsdp_config)
             interns1_model.from_hf(INTERNS1_DENSE_PATH)
             interns1_model.save_hf(tmpdir)
