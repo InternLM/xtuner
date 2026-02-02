@@ -29,6 +29,7 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
     def __init__(self, config: Qwen3VLBaseConfig):
         super().__init__(config)  # type: ignore[arg-type]
 
+        self.skip_vision = config.skip_vision
         if type(self.language_model) is Qwen3MoE:
             # TODO(YHC): This is a hack to make the language model compatible with HF
             _hf_prefix = "model.language_model."
@@ -132,6 +133,13 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
 
         return special_visual_mask, visual_features, deepstack_visual_embeds
 
+    def get_ts_feature(self, ts_values, ts_lens, sr):
+        ts_embeds, ts_pad_mask = self.time_series(
+            time_series_signals=ts_values,
+            ts_lens=ts_lens,
+            sr=sr)
+        return ts_embeds, ts_pad_mask
+
     def forward(
             self,
             seq_ctx: SequenceContext,
@@ -170,12 +178,13 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
                 deepstack_visual_embeds = None
                 visual_pos_masks = None
         else:
-            pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-            image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
-            viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values_dump, image_grid_thw)
-            inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
-            for deepstack_visual_embed in deepstack_visual_embeds:
-                inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
+            if not self.skip_vision:
+                pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+                image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
+                viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values_dump, image_grid_thw)
+                inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
+                for deepstack_visual_embed in deepstack_visual_embeds:
+                    inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
 
             deepstack_visual_embeds = None
             visual_pos_masks = None
@@ -187,7 +196,36 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
             deepstack_visual_embeds = None
             visual_pos_masks = None
 
-        # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
+        time_series_signals = seq_ctx.time_series_signals
+        if time_series_signals is not None:
+            ts_features, ts_pad_mask = self.get_ts_feature(time_series_signals, seq_ctx.ts_lens, seq_ctx.ts_sr)  # [B, T, C], [B, T]
+            ts_features = ts_features[~ts_pad_mask].to(inputs_embeds.device,
+                                                       inputs_embeds.dtype)  # [num_valid_ts_tokens, C]
+            B, N, C = inputs_embeds.shape
+            input_ids = input_ids.reshape(B * N)
+            inputs_embeds = inputs_embeds.reshape(B * N, C)
+            # replace ts_token in inputs_embeds and attention_mask
+            ts_placeholder = (input_ids == self.config.ts_token_id)
+            n_ts_placeholders = ts_placeholder.sum().item()
+            n_ts_tokens = ts_features.size(0)
+            assert n_ts_placeholders == n_ts_tokens, f"[ERROR]: Mismatch: <TS_CONTEXT> tokens={n_ts_placeholders}, ts_embeds_valid={n_ts_tokens}"
+
+            try:
+                inputs_embeds[ts_placeholder] = inputs_embeds[ts_placeholder] * 0.0 + ts_features
+            except Exception as e:
+                logger.error(
+                    f'warning: {e}, inputs_embeds[selected].shape={inputs_embeds[ts_placeholder].shape}, ts_embeds_valid.shape={ts_features.shape}')
+                inputs_embeds = inputs_embeds * 0.0 + ts_features.sum()*0.0
+
+            inputs_embeds = inputs_embeds.reshape(B, N, C)
+        else:
+            fake_time_series_signals = torch.zeros((1, 147, 3), device=input_ids.device, dtype=inputs_embeds.dtype)
+            fake_ts_lens = torch.tensor([147], device=input_ids.device)
+            fake_sr = torch.tensor([36], device=input_ids.device)
+            ts_features, _ = self.get_ts_feature(fake_time_series_signals, fake_ts_lens, fake_sr)
+            inputs_embeds = inputs_embeds * 0.0 + ts_features.sum() * 0.0
+
+            # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
         lang_seq_ctx = SequenceContext(input_ids=None,
                                        cu_seq_lens_q=seq_ctx.cu_seq_lens_q,
                                        cu_seq_lens_k=seq_ctx.cu_seq_lens_k,

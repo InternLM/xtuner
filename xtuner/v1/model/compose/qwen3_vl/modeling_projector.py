@@ -6,7 +6,6 @@ from .qwen3_vl_config import Qwen3VLProjectorConfig
 from xtuner.v1.model import BaseModel
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.utils.compile import maybe_compile
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,

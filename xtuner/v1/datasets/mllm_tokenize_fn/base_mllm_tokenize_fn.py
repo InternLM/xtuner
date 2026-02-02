@@ -117,6 +117,31 @@ def replace_image_token(
     )
 
 
+def collect_time_series_paths_and_extra(messages: list[dict]):
+    time_series_paths = []
+    sampling_rate_list = []
+    for msg in messages:
+        if msg["role"] == "user" or msg["role"] == "pretrain":
+            content = msg["content"]
+            if isinstance(content, list):
+                for c in content:
+                    if c["type"] == "time_series_url":
+                        time_series_paths.append(c["time_series_url"]["url"])
+                        if "sampling_rate" in c["time_series_url"]:
+                            sampling_rate = c["time_series_url"]["sampling_rate"]
+                        else:
+                            sampling_rate = None
+                        sampling_rate_list.append(sampling_rate)
+
+    if len(time_series_paths) > 0:
+        assert len(time_series_paths) == len(sampling_rate_list) == 1
+
+    return (
+        time_series_paths,
+        {"sampling_rate": sampling_rate_list},
+    )
+
+
 def load_image(image_path: str):
     return Image.open(image_path).convert("RGB")
 
@@ -177,6 +202,12 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
         return {"num_tokens": len(input_ids)}
 
+    def calc_num_tokens_time_series_get_item(self, data_item: dict) -> CacheItem:
+        raise NotImplementedError
+
+    def time_series_get_item(self, data_item: dict, media_root: str = "") -> BaseMLLMDataItem:
+        raise NotImplementedError
+
     def pure_text_get_item(self, data_item: Any) -> BaseMLLMDataItem:
         raise NotImplementedError
 
@@ -196,6 +227,10 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
             self._image_wh_list = extra_info["image_wh"]
             self._video_wh_list = extra_info["video_wh"]
             self._video_extra_info_list = extra_info["video_extra_info"]
+
+            self._time_series_path, time_series_extra_info = collect_time_series_paths_and_extra(item["messages"])
+            self._time_series_sampling_rate = time_series_extra_info["sampling_rate"]
+
         except RuntimeError as e:
             if self.state == "cache":
                 print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")
@@ -213,6 +248,12 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 ret = self.calc_num_tokens_video_get_item(item)
             else:
                 ret = self.video_get_item(item, media_root)
+        elif len(self._time_series_path) > 0:
+            assert len(self._time_series_path) == 1, "Currently only one time series input is supported."
+            if self.state == "cache":
+                ret = self.calc_num_tokens_time_series_get_item(item)
+            else:
+                ret = self.time_series_get_item(item, media_root)
         else:
             if self.state == "cache":
                 ret = self.calc_num_tokens_pure_text_get_item(item)
