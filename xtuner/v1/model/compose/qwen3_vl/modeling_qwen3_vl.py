@@ -188,18 +188,12 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
             visual_pos_masks = None
 
         # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
-        lang_seq_ctx = SequenceContext(input_ids=None,
-                                       cu_seq_lens_q=seq_ctx.cu_seq_lens_q,
-                                       cu_seq_lens_k=seq_ctx.cu_seq_lens_k,
-                                       max_length_q=seq_ctx.max_length_q,
-                                       max_length_k=seq_ctx.max_length_k,
-                                       position_ids=seq_ctx.position_ids,
-                                       num_padding=seq_ctx.num_padding,
-                                       sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
-                                       inputs_embeds=inputs_embeds,
-                                       rollout_routed_experts=seq_ctx.rollout_routed_experts,
-                                       deepstack_visual_embeds=deepstack_visual_embeds,
-                                       visual_pos_masks=visual_pos_masks)
+        lang_seq_ctx = seq_ctx.copy(
+            input_ids=None,
+            inputs_embeds=inputs_embeds,
+            deepstack_visual_embeds=deepstack_visual_embeds,
+            visual_pos_masks=visual_pos_masks,
+        )
         outputs = self.language_model(
             lang_seq_ctx,
             loss_ctx
