@@ -35,6 +35,9 @@ jobs:
           #ref: ${{github.event.inputs.repo_ref || 'main'}}
       - name: run-test
         run: |
+          id
+          which python
+          conda env list
           source activate npuci
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
           export DEVICE=npu && pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
