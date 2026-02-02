@@ -349,6 +349,7 @@ class RLTrainer:
             judger_cfg=judger_config,
             replay_buffer_config=replay_buffer_config,
         )
+        self._dataflow_partial_rollout_step = dataflow_config.tail_batch_candidate_steps
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             # resume rollout dataflow
@@ -511,10 +512,19 @@ class RLTrainer:
         """Performs a single rollout step to generate experience."""
         with timer("generation", step_timer_dict):
             ray.get(self._rollout_env_controller.update_active_workers.remote())
-            data_groups, multimodal_train_infos = ray.get(self._rollout_dataflow.run.remote())
+            dataflow_result = ray.get(self._rollout_dataflow.run.remote())
+            data_groups = dataflow_result["data_groups"]
+            multimodal_train_infos = dataflow_result.get("mm_train_infos", None)
+            dataflow_tb_metrics = dataflow_result.get("metrics", {})
+            replay_buffer_status = ray.get(self._rollout_dataflow.get_replaybuffer_status.remote())
+
         self._writer.add_scalar(
             tag="time/generation", scalar_value=step_timer_dict["generation"], global_step=rollout_idx
         )
+        self._writer.add_scalars(tag_scalar_dict=dataflow_tb_metrics, global_step=rollout_idx)
+        tb_replay_buffer_status = {f"async/{k}": v for k, v in replay_buffer_status.items()}
+        self._writer.add_scalars(tag_scalar_dict=tb_replay_buffer_status, global_step=rollout_idx)
+
         with timer("save_trajectory", step_timer_dict):
             trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
             self._save_trajectories(data_groups, trajectory_save_path, rollout_idx)
@@ -533,10 +543,7 @@ class RLTrainer:
 
     def _train_step(self, rollout_idx: int, data_groups, multimodal_train_infos, step_timer_dict: dict):
         """Performs a single training step on the generated experience."""
-        with timer(
-            "onload",
-            step_timer_dict,
-        ):
+        with timer("onload", step_timer_dict):
             ray.get(self._train_controller.onload.remote(target="all"))
             self.logger.info("Training controller loaded")
 
@@ -808,6 +815,8 @@ class RLTrainer:
         rewards = []
 
         rollout_response_len_list = []
+        version_dict = {i: 0 for i in range(self._dataflow_partial_rollout_step + 1)}
+
         # NOTE: Since we currently default to token-in token-out, the code for checking whether response_ids have Retokenization Drift is commented out.
         # If you need to debug, you can uncomment it.
         # mismatch_token_ids_count = 0
@@ -836,6 +845,11 @@ class RLTrainer:
                     response_ids = self.tokenizer.encode(data.env.rollout.response, add_special_tokens=False)
                     rollout_response_len_list.append(len(response_ids))
 
+                version = data.uid.version
+                if version not in version_dict:
+                    version_dict[version] = 0
+                version_dict[version] += 1
+
         rewards_tensor = torch.tensor(rewards).float()
         rollout_response_lens: torch.Tensor = torch.tensor([0.0]).float()
         if len(rollout_response_len_list) > 0:
@@ -853,16 +867,16 @@ class RLTrainer:
                 "response_len_max": rollout_response_lens.max().item(),
                 "response_len_min": rollout_response_lens.min().item(),
                 "total_len": len(rewards),
+                "versions": version_dict,
                 # "mismatch_token_ids_count": mismatch_token_ids_count,
             }
+            self.logger.info(f"versions distribution: {version_dict}")
             json.dump(item, f, ensure_ascii=False, indent=2)
             f.write("\n")
             tb_prefix = "eval" if is_eval else "response"
-            tb_item = {f"{tb_prefix}/{k}": v for k, v in item.items()}
-            self._writer.add_scalars(
-                tag_scalar_dict=tb_item,
-                global_step=rollout_idx,
-            )
+            tb_scalars = {f"{tb_prefix}/{k}": cast(float, v) for k, v in item.items() if k != "versions"}
+            tb_scalars.update({f"{tb_prefix}/version_{k}": float(v) for k, v in version_dict.items()})
+            self._writer.add_scalars(tag_scalar_dict=tb_scalars, global_step=rollout_idx)
             for group in data_groups:
                 if not is_valid_for_training(group):
                     self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
@@ -872,9 +886,14 @@ class RLTrainer:
                         "action_id": data.uid.action_id,
                         "prompt": data.data.extra_info["raw_prompt"],
                         "response": data.env.rollout.response,
+                        "versioned_response": data.env.rollout.versioned_response,
+                        # "response_ids": str(data.env.rollout.response_ids),
+                        # "versioned_response_ids": str(data.env.rollout.versioned_response_ids),
                         "response_len": rollout_response_len_list[_count],
+                        "versioned_response_len": data.env.rollout.versioned_num_return_tokens,
                         "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
+                        "version": data.uid.version,
                         "finish_reason": data.env.rollout.finish_reason,
                     }
                     json.dump(item, f, ensure_ascii=False, indent=2)
@@ -1011,7 +1030,7 @@ class RLTrainer:
 
         resume = resume and bool(meta.exps)
 
-        if resume:
+        if resume and meta.exps:
             latest_exp = meta.exps[-1]
             latest_exp_history = latest_exp.history[-1]
 
@@ -1024,6 +1043,8 @@ class RLTrainer:
 
             staged_path, unstaged_path = git_dir / "staged.diff", git_dir / "unstaged.diff"
 
+            if not git_dir.exists():
+                git_dir.mkdir(parents=True, exist_ok=True)
             commit = record_git_info(staged_path, unstaged_path)
             git_info = GitInfo(
                 commit=commit,
