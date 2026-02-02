@@ -5,6 +5,7 @@ permissions:
   pages: write
 
 on:
+  push:
   workflow_dispatch:
     inputs:
       repo_org:
