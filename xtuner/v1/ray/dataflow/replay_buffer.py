@@ -1,3 +1,5 @@
+import itertools
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +19,7 @@ from xtuner.v1.data_proto.rl_data import (
     MultimodalTrainInfo,
     RLDataFlowItem,
     RLDatasetItem,
+    RLEnvDataItem,
     RLExtraDataItem,
     RLUIDItem,
     RolloutState,
@@ -52,10 +55,11 @@ class ReplayMeta:
     root_id: int = 0
     action_id: int = 0  # same prompt share the same action_id
     action_ref: ObjectRef = None
-    observation_ids: List[int] = field(default_factory=list)  # observation IDs for different versions
+    observation_ids: List[int] = field(default_factory=list)
     observation_refs: List[ObjectRef] = field(default_factory=list)
-    observation_versions: List[int] = field(default_factory=list)  # reserved for async rollout
+    observation_versions: List[int] = field(default_factory=list)  # 目前发数据为按组下发，暂时用不到
     state: RolloutState = RolloutState.INIT
+    version: int = 0  # version for partial rollout
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -84,21 +88,22 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     env_str = grouped_dataitem[0].uid.env
     root_id = grouped_dataitem[0].uid.root_id
     action_id = grouped_dataitem[0].uid.action_id
+    # !!! 注意：这里放的是第一个dataitem的data，因为一组数据的data是一样的 !!!
     data = grouped_dataitem[0].data
+    # 现在是按组发送，那么一组里的dataitem的version是一样的，如果一组中的数据在某次rollout step中没有生成的数据，version也还是会+1
+    group_version = grouped_dataitem[0].uid.version
     observation_ids = []
     observation_refs = []
-    observation_versions = []
 
-    group_states = []
     for item in grouped_dataitem:
-        version = item.uid.version
         observation_ids.append(item.uid.observation_id)
         observation_refs.append(ray.put(item.env))
-        observation_versions.append(version)
-        group_states.append(item.env.rollout.finish_reason)
 
     group_state = determine_group_state(grouped_dataitem)
-    logger.debug(f"determined group_state: {group_state}, replay_state: {group_state}")
+    logger.debug(
+        f"Mapping data items to ReplayMeta {action_id} with group_state: {group_state}, group_version: {group_version}"
+    )
+
     replay_meta = ReplayMeta(
         env=env_str,
         root_id=root_id,
@@ -106,8 +111,8 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         action_ref=ray.put(data),
         observation_ids=observation_ids,
         observation_refs=observation_refs,
-        observation_versions=observation_versions,
         state=group_state,
+        version=group_version,
         extra_info={},
     )
     return replay_meta
@@ -119,16 +124,16 @@ def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowIt
     action_id = replay_meta.action_id
     data_ref = ray.get(replay_meta.action_ref)
     group_data_item = []
-    for obs_id, obs_ref, version in zip(
-        replay_meta.observation_ids, replay_meta.observation_refs, replay_meta.observation_versions
-    ):
+    for obs_id, obs_ref in zip(replay_meta.observation_ids, replay_meta.observation_refs):
         env_data = ray.get(obs_ref)
         # NOTE: This mapping function used by both dump and get. ObjectRefs are kept during dump (for training continuity)
         # but released during get (via del replaymeta) when no longer needed. So we do not free them manually here.
         # ray._private.internal_api.free(obs_ref)
 
         item = RLDataFlowItem(
-            uid=RLUIDItem(env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=version),
+            uid=RLUIDItem(
+                env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=replay_meta.version
+            ),
             data=data_ref,
             env=env_data,
             extra_info=RLExtraDataItem(),
@@ -203,51 +208,71 @@ class ReplayBufferConfig(BaseModel):
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
 
-class Sampler:
-    """Sampler for drawing prompts from datasets or the replay buffer."""
+class DatasetSampler:
+    """Sampler for drawing new prompts from the configured dataset.
 
-    def __init__(self, dataloader, tokenizer, storage):
-        """Initializes the Sampler.
+    This class is responsible for building a dataloader from the provided dataset configurations and sampling fresh
+    data prompts upon request.
+    """
+
+    def __init__(self, dataset_cfg, dataloader_cfg, tokenizer):
+        """Initializes the DatasetSampler.
 
         Args:
-            dataloader: The dataloader for the dataset.
-            tokenizer: The tokenizer for processing text.
-            storage: The ReplayBufferStorage instance.
+            dataset_cfg (List): Configuration for the datasets to sample from.
+            dataloader_cfg (Optional[DataloaderConfig]): Configuration for the
+                PyTorch DataLoader.
+            tokenizer (Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str]):
+                The tokenizer for processing text data. Can be a path or an object.
         """
-        self.train_dataloader = dataloader
-        self.train_dataloader_iter = iter(self.train_dataloader)
-        self.tokenizer = (
-            tokenizer
-            if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast))
-            else AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+        self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+        if isinstance(tokenizer, str):
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+        else:
+            self.tokenizer = tokenizer
+        if dataloader_cfg is not None:
+            self.dataloader_cfg = dataloader_cfg
+            self.dataloader_cfg.dataset_config_list = dataset_cfg
+        else:
+            self.dataloader_cfg = DataloaderConfig(
+                dataset_config_list=dataset_cfg,
+                collator="fake_collator",
+                pack_level="none",
+                num_workers=1,
+            )
+        self.dataloader = self.dataloader_cfg.build(
+            tokenizer=self.tokenizer, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=1
         )
-        self.storage = storage
-        self.sample_count = 0
+        self.dataloader_iter = iter(self.dataloader)
         self.cur_epoch = 0
         self.reduced_consumed_samples = 0
         self.logger = get_logger()
 
-    def sample_from_datasets(self, env: str, repeat_prompt_k: int) -> List[RLDataFlowItem]:
-        """Samples a new group of prompts from the original dataset.
+    def sample(self, env: str, prompt_repeat_k: int) -> List[RLDataFlowItem]:
+        """Samples a new prompt from the dataset and prepares it as a group.
+
+        This method fetches the next item from the dataloader, assigns new
+        unique IDs (root_id, action_id, observation_id), and formats it into
+        a list of RLDataFlowItem objects, repeated `prompt_repeat_k` times.
 
         Args:
-            env (str): The environment name.
-            repeat_prompt_k (int): The number of times to repeat the prompt.
+            env (str): The environment name to be associated with the new samples.
+            prompt_repeat_k (int): The number of times to repeat the sampled
+                prompt in the returned group.
 
         Returns:
-            List[RLDataFlowItem]: A list of data items for the data group contains repeat_prompt_k samples from same data.
+            List[RLDataFlowItem]: A list of newly created data items for a rollout.
         """
         root_id = uuid4().int
         action_id = uuid4().int
-        group_data_item: List[RLDataFlowItem] = [RLDataFlowItem() for _ in range(repeat_prompt_k)]
-
+        group_data_item: List[RLDataFlowItem] = [RLDataFlowItem() for _ in range(prompt_repeat_k)]
         try:
-            data = next(self.train_dataloader_iter)[0]
+            data = next(self.dataloader_iter)[0]
         except StopIteration:
             self.cur_epoch += 1
-            self.train_dataloader.set_epoch(self.cur_epoch)
-            self.train_dataloader_iter = iter(self.train_dataloader)
-            data = next(self.train_dataloader_iter)[0]
+            self.dataloader.set_epoch(self.cur_epoch)
+            self.dataloader_iter = iter(self.dataloader)
+            data = next(self.dataloader_iter)[0]
         self.reduced_consumed_samples += 1
 
         multimodal_train_info = data.pop("multimodal_train_info", {})
@@ -264,61 +289,39 @@ class Sampler:
             )
             data_item.data = RLDatasetItem(**data)
             data_item.extra_info = RLExtraDataItem(retry_times=0)
-
+        self.logger.debug(f"Sampling new prompt with action_id: {action_id} in env: {env}")
         return group_data_item
 
-    def sample_from_unfinished_buffer(self) -> List[RLDataFlowItem]:
-        """Samples a prompt from a partially completed (unfinished) rollout."""
-        action_id = self.storage._paused.pop(0)
-        self.logger.debug(f"Sampling unfinished action_id: {action_id} from replay buffer")
-        replay_meta = self.storage._actions[action_id]
-        group_samples = mapping_replaymeta_to_dataitem(replay_meta)
-        self.sample_count += 1
-        if len(self.storage._paused) == 0:
-            self.logger.info(f"Sampled {self.sample_count} unfinished samples from replay buffer")
-        return group_samples
-
-    def sample(self, env: str, enable_partial_rollout: int, prompt_repeat_k: int) -> List[RLDataFlowItem]:
-        """Selects a sampling strategy and returns a group of samples.
-
-        It decides whether to sample from the unfinished buffer (for partial
-        rollouts greater than 0) or from the original dataset.
-
-        Args:
-            env (str): The environment name.
-            enable_partial_rollout (int): Flag to enable partial rollout.
-            prompt_repeat_k (int): Number of times to repeat the prompt.
-
-        Returns:
-            List[RLDataFlowItem]: A list of sampled data items.
-        """
-        # TODO(@duanyanhui): 考虑sampler结构的独立性，不要传入replay buffer storage,
-        # sample_from_unfinished_buffer可以作为replay buffer的一个方法
-        if enable_partial_rollout > 0 and len(self.storage._paused) > 0:
-            return self.sample_from_unfinished_buffer()
-        else:
-            # note: Sample grouped sample at once. They share the same action_id
-            return self.sample_from_datasets(env, prompt_repeat_k)
+    def resume(self, dataloader_path):
+        dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
+        self.dataloader.load_state_dict(dataloader_state)
+        self.dataloader_iter = iter(self.dataloader)
+        self.reduced_consumed_samples = dataloader_state["sampler"]["step"]
+        self.cur_epoch = dataloader_state["sampler"]["epoch"]
 
 
 class ReplayBufferStorage:
     """Handles the storage of experiences for the replay buffer."""
 
-    def __init__(self, worker_log_dir):
+    def __init__(self, replay_buffer_cfg):
         """Initializes the data structures for storing replay data."""
-        self._paused: List[int] = []  # List of paused action_id,
-        self._returned: List[int] = []  # List of returned action_id,
-        self._actions: Dict[int, ReplayMeta] = {}  # action_id: ReplayMeta
-        self._root2actions: Dict[int, List[int]] = defaultdict(
-            list
-        )  # root_id: [action_id, action_id, ...], designed for grpo
-        self._observations: Dict[int, ReplayMeta] = {}  # observation_id: ReplayMeta
-        self._observations2states: Dict[int, str] = {}  # observation_id: state_str
-        self._states: Dict[str, List[int]] = defaultdict(list)  # str: [observation_id, observation_id, ...]
-        self._action2observations: Dict[int, List[int]] = defaultdict(
-            list
-        )  # action_id: [observation_id, observation_id, ...]
-        self.logger = get_logger(log_dir=worker_log_dir, tag="ReplayBuffer")
+        self.enable_partial_rollout: bool = False
+        self.tail_batch_candidate_steps: int = 0
+        self.tail_batch_trigger_size: int = 0
+
+        self._completed_actions: Dict[int, List[int]] = defaultdict(list)
+        self._aborted_actions: Dict[int, List[int]] = defaultdict(list)
+        self._expired_actions: List[int] = []
+        self._actions: Dict[int, ReplayMeta] = {}
+        self._root2actions: Dict[int, List[int]] = {}
+        self._observations: Dict[int, ReplayMeta] = {}
+        self._observations2states: Dict[int, str] = {}
+        self._states: Dict[str, List[int]] = defaultdict(list)
+        self._action2observations: Dict[int, List[int]] = defaultdict(list)
+        self._multimodal_train_infos: Dict[int, Dict[str, Any]] = {}
+        self.logger = get_logger(log_dir=replay_buffer_cfg.worker_log_dir, tag="ReplayBuffer")
+        self.sample_from_aborted_count = 0
+        self.sample_from_expired_count = 0
 
     def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
@@ -337,19 +340,23 @@ class ReplayBufferStorage:
         replay_meta = mapping_dataitem_to_replaymeta(grouped_dataitem)
         root_id = replay_meta.root_id
         action_id = replay_meta.action_id
-        state = replay_meta.state
 
-        if state == RolloutState.ABORTED:
-            self._paused.append(action_id)
-        elif state == RolloutState.COMPLETED:
-            self._returned.append(action_id)
-        self.logger.debug(
-            f"Adding action_id: {action_id} with state: {state} to ReplayBufferStorage. Paused count: {len(self._paused)}, Returned count: {len(self._returned)}"
-        )
-        self._root2actions[root_id].append(action_id)
+        # 1. 更新版本
+        if root_id in self._root2actions:
+            # TODO: 考虑到非共卡的情况，version是否更新需要根据是否update_weights来判断
+            replay_meta.version += 1
+            self._root2actions[root_id].append(action_id)
+            self.logger.debug(
+                f"Existing root_id: {root_id} with action_id {action_id} found. Incrementing version to {replay_meta.version}."
+            )
+        else:
+            self._root2actions[root_id] = [action_id]
         self._actions[action_id] = replay_meta
 
-        # observation
+        # 2. 根据rollout_state更新completed/aborted/expired相关映射
+        self._check_rollout_state_and_insert(replay_meta)
+
+        # 3. 更新observations相关映射
         for observation_id in replay_meta.observation_ids:
             self._observations[observation_id] = replay_meta
             self._observations2states[observation_id] = replay_meta.state
@@ -357,20 +364,6 @@ class ReplayBufferStorage:
                 self._action2observations[action_id].append(observation_id)
             if observation_id not in self._states[replay_meta.state]:
                 self._states[replay_meta.state].append(observation_id)
-
-    def clear(self):
-        attrs_to_clear = [
-            "_paused",
-            "_returned",
-            "_actions",
-            "_root2actions",
-            "_observations",
-            "_observations2states",
-            "_states",
-            "_action2observations",
-        ]
-        for attr in attrs_to_clear:
-            getattr(self, attr).clear()
 
     def get(self, global_batch_size: int) -> Tuple[List[List[RLDataFlowItem]], List[MultimodalTrainInfo | None]]:
         """Retrieves a batch of finished sample groups from the buffer.
@@ -389,70 +382,65 @@ class ReplayBufferStorage:
         """
         samples = []
         multimodal_train_infos = []
-        if len(self._returned) < global_batch_size:
-            self.logger.error("Not enough finished samples in replay buffer")
-            return [], []
-        else:
-            self.logger.info(
-                f"Retrieving global_batch_size {global_batch_size} from replay buffer, len of self.returned: {len(self._returned)}"
-            )
-            target_finished_list = self._returned[:global_batch_size]
-            remain_finished_list = self._returned[global_batch_size:]
-            for action_id in target_finished_list:
-                replay_meta = self._actions.pop(action_id)
-                observation_ids = self._action2observations.pop(action_id)
-                for obs_id in observation_ids:
-                    self._observations.pop(obs_id)
-                    self._observations2states.pop(obs_id)
-
-                # todo: add an unified state management
-                replay_meta.state = RolloutState.ARCHIVED
-                group_samples = mapping_replaymeta_to_dataitem(replay_meta)
-                del replay_meta
-                multimodal_train_info = None
-                # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
-                for data_item in group_samples:
-                    if hasattr(data_item.data, "multimodal_train_info"):
-                        multimodal_train_info = data_item.data.multimodal_train_info
-                        del data_item.data.multimodal_train_info
-                samples.append(group_samples)
-                multimodal_train_infos.append(multimodal_train_info)
-            self._returned = remain_finished_list
-
-            return samples, multimodal_train_infos
-
-    def get_finished_samples(self):
-        """Returns the number of finished sample groups."""
-        return len(self._returned)
-
-    def get_unfinished_samples(self):
-        """Returns the number of unfinished sample groups."""
-        return len(self._paused)
-
-    def get_prompt_num(self):
-        return len(self._action2observations)
-
-    def status(self):
-        return {
-            "rollout_finished_count": len(self._returned),
-            "rollout_paused_count": len(self._paused),
-            "action_count": len(self._actions),
-            "observation_count": len(self._observations),
-        }
-
-    def print(self):
-        rollout_finished_count = len(self._returned)
-        rollout_paused_count = len(self._paused)
-        action_count = len(self._actions)
-        observation_count = len(self._observations)
-
-        log_message = (
-            "[ReplayBuffer] ReplayBufferStorage states:\n"
-            f"  - Rollout States: Finished={rollout_finished_count}, Paused={rollout_paused_count}\n"
-            f"  - History Actions: {action_count}\n"
-            f"  - History Observations: {observation_count}"
+        target_batch_size = min(global_batch_size, self.completed_samples_count)
+        self.logger.info(f"Retrieving {target_batch_size} completed samples from the replay buffer.")
+        task_time = []
+        for _ in range(target_batch_size):
+            task_start_time = time.perf_counter()
+            action_id = self._pop_highest_version_action(self._completed_actions)
+            if action_id is None:
+                self.logger.warning("Get action_id None from completed_actions and skip this iteration.")
+                continue
+            replay_meta = self._actions.pop(action_id)
+            group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+            # 将这条数据彻底清除,不用再记录root_id对应的action_ids了
+            self._clear_meta_for_root(replay_meta)
+            multimodal_train_info = None
+            # TODO: 是否需要额外返回不重复的 multimodal_train_infos？
+            for data_item in group_samples:
+                if hasattr(data_item.data, "multimodal_train_info"):
+                    multimodal_train_info = data_item.data.multimodal_train_info
+                    del data_item.data.multimodal_train_info
+                if "partial_rollout_input_ids" in data_item.env.rollout.extra_info:
+                    del data_item.env.rollout.extra_info["partial_rollout_input_ids"]
+            samples.append(group_samples)
+            multimodal_train_infos.append(multimodal_train_info)
+            task_end_time = time.perf_counter()
+            task_time.append(task_end_time - task_start_time)
+        # 检查completed_samples中是否还有剩余的数据，并且检查其是否过期
+        avg_time = sum(task_time) / len(task_time) if len(task_time) > 0 else 0
+        self.logger.info(
+            f"Remaining completed samples in buffer: {self.completed_samples_count}, task_time: {sum(task_time)}s, avg_time: {avg_time}s"
         )
-        self.logger.info(log_message)
+        self._check_completed_samples_expired()
+        self._check_completed_samples_aborted()
+        return samples, multimodal_train_infos
+
+    def sample(self, sample_from_expired_states) -> List[RLDataFlowItem]:
+        if sample_from_expired_states and self.expired_samples_count > 0:
+            self.sample_from_expired_count += 1
+            return self._sample_from_expired_storage()
+        if self.aborted_samples_count > 0:
+            self.sample_from_aborted_count += 1
+            return self._sample_from_aborted_storage()
+        return []
+
+    def clear(self):
+        attrs_to_clear = [
+            "_aborted_actions",
+            "_completed_actions",
+            "_expired_actions",
+            "_actions",
+            "_root2actions",
+            "_observations",
+            "_observations2states",
+            "_states",
+            "_action2observations",
+        ]
+        for attr in attrs_to_clear:
+            getattr(self, attr).clear()
+        self.sample_from_aborted_count = 0
+        self.sample_from_expired_count = 0
 
     def resolve_ray_objects(self, data_item: RLDataFlowItem):
         """Resolves ray.ObjectRefs in a RLDataFlowItem to their actual values.
@@ -491,9 +479,11 @@ class ReplayBufferStorage:
         if hasattr(data_item.data, "multimodal_train_info"):
             multimodal_info = data_item.data.multimodal_train_info
             if multimodal_info and "pixel_values" in multimodal_info:
-                pixel_values_ref = ray.put(multimodal_info["pixel_values"])
-                del multimodal_info["pixel_values"]
-                data_item.data.multimodal_train_info = pixel_values_ref
+                # 一组数据共享同一个data_item.data，所以只需要转换一次
+                if not isinstance(multimodal_info["pixel_values"], ray.ObjectRef):
+                    pixel_values_ref = ray.put(multimodal_info["pixel_values"])
+                    del multimodal_info["pixel_values"]
+                    data_item.data.multimodal_train_info["pixel_values"] = pixel_values_ref  # type: ignore[index]
         # convert rollout.extra_info.router_experts to ray.ObjectRef
         if "routed_experts" in data_item.env.rollout.extra_info:
             routed_experts_ref = ray.put(data_item.env.rollout.extra_info["routed_experts"])
@@ -537,8 +527,9 @@ class ReplayBufferStorage:
                 assert not res, "ReplayBufferStorage.dump found unresolved ray.ObjectRef in RLDataFlowItem"
 
         state = {
-            "_paused": self._paused,
-            "_returned": self._returned,
+            "_completed_actions": self._completed_actions,
+            "_aborted_actions": self._aborted_actions,
+            "_expired_actions": self._expired_actions,
             "_actions": all_data_items,
             "_root2actions": dict(self._root2actions),
             "_observations2states": self._observations2states,
@@ -556,14 +547,14 @@ class ReplayBufferStorage:
             file_path (str): The path to the file from which to restore the
                 state.
         """
-        if len(self._actions) > 0:
-            self.logger.warning("ReplayBufferStorage is not empty. Resuming will overwrite the existing state.")
-            self.clear()
+
+        self.clear()
 
         state = torch.load(file_path, map_location="cpu", weights_only=False)
 
-        self._paused = state["_paused"]
-        self._returned = state["_returned"]
+        self._completed_actions = state["_completed_actions"]
+        self._aborted_actions = state["_aborted_actions"]
+        self._expired_actions = state["_expired_actions"]
         self._root2actions = defaultdict(list, state["_root2actions"])
         self._observations2states = state["_observations2states"]
         self._states = defaultdict(list, state["_states"])
@@ -581,6 +572,224 @@ class ReplayBufferStorage:
                 self._observations[observation_id] = replay_meta
 
         self.logger.info(f"ReplayBufferStorage state successfully resumed from {file_path}")
+        self.logger.info(
+            f"ReplayBuffer Storage status: completed_samples_count={self.completed_samples_count}, aborted_samples_count={self.aborted_samples_count}, expired_samples_count={self.expired_samples_count}"
+        )
+
+    @property
+    def completed_samples_count(self) -> int:
+        return sum(len(bucket) for bucket in self._completed_actions.values())
+
+    @property
+    def aborted_samples_count(self):
+        return sum(len(bucket) for bucket in self._aborted_actions.values())
+
+    @property
+    def expired_samples_count(self):
+        return len(self._expired_actions)
+
+    def _sample_from_expired_storage(self) -> List[RLDataFlowItem]:
+        """Samples an item from the expired storage for re-rollout.
+
+        This method takes an action_id from the expired queue, retrieves its
+        original prompt data, cleans up all its previous rollout outputs, and
+        prepares it as a new sample group with a fresh action_id and reset
+        version (0) to be sent for a new generation attempt.
+
+        Returns:
+            List[RLDataFlowItem]: A list of data items ready for a new rollout.
+        """
+        assert len(self._expired_actions) > 0
+        action_id = self._expired_actions.pop()
+        replay_meta = self._actions.pop(action_id)
+        group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+        # 把这条数据上次的记录全部删掉,重新开始rollout,root2actions也要清除
+        self._clear_meta_for_root(replay_meta)
+
+        for sample in group_samples:
+            assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
+            if "routed_experts" in sample.env.rollout.extra_info:
+                ray._private.internal_api.free(sample.env.rollout.extra_info["routed_experts"])
+                del sample.env.rollout.extra_info["routed_experts"]
+            del sample.env
+            sample.env = RLEnvDataItem()  # 重置env数据
+            sample.uid.action_id = action_id
+            sample.uid.version = 0
+
+        self.logger.debug(
+            f"Sampling expired action_id: {action_id} from replay buffer, remain expired samples: {len(self._expired_actions)}"
+        )
+        return group_samples
+
+    def _sample_from_aborted_storage(self) -> List[RLDataFlowItem]:
+        """Samples an item from the aborted storage for re-rollout.
+
+        This method retrieves an action with the highest version (oldest version) from the
+        aborted buckets. It then cleans up its previous (aborted) rollout
+        outputs and prepares it as a new sample group with a fresh action_id.
+        The original version number is preserved to track its retry history.
+
+        Returns:
+            List[RLDataFlowItem]: A list of data items ready for a new rollout.
+        """
+        assert self.aborted_samples_count > 0
+        action_id = self._pop_highest_version_action(self._aborted_actions)
+        # 通过self.aborted_samples_count判断过这里不会返回None
+        replay_meta = self._actions.pop(action_id)  # type: ignore[arg-type]
+        replay_meta_version = replay_meta.version
+        group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+        # 把这条数据上次rollout产生的输出的记录都删掉，上次的数据已经记录在了RLEnvDataItem中了
+        self._clear_meta_for_actions(replay_meta)
+
+        sample_action_id = uuid4().int
+        for sample in group_samples:
+            assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
+            if not self.enable_partial_rollout:
+                # 清除上次的response_ids等env数据
+                if "routed_experts" in sample.env.rollout.extra_info:
+                    ray._private.internal_api.free(sample.env.rollout.extra_info["routed_experts"])
+                    del sample.env.rollout.extra_info["routed_experts"]
+                del sample.env
+                sample.env = RLEnvDataItem()
+                sample.uid.version = 0
+                sample.uid.action_id = action_id if action_id is not None else sample_action_id
+            else:
+                # 将异步的逻辑尽量放在replay buffer中处理，尽量不在env/rollout中进行处理
+                history_response_ids = list(itertools.chain.from_iterable(sample.env.rollout.versioned_response_ids))
+                sample.env.rollout.extra_info["partial_rollout_input_ids"] = (
+                    sample.data.input_ids + history_response_ids
+                )
+                self.logger.debug(
+                    f"partial rollout enabled, {sample_action_id} pass response_ids {len(history_response_ids)} to input_ids {len(sample.data.input_ids)} to data extra info when sampling."
+                )
+                sample.uid.version = replay_meta_version
+                sample.uid.action_id = int(sample_action_id)
+
+        self.logger.debug(
+            f"Sampling aborted action_id: {sample_action_id}, root_id: {group_samples[0].uid.root_id} from replay buffer, remain aborted samples: {self.aborted_samples_count}"
+        )
+        return group_samples
+
+    def _pop_highest_version_action(self, buckets: Dict[int, List[int]]) -> Optional[int]:
+        if not buckets:
+            return None
+
+        highest_version = sorted(buckets.keys())[-1]
+        action_list = buckets[highest_version]
+        action_id = action_list.pop()
+        if not action_list:
+            del buckets[highest_version]
+
+        return action_id
+
+    def _check_completed_samples_expired(self):
+        """Moves samples from completed buckets to the expired list if they are
+        too old after get target completed samples from replay buffer.
+
+        This method iterates through the `_completed_actions` buckets. If a
+        bucket's version index is greater than or equal to the configured
+        `tail_batch_candidate_steps`, all action_ids within that bucket are
+        moved to the `_expired_actions` list, marking them as expired.
+        """
+        if self.tail_batch_candidate_steps <= 0:
+            return
+
+        expired_versions = [v for v in self._completed_actions if v >= self.tail_batch_candidate_steps]
+
+        for version in expired_versions:
+            bucket = self._completed_actions.pop(version)
+            self._expired_actions.extend(bucket)
+            self.logger.info(
+                f"Moved {len(bucket)} completed samples with version {version} to expired samples due to exceeding tail_batch_candidate_steps."
+            )
+
+    def _check_completed_samples_aborted(self):
+        if self.enable_partial_rollout:
+            return
+
+        for version, bucket in self._completed_actions.items():
+            self._aborted_actions[0].extend(bucket)
+            self.logger.info(
+                f"Moved {len(bucket)} completed samples with version {version} to aborted samples due to partial rollout disabled."
+            )
+        self._completed_actions.clear()
+
+    def _clear_meta_for_actions(self, replay_meta: ReplayMeta):
+        """Completely removes an action and all its associated data from the
+        storage.
+
+        This is the single source of truth for deleting an action.
+        """
+        action_id = replay_meta.action_id
+
+        for observation_id in replay_meta.observation_ids:
+            self._observations.pop(observation_id, None)
+            state = self._observations2states.pop(observation_id, None)
+            if state and observation_id in self._states.get(state, []):
+                self._states[state].remove(observation_id)
+
+        self._action2observations.pop(action_id, None)
+        del replay_meta
+
+    def _clear_meta_for_root(self, replay_meta: ReplayMeta):
+        """Clears all actions and associated metadata linked to the same
+        root_id.
+
+        This function is called after a sample group is successfully retrieved
+        for training. It ensures that all historical versions of a prompt
+        (linked by root_id) are purged from the storage to prevent them from
+        being re-sampled or replayed.
+
+        Args:
+            replay_meta (ReplayMeta): The metadata of the action that was just
+                retrieved. The root_id from this object will be used to find
+                and clear all related actions.
+        """
+        root_id = replay_meta.root_id
+        if root_id in self._root2actions:
+            for action_id in self._root2actions[root_id]:
+                new_replay_meta = self._actions.pop(action_id, None)
+                if new_replay_meta:
+                    self._clear_meta_for_actions(new_replay_meta)
+            del self._root2actions[root_id]
+        del replay_meta
+
+    def _check_rollout_state_and_insert(self, replay_meta: ReplayMeta):
+        """Checks the rollout state of a ReplayMeta object and inserts its
+        action_id into the appropriate state bucket.
+
+        This method acts as a router, directing action_ids to different storage
+        lists (_aborted_actions, _completed_actions, _expired_actions) based on
+        their final rollout state and version. It also handles the logic for
+        when an aborted sample becomes expired due to too many retries.
+
+        Args:
+            replay_meta (ReplayMeta): The metadata object containing the final
+                state and version of a rollout action.
+        """
+        state = replay_meta.state
+        root_id = replay_meta.root_id
+        action_id = replay_meta.action_id
+
+        if state == RolloutState.ABORTED:
+            if self.tail_batch_candidate_steps > 0 and replay_meta.version >= self.tail_batch_candidate_steps:
+                # 过期的数据需要重置状态
+                self._expired_actions.append(action_id)
+                self.logger.debug(
+                    f"Add expired sample with action_id: {action_id} to _expired_actions because version: {replay_meta.version} >= tail_batch_candidate_steps: {self.tail_batch_candidate_steps}."
+                )
+            else:
+                self._aborted_actions[replay_meta.version].append(action_id)
+                self.logger.debug(
+                    f"Add aborted sample with action_id: {action_id} version: {replay_meta.version} to _aborted_actions."
+                )
+        elif state == RolloutState.COMPLETED:
+            self._completed_actions[replay_meta.version].append(action_id)
+            self.logger.debug(f"Add sample with root_id: {root_id}, action_id: {action_id} to finished_actions.")
+        else:
+            raise AssertionError(
+                f"Unsupported rollout state {state} for action_id {action_id} in ReplayBufferStorage."
+            )
 
 
 @ray.remote
@@ -598,34 +807,45 @@ class ReplayBuffer:
             config (ReplayBufferConfig): The configuration object.
         """
         self.config = config
-        self.storage = ReplayBufferStorage(config.worker_log_dir)
-        self.tokenizer = config.tokenizer
-        if isinstance(self.tokenizer, str):
-            self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer, trust_remote_code=True)
-
-        if config.dataloader_cfg is not None:
-            self.dataloader_cfg = config.dataloader_cfg
-            self.dataloader_cfg.dataset_config_list = config.dataset_cfg
-        else:
-            self.dataloader_cfg = DataloaderConfig(
-                dataset_config_list=config.dataset_cfg,
-                collator="fake_collator",
-                pack_level="none",
-            )
-        self._dataloader = self.dataloader_cfg.build(
-            tokenizer=self.tokenizer, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=1
-        )
-        self.sampler = Sampler(
-            self._dataloader,
-            self.tokenizer,
-            self.storage,
-        )
+        self.storage = ReplayBufferStorage(config)
+        self.sampler = DatasetSampler(config.dataset_cfg, config.dataloader_cfg, config.tokenizer)
         self.post_processor_func = config.postprocessor_func
+        self.sample_from_expired_states = False
+        self.sample_from_dataset_count = 0
         self.logger = get_logger(log_dir=config.worker_log_dir, tag="ReplayBuffer")
+
+    def setup_storage_config(
+        self, enable_partial_rollout: bool, tail_batch_candidate_steps: int, tail_batch_trigger_size: int
+    ):
+        """Sets up the storage configuration for the replay buffer.
+
+        Args:
+            enable_partial_rollout (bool): Flag to enable partial rollouts.
+            tail_batch_candidate_steps (int): Number of steps to consider for
+                tail batch sampling.
+            tail_batch_trigger_size (int): Threshold size to trigger tail batch
+                sampling.
+        """
+        self.storage.enable_partial_rollout = enable_partial_rollout
+        self.storage.tail_batch_candidate_steps = tail_batch_candidate_steps
+        self.storage.tail_batch_trigger_size = tail_batch_trigger_size
+
+    def get_prerun_state(self) -> Tuple[bool, int]:
+        if (
+            self.storage.tail_batch_trigger_size > 0
+            and self.storage.expired_samples_count > self.storage.tail_batch_trigger_size
+        ):
+            self.sample_from_expired_states = True
+            self.logger.info(
+                f"Enable sampling from expired states. Expired samples: {self.storage.expired_samples_count}, threshold: {self.storage.tail_batch_trigger_size}"
+            )
+        else:
+            self.sample_from_expired_states = False
+        return self.sample_from_expired_states, self.storage.completed_samples_count
 
     def get_train_dataset_length(self):
         """Returns the length of the training dataloader."""
-        return len(self._dataloader)
+        return len(self.sampler.dataloader)
 
     def post_processor(self, group_samples):
         """Applies a post-processing function to a group of samples.
@@ -641,7 +861,7 @@ class ReplayBuffer:
             return group_samples
         return group_samples
 
-    def sample(self, env, enable_partial_rollout: int, prompt_repeat_k: int) -> List[RLDataFlowItem]:
+    def sample(self, env, prompt_repeat_k) -> List[RLDataFlowItem]:
         """Samples a batch of experiences from the replay buffer.
 
         Args:
@@ -652,8 +872,12 @@ class ReplayBuffer:
         Returns:
             A list of sampled data items.
         """
-
-        return self.sampler.sample(env, enable_partial_rollout, prompt_repeat_k)
+        storage_samples = self.storage.sample(self.sample_from_expired_states)
+        if storage_samples:
+            return storage_samples
+        else:
+            self.sample_from_dataset_count += 1
+            return self.sampler.sample(env, prompt_repeat_k)
 
     def get_samples(
         self,
@@ -678,12 +902,15 @@ class ReplayBuffer:
         """
         self.storage.add(grouped_dataitem)
 
-    def print(self):
-        """Prints the current state of the replay buffer storage."""
-        self.storage.print()
-
     def status(self):
-        return self.storage.status()
+        return {
+            "remain_completed_samples_count": self.storage.completed_samples_count,
+            "remain_aborted_samples_count": self.storage.aborted_samples_count,
+            "remain_expired_samples_count": self.storage.expired_samples_count,
+            "sample_from_dataset_count": self.sample_from_dataset_count,
+            "sample_from_aborted_count": self.storage.sample_from_aborted_count,
+            "sample_from_expired_count": self.storage.sample_from_expired_count,
+        }
 
     def save(self, file_path: Path | str):
         """Saves the replay buffer's storage to a file.
@@ -696,7 +923,7 @@ class ReplayBuffer:
 
         # save dataloader
         dataloader_path = file_path / "dataloader"
-        dataloader_state = self._dataloader.get_state_dict(self.sampler.reduced_consumed_samples)
+        dataloader_state = self.sampler.dataloader.get_state_dict(self.sampler.reduced_consumed_samples)
         torch.save(dataloader_state, dataloader_path)
 
         # save storage
@@ -714,17 +941,11 @@ class ReplayBuffer:
             file_path = Path(file_path)
         dataloader_path = file_path / "dataloader"
         if dataloader_path.exists():
-            dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
-            self._dataloader.load_state_dict(dataloader_state)
-
-            # resume dataloader
-            self.sampler = Sampler(
-                self._dataloader,
-                self.tokenizer,
-                self.storage,
+            self.sampler.resume(dataloader_path)
+            self.sample_from_dataset_count = self.sampler.reduced_consumed_samples
+            self.logger.info(
+                f"Dataloader state successfully resumed from {dataloader_path} and set to epoch {self.sampler.cur_epoch} and step {self.sampler.reduced_consumed_samples}."
             )
-            self.sampler.reduced_consumed_samples = dataloader_state["sampler"]["step"]
-            self.sampler.cur_epoch = dataloader_state["sampler"]["epoch"]
         else:
             self.logger.warning(f"Dataloader state file {dataloader_path} does not exist. Skipping dataloader resume.")
         # resume storage
@@ -736,13 +957,13 @@ class ReplayBuffer:
                 f"ReplayBufferStorage state file {rb_storage_path} does not exist. Skipping storage resume."
             )
 
-    def get_finished_samples(self):
-        """Returns the number of finished sample groups in the storage."""
-        return self.storage.get_finished_samples()
+    def get_completed_samples_count(self) -> int:
+        """Returns the count of completed samples in the replay buffer.
 
-    def get_unfinished_samples(self):
-        """Returns the number of unfinished sample groups in the storage."""
-        return self.storage.get_unfinished_samples()
+        Returns:
+            int: The number of completed samples.
+        """
+        return self.storage.completed_samples_count
 
     def clear(self):
         """Clears the replay buffer storage."""
