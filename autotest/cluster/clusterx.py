@@ -35,7 +35,7 @@ class ClusterTaskExecutor:
             all_command.append(f"export {env}")
 
         all_command.append(command)
-        run_command = "\n".join(all_command)
+        run_command = "; ".join(all_command)
 
         try:
             job_name = "-".join([task_config["type"], task_config["case_name"], task_config["run_id"]])

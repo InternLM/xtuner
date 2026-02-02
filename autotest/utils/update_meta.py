@@ -28,10 +28,15 @@ def get_latest_subdir(work_dir):
     return os.path.join(work_dir, latest)
 
 
-
-base_dir = (
-    f"/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output/{os.environ['GITHUB_RUN_ID']}/qwen3-sft-ep8/sft"
-)
+device = os.environ.get("DEVICE", "")
+if device == "npu":
+    base_dir = (
+        f"/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output/{os.environ['GITHUB_RUN_ID']}/npu-qwen3-sft-ep8/sft"
+    )
+else:
+    base_dir = (
+        f"/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output/{os.environ['GITHUB_RUN_ID']}/qwen3-sft-ep8/sft"
+    )
 real_dir = get_latest_subdir(base_dir)
 new_meta = {"end": 10, "exp_dir": real_dir, "checkpoint_list": [f"{real_dir}/checkpoints/ckpt-step-10"]}
 update_meta(f"{base_dir}/.xtuner", new_meta)

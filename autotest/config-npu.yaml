@@ -1,0 +1,106 @@
+base_path:
+    base_output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+    base_baseline_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_baseline
+
+default_config:
+    train: 
+        resource:
+            gpus_per_task: 16
+            cpus_per_task: 256
+            memory_per_task: 1920
+            image: registry2.d.pjlab.org.cn/ccr-yehaochen/910c:xtuner_rc2-20251011-2
+            envs: 
+                - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
+    eval:
+        resource:
+            gpus_per_task: 0
+            cpus_per_task: 16
+            memory_per_task: 128
+            image: registry.h.pjlab.org.cn/ailab-puyu/auto-eval:ld_0101_oc_8ee07ac_v3
+            envs: 
+                - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
+                - HF_DATASETS_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/llmeval/hf_cache
+                - COMPASS_DATA_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/llmeval/compass_data_cache
+                - HF_DATASETS_OFFLINE=1
+                - HF_HUB_OFFLINE=1
+
+case: 
+    npu-qwen3-sft:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3.py
+                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 1
+                envs: 
+                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+                    - RANK=0
+            assert_info:
+                base_metric: npu-qwen3-sft/812c1021/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    npu-qwen3-sft-ep8:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/npu_qwen3_moe_30BA3_ep8.py
+                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 1
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-sft-ep8/812c1021/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+        -
+            type: sft
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py'
+            parameters:
+                config: autotest/config/npu_qwen3_moe_30BA3_ep8_resume.py
+                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+            resource:
+                num_nodes: 1
+                cpus_per_task: 80
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - XTUNER_DETERMINISTIC=true
+                    - TORCH_NPU_USE_HCCL=1
+                    - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
+                    - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
+            assert_info:
+                base_metric: npu-qwen3-sft-ep8/cec3a8d2_resume/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800

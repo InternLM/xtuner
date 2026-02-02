@@ -25,7 +25,7 @@ class Train:
             )
 
             command = (
-                f"cd {current_dir}; pwd; pip install -e .[all]; export GITHUB_RUN_ID={config.get('run_id')}; "
+                f"cd {current_dir}; pwd; pip install -e .[all]; pip install more-itertools; export GITHUB_RUN_ID={config.get('run_id')}; "
                 + "torchrun --nproc-per-node 8 --master_addr=${MASTER_ADDR} --master_port=${MASTER_PORT} --nnodes=${WORLD_SIZE} --node_rank=${RANK} "
                 + f"xtuner/v1/train/cli/{train_type}.py"
             )
