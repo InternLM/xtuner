@@ -1,5 +1,6 @@
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.model.moe.moe import MoEConfig
+from transformers import AutoTokenizer
 from cyclopts import App, Parameter
 from pathlib import Path
 import torch.distributed as dist
@@ -39,6 +40,12 @@ def dcp_to_hf(
             help="Path to the DCP checkpoint, <work_dirs>/<timestamp>/checkpoints/ckpt-step-6"
         ),
     ],
+    tokenizer_path: Annotated[
+        Path,
+        Parameter(
+            help="Path to the tokenizer folder, usually the same as the hf_path"
+        ),
+    ],
     hf_path: Annotated[
         Path | None,
         Parameter(
@@ -52,6 +59,7 @@ def dcp_to_hf(
         ),
     ] = "bf16",
 ):
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     dist.init_process_group(backend="cuda:nccl,cpu:gloo")
     torch.serialization.add_safe_globals(
         [
@@ -97,6 +105,9 @@ def dcp_to_hf(
         model.save_hf(hf_path)
     else:
         model.save_hf(hf_path, save_dtype=torch.float8_e4m3fn)
+
+    if dist.get_rank() == 0:
+        tokenizer.save_pretrained(hf_path)
 
 
 if __name__ == "__main__":
