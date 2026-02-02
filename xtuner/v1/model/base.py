@@ -22,6 +22,7 @@ from safetensors.torch import save_file
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
+    FSDPModule,
     MixedPrecisionPolicy,
     fully_shard,
 )
@@ -1516,3 +1517,13 @@ class BaseModel(nn.Module):
         # TODO: Support hsdp_sharding_size
         fsdp_mesh = init_device_mesh(device, (world_size,))
         return fsdp_mesh
+
+    def _collect_full_state_dict(self, module: nn.Module):
+        assert isinstance(module, (nn.Module, FSDPModule))
+
+        ret = {}
+        for name, param in module.state_dict().items():  # type: ignore[attr-defined]
+            if isinstance(param, DTensor):
+                param = param.full_tensor()
+            ret[name] = param
+        return ret
