@@ -315,7 +315,7 @@ class TrainerConfig(BaseModel):
         arbitrary_types_allowed=True,
         protected_namespaces=(),
     )
-    model_cfg: TransformerConfig | BaseComposeConfig
+    model_cfg: XTunerBaseModelConfig
     load_from: str | Path | None = None
     tokenizer_path: str | Path | None = None
     dataset_cfg: Annotated[DatasetConfigList | None, Parameter(show_default=False)] = (
@@ -440,7 +440,7 @@ class Trainer:
         self,
         *,
         load_from: str | Path | None = None,  # Huggingface model path or saved trainer_path
-        model_cfg: TransformerConfig | BaseComposeConfig,
+        model_cfg: XTunerBaseModelConfig,
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig | None = FSDPConfig(),
         dataset_cfg: DatasetConfigList | None = None,  # TODO: Removed in version 1.1.0
@@ -991,7 +991,7 @@ class Trainer:
     def build_engine(
         self,
         model_path: Path | None,
-        model_config: TransformerConfig | BaseComposeConfig,
+        model_config: XTunerBaseModelConfig,
         optim_config: OptimConfig,
         fsdp_config: FSDPConfig,
         load_checkpoint_path: str | Path | None,
@@ -1641,7 +1641,7 @@ class Trainer:
     def _resolve_config_conflicts(
         self,
         tokenizer: PreTrainedTokenizer,
-        model_cfg: TransformerConfig | BaseComposeConfig,
+        model_cfg: XTunerBaseModelConfig,
         dataloader_cfg: DataloaderConfig,
         fsdp_cfg: FSDPConfig,
     ):
@@ -1844,6 +1844,6 @@ class Trainer:
             config_str = self._config.model_dump_json(indent=2)
             logger.info(f"Training config: {config_str}")
 
-    def _resolve_deprecate_compile_cfg(self, model_cfg: TransformerConfig | BaseComposeConfig, fsdp_cfg: FSDPConfig):
+    def _resolve_deprecate_compile_cfg(self, model_cfg: XTunerBaseModelConfig, fsdp_cfg: FSDPConfig):
         if not fsdp_cfg.torch_compile:
             model_cfg.compile_cfg = False
