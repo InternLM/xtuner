@@ -245,7 +245,7 @@ class RLTrainer:
 
         self._total_epochs = total_epochs
         self._cur_step = 0
-        self._train_mini_step = 1
+        self._global_train_step = 1
 
         if skip_checkpoint_validation:
             patch_default_save_plan()
@@ -555,24 +555,19 @@ class RLTrainer:
             self.logger.info(f"Prepared {len(data_batches)} training data batches")
             self._log_data_info(rollout_idx, data_info)
 
-        self._writer.add_scalar(
-            tag="time/onload",
-            scalar_value=step_timer_dict["onload"],
-            global_step=rollout_idx,
-        )
-
-        self._writer.add_scalar(
-            tag="time/prepare_data",
-            scalar_value=step_timer_dict["prepare_data"],
-            global_step=rollout_idx,
-        )
-
         with timer("training", step_timer_dict):
             workers_log_item: List[WorkerLogItem] = ray.get(
                 self._train_controller.fit.remote(
                     data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
                 )
             )
+        self._log_train_metrics(rollout_idx, step_timer_dict, workers_log_item)
+
+    def _log_train_metrics(self, rollout_idx: int, step_timer_dict: dict, workers_log_item: List[WorkerLogItem]):
+        self._writer.add_scalar(tag="time/onload", scalar_value=step_timer_dict["onload"], global_step=rollout_idx)
+        self._writer.add_scalar(
+            tag="time/prepare_data", scalar_value=step_timer_dict["prepare_data"], global_step=rollout_idx
+        )
         self._writer.add_scalar(tag="time/training", scalar_value=step_timer_dict["training"], global_step=rollout_idx)
 
         rank0_log_item = workers_log_item[0]
@@ -592,6 +587,7 @@ class RLTrainer:
         tb_entropy = {"entropy/train": rank0_log_item["train_entropy"]}
         self._writer.add_scalars(tag_scalar_dict=tb_entropy, global_step=rollout_idx)
 
+        train_start_step = self._global_train_step
         for worker_idx, log_item in enumerate(workers_log_item):
             mini_batch_metrics: dict[str, List[float]] = {}
             for mini_batch_log in log_item["train_metrics"]:
@@ -601,8 +597,6 @@ class RLTrainer:
                     mini_batch_metrics.setdefault(k, []).append(cast(float, v))
 
             for key, value in mini_batch_metrics.items():
-                if len(value) == 0:
-                    continue
                 avg_value = sum(value) / len(value)
                 self._writer.add_scalar(
                     tag=f"train_metrics/worker_{worker_idx}/step_avg_{key}",
@@ -612,11 +606,11 @@ class RLTrainer:
 
             for key, value in mini_batch_metrics.items():
                 for i, v in enumerate(value):
-                    global_step = self._train_mini_step + i
+                    current_step = train_start_step + i
                     self._writer.add_scalar(
                         tag=f"train_metrics/worker_{worker_idx}/{key}",
                         scalar_value=v,
-                        global_step=global_step,
+                        global_step=current_step,
                     )
 
             rank_sft_log = log_item["sft_train_metrics"]
@@ -627,7 +621,8 @@ class RLTrainer:
                     global_step=rollout_idx,
                 )
 
-        self._train_mini_step += len(workers_log_item[0]["train_metrics"])
+        num_mini_batches = len(workers_log_item[0]["train_metrics"])
+        self._global_train_step += num_mini_batches
 
     def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):
         """Synchronizes weights and saves checkpoints."""
