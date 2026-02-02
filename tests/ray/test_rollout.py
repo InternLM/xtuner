@@ -166,15 +166,15 @@ class TestRollout(unittest.TestCase):
                                          self.replay_buffer_cfg,
                                          self.test_env
                                         )
-        responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        responses = ray.get(self.test_flow.run.remote(), timeout=300)["data_groups"]
+        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
 
     def _get_sorted_input_ids(self, responses):
         """Helper to extract and sort input_ids from responses."""
         all_ids = []
-        for data_items in responses[0]:
+        for data_items in responses:
             for data_item in data_items:
                 all_ids.extend(data_item.data.input_ids)
         all_ids.sort()
@@ -212,12 +212,12 @@ class TestRollout(unittest.TestCase):
         # Define run logic based on mode
         def run_continuation(status_ref):
             if is_partial_rollout:
-                remain = status_ref["rollout_paused_count"] + status_ref["rollout_finished_count"]
+                remain = status_ref["remain_aborted_samples_count"] + status_ref["remain_completed_samples_count"]
                 # Finish the remaining paused samples
-                return ray.get(self.test_flow.run.remote(num=remain, enable_partial_rollout=0), timeout=300)
+                return ray.get(self.test_flow.run.remote(num=remain, staleness_threshold=0), timeout=300)["data_groups"]
             else:
                 # Normal run
-                return ray.get(self.test_flow.run.remote(), timeout=300)
+                return ray.get(self.test_flow.run.remote(), timeout=300)["data_groups"]
 
         # continue running after save
         responses_old = run_continuation(rl_status_before_save)
@@ -252,6 +252,7 @@ class TestRollout(unittest.TestCase):
     def test_lmdeploy_dataflow_save_resume(self):
         rollout_cfg = self.rollout_cfg
         dataflow_cfg = self.dataflow_cfg
+        dataflow_cfg.staleness_threshold = 0
         dataflow_cfg.enable_partial_rollout = 0
         self._run_dataflow_save_resume_test(rollout_cfg, dataflow_cfg)
 
@@ -259,7 +260,7 @@ class TestRollout(unittest.TestCase):
     def test_lmdeploy_dataflow_save_resume_with_partial_rollout(self):
         rollout_cfg = self.rollout_cfg
         dataflow_cfg = self.dataflow_cfg
-        dataflow_cfg.max_concurrent = 4
+        dataflow_cfg.staleness_threshold = 1
         dataflow_cfg.enable_partial_rollout = 1
         self._run_dataflow_save_resume_test(rollout_cfg, dataflow_cfg)
 
@@ -286,7 +287,7 @@ class TestRollout(unittest.TestCase):
             prompt_repeat_k=2,
             global_batch_size=2,
             enable_partial_rollout=1,
-            max_concurrent=4,
+            staleness_threshold=1,
             worker_log_dir=self.worker_log_dir,
         )
         self._run_dataflow_save_resume_test(rollout_cfg, dataflow_cfg)
@@ -327,8 +328,8 @@ class TestRollout(unittest.TestCase):
                                          self.replay_buffer_cfg,
                                          self.test_env
                                         )
-        responses = ray.get(self.test_flow.run.remote(), timeout=300)
-        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        responses = ray.get(self.test_flow.run.remote(), timeout=300)["data_groups"]
+        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(self.test_env.shutdown.remote(), timeout=300)
         print("responses: ", responses)
