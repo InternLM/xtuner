@@ -288,7 +288,7 @@ class Calculator:
             l1e0   l1e1   l1e2   l1e3   l1e4   l1e5   l1e6   l1e7 
     PS: l0e0表示layer0的expert0， l1e7表示layer1的expert7
     
-    参考： https://readpaper.com/pdf-annotate/note?pdfId=4622673296512524289&noteId=1750465888039326720 论文中4.1节
+    参考： https://arxiv.org/abs/2205.05198 论文中4.1节
     """
     def __init__(self):
         self.embed = Mem(name="embed")
@@ -768,8 +768,8 @@ class Calculator:
         else:
             attn_acts = self.perlayer_attn.acts + self.perlayer_ckp_acts * (LN_per_gpu - 1)  # type: ignore
         attn_mem = attn_params + attn_grads + self.all_attn.opt_states + self.all_attn.master_params + self.all_attn.master_grads + attn_acts * C.pp_flying_batches  # type: ignore
-        print(f"Attn_mem: {attn_mem / 1024**3} GiB. attn_params: {attn_params / 1024**3} GiB, attn_grads: {attn_grads / 1024**3} GiB, attn_opt_states: {self.attn_opt_states / 1024**3} GiB, "
-              f"attn_master_params: {self.attn_master_params / 1024**3} GiB, attn_master_grads: {self.attn_master_grads / 1024**3} GiB, attn_acts: {attn_acts / 1024**3} GiB, "
+        print(f"Attn_mem: {attn_mem / 1024**3} GiB. attn_params: {attn_params / 1024**3} GiB, attn_grads: {attn_grads / 1024**3} GiB, attn_opt_states: {self.all_attn.opt_states / 1024**3} GiB, "
+              f"attn_master_params: {self.all_attn.master_params / 1024**3} GiB, attn_master_grads: {self.all_attn.master_grads / 1024**3} GiB, attn_acts: {attn_acts / 1024**3} GiB, "
               f"flying_attn_acts: {attn_acts * C.pp_flying_batches / 1024**3} GiB")
 
         mlp_params = self.perlayer_mlp.params * LN_per_gpu  # type: ignore

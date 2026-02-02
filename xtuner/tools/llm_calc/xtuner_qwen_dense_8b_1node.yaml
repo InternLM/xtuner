@@ -25,7 +25,7 @@ master_grad_type: 4
 
 # train params
 MBS: 1
-L: 8192
+L: 32768
 MBN: 1
 
 # model params
@@ -45,6 +45,8 @@ intermediate_size: 12288  # TODO
 mlp_act_dim: 2
 # num_experts: 128
 # topk_weights_position: "after_fc2"
+
+chunk_loss_size: 1024
 
 # recompute params
 recompute: true
