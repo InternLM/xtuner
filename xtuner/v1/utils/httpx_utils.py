@@ -25,6 +25,7 @@ class HttpRequestErrorType(IntEnum):
     UNKNOWN_ERROR = -1
     TIMEOUT_ERROR = 0
     REQUEST_ERROR = 1
+    REQUEST_ABORTED = 2
     # --- Standard HTTP Status Codes ---
     SUCCESS = 200
     BAD_REQUEST = 400
