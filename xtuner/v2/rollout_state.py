@@ -21,22 +21,25 @@ class Status(Enum):
 class RolloutState:
     # dataset 输出必须
     message: list
-    tokens: list[int]
+    tokens: list[int] # 每一次实际输入
     
     uid: int
     session_id: int | None = None
     prompt_ids: list[int]
     response: str
-    response_ids: list[int] 
+    response_ids: list[int] # 每一次实际输出，覆盖写
     logprobs: list[float] 
     routed_experts: list[int] | None = None
     reward: float | list[float] | list[dict] | None = None
-    loss_mask: list[int] | None = None
+    loss_mask: list[int] | None = None # tokens + response_ids的长度
     state: Status = Status.INIT
     sample_parms: SampleParams | None = None
     tools: list | None = None
     tool_choice: str | None = None
-
+    mm_infer_info: dict[str, Any]
+    mm_train_info: dict[str, Any]
+    finish_reason: str | None = None
+    staleness: int = 0
 
 # TODO: 这个对象存在的意义是啥？暂时不用，否则会导致内部循环对象不一致, partial rollout 也不好弄
 @dataclass
