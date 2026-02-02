@@ -72,15 +72,15 @@ class VisionComposeTrainEngine(TrainEngine):
         if dist.get_rank() == 0:
             logger.info(model)
 
-        if self.llm_float8_handler:
+        if self.llm_float8_handler is not None:
             self.llm_float8_handler.build_reduce_mesh(
                 model.language_model, cast(DeviceMesh, model.language_model.fsdp_mesh)
             )
-        if self.vision_float8_handler:
+        if self.vision_float8_handler is not None:
             self.vision_float8_handler.build_reduce_mesh(
                 model.vision_tower, cast(DeviceMesh, model.vision_tower.fsdp_mesh)
             )
-        if self.projector_float8_handler:
+        if self.projector_float8_handler is not None:
             self.projector_float8_handler.build_reduce_mesh(
                 model.multi_modal_projector, cast(DeviceMesh, model.multi_modal_projector.fsdp_mesh)
             )
