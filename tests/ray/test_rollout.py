@@ -117,11 +117,11 @@ class TestRollout(unittest.TestCase):
         pg2 = AutoAcceleratorWorkers.build_placement_group(resource_config, name="ep_pg")
         dense_model_path = MODEL_PATH
         moe_model_path = MOE_MODEL_PATH
-
+        dist_port_base = 38000
         async def run_both():
             return await asyncio.gather(
-                self._run_rollout(dense_model_path, 4, 1, pg1), # tp
-                self._run_rollout(moe_model_path, 1, 4, pg2), # tp
+                self._run_rollout(model_path=dense_model_path, tp_size=4, ep_size=1, pg=pg1, dist_port_base=dist_port_base),
+                self._run_rollout(model_path=moe_model_path, tp_size=1, ep_size=4, pg=pg2, dist_port_base=dist_port_base + 1024 * 4),
                 return_exceptions=False
             )
         
@@ -161,7 +161,7 @@ class TestRollout(unittest.TestCase):
         except Exception as e:
             print(f"Error stopping ray::RayWorkerWrapper cluster: {e}")
 
-    async def _run_rollout(self, model_path, tp_size, ep_size, pg):
+    async def _run_rollout(self, model_path, tp_size, ep_size, pg, dist_port_base):
         rollout_config = RolloutConfig(
             env="test_rollout",
             model_path=model_path,
@@ -171,7 +171,7 @@ class TestRollout(unittest.TestCase):
             expert_parallel_size=ep_size,
             context_length=self.context_length,
             worker_log_dir=self.worker_log_dir,
-            dist_port_base=38000,
+            dist_port_base=dist_port_base,
 
         )
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
