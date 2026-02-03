@@ -186,5 +186,26 @@ case:
                     grad_norm: 1
                     loss/reduced_llm_loss: 0.02
                     lr: 0
+            timeout: 10800
+
+    qwen3-sft-celoss:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_sft_celoss.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-sft-celoss/812c1021/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
             timeout: 10800

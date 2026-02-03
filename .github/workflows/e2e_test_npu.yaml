@@ -37,7 +37,7 @@ jobs:
         run: |
           source activate npuci
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
-          export DEVICE=npu && pytest autotest/test_all.py::test_all[npu-qwen3-sft-ep8] -m all -n 1 -vv --run_id ${{ github.run_id }}
+          export DEVICE=npu && pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
 
       - name: Upload Artifacts
         if: ${{ !cancelled() }}
