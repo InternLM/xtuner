@@ -9,6 +9,7 @@ class Train:
         print(config)
         config_path = config.get("parameters").get("config")
         train_type = config.get("type")
+        nproc_per_node = config.get("resource", {}).get("gpus_per_task", 8)
         if train_type in ["sft", "rl"]:
             model_config = config.get("parameters", {}).get("model", None)
             config_path = config.get("parameters", {}).get("config", None)
@@ -26,7 +27,7 @@ class Train:
 
             command = (
                 f"cd {current_dir}; pwd; pip install -e .[all]; pip install more-itertools; export GITHUB_RUN_ID={config.get('run_id')}; "
-                + "torchrun --nproc-per-node 8 --master_addr=${MASTER_ADDR} --master_port=${MASTER_PORT} --nnodes=${WORLD_SIZE} --node_rank=${RANK} "
+                + f"torchrun --nproc-per-node {nproc_per_node} --master_addr=${{MASTER_ADDR}} --master_port=${{MASTER_PORT}} --nnodes=${{WORLD_SIZE}} --node_rank=${{RANK}} "
                 + f"xtuner/v1/train/cli/{train_type}.py"
             )
             if config_path:
