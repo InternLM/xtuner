@@ -230,6 +230,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         else:
             self.logger = get_logger()
 
+        # print worker_cfg
+        self.logger.info(f"WorkerConfig: {worker_cfg.model_dump_json()}")
+
         self._set_deterministic()
         self._set_random_seed(worker_cfg.seed)
 
@@ -541,8 +544,13 @@ class TrainingWorker(SingleAcceleratorWorker):
             advantages = data["advantages"].to(DEVICE)
             rollout_logprobs = data.get("rollout_logprobs", None)
             rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
+            num_tokens: list[int] = seq_ctx.seq_lens_q.tolist()
             loss_ctx = loss_cfg.build(
-                self.sp_mesh, shifted_labels=shifted_labels, advantages=advantages, rollout_logprobs=rollout_logprobs
+                self.sp_mesh,
+                shifted_labels=shifted_labels,
+                advantages=advantages,
+                rollout_logprobs=rollout_logprobs,
+                num_tokens=num_tokens,
             )
 
             seq_ctx_list.append(seq_ctx)
@@ -588,8 +596,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         for i, loss_ctx in enumerate(loss_ctx_list):
             if loss_ctx.loss_kwargs.rollout_logprobs is not None:
                 # calculate importance sampling weights
-                num_tokens = seq_ctx_list[i].seq_lens_q
-                mismatch_metrics, rollout_is_metrics = loss_ctx.compute_rollout_is(self.sp_mesh, num_tokens)
+                # num_tokens = seq_ctx_list[i].seq_lens_q
+                mismatch_metrics, rollout_is_metrics = loss_ctx.compute_rollout_is()
                 all_rollout_is_metrics.append(rollout_is_metrics)
                 all_mismatch_metrics.append(mismatch_metrics)
 

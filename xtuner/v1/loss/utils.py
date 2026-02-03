@@ -17,7 +17,7 @@ def sp_split(
     split_dim: int,
     padding_value: Any,
 ):
-    if sp_mesh is None or sp_mesh.size() == 1:
+    if tensor is None or sp_mesh is None or sp_mesh.size() == 1:
         return tensor
     tensor = pad_to_multiple_of(tensor, padding_value, sp_mesh.size(), split_dim)
     tensor = split_for_sequence_parallel(tensor, dim=split_dim, sp_mesh=sp_mesh)
@@ -25,10 +25,76 @@ def sp_split(
 
 
 def sp_gather(tensor, sp_mesh: DeviceMesh | None, dim: int):
-    if sp_mesh is None or sp_mesh.size() == 1:
+    if tensor is None or sp_mesh is None or sp_mesh.size() == 1:
         return tensor
     tensor_list = dist.all_gather(tensor, group=sp_mesh.get_group())
     return torch.cat(tensor_list, dim=dim)
+
+
+class _DifferentiableGatherForwardSplitBackward(torch.autograd.Function):
+    """Differentiable gather operation for sequence parallel.
+
+    Gather the input during forward and split the grad during backward. This is needed when gradients need to flow back
+    through the gather operation.
+    """
+
+    @staticmethod
+    def forward(ctx, input, dim, sp_group, grad_scale):
+        ctx.dim = dim
+        ctx.sp_group = sp_group
+        ctx.grad_scale = grad_scale
+        ctx.world_size = dist.get_world_size(sp_group)
+        ctx.rank = dist.get_rank(sp_group)
+
+        input = input.contiguous()
+        if ctx.world_size == 1:
+            return input
+
+        # Use mmengine's dist.all_gather which returns a list
+        tensor_list = dist.all_gather(input, group=sp_group)
+        output = torch.cat(tensor_list, dim=dim).contiguous()
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if ctx.world_size == 1:
+            return grad_output, None, None, None
+
+        if ctx.grad_scale == "up":
+            grad_output = grad_output * ctx.world_size
+        elif ctx.grad_scale == "down":
+            grad_output = grad_output / ctx.world_size
+
+        # Split the gradient and return only the chunk corresponding to this rank
+        dim_size = grad_output.size(ctx.dim)
+        chunk_size = dim_size // ctx.world_size
+        start_idx = ctx.rank * chunk_size
+
+        # Use narrow to get the chunk for this rank
+        grad_input = grad_output.narrow(ctx.dim, start_idx, chunk_size).contiguous()
+
+        return grad_input, None, None, None
+
+
+def sp_gather_differentiable(tensor, sp_mesh: DeviceMesh | None, dim: int, grad_scale=None):
+    """Differentiable version of sp_gather.
+
+    Use this when gradients need to flow back through the gather operation,
+    e.g., for hidden_states in chunk_linear mode.
+
+    Args:
+        tensor: Input tensor to gather.
+        sp_mesh: Sequence parallel device mesh.
+        dim: Dimension to gather along.
+        grad_scale: How to scale gradients. "up" multiplies by world_size,
+                    "down" divides by world_size, None keeps unchanged.
+
+    Returns:
+        Gathered tensor with gradient support.
+    """
+    if tensor is None or sp_mesh is None or sp_mesh.size() == 1:
+        return tensor
+    return _DifferentiableGatherForwardSplitBackward.apply(tensor, dim, sp_mesh.get_group(), grad_scale)
 
 
 def len2weight(x, loss_reduction):
