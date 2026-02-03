@@ -95,7 +95,7 @@ case:
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
                     - PIP_TRUSTED_HOST=pkg.pjlab.org.cn
             assert_info:
-                base_metric: npu-qwen3-sft-ep8/cec3a8d2_resume/tracker.jsonl
+                base_metric: npu-qwen3-sft-ep8/812c1021_resume/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/reduced_llm_loss: 0.000001
