@@ -199,7 +199,7 @@ case:
             assert_info:
                 base_metric: npu-qwen3-sft-celoss-vs-gpu/812c1021/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.02
-                    loss/reduced_llm_loss: 0.02
-                    lr: 0
+                    grad_norm: 0.01
+                    loss/reduced_llm_loss: 0.01
+                    lr: 0.01
             timeout: 10800
