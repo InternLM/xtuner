@@ -21,6 +21,7 @@ from xtuner.v1.datasets.config import (
     DataloaderConfig,
     DatasetConfig,
 )
+import asyncio
 
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
@@ -36,11 +37,13 @@ class TestRollout(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ["XTUNER_USE_FA3"] = "1"
-
+        os.environ["LMD_SKIP_WARMUP"] = "1"
+        
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
-
+        del os.environ["LMD_SKIP_WARMUP"]
+        
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator=resource_map[torch.accelerator.current_accelerator().type],
@@ -50,20 +53,7 @@ class TestRollout(unittest.TestCase):
         )
         self.max_prompt_length = 512
         self.max_response_length = 1024
-        self.rollout_cfg = RolloutConfig(
-            env="test_rollout",
-            model_path=self.model_path,
-            model_name=os.path.basename(self.model_path).lower(),
-            tokenizer_path=self.model_path,
-            rollout_cross_node_comm=False,
-            tensor_parallel_size=1,
-            expert_parallel_size=1,
-            gpus_per_node=8, # gpu: 8, npu: 16
-            dtype="bfloat16",
-            launch_server_method="ray",
-            context_length=self.max_prompt_length + self.max_response_length,
-            worker_log_dir=self.worker_log_dir,
-        )
+        self.context_length = self.max_prompt_length + self.max_response_length
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
         self.judger_cfg = JudgerConfig(
@@ -72,8 +62,8 @@ class TestRollout(unittest.TestCase):
         )
         self.dataflow_cfg = DataFlowConfig(
             env="test",
-            prompt_repeat_k=2,
-            global_batch_size=2,
+            prompt_repeat_k=1,
+            global_batch_size=1,
             enable_partial_rollout=0,
             max_retry_times=1,
             worker_log_dir=self.worker_log_dir,
@@ -102,12 +92,10 @@ class TestRollout(unittest.TestCase):
     def setUp(self):
         ray.init(num_cpus=80, ignore_reinit_error=True)
         self.data_path = TRAIN_DATA_PATH
-        
         self.model_path = MODEL_PATH
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
         self.init_config()
-        self.pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
 
     def tearDown(self):
         ray.shutdown()
@@ -116,6 +104,53 @@ class TestRollout(unittest.TestCase):
         # TODO(chenchiyu): add excplicit deep_ep destroy in lmdeploy.
         self._cleanup_lmdeploy_ray_worker_wrapper()
         self.temp_dir.cleanup()
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_parallel_rollout(self):
+        resource_config = AcceleratorResourcesConfig(
+            accelerator=resource_map[torch.accelerator.current_accelerator().type],
+            num_workers=4,
+            num_cpus_per_worker=4,
+            cpu_memory_per_worker=8 * 1024**3,  # 8 GB
+        )
+        pg1 = AutoAcceleratorWorkers.build_placement_group(resource_config, name="tp_pg")
+        pg2 = AutoAcceleratorWorkers.build_placement_group(resource_config, name="ep_pg")
+        dense_model_path = MODEL_PATH
+        moe_model_path = MOE_MODEL_PATH
+        dist_port_base = 38000
+        async def run_both():
+            return await asyncio.gather(
+                self._run_rollout(model_path=dense_model_path, tp_size=4, ep_size=1, pg=pg1, dist_port_base=dist_port_base),
+                self._run_rollout(model_path=moe_model_path, tp_size=1, ep_size=4, pg=pg2, dist_port_base=dist_port_base + 1024 * 4),
+                return_exceptions=False
+            )
+        
+        asyncio.run(run_both())
+
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    def test_parallel_model_save_and_resume(self):
+        resource_config = AcceleratorResourcesConfig(
+            accelerator=resource_map[torch.accelerator.current_accelerator().type],
+            num_workers=4,
+            num_cpus_per_worker=4,
+            cpu_memory_per_worker=8 * 1024**3,  # 8 GB
+        )
+        pg1 = AutoAcceleratorWorkers.build_placement_group(resource_config, name="dense_pg")
+        pg2 = AutoAcceleratorWorkers.build_placement_group(resource_config, name="moe_pg")
+
+        async def run_both():
+            return await asyncio.wait_for(
+                asyncio.gather(
+                    self._run_dense_save_resume_sync_async(pg1), 
+                    self._run_moe_save_resume_with_r3(pg2), 
+                    return_exceptions=False
+                ),
+                timeout=300
+            )
+        try:
+            asyncio.run(run_both())
+        except asyncio.TimeoutError:
+            self.fail("test_parallel_model_save_and_resume timed out after 300s")
 
     def _cleanup_lmdeploy_ray_worker_wrapper(self):
         try:
@@ -126,114 +161,70 @@ class TestRollout(unittest.TestCase):
         except Exception as e:
             print(f"Error stopping ray::RayWorkerWrapper cluster: {e}")
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_generate(self):
-        rollout_cfg = self.rollout_cfg.model_copy(
-            deep=True,
-            update=dict(tensor_parallel_size=2),
+    async def _run_rollout(self, model_path, tp_size, ep_size, pg, dist_port_base):
+        rollout_config = RolloutConfig(
+            env="test_rollout",
+            model_path=model_path,
+            model_name=os.path.basename(model_path).lower(),
+            tokenizer_path=model_path,
+            tensor_parallel_size=tp_size,
+            expert_parallel_size=ep_size,
+            context_length=self.context_length,
+            worker_log_dir=self.worker_log_dir,
+            dist_port_base=dist_port_base,
+
         )
-        rollout_cfg.model_post_init(None)
+        rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
+        try:
+            result = await asyncio.wait_for(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES), timeout=300)
+            self.assertEqual(result.finish_reason, "stop") 
+        except asyncio.TimeoutError:
+            self.fail("TP Rollout timed out!") 
+        finally:
+            await asyncio.wait_for(rollout_controller.shutdown.remote(), timeout=300)
 
-        sample_params = SampleParams(temperature=0.0)
-        rollout_controller = ray.remote(RolloutController).remote(rollout_cfg, self.pg)  # type: ignore[attr-defined]
-        res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
-       
-        self.assertEqual(res1.finish_reason, "stop") 
-        print("Response from LMDeploy infer:", res1)
-        ray.get(rollout_controller.shutdown.remote(), timeout=300)
-
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_dataflow(self):
-        rollout_cfg = self.rollout_cfg.model_copy(
-            deep=True,
-            update=dict(
-                expert_parallel_size=2,
-                model_path=self.model_path, 
-                model_name=os.path.basename(MOE_MODEL_PATH).lower(),
-                tokenizer_path=MOE_MODEL_PATH,
-            ),
-        )
-        rollout_cfg.model_post_init(None)
-
-        self.dataflow_cfg.enable_partial_rollout = 0
-        self.test_env = SingleTurnEnvironment.remote(
-            "test_env",
-            self.pg,
-            rollout_cfg=rollout_cfg,
-        )
-        self.test_flow = DataFlow.remote("test_env",
-                                         self.dataflow_cfg,
-                                         self.replay_buffer_cfg,
-                                         self.test_env
-                                        )
-        responses = ray.get(self.test_flow.run.remote(), timeout=300)["data_groups"]
-        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
-        self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
-        ray.get(self.test_env.shutdown.remote(), timeout=300)
-
-    def _get_sorted_input_ids(self, responses):
-        """Helper to extract and sort input_ids from responses."""
-        all_ids = []
-        for data_items in responses:
-            for data_item in data_items:
-                all_ids.extend(data_item.data.input_ids)
-        all_ids.sort()
-        return all_ids
-    
-    def _run_dataflow_save_resume_test(self, rollout_cfg, dataflow_cfg):
+    async def _run_dataflow_save_resume_test(self, test_env, dataflow_cfg: DataFlowConfig, replay_buffer_cfg: ReplayBufferConfig):
         """
         Generic driver for dataflow save/resume tests.
         """
         # 1. Initialize Environment and DataFlow
         is_partial_rollout = dataflow_cfg.enable_partial_rollout == 1
-        self.test_env = SingleTurnEnvironment.remote(
-            "test_env",
-            self.pg,
-            rollout_cfg=rollout_cfg,
-        )
-        self.test_flow = DataFlow.remote(
-            "test_env",
-            dataflow_cfg,
-            self.replay_buffer_cfg,
-            self.test_env
-        )
+        test_flow = DataFlow.remote("test_env", dataflow_cfg, replay_buffer_cfg, test_env)
 
         # 2. Initial Run
-        ray.get(self.test_flow.run.remote(), timeout=300)
+        await test_flow.run.remote()
         
         # Capture status before saving (critical for partial rollout consistency check)
-        rl_status_before_save = ray.get(self.test_flow.get_replaybuffer_status.remote())
+        rl_status_before_save = await test_flow.get_replaybuffer_status.remote()
 
         # 3. Save
         save_dir = Path(self.temp_dir.name) / 'checkpoints' / f'ckpt-step-2'
         save_dir.mkdir(parents=True, exist_ok=True)
-        ray.get(self.test_flow.save.remote(save_dir))
+        await test_flow.save.remote(save_dir)
 
         # Define run logic based on mode
-        def run_continuation(status_ref):
+        async def run_continuation(status_ref):
             if is_partial_rollout:
                 remain = status_ref["remain_aborted_samples_count"] + status_ref["remain_completed_samples_count"]
                 # Finish the remaining paused samples
-                return ray.get(self.test_flow.run.remote(num=remain, staleness_threshold=0), timeout=300)["data_groups"]
+                result = await test_flow.run.remote(num=remain, enable_partial_rollout=0)                 
+                return result["data_groups"]
             else:
                 # Normal run
-                return ray.get(self.test_flow.run.remote(), timeout=300)["data_groups"]
+                result = await test_flow.run.remote()
+                return result["data_groups"]
 
         # continue running after save
-        responses_old = run_continuation(rl_status_before_save)
-        rb_status_old = ray.get(self.test_flow.get_replaybuffer_status.remote())
+        responses_old = await run_continuation(rl_status_before_save)
+        rb_status_old = await test_flow.get_replaybuffer_status.remote()
 
 
         # resume from saved checkpoint
-        ray.get(self.test_flow.resume.remote(save_dir))
-        rl_status_resume = ray.get(self.test_flow.get_replaybuffer_status.remote())
-        responses_new = run_continuation(rl_status_resume)
-        rb_status_new = ray.get(self.test_flow.get_replaybuffer_status.remote())
+        await test_flow.resume.remote(save_dir)
+        rl_status_resume = await test_flow.get_replaybuffer_status.remote()
+        responses_new = await run_continuation(rl_status_resume)
+        rb_status_new = await test_flow.get_replaybuffer_status.remote()
 
-        # 6. Cleanup
-        ray.get(self.test_env.shutdown.remote(), timeout=300)
-
-        # 7. Assertions
         # Compare Data
         ids_old = self._get_sorted_input_ids(responses_old)
         ids_new = self._get_sorted_input_ids(responses_new)
@@ -247,57 +238,110 @@ class TestRollout(unittest.TestCase):
         if is_partial_rollout:
             for key in rl_status_before_save:
                 self.assertEqual(rl_status_before_save[key], rl_status_resume[key])
-        
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_dataflow_save_resume(self):
-        rollout_cfg = self.rollout_cfg
-        dataflow_cfg = self.dataflow_cfg
-        dataflow_cfg.staleness_threshold = 0
-        dataflow_cfg.enable_partial_rollout = 0
-        self._run_dataflow_save_resume_test(rollout_cfg, dataflow_cfg)
 
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_dataflow_save_resume_with_partial_rollout(self):
-        rollout_cfg = self.rollout_cfg
-        dataflow_cfg = self.dataflow_cfg
-        dataflow_cfg.staleness_threshold = 1
-        dataflow_cfg.enable_partial_rollout = 1
-        self._run_dataflow_save_resume_test(rollout_cfg, dataflow_cfg)
-
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_dataflow_save_resume_with_partial_rollout_r3(self):
-        model_path = MOE_MODEL_PATH
-        rollout_cfg = RolloutConfig(
+    async def _run_dense_save_resume_sync_async(self, pg):
+        model_path = MODEL_PATH
+        worker_log_dir = os.path.join(self.worker_log_dir, "test_dense")
+        rollout_config = RolloutConfig(
             env="test_rollout",
             model_path=model_path,
             model_name=os.path.basename(model_path).lower(),
             tokenizer_path=model_path,
-            rollout_cross_node_comm=False,
-            tensor_parallel_size=1,
-            expert_parallel_size=1,
-            gpus_per_node=8,
-            dtype="bfloat16",
-            launch_server_method="ray",
-            context_length=self.max_prompt_length + self.max_response_length,
-            worker_log_dir=self.worker_log_dir,
-            enable_return_routed_experts=True,
+            context_length=self.context_length,
+            worker_log_dir=worker_log_dir,
+            dist_port_base=37000,
         )
-        dataflow_cfg = DataFlowConfig(
+        test_env = SingleTurnEnvironment.remote(
+            "test_env",
+            pg,
+            rollout_cfg=rollout_config,
+        )
+        sync_dataflow_cfg = DataFlowConfig(
+            env="test",
+            prompt_repeat_k=2,
+            global_batch_size=2,
+            enable_partial_rollout=0,
+            max_concurrent=2,
+            max_retry_times=1,
+            worker_log_dir=worker_log_dir,
+        )
+        async_dataflow_cfg = DataFlowConfig(
             env="test",
             prompt_repeat_k=2,
             global_batch_size=2,
             enable_partial_rollout=1,
             staleness_threshold=1,
+            max_retry_times=1,
             worker_log_dir=self.worker_log_dir,
         )
-        self._run_dataflow_save_resume_test(rollout_cfg, dataflow_cfg)
+        replay_buffer_cfg = ReplayBufferConfig(
+            dataset_cfg=self.train_dataset_cfg,
+            dataloader_cfg=self.dataloader_cfg,
+            tokenizer=self.tokenizer,
+            worker_log_dir=worker_log_dir,
+        )
+        self._run_dataflow_save_resume_test(test_env, sync_dataflow_cfg, replay_buffer_cfg)
+        self._run_dataflow_save_resume_test(test_env, async_dataflow_cfg, replay_buffer_cfg)
+
+    async def _run_moe_save_resume_with_r3(self, pg):
+        model_path = MOE_MODEL_PATH
+        worker_log_dir = os.path.join(self.worker_log_dir, "test_moe_r3")
+        rollout_config = RolloutConfig(
+            env="test_rollout",
+            model_path=model_path,
+            model_name=os.path.basename(model_path).lower(),
+            tokenizer_path=model_path,
+            expert_parallel_size=2,
+            context_length=self.context_length,
+            worker_log_dir=worker_log_dir,
+            dist_port_base=36000,
+        )
+        test_env = SingleTurnEnvironment.remote(
+            "test_env",
+            pg,
+            rollout_cfg=rollout_config,
+        )
+        async_dataflow_cfg = DataFlowConfig(
+            env="test",
+            prompt_repeat_k=2,
+            global_batch_size=2,
+            enable_partial_rollout=1,
+            max_concurrent=4,
+            max_retry_times=1,
+            worker_log_dir=worker_log_dir,
+        )
+        replay_buffer_cfg = ReplayBufferConfig(
+            dataset_cfg=self.train_dataset_cfg,
+            dataloader_cfg=self.dataloader_cfg,
+            tokenizer=self.tokenizer,
+            worker_log_dir=worker_log_dir,
+        )
+        self._run_dataflow_save_resume_test(test_env, async_dataflow_cfg, replay_buffer_cfg)
+
+    def _get_sorted_input_ids(self, responses):
+        """Helper to extract and sort input_ids from responses."""
+        all_ids = []
+        for data_items in responses[0]:
+            for data_item in data_items:
+                all_ids.extend(data_item.data.input_ids)
+        all_ids.sort()
+        return all_ids
 
     @unittest.skip("skip lmdeploy turbomind generate test due to ci environment issue")
     def test_lmdeploy_turbomind_generate(self):
         from xtuner.v1.ray.rollout import LMDeployWorker
-        self.rollout_cfg.extra_rollout_config["lmdeploy_backend"] = "turbomind"
+        rollout_config = RolloutConfig(
+            env="test_rollout",
+            model_path=MODEL_PATH,
+            model_name=os.path.basename(MODEL_PATH).lower(),
+            tokenizer_path=MODEL_PATH,
+            context_length=self.context_length,
+            worker_log_dir=self.worker_log_dir,
+            extra_rollout_config={"lmdeploy_backend": "turbomind"},
+        )
         sample_params = SampleParams(temperature=0.0)
-        rollout_controller = ray.remote(RolloutController).remote(self.rollout_cfg, self.pg)  # type: ignore[attr-defined]
+        pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
+        rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         res2 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         self.assertEqual(res1, res2, f"res1 != res2, res1={res1}, res2={res2}")
@@ -307,8 +351,18 @@ class TestRollout(unittest.TestCase):
     def test_sglang_generate(self):
         from xtuner.v1.ray.rollout import SGLangWorker
         self.rollout_cfg.launch_server_method="multiprocessing"
+        rollout_config = RolloutConfig(
+            env="test_rollout",
+            model_path=MODEL_PATH,
+            model_name=os.path.basename(MODEL_PATH).lower(),
+            tokenizer_path=MODEL_PATH,
+            context_length=self.context_length,
+            worker_log_dir=self.worker_log_dir,
+            launch_server_method="multiprocessing"
+        )
         sample_params = SampleParams(temperature=0.0)
-        rollout_controller = ray.remote(RolloutController).remote(self.rollout_cfg, self.pg)  # type: ignore[attr-defined]
+        pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
+        rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)  # type: ignore[attr-defined]
         res1 = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))
         self.assertEqual(res1.finish_reason, "stop")
         print("Response from SGLang infer:", res1)
@@ -317,21 +371,30 @@ class TestRollout(unittest.TestCase):
     @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "lmdeploy backend is not enabled")
     def test_sglang_dataflow(self):
         self.dataflow_cfg.enable_partial_rollout = 0
-        self.rollout_cfg.launch_server_method="multiprocessing"
-        self.test_env = SingleTurnEnvironment.remote(
-            "test_env",
-            self.pg,
-            rollout_cfg=self.rollout_cfg,
+        rollout_config = RolloutConfig(
+            env="test_rollout",
+            model_path=MODEL_PATH,
+            model_name=os.path.basename(MODEL_PATH).lower(),
+            tokenizer_path=MODEL_PATH,
+            context_length=self.context_length,
+            worker_log_dir=self.worker_log_dir,
+            launch_server_method="multiprocessing"
         )
-        self.test_flow = DataFlow.remote("test_env",
+        pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
+        test_env = SingleTurnEnvironment.remote(
+            "test_env",
+            pg,
+            rollout_cfg=rollout_config,
+        )
+        test_flow = DataFlow.remote("test_env",
                                          self.dataflow_cfg,
                                          self.replay_buffer_cfg,
-                                         self.test_env
+                                         test_env
                                         )
-        responses = ray.get(self.test_flow.run.remote(), timeout=300)["data_groups"]
+        responses = ray.get(test_flow.run.remote(), timeout=300)["data_groups"]
         finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
-        ray.get(self.test_env.shutdown.remote(), timeout=300)
+        ray.get(test_env.shutdown.remote(), timeout=300)
         print("responses: ", responses)
 
 if __name__ == "__main__":
