@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.loss.chunk_linear import FusedLinearForPPOFunction as ChunkLinear
-from xtuner.v1.loss.utils import sp_gather, sp_gather_differentiable
+from xtuner.v1.loss.utils import sp_gather, sp_gather_autograd
 from xtuner.v1.utils import get_logger
 
 from ..base import (
@@ -150,13 +150,7 @@ class GRPOLossContext(BaseRLLossContext):
             assert head_bias is None, "head_bias must be None when enable_chunk_linear is True"
 
             # Use differentiable gather for hidden_states to allow gradient flow.
-            # grad_scale="up" multiplies gradient by sp_size to compensate for `loss / sp_size` later,
-            # because hidden_states gradient is split back to each rank (not duplicated like head_weight).
-            # 在本函数最后 `loss = loss / self.sp_mesh.size()` 会影响所有梯度
-            # 对于 head_weight：每个 SP rank 计算完整梯度，需要这个 /sp_size
-            # 对于 hidden_states：split 后每个 rank 只拿自己那部分，不应该被 /sp_size 影响
-            # 因此，需要在 sp_gather_differentiable 的 backward 中乘以 sp_size 来补偿，即 grad_scale="up"。
-            hidden_states = sp_gather_differentiable(hidden_states, sp_mesh=self.sp_mesh, dim=1, grad_scale="up")
+            hidden_states = sp_gather_autograd(hidden_states, sp_mesh=self.sp_mesh, dim=1)
             shifted_labels = sp_gather(shifted_labels, sp_mesh=self.sp_mesh, dim=1)
             # clone shifted_labels to avoid modifying the original tensor which is used in loss calculation
             # and set ignore_idx to 0 to avoid index out of bounds error in ChunkLinear.apply
