@@ -392,7 +392,7 @@ class TestRollout(unittest.TestCase):
                                          test_env
                                         )
         responses = ray.get(test_flow.run.remote(), timeout=300)["data_groups"]
-        finished_samples_count = sum(1 for data in responses[0] for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
+        finished_samples_count = sum(1 for data in responses for item in data if item.env.rollout.finish_reason == "stop" or item.env.rollout.finish_reason == "length")
         self.assertEqual(finished_samples_count // self.dataflow_cfg.prompt_repeat_k, self.dataflow_cfg.global_batch_size)
         ray.get(test_env.shutdown.remote(), timeout=300)
         print("responses: ", responses)
