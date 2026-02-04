@@ -91,7 +91,6 @@ case:
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
-                    runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
             timeout: 10800
 
