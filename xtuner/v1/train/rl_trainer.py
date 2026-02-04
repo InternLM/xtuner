@@ -17,7 +17,7 @@ from typing_extensions import Literal, Self, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto.rl_data import is_valid_for_training
+from xtuner.v1.data_proto.rl_data import MultimodalTrainInfo, RLDataFlowItem, is_valid_for_training
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, CPUResourcesConfig
@@ -61,14 +61,15 @@ def bind_train_rollout(
 
 
 class RolloutInfo(TypedDict):
-    # 重构后字段待定
+    data_groups: list[list[RLDataFlowItem]]
+    multimodal_train_infos: list[MultimodalTrainInfo]
     task_time: dict[str, float]
     replay_buffer_info: dict[str, float]
 
 
 class TrainInfo(TypedDict):
     data_info: dict[str, float]
-    workers_log_item: List[WorkerLogItem]
+    workers_log_item: list[WorkerLogItem]
 
 
 class RLTrainerConfig(BaseModel):
@@ -527,30 +528,32 @@ class RLTrainer:
                 global_step=0,
             )
 
-    def _rollout_step(self, rollout_idx: int, step_timer_dict: dict):
+    def _rollout_step(self, rollout_idx: int, step_timer_dict: dict) -> RolloutInfo:
         """Performs a single rollout step to generate experience."""
-        rollout_log_info = {}
         with timer("generation", step_timer_dict):
             ray.get(self._rollout_env_controller.update_active_workers.remote())
             dataflow_result = ray.get(self._rollout_dataflow.run.remote())
-            data_groups = dataflow_result["data_groups"]
-            multimodal_train_infos = dataflow_result.get("mm_train_infos", None)
-            rollout_log_info["task_time"] = dataflow_result.get("metrics", {})
-            rollout_log_info["replay_buffer_info"] = ray.get(self._rollout_dataflow.get_replaybuffer_status.remote())
 
         with timer("save_trajectory", step_timer_dict):
             trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
-            self._save_trajectories(data_groups, trajectory_save_path)
+            self._save_trajectories(dataflow_result["data_groups"], trajectory_save_path)
             self.logger.info(f"Rollout_idx {rollout_idx} finished, saved trajectories to {trajectory_save_path}")
+
         if not self._debug_rollout:
             with timer("rollout_offload", step_timer_dict):
                 ray.get(self._rollout_dataflow.pause.remote())
                 ray.get(self._rollout_env_controller.offload.remote())
-        return data_groups, multimodal_train_infos, rollout_log_info
 
-    def _train_step(self, rollout_idx: int, data_groups, multimodal_train_infos, step_timer_dict: dict):
+        rollout_info: RolloutInfo = {
+            "data_groups": dataflow_result["data_groups"],
+            "multimodal_train_infos": dataflow_result.get("multimodal_train_infos", None),
+            "task_time": dataflow_result.get("metrics", {}),
+            "replay_buffer_info": ray.get(self._rollout_dataflow.get_replaybuffer_status.remote()),
+        }
+        return rollout_info
+
+    def _train_step(self, rollout_idx: int, data_groups, multimodal_train_infos, step_timer_dict: dict) -> TrainInfo:
         """Performs a single training step on the generated experience."""
-        train_log_info = {}
         with timer("onload", step_timer_dict):
             ray.get(self._train_controller.onload.remote(target="all"))
             self.logger.info("Training controller loaded")
@@ -560,7 +563,6 @@ class RLTrainer:
                 data_groups, self._train_worker_cfg.pack_max_length, multimodal_train_infos
             )
             self.logger.info(f"Prepared {len(data_batches)} training data batches")
-            train_log_info["data_info"] = data_info
 
         with timer("training", step_timer_dict):
             workers_log_item: List[WorkerLogItem] = ray.get(
@@ -568,7 +570,10 @@ class RLTrainer:
                     data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
                 )
             )
-            train_log_info["workers_log_item"] = workers_log_item
+        train_log_info: TrainInfo = {
+            "data_info": data_info,
+            "workers_log_item": workers_log_item,
+        }
         return train_log_info
 
     def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):
@@ -586,7 +591,7 @@ class RLTrainer:
             ray.get(self._train_controller.offload.remote(target="model"))
             ray.get(self._rollout_env_controller.onload_kvcache.remote())
 
-    def _evaluate_step(self, rollout_idx: int, step_timer_dict: dict):
+    def _evaluate_step(self, rollout_idx: int, step_timer_dict: dict) -> dict[str, float]:
         """Performs an evaluation step."""
         eval_log_info = {}
         if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
@@ -616,14 +621,15 @@ class RLTrainer:
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
-                data_groups, multimodal_train_infos, rollout_log_info = self._rollout_step(
-                    rollout_idx, step_timer_dict
-                )
+                rollout_info = self._rollout_step(rollout_idx, step_timer_dict)
 
                 if not self._debug_rollout:
                     # 2. Train on the generated experience
                     train_log_info = self._train_step(
-                        rollout_idx, data_groups, multimodal_train_infos, step_timer_dict
+                        rollout_idx,
+                        rollout_info["data_groups"],
+                        rollout_info["multimodal_train_infos"],
+                        step_timer_dict,
                     )
 
                     # 3. Synchronize weights and save checkpoints
@@ -632,7 +638,7 @@ class RLTrainer:
                     # 4. Evaluate model performance
                     eval_log_info = self._evaluate_step(rollout_idx, step_timer_dict)
 
-            self._log_step(rollout_idx, step_timer_dict, rollout_log_info, train_log_info, eval_log_info)
+            self._log_step(rollout_idx, step_timer_dict, rollout_info, train_log_info, eval_log_info)
             self._cur_step = rollout_idx
 
         self._exp_tracker.close()
@@ -675,7 +681,7 @@ class RLTrainer:
                     break
                 mini_batch_metrics: dict[str, List[float]] = {}
                 for mini_batch_log in log_item["train_metrics"]:
-                    rl_worker_log = {**mini_batch_log["loss_log"], **mini_batch_log["rl_other_log"]}
+                    rl_worker_log = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
                     for k, v in rl_worker_log.items():
                         mini_batch_metrics.setdefault(k, []).append(cast(float, v))
 
@@ -703,7 +709,7 @@ class RLTrainer:
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
                 current_global_step = train_start_step + step_idx
-                metrics = {**mini_batch_log["loss_log"], **mini_batch_log["rl_other_log"]}
+                metrics = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
 
                 self._exp_tracker.add_scalars(
                     tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": v for k, v in metrics.items()},
