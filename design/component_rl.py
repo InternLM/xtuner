@@ -33,7 +33,7 @@ class Status(Enum):
     SKIPPED = "skipped"
 
 
-class Sample:  # RolloutState:
+class RolloutState:  # RolloutState:
     # message: list
     tokens: list[int] # 每一次实际输入
     
@@ -57,16 +57,16 @@ class Sample:  # RolloutState:
 
 
 class RolloutController:
-    async def generate_sample(self, sample: Sample) -> Sample: ...
+    async def generate_sample(self, sample: RolloutState) -> RolloutState: ...
 
 
 class Judge:
-    def judge(self, sample: Sample) -> Sample: ...
+    def judge(self, sample: RolloutState) -> RolloutState: ...
 
 
 class Agent:  # Agent负责一条轨迹样本的生成
-    async def generate_sample(self, sample: Sample) -> Sample: ...
-    async def generate_group(self, sample_fn: Callable[[], list[Sample]], data_mgr: "DataManager") -> list[Sample]: ...
+    async def generate_sample(self, sample: RolloutState) -> RolloutState: ...
+    async def generate_group(self, sample_fn: Callable[[], list[RolloutState]], data_mgr: "DataManager") -> list[RolloutState]: ...
 
 class SingleTurnAgent(Agent):
     def __init__(self, rollout_ctl: RolloutController, hf_checkpoint, sample_params=SampleParams(), judge_cfg: dict = None) -> None:
@@ -78,16 +78,16 @@ class SingleTurnAgent(Agent):
         self.sample_params = sample_params
         self.judge = Judge() if judge_cfg is not None else None
 
-    async def generate_sample(self, sample: Sample) -> Sample:
+    async def generate_sample(self, sample: RolloutState) -> RolloutState:
         sample = await self.rollout_ctl.generate_sample(sample)
         if self.judge is not None:
             sample = self.judge.judge(sample)
         return sample
 
-    async def generate_group(self, sample_fn: Callable[[], list[Sample]], data_mgr: "DataManager") -> Status:
+    async def generate_group(self, sample_fn: Callable[[], list[RolloutState]], data_mgr: "DataManager") -> Status:
         pending_tasks = []
 
-        group_samples: list[Sample] = sample_fn()  # list of prompt_k Sample
+        group_samples: list[RolloutState] = sample_fn()  # list of prompt_k Sample
         for sample in group_samples:
             task = asyncio.create_task(self.generate_sample(sample))
             pending_tasks.append(task)
@@ -109,18 +109,18 @@ class MultiTurnToolAgent(Agent):
 
 class DataManager:
     dataloader: DataLoader
-    replay_buffer: list[list[Sample]]
+    replay_buffer: list[list[RolloutState]]
 
-    def sample_from_dataset(self) -> list[Sample]: ...  # get from dataloader
+    def sample_from_dataset(self) -> list[RolloutState]: ...  # get from dataloader
 
-    def add_to_replay_buffer(self, samples: list[Sample]): ...
+    def add_to_replay_buffer(self, samples: list[RolloutState]): ...
 
     def get_batch(self) -> list[TrainItem]: ...  # get from replay_buffer and convert to TrainItem
 
-class Scheduler:  # Scheduler负责调度多个样本的生成，里面可以有超发、异步、重排长短样本等优化
+class ProduceStrategy:  # Scheduler负责调度多个样本的生成，里面可以有超发、异步、重排长短样本等优化
     async def produce_batch(self, batch_size: int, data_mgr: DataManager, agent: Agent): ...
 
-class SyncScheduler(Scheduler):
+class SyncProduceStrategy(ProduceStrategy):
     async def produce_batch(self, batch_size: int, data_mgr: DataManager, agent: Agent):
         data_concurrency = batch_size
 
@@ -144,7 +144,7 @@ class SyncScheduler(Scheduler):
                     print(f"Error in generating trajectory: {e}")
 
 
-class AsyncScheduler(Scheduler):
+class AsyncProduceStrategy(ProduceStrategy):
     def __init__(
             self, 
             staleness_threshold: float = 0.0,
@@ -160,10 +160,10 @@ class AsyncScheduler(Scheduler):
         pass
 
 
-class Env:
+class Environment:
     def __init__(self, rollout_ctl: RolloutController):
         self._agent: Agent = SingleTurnAgent(rollout_ctl)
-        self._scheduler: Scheduler = Scheduler()
+        self._scheduler: ProduceStrategy = SyncProduceStrategy()
     
     async def produce_batch(self, data_mgr: DataManager, batch_size: int):
         await self._scheduler.produce_batch(batch_size, data_mgr, self._agent)
@@ -185,7 +185,7 @@ class TrainController:
 
 
 class Evaluator:  # 根据rollout输出的batch，计算评估指标。本身并不负责rollout。
-    def evaluate(self, batch: list[Sample]) -> dict: ...
+    def evaluate(self, batch: list[RolloutState]) -> dict: ...
 
 
 ################################### Usage example with components #########################################
@@ -200,7 +200,7 @@ def main_colocate_with_train_highlevel():
     train_ctl: TrainController(pg)
 
     data_mgr: DataManager
-    env: Env(rollout_ctl)
+    env: Environment(rollout_ctl)
     eval_data_mgr: DataManager
     evaluator: Evaluator
     total_rollouts: int
@@ -220,13 +220,13 @@ def main_colocate_with_train_highlevel():
         
 
 class Packer:
-    def pack_pad_dispatch(self, samples: list[Sample]) -> list[Sample]: ...
+    def pack_pad_dispatch(self, samples: list[RolloutState]) -> list[RolloutState]: ...
 
 def main_colocate_with_train_lowlevel():
     data_mgr: DataManager
     pg: PlacementGroup
     rollout_ctl: RolloutController(pg)
-    env: Env(rollout_ctl)
+    env: Environment(rollout_ctl)
     train_ctl: TrainController(pg)
 
     eval_data_mgr: DataManager
@@ -261,7 +261,7 @@ def main_separate():
     rollout_ctl: RolloutController(pg1)
     pg1_2: PlacementGroup
     rollout_ctl_2: RolloutController(pg1_2)
-    env: Env(rollout_ctl, rollout_ctl_2)
+    env: Environment(rollout_ctl, rollout_ctl_2)
 
     pg2: PlacementGroup
     train_ctl: TrainController(pg2)
