@@ -16,7 +16,7 @@ class PlacementGroup: ...
 def log_metrics(metrics: dict): ...
 
 
-################################### Main Components ######################################
+################################### Main components ######################################
 class Status(Enum):
     INIT = "init"
     COMPLETED = "completed"
@@ -90,7 +90,7 @@ class DataManager:
     dataloader: DataLoader
     replay_buffer: list[Sample]
 
-    def sample_from_dataset(self) -> list[Sample]: ...
+    def sample_from_dataset(self) -> list[Sample]: ...  # get from dataloader
 
     def add_to_replay_buffer(self, samples: list[Sample]): ...
 
@@ -180,13 +180,19 @@ class Evaluator:  # 根据rollout输出的batch，计算评估指标。本身并
     def evaluate(self, batch: list[Sample]) -> dict: ...
 
 
+################################### Usage example with components #########################################
+# 弱化Trainer：Trainer中代码尽量少，尽量用componet来组织代码。下面是几种典型Trainer的组织方式。
+
 def main_colocate_with_train_highlevel():
-    data_mgr: DataManager
+    # rollout_ctl, train_ctl, data_mgr, env, evaluator等对象都是主进程中本地对象，并不是ray actor。这样：
+    # 1. 保证一大部分的数据传递无需跨机传输，方便统一管理
+    # 2. 减少ray引入的debug和维护难度
     pg: PlacementGroup
     rollout_ctl: RolloutController(pg)
-    env: Env(rollout_ctl)
     train_ctl: TrainController(pg)
 
+    data_mgr: DataManager
+    env: Env(rollout_ctl)
     eval_data_mgr: DataManager
     evaluator: Evaluator
     total_rollouts: int
