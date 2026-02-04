@@ -63,15 +63,15 @@ print(f"Chunk mode Time taken: {time.time() - t1:.2f} seconds")
 Eager mode Loss: 12.125
 Eager mode hidden_states grad norm: 0.0031890869140625
 Eager mode lm_head weight grad norm: 0.353515625
-Eager mode Max memory allocated: 38.54 GB
-Eager mode Max memory reserved: 38.54 GB
-Eager mode Time taken: 0.38 seconds
-Chunk mode Loss: 12.099200248718262
+Eager mode Max memory allocated: 38.57 GB
+Eager mode Max memory reserved: 47.81 GB
+Eager mode Time taken: 0.42 seconds
+Chunk mode Loss: 12.094674110412598
 Chunk mode hidden_states grad norm: 0.0031890869140625
 Chunk mode lm_head weight grad norm: 0.353515625
 Chunk mode Max memory allocated: 6.87 GB
-Chunk mode Max memory reserved: 10.72 GB
-Chunk mode Time taken: 2.67 seconds
+Chunk mode Max memory reserved: 9.56 GB
+Chunk mode Time taken: 0.26 seconds
 ```
 
 (global-average)=
