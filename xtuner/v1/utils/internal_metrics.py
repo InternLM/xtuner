@@ -1,9 +1,10 @@
 from collections import defaultdict
+from typing import cast
 
 import torch
 import torch.distributed as dist
 from mmengine.dist import get_world_size
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, TypeAdapter, model_validator
 from torch import nn
 from torch.utils.hooks import RemovableHandle
 from typing_extensions import TypedDict
@@ -44,6 +45,9 @@ class InternalMetrics(TypedDict, total=False):
     attn_max_logits: dict[str, float]
 
 
+internal_metrics_adapter = TypeAdapter(InternalMetrics)
+
+
 class InternalMetricsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     internal_metrics_interval: int | None = None
@@ -71,23 +75,30 @@ class InternalMetricsRecorder:
     def __init__(self, internal_metrics_cfg: InternalMetricsConfig, model: XTunerBaseModel):
         self.internal_metrics_cfg = internal_metrics_cfg
         self.model = model
+
         self.hooks: list[RemovableHandle] = []
+
         self._attn_monitor_type: str | None = None
         self.attn_max_lse: dict[str, torch.Tensor] = {}
         self.attn_max_logits: dict[str, torch.Tensor] = {}
+
         self.metrics = self._init_metrics_dict()
         self._closed = False
 
     def _init_metrics_dict(self) -> InternalMetrics:
         metrics: InternalMetrics = {}
+
         if self.internal_metrics_cfg.monitor_weights_rms_norm:
             metrics["weight_rms"] = {}
+
         if self.internal_metrics_cfg.monitor_attn_logits_stats:
             attn_cfg: MHAConfig | MLAConfig = self.model.config.attention  # type: ignore[attr-defined]
+
             if isinstance(attn_cfg, MLAConfig):
                 attn_impl = "flash_attention"
             else:
                 attn_impl = attn_cfg.attn_impl
+
             if attn_impl == "eager_attention":
                 # We typically won't use eager attn, but implement it here anyway
                 self._attn_monitor_type = "attn_logits"
@@ -95,6 +106,7 @@ class InternalMetricsRecorder:
             elif not (DEVICE == "npu" and attn_impl == "flash_attention"):
                 self._attn_monitor_type = "softmax_lse"
                 metrics["attn_max_lse"] = {}
+
             for module in self.model.modules():
                 if isinstance(module, ATTENTION_CLS):
                     if self._attn_monitor_type == "attn_logits":
@@ -117,20 +129,28 @@ class InternalMetricsRecorder:
     def calculate_module_weight_rms(self, module: nn.Module, layer_name: str, dtype: torch.dtype = torch.float32):
         """Calculate the RMS of the module's parameters."""
         self._check_closed()
+
         if "weight_rms" not in self.metrics:
             return
+
         all_params = [param.data for param in module.parameters() if param.requires_grad]
+
         if not all_params:
             return
+
         grouped_params = group_tensors_by_device_mesh_and_placements(all_params)  # type: ignore[arg-type]
+
         total_norms = []
         total_numel = 0
+
         for params in grouped_params.values():
             total_norm = cal_total_norm(params, norm_type=2.0, foreach=True, dtype=dtype)
             total_norms.append(total_norm)
             total_numel += sum(p.numel() for p in params)
+
         param_l2_norm = torch.linalg.vector_norm(torch.stack(total_norms), ord=2.0, dtype=dtype)
         param_rms = param_l2_norm / total_numel**0.5
+
         self.metrics["weight_rms"][layer_name] = param_rms.item()
 
     def register_attn_output_hook(self, module: nn.Module):
@@ -140,6 +160,7 @@ class InternalMetricsRecorder:
         def hook(module, input, output):
             if output.get("softmax_lse") is not None:
                 self.attn_max_lse[module.name] = torch.max(self.attn_max_lse[module.name], output["softmax_lse"].max())
+
             if output.get("attn_logits") is not None:
                 self.attn_max_logits[module.name] = max(self.attn_max_logits[module.name], output["attn_logits"].max())
 
@@ -150,9 +171,11 @@ class InternalMetricsRecorder:
     def pop_metrics(self, data_batches: list[ModelItem]):
         """Run a dummy forward to get metrics."""
         self._check_closed()
+
         for name, module in self.model.named_modules():
             if self.internal_metrics_cfg.monitor_attn_logits_stats and isinstance(module, ATTENTION_CLS):
                 self.register_attn_output_hook(module)
+
             if self.internal_metrics_cfg.monitor_weights_rms_norm and isinstance(module, RMS_NORM_MONITOR_MODULES):
                 self.calculate_module_weight_rms(module, self._clean_module_name(name), dtype=torch.float32)
 
@@ -172,6 +195,7 @@ class InternalMetricsRecorder:
                 data_batch = data_batches[i]
                 seq_ctx = data_batch["seq_ctx"]
                 output = self.model(seq_ctx=seq_ctx, loss_ctx=None, **additional_kwargs)
+
                 if (
                     self.internal_metrics_cfg.monitor_moe_load_balance_stats
                     and (cur_tokens_per_expert := output.get("tokens_per_expert_global")) is not None
@@ -195,15 +219,19 @@ class InternalMetricsRecorder:
         if tokens_per_expert_global is not None:
             avg_count_load = tokens_per_expert_global.mean(1)
             max_load_i = torch.amax(tokens_per_expert_global, dim=1)
+
             maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
+
             centered_tokens_per_expert = tokens_per_expert_global - avg_count_load[:, None]
             drop_ratio_all_layers = (centered_tokens_per_expert).abs().mean(dim=1) / avg_count_load
+
             if "drop_ratio" in self.metrics:
                 self.metrics["drop_ratio"].update(
                     {f"layer{idx}": drop_ratio_all_layers[idx].item() for idx in range(drop_ratio_all_layers.shape[0])}
                 )
                 drop_ratio = drop_ratio_all_layers.mean()
                 self.metrics["drop_ratio"]["total"] = drop_ratio.item()
+
             if "maxvio" in self.metrics:
                 self.metrics["maxvio"].update(
                     {f"layer{idx}": maxvio_all_layers[idx].item() for idx in range(max_load_i.shape[0])}
@@ -216,6 +244,7 @@ class InternalMetricsRecorder:
                 # [bsz/intra_layer_micro_batch, ]
                 local_router_logits_max = torch.max(torch.stack(router_logits_list))
                 dist.all_reduce(local_router_logits_max, op=dist.ReduceOp.MAX)
+
                 self.metrics["router_logits_max"][layer_name] = local_router_logits_max.item()
 
         if "router_logits_mean" in self.metrics and router_logits_mean:
@@ -223,16 +252,19 @@ class InternalMetricsRecorder:
                 # [bsz/intra_layer_micro_batch, ]
                 local_router_logits_mean = torch.mean(torch.stack(router_logits_list))
                 dist.all_reduce(local_router_logits_mean.div_(get_world_size()), op=dist.ReduceOp.SUM)
+
                 self.metrics["router_logits_mean"][layer_name] = local_router_logits_mean.item()
 
         if "attn_max_lse" in self.metrics and self._attn_monitor_type == "softmax_lse":
             for layer_name, local_attn_max_lse in self.attn_max_lse.items():
                 dist.all_reduce(local_attn_max_lse, op=dist.ReduceOp.MAX)
+
                 self.metrics["attn_max_lse"][layer_name] = local_attn_max_lse.item()
 
         if "attn_max_logits" in self.metrics and self._attn_monitor_type == "attn_logits":
             for layer_name, local_attn_max_logits in self.attn_max_logits.items():
                 dist.all_reduce(local_attn_max_logits, op=dist.ReduceOp.MAX)
+
                 self.metrics["attn_max_logits"][layer_name] = local_attn_max_logits.item()
 
         self._maybe_reset_attn_max_lse_or_logits(self.attn_max_lse)
@@ -241,7 +273,7 @@ class InternalMetricsRecorder:
         for hook in self.hooks:
             hook.remove()
 
-        return self.metrics
+        return internal_metrics_adapter.validate_python(self.metrics)
 
     def close(self):
         if not self._closed:
@@ -266,6 +298,7 @@ class InternalMetricsRecorder:
     def _maybe_reset_attn_max_lse_or_logits(self, target: dict[str, torch.Tensor]):
         if not target:
             return
+
         for v in target.values():
             if isinstance(v, torch.Tensor):
                 v.fill_(SMALL_VAL)
@@ -293,16 +326,12 @@ class InternalMetricsRecorder:
 
 
 def flatten_internal_metrics_for_logs(metrics: InternalMetrics, sep: str = "/") -> dict:
+    internal_metrics_adapter.validate_python(metrics)
+
     items = []
     for name, sub_metrics in metrics.items():
-        if isinstance(sub_metrics, dict):
-            for k, v in sub_metrics.items():
-                if isinstance(v, (float, int)):
-                    items.append((f"{name}{sep}{k}", v))
-                else:
-                    raise ValueError(f"Unsupported metric value type: expected float or int, but got {type(v)}")
-        else:
-            raise ValueError(
-                f"Unsupported metric type for internal metrics: expected dict, but got {type(sub_metrics)}"
-            )
+        sub_metrics = cast(dict, sub_metrics)
+        for k, v in sub_metrics.items():
+            items.append((f"{name}{sep}{k}", v))
+
     return dict(items)
