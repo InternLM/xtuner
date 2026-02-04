@@ -1,5 +1,5 @@
 ################################### imports ######################################
-from typing import Any
+from typing import Any, Callable
 import asyncio
 from enum import Enum
 from torch.utils.data import DataLoader
@@ -7,6 +7,8 @@ import threading
 
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.data_proto.rl_data import SampleParams  # TODO: 删掉一个？
+from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.loss.base_loss_ctx import BaseLossContext
 
 def load_tokenizer(hf_checkpoint, trust_remote_code=True): ...
 def load_processor(hf_checkpoint, trust_remote_code=True): ...
@@ -14,6 +16,10 @@ def load_processor(hf_checkpoint, trust_remote_code=True): ...
 class PlacementGroup: ...
 
 def log_metrics(metrics: dict): ...
+
+class TrainItem:
+    seq_ctx: SequenceContext
+    loss_ctx: BaseLossContext
 
 
 ################################### Main components ######################################
@@ -60,6 +66,7 @@ class Judge:
 
 class Agent:  # Agent负责一条轨迹样本的生成
     async def generate_sample(self, sample: Sample) -> Sample: ...
+    async def generate_group(self, sample_fn: Callable[[], list[Sample]], data_mgr: "DataManager") -> list[Sample]: ...
 
 class SingleTurnAgent(Agent):
     def __init__(self, rollout_ctl: RolloutController, hf_checkpoint, sample_params=SampleParams(), judge_cfg: dict = None) -> None:
@@ -77,6 +84,20 @@ class SingleTurnAgent(Agent):
             sample = self.judge.judge(sample)
         return sample
 
+    async def generate_group(self, sample_fn: Callable[[], list[Sample]], data_mgr: "DataManager") -> Status:
+        pending_tasks = []
+
+        group_samples: list[Sample] = sample_fn()  # list of prompt_k Sample
+        for sample in group_samples:
+            task = asyncio.create_task(self.generate_sample(sample))
+            pending_tasks.append(task)
+        
+        generated_samples = asyncio.gather(*pending_tasks)
+
+        group_samples = await generated_samples
+        data_mgr.add_to_replay_buffer(group_samples)
+        return Status.COMPLETED
+
 
 class MultiTurnAgent(Agent):
     ...
@@ -88,38 +109,24 @@ class MultiTurnToolAgent(Agent):
 
 class DataManager:
     dataloader: DataLoader
-    replay_buffer: list[Sample]
+    replay_buffer: list[list[Sample]]
 
     def sample_from_dataset(self) -> list[Sample]: ...  # get from dataloader
 
     def add_to_replay_buffer(self, samples: list[Sample]): ...
 
-    def get_batch(self) -> list[Sample]: ...  # get from replay_buffer
+    def get_batch(self) -> list[TrainItem]: ...  # get from replay_buffer and convert to TrainItem
 
 class Scheduler:  # Scheduler负责调度多个样本的生成，里面可以有超发、异步、重排长短样本等优化
     async def produce_batch(self, batch_size: int, data_mgr: DataManager, agent: Agent): ...
 
 class SyncScheduler(Scheduler):
-    async def _generate_group(self, data_mgr: DataManager, agent: Agent) -> Status:
-        pending_tasks = []
-
-        group_samples: list[Sample] = data_mgr.sample_from_dataset()  # list of prompt_k Sample
-        for sample in group_samples:
-            task = asyncio.create_task(agent.generate_sample(sample))
-            pending_tasks.append(task)
-        
-        generated_samples = asyncio.gather(*pending_tasks)
-
-        group_samples = await generated_samples
-        data_mgr.replay_buffer.add(group_samples)
-        return Status.COMPLETED
-
     async def produce_batch(self, batch_size: int, data_mgr: DataManager, agent: Agent):
         data_concurrency = batch_size
 
         pending_tasks = []
         for _ in range(data_concurrency):
-            task = asyncio.create_task(self._generate_group(data_mgr, agent))
+            task = asyncio.create_task(agent.generate_group(data_mgr.sample_from_dataset, data_mgr))
             pending_tasks.append(task)
 
         completed_sample_count = 0
@@ -149,6 +156,7 @@ class AsyncScheduler(Scheduler):
         self.buffer = _Buffer(enable_partial_rollout, tail_batch_candidate_step, tail_batch_trigger_size)
 
     async def produce_batch(self, batch_size: int, data_mgr: DataManager, agent: Agent):
+        # hack sample_fn from data_mgr.sample_from_dataset and self.buffer.sample()
         pass
 
 
@@ -166,13 +174,13 @@ class Env:
 
 class TrainController:
     # high level API
-    def fit(self, batch: list[Sample]) -> dict: ...
+    def fit(self, batch: list[TrainItem]) -> dict: ...
     # low level API
-    def compute_old_logprobs(self, batch: list[Sample]) -> list[Sample]: ...
-    def compute_ref_logprobs(self, batch: list[Sample]) -> list[Sample]: ...
-    def compute_values(self, batch: list[Sample]) -> list[Sample]: ...
-    def compute_advantages(self, batch: list[Sample]) -> list[Sample]: ...
-    def train(self, batch: list[Sample]) -> dict: ...
+    def compute_old_logprobs(self, batch: list[TrainItem]) -> list[TrainItem]: ...
+    def compute_ref_logprobs(self, batch: list[TrainItem]) -> list[TrainItem]: ...
+    def compute_values(self, batch: list[TrainItem]) -> list[TrainItem]: ...
+    def compute_advantages(self, batch: list[TrainItem]) -> list[TrainItem]: ...
+    def train(self, batch: list[TrainItem]) -> dict: ...
     def sync_weights(self, rollout_ctl: RolloutController): ...
 
 
@@ -200,7 +208,8 @@ def main_colocate_with_train_highlevel():
     for i in range(total_rollouts):
         env.produce_batch(data_mgr)
 
-        metrics = train_ctl.fit(data_mgr.get_batch())
+        train_batch: list[TrainItem] = data_mgr.get_batch()
+        metrics = train_ctl.fit(train_batch)
         log_metrics(metrics)
 
         train_ctl.sync_weights(rollout_ctl)
@@ -227,14 +236,14 @@ def main_colocate_with_train_lowlevel():
     for i in range(total_rollouts):
         env.produce_batch(data_mgr)
 
-        batch = data_mgr.get_batch()
+        batch: list[TrainItem] = data_mgr.get_batch()
 
         # below is equivalent to train_ctl.fit(batch)
         batch = Packer.pack_pad_dispatch(batch)
         batch = train_ctl.compute_old_logprobs(batch)
         batch = train_ctl.compute_ref_logprobs(batch)
         batch = train_ctl.compute_values(batch)
-        batch = train_ctl.compute_advantages(batch)
+        batch = train_ctl.compute_advantages(batch)  # TODO: AdvEstimator
         metrics = train_ctl.train(batch)
 
         log_metrics(metrics)
@@ -265,7 +274,8 @@ def main_separate():
 
     total_rollouts: int
     for i in range(total_rollouts):
-        metrics = train_ctl.fit(data_mgr.get_batch())
+        batch: list[TrainItem] = data_mgr.get_batch()
+        metrics = train_ctl.fit(batch)
         log_metrics(metrics)
 
         train_ctl.sync_weights(rollout_ctl)
