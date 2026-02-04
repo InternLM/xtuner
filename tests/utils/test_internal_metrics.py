@@ -1,4 +1,5 @@
 import os
+from sys import intern
 from typing import cast
 import torch
 from torch import nn
@@ -17,7 +18,7 @@ from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.float8.float8_gmm_tile_wise import TileWiseFloat8GroupedLinear
 from xtuner.v1.utils import internal_metrics
-from xtuner.v1.utils.internal_metrics import InternalMetricsConfig, InternalMetricsRecorder
+from xtuner.v1.utils.internal_metrics import InternalMetricsConfig, InternalMetricsRecorder, internal_metrics_adapter
 from xtuner.v1.utils.device import get_device
 
 
@@ -98,38 +99,44 @@ class TestInternalMetricsRecorder(DeterministicDDPTestCase):
         metrics = metrics_recorder.pop_metrics(data_batches)
 
         # Check that all expected top-level keys exist
-        assert "weight_rms" in metrics
-        assert "router_logits_max" in metrics
-        assert "router_logits_mean" in metrics
-        assert "maxvio" in metrics
-        assert "drop_ratio" in metrics
+        self.assertIn("weight_rms", metrics, "Expected `weight_rms` in metrics")
+        self.assertIn("router_logits_max", metrics, "Expected `router_logits_max` in metrics")
+        self.assertIn("router_logits_mean", metrics, "Expected `router_logits_mean` in metrics")
+        self.assertIn("maxvio", metrics, "Expected `maxvio` in metrics")
+        self.assertIn("drop_ratio", metrics, "Expected `drop_ratio` in metrics")
+
+        internal_metrics_adapter.validate_python(metrics)
 
         if DEVICE != "npu":
-            assert "attn_max_lse" in metrics or "attn_max_logits" in metrics
+            self.assertTrue(
+                any(key in metrics for key in ["attn_max_lse", "attn_max_logits"]),
+                "Expected either `attn_max_lse` or `attn_max_logits` in metrics"
+            )
 
         # Check that all values are valid floats (not NaN or Inf)
         for metric_name, metric_dict in metrics.items():
-            assert isinstance(metric_dict, dict), f"{metric_name} should be a dict"
-            for key, value in metric_dict.items():
-                assert isinstance(value, float), f"{metric_name}[{key}] should be float"
-                assert not torch.isnan(torch.tensor(value)), f"{metric_name}[{key}] is NaN"
-                assert not torch.isinf(torch.tensor(value)), f"{metric_name}[{key}] is Inf"
+            self.assertIsInstance(metric_dict, dict, f"{metric_name} should be a dict")
+            for key, value in cast(dict, metric_dict).items():
+                self.assertIsInstance(value, float, f"{metric_name}[{key}] should be float")
+                self.assertFalse(torch.isnan(torch.tensor(value)), f"{metric_name}[{key}] is NaN")
+                self.assertFalse(torch.isinf(torch.tensor(value)), f"{metric_name}[{key}] is Inf")
 
         for key in ["embed_tokens", "lm_head"] + [f"layers.{i}" for i in range(model.config.num_hidden_layers)]:
-            assert key in metrics["weight_rms"], f"key: {key}, weight_rms: {metrics['weight_rms']}"
+            self.assertIn(key, metrics["weight_rms"])  # type: ignore[attr-defined]
 
         for key in [f"layer{i}" for i in range(model.config.num_hidden_layers)]:
-            assert key in metrics["maxvio"], f"key: {key}, maxvio: {metrics['maxvio']}"
-            assert key in metrics["drop_ratio"], f"key: {key}, drop_ratio: {metrics['drop_ratio']}"
-            assert key in metrics["router_logits_max"], f"key: {key}, router_logits_max: {metrics['router_logits_max']}"
-            assert key in metrics["router_logits_mean"], f"key: {key}, router_logits_mean: {metrics['router_logits_mean']}"
+            self.assertIn(key, metrics["maxvio"])  # type: ignore[attr-defined]
+            self.assertIn(key, metrics["drop_ratio"])  # type: ignore[attr-defined]
+            self.assertIn(key, metrics["router_logits_max"])  # type: ignore[attr-defined]
+            self.assertIn(key, metrics["router_logits_mean"])  # type: ignore[attr-defined]
 
         if DEVICE != "npu":
             for layer in range(model.config.num_hidden_layers):
-                assert (
-                        f"layers.{layer}.self_attn" in metrics["attn_max_lse"] or  # type: ignore[attr-defined] 
-                        f"layers.{layer}.self_attn" in metrics["attn_max_logits"]  # type: ignore[attr-defined]
+                self.assertTrue(
+                    f"layers.{layer}.self_attn" in metrics.get("attn_max_lse", {}) or  # type: ignore[attr-defined]
+                    f"layers.{layer}.self_attn" in metrics.get("attn_max_logits", {}),  # type: ignore[attr-defined]
+                    f"Expected `layers.{layer}.self_attn` in either `attn_max_lse` or `attn_max_logits`"
                 )
 
-        assert "total" in metrics["maxvio"]
-        assert "total" in metrics["drop_ratio"]
+        self.assertIn("total", metrics["maxvio"])  # type: ignore[attr-defined]
+        self.assertIn("total", metrics["drop_ratio"])  # type: ignore[attr-defined]
