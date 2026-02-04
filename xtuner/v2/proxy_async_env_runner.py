@@ -1,6 +1,9 @@
 import asyncio
 from .simple_env_runner import SimpleEnvRunner
 from .rollout_state import RolloutState, Status
+from typing import List, Dict
+from collections import defaultdict
+from .simple_env_runner import DataSampler
 
 # 用户无感
 class ExpiredBuffer:
@@ -168,7 +171,7 @@ class AsyncProxyEnvRuner:
                                     data_sampler: DataSampler,
                                     batch_size: int,
                                     prompt_repeat_k: int,
-                                    ) -> List[List[RolloutState]]:
+                                    ):
         # 基于当前内部管理的状态，就可以下一次应该从哪个池子中采样
         # 高度内聚功能模块
         last_step_remain_completed_samples = self.buffer.completed_buffer.length

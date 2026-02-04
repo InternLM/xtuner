@@ -151,4 +151,6 @@ if __name__ == '__main__':
 
     ray.get(rollout_controller.shutdown.remote(), timeout=300)
 
+    from xtuner.v2.proxy_async_env_runner import ProxyAsyncEnvRunner
+
 

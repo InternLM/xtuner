@@ -4,7 +4,7 @@ from xtuner.v1.data_proto.rl_data import SampleParams
 from transformers import AutoTokenizer, AutoProcessor, PreTrainedTokenizerBase
 from transformers.image_processing_utils import ProcessorMixin
 from xtuner.v1.ray.rollout.controller import SampleParams
-from dataclasses import field
+from typing import Any
 
 
 class Status(Enum):
@@ -19,7 +19,6 @@ class Status(Enum):
 
 @dataclass
 class RolloutState:
-    # dataset 输出必须
     message: list
     tokens: list[int] # 每一次实际输入
     
@@ -31,7 +30,7 @@ class RolloutState:
     logprobs: list[float] 
     routed_experts: list[int] | None = None
     reward: float | list[float] | list[dict] | None = None
-    loss_mask: list[int] | None = None # tokens + response_ids的长度
+    loss_mask: list[int] | None = None # tokens + response_ids 的长度
     state: Status = Status.INIT
     sample_parms: SampleParams | None = None
     tools: list | None = None
@@ -40,12 +39,7 @@ class RolloutState:
     mm_train_info: dict[str, Any]
     finish_reason: str | None = None
     staleness: int = 0
-
-# TODO: 这个对象存在的意义是啥？暂时不用，否则会导致内部循环对象不一致, partial rollout 也不好弄
-@dataclass
-class Trajectory:
-    env: str = 'default'
-    rollout_state: RolloutState | list[RolloutState] 
+    extra_fields: dict[str, Any] | None = None
 
 
 def load_tokenizer(name_or_path: str, **kwargs):

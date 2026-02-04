@@ -1,5 +1,4 @@
 
-
 import asyncio
 from xtuner.v1.datasets import DataloaderConfig
 from .utils import load_function
@@ -96,7 +95,6 @@ class SimpleEnvRunner:
             return await self.generate_single_sample(rollout_state)
     
     # 生成一组样本
-
     async def generate_group(self, sample_func, prompt_repeat_k: int) -> list[RolloutState]:
         pending_tasks = []
 
@@ -115,7 +113,7 @@ class SimpleEnvRunner:
                              data_sampler: DataSampler,
                              batch_size: int, 
                              prompt_repeat_k: int,
-                             ) -> List[List[RolloutState]]:
+                             ):
         data_concurrency = batch_size
         sample_func = data_sampler.sample_from_dataset
 
@@ -139,13 +137,12 @@ class SimpleEnvRunner:
                 except Exception as e:
                     print(f"Error in generating trajectory: {e}")
         
-    # =====================================================================
     # 用于可中断生成场景
     async def async_generate_batch(self, 
                                     data_sampler: DataSampler,
                                     batch_size: int, 
                                     prompt_repeat_k: int,
-                                    ) -> list[RolloutState]:
+                                    ):
         return await self.async_proxy_runner.async_generate_batch(
                                                             data_sampler,
                                                             batch_size, 

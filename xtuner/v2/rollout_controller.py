@@ -1,11 +1,5 @@
 from xtuner.v1.ray.rollout import RolloutController as V1RolloutController
-from .rollout_state import RolloutState, Status
-
-reason_map = {
-    "length": Status.COMPLETED,
-    'aborted': Status.ABORTED,
-    "failed": Status.FAILED,
-}
+from .rollout_state import RolloutState
 
 # 临时方案
 class RolloutController(V1RolloutController):
