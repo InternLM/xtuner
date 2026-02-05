@@ -4,6 +4,7 @@ import asyncio
 from enum import Enum
 from torch.utils.data import DataLoader
 import threading
+from typing import List
 
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.data_proto.rl_data import SampleParams  # TODO: 删掉一个？
@@ -19,7 +20,7 @@ def log_metrics(metrics: dict): ...
 
 class TrainItem:
     seq_ctx: SequenceContext
-    loss_ctx: BaseLossContext
+    loss_ctxs: List[BaseLossContext] # 考虑更通用的多 loss 场景
 
 
 ################################### Main components ######################################
@@ -28,9 +29,6 @@ class Status(Enum):
     COMPLETED = "completed"
     ABORTED = "aborted"
     FAILED = "failed"
-    ARCHIVED = "archived"
-    EXPIRED = "expired"
-    SKIPPED = "skipped"
 
 
 class RolloutState:  # RolloutState:
@@ -54,21 +52,26 @@ class RolloutState:  # RolloutState:
     mm_train_info: dict[str, Any]
     finish_reason: str | None = None
     staleness: int = 0
+    extra_fields: dict[str, Any] = {}
 
 
 class RolloutController:
-    async def generate_sample(self, sample: RolloutState) -> RolloutState: ...
+    async def generate(self, rollout_state: RolloutState) -> RolloutState: ...
 
 
 class Judge:
-    def judge(self, sample: RolloutState) -> RolloutState: ...
+    def judge(self, rollout_state: RolloutState) -> RolloutState: ...
 
 
-class Agent:  # Agent负责一条轨迹样本的生成
-    async def generate_sample(self, sample: RolloutState) -> RolloutState: ...
-    async def generate_group(self, sample_fn: Callable[[], list[RolloutState]], data_mgr: "DataManager") -> list[RolloutState]: ...
+# 考虑过滤才需要
+class DataSampler:
+    def __init__(self): 
+        self.dataloaders: DataLoader
 
-class SingleTurnAgent(Agent):
+    def sample(self) -> list[RolloutState]: ...
+
+
+class AgentLoop:  # Agent负责一条轨迹样本的生成
     def __init__(self, rollout_ctl: RolloutController, hf_checkpoint, sample_params=SampleParams(), judge_cfg: dict = None) -> None:
         # persistent state for the generation process
         self.rollout_ctl = rollout_ctl
@@ -78,16 +81,12 @@ class SingleTurnAgent(Agent):
         self.sample_params = sample_params
         self.judge = Judge() if judge_cfg is not None else None
 
-    async def generate_sample(self, sample: RolloutState) -> RolloutState:
-        sample = await self.rollout_ctl.generate_sample(sample)
-        if self.judge is not None:
-            sample = self.judge.judge(sample)
-        return sample
+    async def generate_sample(self, rollout_state: RolloutState) -> RolloutState: ...
 
-    async def generate_group(self, sample_fn: Callable[[], list[RolloutState]], data_mgr: "DataManager") -> Status:
+    async def generate_group(self, data_sampler: DataSampler) -> List[RolloutState]:
         pending_tasks = []
 
-        group_samples: list[RolloutState] = sample_fn()  # list of prompt_k Sample
+        group_samples: list[RolloutState] = data_sampler.sample()  # list of prompt_k Sample
         for sample in group_samples:
             task = asyncio.create_task(self.generate_sample(sample))
             pending_tasks.append(task)
@@ -95,38 +94,41 @@ class SingleTurnAgent(Agent):
         generated_samples = asyncio.gather(*pending_tasks)
 
         group_samples = await generated_samples
-        data_mgr.add_to_replay_buffer(group_samples)
-        return Status.COMPLETED
+        return group_samples
 
 
-class MultiTurnAgent(Agent):
-    ...
+class SingleTurnAgentLoop(AgentLoop):
+    async def generate_sample(self, sample: RolloutState) -> RolloutState:
+        sample = await self.rollout_ctl.generate(sample)
+        if self.judge is not None:
+            sample = self.judge.judge(sample)
+        return sample
 
 
-class MultiTurnToolAgent(Agent):
-    ...
+class MultiTurnAgentLoop(AgentLoop):
+    async def generate_sample(self, sample: RolloutState) -> RolloutState:
+        ...
 
 
-class DataManager:
-    dataloader: DataLoader
+class ReplayBuffer:
     replay_buffer: list[list[RolloutState]]
 
-    def sample_from_dataset(self) -> list[RolloutState]: ...  # get from dataloader
+    def put(self, samples: list[RolloutState]): ...
 
-    def add_to_replay_buffer(self, samples: list[RolloutState]): ...
+    def get(self, batch_size) -> list[TrainItem]: ...  # get from replay_buffer and convert to TrainItem
 
-    def get_batch(self) -> list[TrainItem]: ...  # get from replay_buffer and convert to TrainItem
 
 class ProduceStrategy:  # Scheduler负责调度多个样本的生成，里面可以有超发、异步、重排长短样本等优化
-    async def produce_batch(self, batch_size: int, data_mgr: DataManager, agent: Agent): ...
+    async def produce_batch(self, batch_size: int, data_sampler: DataSampler, replay_buffer: ReplayBuffer, agent_loop: AgentLoop): ...
+
 
 class SyncProduceStrategy(ProduceStrategy):
-    async def produce_batch(self, batch_size: int, data_mgr: DataManager, agent: Agent):
+    async def produce_batch(self, batch_size: int, data_sampler: DataSampler, replay_buffer: ReplayBuffer, agent_loop: AgentLoop):
         data_concurrency = batch_size
 
         pending_tasks = []
         for _ in range(data_concurrency):
-            task = asyncio.create_task(agent.generate_group(data_mgr.sample_from_dataset, data_mgr))
+            task = asyncio.create_task(agent_loop.generate_group(data_sampler))
             pending_tasks.append(task)
 
         completed_sample_count = 0
@@ -139,6 +141,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 try:
                     status: Status =  await task
                     if status == Status.COMPLETED:
+                        replay_buffer.put(task.result())
                         completed_sample_count += 1
                 except Exception as e:
                     print(f"Error in generating trajectory: {e}")
@@ -155,31 +158,57 @@ class AsyncProduceStrategy(ProduceStrategy):
         class _Buffer: ...
         self.buffer = _Buffer(enable_partial_rollout, tail_batch_candidate_step, tail_batch_trigger_size)
 
-    async def produce_batch(self, batch_size: int, data_mgr: DataManager, agent: Agent):
+    async def produce_batch(self, batch_size: int, data_sampler: DataSampler, replay_buffer: ReplayBuffer, agent_loop: AgentLoop):
         # hack sample_fn from data_mgr.sample_from_dataset and self.buffer.sample()
-        pass
+        data_sampler = self.buffer.get_sample_func(data_sampler, prompt_repeat_k)
+        ...
+        
 
-
-class Environment:
-    def __init__(self, rollout_ctl: RolloutController):
-        self._agent: Agent = SingleTurnAgent(rollout_ctl)
-        self._scheduler: ProduceStrategy = SyncProduceStrategy()
+# 支持单 task
+class AgentLoopManager:
+    def __init__(self, agent_loop: AgentLoop, producestrategy_cfg: ProduceStrategy, data_sampler: DataSampler, replay_buffer: ReplayBuffer):
+        # 一一绑定
+        self._agent_loop: AgentLoop = agent_loop # 负责一条或者一组样本生成
+        self._scheduler: ProduceStrategy = producestrategy_cfg.build() # 负责一批样本生成+调度
+        self._data_sampler: DataSampler = data_sampler
+        self._replay_buffer: ReplayBuffer = replay_buffer
     
-    async def produce_batch(self, data_mgr: DataManager, batch_size: int):
-        await self._scheduler.produce_batch(batch_size, data_mgr, self._agent)
+    # 共卡
+    async def produce_batch(self, batch_size: int):
+        await self._scheduler.produce_batch(batch_size//2, self._data_sampler, ...)
+        return self._replay_buffer.get(batch_size)
+    
+    # 非共卡
+    async def disaggregate_produce_batch(self, batch_size: int):
+        # 起一个单独线程不断生成
+        self._scheduler.produce_batch(batch_size, self._data_sampler, ...)
 
-    def produce_loop(self, data_mgr: DataManager):
+    async def disaggregate_get_batch(self, batch_size: int):
+        # 从不同的 replay_buffer 中采样，然后训练
+        return self._replay_buffer.get(batch_size)
+
+
+# 多 task 自己写
+class MulitiAgentLoopManager(AgentLoopManager):
+    def __init__(self, 
+                 agent_loop_managers: list[AgentLoopManager]):
+          self._agent_loop_managers = agent_loop_managers
+
+    async def produce_batch(self, batch_size: int):
+        pass
+
+    async def disaggregate_produce_batch(self, batch_size: int):
+        pass
+
+    async def disaggregate_get_batch(self, batch_size: int):
         pass
 
 
+
+# ppo 算法是通过在 Trainworker 中新增额外方法实现，无需重写 TrainController 和 Trainworker
 class TrainController:
     # high level API
     def fit(self, batch: list[TrainItem]) -> dict: ...
-    # low level API
-    def compute_old_logprobs(self, batch: list[TrainItem]) -> list[TrainItem]: ...
-    def compute_ref_logprobs(self, batch: list[TrainItem]) -> list[TrainItem]: ...
-    def compute_values(self, batch: list[TrainItem]) -> list[TrainItem]: ...
-    def compute_advantages(self, batch: list[TrainItem]) -> list[TrainItem]: ...
     def train(self, batch: list[TrainItem]) -> dict: ...
     def sync_weights(self, rollout_ctl: RolloutController): ...
 
