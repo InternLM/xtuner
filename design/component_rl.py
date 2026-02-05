@@ -20,7 +20,7 @@ def log_metrics(metrics: dict): ...
 
 class TrainItem:
     seq_ctx: SequenceContext
-    loss_ctxs: List[BaseLossContext] # 考虑更通用的多 loss 场景
+    loss_ctxs: BaseLossContext # 考虑更通用的多 loss 场景，时间原因暂时不改
 
 
 ################################### Main components ######################################
@@ -63,32 +63,24 @@ class Judge:
     def judge(self, rollout_state: RolloutState) -> RolloutState: ...
 
 
-# 考虑过滤才需要
-class DataSampler:
-    def __init__(self): 
-        self.dataloaders: DataLoader
-
-    def sample(self) -> list[RolloutState]: ...
-
-
-class AgentLoop:  # Agent负责一条轨迹样本的生成
+# 负责一条和一组轨迹生成，非常简单
+class AgentLoop:  
     def __init__(self, rollout_ctl: RolloutController, hf_checkpoint, sample_params=SampleParams(), judge_cfg: dict = None) -> None:
-        # persistent state for the generation process
         self.rollout_ctl = rollout_ctl
         self.hf_checkpoint = hf_checkpoint
         self.tokenizer = load_tokenizer(hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
         self.sample_params = sample_params
         self.judge = Judge() if judge_cfg is not None else None
+        self.task_name = 'aa'
 
     async def generate_sample(self, rollout_state: RolloutState) -> RolloutState: ...
 
-    async def generate_group(self, data_sampler: DataSampler) -> List[RolloutState]:
+    async def generate_group(self, rollout_state, prompt_k) -> List[RolloutState]:
         pending_tasks = []
 
-        group_samples: list[RolloutState] = data_sampler.sample()  # list of prompt_k Sample
-        for sample in group_samples:
-            task = asyncio.create_task(self.generate_sample(sample))
+        for _ in range(prompt_k):
+            task = asyncio.create_task(self.generate_sample(rollout_state))
             pending_tasks.append(task)
         
         generated_samples = asyncio.gather(*pending_tasks)
@@ -98,37 +90,71 @@ class AgentLoop:  # Agent负责一条轨迹样本的生成
 
 
 class SingleTurnAgentLoop(AgentLoop):
-    async def generate_sample(self, sample: RolloutState) -> RolloutState:
-        sample = await self.rollout_ctl.generate(sample)
+    async def generate_sample(self, rollout_state: RolloutState) -> RolloutState:
+        rollout_state = await self.rollout_ctl.generate(rollout_state)
         if self.judge is not None:
-            sample = self.judge.judge(sample)
-        return sample
+            rollout_state = self.judge.judge(rollout_state)
+        return rollout_state
 
 
 class MultiTurnAgentLoop(AgentLoop):
-    async def generate_sample(self, sample: RolloutState) -> RolloutState:
+    async def generate_sample(self, rollout_state: RolloutState) -> RolloutState:
         ...
 
 
-class ReplayBuffer:
-    replay_buffer: list[list[RolloutState]]
+# 中心化管理所有 rollout 过程中的数据，暂时训练中途数据不会放到其中，后续可能会统一为全局数据管理器
+# 只管理数据，不控制数据
+# 后续可能会抽象一层 backend interface，支持不同存储后端
+# 是否需要是 ray 对象？
+class BaseReplayBuffer:
+    def __init__(self, limit: int = 0):
+        self.limit = limit
+        # 默认只保留一次 rollout + trainer 的结果，可以配置保留更多历史轨迹
+        self.complate_buffers = {}
+        self.aborted_buffers = {}
+        self.expired_buffers = {}
+        self.filtered_buffers = {}
 
-    def put(self, samples: list[RolloutState]): ...
+    async def put_to_complate(self, task_name, samples: list[RolloutState]): ...
+        
+    async def get_from_complate(self, task_name, batch_size) -> list[RolloutState]: ...  
 
-    def get(self, batch_size) -> list[TrainItem]: ...  # get from replay_buffer and convert to TrainItem
+    async def put_to_aborted(self, task_name, samples: list[RolloutState]): ...
 
+    async def get_from_aborted(self, task_name, batch_size) -> list[RolloutState]: ...
+
+    async def put_to_expired(self, task_name, samples: list[RolloutState]): ...
+
+    async def get_from_expired(self, task_name, batch_size) -> list[RolloutState]: ...
+
+    async def put_to_filtered(self, task_name, samples: list[RolloutState]): ...
+
+    async def get_from_filtered(self, task_name, batch_size) -> list[RolloutState]: ...
+
+
+class AsyncReplayBuffer(BaseReplayBuffer):
+    def __init__(self, limit: int = 0):
+        super().__init__(limit)
+    
 
 class ProduceStrategy:  # Scheduler负责调度多个样本的生成，里面可以有超发、异步、重排长短样本等优化
-    async def produce_batch(self, batch_size: int, data_sampler: DataSampler, replay_buffer: ReplayBuffer, agent_loop: AgentLoop): ...
+    
+    def __init__(self, dataloader: DataLoader, replay_buffer: BaseReplayBuffer):
+        self.dataloader: DataLoader
+        self.replay_buffer: BaseReplayBuffer
+
+    async def produce_batch(self, batch_size: int, prompt_k: int, agent_loop: AgentLoop): ...
 
 
 class SyncProduceStrategy(ProduceStrategy):
-    async def produce_batch(self, batch_size: int, data_sampler: DataSampler, replay_buffer: ReplayBuffer, agent_loop: AgentLoop):
+    async def produce_batch(self, batch_size: int, prompt_k: int, agent_loop: AgentLoop):
         data_concurrency = batch_size
-
+        
+        rollout_state = next(self.dataloader)
+        
         pending_tasks = []
         for _ in range(data_concurrency):
-            task = asyncio.create_task(agent_loop.generate_group(data_sampler))
+            task = asyncio.create_task(agent_loop.generate_group(rollout_state, prompt_k))
             pending_tasks.append(task)
 
         completed_sample_count = 0
@@ -137,11 +163,14 @@ class SyncProduceStrategy(ProduceStrategy):
                 print("All tasks are done but not enough samples collected.")
                 break
             done_tasks, pending_tasks = await asyncio.wait(pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+
+            # 如果要过滤，在这个地方处理，然后加入到 replay buffer
+            # 如果被过滤的数据就放到 put_to_filtered pool 中
             for task in done_tasks:
                 try:
                     status: Status =  await task
                     if status == Status.COMPLETED:
-                        replay_buffer.put(task.result())
+                        self.replay_buffer.put_to_complate(agent_loop.task_name, task.result())
                         completed_sample_count += 1
                 except Exception as e:
                     print(f"Error in generating trajectory: {e}")
@@ -158,7 +187,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         class _Buffer: ...
         self.buffer = _Buffer(enable_partial_rollout, tail_batch_candidate_step, tail_batch_trigger_size)
 
-    async def produce_batch(self, batch_size: int, data_sampler: DataSampler, replay_buffer: ReplayBuffer, agent_loop: AgentLoop):
+    async def produce_batch(self, batch_size: int, prompt_k: int, agent_loop: AgentLoop):
         # hack sample_fn from data_mgr.sample_from_dataset and self.buffer.sample()
         data_sampler = self.buffer.get_sample_func(data_sampler, prompt_repeat_k)
         ...
@@ -166,17 +195,16 @@ class AsyncProduceStrategy(ProduceStrategy):
 
 # 支持单 task
 class AgentLoopManager:
-    def __init__(self, agent_loop: AgentLoop, producestrategy_cfg: ProduceStrategy, data_sampler: DataSampler, replay_buffer: ReplayBuffer):
+    def __init__(self, agent_loop: AgentLoop, producestrategy_cfg: ProduceStrategy, replay_buffer: BaseReplayBuffer):
         # 一一绑定
         self._agent_loop: AgentLoop = agent_loop # 负责一条或者一组样本生成
         self._scheduler: ProduceStrategy = producestrategy_cfg.build() # 负责一批样本生成+调度
-        self._data_sampler: DataSampler = data_sampler
-        self._replay_buffer: ReplayBuffer = replay_buffer
+        self._replay_buffer: BaseReplayBuffer = replay_buffer
     
     # 共卡
     async def produce_batch(self, batch_size: int):
         await self._scheduler.produce_batch(batch_size//2, self._data_sampler, ...)
-        return self._replay_buffer.get(batch_size)
+        return self._replay_buffer.get_from_complate(batch_size)
     
     # 非共卡
     async def disaggregate_produce_batch(self, batch_size: int):
@@ -185,7 +213,7 @@ class AgentLoopManager:
 
     async def disaggregate_get_batch(self, batch_size: int):
         # 从不同的 replay_buffer 中采样，然后训练
-        return self._replay_buffer.get(batch_size)
+        return self._replay_buffer.get_from_complate(batch_size)
 
 
 # 多 task 自己写
