@@ -191,12 +191,12 @@ def check_rl_result(case_name, base_path, cur_path, assert_info):
             zip(base_metrics[metric], cur_metrics[metric])
         ):
             if method == "absolute":
-                error = abs(cur_val - base_val)
+                error = round(abs(cur_val - base_val), 5)
             elif method == "relative":
                 if abs(base_val) < 1e-10:
                     error = float("inf") if abs(cur_val) > 1e-10 else 0.0
                 else:
-                    error = abs(cur_val - base_val) / abs(base_val)
+                    error = round(abs(cur_val - base_val) / abs(base_val), 5)
             else:
                 raise ValueError(f"Unknown method: {method}")
 
