@@ -443,7 +443,11 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
     ) -> dict:
         line = data.decode()
         tokenized = tokenize_fn(json.loads(line))
-        return {"num_tokens": tokenized["num_tokens"]}
+        if hasattr(tokenized, "num_tokens"):
+            num_tokens = tokenized.num_tokens
+        else:
+            num_tokens = tokenized["num_tokens"]
+        return {"num_tokens": num_tokens}
 
     def count_tokens(self, offsets, cache_dir=None):
         self.tokenize_fn.set_state("cache")
