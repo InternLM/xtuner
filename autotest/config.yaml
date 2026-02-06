@@ -208,3 +208,46 @@ case:
                     runtime_info/tgs: 0.05
                     runtime_info/text_tokens: 0
             timeout: 10800
+
+    qwen3-rl-lmdeploy:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_qwen3_gsk8k_grpo.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-8B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-rl-lmdeploy/20260203/tracker.jsonl
+                check_metrics:
+                    - 
+                       metric:  eval/accuracy
+                       threshold: 0.05
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0001
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.12
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 10
+                       method: absolute
+                       operator: <
+            timeout: 2460

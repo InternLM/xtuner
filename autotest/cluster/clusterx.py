@@ -58,11 +58,18 @@ class ClusterTaskExecutor:
             raise RuntimeError(f"clusterx job {job_name} start fail, task config is {task_config}, exception is: {e}")
 
         start_time = time.time()
+        run_start_time = None
 
         while True:
             status = self.get_task_status(job_schema.job_id)
+            if status in [JobStatus.RUNNING] and run_start_time is None:
+                run_start_time = time.time()
             if status in [JobStatus.SUCCEEDED]:
-                return True, "Task succeeded"
+                run_time = time.time() - run_start_time
+                if run_time >= timeout:
+                    return False, 'Task succeeded, but run time is {run_time}, exceeding then {timeout}'
+                else:
+                    return True, "Task succeeded"
             elif status in [JobStatus.FAILED, JobStatus.STOPPED]:
                 if status in [JobStatus.FAILED]:
                     time.sleep(10)

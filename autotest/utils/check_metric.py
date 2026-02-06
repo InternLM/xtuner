@@ -154,5 +154,87 @@ def check_result(case_name, base_path, cur_path, check_metric):
     result = not fail_metric
     return result, f"Some metric check failed,{fail_metric}"
 
+def check_rl_result(case_name, base_path, cur_path, assert_info):
+    fail_metric = {}
+    check_metrics_list = assert_info["check_metrics"]
+
+    metric_list = [item["metric"] for item in check_metrics_list]
+
+    base_steps, base_metrics = extract_value(base_path, metric_list)
+    cur_steps, cur_metrics = extract_value(cur_path, metric_list)
+
+    assert (
+        cur_steps == base_steps
+    ), f"current steps is not equal to base steps, current steps: {cur_steps}, base steps: {base_steps}"
+
+    output_path = Path(f"../{os.environ.get('GITHUB_RUN_ID','0')}")
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    check_metric_dict = {item["metric"]: item["threshold"] for item in check_metrics_list}
+    plot_all(case_name, check_metric_dict, base_metrics, cur_metrics, output_path)
+
+    shutil.copytree(output_path, f"./{os.environ['GITHUB_RUN_ID']}", dirs_exist_ok=True)
+    write_to_summary(case_name, base_path, cur_path)
+
+    for config in check_metrics_list:
+        metric = config["metric"]
+        threshold = config["threshold"]
+        method = config["method"]  # 'absolute' or 'relative'
+        operator = config["operator"]  # '<' or '<='
+
+        max_error = 0.0
+        max_error_idx = 0
+        check_flag = True
+
+        for idx, (base_val, cur_val) in enumerate(
+            zip(base_metrics[metric], cur_metrics[metric])
+        ):
+            if method == "absolute":
+                error = abs(cur_val - base_val)
+            elif method == "relative":
+                if abs(base_val) < 1e-10:
+                    error = float("inf") if abs(cur_val) > 1e-10 else 0.0
+                else:
+                    error = abs(cur_val - base_val) / abs(base_val)
+            else:
+                raise ValueError(f"Unknown method: {method}")
+
+            if error > max_error:
+                max_error = error
+                max_error_idx = idx
+
+            if operator == "<":
+                if not (error < threshold):
+                    fail_metric[metric] = (
+                        f"{metric} error {error:.6f} not less than threshold {threshold} "
+                        f"(method: {method}, operator: {operator}) at step {idx}, "
+                        f"baseline: {base_val:.6f}, current: {cur_val:.6f}"
+                    )
+                    check_flag = False
+                    break
+            elif operator == "<=":
+                if not (error <= threshold):
+                    fail_metric[metric] = (
+                        f"{metric} error {error:.6f} not less than or equal to threshold {threshold} "
+                        f"(method: {method}, operator: {operator}) at step {idx}, "
+                        f"baseline: {base_val:.6f}, current: {cur_val:.6f}"
+                    )
+                    check_flag = False
+                    break
+            else:
+                raise ValueError(f"Unknown operator: {operator}")
+
+        if check_flag:
+            logger.info(
+                f"✓ {metric} check passed, max error is {max_error:.6f} at step {max_error_idx} "
+                f"(method: {method}, operator: {operator})"
+            )
+
+    result = not bool(fail_metric)
+    if result:
+        return result, "All metrics check passed."
+    else:
+        return result, f"Some metric check failed: {fail_metric}"
+
 if __name__ == "__main__":
     print(check_result("qwen3-sft", "./base/tracker.jsonl", "./current/tracker.jsonl",{"grad_norm":0.000001,"loss/reduced_llm_loss":0.000001,"lr":0,"memory/max_memory_GB":0.2,"runtime_info/tgs":0.05,"runtime_info/text_tokens":0}))
