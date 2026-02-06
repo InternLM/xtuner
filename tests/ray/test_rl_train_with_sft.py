@@ -80,7 +80,6 @@ class TestRLTrainWithSFT(unittest.TestCase):
         model_cfg = Qwen3Dense8BConfig()
         optim_cfg: AdamWConfig = AdamWConfig(lr=5e-7, foreach=False)
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=1,
         )
