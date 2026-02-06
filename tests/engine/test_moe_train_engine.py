@@ -48,11 +48,11 @@ class TestMoEEngine(DeterministicDDPTestCase):
             ep_size=ep_size,
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
+            compile_cfg=False,
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=False,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -129,11 +129,11 @@ class TestMoEEngine(DeterministicDDPTestCase):
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
             freeze_routers=True,
+            compile_cfg=False,
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=False,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -232,10 +232,10 @@ class TestMoEEngine(DeterministicDDPTestCase):
             ep_size=ep_size,
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
+            compile_cfg=False,
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=False,
             cpu_offload=False,
             ep_size=ep_size,
             hsdp_sharding_size=hsdp_sharding_size,
@@ -447,12 +447,12 @@ def create_engine_from_hf(load_from: Path, dispatcher: str | None, ep_size: int,
     moe_cfg : Qwen3MoEConfig = get_model_config_from_hf(load_from)
     moe_cfg.dispatcher = dispatcher
     moe_cfg.ep_size = ep_size
+    moe_cfg.compile_cfg = False
     if tiny:
         moe_cfg.num_hidden_layers = 2
 
     optim_cfg: AdamWConfig = AdamWConfig()
     fsdp_cfg: FSDPConfig = FSDPConfig(
-        torch_compile=False,
         cpu_offload=False,
         ep_size=ep_size,
     )

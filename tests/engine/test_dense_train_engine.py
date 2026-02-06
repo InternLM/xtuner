@@ -40,7 +40,6 @@ class TestDenseEngine(DeterministicDDPTestCase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             tp_size=tp_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -125,7 +124,6 @@ class TestDenseEngine(DeterministicDDPTestCase):
         moe_cfg = Qwen3Dense8BConfig()
         optim_cfg: AdamWConfig = AdamWConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             tp_size=tp_size,
             hsdp_sharding_size=hsdp_sharding_size,

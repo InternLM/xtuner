@@ -45,7 +45,6 @@ class TestQwen3Dense4B(DistributedTestBase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig(lr_min=1e-3)
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             tp_size=tp_size
         )
@@ -114,7 +113,6 @@ class TestQwen3Dense4B(DistributedTestBase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig(lr_min=1e-3)
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             tp_size=tp_size
         )
