@@ -106,36 +106,21 @@ class MultiTurnAgentLoop(AgentLoop):
 # 只管理数据，不控制数据
 # 后续可能会抽象一层 backend interface，支持不同存储后端
 # 是否需要是 ray 对象？
+
 class BaseReplayBuffer:
     def __init__(self, limit: int = 0):
         self.limit = limit
         # 默认只保留一次 rollout + trainer 的结果，可以配置保留更多历史轨迹
-        self.complate_buffers = {}
-        self.aborted_buffers = {}
-        self.expired_buffers = {}
-        self.filtered_buffers = {}
-
-    async def put_to_complate(self, task_name, samples: list[RolloutState]): ...
-        
-    async def get_from_complate(self, task_name, batch_size) -> list[RolloutState]: ...  
-
-    async def put_to_aborted(self, task_name, samples: list[RolloutState]): ...
-
-    async def get_from_aborted(self, task_name, batch_size) -> list[RolloutState]: ...
-
-    async def put_to_expired(self, task_name, samples: list[RolloutState]): ...
-
-    async def get_from_expired(self, task_name, batch_size) -> list[RolloutState]: ...
-
-    async def put_to_filtered(self, task_name, samples: list[RolloutState]): ...
-
-    async def get_from_filtered(self, task_name, batch_size) -> list[RolloutState]: ...
-
-
-class AsyncReplayBuffer(BaseReplayBuffer):
-    def __init__(self, limit: int = 0):
-        super().__init__(limit)
+        # 如何写都可以
+        self.buffers = {"complate": {}, 
+                        "aborted": {}, 
+                        "expired": {}, 
+                        "filtered": {}}
     
+    async def put(sampler: list[RolloutState], task_name: str, group_state: Status): ...
+
+    async def get(batch_size: int, task_name: str, group_state: Status) -> list[RolloutState]: ...
+          
 
 class ProduceStrategy:  # Scheduler负责调度多个样本的生成，里面可以有超发、异步、重排长短样本等优化
     
@@ -226,7 +211,8 @@ class MulitiAgentLoopManager(AgentLoopManager):
         pass
 
     async def disaggregate_produce_batch(self, batch_size: int):
-        pass
+        self._scheduler[0].produce_batch(8, self._data_sampler, ...)
+        self._scheduler[1].produce_batch(8, self._data_sampler, ...)
 
     async def disaggregate_get_batch(self, batch_size: int):
         pass
