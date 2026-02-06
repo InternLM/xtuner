@@ -8,7 +8,7 @@ from mmengine import list_dir_or_file
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.config import FSDPConfig
-from xtuner.v1.config.optim import AdamWConfig, LRConfig
+from xtuner.v1.config.optim import AdamWConfig, LRConfig, MuonConfig
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig, DatasetConfigList
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
@@ -73,7 +73,7 @@ class TrainingArguments(BaseModel):
     max_length: Annotated[int, Parameter(group=dataset_group, help="max single sequence length")] = 4096
     # optimizer
     lr: Annotated[float, Parameter(group=optimizer_group, help="learning rate")] = 6e-5
-    optim: Annotated[Literal["AdamW"], Parameter(group=optimizer_group, help="optimizer type")] = "AdamW"
+    optim: Annotated[Literal["AdamW", "Muon"], Parameter(group=optimizer_group, help="optimizer type")] = "AdamW"
     # lr-scheduler
     lr_min: Annotated[float, Parameter(group=lr_scheduler_group, help="minimum learning rate")] = 1e-6
     scheduler_type: Annotated[
@@ -124,8 +124,12 @@ class TrainingArguments(BaseModel):
         # Load dataset config
         dataset_cfg = self._get_dataset_config()
         # Create optimizer config
-        optim_cfg = AdamWConfig(lr=self.lr, foreach=False)
-
+        if self.optim == "AdamW":
+            optim_cfg = AdamWConfig(lr=self.lr, foreach=False)
+        elif self.optim == "Muon":
+            optim_cfg = MuonConfig(lr=self.lr)
+        else:
+            raise ValueError(f"Unkown optimizer type {self.optim}, only support `AdamW` and `Muon`.")
         # Create learning rate scheduler config
         lr_cfg = LRConfig(lr_type=self.scheduler_type, warmup_ratio=self.warmup_ratio, lr_min=self.lr_min)
 
