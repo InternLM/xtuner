@@ -627,11 +627,12 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         tokenize_fn: Callable[[dict], CacheItem],
     ) -> dict:
         line = data.decode()
-        tokenized: dict = tokenize_fn(json.loads(line))  # type: ignore[assignment]
-        res = {"num_tokens": tokenized["num_tokens"], "proxy_attn_flops": tokenized["proxy_attn_flops"]}
-        if "chunks" in tokenized:
-            res["chunks"] = tokenized["chunks"]
-        return res
+        tokenized = tokenize_fn(json.loads(line))
+        if hasattr(tokenized, "num_tokens"):
+            num_tokens = tokenized.num_tokens
+        else:
+            num_tokens = tokenized["num_tokens"]
+        return {"num_tokens": num_tokens}
 
     def count_tokens(self, offsets, cache_dir=None):
         self.tokenize_fn.set_state("cache")
