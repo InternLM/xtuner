@@ -20,7 +20,8 @@ def extract_value(file, metrics):
         for line in f:
             line = json.loads(line)
             for metric in metrics:
-                metric_all[metric].append(line[metric])
+                if metric in line:
+                     metric_all[metric].append(line[metric])
             total_step += 1
 
     return total_step, metric_all
