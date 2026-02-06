@@ -68,13 +68,14 @@ class RolloutState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # --- 数据 ---
-    message_uid: int  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
     prompt_ids: list[int]  # 原始 prompt的token ids
     data_source: dict[str, Any] | None = None
     mm_info: MultimodalInfo | None = None
     reward_model: dict[str, Any] | None = None
-    
+    message_uid: int | None = None  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
+    num_tokens: int | None = None  # 用于 cache 管理
+
     # --- InferEngine 输入 ---
     session_uid: int | None = None
     tokens: list[int]  # 每一次推理引擎的实际输入
@@ -86,7 +87,7 @@ class RolloutState(BaseModel):
     response: str | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
-    routed_experts: list[int] | RayObjectRef | None = None # type: ignore[valid-type]
+    routed_experts: list[int] | RayObjectRef | None = None  # type: ignore[valid-type]
     finish_reason: str | None = None
 
     #  --- Judger 输出 ---
