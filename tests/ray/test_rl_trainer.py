@@ -47,6 +47,7 @@ class TestRLTrainer(unittest.TestCase):
         
     def init_traine_worker_config(self, train_optimizer_steps, pack_max_length):
         model_cfg = get_model_config_from_hf(Path(MODEL_PATH))
+        model_cfg.compile_cfg = False
         optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
         loss_cfg = GRPOLossConfig(
             policy_loss_cfg=dict(
@@ -65,7 +66,7 @@ class TestRLTrainer(unittest.TestCase):
             chunk_size=512,
         )
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-        fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
+        fsdp_cfg = FSDPConfig(cpu_offload=False, ep_size=1)
         train_worker_cfg: WorkerConfig = WorkerConfig(
             model_cfg=model_cfg,
             load_from=MODEL_PATH,
