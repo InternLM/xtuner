@@ -1,3 +1,4 @@
+# type: ignore
 # ================================================================
 # Copyright (c) 2026 InternLM. All rights reserved.
 #
@@ -47,7 +48,7 @@ def to_local(tensor: Union[Tensor, List[Tensor]]) -> Union[Tensor, List[Tensor]]
     return [t.to_local() if isinstance(t, DTensor) else t for t in tensor]
 
 
-def dtensor_from_local(tensor: Union[Tensor, List[Tensor]], ref: Tensor) -> Union[DTensor, List[DTensor]]:
+def dtensor_from_local(tensor: Union[Tensor, List[Tensor]], ref: Tensor) -> Union[DTensor, List[DTensor]]:  # type: ignore
     """Convert a single local Tensor or list of local Tensors to DTensor.
 
     The reference tensor's device mesh and placements are used to create the DTensor. if the reference tensor is not a
@@ -211,7 +212,7 @@ def adamw_update(
 
 
 @torch.compile(fullgraph=True)
-def adamw_update_foreach(
+def adamw_update_foreach(  # type: ignore
     X: List[Tensor],  # Model weights (modified in place)
     G: List[Tensor],  # Gradient
     M: List[Tensor],  # Momentum buffer (modified in place)
