@@ -128,7 +128,7 @@ def ns_line_1_kernel(
     tl.store(c_ptrs_t, output.T, mask=c_mask_t)
 
 
-def ns_line_1(A: Tensor, *, out: Tensor = None):
+def ns_line_1(A: Tensor, *, out: Tensor | None = None):
     """Launch Triton kernel to compute C = A @ A.T."""
     if A.ndim > 3 or A.ndim < 2:
         raise ValueError(f"Input tensor must be 2D or 3D, but got {A.ndim}D tensor.")
@@ -144,7 +144,7 @@ def ns_line_1(A: Tensor, *, out: Tensor = None):
     input_batch_stride = A.stride(0) if A.ndim == 3 else 0
     output_batch_stride = out.stride(0) if out.ndim == 3 else 0
 
-    grid = lambda meta: (batch_size * triton.cdiv(M, meta["BLOCK_SIZE_M"]) * triton.cdiv(M, meta["BLOCK_SIZE_N"]),)
+    grid = lambda meta: (batch_size * triton.cdiv(M, meta["BLOCK_SIZE_M"]) * triton.cdiv(M, meta["BLOCK_SIZE_N"]),)  # noqa: E731
     ns_line_1_kernel[grid](
         A_ptr=A,
         C_ptr=out,
@@ -246,7 +246,7 @@ def ns_line_2_kernel(
     tl.store(c_ptrs_t, output.T, mask=c_mask_t)
 
 
-def ns_line_2(A: Tensor, alpha: float, beta: float, *, out: Tensor = None):
+def ns_line_2(A: Tensor, alpha: float, beta: float, *, out: Tensor | None = None):
     """Launch Triton kernel to compute C = alpha * A @ A.T + beta * A."""
     if A.ndim > 3 or A.ndim < 2:
         raise ValueError(f"Input tensor must be 2D or 3D, but got {A.ndim}D tensor.")
@@ -264,7 +264,7 @@ def ns_line_2(A: Tensor, alpha: float, beta: float, *, out: Tensor = None):
     input_batch_stride = A.stride(0) if A.ndim == 3 else 0
     output_batch_stride = out.stride(0) if out.ndim == 3 else 0
 
-    grid = lambda meta: (batch_size * triton.cdiv(M, meta["BLOCK_SIZE_M"]) * triton.cdiv(M, meta["BLOCK_SIZE_N"]),)
+    grid = lambda meta: (batch_size * triton.cdiv(M, meta["BLOCK_SIZE_M"]) * triton.cdiv(M, meta["BLOCK_SIZE_N"]),)  # noqa: E731
     ns_line_2_kernel[grid](
         A_ptr=A,
         C_ptr=out,
