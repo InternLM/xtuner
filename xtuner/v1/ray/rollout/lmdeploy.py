@@ -1,14 +1,14 @@
-import copy
 import os
 from argparse import Namespace
 from itertools import chain
-from typing import Any, Dict, List, Union
+from typing import List
 
 import ray
 import requests
 from ray.util.placement_group import placement_group_table
 
 from transformers import AutoTokenizer
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.ray.config import RolloutConfig
 
 from .worker import RolloutWorker
@@ -75,81 +75,52 @@ class LMDeployWorker(RolloutWorker):
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
 
-    async def _create_request(
-        self,
-        url: str,
-        prompt: Union[str, List[Dict[str, Any]]] | None,
-        input_ids: List[int] | None,
-        tools: List,  # reserved for agent tool use
-        tool_choice: str,  # reserved for agent tool use
-        sample_params: dict,
-        extra_params: dict,
-        extra_info: dict,
-    ):
-        """Create and send a streaming generation request to the server.
+    def offload(self):
+        """Offloads the model weights and KV cache."""
+        return self._sleep(level=2)
 
-        Args:
-            url (str): The URL of the generation endpoint.
-            prompt (List[Dict[str, str]]): The input prompt for generation,
-                formatted as a list of messages.
-            tools (List): A list of tools the model can call.
-            tool_choice (str): The tool choice strategy.
-            sample_params (dict): Parameters for sampling. Defaults to {}.
-            extra_params (dict): Extra parameters for the request.
-                Defaults to {}.
+    def onload_weights(self):
+        """Onloads the model weights by waking up the model."""
+        return self._wake_up(tags=["weights"])
 
-        Returns:
-            An httpx.Response object for streaming the response.
-        """
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_keys}",  # 如果需要鉴权
-        }
-        payload = {
-            "model": self.model_name,
-            "tools": tools if len(tools) > 0 else None,
-            "tool_choice": tool_choice if tool_choice else None,
-        }
-        if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
-            if "image_data" in extra_info:
-                assert input_ids is not None, "input_ids is required when image_data is provided."
+    def onload_kvcache(self):
+        """Onloads the KV cache by waking up the model."""
+        return self._wake_up(tags=["kv_cache"])
 
-            if input_ids is not None:
-                payload["input_ids"] = input_ids
-                if "image_data" in extra_info:
-                    payload["image_data"] = extra_info["image_data"]
+    def _get_request_payload(self, rollout_state: RolloutState) -> dict:
+        tools = rollout_state.tools
+        tool_choice = rollout_state.tool_choice
+        sample_params = rollout_state.sample_params
+        message = rollout_state.message
+        input_tokens = rollout_state.tokens
+
+        if sample_params.return_token_ids:
+            payload = {
+                "model": self.model_name,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+            if input_tokens is not None:
+                payload["input_ids"] = input_tokens
             else:
-                text_prompt = self.tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
+                text_prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
                 prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
                 payload["input_ids"] = prompt_token_ids
+            sample_params.return_routed_experts = True if self.enable_return_routed_experts else False
+            lmdeploy_sample_params = self._transform_sample_params(sample_params)   
+            payload.update(sample_params)
         else:
-            payload["messages"] = prompt
-
-        if "partial_rollout_input_ids" in extra_info:
-            assert "return_token_ids" in extra_params and extra_params["return_token_ids"], (
-                "concat response_ids and input_ids is only compatible with return_token_ids=True."
-            )
-            payload["input_ids"] = extra_info["partial_rollout_input_ids"]
-            assert len(payload["input_ids"]) <= self.config.context_length, (
-                f"Total input length {len(payload['input_ids'])} exceeds context length {self.config.context_length}."
-            )
-
-        if self.enable_return_routed_experts:
-            extra_params["return_routed_experts"] = True
-
-        lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
-        payload.update(lmdeploy_sample_params)
-        return await self._safe_post_request(url, headers, payload)
-
-    def get_logprobs(self, input_ids, sampling_params):
-        """This method will be implemented for the LMDeploy worker in the
-        future."""
-        pass
-
-    def generate(self, input_ids, sampling_params):
-        """This method will be implemented for the LMDeploy worker in the
-        future."""
-        pass
+            payload = {
+                "model": self.model_name,
+                "messages": rollout_state.message,
+            }
+            lmdeploy_sample_params = self._transform_sample_params(sample_params)   
+            lmdeploy_sample_params.pop("no_stop_trim", None)
+            lmdeploy_sample_params.pop("return_logprob", None)
+            lmdeploy_sample_params.pop("stop_token_ids", None)
+            lmdeploy_sample_params["min_new_tokens"] = sample_params.min_tokens
+            payload.update(lmdeploy_sample_params)
+        return payload
 
     def _sleep(self, level: int = 1):
         """Put the model into a sleep state to save resources.
@@ -167,11 +138,7 @@ class LMDeployWorker(RolloutWorker):
         assert response.status_code == 200, response.status_code
         return response.text
 
-    def offload(self):
-        """Offloads the model weights and KV cache."""
-        return self._sleep(level=2)
-
-    def wake_up(self, tags: List[str] | None = None):
+    def _wake_up(self, tags: List[str] | None = None):
         """Wakes up the model from a sleep state.
 
         Args:
@@ -187,26 +154,6 @@ class LMDeployWorker(RolloutWorker):
         response = requests.post(url, headers=headers, params=data)
         assert response.status_code == 200, response.status_code
         return response.text
-
-    def onload_weights(self):
-        """Onloads the model weights by waking up the model."""
-        return self.wake_up(tags=["weights"])
-
-    def onload_kvcache(self):
-        """Onloads the KV cache by waking up the model."""
-        return self.wake_up(tags=["kv_cache"])
-
-    def pause_generation(self):
-        """It will implemented for LMDeploy worker in the future."""
-        pass
-
-    def continue_generation(self):
-        """It will implemented for LMDeploy worker in the future."""
-        pass
-
-    def reset_prefix_cache(self):
-        """It will implemented for LMDeploy worker in the future."""
-        pass
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         """Transform the RolloutConfig into a Namespace suitable for the
@@ -238,7 +185,7 @@ class LMDeployWorker(RolloutWorker):
         # Therefore, each server only needs to handle 1 / dp_size of the total requests
         max_batch_size = self.config.rollout_max_batch_size_per_instance // dp_size
         distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
-        lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "WARNING")
+        lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "ERROR")
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
 
@@ -368,8 +315,5 @@ class LMDeployWorker(RolloutWorker):
             **lmdeploy_config_kwargs,
         )
 
-    def _transform_sample_params(self, sample_params: Dict, extra_params: Dict = {}):
-        lmdeploy_sample_params = copy.deepcopy(sample_params)
-        if extra_params:
-            lmdeploy_sample_params.update(extra_params)
-        return lmdeploy_sample_params
+    def _transform_sample_params(self, sample_params: SampleParams) -> dict:
+        return sample_params.model_dump(exclude_none=True)
