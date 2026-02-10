@@ -5,44 +5,112 @@ import ray
 from transformers import AutoTokenizer
 import torch
 import tempfile
+import httpx
 from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.ray.rollout.lmdeploy import LMDeployWorker
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.environment import SingleTurnEnvironment
-from xtuner.v1.datasets import RLTokenizeFnConfig
-from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.ray.rollout.controller import RolloutController
-from xtuner.v1.utils.rl_test_utils import MockTimeoutRolloutWorker, MockRequestErrorRolloutWorker, MockClientErrorRolloutWorker, MockServerErrorRolloutWorker
+from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
+TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"] 
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 resource_map = {"npu": "NPU", "cuda": "GPU"}
+
+class MockTimeoutRolloutWorker(LMDeployWorker):
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        try:
+            raise httpx.TimeoutException("Mocked timeout error")
+        except Exception as e:
+            error_type = HttpRequestErrorType.from_exception(e)
+            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
+            self.logger.info(f"Caught mocked timeout exception: {e.__class__.__name__}")
+            return result
+
+    def _launch_server(self):
+        pass  # Override
+
+
+class MockRequestErrorRolloutWorker(LMDeployWorker):
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        try:
+            req = httpx.Request("POST", url)
+            raise httpx.RequestError("Mocked httpx request error", request=req)
+        except Exception as e:
+            error_type = HttpRequestErrorType.from_exception(e)
+            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
+            self.logger.info(f"Caught mocked request error exception: {e.__class__.__name__}")
+            return result
+
+    def _launch_server(self):
+        pass  # Override
+
+
+class MockClientErrorRolloutWorker(LMDeployWorker):
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        try:
+            req = httpx.Request("POST", url)
+            res = httpx.Response(400, request=req)
+            raise httpx.HTTPStatusError("Mocked client error", request=req, response=res)
+        except Exception as e:
+            error_type = HttpRequestErrorType.from_exception(e)
+            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
+            self.logger.info(f"Caught mocked client exception: {e.__class__.__name__}")
+            return result
+
+    def _launch_server(self):
+        pass  # Override
+
+
+class MockServerErrorRolloutWorker(LMDeployWorker):
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        try:
+            req = httpx.Request("POST", url)
+            res = httpx.Response(500, request=req)
+            raise httpx.HTTPStatusError("Mocked server error", request=req, response=res)
+        except Exception as e:
+            error_type = HttpRequestErrorType.from_exception(e)
+            result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)
+            self.logger.info(f"Caught mocked server exception: {e.__class__.__name__}")
+            return result
+
+    def _launch_server(self):
+        pass  # Override
+
+class MockInvalidResponseRolloutWorker(LMDeployWorker):
+    async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        mock_rollout_state = RolloutState(message=TEST_TEXT_MESSAGES, status=Status.FAILED)
+        result = HttpRequestResult(response=mock_rollout_state)
+        return result
+    
+    async def _safe_handle_response(self, rollout_state, http_response) -> RolloutState:
+        mock_rollout_state = RolloutState(message=TEST_TEXT_MESSAGES, status=Status.FAILED)
+        return mock_rollout_state
+    
+    def _launch_server(self):
+        pass  # Override
+
 @ray.remote
 class MockTimeoutRolloutController(RolloutController):
-    def _get_worker_cls(self):
-        return ray.remote(MockTimeoutRolloutWorker)
-    def deactivate_worker_by_url(self, url):
-        pass
+    def _get_worker_cls(self): return ray.remote(MockTimeoutRolloutWorker)
+
 @ray.remote
 class MockRequestErrorRolloutController(RolloutController):
-    def _get_worker_cls(self):
-        return ray.remote(MockRequestErrorRolloutWorker)
-    def deactivate_worker_by_url(self, url):
-        pass
+    def _get_worker_cls(self): return ray.remote(MockRequestErrorRolloutWorker)
+
 @ray.remote    
 class MockClientErrorRolloutController(RolloutController):
-    def _get_worker_cls(self):
-        return ray.remote(MockClientErrorRolloutWorker)
-    def deactivate_worker_by_url(self, url):
-        pass
+    def _get_worker_cls(self): return ray.remote(MockClientErrorRolloutWorker)
+
 @ray.remote
 class MockServerErrorRolloutController(RolloutController):
-    def _get_worker_cls(self):
-        return ray.remote(MockServerErrorRolloutWorker)
-    
-    def deactivate_worker_by_url(self, url):
-        pass
+    def _get_worker_cls(self): return ray.remote(MockServerErrorRolloutWorker)
 
+@ray.remote
+class MockInvalidResponseRolloutController(RolloutController):
+    def _get_worker_cls(self): return ray.remote(MockInvalidResponseRolloutWorker)
+    
 class TestMockRollout(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -69,31 +137,10 @@ class TestMockRollout(unittest.TestCase):
             tensor_parallel_size=1,
             context_length=self.max_prompt_length + self.max_response_length,
             max_retry_per_worker=2,
-            worker_log_dir=self.worker_log_dir
+            max_retry_per_sample=3,
+            worker_log_dir=self.worker_log_dir,
         )
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
-
-        self.dataflow_cfg = DataFlowConfig(
-            max_concurrent=self.max_concurrent,
-            global_batch_size=self.global_batch_size,
-            max_retry_times=self.max_retry_times,
-            worker_log_dir=self.worker_log_dir  
-        )
-        train_dataset_cfg = [{
-            "dataset": DatasetConfig(name="mock_data", anno_path=TRAIN_DATA_PATH),
-            "tokenize_fn": RLTokenizeFnConfig(max_length=self.max_prompt_length),
-        }]
-        dataloader_cfg = DataloaderConfig(
-            collator='fake_collator',
-            pack_level='none',
-            group_by_length=False,
-        )
-        self.replay_buffer_cfg = ReplayBufferConfig(
-            dataset_cfg=train_dataset_cfg,
-            dataloader_cfg=dataloader_cfg,
-            tokenizer=tokenizer,
-            worker_log_dir=self.worker_log_dir
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
     def tearDown(self):
         ray.shutdown()
@@ -101,27 +148,31 @@ class TestMockRollout(unittest.TestCase):
 
     async def _run_mock_test(self, mock_controller_cls, error_name, pg):
         rollout_controller = mock_controller_cls.remote(self.rollout_cfg, pg)
-        self.test_env = SingleTurnEnvironment.remote("env", pg, self.rollout_cfg, rollout_controller=rollout_controller)
-        self.test_dataflow = DataFlow.remote("dataflow", self.dataflow_cfg, self.replay_buffer_cfg, self.test_env)
-        
-        result = await self.test_dataflow.run.remote(num=3)
-        completed_rollouts = result["data_groups"]
-        status = await self.test_dataflow.get_replaybuffer_status.remote()
-        self.assertEqual(len(completed_rollouts), 0, f"[{error_name}] Expected no rollouts to complete successfully.")
-        self.assertEqual(status["remain_completed_samples_count"], 0, f"[{error_name}] Completed count in buffer should be 0.")
-        self.assertEqual(status["remain_aborted_samples_count"], 0, f"[{error_name}] Expected no rollouts to be interrupted.")
-        await self.test_env.shutdown.remote()
+        input_state = RolloutState(message=TEST_TEXT_MESSAGES)
+        result_state = await rollout_controller.generate.remote(rollout_state=input_state)
+        self.assertEqual(result_state.status, Status.FAILED, f"Expected rollout to fail due to {error_name}, but it succeeded.")
+        self.assertIsNotNone(result_state.error_msg, f"Expected an error message for {error_name} case, but got None.")
+        if error_name == "server_error":
+            self.assertIn("Server error", result_state.error_msg, f"Expected error message to indicate a server error for {error_name} case, but got: {result_state.error_msg}")
+        elif error_name == "client_error":
+            self.assertIn("Client error", result_state.error_msg, f"Expected error message to indicate a client error for {error_name} case, but got: {result_state.error_msg}")
+        elif error_name in ["request_error", "timeout"]:
+            self.assertIn("Request failed", result_state.error_msg, f"Expected error message to indicate a request error for {error_name} case, but got: {result_state.error_msg}")
+            self.assertIn(str(self.rollout_cfg.max_retry_per_sample), result_state.error_msg, f"Expected error message to include max retry times for {error_name} case, but got: {result_state.error_msg}")
+        elif error_name == "invalid_response":
+            self.assertIn("Invalid rollout response", result_state.error_msg, f"Expected error message to indicate an invalid response for {error_name} case, but got: {result_state.error_msg}")
+            self.assertIn(str(self.rollout_cfg.max_retry_per_sample), result_state.error_msg, f"Expected error message to include max retry times for {error_name} case, but got: {result_state.error_msg}")
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
     def test_parallel_mock_rollout(self):
         async def run_parallel():
             res_cfg_small = AcceleratorResourcesConfig(
                 accelerator=resource_map[torch.accelerator.current_accelerator().type],
-                num_workers=2,
+                num_workers=1,
                 num_cpus_per_worker=2,
             )
             
-            pgs = [AutoAcceleratorWorkers.build_placement_group(res_cfg_small, name=f"pg_{i}") for i in range(4)]
+            pgs = [AutoAcceleratorWorkers.build_placement_group(res_cfg_small, name=f"pg_{i}") for i in range(5)]
             await asyncio.gather(*[pg.ready() for pg in pgs])
 
             tasks = [
@@ -129,6 +180,7 @@ class TestMockRollout(unittest.TestCase):
                 self._run_mock_test(MockRequestErrorRolloutController, "request_error", pgs[1]),
                 self._run_mock_test(MockClientErrorRolloutController, "client_error", pgs[2]),
                 self._run_mock_test(MockServerErrorRolloutController, "server_error", pgs[3]),
+                self._run_mock_test(MockInvalidResponseRolloutController, "invalid_response", pgs[4]),
             ]
             await asyncio.gather(*tasks)
 
