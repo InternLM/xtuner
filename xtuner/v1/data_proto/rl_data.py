@@ -44,6 +44,7 @@ class SampleParams(BaseModel):
     include_stop_str_in_output: bool = True
     no_stop_trim: bool = True
     spaces_between_special_tokens: bool = False
+    return_routed_experts: bool = False
 
 
 class Status(Enum):
@@ -65,23 +66,23 @@ class MultimodalInfo(TypedDict):
 
 
 class RolloutState(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     # --- 数据 ---
+    message_uid: int | None = None  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
-    prompt_ids: list[int]  # 原始 prompt的token ids
+    prompt_ids: list[int] | None = None  # 原始 prompt的token ids
     data_source: dict[str, Any] | None = None
     mm_info: MultimodalInfo | None = None
     reward_model: dict[str, Any] | None = None
-    message_uid: int | None = None  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
     num_tokens: int | None = None  # 用于 cache 管理
 
     # --- InferEngine 输入 ---
     session_uid: int | None = None
-    tokens: list[int]  # 每一次推理引擎的实际输入
+    tokens: list[int] | None = None  # 每一次推理引擎的实际输入
     tools: list | None = None
     tool_choice: str | None = None
-    sample_parms: SampleParams | None = None
+    sample_params: SampleParams = SampleParams()
 
     # --- InferEngine 输出 ---
     response: str | None = None
@@ -94,8 +95,47 @@ class RolloutState(BaseModel):
     reward: float | list[float] | list[dict] | None = None
 
     #  --- 状态 ---
-    state: Status = Status.INIT
+    status: Status = Status.INIT
+    error_msg: str | None = None
     seq_staleness: int = 0  # 整条序列的staleness，一般为最大的token_staleness
     token_staleness: list[int] | None = None  # 每一个token的staleness，长度和tokens保持一致
     loss_mask: list[int] | None = None  # tokens + response_ids的长度
     extra_fields: dict[str, Any] = {}
+
+
+def update_status_from_finish_reason(finish_reason: str | None) -> Status:
+    """Updates the internal status based on the inference engine's finish
+    reason.
+
+    State Transition Logic:
+    -------------------------------------------------------------
+    | Finish Reason (Input)          | Internal Status (Output) |
+    | :----------------------------- | :----------------------- |
+    | `stop`, `length`, `tool_calls` | `Status.COMPLETED`       |
+    | `abort`                        | `Status.ABORTED`         |
+    | `error` or `None`              | `Status.FAILED`          |
+    | *Others*                       | *Raises ValueError*      |
+    -------------------------------------------------------------
+
+    Args:
+        finish_reason (str | None): The raw finish reason string returned by
+            the inference engine (e.g., vLLM, LMDeploy).
+
+    Raises:
+        ValueError: If the ``finish_reason`` is unknown and cannot be mapped.
+    """
+    if finish_reason is None:
+        logger.error("finish_reason is None, setting status to FAILED.")
+        return Status.FAILED
+
+    reason = finish_reason.lower()
+    if reason in ("stop", "length", "tool_calls"):
+        return Status.COMPLETED
+    elif reason == "abort":
+        return Status.ABORTED
+    elif reason == "error":
+        logger.warning("finish_reason is 'error', setting status to FAILED.")
+        return Status.FAILED
+    else:
+        logger.error(f"finish_reason '{finish_reason}' is unknown, setting status to FAILED.")
+        return Status.FAILED
