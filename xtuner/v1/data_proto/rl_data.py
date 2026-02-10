@@ -44,7 +44,7 @@ class SampleParams(BaseModel):
     include_stop_str_in_output: bool = True
     no_stop_trim: bool = True
     spaces_between_special_tokens: bool = False
-    return_routed_experts : bool = False 
+    return_routed_experts: bool = False
 
 
 class Status(Enum):
@@ -69,7 +69,7 @@ class RolloutState(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     # --- 数据 ---
-    message_uid: int | None = None # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
+    message_uid: int | None = None  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
     prompt_ids: list[int] | None = None  # 原始 prompt的token ids
     data_source: dict[str, Any] | None = None
