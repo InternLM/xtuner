@@ -1,13 +1,107 @@
+import asyncio
 import inspect
-from typing import Any, Callable, List, Optional
+from typing import Callable, List
 
 import httpx
 import ray
 from pydantic import BaseModel, ConfigDict, Field
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
-from xtuner.v1.utils import get_logger
+from xtuner.v1.data_proto.rl_data import RolloutState
+
+
+class NativeJudger:
+    # 默认使用NativeJudger的Judger为ray.actor，如果为function，则通过用户自己调用
+    """Base class for judgers, providing a standard interface for executing a
+    judging process, which can be either a local function or a remote service.
+
+    The judger orchestrates a three-step pipeline:
+    1. Pre-process the input data.
+    2. Execute the core logic (local function or remote HTTP call).
+    3. Post-process the result.
+    """
+
+    def __init__(
+        self,
+        judger_name: str = "native_judger",
+        reward_handler: Callable | str | None = None,  # 支持函数/url，其他类型可以后面再加上
+        extra_info: dict = {},
+        request_timeout: float = 30.0,
+    ):
+        self._judger_name = judger_name
+        self.extra_info = extra_info
+        self.reward_handler = reward_handler
+        self.request_timeout = request_timeout
+
+    async def judge(self, rollout_state: RolloutState) -> RolloutState:
+        # native preprocess
+        assert rollout_state.response is not None, (
+            "RolloutState must have a response for judging. You should detokenize the response_ids in AgentLoop"
+        )
+        # 传入rollout_state方便用户从rollout_state挑选自己想要的字段
+        info = {**self.extra_info, "rollout_state": rollout_state}
+        input_kwargs = {
+            "response": rollout_state.response,
+            "label": rollout_state.reward_model["ground_truth"],
+            "extra_info": info,
+        }
+        # actual judger function
+        if isinstance(self.reward_handler, str):
+            async with httpx.AsyncClient(timeout=self.request_timeout) as client:
+                response = await client.post(self.reward_handler, json=input_kwargs)
+                response.raise_for_status()
+                judger_response = response.json()
+        elif callable(self.reward_handler):
+            if inspect.iscoroutinefunction(self.reward_handler):
+                judger_response = await self.reward_handler(**input_kwargs)
+            else:
+                judger_response = self.reward_handler(**input_kwargs)
+        # native postprocess
+        rollout_state.reward = judger_response
+        return rollout_state
+
+    def get_judger_name(self) -> str:
+        """Get the name of the judger.
+
+        Returns:
+            str: The name of the judger.
+        """
+        return self._judger_name
+
+
+class NativeJudgerRouter:
+    """NativeJudger 路由管理器。
+
+    功能：
+    1. 通过维护 worker 负载实现负载均衡（Least Loaded）。
+    2. 当负载相同时，通过轮询（Round-robin）分配任务。
+    """
+
+    def __init__(self, workers: List[ray.actor.ActorHandle], judger_name: str):
+        self.workers = workers
+        self._worker_loads = {worker: 0 for worker in workers}
+        self._rr_index = 0
+        self._lock = asyncio.Lock()
+        self._judger_name = judger_name
+
+    async def judge(self, rollout_state: RolloutState) -> RolloutState:
+        async with self._lock:
+            min_load = min(self._worker_loads.values())
+            candidates = [w for w in self.workers if self._worker_loads[w] == min_load]
+            worker = candidates[self._rr_index % len(candidates)]
+            self._rr_index = (self._rr_index + 1) % len(self.workers)
+            self._worker_loads[worker] += 1
+        try:
+            return await worker.judge.remote(rollout_state)
+        finally:
+            async with self._lock:
+                self._worker_loads[worker] -= 1
+
+    def get_worker_status(self) -> dict[str, int]:
+        return {str(w): load for w, load in self._worker_loads.items()}
+
+    def get_judger_name(self) -> str:
+        return self._judger_name
 
 
 class NativeJudgerConfig(BaseModel):
@@ -37,14 +131,19 @@ class NativeJudgerConfig(BaseModel):
     num_ray_actors: int = 1
     num_cpus_per_actor: int = 1
     cpu_memory_per_actor: int = 1024**3
-    reward_func: Optional[Callable] = Field(default=None, exclude=True)
-    remote_url: Optional[str] = None
-    preprocess_func: Optional[Callable] = Field(default=None, exclude=True)
-    postprocess_func: Optional[Callable] = Field(default=None, exclude=True)
+    reward_handler: Callable | str = Field(default=None, exclude=True)
     request_timeout: float = 30.0
     extra_info: dict = Field(default={}, exclude=True)
 
-    def build_actor(self, pg: PlacementGroup, start_bundle_idx: int) -> List[ray.actor.ActorClass]:
+    def build(self) -> NativeJudger:
+        return NativeJudger(
+            judger_name=self.judger_name,
+            reward_handler=self.reward_handler,
+            request_timeout=self.request_timeout,
+            extra_info=self.extra_info,
+        )
+
+    def build_router(self, pg: PlacementGroup, start_bundle_idx: int) -> NativeJudgerRouter:
         """Create and launch Ray actor instances for the GSM8K judger.
 
         This method instantiates multiple NativeJudger Ray actors according to `num_ray_actors`,
@@ -77,190 +176,11 @@ class NativeJudgerConfig(BaseModel):
                 )
                 .remote(
                     judger_name=self.judger_name,
-                    reward_func=self.reward_func,
-                    remote_url=self.remote_url,
-                    preprocess_func=self.preprocess_func,
-                    postprocess_func=self.postprocess_func,
+                    reward_handler=self.reward_handler,
                     request_timeout=self.request_timeout,
                     extra_info=self.extra_info,
                 )
             )
             workers_list.append(worker)
-        return workers_list
-
-
-class NativeJudger:
-    """Base class for judgers, providing a standard interface for executing a
-    judging process, which can be either a local function or a remote service.
-
-    The judger orchestrates a three-step pipeline:
-    1. Pre-process the input data.
-    2. Execute the core logic (local function or remote HTTP call).
-    3. Post-process the result.
-    """
-
-    def __init__(
-        self,
-        judger_name: str = "native_judger",
-        reward_func: Optional[Callable] = None,
-        remote_url: Optional[str] = None,
-        preprocess_func: Optional[Callable] = None,
-        postprocess_func: Optional[Callable] = None,
-        request_timeout: float = 30.0,
-        extra_info: dict = {},
-    ):
-        """Initialize the NativeJudger.
-
-        Args:
-            reward_func (Optional[Callable]): A local function to compute the
-                reward. Exactly one of `reward_func` or `remote_url` must be
-                provided. Defaults to None.
-            remote_url (Optional[str]): The URL of a remote service for
-                judging. Exactly one of `reward_func` or `remote_url` must be
-                provided. Defaults to None.
-            preprocess_func (Optional[Callable]): A function to preprocess the
-                input data before judger execution. Defaults to None.
-            postprocess_func (Optional[Callable]): A function to postprocess
-                the judger result. Defaults to None.
-            request_timeout (float): Timeout for remote requests in seconds.
-                Defaults to 30.0.
-            extra_info (dict): Extra information to be passed to the reward
-                function. Defaults to {}.
-
-        Raises:
-            ValueError: If both or neither of `reward_func` and `remote_url`
-                are provided.
-        """
-        if (reward_func is None and remote_url is None) or (reward_func is not None and remote_url is not None):
-            raise ValueError("Exactly one of 'reward_func' or 'remote_url' must be provided.")
-        self.judger_name = judger_name
-        self.extra_info = extra_info
-        self.reward_func = reward_func
-        self.remote_url = remote_url
-
-        self.preprocess_func = preprocess_func or self._default_preprocess
-        self.postprocess_func = postprocess_func or self._default_postprocess
-
-        self.http_client = None
-        self.execute_func = None
-
-        if self.reward_func:
-            self.execute_func = self._local_executor
-        elif self.remote_url:
-            self.http_client = httpx.AsyncClient(timeout=request_timeout)
-            self.execute_func = self._remote_executor
-
-    def _default_preprocess(self, data_item: List[RLDataFlowItem], extra_info: dict) -> Any:
-        """Default preprocessing function.
-
-        Args:
-            data_item (RLDataFlowItem | List[RLDataFlowItem]): The data item(s) to preprocess.
-
-        Returns:
-            Any: A dictionary containing the responses, labels, and extra info.
-        """
-
-        assert len(data_item) == 1, "Default preprocess only supports single data item."
-        # TODO: Support batch reward calculation via API server
-        response = data_item[0].env.rollout.response
-        assert data_item[0].data.reward_model is not None
-        label = data_item[0].data.reward_model["ground_truth"]
-        return {
-            "response": response,
-            "label": label,
-            "extra_info": extra_info,
-        }
-
-    def _default_postprocess(self, result: Any) -> List[RLJudgerResponseItem]:
-        ## 将结果包装成 RLJudgerResponseItem
-        """Default postprocessing function.
-
-        Args:
-            result (Any): The result from the execution step.
-
-        Returns:
-            Any: The result, unchanged.
-        """
-        if not isinstance(result, list):
-            result = [result]
-        # todo: 支持多个judger结果的返回
-        judger_response_item = [RLJudgerResponseItem(reward=result[i]) for i in range(len(result))]
-        return judger_response_item
-
-    async def _local_executor(self, data_item: List[RLDataFlowItem]) -> List[RLJudgerResponseItem]:
-        """Executes the reward function locally.
-
-        Args:
-            responses (str | List[str]): The model's response(s).
-            labels (str | List[str]): The ground-truth label(s).
-
-        Returns:
-            Any: The postprocessed result of the reward function.
-        """
-        assert self.reward_func is not None, "reward_func cannot be None for local execution."
-        # 记录每个judger请求的uid, 方便后续结果合并
-        uid_list = [item.uid.observation_id for item in data_item]
-        kwargs = self.preprocess_func(data_item, self.extra_info)
-        if inspect.iscoroutinefunction(self.reward_func):
-            json_result = await self.reward_func(**kwargs)
-        else:
-            json_result = self.reward_func(**kwargs)
-
-        # transform json to RLJudgerResponseItem
-        result = self.postprocess_func(json_result)
-        for i in range(len(result)):
-            result[i].uid = uid_list[i]
-        return result
-
-    async def _remote_executor(self, data_item: List[RLDataFlowItem]) -> List[RLJudgerResponseItem]:
-        """Executes the reward function by calling a remote service.
-
-        Args:
-            responses (str | List[str]): The model's response(s).
-            labels (str | List[str]): The ground-truth label(s).
-
-        Returns:
-            Any: The postprocessed result from the remote service, or None if
-                an error occurs.
-        """
-        assert self.remote_url is not None and self.http_client is not None, (
-            "remote_url cannot be None for remote execution."
-        )
-        payload = self.preprocess_func(data_item, self.extra_info)
-        try:
-            response = await self.http_client.post(self.remote_url, json=payload)
-            response.raise_for_status()
-            json_result = response.json()
-            # 重要，必须加
-            json_result["uid"] = data_item[0].uid.observation_id
-            # transform json to RLJudgerResponseItem
-            return self.postprocess_func(json_result)
-        except httpx.RequestError as exc:
-            get_logger().error(f"An error occurred while requesting {exc.request.url}: {exc}")
-            return []
-
-    async def judge(self, data_item: List[RLDataFlowItem]) -> List[RLJudgerResponseItem]:
-        """The main public method to run the judging pipeline.
-
-        Args:
-            responses (str | List[str]): The model's response(s) to be judged.
-            labels (str | List[str]): The ground-truth label(s).
-
-        Returns:
-            Any: The final result after the full
-                preprocess-execute-postprocess pipeline.
-
-        Raises:
-            RuntimeError: If the judger is not properly initialized.
-        """
-        if self.execute_func is None:
-            raise RuntimeError("Judger is not properly initialized.")
-        return await self.execute_func(data_item)
-
-    def get_judger_name(self) -> str:
-        """Get the name of the judger.
-
-        Returns:
-            str: The name of the judger.
-        """
-        return self.judger_name
+        judger_router = NativeJudgerRouter(workers=workers_list, judger_name=self.judger_name)
+        return judger_router

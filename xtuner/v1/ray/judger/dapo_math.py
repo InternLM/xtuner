@@ -301,7 +301,7 @@ class DapoMathJudgerConfig(NativeJudgerConfig):
     overlong_buffer_len: Optional[int] = None
     overlong_penalty_factor: Optional[float] = None
     tokenizer: Any = Field(default=None, exclude=True)
-    reward_func: Callable = Field(default=compute_reward, exclude=True)
+    reward_handler: Callable = Field(default=compute_reward, exclude=True)
 
     def __init__(
         self,
