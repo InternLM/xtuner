@@ -202,21 +202,30 @@ class RolloutController:
         except asyncio.TimeoutError:
             self.logger.error(f"Rollout timeout for worker {worker}. Skipping sample.")
             rollout_state.status = Status.FAILED
+            rollout_state.error_msg = (
+                f"Rollout request timed out after {self.config.rollout_timeout * self.timeout_multiplier} seconds."
+            )
             return rollout_state
 
-    def pause(self):
-        """Pauses all active rollout workers.
+    def pause_generation(self):
+        return self._broadcast_to_active_workers("pause_generation")
 
-        Args:
-            block (bool): Whether to block until the operation completes.
-        """
-        self._set_pause_state()
-        self._offload()
+    def continue_generation(self):
+        return self._broadcast_to_active_workers("continue_generation")
 
-    def restart(self):
-        self._set_restart_state()
-        self._onload_weights()
-        self._onload_kvcache()
+    def offload(self):
+        return self._broadcast_to_active_workers("offload")
+
+    def onload(self):
+        self._broadcast_to_active_workers("onload_weights")
+        self._broadcast_to_active_workers("onload_kvcache")
+        return
+
+    def onload_weights(self):
+        return self._broadcast_to_active_workers("onload_weights")
+
+    def onload_kvcache(self):
+        return self._broadcast_to_active_workers("onload_kvcache")
 
     def shutdown(self):
         """Shuts down all active rollout workers.
@@ -303,46 +312,6 @@ class RolloutController:
 
         results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
         return results
-
-    def _set_pause_state(self):
-        """Pauses all active rollout workers.
-
-        Args:
-            block (bool): Whether to block until the operation completes.
-        """
-        return self._broadcast_to_active_workers("set_pause_state")
-
-    def _set_restart_state(self):
-        """Restarts all active rollout workers.
-
-        Args:
-            block (bool): Whether to block until the operation completes.
-        """
-        return self._broadcast_to_active_workers("set_restart_state")
-
-    def _offload(self):
-        """Offloads model weights and KV cache on all active rollout workers.
-
-        Args:
-            block (bool): Whether to block until the operation completes.
-        """
-        return self._broadcast_to_active_workers("offload")
-
-    def _onload_weights(self=True):
-        """Onloads model weights on all active rollout workers.
-
-        Args:
-            block (bool): Whether to block until the operation completes.
-        """
-        return self._broadcast_to_active_workers("onload_weights")
-
-    def _onload_kvcache(self=True):
-        """Onloads KV cache on all active rollout workers.
-
-        Args:
-            block (bool): Whether to block until the operation completes.
-        """
-        return self._broadcast_to_active_workers("onload_kvcache")
 
     def _deactivate_worker(self, url: str):
         """A helper function to deactivate a worker, update all related states,
@@ -433,6 +402,7 @@ class RolloutController:
             except Exception as e:
                 self.logger.error(f"Generate failed in API server: {e}")
                 request.status = Status.FAILED
+                request.error_msg = f"Generate failed in API server with error: {str(e)}"
                 return request
 
         config = uvicorn.Config(app, host=host, port=port)

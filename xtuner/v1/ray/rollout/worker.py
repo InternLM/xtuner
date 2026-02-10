@@ -174,11 +174,11 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.debug(f"Worker {self.rank} server process and its children terminated.")
             return
 
-    def set_pause_state(self):
+    def pause_generation(self):
         """Pause the worker's generation process."""
         self.paused = True
 
-    def set_restart_state(self):
+    def continue_generation(self):
         """Resume the worker's generation process."""
         self.receive_abort_request.clear()
 
@@ -241,6 +241,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         f"Invalid rollout response for request {uid} after {max_retries} attempts, marking as FAILED."
                     )
                     rollout_state.status = Status.FAILED
+                    rollout_state.error_msg = f"Invalid rollout response after {max_retries} attempts."
                     return rollout_state
 
                 # Case 1.3: Invalid rollout response but we have retries left
@@ -262,6 +263,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                 self.logger.warning(
                     f"rollout request {uid} to {http_result.url} was skipped due to client error {http_result.error_type} with {http_result.error_msg}"
                 )
+                rollout_state.error_msg = (
+                    f"Client error {http_result.error_type} with message: {http_result.error_msg}"
+                )
                 rollout_state.status = Status.FAILED
                 return rollout_state
 
@@ -269,6 +273,9 @@ class RolloutWorker(SingleAcceleratorWorker):
                 # Case 2.3: A non-retryable server error occurred (such as 5xx HTTP status)
                 self.logger.warning(
                     f"rollout request {uid} to {http_result.url} failed due to server error {http_result.error_type} with {http_result.error_msg}"
+                )
+                rollout_state.error_msg = (
+                    f"Server error {http_result.error_type} with message: {http_result.error_msg}"
                 )
                 rollout_state.status = Status.FAILED
                 return rollout_state
@@ -279,6 +286,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     self.logger.warning(
                         f"rollout request {uid} to {http_result.url} failed after {max_retries} attempts due to retryable error {http_result.error_type} with {http_result.error_msg}"
                     )
+                    rollout_state.error_msg = f"Request failed after {max_retries} attempts due to retryable error {http_result.error_type} with message: {http_result.error_msg}"
                     rollout_state.status = Status.FAILED
                     return rollout_state
 
@@ -294,7 +302,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     f"Unexpected error during rollout request {uid} to {http_result.url}: {http_result.exception}"
                 )
         return rollout_state
-        
+
     def _launch_server(self):
         """Launch the inference server as a separate process or Ray task.
 
@@ -484,7 +492,14 @@ class RolloutWorker(SingleAcceleratorWorker):
                         error_msg = f"Incomplete rollout data for msg {uid}: {', '.join(validation_errors)}"
                         self.logger.error(error_msg)
                         rollout_state.status = Status.FAILED
+                        rollout_state.error_msg = error_msg
                         return rollout_state
+                elif rollout_status == Status.FAILED:
+                    error_msg = f"Rollout failed for msg {uid} with finish_reason {finish_reason}"
+                    self.logger.error(error_msg)
+                    rollout_state.status = Status.FAILED
+                    rollout_state.error_msg = error_msg
+                    return rollout_state
 
                 rollout_state.response = returned_response
                 rollout_state.response_ids = response_ids
@@ -520,10 +535,11 @@ class RolloutWorker(SingleAcceleratorWorker):
                 if rollout_status == Status.COMPLETED and not returned_response:
                     self.logger.error(f"Empty response text for msg {uid} with finish_reason {finish_reason}")
                     rollout_state.status = Status.FAILED
+                    rollout_state.error_msg = "Empty response text"
                     return rollout_state
-                
+
                 rollout_state.response = returned_response
-                rollout_state.finish_reason = finish_reason 
+                rollout_state.finish_reason = finish_reason
                 rollout_state.status = rollout_status
                 return rollout_state
             except KeyError as e:

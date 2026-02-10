@@ -96,6 +96,7 @@ class RolloutState(BaseModel):
 
     #  --- 状态 ---
     status: Status = Status.INIT
+    error_msg: str | None = None
     seq_staleness: int = 0  # 整条序列的staleness，一般为最大的token_staleness
     token_staleness: list[int] | None = None  # 每一个token的staleness，长度和tokens保持一致
     loss_mask: list[int] | None = None  # tokens + response_ids的长度
