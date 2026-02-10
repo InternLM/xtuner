@@ -208,24 +208,23 @@ class RolloutController:
             return rollout_state
 
     def pause_generation(self):
-        return self._broadcast_to_active_workers("pause_generation")
+        self._broadcast_to_active_workers("pause_generation")
 
     def continue_generation(self):
-        return self._broadcast_to_active_workers("continue_generation")
+        self._broadcast_to_active_workers("continue_generation")
 
     def offload(self):
-        return self._broadcast_to_active_workers("offload")
+        self._broadcast_to_active_workers("offload")
 
     def onload(self):
         self._broadcast_to_active_workers("onload_weights")
         self._broadcast_to_active_workers("onload_kvcache")
-        return
 
     def onload_weights(self):
-        return self._broadcast_to_active_workers("onload_weights")
+        self._broadcast_to_active_workers("onload_weights")
 
     def onload_kvcache(self):
-        return self._broadcast_to_active_workers("onload_kvcache")
+        self._broadcast_to_active_workers("onload_kvcache")
 
     def shutdown(self):
         """Shuts down all active rollout workers.
@@ -233,7 +232,7 @@ class RolloutController:
         Args:
             block (bool): Whether to block until the operation completes.
         """
-        return self._broadcast_to_active_workers("shutdown")
+        self._broadcast_to_active_workers("shutdown")
 
     def _update_dist_init_addr(self, nodes_per_engine, server_urls_per_engine, dist_init_addrs, tp_size):
         """Update the distributed initialization addresses for workers.
