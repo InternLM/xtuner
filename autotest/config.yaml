@@ -218,7 +218,7 @@ case:
             resource:
                 envs:
                     - GPTOSS_21B_PATH=/mnt/shared-storage-user/llmrazor-share/model/gpt-oss-20b-bf16
-                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca2
+                    - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
                     - XTUNER_DETERMINISTIC=true
             assert_info:
                 base_metric: gptoss-sft/7b774a0e2/tracker.jsonl
