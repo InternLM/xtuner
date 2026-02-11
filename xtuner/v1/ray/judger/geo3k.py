@@ -40,4 +40,4 @@ class GEO3KJudgerConfig(NativeJudgerConfig):
 
     judger_name: str = "hiyouga/geometry3k"
     extra_info: dict = {"format_score": 0.1, "use_boxed": True}
-    reward_func: Callable = compute_reward
+    reward_handler: Callable = compute_reward
