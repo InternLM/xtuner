@@ -82,4 +82,4 @@ class GSM8KJudgerConfig(NativeJudgerConfig):
 
     judger_name: str = "openai/gsm8k"
     extra_info: dict = {"score": 1, "format_score": 0}
-    reward_func: Callable = compute_reward
+    reward_handler: Callable = compute_reward
