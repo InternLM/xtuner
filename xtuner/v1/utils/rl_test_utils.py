@@ -2,7 +2,7 @@ import json
 import multiprocessing
 import os
 import time
-from typing import Any, Callable, Dict, List
+from typing import Any, Dict, List
 
 import requests
 import uvicorn
@@ -90,17 +90,7 @@ class JudgerServer:
             print("Server stopped.")
 
 
-def custom_postprocessor_for_gsm8k(result):
-    from xtuner.v1.data_proto.rl_data import RLJudgerResponseItem
-
-    if not isinstance(result, list):
-        result = [result]
-    judger_response_item = [RLJudgerResponseItem(uid=result[i]["uid"], reward=result[i]) for i in range(len(result))]
-    return judger_response_item
-
-
 class GSM8KRemoteJudgerConfig(NativeJudgerConfig):
     judger_name: str
-    remote_url: str
+    reward_handler: str
     extra_info: dict = {"score": 1, "format_score": 0}
-    postprocess_func: Callable = custom_postprocessor_for_gsm8k
