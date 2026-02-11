@@ -92,5 +92,5 @@ class JudgerServer:
 
 class GSM8KRemoteJudgerConfig(NativeJudgerConfig):
     judger_name: str
-    remote_url: str
+    reward_handler: str
     extra_info: dict = {"score": 1, "format_score": 0}

@@ -32,7 +32,7 @@ def construct_gsm8k_judger_data(data_path) -> tuple[list[RolloutState], list[flo
             item = json.loads(line.strip())
             prompt = item["input"][5:-11]
             response = item["output"]
-            gt = item["gs"]
+            gt = item["gts"]
             states.append(
                 RolloutState(
                     message=[{"role": "user", "content": prompt}],
@@ -78,22 +78,22 @@ class TestJudgerController(unittest.TestCase):
     async def _judger_batch(self, judger_router, states):
         return await asyncio.gather(*(judger_router.judge(s) for s in states))
     
-    async def test_gsm8k_judger(self):
+    def test_gsm8k_judger(self):
         from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
         gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
         # Test Case 1: NativeJudger
         native_judger = gsm8k_judger_config.build()
-        res1 = await native_judger.judge(FAKE_JUDGER_INPUT_ITEM)
+        res1 = asyncio.run(native_judger.judge(FAKE_JUDGER_INPUT_ITEM))
         self.assertEqual(res1.reward["score"], 1.0)
 
-        # Test Case 2: NativeJudger with cpu resource, as ray actor
+        # Test Case 2: NativeJudger with cpu resource + 从外面传入pg
         cpu_cfg = CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1)
         pg = AutoCPUWorkers.build_placement_group(cpu_cfg)
         ray.get(pg.ready())
         native_judger_actors = gsm8k_judger_config.build_router(pg, 0)
-        res2 = await ray.get(native_judger_actors.judge.remote(FAKE_JUDGER_INPUT_ITEM))
+        res2 = asyncio.run(native_judger_actors.judge(FAKE_JUDGER_INPUT_ITEM))
         self.assertEqual(res2.reward["score"], 1.0)
-        ray.kill(native_judger_actors)
+        del native_judger_actors
 
         # Test Case 3: NativeJudgerRouter + 一批数据的分数是否正确
         judger_router = gsm8k_judger_config.build_router(pg)
@@ -123,12 +123,7 @@ class TestJudgerController(unittest.TestCase):
             overlong_penalty_factor=1.0,
             tokenizer=tokenizer
         )
-        # 定义 CPU Resource Config 和 Placement Group
-        cpu_cfg = CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1)
-        pg = AutoCPUWorkers.build_placement_group(cpu_cfg)
-        ray.get(pg.ready())
-        # 创建 Router
-        router = config.build_router(pg, 0)
+        router = config.build_router()
         rollout_states = asyncio.run(self._judger_batch(router, states))
         rewards = [s.reward["score"] for s in rollout_states]
         expected_avg_score = np.mean(history_reward)
@@ -139,16 +134,36 @@ class TestJudgerController(unittest.TestCase):
         from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
         config = GEO3KJudgerConfig(judger_name="geo3k", num_ray_actors=4)
         states, history_reward = construct_geo3k_dapo_judger_data(GEO_ROLLOUT_DATA_PATH)
-        cpu_cfg = CPUResourcesConfig(num_workers=4, num_cpus_per_worker=1)
-        pg = AutoCPUWorkers.build_placement_group(cpu_cfg)
-        ray.get(pg.ready())
-        router = config.build_router(pg, 0)
+        router = config.build_router()
         rollout_states = asyncio.run(self._judger_batch(router, states))
         rewards = [s.reward["score"] for s in rollout_states]
         expected_avg_score = np.mean(history_reward)
         self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
+        # 验证Router中确实有4个Worker实例在运行
         self.assertEqual(len(router.get_worker_status()), 4)
 
+    def test_multi_judger_router(self):
+        import time
+        from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
+
+        gsm8k_config_1 = GSM8KJudgerConfig(judger_name="openai/gsm8k_1", num_ray_actors=2, num_cpus_per_actor=1)
+        gsm8k_config_2 = GSM8KJudgerConfig(judger_name="openai/gsm8k_2", num_ray_actors=8, num_cpus_per_actor=2)
+
+        gsm8k_router_1 = gsm8k_config_1.build_router()
+        gsm8k_router_2 = gsm8k_config_2.build_router() 
+
+        states, history_reward = construct_gsm8k_judger_data(VERL_ROLLOUT_DATA_PATH)
+        gsm8k_results_1 = asyncio.run(self._judger_batch(gsm8k_router_1, states))
+        gsm8k_results_2 = asyncio.run(self._judger_batch(gsm8k_router_2, states)) 
+
+        gsm8k_rewards_1 = [s.reward["score"] for s in gsm8k_results_1]
+        gsm8k_rewards_2 = [s.reward["score"] for s in gsm8k_results_2]
+
+        expected_avg_score = np.mean(history_reward)
+        self.assertEqual(round(np.mean(gsm8k_rewards_1), 4), round(expected_avg_score, 4))
+        self.assertEqual(round(np.mean(gsm8k_rewards_2), 4), round(expected_avg_score, 4))
+        self.assertEqual(len(gsm8k_router_1.get_worker_status()), 2)
+        self.assertEqual(len(gsm8k_router_2.get_worker_status()), 8)
 
     def test_gsm8k_remote_judger(self):
         # 测试输入remote_url时 + 1个实例 + 裸的NativeJudger的评判分数是否正确
@@ -157,9 +172,10 @@ class TestJudgerController(unittest.TestCase):
         server = JudgerServer(port=8018)
         server.start()
         try:
-            remote_judger_config = GSM8KRemoteJudgerConfig(judger_name="openai/gsm8k", remote_url=server.url)
+            remote_judger_config = GSM8KRemoteJudgerConfig(judger_name="openai/gsm8k", reward_handler=server.url)
             native_remote_judger = remote_judger_config.build()
-            res = native_remote_judger.judge(FAKE_JUDGER_INPUT_ITEM)
+            res = asyncio.run(native_remote_judger.judge(FAKE_JUDGER_INPUT_ITEM))
+            self.assertEqual(res.reward["score"], 1.0)
         finally:
             server.stop()
 

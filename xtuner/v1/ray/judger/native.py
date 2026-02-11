@@ -39,13 +39,14 @@ class NativeJudger:
             "RolloutState must have a response for judging. You should detokenize the response_ids in AgentLoop"
         )
         # 传入rollout_state方便用户从rollout_state挑选自己想要的字段
-        info = {**self.extra_info, "rollout_state": rollout_state}
+        info = {**self.extra_info, "rollout_state": rollout_state.model_dump(mode="json")}
         input_kwargs = {
             "response": rollout_state.response,
             "label": rollout_state.reward_model["ground_truth"],
             "extra_info": info,
         }
         # actual judger function
+        judger_response = None
         if isinstance(self.reward_handler, str):
             async with httpx.AsyncClient(timeout=self.request_timeout) as client:
                 response = await client.post(self.reward_handler, json=input_kwargs)
@@ -56,6 +57,7 @@ class NativeJudger:
                 judger_response = await self.reward_handler(**input_kwargs)
             else:
                 judger_response = self.reward_handler(**input_kwargs)
+        assert judger_response is not None, "Reward handler did not return a response."
         # native postprocess
         rollout_state.reward = judger_response
         return rollout_state
@@ -120,8 +122,6 @@ class NativeJudgerConfig(BaseModel):
             Exactly one of reward_func or remote_url must be provided.
         remote_url (Optional[str]): Remote service URL for judging.
             Exactly one of reward_func or remote_url must be provided.
-        preprocess_func (Optional[Callable]): Function to preprocess input data before judging.
-        postprocess_func (Optional[Callable]): Function to postprocess the judging result.
         request_timeout (float): Timeout (in seconds) for remote requests.
         extra_info (dict): Additional information to be passed to the judger or reward function.
     """
@@ -143,7 +143,7 @@ class NativeJudgerConfig(BaseModel):
             extra_info=self.extra_info,
         )
 
-    def build_router(self, pg: PlacementGroup, start_bundle_idx: int) -> NativeJudgerRouter:
+    def build_router(self, pg: PlacementGroup | None = None, start_bundle_idx: int = 0) -> NativeJudgerRouter:
         """Create and launch Ray actor instances for the GSM8K judger.
 
         This method instantiates multiple NativeJudger Ray actors according to `num_ray_actors`,
@@ -157,7 +157,23 @@ class NativeJudgerConfig(BaseModel):
         Returns:
             List[ActorClass]: A list of Ray actor handles representing the launched judger workers.
         """
+        if pg is None:
+            # NOTE: 这里直接在build_router里创建PlacementGroup是为了简化用户使用，用户不需要关心PlacementGroup的细节。
+            from xtuner.v1.ray.base import CPUResourcesConfig
+
+            cpu_resource_cfg = CPUResourcesConfig(
+                num_workers=self.num_ray_actors,
+                num_cpus_per_worker=self.num_cpus_per_actor,
+                cpu_memory_per_worker=self.cpu_memory_per_actor,
+            )
+            pg = cpu_resource_cfg.build_placement_group()
+            ray.get(pg.ready())
+            start_bundle_idx = 0
+
         workers_list = []
+        assert len(pg.bundle_specs) >= self.num_ray_actors, (
+            "Placement group does not have enough bundles for the number of ray actors."
+        )
         for idx in range(self.num_ray_actors):
             bundle_idx = start_bundle_idx + idx
             pg_options = {"num_cpus": self.num_cpus_per_actor, "memory": self.cpu_memory_per_actor}
