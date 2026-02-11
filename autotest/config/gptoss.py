@@ -23,7 +23,7 @@ lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     torch_compile=False,
     cpu_offload=False,
-    ep_size=moe_cfg.ep_size,
+    ep_size=gptoss_cfg.ep_size,
 )
 
 dataset_config = [
