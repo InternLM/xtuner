@@ -50,6 +50,6 @@ trainer = TrainerConfig(
     tokenizer_path=GPTOSS_21B_PATH,
     global_batch_size=16,
     total_epoch=1,
-    work_dir=f"/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output/{os.environ['GITHUB_RUN_ID']}/gptoss-sft/sft",
+    work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
 )
