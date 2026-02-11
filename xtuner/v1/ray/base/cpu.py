@@ -80,6 +80,14 @@ class CPUResourcesConfig(BaseModel):
             pg_pack_strategy=pg_pack_strategy,
         )
 
+    def build_placement_group(self) -> PlacementGroup:
+        """Build a Ray PlacementGroup based on this resource configuration.
+
+        Returns:
+            PlacementGroup: The created Ray PlacementGroup.
+        """
+        return AutoCPUWorkers.build_placement_group(self)
+
 
 class BaseCPUWorker:
     """The BaseCPUWorker class serves as a foundational structure for CPU-based
