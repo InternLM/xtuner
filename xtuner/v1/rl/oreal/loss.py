@@ -4,6 +4,7 @@ from typing import Any, Literal, cast
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.distributed.device_mesh import DeviceMesh
 
 from ..base import (
     BaseRLLossConfig,
@@ -42,8 +43,8 @@ class OrealLossContext(BaseRLLossContext):
     loss_cfg: OrealLossConfig
     loss_kwargs: OrealLossKwargs
 
-    def __init__(self, loss_cfg: OrealLossConfig, loss_kwargs: OrealLossKwargs):
-        super().__init__(loss_cfg, loss_kwargs)
+    def __init__(self, loss_cfg: OrealLossConfig, loss_kwargs: OrealLossKwargs, sp_mesh: DeviceMesh | None = None):
+        super().__init__(loss_cfg, loss_kwargs, sp_mesh)
         self.policy_loss_fn = get_policy_loss_fn(self.loss_cfg.policy_loss_cfg.get("loss_type", "vanilla"))
 
     @staticmethod
@@ -121,6 +122,7 @@ class OrealLossContext(BaseRLLossContext):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: OrealLossKwargs,
+        enable_chunk_linear: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         """Step 2.a and 2.b in the loss calculation in
         xtuner/v1/loss/base_loss_ctx.py."""
