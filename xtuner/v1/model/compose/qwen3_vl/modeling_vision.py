@@ -14,6 +14,7 @@ from xtuner.v1.config import FSDPConfig
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
+    OffloadPolicy,
     fully_shard,
 )
 from transformers.models.llama.modeling_llama import repeat_kv
@@ -357,7 +358,7 @@ class Qwen3VLVisionModel(BaseModel):
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy()
                 if fsdp_config.cpu_offload
-                else None,
+                else OffloadPolicy(),
             )
 
         for layer_cur, layer_next in zip(self.blocks[:-1],  self.blocks[1:]):
@@ -368,7 +369,7 @@ class Qwen3VLVisionModel(BaseModel):
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=True,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else OffloadPolicy(),
         )
         return self
 
