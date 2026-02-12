@@ -50,6 +50,6 @@ trainer = TrainerConfig(
     tokenizer_path=QWEN3_MOE_PATH,
     global_batch_size=16,
     total_epoch=1,
-    work_dir=f"/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output/{os.environ['GITHUB_RUN_ID']}/npu-qwen3-sft-tp2/sft",
+    work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
 )

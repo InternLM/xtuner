@@ -55,6 +55,6 @@ trainer = TrainerConfig(
     global_batch_size=32,
     intra_layer_micro_batch=2,
     total_epoch=1,
-    work_dir=f"/mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output/{os.environ['GITHUB_RUN_ID']}/qwen3-sft-fp8/sft",
+    work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
 )
