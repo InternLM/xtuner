@@ -206,16 +206,10 @@ class TestQwen3VL(DeterministicDDPTestCase):
         patch_hf_rms_norm(hf_model)
 
         with torch.device("meta"):
-            model_cfg = Qwen3VLDense4BConfig()
-            if compile is False:
-                model_cfg.compile_cfg = False
+            model_cfg = Qwen3VLDense4BConfig(compile_cfg=compile)
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
-        fsdp_config = FSDPConfig(
-            cpu_offload=False,
-            torch_compile=compile
-        )
-
+        fsdp_config = FSDPConfig(cpu_offload=False)
         fsdp_mesh = init_world_mesh()
         qwen3vl_model.vision_tower.fsdp_mesh = fsdp_mesh
         qwen3vl_model.vision_tower.fsdp_config = fsdp_config

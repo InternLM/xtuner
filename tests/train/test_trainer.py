@@ -408,7 +408,7 @@ class TestTrainerConfig(DeterministicDDPTestCase):
 
         self.optim_cfg = AdamWConfig(lr=0.1, weight_decay=0.1)
         self.lr_cfg = LRConfig(lr_type="cosine", lr_min=0.001, warmup_ratio=0.03)
-        self.fsdp_cfg = FSDPConfig(torch_compile=True)
+        self.fsdp_cfg = FSDPConfig()
         temp_dir = tempfile.TemporaryDirectory()
         if dist.get_rank() == 0:
             temp_dir = [temp_dir.name]
