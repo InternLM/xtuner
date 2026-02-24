@@ -511,7 +511,7 @@ class TrainEngine:
 
     def put_optimizer_to_device(self, device: torch.device | str):
         """Put the optimizer to the given device."""
-        if self.fsdp_cfg.cpu_offload:
+        if self.fsdp_cfg.cpu_offload or self.optim_cfg.swap_optimizer:
             return
         if not self.optimizer.state:
             return

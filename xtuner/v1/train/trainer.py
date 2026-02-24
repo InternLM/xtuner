@@ -737,6 +737,13 @@ class Trainer:
             grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
             self._engine.step_optimizer(grad_norm)
 
+            if self._optim_config.swap_optimizer:
+                is_save_dcp = (self._is_save_dcp(is_snapshot=False) or self._is_save_dcp(is_snapshot=True))
+                if not is_save_dcp:
+                    from xtuner.v1.config.optim import SwapOptimizerOperate
+                    SwapOptimizerOperate.swap_all_to_host()
+                torch.npu.synchronize()
+
             time_after_train_step = time.time()
             ProberList.after_step()
 
@@ -1092,6 +1099,22 @@ class Trainer:
                 raise RuntimeError("Health check failed, exit training")
             logger.info(f"Health check passed at step {self.cur_step}")
 
+    
+    def _is_save_dcp(self, is_snapshot: bool = False) -> bool:
+        ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
+        cur_step = self._cur_step + 1
+        if ckp_interval is None:
+            return False
+
+        if ckp_interval == -1:  # only save at the end of training
+            if cur_step != self.total_step:
+                return False
+        else:
+            if cur_step % ckp_interval != 0 and (is_snapshot or cur_step != self.total_step):
+                # if is_snapshot, only save at interval
+                # else save at interval or at the end of training
+                return False
+        return True
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
         if ckp_interval is None:
@@ -1122,6 +1145,12 @@ class Trainer:
             model_dir=model_path,
             optimizer_dir=optimizer_path,
         )
+
+        if self._optim_config.swap_optimizer:
+            torch.npu.synchronize()
+            from xtuner.v1.config.optim import SwapOptimizerOperate
+            SwapOptimizerOperate.swap_all_to_host()
+            torch.npu.synchronize()
 
         # Save dataloader
         self._save_dataloader(dataloader_path)
@@ -1758,6 +1787,11 @@ class Trainer:
             if load_checkpoint_cfg.load_optimizer_states or load_checkpoint_cfg.load_optimizer_args
             else None
         )
+
+        if self._optim_config.swap_optimizer:
+            from xtuner.v1.config.optim import SwapOptimizerOperate
+            SwapOptimizerOperate.swap_all_to_device()
+
 
         self._engine.load_dcp(
             model_dir=model_path,
