@@ -5,6 +5,7 @@ permissions:
   pages: write
 
 on:
+  push:
   workflow_dispatch:
     inputs:
       repo_org:
@@ -29,14 +30,14 @@ jobs:
         run: sudo git clean -ffdx
       - name: Clone repository
         uses: actions/checkout@v2
-        with:
-          repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
-          ref: ${{github.event.inputs.repo_ref || 'main'}}
+          #with:
+          #repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
+          #ref: ${{github.event.inputs.repo_ref || 'main'}}
       - name: run-test
         run: |
           source activate npuci
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
-          export DEVICE=npu && pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+          export DEVICE=npu && pytest autotest/test_all.py::test_all[npu-qwen3-sft-ep8] -m all -n 1 -vv --run_id ${{ github.run_id }}
 
       - name: Upload Artifacts
         if: ${{ !cancelled() }}

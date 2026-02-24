@@ -73,7 +73,7 @@ case:
         -
             type: sft
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py'
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output'
             parameters:
                 config: autotest/config/qwen3_moe_30BA3_ep8_resume.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output

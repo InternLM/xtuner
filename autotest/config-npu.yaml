@@ -80,7 +80,7 @@ case:
         -
             type: sft
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py'
+                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output'
             parameters:
                 config: autotest/config/npu_qwen3_moe_30BA3_ep8_resume.py
                 output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
