@@ -218,14 +218,24 @@ class MulitiAgentLoopManager(AgentLoopManager):
         pass
 
 
+# 1. grpo 算法是在 TrainController 中调用AdvantageEstimator
+# 2. ppo 算法是在 Trainworker 中调用AdvantageEstimator，并新增额外方法实现(如 compute_ref_logprobs, compute_values)，无需重写 TrainController 和 Trainworker
+class AdvantageEstimator:
+    def compute_advantages(self, batch: list[TrainItem]) -> list[TrainItem]: ...
+
 
 # ppo 算法是通过在 Trainworker 中新增额外方法实现，无需重写 TrainController 和 Trainworker
 class TrainController:
+    advantage_estimator: AdvantageEstimator
     # high level API
     def fit(self, batch: list[TrainItem]) -> dict: ...
     def train(self, batch: list[TrainItem]) -> dict: ...
-    def sync_weights(self, rollout_ctl: RolloutController): ...
 
+
+class CheckpointEngine:
+    rollout_ctl: RolloutController
+    train_ctl: TrainController
+    def update_weights(self): ...
 
 class Evaluator:  # 根据rollout输出的batch，计算评估指标。本身并不负责rollout。
     def evaluate(self, batch: list[RolloutState]) -> dict: ...
@@ -241,23 +251,24 @@ def main_colocate_with_train_highlevel():
     pg: PlacementGroup
     rollout_ctl: RolloutController(pg)
     train_ctl: TrainController(pg)
+    checkpoint_engine: CheckpointEngine(rollout_ctl, train_ctl)
 
     data_mgr: DataManager
-    env: Environment(rollout_ctl)
+    env: AgentLoopManager(rollout_ctl)
     eval_data_mgr: DataManager
     evaluator: Evaluator
     total_rollouts: int
 
     for i in range(total_rollouts):
-        env.produce_batch(data_mgr)
+        asyncio.run(env.produce_batch(data_mgr))
 
         train_batch: list[TrainItem] = data_mgr.get_batch()
         metrics = train_ctl.fit(train_batch)
         log_metrics(metrics)
 
-        train_ctl.sync_weights(rollout_ctl)
+        checkpoint_engine.update_weights()
 
-        env.produce_batch(eval_data_mgr)
+        asyncio.run(env.produce_batch(eval_data_mgr))
         eval_metrics = evaluator.evaluate(eval_data_mgr.get_batch())
         log_metrics(eval_metrics)
         
@@ -269,15 +280,16 @@ def main_colocate_with_train_lowlevel():
     data_mgr: DataManager
     pg: PlacementGroup
     rollout_ctl: RolloutController(pg)
-    env: Environment(rollout_ctl)
+    env: AgentLoopManager(rollout_ctl)
     train_ctl: TrainController(pg)
+    checkpoint_engine: CheckpointEngine(rollout_ctl, train_ctl)
 
     eval_data_mgr: DataManager
     evaluator: Evaluator
     total_rollouts: int
 
     for i in range(total_rollouts):
-        env.produce_batch(data_mgr)
+        asyncio.run(env.produce_batch(data_mgr))
 
         batch: list[TrainItem] = data_mgr.get_batch()
 
@@ -291,7 +303,7 @@ def main_colocate_with_train_lowlevel():
 
         log_metrics(metrics)
 
-        train_ctl.sync_weights(rollout_ctl)
+        checkpoint_engine.update_weights()
 
         env.produce_batch(eval_data_mgr)
         eval_metrics = evaluator.evaluate(eval_data_mgr.get_batch())
@@ -302,12 +314,13 @@ def main_separate():
     data_mgr: DataManager
     pg1: PlacementGroup
     rollout_ctl: RolloutController(pg1)
-    pg1_2: PlacementGroup
-    rollout_ctl_2: RolloutController(pg1_2)
-    env: Environment(rollout_ctl, rollout_ctl_2)
+    # pg1_2: PlacementGroup
+    # rollout_ctl_2: RolloutController(pg1_2)
+    env: AgentLoopManager(rollout_ctl)  # Environment(rollout_ctl, rollout_ctl_2)
 
     pg2: PlacementGroup
     train_ctl: TrainController(pg2)
+    checkpoint_engine: CheckpointEngine(rollout_ctl, train_ctl)
 
     eval_data_mgr: DataManager
     evaluator: Evaluator
@@ -321,7 +334,7 @@ def main_separate():
         metrics = train_ctl.fit(batch)
         log_metrics(metrics)
 
-        train_ctl.sync_weights(rollout_ctl)
+        checkpoint_engine.update_weights()
 
         env.produce_batch(eval_data_mgr)  # 优先级高于env.produce_loop
         eval_metrics = evaluator.evaluate(eval_data_mgr.get_batch())
