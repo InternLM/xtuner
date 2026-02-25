@@ -77,6 +77,8 @@ class SamplerWithReplayBuffer(Sampler):
         data = await self.replay_buffer.get(1, task_name=task_name, group_status=Status.ABORTED)
         if len(data) == 0:
             data = self._sample_from_dataloader()
+        else:
+            data = data[0]
         return data
 
 
@@ -183,6 +185,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                 )
                 pbar.update(completed_sample_count - last_pbar_n)
                 last_pbar_n = completed_sample_count
+
                 if len(pending_tasks) + completed_sample_count < data_concurrency + init_completed_sample_count:
                     rollout_state = await sampler.sample(task_name=task_name)
                     task = asyncio.create_task(agent_loop.generate_group(rollout_state))

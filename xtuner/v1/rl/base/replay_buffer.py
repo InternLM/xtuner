@@ -20,7 +20,7 @@ class Storage(ABC):
     @abstractmethod
     async def get(self, count: int, storage_indices: StorageIndices) -> list[RolloutState]: ...
     @abstractmethod
-    async def count(self, storage_indices: StorageIndices) -> int: ...
+    def count(self, storage_indices: StorageIndices) -> int: ...
     @abstractmethod
     def __len__(self): ...
 
@@ -39,9 +39,9 @@ class NaiveStorage(Storage):
 
     async def put(self, items: list[RolloutState], storage_indices: StorageIndices):
         indices = self._hash_storage_indices(storage_indices)
-        self._storage[indices].extend(items)
+        self._storage[indices].append(items)
 
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[RolloutState]:
+    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]:
         indices = self._hash_storage_indices(storage_indices)
         target_list = self._storage[indices]
         target_count = min(count, len(target_list))
@@ -169,7 +169,7 @@ class FIFOBackend(NaiveStorage):
     async def put(self, items: list[RolloutState], storage_indices: StorageIndices):
         await super().put(items, storage_indices)
 
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[RolloutState]:
+    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]:
         indices = self._hash_storage_indices(storage_indices)
         target_count = min(count, len(self._storage[indices]))
         return [self._storage[indices].popleft() for _ in range(target_count)]
@@ -188,10 +188,10 @@ class StalenessBackend(NaiveStorage):
     async def put(self, items: list[RolloutState], storage_indices: StorageIndices):
         indices = self._hash_storage_indices(storage_indices)
         group_seq_staleness = max([item.seq_staleness for item in items])
-        self._storage[indices][group_seq_staleness].extend(items)
+        self._storage[indices][group_seq_staleness].append(items)
         self._bucket_counts[indices] += len(items)
 
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[RolloutState]:
+    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]:
         indices = self._hash_storage_indices(storage_indices)
         if self._bucket_counts[indices] == 0:
             return []
@@ -210,7 +210,7 @@ class StalenessBackend(NaiveStorage):
             needed -= take
         return target_items
 
-    async def count(self, storage_indices: StorageIndices) -> int:
+    def count(self, storage_indices: StorageIndices) -> int:
         indices = self._hash_storage_indices(storage_indices)
         total_len = 0
         for s in range(self.min_staleness, self.max_staleness + 1):
@@ -232,7 +232,7 @@ class ReplayBuffer:
         async with self._lock:
             await self._storage.put(items, indices)
 
-    async def get(self, batch_size: int, task_name: str, group_status: Status, **kwargs) -> list[RolloutState]:
+    async def get(self, batch_size: int, task_name: str, group_status: Status, **kwargs) -> list[list[RolloutState]]:
         indices = StorageIndices(task_name=task_name, group_status=group_status, tags=kwargs)
         async with self._lock:
             return await self._storage.get(batch_size, indices)
@@ -240,4 +240,4 @@ class ReplayBuffer:
     async def count(self, task_name: str, group_status: Status, **kwargs) -> int:
         indices = StorageIndices(task_name=task_name, group_status=group_status, tags=kwargs)
         async with self._lock:
-            return await self._storage.count(indices)
+            return self._storage.count(indices)
