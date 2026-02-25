@@ -95,6 +95,7 @@ class RolloutState(BaseModel):
     reward: float | list[float] | list[dict] | None = None
 
     #  --- 状态 ---
+    task_name: str | None = None
     status: Status = Status.INIT
     error_msg: str | None = None
     seq_staleness: int = 0  # 整条序列的staleness，一般为最大的token_staleness
@@ -139,3 +140,47 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
     else:
         logger.error(f"finish_reason '{finish_reason}' is unknown, setting status to FAILED.")
         return Status.FAILED
+
+
+def update_group_status(rollout_states: list[RolloutState]) -> Status:
+    """Updates the group status based on the individual rollout states.
+
+    Group Status Logic:
+    -------------------------------------------------------------
+    | Individual Rollout States       | Group Status (Output)   |
+    | :----------------------------- | :----------------------- |
+    | All `Status.COMPLETED`          | `Status.COMPLETED`       |
+    | Any `Status.FAILED`             | `Status.FAILED`          |
+    | Any `Status.ABORTED`            | `Status.ABORTED`         |
+    | Any `Status.EXPIRED`            | `Status.EXPIRED`         |
+    | Any `Status.FILTERED`           | `Status.FILTERED`        |
+    | *Others*                       | *Determined by priority*|
+    -------------------------------------------------------------
+
+    Priority Order (from highest to lowest):
+    1. FAILED
+    2. ABORTED
+    3. EXPIRED
+    4. FILTERED
+    5. COMPLETED
+
+    Args:
+        rollout_states (list[RolloutState]): A list of individual rollout states.
+
+    Returns:
+        Status: The aggregated group status based on the individual states.
+    """
+    if all(state.status == Status.COMPLETED for state in rollout_states):
+        return Status.COMPLETED
+    elif any(state.status == Status.FAILED for state in rollout_states):
+        return Status.FAILED
+    elif any(state.status == Status.ABORTED for state in rollout_states):
+        return Status.ABORTED
+    elif any(state.status == Status.EXPIRED for state in rollout_states):
+        return Status.EXPIRED
+    elif any(state.status == Status.FILTERED for state in rollout_states):
+        return Status.FILTERED
+    else:
+        # If there are other statuses, we can determine the group status based on a defined priority order.
+        # For now, we will default to COMPLETED if none of the above conditions are met.
+        return Status.COMPLETED
