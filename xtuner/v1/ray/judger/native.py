@@ -40,6 +40,9 @@ class NativeJudger:
         )
         # 传入rollout_state方便用户从rollout_state挑选自己想要的字段
         info = {**self.extra_info, "rollout_state": rollout_state.model_dump(mode="json")}
+        assert rollout_state.reward_model is not None and "ground_truth" in rollout_state.reward_model, (
+            "RolloutState must have reward_model with 'ground_truth' for judging. You should set reward_model in AgentLoop"
+        )
         input_kwargs = {
             "response": rollout_state.response,
             "label": rollout_state.reward_model["ground_truth"],

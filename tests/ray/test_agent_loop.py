@@ -7,7 +7,7 @@ import torch
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.agent_loop import SingleTurnAgentLoop
+from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoop
 from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManager
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
 from xtuner.v1.ray.rollout import RolloutController
@@ -76,29 +76,29 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         ray.shutdown()
         self.temp_dir.cleanup()
 
-    # async def test_gsm8k_agent_loop(self):
-    #     # 1. 创建 rollout_controller, judger
-    #     pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
-    #     rollout_controller = ray.remote(RolloutController).remote(self.rollout_config, pg)
-    #     gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
-    #     gsm8k_judger = gsm8k_judger_config.build_router()
-    #     # 2. 创建 AgentLoop
-    #     sample_params = SampleParams(max_tokens=self.max_response_length, temperature=0.0)
-    #     agent_loop = SingleTurnAgentLoop(rollout_ctl=rollout_controller, sample_params=sample_params, hf_checkpoint=self.model_path, judger=gsm8k_judger)
-    #     # 3. 构造输入数据
-    #     rollout_state = FAKE_INPUT_ITEM
-    #     # 4. 执行 generate_group && generate_sample
-    #     group_rollout_state = await agent_loop.generate_group(rollout_state, prompt_repeat_k=4)
-    #     single_rollout_state = await agent_loop.generate_sample(rollout_state)
-    #     # 5. 验证结果
-    #     self.assertEqual(len(group_rollout_state), 4)
-    #     for state in group_rollout_state:
-    #         self.assertEqual(state.status, Status.COMPLETED)
-    #         self.assertGreater(len(state.response_ids), 0)
-    #         self.assertEqual(single_rollout_state.reward["score"], 1)  
-    #     self.assertEqual(single_rollout_state.status, Status.COMPLETED)
-    #     self.assertGreater(len(single_rollout_state.response_ids), 0)
-    #     self.assertEqual(single_rollout_state.reward["score"], 1)  
+    async def test_gsm8k_agent_loop(self):
+        # 1. 创建 rollout_controller, judger
+        pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
+        rollout_controller = ray.remote(RolloutController).remote(self.rollout_config, pg)
+        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
+        gsm8k_judger = gsm8k_judger_config.build_router()
+        # 2. 创建 AgentLoop
+        sample_params = SampleParams(max_tokens=self.max_response_length, temperature=0.0)
+        agent_loop = SingleTurnAgentLoop(rollout_ctl=rollout_controller, sample_params=sample_params, hf_checkpoint=self.model_path, judger=gsm8k_judger)
+        # 3. 构造输入数据
+        rollout_state = FAKE_INPUT_ITEM
+        # 4. 执行 generate_group && generate_sample
+        group_rollout_state = await agent_loop.generate_group(rollout_state, prompt_repeat_k=4)
+        single_rollout_state = await agent_loop.generate_sample(rollout_state)
+        # 5. 验证结果
+        self.assertEqual(len(group_rollout_state), 4)
+        for state in group_rollout_state:
+            self.assertEqual(state.status, Status.COMPLETED)
+            self.assertGreater(len(state.response_ids), 0)
+            self.assertEqual(single_rollout_state.reward["score"], 1)  
+        self.assertEqual(single_rollout_state.status, Status.COMPLETED)
+        self.assertGreater(len(single_rollout_state.response_ids), 0)
+        self.assertEqual(single_rollout_state.reward["score"], 1)  
 
     async def test_gsm8k_agent_loop_manager(self):
         # 1. 创建 rollout_controller, judger
@@ -110,8 +110,6 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         sample_params = SampleParams(max_tokens=self.max_response_length, temperature=0.0)
         agent_loop = SingleTurnAgentLoop(rollout_ctl=rollout_controller, sample_params=sample_params, hf_checkpoint=self.model_path, judger=gsm8k_judger)
         # 3. 创建 AgentLoopManager
-        replay_buffer = ReplayBuffer()
-        stragegy = SyncProduceStrategy(replay_buffer=replay_buffer)
         dataloader_cfg = DataloaderConfig(
             dataset_config_list=[
                 {
@@ -125,10 +123,12 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             pack_level='none',
             group_by_length=False,
         )
-        sampler = Sampler(task_name="test_gsm8k", dataloader_cfg=dataloader_cfg, tokenizer=self.tokenizer)
-        agent_loop_manager = AgentLoopManager(agent_loop=agent_loop, replay_buffer=replay_buffer, sampler=sampler, produce_strategy=stragegy)
+        sampler = Sampler(dataloader_cfg=dataloader_cfg, tokenizer=self.tokenizer, prompt_repeat_k=2)
+        replay_buffer = ReplayBuffer()
+        stragegy = SyncProduceStrategy()
+        agent_loop_manager = AgentLoopManager(agent_loop=agent_loop, produce_strategy=stragegy, sampler=sampler, replay_buffer=replay_buffer, task_name="test_gsm8k")
         # 4. 执行 produce_batch
-        batch_rollout_states = await agent_loop_manager.produce_batch(task_name="test_gsm8k", batch_size=4, prompt_k=2)
+        batch_rollout_states = await agent_loop_manager.produce_batch(batch_size=4)
         # 5. 验证结果
         self.assertEqual(len(batch_rollout_states), 4)
         for group_state in batch_rollout_states:

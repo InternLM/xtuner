@@ -14,7 +14,7 @@ class AgentLoop(ABC):
         rollout_ctl: RolloutController,
         sample_params: SampleParams,
         hf_checkpoint: str,
-        judger: Callable | NativeJudger | NativeJudgerRouter = None,
+        judger: Callable | NativeJudger | NativeJudgerRouter | None = None,
     ) -> None:
         self.rollout_ctl = rollout_ctl
         self.hf_checkpoint = hf_checkpoint
@@ -52,7 +52,7 @@ class SingleTurnAgentLoop(AgentLoop):
     async def generate_sample(self, rollout_state: RolloutState) -> RolloutState:
         assert rollout_state.sample_params is not None, "sample_params must be set in rollout_state"
         rollout_state.tokens = rollout_state.prompt_ids
-        rollout_state = await self.rollout_ctl.generate.remote(rollout_state)
+        rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
         if rollout_state.status != Status.COMPLETED:
             return rollout_state
         rollout_state = await self.judge_sample(rollout_state)
