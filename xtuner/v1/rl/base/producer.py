@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 
-from ..agent_loop import AgentLoop
+from .agent_loop import AgentLoop
 from .replay_buffer import ReplayBuffer
 
 
@@ -74,26 +74,27 @@ class SamplerWithReplayBuffer(Sampler):
         return group_data
 
     async def sample(self, task_name: str) -> list[RolloutState]:
-        data = await self.replay_buffer.get(1, task_name=task_name, group_status=Status.ABORTED)
-        if len(data) == 0:
-            data = self._sample_from_dataloader()
-        return data
+        buffer_data = await self.replay_buffer.get(1, task_name=task_name, group_status=Status.ABORTED)
+        if len(buffer_data) == 0:
+            return self._sample_from_dataloader()
+        else:
+            return buffer_data[0]
 
 
 class ProduceStrategy(ABC):
-    # NOTE: dataloader不作为ProduceStrategy的成员变量的原因：produce_strategy不绑定dataloader
-    def __init__(self, replay_buffer: ReplayBuffer):
-        self.replay_buffer = replay_buffer
-
     @abstractmethod
-    async def produce_batch(self, agent_loop: AgentLoop, sampler: Sampler, batch_size: int, task_name: str): ...
+    async def produce_batch(
+        self, agent_loop: AgentLoop, sampler: Sampler, replay_buffer: ReplayBuffer, batch_size: int, task_name: str
+    ): ...
 
 
 class SyncProduceStrategy(ProduceStrategy):
-    async def produce_batch(self, agent_loop: AgentLoop, sampler: Sampler, batch_size: int, task_name: str):
+    async def produce_batch(
+        self, agent_loop: AgentLoop, sampler: Sampler, replay_buffer: ReplayBuffer, batch_size: int, task_name: str
+    ):
         pbar_refrash_step = max(1, int(batch_size * 0.1))
         pending_tasks = set()
-        completed_sample_count = await self.replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
+        completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         assert completed_sample_count == 0, "SyncProduceStrategy assumes no completed samples at the start."
         with tqdm(total=batch_size, desc=f"Sync Producer [{task_name}]", miniters=pbar_refrash_step) as pbar:
             last_pbar_n = completed_sample_count
@@ -114,7 +115,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 # 如果被过滤的数据就放到 put_to_filtered pool 中
                 for task in done_tasks:
                     try:
-                        await self.replay_buffer.put(items=task.result(), task_name=task_name)
+                        await replay_buffer.put(items=task.result(), task_name=task_name)
                     except Exception as e:
                         print(f"Error in generating trajectory: {e}")
 
@@ -123,9 +124,7 @@ class SyncProduceStrategy(ProduceStrategy):
                     task = asyncio.create_task(agent_loop.generate_group(rollout_state))
                     pending_tasks.add(task)
 
-                completed_sample_count = await self.replay_buffer.count(
-                    task_name=task_name, group_status=Status.COMPLETED
-                )
+                completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
                 pbar.update(completed_sample_count - last_pbar_n)
                 last_pbar_n = completed_sample_count
 
@@ -133,25 +132,23 @@ class SyncProduceStrategy(ProduceStrategy):
 class AsyncProduceStrategy(ProduceStrategy):
     def __init__(
         self,
-        replay_buffer: ReplayBuffer,
         staleness_threshold: float = 0.0,
         enable_partial_rollout: bool = False,
         tail_batch_trigger_size: int = 0,
         tail_batch_candidate_step: int = 0,
     ):
-        super().__init__(replay_buffer)
         self.staleness_threshold = staleness_threshold
         self.enable_partial_rollout = enable_partial_rollout
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self.tail_batch_candidate_step = tail_batch_candidate_step
 
-    async def produce_batch(self, agent_loop: AgentLoop, sampler: Sampler, batch_size: int, task_name: str):
+    async def produce_batch(
+        self, agent_loop: AgentLoop, sampler: Sampler, replay_buffer: ReplayBuffer, batch_size: int, task_name: str
+    ):
         data_concurrency = int((1 + self.staleness_threshold) * batch_size)
         pbar_refrash_step = max(1, int(data_concurrency * 0.1))
         pending_tasks = set()
-        init_completed_sample_count = await self.replay_buffer.count(
-            task_name=task_name, group_status=Status.COMPLETED
-        )
+        init_completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         with tqdm(total=batch_size, desc=f"ASync Producer [{task_name}]", miniters=pbar_refrash_step) as pbar:
             last_pbar_n = init_completed_sample_count
             pbar.update(last_pbar_n)
@@ -173,16 +170,15 @@ class AsyncProduceStrategy(ProduceStrategy):
                 # 如果被过滤的数据就放到 put_to_filtered pool 中
                 for task in done_tasks:
                     try:
-                        await self.replay_buffer.put(items=task.result(), task_name=task_name)
+                        await replay_buffer.put(items=task.result(), task_name=task_name)
                     except Exception as e:
                         print(f"Error in generating trajectory: {e}")
 
                 print(f"Completed sample count: {completed_sample_count}, Pending task count: {len(pending_tasks)}")
-                completed_sample_count = await self.replay_buffer.count(
-                    task_name=task_name, group_status=Status.COMPLETED
-                )
+                completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
                 pbar.update(completed_sample_count - last_pbar_n)
                 last_pbar_n = completed_sample_count
+
                 if len(pending_tasks) + completed_sample_count < data_concurrency + init_completed_sample_count:
                     rollout_state = await sampler.sample(task_name=task_name)
                     task = asyncio.create_task(agent_loop.generate_group(rollout_state))

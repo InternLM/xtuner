@@ -72,7 +72,7 @@ class RolloutState(BaseModel):
     message_uid: int | None = None  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
     prompt_ids: list[int] | None = None  # 原始 prompt的token ids
-    data_source: dict[str, Any] | None = None
+    data_source: dict[str, Any] | str | None = None
     mm_info: MultimodalInfo | None = None
     reward_model: dict[str, Any] | None = None
     num_tokens: int | None = None  # 用于 cache 管理

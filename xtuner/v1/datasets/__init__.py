@@ -19,7 +19,7 @@ from .mllm_tokenize_fn import (
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 from .pt_tokenize_fn import PretrainTokenizeFunction, PretrainTokenizeFunctionConfig
 from .resume import get_dataloader_state, load_dataloader_state
-from .rl_tokenize_fn import RLTokenizeFnConfig
+from .rl_tokenize_fn import RLTextTokenizeFnConfig
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .sft_tokenize_fn import OpenaiTokenizeFunction, OpenaiTokenizeFunctionConfig
 from .utils import CachableTokenizeFunction, CacheObj, calculate_file_sha256, calculate_xxhash, tokenizer_hash

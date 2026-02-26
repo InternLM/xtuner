@@ -13,14 +13,18 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
     async def test_fifo_backend(self):
         backend = FIFOBackend()
         buffer = ReplayBuffer(storage_backend=backend)
-        states = [MockState(i) for i in range(1, 4)]
+        group_states1 = [MockState(i) for i in range(1, 4)]
+        group_states2 = [MockState(i) for i in range(5, 7)]
         
-        await buffer.put(states, "task1")
+        await buffer.put(group_states1, "task1")
+        await buffer.put(group_states2, "task1")
         res = await buffer.get(2, "task1", Status.COMPLETED)
         
         self.assertEqual(len(res), 2)
-        self.assertEqual(res[0].id, 1)
-        self.assertEqual(res[1].id, 2)
+        self.assertEqual(len(res[0]), 3)
+        self.assertEqual(len(res[1]), 2)
+        self.assertEqual(res[0][0].id, 1)
+        self.assertEqual(res[1][0].id, 5)
 
     async def test_staleness_priority(self):
         backend = StalenessBackend(min_staleness=0, max_staleness=5)
@@ -33,8 +37,8 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         await buffer.put([s5], "task1")
         
         res = await buffer.get(2, "task1", Status.COMPLETED)
-        self.assertEqual(res[0].id, "high")
-        self.assertEqual(res[1].id, "low")
+        self.assertEqual(res[0][0].id, "high")
+        self.assertEqual(res[1][0].id, "low")
 
     async def test_multi_task(self):
         buffer = ReplayBuffer()
@@ -44,6 +48,8 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         res_a = await buffer.get(10, "task_a", Status.COMPLETED)
         res_b = await buffer.get(10, "task_b", Status.COMPLETED)
         self.assertEqual(len(res_a), 1)
-        self.assertEqual(res_a[0].id, 100)
+        self.assertEqual(len(res_a[0]), 1)
+        self.assertEqual(res_a[0][0].id, 100)
         self.assertEqual(len(res_b), 1)
-        self.assertEqual(res_b[0].id, 200)
+        self.assertEqual(len(res_b[0]), 1)
+        self.assertEqual(res_b[0][0].id, 200)
