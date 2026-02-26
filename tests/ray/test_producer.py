@@ -58,10 +58,10 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         await strategy.produce_batch(mock_agent_loop, sampler, batch_size=2, task_name="test_task")
 
         # 验证：ReplayBuffer 中应该有 2 条 COMPLETED 数据
-        final_data = await self.replay_buffer.get(10, "test_task", Status.COMPLETED)
+        final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(final_data), 2)
-        self.assertEqual(final_data[0].id, 0)
-        self.assertEqual(final_data[1].id, 1)
+        self.assertEqual(final_data[0][0].id, 0)
+        self.assertEqual(final_data[1][0].id, 1)
 
     async def test_async_produce_strategy(self):
         # 这个async_produce_strategy的测试主要验证超发逻辑 + staleness 优先get的逻辑
@@ -95,7 +95,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # NOTE(@duanyanhui): 目前还没实现暂停功能，所以4条都会推理完成,4条数据按照新鲜度顺序排列，999 是最旧的，0 是最新的
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(final_data), 4)
-        self.assertEqual(final_data[0].id, 999)
-        self.assertEqual(final_data[1].id, 2)
-        self.assertEqual(final_data[2].id, 1)
-        self.assertEqual(final_data[3].id, 0)
+        self.assertEqual(final_data[0][0].id, 999)
+        self.assertEqual(final_data[1][0].id, 2)
+        self.assertEqual(final_data[2][0].id, 1)
+        self.assertEqual(final_data[3][0].id, 0)
