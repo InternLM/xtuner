@@ -1,8 +1,7 @@
 import abc
 import asyncio
 from abc import ABC
-from copy import deepcopy
-from typing import Awaitable, Callable, List
+from typing import Awaitable, Callable
 
 import ray
 
@@ -29,11 +28,11 @@ class AgentLoop(ABC):
     @abc.abstractmethod
     async def generate_sample(self, rollout_state: RolloutState) -> RolloutState: ...
 
-    async def generate_group(self, rollout_state, prompt_repeat_k) -> List[RolloutState]:
+    async def generate_group(self, rollout_state: list[RolloutState]) -> list[RolloutState]:
         pending_tasks = []
-        for _ in range(prompt_repeat_k):
-            rollout_state.sample_params = self.sample_params
-            task = asyncio.create_task(self.generate_sample(deepcopy(rollout_state)))
+        for state in rollout_state:
+            state.sample_params = self.sample_params
+            task = asyncio.create_task(self.generate_sample(state))
             pending_tasks.append(task)
         generated_samples = asyncio.gather(*pending_tasks)
         group_samples = await generated_samples
