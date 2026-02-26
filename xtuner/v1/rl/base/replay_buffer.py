@@ -18,9 +18,9 @@ class Storage(ABC):
     @abstractmethod
     async def put(self, items: list[RolloutState], storage_indices: StorageIndices): ...
     @abstractmethod
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[RolloutState]: ...
+    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]: ...
     @abstractmethod
-    async def count(self, storage_indices: StorageIndices) -> int: ...
+    def count(self, storage_indices: StorageIndices) -> int: ...
     @abstractmethod
     def __len__(self): ...
 
@@ -39,9 +39,9 @@ class NaiveStorage(Storage):
 
     async def put(self, items: list[RolloutState], storage_indices: StorageIndices):
         indices = self._hash_storage_indices(storage_indices)
-        self._storage[indices].extend(items)
+        self._storage[indices].append(items)
 
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[RolloutState]:
+    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]:
         indices = self._hash_storage_indices(storage_indices)
         target_list = self._storage[indices]
         target_count = min(count, len(target_list))
@@ -57,109 +57,6 @@ class NaiveStorage(Storage):
         return len(self._storage[indices])
 
 
-class PandasStorage(Storage):
-    def __init__(self, limit: int = 0):
-        raise NotImplementedError("PandasStorageBackend is under development and not yet implemented.")
-        import pandas as pd
-
-        self._df = pd.DataFrame(columns=["task_name", "group_status", "data"])
-
-    def __len__(self): ...
-    async def put(self, items: list[RolloutState], indices: StorageIndices):
-        import pandas as pd
-
-        new_rows = []
-        base_info = {"task_name": indices.task_name, "group_status": indices.group_status, **indices.tags}
-
-        for item in items:
-            row = base_info.copy()
-            row["data"] = item
-            new_rows.append(row)
-
-        new_df = pd.DataFrame(new_rows)
-        self._df = pd.concat([self._df, new_df], ignore_index=True, sort=False)
-
-    async def get(self, count: int, indices: StorageIndices) -> list[RolloutState]:
-        if self._df.empty:
-            return []
-        mask = (self._df["task_name"] == indices.task_name) & (self._df["group_status"] == indices.group_status)
-        for key, value in indices.tags.items():
-            if key in self._df.columns:
-                mask &= self._df[key] == value
-            else:
-                return []
-        target_df = self._df[mask].head(count)
-        if target_df.empty:
-            return []
-        result = target_df["data"].tolist()
-        self._df.drop(target_df.index, inplace=True)
-        return result
-
-
-class SQLStorage(Storage):
-    def __init__(self, db_path: str = ":memory:"):
-        raise NotImplementedError("SQLStorageBackend is under development and not yet implemented.")
-        self.db_path = db_path
-        self._init_db()
-
-    def _init_db(self): ...
-    def _serialize_item(self, item: RolloutState) -> bytes: ...
-    def _deserialize_item(self, blob: bytes) -> RolloutState: ...
-    def __len__(self): ...
-
-    async def put(self, items: list[RolloutState], indices: StorageIndices):
-        import json
-        import sqlite3
-
-        rows = []
-        tags_json = json.dumps(indices.tags)
-
-        for item in items:
-            data_blob = self._serialize_item(item)
-            rows.append((indices.task_name, indices.group_status, tags_json, data_blob))
-
-        with sqlite3.connect(self.db_path) as conn:
-            conn.executemany(
-                "INSERT INTO replay_buffer (task_name, group_status, tags, data) VALUES (?, ?, ?, ?)", rows
-            )
-
-    async def get(self, count: int, indices: StorageIndices) -> list[RolloutState]:
-        import sqlite3
-
-        # 构建动态查询
-        query = "SELECT id, data FROM replay_buffer WHERE task_name = ? AND group_status = ?"
-        params = [indices.task_name, indices.group_status]
-
-        # SQLite 的 JSON 查询语法 (需要 SQLite 3.38+，如果是旧版本需要用 LIKE 模拟或不做 DB 级过滤)
-        # 这里演示简单的方法：如果在 Python 端过滤 tags 效率低，但在 SQL 端过滤 JSON 语法较复杂。
-        # 为了通用性，这里我只用 task 和 status 查出候选集，然后用 Python 过滤 Tags (如果 tags 很复杂建议把 tags 独立成列)
-        # 或者使用 JSON_EXTRACT (推荐)
-        for key, value in indices.tags.items():
-            # 注意：JSON 中数值和字符串的区别。这里假设 value 都是简单类型。
-            # $.key 取出对应的值
-            query += f" AND json_extract(tags, '$.{key}') = ?"
-            params.append(value)
-
-        query += f" LIMIT {count}"
-
-        results = []
-        ids_to_delete = []
-
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(query, params)
-            rows = cursor.fetchall()
-
-            for row_id, data_blob in rows:
-                results.append(self._deserialize_item(data_blob))
-                ids_to_delete.append(row_id)
-
-            if ids_to_delete:
-                placeholders = ",".join("?" for _ in ids_to_delete)
-                conn.execute(f"DELETE FROM replay_buffer WHERE id IN ({placeholders})", ids_to_delete)
-
-        return results
-
-
 class FIFOBackend(NaiveStorage):
     # 普通的先进先出，用完就丢，不持久保存，目前同步应该就够用了
     def __init__(self, limit: int = 0):
@@ -169,7 +66,7 @@ class FIFOBackend(NaiveStorage):
     async def put(self, items: list[RolloutState], storage_indices: StorageIndices):
         await super().put(items, storage_indices)
 
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[RolloutState]:
+    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]:
         indices = self._hash_storage_indices(storage_indices)
         target_count = min(count, len(self._storage[indices]))
         return [self._storage[indices].popleft() for _ in range(target_count)]
@@ -183,15 +80,15 @@ class StalenessBackend(NaiveStorage):
         self.max_staleness = max_staleness
         self.min_staleness = min_staleness
         self._storage = defaultdict(lambda: {i: deque() for i in range(min_staleness, max_staleness + 1)})
-        self._bucket_counts = defaultdict(int)
+        self._bucket_counts: defaultdict[tuple, int] = defaultdict(int)
 
     async def put(self, items: list[RolloutState], storage_indices: StorageIndices):
         indices = self._hash_storage_indices(storage_indices)
         group_seq_staleness = max([item.seq_staleness for item in items])
-        self._storage[indices][group_seq_staleness].extend(items)
+        self._storage[indices][group_seq_staleness].append(items)
         self._bucket_counts[indices] += len(items)
 
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[RolloutState]:
+    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]:
         indices = self._hash_storage_indices(storage_indices)
         if self._bucket_counts[indices] == 0:
             return []
@@ -210,7 +107,7 @@ class StalenessBackend(NaiveStorage):
             needed -= take
         return target_items
 
-    async def count(self, storage_indices: StorageIndices) -> int:
+    def count(self, storage_indices: StorageIndices) -> int:
         indices = self._hash_storage_indices(storage_indices)
         total_len = 0
         for s in range(self.min_staleness, self.max_staleness + 1):
@@ -222,7 +119,7 @@ class StalenessBackend(NaiveStorage):
 
 
 class ReplayBuffer:
-    def __init__(self, storage_backend: Storage = None):
+    def __init__(self, storage_backend: Storage | None = None):
         self._storage = FIFOBackend() if storage_backend is None else storage_backend
         self._lock = asyncio.Lock()
 
@@ -232,7 +129,7 @@ class ReplayBuffer:
         async with self._lock:
             await self._storage.put(items, indices)
 
-    async def get(self, batch_size: int, task_name: str, group_status: Status, **kwargs) -> list[RolloutState]:
+    async def get(self, batch_size: int, task_name: str, group_status: Status, **kwargs) -> list[list[RolloutState]]:
         indices = StorageIndices(task_name=task_name, group_status=group_status, tags=kwargs)
         async with self._lock:
             return await self._storage.get(batch_size, indices)
@@ -240,4 +137,4 @@ class ReplayBuffer:
     async def count(self, task_name: str, group_status: Status, **kwargs) -> int:
         indices = StorageIndices(task_name=task_name, group_status=group_status, tags=kwargs)
         async with self._lock:
-            return await self._storage.count(indices)
+            return self._storage.count(indices)
