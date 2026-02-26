@@ -32,7 +32,7 @@ resource_map = {
     "npu": "NPU",
     "cuda": "GPU",
 }
-class TestRollout(unittest.TestCase):
+class TestRollout(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
