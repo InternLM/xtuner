@@ -29,34 +29,33 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.replay_buffer = ReplayBuffer(storage_backend=self.backend)
 
     async def test_sampler_with_replay_buffer(self):
-        sampler = SamplerWithReplayBuffer("test_task", self.mock_dataloader_cfg, self.mock_tokenizer, self.replay_buffer)
+        task_name = "test_task"
+        sampler = SamplerWithReplayBuffer(self.mock_dataloader_cfg, self.mock_tokenizer, self.replay_buffer)
         
         # 场景 A: ReplayBuffer 为空，从 Dataloader 拿
-        data = await sampler.sample()
-        self.assertEqual(data.id, 0)
+        data = await sampler.sample(task_name)
+        self.assertEqual(data[0].id, 0)
 
         # 场景 B: ReplayBuffer 有 ABORTED 数据，优先拿
         aborted_item = MockRolloutState(999, status=Status.ABORTED)
-        await self.replay_buffer.put([aborted_item], "test_task")
+        await self.replay_buffer.put([aborted_item], task_name)
         
-        data = await sampler.sample()
+        data = await sampler.sample(task_name)
         self.assertEqual(data[0].id, 999)
 
     async def test_sync_produce_strategy(self):
-        # 1. 模拟 AgentLoop
         mock_agent_loop = MagicMock()
-        mock_agent_loop.task_name = "test_task"
-        # generate_group 返回的是 List[RolloutState]
-        async def mock_gen(rs, k):
-            rs.status = Status.COMPLETED
-            return [rs]
+        async def mock_gen(rs):
+            for r in rs:
+                r.status = Status.COMPLETED
+            return rs
         mock_agent_loop.generate_group = mock_gen
 
-        sampler = Sampler("test_task", self.mock_dataloader_cfg, self.mock_tokenizer)
+        sampler = Sampler(self.mock_dataloader_cfg, self.mock_tokenizer)
         strategy = SyncProduceStrategy(self.replay_buffer)
 
         # 执行：生产 batch_size 为 2 的数据
-        await strategy.produce_batch(mock_agent_loop, sampler, batch_size=2, prompt_k=1)
+        await strategy.produce_batch(mock_agent_loop, sampler, batch_size=2, task_name="test_task")
 
         # 验证：ReplayBuffer 中应该有 2 条 COMPLETED 数据
         final_data = await self.replay_buffer.get(10, "test_task", Status.COMPLETED)
@@ -68,34 +67,33 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 这个async_produce_strategy的测试主要验证超发逻辑 + staleness 优先get的逻辑
         # 异步的其他功能如 partial_rollout, tail_batch不在这里进行验证 
         mock_agent_loop = MagicMock()
-        mock_agent_loop.task_name = "test_task"
-
+        task_name = "test_task"
         call_count = 0
-        async def mock_gen(rs, k):
+        async def mock_gen(rs):
             nonlocal call_count
             call_count += 1
-            if isinstance(rs, list):
-                for r in rs:
+            for r in rs:
+                if r.id == 999:
                     r.seq_staleness = 5  
-                    r.status = Status.COMPLETED
-                return rs
-            else:
-                rs.seq_staleness = call_count
-                rs.status = Status.COMPLETED
-                return [rs]
+                else:
+                    r.seq_staleness = call_count
+                r.status = Status.COMPLETED
+                print(r.id, r.seq_staleness, r.status)
+            return rs
+
         mock_agent_loop.generate_group = mock_gen
 
-        sampler = SamplerWithReplayBuffer("test_task", self.mock_dataloader_cfg, self.mock_tokenizer, self.replay_buffer)
+        sampler = SamplerWithReplayBuffer(self.mock_dataloader_cfg, self.mock_tokenizer, self.replay_buffer)
         strategy = AsyncProduceStrategy(self.replay_buffer, staleness_threshold = 1)
         # 预处理
         aborted_item = MockRolloutState(999, status=Status.ABORTED)
-        await self.replay_buffer.put([aborted_item], "test_task")
+        await self.replay_buffer.put([aborted_item], task_name)
         # 执行
-        await strategy.produce_batch(mock_agent_loop, sampler, batch_size=2, prompt_k=1)
+        await strategy.produce_batch(mock_agent_loop, sampler, batch_size=2, task_name=task_name)
 
         # 验证：ReplayBuffer 中应该有 4 条 COMPLETED 数据，
         # NOTE(@duanyanhui): 目前还没实现暂停功能，所以4条都会推理完成,4条数据按照新鲜度顺序排列，999 是最旧的，0 是最新的
-        final_data = await self.replay_buffer.get(10, "test_task", Status.COMPLETED)
+        final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(final_data), 4)
         self.assertEqual(final_data[0].id, 999)
         self.assertEqual(final_data[1].id, 2)

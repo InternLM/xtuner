@@ -1,6 +1,8 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Union
+from typing import Iterator, Optional, Union
+
+from tqdm.auto import tqdm
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
@@ -14,9 +16,9 @@ from .replay_buffer import ReplayBuffer
 class Sampler:
     def __init__(
         self,
-        task_name: str,
         dataloader_cfg: DataloaderConfig,
         tokenizer: Union[str, PreTrainedTokenizer, PreTrainedTokenizerFast],
+        prompt_repeat_k: int = 1,
     ):
         self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
         if isinstance(tokenizer, str):
@@ -26,11 +28,14 @@ class Sampler:
         self.dataloader = dataloader_cfg.build(
             tokenizer=self.tokenizer, dp_mesh=None, global_batch_size=1, micro_batch_size=1, seed=1
         )
-        self.dataloader_iter = iter(self.dataloader)
+        self.dataloader_iter: Optional[Iterator] = None
         self.cur_epoch = 0
-        self.task_name = task_name
+        self.prompt_repeat_k = prompt_repeat_k
 
-    async def sample(self) -> RolloutState:
+    async def sample(self, task_name: str) -> list[RolloutState]:
+        if self.dataloader_iter is None:
+            self.dataloader_iter = iter(self.dataloader)
+        assert self.dataloader_iter is not None
         try:
             data = next(self.dataloader_iter)[0]
         except StopIteration:
@@ -38,21 +43,26 @@ class Sampler:
             self.dataloader.set_epoch(self.cur_epoch)
             self.dataloader_iter = iter(self.dataloader)
             data = next(self.dataloader_iter)[0]
-        return data
+        group_data = [data] * self.prompt_repeat_k
+        return group_data
 
 
 class SamplerWithReplayBuffer(Sampler):
     def __init__(
         self,
-        task_name: str,
         dataloader_cfg: DataloaderConfig,
         tokenizer: Union[str, PreTrainedTokenizer, PreTrainedTokenizerFast],
         replay_buffer: ReplayBuffer,
+        prompt_repeat_k: int = 1,
     ):
-        super().__init__(task_name, dataloader_cfg, tokenizer)
+        super().__init__(dataloader_cfg, tokenizer, prompt_repeat_k)
         self.replay_buffer = replay_buffer
 
-    def _sample_from_dataloader(self) -> RolloutState:
+    def _sample_from_dataloader(self) -> list[RolloutState]:
+        if self.dataloader_iter is None:
+            self.dataloader_iter = iter(self.dataloader)
+
+        assert self.dataloader_iter is not None
         try:
             data = next(self.dataloader_iter)[0]
         except StopIteration:
@@ -60,10 +70,11 @@ class SamplerWithReplayBuffer(Sampler):
             self.dataloader.set_epoch(self.cur_epoch)
             self.dataloader_iter = iter(self.dataloader)
             data = next(self.dataloader_iter)[0]
-        return data
+        group_data = [data] * self.prompt_repeat_k
+        return group_data
 
-    async def sample(self) -> list[RolloutState]:
-        data = await self.replay_buffer.get(1, task_name=self.task_name, group_status=Status.ABORTED)
+    async def sample(self, task_name: str) -> list[RolloutState]:
+        data = await self.replay_buffer.get(1, task_name=task_name, group_status=Status.ABORTED)
         if len(data) == 0:
             data = self._sample_from_dataloader()
         return data
@@ -75,46 +86,48 @@ class ProduceStrategy(ABC):
         self.replay_buffer = replay_buffer
 
     @abstractmethod
-    async def produce_batch(self, agent_loop: AgentLoop, sampler: Sampler, batch_size: int, prompt_k: int): ...
+    async def produce_batch(self, agent_loop: AgentLoop, sampler: Sampler, batch_size: int, task_name: str): ...
 
 
 class SyncProduceStrategy(ProduceStrategy):
-    async def produce_batch(self, agent_loop: AgentLoop, sampler: Sampler, batch_size: int, prompt_k: int):
-        data_concurrency = batch_size
+    async def produce_batch(self, agent_loop: AgentLoop, sampler: Sampler, batch_size: int, task_name: str):
+        pbar_refrash_step = max(1, int(batch_size * 0.1))
         pending_tasks = set()
-        for _ in range(data_concurrency):
-            rollout_state = await sampler.sample()
-            task = asyncio.create_task(agent_loop.generate_group(rollout_state, prompt_k))
-            pending_tasks.add(task)
-
-        init_completed_sample_count = await self.replay_buffer.count(
-            task_name=agent_loop.task_name, group_status=Status.COMPLETED
-        )
-        completed_sample_count = init_completed_sample_count
-        while completed_sample_count < data_concurrency:
-            if not pending_tasks:
-                print("All tasks are done but not enough samples collected.")
-                break
-            done_tasks, pending_tasks = await asyncio.wait(
-                pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
-            )
-
-            # 如果要过滤，在这个地方处理，然后加入到 replay buffer
-            # 如果被过滤的数据就放到 put_to_filtered pool 中
-            for task in done_tasks:
-                try:
-                    await self.replay_buffer.put(items=task.result(), task_name=agent_loop.task_name)
-                except Exception as e:
-                    print(f"Error in generating trajectory: {e}")
-
-            if len(pending_tasks) + completed_sample_count < data_concurrency + init_completed_sample_count:
-                rollout_state = await sampler.sample()
-                task = asyncio.create_task(agent_loop.generate_group(rollout_state, prompt_k))
+        completed_sample_count = await self.replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
+        assert completed_sample_count == 0, "SyncProduceStrategy assumes no completed samples at the start."
+        with tqdm(total=batch_size, desc=f"Sync Producer [{task_name}]", miniters=pbar_refrash_step) as pbar:
+            last_pbar_n = completed_sample_count
+            pbar.update(last_pbar_n)
+            for _ in range(batch_size):
+                rollout_state = await sampler.sample(task_name=task_name)
+                task = asyncio.create_task(agent_loop.generate_group(rollout_state))
                 pending_tasks.add(task)
 
-            completed_sample_count = await self.replay_buffer.count(
-                task_name=agent_loop.task_name, group_status=Status.COMPLETED
-            )
+            while completed_sample_count < batch_size:
+                if not pending_tasks:
+                    print("All tasks are done but not enough samples collected.")
+                    break
+                done_tasks, pending_tasks = await asyncio.wait(
+                    pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
+                )
+                # 如果要过滤，在这个地方处理，然后加入到 replay buffer
+                # 如果被过滤的数据就放到 put_to_filtered pool 中
+                for task in done_tasks:
+                    try:
+                        await self.replay_buffer.put(items=task.result(), task_name=task_name)
+                    except Exception as e:
+                        print(f"Error in generating trajectory: {e}")
+
+                if len(pending_tasks) + completed_sample_count < batch_size:
+                    rollout_state = await sampler.sample(task_name=task_name)
+                    task = asyncio.create_task(agent_loop.generate_group(rollout_state))
+                    pending_tasks.add(task)
+
+                completed_sample_count = await self.replay_buffer.count(
+                    task_name=task_name, group_status=Status.COMPLETED
+                )
+                pbar.update(completed_sample_count - last_pbar_n)
+                last_pbar_n = completed_sample_count
 
 
 class AsyncProduceStrategy(ProduceStrategy):
@@ -132,47 +145,48 @@ class AsyncProduceStrategy(ProduceStrategy):
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self.tail_batch_candidate_step = tail_batch_candidate_step
 
-    async def produce_batch(
-        self, agent_loop: AgentLoop, sampler: SamplerWithReplayBuffer, batch_size: int, prompt_k: int
-    ):
-        data_concurrency = (1 + self.staleness_threshold) * batch_size
-        print(
-            f"AsyncProduceStrategy: data_concurrency={data_concurrency}, staleness_threshold={self.staleness_threshold}"
-        )
+    async def produce_batch(self, agent_loop: AgentLoop, sampler: Sampler, batch_size: int, task_name: str):
+        data_concurrency = int((1 + self.staleness_threshold) * batch_size)
+        pbar_refrash_step = max(1, int(data_concurrency * 0.1))
         pending_tasks = set()
-        for _ in range(data_concurrency):
-            rollout_state = await sampler.sample()
-            task = asyncio.create_task(agent_loop.generate_group(rollout_state, prompt_k))
-            pending_tasks.add(task)
-
         init_completed_sample_count = await self.replay_buffer.count(
-            task_name=agent_loop.task_name, group_status=Status.COMPLETED
+            task_name=task_name, group_status=Status.COMPLETED
         )
-        completed_sample_count = init_completed_sample_count
-        while completed_sample_count < data_concurrency:
-            if not pending_tasks:
-                print("All tasks are done but not enough samples collected.")
-                break
-            done_tasks, pending_tasks = await asyncio.wait(
-                pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
-            )
-
-            # 如果要过滤，在这个地方处理，然后加入到 replay buffer
-            # 如果被过滤的数据就放到 put_to_filtered pool 中
-            for task in done_tasks:
-                try:
-                    await self.replay_buffer.put(items=task.result(), task_name=agent_loop.task_name)
-                except Exception as e:
-                    print(f"Error in generating trajectory: {e}")
-
-            print(f"Completed sample count: {completed_sample_count}, Pending task count: {len(pending_tasks)}")
-            completed_sample_count = await self.replay_buffer.count(
-                task_name=agent_loop.task_name, group_status=Status.COMPLETED
-            )
-            if len(pending_tasks) + completed_sample_count < data_concurrency + init_completed_sample_count:
-                rollout_state = await sampler.sample()
-                task = asyncio.create_task(agent_loop.generate_group(rollout_state, prompt_k))
+        with tqdm(total=batch_size, desc=f"ASync Producer [{task_name}]", miniters=pbar_refrash_step) as pbar:
+            last_pbar_n = init_completed_sample_count
+            pbar.update(last_pbar_n)
+            for _ in range(data_concurrency):
+                rollout_state = await sampler.sample(task_name=task_name)
+                task = asyncio.create_task(agent_loop.generate_group(rollout_state))
                 pending_tasks.add(task)
+
+            completed_sample_count = init_completed_sample_count
+            while completed_sample_count < batch_size:
+                if not pending_tasks:
+                    print("All tasks are done but not enough samples collected.")
+                    break
+                done_tasks, pending_tasks = await asyncio.wait(
+                    pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # 如果要过滤，在这个地方处理，然后加入到 replay buffer
+                # 如果被过滤的数据就放到 put_to_filtered pool 中
+                for task in done_tasks:
+                    try:
+                        await self.replay_buffer.put(items=task.result(), task_name=task_name)
+                    except Exception as e:
+                        print(f"Error in generating trajectory: {e}")
+
+                print(f"Completed sample count: {completed_sample_count}, Pending task count: {len(pending_tasks)}")
+                completed_sample_count = await self.replay_buffer.count(
+                    task_name=task_name, group_status=Status.COMPLETED
+                )
+                pbar.update(completed_sample_count - last_pbar_n)
+                last_pbar_n = completed_sample_count
+                if len(pending_tasks) + completed_sample_count < data_concurrency + init_completed_sample_count:
+                    rollout_state = await sampler.sample(task_name=task_name)
+                    task = asyncio.create_task(agent_loop.generate_group(rollout_state))
+                    pending_tasks.add(task)
 
         if len(pending_tasks) > 0:
             await agent_loop.pause()
