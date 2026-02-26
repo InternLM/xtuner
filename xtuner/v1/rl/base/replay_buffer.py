@@ -20,6 +20,8 @@ class Storage(ABC):
     @abstractmethod
     async def get(self, count: int, storage_indices: StorageIndices) -> list[RolloutState]: ...
     @abstractmethod
+    async def count(self, storage_indices: StorageIndices) -> int: ...
+    @abstractmethod
     def __len__(self): ...
 
 
@@ -49,6 +51,10 @@ class NaiveStorage(Storage):
 
     def __len__(self):
         return sum(len(v) for v in self._storage.values())
+
+    def count(self, storage_indices: StorageIndices) -> int:
+        indices = self._hash_storage_indices(storage_indices)
+        return len(self._storage[indices])
 
 
 class PandasStorage(Storage):
@@ -204,6 +210,13 @@ class StalenessBackend(NaiveStorage):
             needed -= take
         return target_items
 
+    async def count(self, storage_indices: StorageIndices) -> int:
+        indices = self._hash_storage_indices(storage_indices)
+        total_len = 0
+        for s in range(self.min_staleness, self.max_staleness + 1):
+            total_len += len(self._storage[indices][s])
+        return total_len
+
     def __len__(self):
         return sum(count for count in self._bucket_counts.values())
 
@@ -223,3 +236,8 @@ class ReplayBuffer:
         indices = StorageIndices(task_name=task_name, group_status=group_status, tags=kwargs)
         async with self._lock:
             return await self._storage.get(batch_size, indices)
+
+    async def count(self, task_name: str, group_status: Status, **kwargs) -> int:
+        indices = StorageIndices(task_name=task_name, group_status=group_status, tags=kwargs)
+        async with self._lock:
+            return await self._storage.count(indices)
