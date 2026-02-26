@@ -190,9 +190,11 @@ class MoEDecoderLayer(nn.Module):
         moe_bias: bool = False,
         hidden_act: str,
         rms_norm_eps: float = 1e-6,
+        rms_norm_type: Literal['default', 'zero_centered'] = 'default',
         num_experts_per_tok: int,
         n_routed_experts: int,
         n_shared_experts: int,
+        with_shared_expert_gate: bool = False,
         hidden_factor: float = 1.0,
         attention_config: MHAConfig | MLAConfig,
         rope_scaling_cfg: RopeScalingConfig | None = None,
@@ -220,10 +222,11 @@ class MoEDecoderLayer(nn.Module):
             layer_type=layer_type,
             float8_cfg=float8_cfg,
         )
-        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
         self.shared_experts: MoEMLP | None
         self.layer_idx = layer_idx
-
+        
+        self.with_shared_expert_gate = with_shared_expert_gate
         if n_shared_experts > 0:
             self.shared_experts = MoEMLP(
                 hidden_size=hidden_size,
@@ -233,10 +236,13 @@ class MoEDecoderLayer(nn.Module):
                 mlp_bias=mlp_bias,
                 float8_cfg=float8_cfg,
             )
+            if with_shared_expert_gate:
+                self.shared_expert_gate = build_linear(hidden_size, 1, bias=False, float8_cfg=float8_cfg)
         else:
             self.shared_experts = None
+            self.shared_expert_gate = None
 
-        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
 
         self.gate = MoEGate(
             hidden_size=hidden_size,
@@ -585,6 +591,10 @@ class MoEDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         assert self.shared_experts is not None, "Shared experts should be initialized when n_shared_experts > 0"
         shared_experts_out = self.shared_experts(hidden_states)
+
+        if self.with_shared_expert_gate:
+            shared_experts_out = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_experts_out
+            
         return shared_experts_out
 
     def _post_moe_forward(
