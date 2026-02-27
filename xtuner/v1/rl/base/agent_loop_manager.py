@@ -3,6 +3,7 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto import Status
 from xtuner.v1.rl.base.producer import ProduceStrategy, Sampler
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
+from xtuner.v1.data_proto import RolloutState
 
 from .agent_loop import AgentLoop
 
@@ -45,11 +46,12 @@ class AgentLoopManager:
         self.task_name = task_name
 
     # 共卡
-    async def produce_batch(self, batch_size: int):
+    async def produce_batch(self, batch_size: int) -> list[list[RolloutState]]:
         await self._scheduler.produce_batch(
             self._agent_loop, self._data_sampler, self._replay_buffer, batch_size, self.task_name
         )
-        return await self._replay_buffer.get(batch_size, self.task_name, Status.COMPLETED)
+        batch_rollout_states: list[list[RolloutState]] = await self._replay_buffer.get(batch_size, self.task_name, Status.COMPLETED)
+        return batch_rollout_states
 
     # # 非共卡
     # async def disaggregate_produce_batch(self, batch_size: int):

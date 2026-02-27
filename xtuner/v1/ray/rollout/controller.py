@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 from uuid import uuid4
 
 import ray
+from ray.actor import ActorProxy
 import uvicorn
 from fastapi import FastAPI
 from ray.util.placement_group import PlacementGroup
@@ -466,3 +467,6 @@ class RolloutController:
             self.workers_info[url] = WorkerInfo(rank=rank, actor=active_rollout_workers[i])
         self.logger.info(f"Rollout worker server URLs: {list(self.workers_info.keys())}")
         return engine_rank_mesh_array, worker_server_urls_map
+
+RayRolloutController = ray.remote(RolloutController)
+RolloutControllerProxy = ActorProxy[RayRolloutController]

@@ -30,6 +30,7 @@ from xtuner.v1.rl.base import (
     WorkerConfig,
     WorkerLogItem,
 )
+from xtuner.v1.ray.rollout.controller import RolloutController, RolloutControllerProxy
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer
@@ -56,11 +57,11 @@ DEVICE_MODULE = get_torch_device_module()
 
 
 def bind_train_rollout(
-    train_controller,
-    rollout_controller,
+    train_controller: TrainingControllerProxy,
+    rollout_controller: RolloutControllerProxy,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
-    info_dict = ray.get(rollout_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
+    info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())  # type: ignore[attr-defined]
     ray.get(train_controller.update_rollout_info.remote(info_dict))
     return
 
@@ -136,6 +137,8 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
 
 
 class RLColocateTrainer:
+    _EXP_TRACKING_PATH = "exp_tracking"
+
     # 弱化Trainer：Trainer中代码尽量少，尽量用componet来组织代码。
     # 目标是像torch一样，让用户自己写init 和 train loop，我们只提供组件。
     def __init__(
@@ -157,8 +160,12 @@ class RLColocateTrainer:
         log_dir: Path | str,
         seed: int = 66,
 
+        # steps
         rollout_steps: int,
         global_batch_size: int,
+
+        # exp tracker
+        exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
     ):
         # log
         log_dir = Path(log_dir)
@@ -206,6 +213,11 @@ class RLColocateTrainer:
         # TODO: build agnet_loop_manager
         self.agent_loop_manager = AgentLoopManager(agent_loop=agent_loop, produce_strategy=stragegy, sampler=sampler, replay_buffer=replay_buffer, task_name="test_gsm8k")
 
+
+        # others
+        self._debug_rollout = False
+        self._exp_tracker = self._init_tracker(exp_tracker, log_dir / self._EXP_TRACKING_PATH)
+        self._display_all_workers_log = False
     
     # TODO: simplify with WorkerConfig.build()
     def _build_train_controller(self, train_worker_cfg: WorkerConfig) -> TrainingControllerProxy:
@@ -251,7 +263,6 @@ class RLColocateTrainer:
         if rollout_cfg is None:
             return rollout_controller
 
-        from xtuner.v1.ray.rollout.controller import RolloutController
 
         rollout_controller = (
             ray.remote(RolloutController)
@@ -259,6 +270,10 @@ class RLColocateTrainer:
             .remote(rollout_cfg, placement_group)
         )  # type: ignore[attr-defined]
         return rollout_controller
+    
+    def _init_tracker(self, exp_tracker: Literal["tensorboard", "jsonl"], work_dir: Path):
+        writer = get_writer(writer_type=exp_tracker, log_dir=work_dir)
+        return writer
     
     def fit(self):
         self.logger.info("Start RL training")
@@ -272,7 +287,11 @@ class RLColocateTrainer:
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
                 # rollout_info = self._rollout_step(rollout_idx, step_timer_dict)
+                ray.get(self.rollout_controller.check_health.remote())
                 train_batch: list[list[RolloutState]] = asyncio.run(self.agent_loop_manager.produce_batch(self.global_batch_size))
+                # TODO: save trajectory
+                ray.get(self.rollout_controller.pause_generation.remote())
+                ray.get(self.rollout_controller.offload.remote())
                 rollout_info = {}
 
                 if not self._debug_rollout:
@@ -320,6 +339,7 @@ class RLColocateTrainer:
             self._log_step(rollout_idx, step_timer_dict, rollout_info, train_log_info, eval_log_info)
             self._cur_step = rollout_idx
 
+    # TODO: simplify with Packer.pack_pad_dispatch()
     def _prepare_train_data(self, data_groups: list[list[RolloutState]], pack_max_length: int):
         rewards_list = []
         advantages_list = []
@@ -424,12 +444,71 @@ class RLColocateTrainer:
             # self._maybe_save_checkpoint()
 
         with timer("sync_weight", step_timer_dict):
-            bind_train_rollout(train_controller=self.train_controller, env_controller=self.rollout_controller)
+            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
             ray.get(self.rollout_controller.onload_weights.remote())
             ray.get(self.train_controller.update_weights.remote())
             self.logger.info("Model weights synchronized successfully.")
             ray.get(self.train_controller.offload.remote(target="model"))
             ray.get(self.rollout_controller.onload_kvcache.remote())
+    
+    def _log_step(
+        self,
+        rollout_idx: int,
+        step_timer_dict: dict,
+        rollout_info: dict,  # RolloutInfo,  # TODO
+        train_info: TrainInfo,
+        eval_info: dict[str, float],
+    ):
+        all_scalars = {}
+        log_time_str = ""
+        trajectory_str = ""
+        eval_str = ""
+        if step_timer_dict:
+            all_scalars.update({f"time/{k}": v for k, v in step_timer_dict.items()})
+            log_time_str = f"\nRollout {rollout_idx} finished and timing listed:\n"
+            log_time_str += "\n".join([f" - {k:<25}: {v:.2f}s" for k, v in step_timer_dict.items()])
+
+        if rollout_info:
+            all_scalars.update(rollout_info.get("task_time", {}))
+            all_scalars.update({f"async/{k}": v for k, v in rollout_info.get("replay_buffer_info", {}).items()})
+
+        if train_info:
+            all_scalars.update({f"response/{k}": v for k, v in train_info.get("data_info", {}).items()})
+            trajectory_str = f"\nRollout {rollout_idx} data statistics:\n"
+            trajectory_str += "\n".join([f"- {k:<25}: {v:.4f}" for k, v in train_info.get("data_info", {}).items()])
+            rank0_log_item = train_info["workers_log_item"][0]
+            rank0_rollout_is_metrics = rank0_log_item.get("rollout_is_metrics", {})
+            rank0_mismatch_metrics = rank0_log_item.get("mismatch_metrics", {})
+            rank0_rollout_entropy = rank0_log_item.get("rollout_entropy", 0.0)
+            all_scalars.update({f"rollout_is/{k}": v for k, v in rank0_rollout_is_metrics.items()})
+            all_scalars.update({f"{k}": v for k, v in rank0_mismatch_metrics.items()})
+            all_scalars.update({"entropy/rollout": rank0_rollout_entropy})
+            all_scalars.update({"entropy/train": rank0_log_item["train_entropy"]})
+            for worker_idx, log_item in enumerate(train_info["workers_log_item"]):
+                if not self._display_all_workers_log and worker_idx > 0:
+                    break
+                mini_batch_metrics: dict[str, List[float]] = {}
+                for mini_batch_log in log_item["train_metrics"]:
+                    rl_worker_log = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
+                    for k, v in rl_worker_log.items():
+                        mini_batch_metrics.setdefault(k, []).append(cast(float, v))
+
+                for key, value in mini_batch_metrics.items():
+                    avg_value = sum(value) / len(value)
+                    all_scalars.update({f"train_metrics/worker_{worker_idx}/step_avg_{key}": avg_value})
+
+                rank_sft_log = log_item["sft_train_metrics"]
+                for k, v in rank_sft_log.items():
+                    all_scalars.update({f"sft_train_metrics/worker_{worker_idx}/{k}": v})
+
+        if eval_info:
+            all_scalars.update({f"eval/{k}": v for k, v in eval_info.items()})
+            eval_str = " ".join([f"{k}: {v:.4f}" for k, v in eval_info.items()])
+
+        self.logger.info(f"Rollout {rollout_idx}/{self._rollout_steps}{log_time_str} {trajectory_str} ")
+        if eval_str:
+            self.logger.info(f"Eval: {eval_str}")
+        self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=rollout_idx)
 
 
 if __name__ == "__main__":
