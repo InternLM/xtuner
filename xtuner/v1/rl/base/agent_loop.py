@@ -1,6 +1,8 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Callable, Type
+
+from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto import RolloutState, SampleParams, Status
 from xtuner.v1.ray.judger import NativeJudger, NativeJudgerRouter
@@ -57,3 +59,18 @@ class SingleTurnAgentLoop(AgentLoop):
             return rollout_state
         rollout_state = await self.judge_sample(rollout_state)
         return rollout_state
+
+
+class AgentLoopConfig(BaseModel):
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+    type: Type[AgentLoop] = SingleTurnAgentLoop
+    hf_checkpoint: str
+    sample_params: SampleParams
+
+    def build(self, rollout_controller, judger=None) -> AgentLoop:
+        return self.type(
+            rollout_ctl=rollout_controller,
+            sample_params=self.sample_params,
+            hf_checkpoint=self.hf_checkpoint,
+            judger=judger,
+        )
