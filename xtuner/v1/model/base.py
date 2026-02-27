@@ -194,11 +194,25 @@ class TransformerConfig(XTunerBaseModelConfig):
             ]
 
 
-class ModelOutputs(TypedDict):
-    hidden_states: NotRequired[list[torch.Tensor]]
-    logits: NotRequired[torch.Tensor]
+class ModelOutputs(PydanticBaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    hidden_states: list[torch.Tensor] | None = None
+    logits: torch.Tensor | None = None
     loss: torch.Tensor
-    extra_info: ModelForwardExtraLogInfo
+    extra_info: ModelForwardExtraLogInfo | None = None
+
+    def free(self):
+        self.hidden_states = None
+        self.logits = None
+        self.extra_info = None
+
+    # TODO: Only for avoid BC. Should be removed later.
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    # TODO: Only for avoid BC. Should be removed later.
+    def __contains__(self, key):
+        return key in self.model_fields_set
 
 
 def _is_float8_available():
