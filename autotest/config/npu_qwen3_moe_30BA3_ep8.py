@@ -51,6 +51,7 @@ trainer = TrainerConfig(
     total_epoch=1,
     work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
+    dist_backend="npu:hccl",
     checkpoint_interval=10,
     checkpoint_maxkeep=2,
 )
