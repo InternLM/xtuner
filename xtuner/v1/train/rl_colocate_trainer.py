@@ -40,14 +40,15 @@ from xtuner.v1.utils.env_check import get_rollout_engine_version
 from xtuner.v1.train.trainer import ExpHistory, ExpInfo, GitInfo, LoadCheckpointConfig, XTunerMeta
 
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
-from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoop, AgentLoop
-from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManager
-from xtuner.v1.rl.base.producer import SyncProduceStrategy, Sampler
+from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoop, AgentLoop, AgentLoopConfig
+from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManager, AgentLoopManagerConfig
+from xtuner.v1.rl.base.producer import ProduceStrategyConfig, SyncProduceStrategyConfig
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig, NativeJudgerConfig
-
+from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.base.sampler import SamplerConfig
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
@@ -150,11 +151,14 @@ class RLColocateTrainer:
         judger_config: NativeJudgerConfig,
 
         # Sampler config
-        dataloader_cfg: DataloaderConfig,
+        sampler_config: SamplerConfig,
         tokenizer_path: str | Path,
+        replay_buffer_config: dict,
         # agent loop config
-        sample_params: SampleParams,
-
+        agent_loop_config: AgentLoopConfig,
+        # agent loop manager config
+        produce_strategy_config: ProduceStrategyConfig,
+        agent_loop_manager_cfg: AgentLoopManagerConfig,
         # others
         load_from: str | Path,
         log_dir: Path | str,
@@ -199,20 +203,24 @@ class RLColocateTrainer:
 
         # build judger
         judger = judger_config.build_router()
-        # TODO: build agent_loop
-        # sample_params = SampleParams(max_tokens=self.max_response_length, temperature=0.0)
-        hf_checkpoint: str = load_from if isinstance(load_from, str) else load_from.as_posix()
-        agent_loop: AgentLoop = SingleTurnAgentLoop(self.rollout_controller, sample_params, hf_checkpoint, judger)
-        # TODO: build produce_strategy
-        stragegy = SyncProduceStrategy()
-        # TODO: build sampler
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        sampler = Sampler(dataloader_cfg=dataloader_cfg, tokenizer=self.tokenizer, prompt_repeat_k=8)
+
+        # build agent_loop
+        agent_loop  = agent_loop_cfg.build(rollout_controller=self.rollout_controller, judger=judger)
+
+        # build produce_strategy
+        stragegy = producer_cfg.build()
         # TODO: build replay_buffer
         replay_buffer = ReplayBuffer()
-        # TODO: build agnet_loop_manager
-        self.agent_loop_manager = AgentLoopManager(agent_loop=agent_loop, produce_strategy=stragegy, sampler=sampler, replay_buffer=replay_buffer, task_name="test_gsm8k")
-
+        # build sampler
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        sampler = sampler_config.build(tokenizer=self.tokenizer, replay_buffer=replay_buffer)
+        # build agnet_loop_manager
+        self.agent_loop_manager = agent_loop_manager_cfg.build(
+            agent_loop=agent_loop,
+            produce_strategy=stragegy,
+            sampler=sampler,
+            replay_buffer=replay_buffer,
+        )
 
         # others
         self._debug_rollout = False
@@ -625,7 +633,10 @@ if __name__ == "__main__":
         collator="fake_collator",
         pack_level="none",
     )
-
+    sampler_config = SamplerConfig(
+        dataloader_cfg=dataloader_cfg,
+        prompt_repeat_k=prompt_repeat_k,
+    )
     # agent loop config
     sample_params = SampleParams(
         max_tokens=max_response_length,
@@ -634,7 +645,12 @@ if __name__ == "__main__":
         temperature=1.0,
         min_tokens=0,
     )
-
+    agent_loop_cfg = SingleTurnAgentLoopConfig(
+        hf_checkpoint=model_path,
+        sample_params=sample_params,
+    )
+    producer_cfg = SyncProduceStrategyConfig()
+    agent_loop_manager_cfg = AgentLoopManagerConfig(task_name="test_task")
     # Finally, build the trainer
     trainer = RLColocateTrainer(
         resources=resources,
@@ -642,10 +658,12 @@ if __name__ == "__main__":
         rollout_config=rollout_config,
         judger_config=judger_config,
 
-        dataloader_cfg=dataloader_cfg,
+        sampler_config=sampler_config,
         tokenizer_path=model_path,
-
-        sample_params=sample_params,
+        replay_buffer_config=dict(),
+        agent_loop_config=agent_loop_cfg,
+        produce_strategy_config=producer_cfg,
+        agent_loop_manager_cfg=agent_loop_manager_cfg,
 
         load_from=model_path,
         log_dir=log_dir,
