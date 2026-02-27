@@ -37,7 +37,7 @@ dependencies = [
   "tiktoken",
   "torch>=2.6.0",
   "torchvision",
-  "transformers==4.57.0",
+  "transformers==5.2.0",
   "cyclopts",
   "transformers_stream_generator",
   "opencv-python-headless<=4.12.0.88",
