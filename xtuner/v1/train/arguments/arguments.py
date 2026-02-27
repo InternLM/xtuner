@@ -129,7 +129,7 @@ class TrainingArguments(BaseModel):
         elif self.optim == "Muon":
             optim_cfg = MuonConfig(lr=self.lr)
         else:
-            raise ValueError(f"Unkown optimizer type {self.optim}, only support `AdamW` and `Muon`.")
+            raise ValueError(f"Unknown optimizer type {self.optim}, only support `AdamW` and `Muon`.")
         # Create learning rate scheduler config
         lr_cfg = LRConfig(lr_type=self.scheduler_type, warmup_ratio=self.warmup_ratio, lr_min=self.lr_min)
 
