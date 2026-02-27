@@ -1845,5 +1845,12 @@ class Trainer:
             logger.info(f"Training config: {config_str}")
 
     def _resolve_deprecate_compile_cfg(self, model_cfg: XTunerBaseModelConfig, fsdp_cfg: FSDPConfig):
+        if self.rank == 0:
+            logger.warning(
+                "FSDPConfig.torch_compile is deprecated, and will be removed in version 1.1.0. "
+                "Please use XTunerBaseModelConfig.compile_cfg to control whether to use torch.compile for the model"
+            )
         if not fsdp_cfg.torch_compile:
+            if self.rank == 0:
+                logger.warning("FSDPConfig.torch_compile is set to False, setting model_cfg.compile_cfg to False.")
             model_cfg.compile_cfg = False

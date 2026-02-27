@@ -49,7 +49,6 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=8,
@@ -130,7 +129,6 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -217,7 +215,6 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -323,7 +320,6 @@ class TestMoEEngineFloat8Case2(DeterministicDDPTestCase):
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
             hsdp_sharding_size=hsdp_sharding_size,

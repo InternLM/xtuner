@@ -22,7 +22,8 @@ class FSDPConfig(BaseModel):
     # TODO: (caoweihan) Convert `torch.dtype` to `Annotated` for compatibility with cyclopts
     param_dtype: Annotated[torch.dtype, Parameter(help="Data type for model parameters")] = torch.bfloat16
     reduce_dtype: Annotated[torch.dtype, Parameter(help="Data type for reduction operations")] = torch.bfloat16
-    torch_compile: Annotated[bool, Parameter(help="Enable model compilation for faster inference")] = False
+    # TODO: deprecate `torch_compile` in favor of `compile_cfg` in XTunerBaseModelConfig
+    torch_compile: Annotated[bool, Parameter(help="Enable model compilation for faster inference")] = True
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
     )
