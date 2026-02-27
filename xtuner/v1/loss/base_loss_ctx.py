@@ -12,6 +12,7 @@ from torch.distributed.nn.functional import all_reduce
 from typing_extensions import Self
 
 from xtuner.v1.loss.utils import sp_split
+from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 
 from .chunk_loss import ChunkLoss
 
@@ -194,6 +195,10 @@ class BaseLossContext(nn.Module, ABC):
             loss, (logits, extra_info) = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
         else:
             loss, (logits, extra_info) = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+
+        # TODO: yanhuida, should be removed
+        if not isinstance(extra_info, ModelForwardExtraLogInfo):
+            extra_info = ModelForwardExtraLogInfo(extra_info)
 
         extra_info["local_base_loss"] = loss.detach().clone()
 
