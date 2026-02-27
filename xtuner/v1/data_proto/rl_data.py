@@ -4,7 +4,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 from typing_extensions import NotRequired, TypedDict
 
 # ====================================
@@ -90,6 +90,22 @@ class RolloutState(BaseModel):
     logprobs: list[float] | None = None
     routed_experts: list[int] | RayObjectRef | None = None  # type: ignore[valid-type]
     finish_reason: str | None = None
+
+    @field_serializer('routed_experts')
+    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | None:
+        """Dump 时跳过 ray.ObjectRef，序列化为 None，避免 PydanticSerializationError。"""
+        if value is None:
+            return None
+        try:
+            import ray
+            if isinstance(value, ray.ObjectRef):
+                return None
+        except ImportError:
+            pass
+        if type(value).__name__ == 'ObjectRef' and 'ray' in getattr(
+                type(value), '__module__', ''):
+            return None
+        return value  # list[int]
 
     #  --- Judger 输出 ---
     reward: float | list[float] | list[dict] | None = None
