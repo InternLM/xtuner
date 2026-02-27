@@ -163,6 +163,7 @@ class RLColocateTrainer:
         load_from: str | Path,
         log_dir: Path | str,
         seed: int = 66,
+        debug_rollout: bool = False,
 
         # steps
         rollout_steps: int,
@@ -223,7 +224,9 @@ class RLColocateTrainer:
         )
 
         # others
-        self._debug_rollout = False
+        if debug_rollout:
+            self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
+        self._debug_rollout = debug_rollout
         self._exp_tracker = self._init_tracker(exp_tracker, log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
     
@@ -295,12 +298,13 @@ class RLColocateTrainer:
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
                 # rollout_info = self._rollout_step(rollout_idx, step_timer_dict)
-                ray.get(self.rollout_controller.check_health.remote())
+                # ray.get(self.rollout_controller.check_health.remote())
                 train_batch: list[list[RolloutState]] = asyncio.run(self.agent_loop_manager.produce_batch(self.global_batch_size))
-                # TODO: save trajectory
-                ray.get(self.rollout_controller.pause_generation.remote())
-                ray.get(self.rollout_controller.offload.remote())
                 rollout_info = {}
+                # TODO: save trajectory
+                if not self._debug_rollout:
+                    ray.get(self.rollout_controller.pause_generation.remote())
+                    ray.get(self.rollout_controller.offload.remote())
 
                 if not self._debug_rollout:
                     with timer("onload", step_timer_dict):
@@ -343,6 +347,9 @@ class RLColocateTrainer:
                     eval_log_info = {}
                     # eval_batch: list[RolloutState] = asyncio.run(self.agent_loop_manager.produce_batch(self.eval_batch_size))
                     # eval_metrics = self.evaluator.evaluate(eval_batch)
+                else:
+                    train_log_info = {} 
+                    eval_log_info = {}
 
             self._log_step(rollout_idx, step_timer_dict, rollout_info, train_log_info, eval_log_info)
             self._cur_step = rollout_idx
@@ -538,7 +545,7 @@ if __name__ == "__main__":
     rollout_steps = 100  # 5000
     train_optimizer_steps = 1  # 16
     global_batch_size = 64 * train_optimizer_steps  # 512
-    prompt_repeat_k = 5  # 16
+    prompt_repeat_k = 8  # 16
     rollout_tp_size = 1  # 2
     rollout_ep_size = 1
     max_prompt_length = 512  # 2048
@@ -668,6 +675,7 @@ if __name__ == "__main__":
         load_from=model_path,
         log_dir=log_dir,
         seed=123,
+        debug_rollout=True,
 
         rollout_steps=rollout_steps,
         global_batch_size=global_batch_size,
