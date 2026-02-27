@@ -7,12 +7,13 @@ import torch
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.base.agent_loop import AgentLoopConfig, SingleTurnAgentLoop
+from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-from xtuner.v1.rl.base.producer import SyncProduceStrategy, SamplerConfig, ProducerConfig
+from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
+from xtuner.v1.rl.base.sampler import SamplerConfig
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
@@ -79,8 +80,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             worker_log_dir=self.worker_log_dir,
         )
         judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")  
-        agent_loop_cfg = AgentLoopConfig(
-            type=SingleTurnAgentLoop,
+        agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)
         )
@@ -119,8 +119,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             worker_log_dir=self.worker_log_dir,
         )
         judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")  
-        agent_loop_cfg = AgentLoopConfig(
-            type=SingleTurnAgentLoop,
+        agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)
         )
@@ -140,7 +139,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             ),
             prompt_repeat_k=2,
         )
-        producer_cfg = ProducerConfig()
+        producer_cfg = SyncProduceStrategyConfig()
         agent_loop_manager_cfg = AgentLoopManagerConfig(task_name="test_gsm8k")
         # 2. 创建 rollout_controller, judger
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
