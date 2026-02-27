@@ -1,3 +1,5 @@
+from pydantic import BaseModel, ConfigDict
+
 from xtuner.v1.data_proto import Status
 from xtuner.v1.rl.base.producer import ProduceStrategy, Sampler
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
@@ -37,3 +39,24 @@ class AgentLoopManager:
     # async def disaggregate_get_batch(self, task_name: str, batch_size: int):
     #     # 从不同的 replay_buffer 中采样，然后训练
     #     return self._replay_buffer.get(batch_size, task_name, Status.COMPLETED)
+
+
+class AgentLoopManagerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    task_name: str
+
+    def build(
+        self,
+        agent_loop: AgentLoop,
+        produce_strategy: ProduceStrategy,
+        sampler: Sampler,
+        replay_buffer: ReplayBuffer,
+    ) -> AgentLoopManager:
+        return AgentLoopManager(
+            agent_loop=agent_loop,
+            produce_strategy=produce_strategy,
+            sampler=sampler,
+            replay_buffer=replay_buffer,
+            task_name=self.task_name,
+        )
