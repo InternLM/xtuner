@@ -1,4 +1,4 @@
-from .muon import Muon
+from .muon import Muon  # type: ignore
 
 
 __all__ = ["Muon"]
