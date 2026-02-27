@@ -17,12 +17,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
             key = "model.language_model." + key
 
         if "layers" in key:
-            key = re.sub(r"layers\.(\d+)\.(experts|gate|shared_experts)", r"layers.\1.mlp.\2", key)
-            key = key.replace("shared_experts", "shared_expert")
-
-            layer_idx = int(re.findall(r"layers\.(\d+)\.", key)[0])
-            if self.config.layers_type[layer_idx] == "linear_attention":
-                 key = key.replace("self_attn", "linear_attn")
+            key = re.sub(r"layers\.(\d+)\.(experts|gate)", r"layers.\1.mlp.\2", key)
 
         if "fused_w1w3.weight" in key:
             key = key.replace("fused_w1w3.weight", "gate_up_proj")

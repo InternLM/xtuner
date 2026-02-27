@@ -200,7 +200,10 @@ class GateDeltaNet(nn.Module):
         core_attn_out = core_attn_out.reshape(batch_size, seq_len, -1)
 
         output = self.out_proj(core_attn_out)
-        return output
+        attn_outputs: AttnOutputs = {
+            "projected_output": output,
+        }
+        return attn_outputs
     
     @overload  # type: ignore
     def __call__(  # type: ignore
