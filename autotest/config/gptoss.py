@@ -5,8 +5,8 @@ from xtuner.v1.config import (
     FSDPConfig,
     LRConfig,
 )
-from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.model.moe.gpt_oss import GptOss21BA3P6Config
@@ -29,7 +29,7 @@ fsdp_cfg = FSDPConfig(
 dataset_config = [
     {
         "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-        "tokenize_fn": FTDPTokenizeFnConfig(max_length=16384),
+        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template='gpt-oss', max_length=16384),
     },
 ]
 
