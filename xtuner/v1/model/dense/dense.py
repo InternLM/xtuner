@@ -107,7 +107,7 @@ class Dense(BaseModel):
         output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info
-        return ModelOutputs(**output)  # type: ignore[typeddict-item]
+        return ModelOutputs(**output)
 
     def build_embeddings(self, config: TransformerConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
