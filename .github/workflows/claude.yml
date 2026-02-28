@@ -52,13 +52,9 @@ jobs:
               - Code quality, style, and best practices
               - Potential bugs, issues, incorrect logic
               - Security implications
-              - CLAUDE.md compliance
+              - .claude/CLAUDE.md compliance
 
               For every issue, rate how significant it is. Make sure you are confident in your diagnosis.
-
-              For every CLAUDE.md compliance violation, check if repo has other places where this issue appears.
-              If it does, do not point out the violation in the place it appears.
-              Instead in the final top-level comment, include a suggestion how to improve CLAUDE.md.
 
               Provide detailed feedback as PR comments, using inline comments for specific issues.
               Use `gh pr comment ${{ github.event.pull_request.number }} --body "..."` for top-level summary. Keep it short.
