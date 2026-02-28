@@ -151,13 +151,13 @@ class RLColocateTrainer:
         judger_config: NativeJudgerConfig,
 
         # Sampler config
-        sampler_config: SamplerConfig,
+        # sampler_config: SamplerConfig,
         tokenizer_path: str | Path,
         replay_buffer_config: dict,
         # agent loop config
-        agent_loop_config: AgentLoopConfig,
+        # agent_loop_config: AgentLoopConfig,
         # agent loop manager config
-        produce_strategy_config: ProduceStrategyConfig,
+        # produce_strategy_config: ProduceStrategyConfig,
         agent_loop_manager_cfg: AgentLoopManagerConfig,
         # others
         load_from: str | Path,
@@ -203,23 +203,23 @@ class RLColocateTrainer:
         self.rollout_controller = self.init_rollout_controller(rollout_config, self._pg)
 
         # build judger
-        judger = judger_config.build_router()
+        judger = judger_config.build_router()  # TODO: use build instead of build_router
 
         # build agent_loop
-        agent_loop  = agent_loop_config.build(rollout_controller=self.rollout_controller, judger=judger)
+        # agent_loop  = agent_loop_config.build(rollout_controller=self.rollout_controller, judger=judger)
 
         # build produce_strategy
-        stragegy = produce_strategy_config.build()
+        # stragegy = produce_strategy_config.build()
         # TODO: build replay_buffer
         replay_buffer = ReplayBuffer()
         # build sampler
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        sampler = sampler_config.build(tokenizer=self.tokenizer, replay_buffer=replay_buffer)
+        # sampler = sampler_config.build(tokenizer=self.tokenizer, replay_buffer=replay_buffer)
         # build agnet_loop_manager
         self.agent_loop_manager = agent_loop_manager_cfg.build(
-            agent_loop=agent_loop,
-            produce_strategy=stragegy,
-            sampler=sampler,
+            rollout_controller=self.rollout_controller,
+            judger=judger,
+            tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
         )
 
@@ -539,6 +539,7 @@ if __name__ == "__main__":
     model_path = os.environ["MODEL_PATH"]
     enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", '0')
     data_path = os.environ["DATA_PATH"]
+    eval_data_path = os.environ["EVAL_DATA_PATH"]
     log_dir = os.environ["WORK_DIR"]  # TODO: work_dir
 
     # total_epochs = 3  # 5000
@@ -657,7 +658,44 @@ if __name__ == "__main__":
         sample_params=sample_params,
     )
     produce_strategy_config = SyncProduceStrategyConfig()
-    agent_loop_manager_cfg = AgentLoopManagerConfig(task_name="test_task")  # TODO: agent loop and produce config here
+    agent_loop_manager_cfg = AgentLoopManagerConfig(
+        task_name="train_task",
+        agent_loop_config=agent_loop_config,
+        produce_strategy_config=produce_strategy_config,
+        sampler_config=sampler_config,
+    )
+
+    eval_dataset = DatasetConfig(name=exp_name, anno_path=eval_data_path, sample_ratio=1.0)
+    eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
+    eval_dataloader_cfg = DataloaderConfig(
+        dataset_config_list=eval_dataset_cfg,
+        pack_max_length=pack_max_length,
+        collator="fake_collator",
+        pack_level="none",
+    )
+    eval_sampler_config = SamplerConfig(
+        dataloader_cfg=eval_dataloader_cfg,
+        prompt_repeat_k=1,
+    )
+
+    eval_sample_params = SampleParams(
+        max_tokens=max_response_length,
+        top_k=1,
+        top_p=1.0,
+        temperature=0.0,
+        min_tokens=0,
+    )
+    eval_agent_loop_config = SingleTurnAgentLoopConfig(
+        hf_checkpoint=model_path,
+        sample_params=eval_sample_params,
+    )
+    eval_produce_strategy_config = SyncProduceStrategyConfig()
+    eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+        task_name="eval_task",
+        agent_loop_config=eval_agent_loop_config,
+        produce_strategy_config=eval_produce_strategy_config,
+        sampler_config=eval_sampler_config,
+    )
     # Finally, build the trainer
     trainer = RLColocateTrainer(
         resources=resources,
@@ -665,11 +703,11 @@ if __name__ == "__main__":
         rollout_config=rollout_config,
         judger_config=judger_config,
 
-        sampler_config=sampler_config,
+        # sampler_config=sampler_config,
         tokenizer_path=model_path,
         replay_buffer_config=dict(),  # TODO
-        agent_loop_config=agent_loop_config,
-        produce_strategy_config=produce_strategy_config,
+        # agent_loop_config=agent_loop_config,
+        # produce_strategy_config=produce_strategy_config,
         agent_loop_manager_cfg=agent_loop_manager_cfg,
 
         load_from=model_path,

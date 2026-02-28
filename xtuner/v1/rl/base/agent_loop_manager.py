@@ -6,20 +6,32 @@ from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
 from xtuner.v1.data_proto import RolloutState
 
 from .agent_loop import AgentLoop
+from .agent_loop import AgentLoopConfig
+from .producer import ProduceStrategyConfig
+from .sampler import SamplerConfig
+from xtuner.v1.ray.rollout import RolloutController
+from xtuner.v1.ray.judger import Judger
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 
 class AgentLoopManagerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     task_name: str
+    agent_loop_config: AgentLoopConfig
+    produce_strategy_config: ProduceStrategyConfig
+    sampler_config: SamplerConfig
 
     def build(
         self,
-        agent_loop: AgentLoop,
-        produce_strategy: ProduceStrategy,
-        sampler: Sampler,
+        rollout_controller: RolloutController,
+        judger: Judger,
+        tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
         replay_buffer: ReplayBuffer,
     ) -> "AgentLoopManager":
+        agent_loop = self.agent_loop_config.build(rollout_controller=rollout_controller, judger=judger)
+        produce_strategy = self.produce_strategy_config.build()
+        sampler = self.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
         return AgentLoopManager(
             agent_loop=agent_loop,
             produce_strategy=produce_strategy,

@@ -1,16 +1,24 @@
 import asyncio
 import inspect
-from typing import Callable, List
+from abc import ABC, abstractmethod
+from typing import Callable, List, cast
 
 import httpx
 import ray
+from ray.actor import ActorClass, ActorProxy
 from pydantic import BaseModel, ConfigDict, Field
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.utils.type_helper import ray_method
 
 
-class NativeJudger:
+class Judger(ABC):
+    @abstractmethod
+    async def judge(self, rollout_state: RolloutState) -> RolloutState: ...
+
+
+class NativeJudger(Judger):
     # 默认使用NativeJudger的Judger为ray.actor，如果为function，则通过用户自己调用
     """Base class for judgers, providing a standard interface for executing a
     judging process, which can be either a local function or a remote service.
@@ -33,6 +41,7 @@ class NativeJudger:
         self.reward_handler = reward_handler
         self.request_timeout = request_timeout
 
+    @ray_method
     async def judge(self, rollout_state: RolloutState) -> RolloutState:
         # native preprocess
         assert rollout_state.response is not None, (
@@ -73,8 +82,15 @@ class NativeJudger:
         """
         return self._judger_name
 
+# For type hint and IDE support. For more info, please refer to:
+# 1. https://docs.ray.io/en/latest/ray-core/actors.html#type-hints-and-static-typing-for-actors
+# 2. https://github.com/InternLM/xtuner/pull/1349
+RayJudger = cast(ActorClass[NativeJudger], ray.remote(NativeJudger))
+RayJudgerProxy = ActorProxy[NativeJudger]
 
-class NativeJudgerRouter:
+
+# TODO: rename to `RouterJudger`
+class NativeJudgerRouter(Judger):
     """NativeJudger 路由管理器。
 
     功能：
@@ -82,7 +98,7 @@ class NativeJudgerRouter:
     2. 当负载相同时，通过轮询（Round-robin）分配任务。
     """
 
-    def __init__(self, workers: List[ray.actor.ActorHandle], judger_name: str):
+    def __init__(self, workers: List[RayJudgerProxy], judger_name: str):
         self.workers = workers
         self._worker_loads = {worker: 0 for worker in workers}
         self._rr_index = 0
@@ -92,8 +108,8 @@ class NativeJudgerRouter:
     async def judge(self, rollout_state: RolloutState) -> RolloutState:
         async with self._lock:
             min_load = min(self._worker_loads.values())
-            candidates = [w for w in self.workers if self._worker_loads[w] == min_load]
-            worker = candidates[self._rr_index % len(candidates)]
+            candidates: list[RayJudgerProxy] = [w for w in self.workers if self._worker_loads[w] == min_load]
+            worker: RayJudgerProxy = candidates[self._rr_index % len(candidates)]
             self._rr_index = (self._rr_index + 1) % len(self.workers)
             self._worker_loads[worker] += 1
         try:
@@ -109,6 +125,8 @@ class NativeJudgerRouter:
         return self._judger_name
 
 
+# TODO: Use NativeJudgerConfig to build NativeJudger
+# and use NativeJudgerRouterConfig to build NativeJudgerRouter
 class NativeJudgerConfig(BaseModel):
     """Configuration class for NativeJudger.
 
@@ -187,7 +205,7 @@ class NativeJudgerConfig(BaseModel):
                 f"Placement group bundle {bundle_idx} does not have enough memory resources."
             )
             worker = (
-                ray.remote(NativeJudger)
+                RayJudger
                 .options(
                     placement_group=pg,
                     placement_group_bundle_index=bundle_idx,
