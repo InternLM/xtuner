@@ -167,7 +167,8 @@ class RLColocateTrainer:
 
         # others
         load_from: str | Path,
-        log_dir: Path | str,
+        work_dir: Path | str | None = None,
+        log_dir: Path | str | None = None,
         seed: int = 66,
         debug_rollout: bool = False,
 
@@ -179,7 +180,8 @@ class RLColocateTrainer:
         exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
     ):
         # log
-        log_dir = Path(log_dir)
+        work_dir = Path(work_dir) if work_dir else Path.cwd() / "work_dirs"
+        log_dir = work_dir / "logs"
         self.logger = get_logger(log_dir=log_dir, tag="RLTrainer")
 
         # steps
@@ -328,12 +330,12 @@ class RLColocateTrainer:
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
                 # rollout_info = self._rollout_step(rollout_idx, step_timer_dict)
-                # ray.get(self.rollout_controller.check_health.remote())
+                # TODO: ray.get(self.rollout_controller.check_health.remote())
                 train_batch: list[list[RolloutState]] = asyncio.run(self.agent_loop_manager.produce_batch(self.global_batch_size))
-                rollout_info = {}
-                # TODO: save trajectory
+                rollout_info = {}  # TODO: rollout info?
+                # TODO: save train trajectory
                 if not self._debug_rollout:
-                    ray.get(self.rollout_controller.pause_generation.remote())
+                    # TODO: ray.get(self.rollout_controller.pause_generation.remote())
                     ray.get(self.rollout_controller.offload.remote())
 
                 if not self._debug_rollout:
@@ -746,10 +748,10 @@ if __name__ == "__main__":
         train_worker_cfg=train_worker_cfg,
         rollout_config=rollout_config,
         judger_config=judger_config,
+        replay_buffer_config=dict(),  # TODO
+        tokenizer_path=model_path,
 
         # sampler_config=sampler_config,
-        tokenizer_path=model_path,
-        replay_buffer_config=dict(),  # TODO
         # agent_loop_config=agent_loop_config,
         # produce_strategy_config=produce_strategy_config,
         agent_loop_manager_cfg=agent_loop_manager_cfg,
