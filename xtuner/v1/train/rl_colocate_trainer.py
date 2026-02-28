@@ -206,10 +206,10 @@ class RLColocateTrainer:
         judger = judger_config.build_router()
 
         # build agent_loop
-        agent_loop  = agent_loop_cfg.build(rollout_controller=self.rollout_controller, judger=judger)
+        agent_loop  = agent_loop_config.build(rollout_controller=self.rollout_controller, judger=judger)
 
         # build produce_strategy
-        stragegy = producer_cfg.build()
+        stragegy = produce_strategy_config.build()
         # TODO: build replay_buffer
         replay_buffer = ReplayBuffer()
         # build sampler
@@ -542,10 +542,10 @@ if __name__ == "__main__":
     log_dir = os.environ["WORK_DIR"]  # TODO: work_dir
 
     # total_epochs = 3  # 5000
-    rollout_steps = 100  # 5000
+    rollout_steps = 45  # 5000
     train_optimizer_steps = 1  # 16
     global_batch_size = 64 * train_optimizer_steps  # 512
-    prompt_repeat_k = 8  # 16
+    prompt_repeat_k = 5  # 16
     rollout_tp_size = 1  # 2
     rollout_ep_size = 1
     max_prompt_length = 512  # 2048
@@ -652,12 +652,12 @@ if __name__ == "__main__":
         temperature=1.0,
         min_tokens=0,
     )
-    agent_loop_cfg = SingleTurnAgentLoopConfig(
+    agent_loop_config = SingleTurnAgentLoopConfig(
         hf_checkpoint=model_path,
         sample_params=sample_params,
     )
-    producer_cfg = SyncProduceStrategyConfig()
-    agent_loop_manager_cfg = AgentLoopManagerConfig(task_name="test_task")
+    produce_strategy_config = SyncProduceStrategyConfig()
+    agent_loop_manager_cfg = AgentLoopManagerConfig(task_name="test_task")  # TODO: agent loop and produce config here
     # Finally, build the trainer
     trainer = RLColocateTrainer(
         resources=resources,
@@ -667,15 +667,15 @@ if __name__ == "__main__":
 
         sampler_config=sampler_config,
         tokenizer_path=model_path,
-        replay_buffer_config=dict(),
-        agent_loop_config=agent_loop_cfg,
-        produce_strategy_config=producer_cfg,
+        replay_buffer_config=dict(),  # TODO
+        agent_loop_config=agent_loop_config,
+        produce_strategy_config=produce_strategy_config,
         agent_loop_manager_cfg=agent_loop_manager_cfg,
 
         load_from=model_path,
         log_dir=log_dir,
         seed=123,
-        debug_rollout=True,
+        debug_rollout=False,
 
         rollout_steps=rollout_steps,
         global_batch_size=global_batch_size,
