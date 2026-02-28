@@ -139,6 +139,7 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
 
 
 class RLColocateTrainer:
+    _META_PATH = ".xtuner_rl_colocate_trainer"
     _EXP_TRACKING_PATH = "exp_tracking"
 
     # 弱化Trainer：Trainer中代码尽量少，尽量用componet来组织代码。
@@ -165,12 +166,16 @@ class RLColocateTrainer:
         eval_agent_loop_manager_cfg: AgentLoopManagerConfig,
         evaluator_config: EvaluatorConfig,
 
+        # work_dir and resume
+        work_dir: Path | str | None = None,
+        auto_resume: bool = False,
+
         # others
         load_from: str | Path,
-        work_dir: Path | str | None = None,
         log_dir: Path | str | None = None,
         seed: int = 66,
         debug_rollout: bool = False,
+        skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
 
         # steps
         rollout_steps: int,
@@ -179,14 +184,34 @@ class RLColocateTrainer:
         # exp tracker
         exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
     ):
-        # log
+        # check fa3 first
+        if os.environ.get("XTUNER_USE_FA3", "0") == "1":
+            try:
+                from xtuner.v1.ops.flash_attn import get_flash_attn_varlen
+
+                get_flash_attn_varlen()
+            except RuntimeError as e:
+                raise RuntimeError(
+                    f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0."
+                )
+
+        # work_dir
         work_dir = Path(work_dir) if work_dir else Path.cwd() / "work_dirs"
-        log_dir = work_dir / "logs"
+        if get_rank() == 0:
+            work_dir.mkdir(parents=True, exist_ok=True)
+        self._work_dir = work_dir
+        self._meta = self._init_xtuner_meta(work_dir, auto_resume)
+
+        # log
+        log_dir = self.exp_dir / "logs"
         self.logger = get_logger(log_dir=log_dir, tag="RLTrainer")
+
+        if skip_checkpoint_validation:
+            patch_default_save_plan()
 
         # steps
         self._rollout_steps = rollout_steps
-        # self._total_epochs = total_epochs
+        # self._total_epochs = total_epochs  # TODO
         self._cur_step = 0
         self._global_train_step = 1
         self.global_batch_size = global_batch_size
@@ -248,6 +273,79 @@ class RLColocateTrainer:
         self._debug_rollout = debug_rollout
         self._exp_tracker = self._init_tracker(exp_tracker, log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
+
+    @property
+    def exp_dir(self) -> Path:
+        return Path(self._meta.latest_exp.exp_dir)
+
+    # TODO: simplify with XTunerMeta.build()
+    def _init_xtuner_meta(self, work_dir: Path, resume: bool) -> XTunerMeta:
+        if not work_dir.exists():
+            work_dir.mkdir(parents=True, exist_ok=True)
+
+        meta_path = work_dir / self._META_PATH
+        if not meta_path.exists():
+            meta = XTunerMeta(exps=[])
+            with open(meta_path, "w") as f:
+                f.write(meta.model_dump_json(indent=2))
+
+        meta = cast(XTunerMeta, XTunerMeta.model_validate(load(meta_path, file_format="json")))
+
+        resume = resume and bool(meta.exps)
+
+        if resume and meta.exps:
+            latest_exp = meta.exps[-1]
+            latest_exp_history = latest_exp.history[-1]
+
+            begin = cast(int, latest_exp_history.get("end") or latest_exp_history["begin"])
+            exp_dir = Path(latest_exp.exp_dir)
+            git_dir = exp_dir / f"git-info-begin-{begin}"
+
+            if not git_dir:
+                git_dir.mkdir(parents=True, exist_ok=True)
+
+            staged_path, unstaged_path = git_dir / "staged.diff", git_dir / "unstaged.diff"
+
+            if not git_dir.exists():
+                git_dir.mkdir(parents=True, exist_ok=True)
+            commit = record_git_info(staged_path, unstaged_path)
+            git_info = GitInfo(
+                commit=commit,
+                staged=str(staged_path),
+                unstaged=str(unstaged_path),
+            )
+
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            new_exp_history = ExpHistory(
+                begin=begin,
+                timestamp=timestamp,
+                git_info=git_info,
+            )
+            latest_exp.history.append(new_exp_history)
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            exp_dir = work_dir / timestamp
+            git_dir = Path(f"{exp_dir}/git-info-begin-{0}")
+
+            if not git_dir.exists():
+                git_dir.mkdir(parents=True, exist_ok=True)
+
+            staged_path, unstaged_path = git_dir / "staged.diff", git_dir / "unstaged.diff"
+            commit = record_git_info(staged_path, unstaged_path)
+            git_info = GitInfo(
+                commit=commit,
+                staged=str(staged_path),
+                unstaged=str(unstaged_path),
+            )
+
+            new_history = ExpHistory(
+                begin=0,
+                timestamp=timestamp,
+                git_info=git_info,
+            )
+            new_exp = ExpInfo(history=[new_history], exp_dir=str(exp_dir))
+            meta.exps.append(new_exp)
+        return meta
     
     # TODO: simplify with WorkerConfig.build()
     def _build_train_controller(self, train_worker_cfg: WorkerConfig) -> TrainingControllerProxy:
@@ -576,7 +674,7 @@ if __name__ == "__main__":
     enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", '0')
     data_path = os.environ["DATA_PATH"]
     eval_data_path = os.environ["EVAL_DATA_PATH"]
-    log_dir = os.environ["WORK_DIR"]  # TODO: work_dir
+    work_dir = os.environ["WORK_DIR"]  # TODO: work_dir
 
     # total_epochs = 3  # 5000
     rollout_steps = 45  # 5000
@@ -760,7 +858,7 @@ if __name__ == "__main__":
         evaluator_config=evaluator_config,
 
         load_from=model_path,
-        log_dir=log_dir,
+        work_dir=work_dir,
         seed=123,
         debug_rollout=False,
 
