@@ -247,6 +247,8 @@ def qwen3_vl_sft_collator(
         if len(position_ids_list) > 0:
             position_ids = torch.cat(position_ids_list, dim=-1)
             position_ids = position_ids[:, :, :-1]
+            if pack_to_max_length and pack_max_length - position_ids.shape[-1] > 0:
+                position_ids = pad_to_max_length(position_ids, 0, max_length=pack_max_length, dim=-1)
 
         num_img_tokens: list[int] = []
         for data in instance:

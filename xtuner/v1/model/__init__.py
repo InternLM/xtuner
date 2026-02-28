@@ -17,6 +17,7 @@ from .compose.qwen3_vl import (
     Qwen3VLMoE30BA3Config,
     Qwen3VLMoE235BA22Config,
 )
+from .compose.qwen3_5 import Qwen3_5_VLMoE35BA3Config
 from .dense.dense import Dense
 from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
 from .dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
@@ -98,4 +99,5 @@ __all__ = [
     "TorchCompileOption",
     "DEFAULT_FLOAT8_CFG",
     "XTunerBaseModelConfig",
+    "Qwen3_5_VLMoE35BA3Config",
 ]

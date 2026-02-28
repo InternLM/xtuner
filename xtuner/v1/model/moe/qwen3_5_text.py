@@ -94,7 +94,7 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
             num_experts = self.config.n_routed_experts
             hidden_size = safetensor.size(1)
             safetensor = safetensor.reshape(num_experts, -1, hidden_size).contiguous()  # num_experts, 2 * expert_dim, hidden_size
-        elif "down_proj" in hf_param_name:
+        elif "down_proj" in hf_param_name and "shared_expert" not in hf_param_name:
             # xtuner: num_experts * hidden_size, expert_dim
             # hf: num_experts, hidden_size, expert_dim
             num_experts = self.config.n_routed_experts

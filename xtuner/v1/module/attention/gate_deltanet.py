@@ -154,15 +154,12 @@ class GateDeltaNet(nn.Module):
         b = self.in_proj_b(hidden_states)
         a = self.in_proj_a(hidden_states)
 
-        num_tokens = seq_ctx.seq_lens_q
-        seq_idx = torch.cat([torch.full((s,), i, dtype=torch.int32, 
-                                        device=hidden_states.device) for i, s in enumerate(num_tokens)], dim=0)[None]
         mixed_qkv = self.causal_conv1d_fn(
             x=mixed_qkv,
             weight=self.conv1d.weight.squeeze(1),
             bias=self.conv1d.bias,
             activation=self.activation,
-            seq_idx=seq_idx,
+            seq_idx=seq_ctx.seq_idx,
         )
         mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
@@ -185,7 +182,7 @@ class GateDeltaNet(nn.Module):
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
         
-        core_attn_out, _ = self.chunk_gated_delta_rule( # TODO: packed sequence support
+        core_attn_out, _ = self.chunk_gated_delta_rule(
                 query,
                 key,
                 value,
