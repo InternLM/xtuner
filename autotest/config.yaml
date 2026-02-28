@@ -73,7 +73,7 @@ case:
         -
             type: sft
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py'
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output'
             parameters:
                 config: autotest/config/qwen3_moe_30BA3_ep8_resume.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
@@ -194,6 +194,8 @@ case:
                 config: autotest/config/qwen3_sft_celoss.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
+                num_nodes: 2
+                cpus_per_task: 80
                 envs:
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca

@@ -67,7 +67,7 @@ class ClusterTaskExecutor:
             if status in [JobStatus.SUCCEEDED]:
                 run_time = time.time() - run_start_time
                 if run_time >= timeout:
-                    return False, 'Task succeeded, but run time is {run_time}, exceeding then {timeout}'
+                    return False, f'Task succeeded, but run time is {run_time}, exceeding then {timeout}'
                 else:
                     return True, "Task succeeded"
             elif status in [JobStatus.FAILED, JobStatus.STOPPED]:
