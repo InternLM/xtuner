@@ -49,6 +49,7 @@ from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig, NativeJudgerConfig
 from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.base.sampler import SamplerConfig
+from xtuner.v1.rl.evaluator import EvaluatorConfig
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
@@ -159,6 +160,11 @@ class RLColocateTrainer:
         # agent loop manager config
         # produce_strategy_config: ProduceStrategyConfig,
         agent_loop_manager_cfg: AgentLoopManagerConfig,
+
+        # eval configs
+        eval_agent_loop_manager_cfg: AgentLoopManagerConfig,
+        evaluator_config: EvaluatorConfig,
+
         # others
         load_from: str | Path,
         log_dir: Path | str,
@@ -222,6 +228,17 @@ class RLColocateTrainer:
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
         )
+
+        # build eval agent loop manager
+        self.eval_agent_loop_manager = eval_agent_loop_manager_cfg.build(
+            rollout_controller=self.rollout_controller,
+            judger=judger,
+            tokenizer=self.tokenizer,
+            replay_buffer=replay_buffer,
+        )
+        # build evaluator
+        total_eval_samples = len(self.eval_agent_loop_manager._data_sampler)
+        self.evaluator = evaluator_config.build(total_eval_samples=total_eval_samples)
 
         # others
         if debug_rollout:
@@ -292,6 +309,19 @@ class RLColocateTrainer:
             self.logger.info(f"Rollout steps {self._rollout_steps} reached, stop training")
             return
         
+        if self.evaluator.enable_initial_evaluate and not self._debug_rollout:
+            # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
+            # TODO: ray.get(self.rollout_controller.restart.remote())
+            eval_batch: list[list[RolloutState]] = asyncio.run(self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size))
+            eval_metrics = self.evaluator.run(eval_batch)
+            self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
+
+            tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
+            self._exp_tracker.add_scalars(
+                tag_scalar_dict=tb_scores,
+                global_step=0,
+            )
+        
         for rollout_idx in range(self._cur_step + 1, self._rollout_steps + 1):
             self.logger.info(f"Rollout {rollout_idx}/{self._rollout_steps} start")
             step_timer_dict = {}
@@ -343,10 +373,14 @@ class RLColocateTrainer:
                     self._sync_weights_and_save(rollout_idx, step_timer_dict)
 
                     # 4. Evaluate model performance
-                    # eval_log_info = self._evaluate_step(rollout_idx, step_timer_dict)
                     eval_log_info = {}
-                    # eval_batch: list[RolloutState] = asyncio.run(self.agent_loop_manager.produce_batch(self.eval_batch_size))
-                    # eval_metrics = self.evaluator.evaluate(eval_batch)
+                    if self.evaluator.enable_evaluate and rollout_idx % self.evaluator.evaluate_step == 0:
+                        with timer("evaluation", step_timer_dict):
+                            # TODO: ray.get(self.rollout_controller.restart.remote())
+                            eval_batch: list[list[RolloutState]] = asyncio.run(self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size))
+                            eval_metrics = self.evaluator.run(eval_batch)
+                            # TODO: save eval trajectory
+                            eval_log_info.update(eval_metrics)
                 else:
                     train_log_info = {} 
                     eval_log_info = {}
@@ -544,6 +578,7 @@ if __name__ == "__main__":
 
     # total_epochs = 3  # 5000
     rollout_steps = 45  # 5000
+    evaluate_step = 45  # 1000
     train_optimizer_steps = 1  # 16
     global_batch_size = 64 * train_optimizer_steps  # 512
     prompt_repeat_k = 5  # 16
@@ -630,7 +665,8 @@ if __name__ == "__main__":
         pack_max_length=pack_max_length,
     )
 
-    # dataloader config
+    # train agent loop manager config
+    # train sampler config
     train_dataset = DatasetConfig(name=exp_name, anno_path=data_path)
     tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
 
@@ -645,7 +681,8 @@ if __name__ == "__main__":
         dataloader_cfg=dataloader_cfg,
         prompt_repeat_k=prompt_repeat_k,
     )
-    # agent loop config
+
+    # train agent loop config
     sample_params = SampleParams(
         max_tokens=max_response_length,
         top_k=0,
@@ -665,6 +702,7 @@ if __name__ == "__main__":
         sampler_config=sampler_config,
     )
 
+    # eval agent loop manager config
     eval_dataset = DatasetConfig(name=exp_name, anno_path=eval_data_path, sample_ratio=1.0)
     eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
     eval_dataloader_cfg = DataloaderConfig(
@@ -689,12 +727,18 @@ if __name__ == "__main__":
         hf_checkpoint=model_path,
         sample_params=eval_sample_params,
     )
-    eval_produce_strategy_config = SyncProduceStrategyConfig()
     eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
         task_name="eval_task",
         agent_loop_config=eval_agent_loop_config,
-        produce_strategy_config=eval_produce_strategy_config,
         sampler_config=eval_sampler_config,
+    )
+
+    # evaluate config
+    evaluator_config = EvaluatorConfig(
+        enable_evaluate=True,
+        enable_initial_evaluate=False,  # TODO
+        evaluate_step=evaluate_step,  # TODO
+        compute_metric_func=None,
     )
     # Finally, build the trainer
     trainer = RLColocateTrainer(
@@ -709,6 +753,9 @@ if __name__ == "__main__":
         # agent_loop_config=agent_loop_config,
         # produce_strategy_config=produce_strategy_config,
         agent_loop_manager_cfg=agent_loop_manager_cfg,
+
+        eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
+        evaluator_config=evaluator_config,
 
         load_from=model_path,
         log_dir=log_dir,

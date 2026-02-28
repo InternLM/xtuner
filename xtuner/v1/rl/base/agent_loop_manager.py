@@ -7,7 +7,7 @@ from xtuner.v1.data_proto import RolloutState
 
 from .agent_loop import AgentLoop
 from .agent_loop import AgentLoopConfig
-from .producer import ProduceStrategyConfig
+from .producer import ProduceStrategyConfig, SyncProduceStrategyConfig
 from .sampler import SamplerConfig
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.ray.judger import Judger
@@ -19,7 +19,7 @@ class AgentLoopManagerConfig(BaseModel):
 
     task_name: str
     agent_loop_config: AgentLoopConfig
-    produce_strategy_config: ProduceStrategyConfig
+    produce_strategy_config: ProduceStrategyConfig = SyncProduceStrategyConfig()
     sampler_config: SamplerConfig
 
     def build(

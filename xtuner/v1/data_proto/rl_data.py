@@ -108,7 +108,7 @@ class RolloutState(BaseModel):
         return value  # list[int]
 
     #  --- Judger 输出 ---
-    reward: float | list[float] | list[dict] | None = None
+    reward: float | list[float] | dict[str, Any] | None = None
 
     #  --- 状态 ---
     task_name: str | None = None
