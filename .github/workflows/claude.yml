@@ -38,7 +38,7 @@ jobs:
           # Prompt A workaround for claude code action bug of `Fork` PR
           prompt: |
               REPO: ${{ github.repository }}
-              PR NUMBER: ${{ github.event.pull_request.number }}
+              PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
 
               Please review this pull request.
 
