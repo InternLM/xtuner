@@ -154,12 +154,15 @@ class GateDeltaNet(nn.Module):
         b = self.in_proj_b(hidden_states)
         a = self.in_proj_a(hidden_states)
 
+        num_tokens = seq_ctx.seq_lens_q
+        seq_idx = torch.cat([torch.full((s,), i, dtype=torch.int32, 
+                                        device=hidden_states.device) for i, s in enumerate(num_tokens)], dim=0)[None]
         mixed_qkv = self.causal_conv1d_fn(
             x=mixed_qkv,
             weight=self.conv1d.weight.squeeze(1),
             bias=self.conv1d.bias,
             activation=self.activation,
-            seq_idx=None, # TODO: packed sequence support
+            seq_idx=seq_idx,
         )
         mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
@@ -191,6 +194,7 @@ class GateDeltaNet(nn.Module):
                 initial_state=None,
                 output_final_state=False,
                 use_qk_l2norm_in_kernel=True,
+                cu_seqlens=seq_ctx.cu_seq_lens_q,
             )
         
         # reshape input data into 2D tensor
