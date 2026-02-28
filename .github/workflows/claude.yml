@@ -9,6 +9,9 @@ on:
     types: [opened, assigned]
   pull_request_review:
     types: [submitted]
+  pull_request_target:
+      types: [opened, synchronize]
+      branches: [main]
 
 jobs:
   claude:
@@ -38,7 +41,7 @@ jobs:
           # Prompt A workaround for claude code action bug of `Fork` PR
           prompt: |
               REPO: ${{ github.repository }}
-              PR NUMBER: ${{ github.event.pull_request.number }}
+              PR NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.pull_request_target.number }}
 
               Please review this pull request.
 
