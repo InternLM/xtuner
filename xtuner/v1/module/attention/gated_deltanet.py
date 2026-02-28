@@ -15,6 +15,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger
+from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
@@ -26,7 +27,7 @@ from causal_conv1d import causal_conv1d_fn
 logger = get_logger()
 
 
-class GateDeltaNetConfig(BaseModel):
+class GatedDeltaNetConfig(BaseModel):
     model_config = ConfigDict(title="Base attention config for xtuner", extra="forbid")
     num_value_heads: Annotated[int, Parameter(group="attention")]
     num_key_heads: Annotated[int, Parameter(group="attention")]
@@ -41,15 +42,15 @@ class GateDeltaNetConfig(BaseModel):
         hidden_size: int,
         float8_cfg: Float8Config | None = None,
         **kwargs,
-    ) -> "GateDeltaNet":
-        return GateDeltaNet(
+    ) -> "GatedDeltaNet":
+        return GatedDeltaNet(
             **self.model_dump(),
             hidden_size=hidden_size,
             float8_cfg=float8_cfg,
         )
 
 
-class GateDeltaNet(nn.Module):
+class GatedDeltaNet(nn.Module):
     def __init__(self, 
                  hidden_size: int, 
                  num_value_heads: int, 
@@ -153,7 +154,7 @@ class GateDeltaNet(nn.Module):
 
         b = self.in_proj_b(hidden_states)
         a = self.in_proj_a(hidden_states)
-
+        
         mixed_qkv = self.causal_conv1d_fn(
             x=mixed_qkv,
             weight=self.conv1d.weight.squeeze(1),

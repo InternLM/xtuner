@@ -4,7 +4,7 @@ from typing import Literal
 import re
 import torch
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
-from xtuner.v1.module.attention import MHAConfig, GateDeltaNetConfig
+from xtuner.v1.module.attention import MHAConfig, GatedDeltaNetConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 
@@ -140,7 +140,7 @@ class Qwen3_5_VLTextMoE35BA3BConfig(Qwen3_5_VLTextMoEConfig):
         rms_norm_type="zero_centered",
         sliding_window=1024
     )
-    linear_attention: GateDeltaNetConfig = GateDeltaNetConfig(
+    linear_attention: GatedDeltaNetConfig = GatedDeltaNetConfig(
         num_value_heads=32,
         num_key_heads=16,
         key_head_dim=128,
