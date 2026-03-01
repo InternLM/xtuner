@@ -1,22 +1,12 @@
-name: Claude Code
+name: Claude Code Review
 
 on:
-  issue_comment:
-    types: [created]
   pull_request_review_comment:
     types: [created]
-  issues:
-    types: [opened, assigned]
-  pull_request_review:
-    types: [submitted]
 
 jobs:
-  claude:
-    if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+  claude-review:
+    if: contains(github.event.comment.body, '@claude review')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -30,8 +20,8 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Run Claude Code
-        id: claude
+      - name: Run Claude Code Review
+        id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -65,7 +55,7 @@ jobs:
               When linking to code in inline comments, follow the following format precisely, otherwise the Markdown preview
               won't render correctly: https://github.com/${{ github.repository }}/blob/${{ github.event.pull_request.head.sha }}/README.md#L10-L15
           claude_args: |
-              --max-turns 50
+              --max-turns 30
               --model claude-opus-4-6
               --allowedTools "
                 Read,Write,Edit,MultiEdit,LS,Grep,Glob,
@@ -79,14 +69,4 @@ jobs:
           # This requires "tag mode", which is currently bugged:
           # https://github.com/anthropics/claude-code-action/issues/939
           track_progress: false
-
-          # Enable access to other GH Actions outputs
-          additional_permissions: |
-              actions: read
-          # plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          # plugins: 'code-review@claude-code-plugins'
-          # prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
-
 
