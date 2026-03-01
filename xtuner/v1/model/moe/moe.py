@@ -761,6 +761,7 @@ class MoE(BaseModel):
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
+        list(self.layers.values())[-1].set_modules_to_forward_prefetch([self.norm, self.lm_head])  # type: ignore
 
         for _, module in self.named_modules():
             if isinstance(module, nn.Embedding):
