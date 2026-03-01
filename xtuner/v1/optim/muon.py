@@ -35,8 +35,6 @@ from torch.distributed import ProcessGroup
 from torch.distributed.tensor import DeviceMesh, DTensor
 from torch.optim.optimizer import Optimizer, ParamsT
 
-from .newton_schulz_triton import newton_schulz_triton
-
 
 def to_local(tensor: Union[Tensor, List[Tensor]]) -> Union[Tensor, List[Tensor]]:
     """Convert a single DTensor or list of DTensors to local tensors.
@@ -371,6 +369,8 @@ class Muon(Optimizer):
                 raise TypeError(f"newton_schulz_func must be a callable function, got {type(newton_schulz_func)}")
             self._newton_schulz_func = newton_schulz_func
         elif use_triton:
+            from .newton_schulz_triton import newton_schulz_triton
+
             self._newton_schulz_func = newton_schulz_triton
         else:
             self._newton_schulz_func = zeropower_via_newtonschulz5
