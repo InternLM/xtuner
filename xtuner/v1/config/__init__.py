@@ -1,6 +1,6 @@
 from .fsdp import FSDPConfig
 from .generate import GenerateConfig
-from .optim import AdamWConfig, LRConfig, OptimConfig
+from .optim import AdamWConfig, LRConfig, MuonConfig, OptimConfig
 
 
 __all__ = [
@@ -9,4 +9,5 @@ __all__ = [
     "AdamWConfig",
     "LRConfig",
     "GenerateConfig",
+    "MuonConfig",
 ]
