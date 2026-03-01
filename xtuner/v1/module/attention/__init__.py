@@ -2,6 +2,7 @@
 from .attn_outputs import AttnOutputs
 from .mha import MHAConfig, MultiHeadAttention
 from .mla import MLAConfig, MultiLatentAttention
+from .gated_deltanet import GatedDeltaNetConfig, GatedDeltaNet
 
 
 __all__ = [
@@ -10,4 +11,6 @@ __all__ = [
     "MHAConfig",
     "MLAConfig",
     "AttnOutputs",
+    "GatedDeltaNet",
+    "GatedDeltaNetConfig",
 ]

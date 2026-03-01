@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
-from xtuner.utils import IGNORE_INDEX
+from xtuner.v1.utils import IGNORE_INDEX
 from xtuner.v1.data_proto.messages.base import BaseMessages
 from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.utils import get_logger

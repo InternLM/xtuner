@@ -39,7 +39,7 @@ from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
 from xtuner.v1.loss import BaseLossContext
-from xtuner.v1.module.attention import MHAConfig, MLAConfig
+from xtuner.v1.module.attention import MHAConfig, MLAConfig, GatedDeltaNetConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
@@ -147,9 +147,11 @@ class TransformerConfig(XTunerBaseModelConfig):
     hidden_size: Annotated[int, Parameter(group="model")]
     intermediate_size: Annotated[int, Parameter(group="model")]
     rms_norm_eps: Annotated[float, Parameter(group="model")]
+    rms_norm_type: Annotated[str, Parameter(group="model")] = 'default'  # default | zero_centered
     rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: MLAConfig | MHAConfig
+    linear_attention: Annotated[GatedDeltaNetConfig | None, Parameter(group="model")] = None
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
     model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed

@@ -127,9 +127,13 @@ class MoEGate(nn.Module):
             bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
             bias = bias.float()
 
-        logits = F.linear(hidden_states.float(), weight.float(), bias)
-
-        return self.router(logits, rollout_routed_experts)
+        # logits = F.linear(hidden_states.float(), weight.float(), bias)
+        # return self.router(logits, rollout_routed_experts)
+    
+        logits = F.linear(hidden_states, weight, bias)
+        gate = self.router(logits, rollout_routed_experts)
+        gate['topk_weights'] = gate['topk_weights'].float()
+        return gate
 
 
 class MoEBlock(nn.Module):
@@ -190,9 +194,11 @@ class MoEDecoderLayer(nn.Module):
         moe_bias: bool = False,
         hidden_act: str,
         rms_norm_eps: float = 1e-6,
+        rms_norm_type: Literal['default', 'zero_centered'] = 'default',
         num_experts_per_tok: int,
         n_routed_experts: int,
         n_shared_experts: int,
+        with_shared_expert_gate: bool = False,
         hidden_factor: float = 1.0,
         attention_config: MHAConfig | MLAConfig,
         rope_scaling_cfg: RopeScalingConfig | None = None,
@@ -220,10 +226,11 @@ class MoEDecoderLayer(nn.Module):
             layer_type=layer_type,
             float8_cfg=float8_cfg,
         )
-        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
         self.shared_experts: MoEMLP | None
         self.layer_idx = layer_idx
-
+        
+        self.with_shared_expert_gate = with_shared_expert_gate
         if n_shared_experts > 0:
             self.shared_experts = MoEMLP(
                 hidden_size=hidden_size,
@@ -233,10 +240,13 @@ class MoEDecoderLayer(nn.Module):
                 mlp_bias=mlp_bias,
                 float8_cfg=float8_cfg,
             )
+            if with_shared_expert_gate:
+                self.shared_expert_gate = build_linear(hidden_size, 1, bias=False, float8_cfg=float8_cfg)
         else:
             self.shared_experts = None
+            self.shared_expert_gate = None
 
-        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
 
         self.gate = MoEGate(
             hidden_size=hidden_size,
@@ -381,6 +391,41 @@ class MoEDecoderLayer(nn.Module):
         )
         combined_hidden_states = post_combined["hidden_states"]
         combined_hidden_states = combined_hidden_states.view(*origin_shape)
+        
+        # # 对齐 hf 实现用
+        # # xtuner: num_experts * 2 * expert_dim, hidden_size
+        # # hf: num_experts, 2 * expert_dim, hidden_size
+        # origin_gate_up_proj = self.experts.fused_w1w3.weight
+        # gate_up_proj = origin_gate_up_proj.view(self.n_routed_experts, 2 * self.experts.intermediate_size, self.hidden_size)
+
+        # # xtuner: num_experts * hidden_size, expert_dim
+        # # hf: num_experts, hidden_size, expert_dim
+        # origin_down_proj = self.experts.fused_w2.weight
+        # down_proj = origin_down_proj.view(self.n_routed_experts, self.hidden_size, self.experts.intermediate_size)
+        
+        # from transformers.activations import ACT2FN
+        # act_fn = ACT2FN['silu']
+        
+        # hidden_states_reshaped = hidden_states.view(-1, hidden_states.size(-1))
+        # combined_hidden_states = torch.zeros_like(hidden_states_reshaped)
+        # with torch.no_grad():
+        #     expert_mask = torch.nn.functional.one_hot(router_results["topk_ids"], num_classes=self.n_routed_experts)
+        #     expert_mask = expert_mask.permute(2, 1, 0)
+        #     expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
+        # for expert_idx in expert_hit:
+        #     expert_idx = expert_idx[0]
+        #     if expert_idx == self.n_routed_experts:
+        #         continue
+        #     top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
+        #     current_state = hidden_states_reshaped[token_idx]
+        #     gate, up = nn.functional.linear(current_state, gate_up_proj[expert_idx]).chunk(2, dim=-1)
+        #     current_hidden_states = act_fn(gate) * up
+        #     current_hidden_states = nn.functional.linear(current_hidden_states, down_proj[expert_idx])
+        #     current_hidden_states = current_hidden_states * router_results["topk_weights"][token_idx, top_k_pos, None]
+        #     combined_hidden_states.index_add_(0, token_idx, current_hidden_states.to(combined_hidden_states.dtype))
+            
+        # combined_hidden_states = combined_hidden_states.view(*origin_shape)
+
         # ProberList.after_combine(self.layer_idx, combined_hidden_states)
 
         if self.n_shared_experts > 0:
@@ -585,6 +630,10 @@ class MoEDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         assert self.shared_experts is not None, "Shared experts should be initialized when n_shared_experts > 0"
         shared_experts_out = self.shared_experts(hidden_states)
+
+        if self.with_shared_expert_gate:
+            shared_experts_out = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_experts_out
+            
         return shared_experts_out
 
     def _post_moe_forward(

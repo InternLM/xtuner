@@ -44,6 +44,7 @@ class DenseDecoderLayer(nn.Module):
         mlp_bias: bool = False,
         hidden_act: str,
         rms_norm_eps: float = 1e-6,
+        rms_norm_type: Literal['default', 'zero_centered'] = 'default',
         attention_config: MLAConfig | MHAConfig,
         rope_scaling_cfg: RopeScalingConfig | None = None,
         generate_config: GenerateConfig | None = None,
@@ -68,8 +69,8 @@ class DenseDecoderLayer(nn.Module):
             hidden_act=hidden_act,
             float8_cfg=float8_cfg,
         )
-        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps,type=rms_norm_type)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
 
     def forward(
         self,
