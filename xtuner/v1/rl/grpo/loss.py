@@ -4,7 +4,10 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.distributed.device_mesh import DeviceMesh
 
+from xtuner.v1.loss.chunk_linear import FusedLinearForPPOFunction as ChunkLinear
+from xtuner.v1.loss.utils import sp_gather, sp_gather_autograd
 from xtuner.v1.utils import get_logger
 
 from ..base import (
@@ -70,8 +73,10 @@ class GRPOLossContext(BaseRLLossContext):
     loss_cfg: GRPOLossConfig
     loss_kwargs: GRPOLossKwargs
 
-    def __init__(self, loss_cfg: GRPOLossConfig, loss_kwargs: GRPOLossKwargs):
-        super().__init__(loss_cfg, loss_kwargs)
+    def __init__(self, loss_cfg: GRPOLossConfig, loss_kwargs: GRPOLossKwargs, sp_mesh: DeviceMesh | None = None):
+        super().__init__(loss_cfg, loss_kwargs, sp_mesh)
+        # TODO: Refactor it to PolicyLossFn and its Cfg. And support verl core algos seamlessly
+        #       such as https://github.com/verl-project/verl/blob/de9880d76467af6bcb9b5c12fad6dfa980e83d57/verl/trainer/ppo/core_algos.py#L1254
         self.policy_loss_fn = get_policy_loss_fn(self.loss_cfg.policy_loss_cfg.get("loss_type", "vanilla"))
 
     @staticmethod
@@ -123,31 +128,59 @@ class GRPOLossContext(BaseRLLossContext):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: GRPOLossKwargs,
+        enable_chunk_linear: bool = False,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         """Step 2.a and 2.b in the loss calculation in
         xtuner/v1/loss/base_loss_ctx.py."""
-        # We do linear forward here to simplify the implementation of chunk loss (saving memory).
-        logits = F.linear(hidden_states, head_weight, head_bias)
-        logits = logits.float()
+        # If enable chunk_linear mode, then all the activation tensors in this function will be sp_gathered.
+        # So the policy loss and kl loss function will receive these whole sequence activations to calculate loss.
 
         shifted_labels = loss_kwargs.shifted_labels
         old_logprobs = loss_kwargs.old_logprobs
         advantages = loss_kwargs.advantages
         policy_loss_weight = loss_kwargs.policy_loss_weight
+        rollout_logprobs = loss_kwargs.rollout_logprobs
 
-        logprobs = gather_logprobs(logits, shifted_labels)
+        if not enable_chunk_linear:
+            # We do linear forward here to simplify the implementation of chunk loss (saving memory).
+            logits = F.linear(hidden_states, head_weight, head_bias)
+            logits = logits.float()
+            logprobs = gather_logprobs(logits, shifted_labels)
+        else:
+            assert head_bias is None, "head_bias must be None when enable_chunk_linear is True"
+
+            # Use differentiable gather for hidden_states to allow gradient flow.
+            hidden_states = sp_gather_autograd(hidden_states, sp_mesh=self.sp_mesh, dim=1)
+            shifted_labels = sp_gather(shifted_labels, sp_mesh=self.sp_mesh, dim=1)
+            # clone shifted_labels to avoid modifying the original tensor which is used in loss calculation
+            # and set ignore_idx to 0 to avoid index out of bounds error in ChunkLinear.apply
+            chunk_linear_labels = shifted_labels.clone()
+            chunk_linear_labels[chunk_linear_labels == self.loss_cfg.ignore_idx] = 0
+            logprobs, entropy = ChunkLinear.apply(
+                hidden_states, head_weight, chunk_linear_labels, 1.0, self.loss_cfg.chunk_size
+            )
+            logits = None
+
+            rollout_logprobs = sp_gather(rollout_logprobs, sp_mesh=self.sp_mesh, dim=1)
+            old_logprobs = sp_gather(old_logprobs, sp_mesh=self.sp_mesh, dim=1)
+            advantages = sp_gather(advantages, sp_mesh=self.sp_mesh, dim=1)
+            policy_loss_weight = sp_gather(policy_loss_weight, sp_mesh=self.sp_mesh, dim=1)
+
         loss = self.policy_loss_fn(
             logprobs,
             old_logprobs,
             advantages,
             policy_loss_weight,
             self.loss_cfg.policy_loss_cfg,
+            enable_chunk_linear,
+            self.loss_kwargs.num_tokens,
+            shifted_labels,
         )
 
         assert old_logprobs is not None
         ratio = (logprobs - old_logprobs.detach()).exp()
         ratio = ratio * (shifted_labels != self.loss_cfg.ignore_idx).float()
-        extra_info = {"max_ratio": ratio.max()}
+        extra_info = {"max_ratio": ratio.max()}  # metrics for logging
 
         if self.loss_cfg.use_kl_loss:
             ref_logprobs = loss_kwargs.ref_logprobs
@@ -155,7 +188,13 @@ class GRPOLossContext(BaseRLLossContext):
             assert ref_logprobs is not None and kl_loss_weight is not None, (
                 "loss_kwargs.ref_logprobs and loss_kwargs.kl_loss_weight can not be None when use_kl_loss=True"
             )
+            if enable_chunk_linear:
+                ref_logprobs = sp_gather(ref_logprobs, sp_mesh=self.sp_mesh, dim=1)
+                kl_loss_weight = sp_gather(kl_loss_weight, sp_mesh=self.sp_mesh, dim=1)
             kl_loss = kl_penalty(logprobs, ref_logprobs, kl_loss_weight, self.loss_cfg.kl_loss_type)
             loss = loss + kl_loss
+
+        if enable_chunk_linear and self.sp_mesh and self.sp_mesh.size() > 1:
+            loss = loss / self.sp_mesh.size()
 
         return loss, (logits, extra_info)

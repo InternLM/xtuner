@@ -3,6 +3,8 @@ from typing import Any, Callable
 import torch
 import torch.nn.functional as F
 
+from xtuner.v1.data_proto.utils import convert_packed_to_padded
+
 
 PolicyLossFn = Callable[
     [
@@ -62,6 +64,9 @@ def pg_loss_fn(
     advantages: torch.Tensor,
     loss_weights: torch.Tensor,
     policy_loss_cfg: dict,
+    enable_chunk_linear: bool = False,
+    num_tokens: list[int] | None = None,
+    shifted_labels: torch.Tensor | None = None,
 ) -> torch.Tensor:
     check_config(["cliprange_low", "cliprange_high"], policy_loss_cfg)
     cliprange_low = policy_loss_cfg["cliprange_low"]
@@ -81,6 +86,68 @@ def pg_loss_fn(
     clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
     loss = (pg_losses * loss_weights.to(pg_losses.dtype)).sum()
+    return loss
+
+
+@register_policy_loss("gspo")
+def gspo_loss_fn(
+    log_prob: torch.Tensor,
+    old_log_prob: torch.Tensor,
+    advantages: torch.Tensor,
+    loss_weights: torch.Tensor,
+    policy_loss_cfg: dict,
+    enable_chunk_linear: bool = True,
+    num_tokens: list[int] | None = None,
+    shifted_labels: torch.Tensor | None = None,
+) -> torch.Tensor:
+    assert num_tokens is not None
+    assert shifted_labels is not None
+    assert enable_chunk_linear, "GSPO can only be supported when enable_chunk_linear"
+    check_config(["cliprange_low", "cliprange_high"], policy_loss_cfg)
+    cliprange_low = policy_loss_cfg["cliprange_low"]
+    cliprange_high = policy_loss_cfg["cliprange_high"]
+    clip_ratio_c = policy_loss_cfg.get("clip_ratio_c", 3.0)
+    log_prob_diff_min = policy_loss_cfg.get("log_prob_diff_min", -20.0)
+    log_prob_diff_max = policy_loss_cfg.get("log_prob_diff_max", 20.0)
+    advantages = advantages.to(log_prob.dtype)
+    response_mask = shifted_labels != -100
+
+    # 1. unpack
+    old_log_prob = convert_packed_to_padded(old_log_prob, num_tokens, padding_value=0, padding_side="right")
+    log_prob = convert_packed_to_padded(log_prob, num_tokens, padding_value=0, padding_side="right")
+    advantages = convert_packed_to_padded(advantages, num_tokens, padding_value=0, padding_side="right")
+    response_mask = convert_packed_to_padded(response_mask, num_tokens, padding_value=0, padding_side="right")
+    loss_weights = convert_packed_to_padded(loss_weights, num_tokens, padding_value=0, padding_side="right")
+
+    # 2. calculate loss
+    # adapted from https://github.com/verl-project/verl/blob/de9880d76467af6bcb9b5c12fad6dfa980e83d57/verl/trainer/ppo/core_algos.py#L1254
+    negative_approx_kl = log_prob - old_log_prob
+
+    # compute sequence-level importance ratio:
+    # si(θ) = (π_θ(yi|x)/π_θold(yi|x))^(1/|yi|) =
+    # exp [(1/|y_i|) * Σ_t log(π_θ(y_i,t|x,y_i,<t)/π_θold(y_i,t|x,y_i,<t))]
+    seq_lengths = torch.sum(response_mask, dim=-1).clamp(min=1)
+    negative_approx_kl_seq = torch.sum(negative_approx_kl * response_mask, dim=-1) / seq_lengths
+
+    # Combined ratio at token level:
+    # s_i,t(θ) = sg[s_i(θ)] · π_θ(y_i,t|x, y_i,<t) / sg[π_θ(y_i,t|x, y_i,<t)]
+    # In log space: log(s_i,t(θ)) = sg[log(s_i(θ))] + log_prob - sg[log_prob]
+    log_seq_importance_ratio = log_prob - log_prob.detach() + negative_approx_kl_seq.detach().unsqueeze(-1)
+    log_seq_importance_ratio = torch.clamp(
+        log_seq_importance_ratio, min=log_prob_diff_min, max=log_prob_diff_max
+    )  # clamp for numerical stability
+
+    # finally exp() to remove log
+    seq_importance_ratio = torch.exp(log_seq_importance_ratio)
+
+    pg_losses1 = -advantages * seq_importance_ratio
+    pg_losses2 = -advantages * torch.clamp(seq_importance_ratio, 1 - cliprange_low, 1 + cliprange_high)
+    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
+    pg_losses3 = -clip_ratio_c * advantages
+    clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+    pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    loss = (pg_losses * loss_weights.to(pg_losses.dtype)).sum()
+
     return loss
 
 

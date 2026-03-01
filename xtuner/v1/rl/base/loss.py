@@ -1,6 +1,7 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import torch
+from cyclopts import Parameter
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
@@ -80,6 +81,7 @@ class BaseRLLossConfig(BaseLossConfig):
        with a reference model for KL divergence computation.
     """
 
+    mode: Annotated[Literal["eager", "chunk", "chunk_linear"], Parameter(help="loss calculation mode")] = "eager"  # type: ignore
     policy_loss_cfg: dict[str, Any]
     use_kl_loss: bool = False
     kl_loss_coef: float = 0.001
@@ -103,6 +105,7 @@ class BaseRLLossConfig(BaseLossConfig):
         old_logprobs: torch.Tensor | None = None,
         rollout_is_weights: torch.Tensor | None = None,
         ref_logprobs: torch.Tensor | None = None,
+        num_tokens: list[int] = [],
     ) -> "BaseRLLossContext":
         LossKwargs = self._loss_kwargs_cls
         loss_kwargs = LossKwargs(
@@ -112,12 +115,13 @@ class BaseRLLossConfig(BaseLossConfig):
             rollout_logprobs=rollout_logprobs,
             is_weights=rollout_is_weights,
             ref_logprobs=ref_logprobs,
+            num_tokens=num_tokens,
         ).to(DEVICE)
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
 
         LossContext = self.loss_ctx_cls
-        return LossContext(self, loss_kwargs)
+        return LossContext(self, loss_kwargs, sp_mesh=sp_mesh)
 
 
 class BaseRLLossKwargs(BaseLossKwargs):
@@ -142,6 +146,7 @@ class BaseRLLossKwargs(BaseLossKwargs):
     kl_loss_weight: torch.Tensor | None = None
     global_grad_tokens: torch.Tensor | None = None
     is_weights: torch.Tensor | None = None
+    num_tokens: list[int] = []
 
     def sp_split(self, sp_mesh: DeviceMesh) -> Self:
         self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
@@ -181,13 +186,13 @@ class BaseRLLossContext(BaseLossContext):
     loss_cfg: BaseRLLossConfig
     loss_kwargs: BaseRLLossKwargs
 
-    def compute_rollout_is(
-        self, sp_mesh: DeviceMesh, num_tokens: torch.Tensor
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    def compute_rollout_is(self) -> tuple[dict[str, Any], dict[str, Any]]:
         shifted_labels = self.loss_kwargs.shifted_labels
         rollout_logprobs = self.loss_kwargs.rollout_logprobs
         mask = shifted_labels != self.loss_cfg.ignore_idx
         old_logprobs = self.loss_kwargs.old_logprobs
+        num_tokens = self.loss_kwargs.num_tokens
+        sp_mesh = self.sp_mesh
 
         assert rollout_logprobs is not None
         assert old_logprobs is not None
@@ -224,3 +229,27 @@ class BaseRLLossContext(BaseLossContext):
 
         self.loss_kwargs.is_weights = rollout_is_weights
         return mismatch_metrics, rollout_is_metrics
+
+    def _run_mode(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: BaseRLLossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        if self.loss_cfg.mode == "eager":
+            return self.eager_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+        elif self.loss_cfg.mode == "chunk":
+            return self.chunk_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+        else:
+            assert self.loss_cfg.mode == "chunk_linear", "Unsupported loss mode"
+            return self._chunk_linear_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+
+    def _chunk_linear_mode(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: BaseRLLossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        return self.loss_fn(hidden_states, head_weight, head_bias, loss_kwargs, enable_chunk_linear=True)
