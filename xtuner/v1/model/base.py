@@ -1285,7 +1285,11 @@ class BaseModel(nn.Module):
             else:
                 origin_fsdp_size.append(load_spec.shape[self.FSDP_SHARD_DIM])
 
-        _fsdp_unsharded_tensor_list = foreach_all_gather(padded_tensor_list, self.fsdp_mesh.get_group())
+        _fsdp_unsharded_tensor_list = foreach_all_gather(
+            padded_tensor_list,
+            self.fsdp_mesh.get_group(),
+            [[tuple(t.size()) for t in padded_tensor_list]] * self.fsdp_mesh.size(),
+        )
         fsdp_unsharded_tensor_list = []
 
         # Concatenate the tensors along the FSDP shard dim
