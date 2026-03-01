@@ -1,0 +1,39 @@
+/*h1 {*/
+/*    color: #003B71 !important;*/
+/*}*/
+/**/
+/*.admonition.note > .admonition-title::after {*/
+/*  content: "" !important;*/
+/*  -webkit-mask: none !important;*/
+/*  mask: none !important;*/
+/*  background: url("image/note.png") no-repeat center / contain !important;*/
+/*  width: 2em; height: 2em;*/
+/*  margin-left: -0.5rem; /* 视情况微调 */*/
+/*  margin-top: -0.15rem; /* 视情况微调 */*/
+/*}*/
+/**/
+/*html[data-theme="light"], html[data-mode="light"] { --pst-icon-admonition-note: url("icons/note-light.svg"); } */
+/*html[data-theme="dark"],  html[data-mode="dark"]  { --pst-icon-admonition-note: url("icons/note-dark.svg"); }  */
+
+
+/*.admonition.note > .admonition-title {*/
+/*  background-color: #dce7fc !important;*/
+/*}*/
+
+/* docs/zh_cn/_static/custom.css */
+h1 {
+  color: #003B71 !important;
+}
+
+/* 明/暗色分别指定图标 */
+html[data-theme="light"], html[data-mode="light"] { --note-icon-url: url("image/note-light.png"); }
+html[data-theme="dark"],  html[data-mode="dark"]  { --note-icon-url: url("image/note-dark.png"); }
+
+/* 覆盖 note 的图标渲染 */
+.admonition.note > .admonition-title::after {
+  content: "" !important;
+  width: 2em; height: 2em;
+  margin-left: -0.5rem;
+  margin-top: -0.15rem;
+  background: var(--note-icon-url) no-repeat center / contain !important;
+}
