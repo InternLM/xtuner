@@ -141,6 +141,7 @@ class BaseLossContext(nn.Module, ABC):
         super().__init__()
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
+        self._batch_size = 1
 
     @staticmethod
     @abstractmethod
@@ -218,3 +219,7 @@ class BaseLossContext(nn.Module, ABC):
         loss_kwargs = type(first.loss_kwargs).cat(loss_kwargs_chunks)
 
         return cls(loss_cfg, loss_kwargs)
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size

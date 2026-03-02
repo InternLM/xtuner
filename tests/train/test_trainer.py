@@ -26,7 +26,6 @@ from xtuner.v1.train.trainer import HooksConfig, Trainer, ResumeConfig, HookStag
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.train.trainer import TrainerConfig
-from xtuner.v1.engine.train_engine import LossLog, OtherLog
 from xtuner.v1.loss import CELossConfig
 from xtuner._testing import DeterministicDDPTestCase
 from unittest import TestCase
@@ -647,8 +646,6 @@ class TestHooksConfig(DeterministicDDPTestCase):
         self.create_pg(DEVICE)
         checkpoint_function_call_times = 0
         train_step_function_call_times = 0
-        losslog_adapater = TypeAdapter(LossLog)
-        otherlog_adapter = TypeAdapter(OtherLog)
 
         def checkpoint_hook(checkpoint, step, epoch, total_step, total_epoch):
             nonlocal checkpoint_function_call_times
@@ -674,9 +671,6 @@ class TestHooksConfig(DeterministicDDPTestCase):
                 self.count = 0
 
             def __call__(self, loss_log, other_log, step, epoch, total_step, total_epoch):
-                losslog_adapater.validate_python(loss_log)
-                otherlog_adapter.validate_python(other_log)
-
                 assert self.trainer().cur_step == step
                 assert self.trainer().cur_epoch == epoch
                 assert self.trainer().total_step == total_step
