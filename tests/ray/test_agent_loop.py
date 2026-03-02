@@ -139,22 +139,22 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             ),
             prompt_repeat_k=2,
         )
-        producer_cfg = SyncProduceStrategyConfig()
-        agent_loop_manager_cfg = AgentLoopManagerConfig(task_name="test_gsm8k")
+        agent_loop_manager_cfg = AgentLoopManagerConfig(
+            task_name="test_gsm8k",
+            agent_loop_config=agent_loop_cfg,
+            produce_strategy_config=SyncProduceStrategyConfig(),
+            sampler_config=sampler_config,
+        )
         # 2. 创建 rollout_controller, judger
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
         gsm8k_judger = judger_config.build_router()
-        # 3. 创建 AgentLoop
-        agent_loop = agent_loop_cfg.build(rollout_controller=rollout_controller, judger=gsm8k_judger)
-        # 4. 创建 AgentLoopManager
+        # 3. 创建 AgentLoopManager
         replay_buffer = ReplayBuffer()
-        sampler = sampler_config.build(tokenizer = self.tokenizer, replay_buffer=replay_buffer)
-        stragegy = producer_cfg.build()
         agent_loop_manager = agent_loop_manager_cfg.build(
-            agent_loop=agent_loop,
-            produce_strategy=stragegy,
-            sampler=sampler,
+            rollout_controller=rollout_controller,
+            judger=gsm8k_judger,
+            tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
         )
         # 4. 执行 produce_batch
