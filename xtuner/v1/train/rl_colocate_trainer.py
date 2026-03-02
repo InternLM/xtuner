@@ -165,6 +165,9 @@ class RLColocateTrainer:
         # eval configs
         eval_agent_loop_manager_cfg: AgentLoopManagerConfig,
         evaluator_config: EvaluatorConfig,
+        enable_evaluate: bool = True,
+        enable_initial_evaluate: bool = False,
+        evaluate_step: int = 1,
 
         # work_dir and resume
         work_dir: Path | str | None = None,
@@ -263,6 +266,11 @@ class RLColocateTrainer:
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
         )
+        # eval 相关由 Trainer 持有，Evaluator 只负责 run() 计算指标
+        self._enable_evaluate = enable_evaluate
+        self._enable_initial_evaluate = enable_initial_evaluate
+        self._evaluate_step = evaluate_step
+
         # build evaluator
         total_eval_samples = len(self.eval_agent_loop_manager._data_sampler)
         self.evaluator = evaluator_config.build(total_eval_samples=total_eval_samples)
@@ -409,7 +417,7 @@ class RLColocateTrainer:
             self.logger.info(f"Rollout steps {self._rollout_steps} reached, stop training")
             return
         
-        if self.evaluator.enable_initial_evaluate and not self._debug_rollout:
+        if self._enable_initial_evaluate and not self._debug_rollout:
             # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
             # TODO: ray.get(self.rollout_controller.restart.remote())
             eval_batch: list[list[RolloutState]] = asyncio.run(self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size))
@@ -474,7 +482,7 @@ class RLColocateTrainer:
 
                     # 4. Evaluate model performance
                     eval_log_info = {}
-                    if self.evaluator.enable_evaluate and rollout_idx % self.evaluator.evaluate_step == 0:
+                    if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
                         with timer("evaluation", step_timer_dict):
                             # TODO: ray.get(self.rollout_controller.restart.remote())
                             eval_batch: list[list[RolloutState]] = asyncio.run(self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size))
@@ -834,12 +842,7 @@ if __name__ == "__main__":
     )
 
     # evaluate config
-    evaluator_config = EvaluatorConfig(
-        enable_evaluate=True,
-        enable_initial_evaluate=False,  # TODO
-        evaluate_step=evaluate_step,  # TODO
-        compute_metric_func=None,
-    )
+    evaluator_config = EvaluatorConfig(compute_metric_func=None)
     # Finally, build the trainer
     trainer = RLColocateTrainer(
         resources=resources,
@@ -856,6 +859,9 @@ if __name__ == "__main__":
 
         eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
         evaluator_config=evaluator_config,
+        enable_evaluate=True,
+        enable_initial_evaluate=False,
+        evaluate_step=evaluate_step,
 
         load_from=model_path,
         work_dir=work_dir,
