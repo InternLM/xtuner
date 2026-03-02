@@ -8,6 +8,7 @@ export ADAPTIVE_GEMM_URL=https://github.com/InternLM/AdaptiveGEMM@374e68fb9ea716
 export GROUPED_GEMM_URL=https://github.com/InternLM/GroupedGEMM@aa5ffb21cb626d6cd61d99fc42958127b0b99be7
 export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee # v1.2.1
 export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@c9f8b34dcdacc20aa746b786f983492c51072870 # v2.1.1.post3
+export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a919967f14d3fd031da1288ad5025 # v1.6.0
 
 export TORCH_VERSION=${TORCH_VERSION:-"2.8.0"}
 export LMDEPLOY_VERSION="0.11.0"
@@ -27,6 +28,7 @@ docker build . \
   --build-arg ADAPTIVE_GEMM_URL=$ADAPTIVE_GEMM_URL \
   --build-arg FLASH_ATTN_URL=$FLASH_ATTN_URL \
   --build-arg GROUPED_GEMM_URL=$GROUPED_GEMM_URL \
+  --build-arg CAUSAL_CONV1D_URL=$CAUSAL_CONV1D_URL \
   --build-arg DEEP_EP_URL=$DEEP_EP_URL \
   --build-arg DEEP_GEMM_URL=$DEEP_GEMM_URL \
   --build-arg XTUNER_URL=$XTUNER_URL \
@@ -41,6 +43,7 @@ docker build . \
   --label "ADAPTIVE_GEMM_URL=${ADAPTIVE_GEMM_URL/@/\/tree\/}" \
   --label "FLASH_ATTN_URL=${FLASH_ATTN_URL/@/\/tree\/}" \
   --label "GROUPED_GEMM_URL=${GROUPED_GEMM_URL/@/\/tree\/}" \
+  --label "CAUSAL_CONV1D_URL=${CAUSAL_CONV1D_URL/@/\/tree\/}" \
   --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
   --label "DEEP_GEMM_URL=${DEEP_GEMM_URL/@/\/tree\/}" \
   --label "LMDEPLOY_VERSION=$LMDEPLOY_VERSION" \

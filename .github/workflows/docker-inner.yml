@@ -5,7 +5,7 @@ on:
     inputs:
       image_tag:
         required: true
-        description: 'Set docker image tag. Default is "latest", you can also set "auto" to genterate a formated tag, or input a manual tag'
+        description: 'Set docker image tag. Default is "latest", you can also set "auto" to generate a formated tag, or input a manual tag'
         type: string
         default: auto
       torch_version:
@@ -13,6 +13,11 @@ on:
         description: 'Set docker torch version. Default is "2.8.0"'
         type: string
         default: '2.8.0'
+      build_only:
+        required: false
+        description: 'Whether only build the image, not triggle pushing.'
+        type: boolean
+        default: false
   schedule:
     - cron:  '00 14 * * 0-4'
 
@@ -46,6 +51,7 @@ jobs:
           bash ${{ github.workspace }}/image_build.sh
           echo "Built image with tag: ${DOCKER_TAG}"
       - name: Push to cluster
+        if: ${{ !inputs.build_only }}
         run: |
           echo "$DOCKER_TAG"
           docker login registry.h.pjlab.org.cn -p ${{ secrets.CLUSTER_DOCKERHUB_TOKEN }} -u ${{ secrets.CLUSTER_DOCKERHUB_USERNAME }}
