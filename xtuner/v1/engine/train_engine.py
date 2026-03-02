@@ -3,7 +3,7 @@ import os
 import threading
 from concurrent.futures import wait
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, cast
 
 import torch
 import torch.distributed as dist
@@ -17,7 +17,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torch.distributed.device_mesh import DeviceMesh
 from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
@@ -26,7 +25,6 @@ from typing_extensions import NotRequired, TypedDict
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.model.base import BaseModel, ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 from xtuner.v1.module.router import NoAuxRouterConfig
@@ -138,7 +136,6 @@ class TrainEngine:
     model: BaseModel
     optimizer: torch.optim.Optimizer
     scheduler: torch.optim.lr_scheduler.LRScheduler
-    float8_handler: Optional[Float8Handler]
 
     def __init__(
         self,
@@ -168,19 +165,10 @@ class TrainEngine:
         with torch.device("meta"):
             model = self.model_cfg.build()
 
-        self.float8_handler = None
-        if self.model_cfg.float8_cfg is not None and self.model_cfg.float8_cfg.enable_float8:
-            self.float8_handler = Float8Handler(
-                scaling_granularity_gemm=self.model_cfg.float8_cfg.scaling_granularity_gemm,
-                scaling_granularity_grouped_gemm=self.model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
-            )
         model = model.fully_shard(self.fsdp_cfg)
 
         if dist.get_rank() == 0:
             logger.info(model)
-
-        if self.float8_handler:
-            self.float8_handler.build_reduce_mesh(model, cast(DeviceMesh, model.fsdp_mesh))
         return model
 
     def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
@@ -218,18 +206,13 @@ class TrainEngine:
         intra_layer_micro_batch = self.intra_layer_micro_batch
         return data_batches_len // intra_layer_micro_batch
 
-    # this method can be called outside, e.g., at the beginning of compute_actor_logprobs or compute_ref_logprobs during rl training
-    def maybe_precompute_float8_dynamic_scale_for_fsdp(self):
-        if self.float8_handler is not None:
-            self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
-
     def train_step(self, data_batches: list[ModelItem]) -> tuple[LossLog, OtherLog]:
         """Perform a training step with the given data batches and mesh.
 
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
         """
-        self.maybe_precompute_float8_dynamic_scale_for_fsdp()
+        self._maybe_precompute_float8_dynamic_scale_for_fsdp()
 
         loss_log: LossLog = {}  # type: ignore[typeddict-item]
         other_log: OtherLog = {}  # type: ignore[typeddict-item]
@@ -541,3 +524,8 @@ class TrainEngine:
                         state[key] = val.to(device, non_blocking=True)
         DEVICE_MODULE.synchronize()
         return
+
+    def _maybe_precompute_float8_dynamic_scale_for_fsdp(self):
+        for model in self.model.modules():
+            if isinstance(model, BaseModel) and model.float8_handler is not None:
+                model.float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)

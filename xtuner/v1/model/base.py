@@ -394,6 +394,19 @@ class BaseModel(nn.Module):
 
         return _compile_cfg
 
+    @property
+    def float8_handler(self):
+        if (
+            self.config.float8_cfg is not None
+            and self.config.float8_cfg.enable_float8
+            and self._float8_handler is None
+        ):
+            self._float8_handler = self.config.float8_cfg.build()
+
+            if self.fsdp_mesh is not None:
+                self._float8_handler.build_reduce_mesh(self, self.fsdp_mesh)
+        return self._float8_handler
+
     @torch.no_grad()
     def init_weights(self):
         # TODO: HardCode here. The initialization method should be module specific. All module in model

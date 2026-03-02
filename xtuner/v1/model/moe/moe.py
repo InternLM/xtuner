@@ -22,7 +22,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from tqdm import tqdm
-from typing_extensions import NotRequired, overload, override
+from typing_extensions import overload, override
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
