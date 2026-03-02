@@ -35,6 +35,9 @@ class _DatasetSampler:
         self.cur_epoch = 0
         self.prompt_repeat_k = prompt_repeat_k
 
+    def __len__(self) -> int:
+        return len(self.dataloader)
+
     def sample_from_dataloader(self) -> list[RolloutState]:
         if self.dataloader_iter is None:
             self.dataloader_iter = iter(self.dataloader)
