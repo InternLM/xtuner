@@ -293,6 +293,7 @@ class TrainEngine:
                     seq_ctx=seq_ctx_list,
                     loss_ctx=loss_ctx_list,
                 )
+            output.free_nongrad_feature()
 
             # llm loss has been global averaged
             llm_loss = output["loss"]
