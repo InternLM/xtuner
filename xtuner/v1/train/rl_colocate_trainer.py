@@ -216,7 +216,7 @@ class RLColocateTrainer:
         self._rollout_steps = rollout_steps
         # self._total_epochs = total_epochs  # TODO
         self._cur_step = 0
-        self._global_train_step = 1
+        self._global_train_step = 0
         self.global_batch_size = global_batch_size
 
         # main components    
@@ -657,6 +657,8 @@ class RLColocateTrainer:
                 rank_sft_log = log_item["sft_train_metrics"]
                 for k, v in rank_sft_log.items():
                     all_scalars.update({f"sft_train_metrics/worker_{worker_idx}/{k}": v})
+            
+            self._log_mini_batch_metrics(train_info["workers_log_item"])
 
         if eval_info:
             all_scalars.update({f"eval/{k}": v for k, v in eval_info.items()})
@@ -666,6 +668,21 @@ class RLColocateTrainer:
         if eval_str:
             self.logger.info(f"Eval: {eval_str}")
         self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=rollout_idx)
+
+    def _log_mini_batch_metrics(self, workers_log_item: List[WorkerLogItem]):
+        train_start_step = self._global_train_step + 1
+        for worker_idx, log_item in enumerate(workers_log_item):
+            for step_idx, mini_batch_log in enumerate(log_item["train_metrics"]):
+                if not self._display_all_workers_log and worker_idx > 0:
+                    break
+                current_global_step = train_start_step + step_idx
+                metrics = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
+
+                self._exp_tracker.add_scalars(
+                    tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": v for k, v in metrics.items()},
+                    global_step=current_global_step,
+                )
+        self._global_train_step += len(workers_log_item[0]["train_metrics"])
 
 
 if __name__ == "__main__":
