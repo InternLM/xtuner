@@ -36,6 +36,7 @@ class SequenceContext:
     block_table: torch.Tensor | None
     device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None
+    seq_idx: torch.IntTensor | None
 
     # Qwen3VL
     image_grid_thw: torch.Tensor | None
@@ -98,15 +99,10 @@ class SequenceContext:
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
+        self.seq_idx = None
 
         seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
         seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
-
-        # Used for causal_conv1d varlen. It cannot be calculated in the compile function of linear attention,
-        # and needs to be calculated in advance.
-        self.seq_idx = torch.cat(
-            [torch.full((s,), i, dtype=torch.int32, device=device) for i, s in enumerate(seq_lens_q)], dim=0
-        )[None]
 
         if position_ids is None:
             _position_ids = [torch.arange(k - q, k) for q, k in zip(seq_lens_q, seq_lens_k)]
@@ -383,11 +379,9 @@ class SequenceContext:
         if device == "npu" or isinstance(device, torch.device) and device.type == "npu":
             self.cu_seq_lens_q = self.cu_seq_lens_q.cpu()  # type: ignore
             self.cu_seq_lens_k = self.cu_seq_lens_k.cpu()  # type: ignore
-            self.seq_idx = self.seq_idx.cpu()  # type: ignore
         else:
             self.cu_seq_lens_q = self.cu_seq_lens_q.to(device)  # type: ignore
             self.cu_seq_lens_k = self.cu_seq_lens_k.to(device)  # type: ignore
-            self.seq_idx = self.seq_idx.to(device)  # type: ignore
 
         if self.position_ids is not None and hasattr(self.position_ids, "to"):
             self.position_ids = self.position_ids.to(device)  # type: ignore

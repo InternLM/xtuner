@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import Annotated
+from typing import Annotated, cast
 
 import torch
 import torch.nn.functional as F
@@ -191,12 +191,25 @@ class GatedDeltaNet(nn.Module):
         if bias and isinstance(bias, DTensor):
             bias = bias.to_local()
 
+        # TODO: If full_graph mode is supported in the future, it needs to be modified to custom_op
+        if seq_ctx.seq_idx is None:
+            seq_idx = torch.cat(
+                [
+                    torch.full((s,), i, dtype=torch.int32, device=mixed_qkv.device)
+                    for i, s in enumerate(seq_ctx.seq_lens_q)
+                ],
+                dim=0,
+            )[None]
+            seq_ctx.seq_idx = cast(torch.IntTensor, seq_idx)
+        else:
+            seq_idx = seq_ctx.seq_idx
+
         mixed_qkv = self.causal_conv1d_fn(
             x=mixed_qkv,
             weight=weight,
             bias=bias,
             activation=self.activation,
-            seq_idx=seq_ctx.seq_idx,
+            seq_idx=seq_idx,
         )
         mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
