@@ -117,7 +117,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/causal-conv1d
 
-RUN CAUSAL_CONV1D_FORCE_BUILD=TRUE pip wheel -w ${CAUSAL_CONV1D_DIR} -v --no-deps --no-build-isolation .
+RUN CAUSAL_CONV1D_FORCE_BUILD=TRUE pip wheel -w ${CAUSAL_CONV1D_DIR} -v --no-deps --no-build-isolation . && ls -la ${CAUSAL_CONV1D_DIR}/*.whl
 
 # pypi install nvshmem and compile deepep
 FROM setup_env AS deep_ep
