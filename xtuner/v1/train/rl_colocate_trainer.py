@@ -10,7 +10,10 @@ import ray
 import torch
 from mmengine import load
 from mmengine.dist import get_rank
-from typing_extensions import Literal, TypedDict
+from mmengine.runner import set_random_seed
+from pydantic import BaseModel, ConfigDict, model_validator
+from ray.util.placement_group import PlacementGroup
+from typing_extensions import Literal, Self, TypedDict
 
 from transformers import AutoTokenizer
 from xtuner.v1._writer import get_writer
@@ -32,6 +35,7 @@ from xtuner.v1.rl.base import (
     WorkerConfig,
     WorkerLogItem,
 )
+from xtuner.v1.ray.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer
@@ -260,7 +264,7 @@ class RLColocateTrainer:
         if get_rank() == 0:
             work_dir.mkdir(parents=True, exist_ok=True)
         self._work_dir = work_dir
-        self._meta = self._init_xtuner_meta(work_dir, auto_resume)
+        self._meta = XTunerMeta.build(work_dir, self._META_PATH, auto_resume)
 
         # log
         log_dir = self.exp_dir / "logs"
@@ -291,23 +295,16 @@ class RLColocateTrainer:
         rollout_config.worker_log_dir = log_dir
 
         # build train controller and rollout controller
-        self.train_controller = self._build_train_controller(train_worker_cfg)
+        self.train_controller = train_worker_cfg.build(self._pg)
 
-        self.rollout_controller = self.init_rollout_controller(rollout_config, self._pg)
+        self.rollout_controller = rollout_config.build(self._pg)
 
         # build judger
         judger = judger_config.build()
 
-        # build agent_loop
-        # agent_loop  = agent_loop_config.build(rollout_controller=self.rollout_controller, judger=judger)
-
-        # build produce_strategy
-        # stragegy = produce_strategy_config.build()
         # TODO: build replay_buffer
         replay_buffer = ReplayBuffer()
-        # build sampler
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        # sampler = sampler_config.build(tokenizer=self.tokenizer, replay_buffer=replay_buffer)
         # build agnet_loop_manager
         self.agent_loop_manager = agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
@@ -323,7 +320,7 @@ class RLColocateTrainer:
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
         )
-        # eval 相关由 Trainer 持有，Evaluator 只负责 run() 计算指标
+
         self._enable_evaluate = enable_evaluate
         self._enable_initial_evaluate = enable_initial_evaluate
         self._evaluate_step = evaluate_step
@@ -342,43 +339,6 @@ class RLColocateTrainer:
     @property
     def exp_dir(self) -> Path:
         return Path(self._meta.latest_exp.exp_dir)
-
-    def _init_xtuner_meta(self, work_dir: Path, auto_resume: bool) -> XTunerMeta:
-        return XTunerMeta.build(work_dir, self._META_PATH, auto_resume)
-    
-    def _build_train_controller(self, train_worker_cfg: WorkerConfig) -> TrainingControllerProxy:
-        return train_worker_cfg.build(self._pg)
-    
-    # TODO: simplify with RolloutConfig.build()
-    def init_rollout_controller(self, rollout_cfg: Any, placement_group: Any):
-        """Initializes the rollout controller with the appropriate worker
-        backend.
-
-        Based on the `rollout_cfg`, this method selects and initializes the corresponding
-        rollout worker (e.g., `LMDeployWorker` or `vLLMWorker`). It then creates and
-        returns a `RolloutController` to manage these workers.
-
-        Args:
-            rollout_cfg (Any): The configuration for the rollout controller.
-            placement_group (Any): The placement group for scheduling Ray actors.
-
-        Returns:
-            The initialized rollout controller, or None if `rollout_cfg` is not provided.
-
-        Raises:
-            NotImplementedError: If the specified rollout backend is not supported.
-        """
-
-        rollout_controller = None
-        if rollout_cfg is None:
-            return rollout_controller
-
-        rollout_controller = (
-            ray.remote(RolloutController)
-            .options(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
-            .remote(rollout_cfg, placement_group)
-        )  # type: ignore[attr-defined]
-        return rollout_controller
 
     def _init_tracker(self, exp_tracker: Literal["tensorboard", "jsonl"], work_dir: Path):
         writer = get_writer(writer_type=exp_tracker, log_dir=work_dir)
