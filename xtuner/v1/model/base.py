@@ -194,11 +194,32 @@ class TransformerConfig(XTunerBaseModelConfig):
             ]
 
 
-class ModelOutputs(TypedDict):
-    hidden_states: NotRequired[list[torch.Tensor]]
-    logits: NotRequired[torch.Tensor]
+class ModelOutputs(PydanticBaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    hidden_states: list[torch.Tensor] | None = None
+    logits: torch.Tensor | None = None
     loss: torch.Tensor
-    extra_info: ModelForwardExtraLogInfo
+    extra_info: ModelForwardExtraLogInfo | None = None
+
+    def free_nongrad_feature(self):
+        """Release large intermediate tensors not needed for backward or
+        logging.
+
+        This method is called immediately after forward() in the micro-batch loop.
+        It releases large tensors (logits, hidden_states) while keeping:
+        - loss: needed for backward pass
+        - extra_info: lightweight logging info needed by post_micro_batch_forward()
+        """
+        self.hidden_states = None
+        self.logits = None
+
+    # TODO: Only for avoid BC. Should be removed later.
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    # TODO: Only for avoid BC. Should be removed later.
+    def __contains__(self, key):
+        return key in self.model_fields_set
 
 
 def _is_float8_available():
@@ -372,6 +393,19 @@ class BaseModel(nn.Module):
                 _compile_cfg |= sub_custom_cfg
 
         return _compile_cfg
+
+    @property
+    def float8_handler(self):
+        if (
+            self.config.float8_cfg is not None
+            and self.config.float8_cfg.enable_float8
+            and self._float8_handler is None
+        ):
+            self._float8_handler = self.config.float8_cfg.build()
+
+            if self.fsdp_mesh is not None:
+                self._float8_handler.build_reduce_mesh(self, self.fsdp_mesh)
+        return self._float8_handler
 
     @torch.no_grad()
     def init_weights(self):
