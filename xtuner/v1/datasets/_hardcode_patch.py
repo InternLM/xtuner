@@ -28,7 +28,8 @@ from xtuner.v1.utils import get_logger
 from .ftdp import FtdpTokenizeFunction
 from .mllm_tokenize_fn import Qwen3VLTokenizeFunction
 from .pt_tokenize_fn import PretrainTokenizeFunction
-from .rl_tokenize_fn.rl_tokenize_fn import InternS1VLTokenizeFunction
+# from .rl_tokenize_fn.rl_tokenize_fn import InternS1VLTokenizeFunction
+from .mllm_tokenize_fn import InternS1VLTokenizeFunction
 from .sft_tokenize_fn import OpenaiTokenizeFunction
 
 
