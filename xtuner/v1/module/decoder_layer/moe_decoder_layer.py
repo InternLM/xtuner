@@ -248,7 +248,7 @@ class MoEDecoderLayer(nn.Module):
                 float8_cfg=float8_cfg,
             )
             if with_shared_expert_gate:
-                self.shared_expert_gate = build_linear(hidden_size, 1, bias=False, float8_cfg=float8_cfg)
+                self.shared_expert_gate = build_linear(hidden_size, 1, bias=False)
         else:
             self.shared_experts = None
             self.shared_expert_gate = None

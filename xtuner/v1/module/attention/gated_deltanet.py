@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch import nn
+from torch.distributed.tensor import DTensor
 from typing_extensions import overload
 
 from xtuner.v1.data_proto import SequenceContext
@@ -18,10 +19,37 @@ from .attn_outputs import AttnOutputs
 
 
 try:
-    from fla.modules import FusedRMSNormGated
+    from fla.modules import FusedRMSNormGated as FLA_FusedRMSNormGated
+    from fla.modules.fused_norm_gate import rms_norm_gated
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+    class FusedRMSNormGated(FLA_FusedRMSNormGated):
+        def forward(
+            self,
+            x: torch.Tensor,
+            g: torch.Tensor,
+            residual: torch.Tensor | None = None,
+            prenorm: bool = False,
+            residual_in_fp32: bool = False,
+        ) -> torch.Tensor:
+            weight = self.weight
+            if isinstance(weight, DTensor):
+                weight = weight.to_local()
+
+            return rms_norm_gated(
+                x,
+                g,
+                weight,
+                self.bias,
+                self.activation,
+                residual=residual,
+                eps=self.eps,
+                prenorm=prenorm,
+                residual_in_fp32=residual_in_fp32,
+            )
+
 except ImportError:
-    FusedRMSNormGated = None
+    FusedRMSNormGated = None  # type: ignore
     chunk_gated_delta_rule = None
 
 try:
@@ -136,18 +164,8 @@ class GatedDeltaNet(nn.Module):
             bias=False,
             float8_cfg=self.float8_cfg,
         )
-        self.in_proj_b = build_linear(
-            self.hidden_size,
-            self.num_v_heads,
-            bias=False,
-            float8_cfg=self.float8_cfg,
-        )
-        self.in_proj_a = build_linear(
-            self.hidden_size,
-            self.num_v_heads,
-            bias=False,
-            float8_cfg=self.float8_cfg,
-        )
+        self.in_proj_b = build_linear(self.hidden_size, self.num_v_heads, bias=False)
+        self.in_proj_a = build_linear(self.hidden_size, self.num_v_heads, bias=False)
 
     def forward(
         self,
@@ -166,10 +184,17 @@ class GatedDeltaNet(nn.Module):
         b = self.in_proj_b(hidden_states)
         a = self.in_proj_a(hidden_states)
 
+        weight = self.conv1d.weight.squeeze(1)
+        bias = self.conv1d.bias
+        if isinstance(weight, DTensor):
+            weight = weight.to_local()
+        if bias and isinstance(bias, DTensor):
+            bias = bias.to_local()
+
         mixed_qkv = self.causal_conv1d_fn(
             x=mixed_qkv,
-            weight=self.conv1d.weight.squeeze(1),
-            bias=self.conv1d.bias,
+            weight=weight,
+            bias=bias,
             activation=self.activation,
             seq_idx=seq_ctx.seq_idx,
         )
@@ -189,7 +214,15 @@ class GatedDeltaNet(nn.Module):
 
         beta = b.sigmoid()
         # If the model is loaded in fp16, without the .float() here, A might be -inf
-        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+        A_log = self.A_log
+        dt_bias = self.dt_bias
+        if isinstance(A_log, DTensor):
+            A_log = A_log.to_local()
+        if isinstance(dt_bias, DTensor):
+            dt_bias = dt_bias.to_local()
+
+        g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
+
         if self.num_v_heads // self.num_k_heads > 1:
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
@@ -209,6 +242,7 @@ class GatedDeltaNet(nn.Module):
         # reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
+
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(batch_size, seq_len, -1)
 

@@ -3,13 +3,41 @@ from typing import Literal
 
 import torch
 from pydantic import computed_field
+from typing_extensions import override
 
+from xtuner.v1.model.base import (
+    DEFAULT_FLOAT8_CFG,
+    TorchCompileOption,
+)
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .qwen3vl_text import Qwen3VLTextMoE
+
+
+MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEBlock.forward": TorchCompileOption(fullgraph=True),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward": TorchCompileOption(fullgraph=False),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._pre_moe_forward": TorchCompileOption(
+        fullgraph=False
+    ),
+    "xtuner.v1.module.attention.mha.MultiHeadAttention.forward": TorchCompileOption(fullgraph=True),
+    # TODO: GatedDeltaNet does not currently support torch.compile(full_graph=True); support will be added in the future.
+    "xtuner.v1.module.attention.gated_deltanet.GatedDeltaNet.forward": TorchCompileOption(fullgraph=False),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._shared_experts_forward": TorchCompileOption(
+        fullgraph=True
+    ),
+    "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._post_moe_forward": TorchCompileOption(
+        fullgraph=True
+    ),
+    "xtuner.v1.module.decoder_layer.dense_decoder_layer.DenseDecoderLayer.forward": TorchCompileOption(fullgraph=True),
+    **DEFAULT_FLOAT8_CFG,
+}
+
+MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
+MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward")
 
 
 class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
@@ -104,6 +132,14 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
             expert_dim = safetensor.size(1)
             safetensor = safetensor.reshape(num_experts, -1, expert_dim).contiguous()
         return safetensor
+
+    @property
+    @override
+    def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
+        if self.config.ep_size > 1:
+            return MOE_EP_COMPILE_CFG
+        else:
+            return MOE_NON_EP_COMPILE_CFG
 
 
 class Qwen3_5_VLTextMoEConfig(MoEConfig):
