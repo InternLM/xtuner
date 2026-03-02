@@ -343,95 +343,12 @@ class RLColocateTrainer:
     def exp_dir(self) -> Path:
         return Path(self._meta.latest_exp.exp_dir)
 
-    # TODO: simplify with XTunerMeta.build()
-    def _init_xtuner_meta(self, work_dir: Path, resume: bool) -> XTunerMeta:
-        if not work_dir.exists():
-            work_dir.mkdir(parents=True, exist_ok=True)
-
-        meta_path = work_dir / self._META_PATH
-        if not meta_path.exists():
-            meta = XTunerMeta(exps=[])
-            with open(meta_path, "w") as f:
-                f.write(meta.model_dump_json(indent=2))
-
-        meta = cast(XTunerMeta, XTunerMeta.model_validate(load(meta_path, file_format="json")))
-
-        resume = resume and bool(meta.exps)
-
-        if resume and meta.exps:
-            latest_exp = meta.exps[-1]
-            latest_exp_history = latest_exp.history[-1]
-
-            begin = cast(int, latest_exp_history.get("end") or latest_exp_history["begin"])
-            exp_dir = Path(latest_exp.exp_dir)
-            git_dir = exp_dir / f"git-info-begin-{begin}"
-
-            if not git_dir:
-                git_dir.mkdir(parents=True, exist_ok=True)
-
-            staged_path, unstaged_path = git_dir / "staged.diff", git_dir / "unstaged.diff"
-
-            if not git_dir.exists():
-                git_dir.mkdir(parents=True, exist_ok=True)
-            commit = record_git_info(staged_path, unstaged_path)
-            git_info = GitInfo(
-                commit=commit,
-                staged=str(staged_path),
-                unstaged=str(unstaged_path),
-            )
-
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            new_exp_history = ExpHistory(
-                begin=begin,
-                timestamp=timestamp,
-                git_info=git_info,
-            )
-            latest_exp.history.append(new_exp_history)
-        else:
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            exp_dir = work_dir / timestamp
-            git_dir = Path(f"{exp_dir}/git-info-begin-{0}")
-
-            if not git_dir.exists():
-                git_dir.mkdir(parents=True, exist_ok=True)
-
-            staged_path, unstaged_path = git_dir / "staged.diff", git_dir / "unstaged.diff"
-            commit = record_git_info(staged_path, unstaged_path)
-            git_info = GitInfo(
-                commit=commit,
-                staged=str(staged_path),
-                unstaged=str(unstaged_path),
-            )
-
-            new_history = ExpHistory(
-                begin=0,
-                timestamp=timestamp,
-                git_info=git_info,
-            )
-            new_exp = ExpInfo(history=[new_history], exp_dir=str(exp_dir))
-            meta.exps.append(new_exp)
-        return meta
-
-    # TODO: simplify with WorkerConfig.build()
+    def _init_xtuner_meta(self, work_dir: Path, auto_resume: bool) -> XTunerMeta:
+        return XTunerMeta.build(work_dir, self._META_PATH, auto_resume)
+    
     def _build_train_controller(self, train_worker_cfg: WorkerConfig) -> TrainingControllerProxy:
-        TrainingWorker = cast(
-            TrainingWorkerClass,
-            ray.remote(
-                runtime_env={
-                    "env_vars": {
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                        "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
-                    }
-                },
-            )(BaseTrainingWorker),
-        )
-        train_workers: list[TrainingWorkerProxy]
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
-        ray.wait([worker.ready.remote() for worker in train_workers])
-        train_controller = TrainingController.remote(workers=train_workers)
-        return train_controller
-
+        return train_worker_cfg.build(self._pg)
+    
     # TODO: simplify with RolloutConfig.build()
     def init_rollout_controller(self, rollout_cfg: Any, placement_group: Any):
         """Initializes the rollout controller with the appropriate worker
