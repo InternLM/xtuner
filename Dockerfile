@@ -117,7 +117,7 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 
 WORKDIR ${CODESPACE}/causal-conv1d
 
-RUN CAUSAL_CONV1D_FORCE_BUILD=TRUE pip wheel -w ${CAUSAL_CONV1D_DIR} -v --no-deps --no-build-isolation . && ls -la ${CAUSAL_CONV1D_DIR}/*.whl
+RUN CAUSAL_CONV1D_FORCE_BUILD=TRUE pip wheel -w ${CAUSAL_CONV1D_DIR} -v --no-deps --no-build-isolation .
 
 # pypi install nvshmem and compile deepep
 FROM setup_env AS deep_ep
@@ -202,7 +202,7 @@ RUN unzip ${ADAPTIVE_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${GROUPED_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${DEEP_EP_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${DEEP_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
-RUN unzip ${CAUSAL_CONV1D_DIR} -d ${PYTHON_SITE_PACKAGE_PATH}
+RUN unzip ${CAUSAL_CONV1D_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 
 # install sglang and its runtime requirements
 ARG SGLANG_VERSION
