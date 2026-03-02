@@ -29,23 +29,23 @@ class ShouldContinueFn(Protocol):
     def __call__(self, completed_count: int, batch_size: int, **kwargs) -> bool: ...
 
 
-class ProducerConfig(ABC, BaseModel):
+class ProduceStrategyConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
 
     @abstractmethod
-    def build(self) -> "ProduceStrategy": ...
+    def build(self) -> "ProduceStrategyConfig": ...
 
 
-class SyncProduceStrategyConfig(ProducerConfig):
+class SyncProduceStrategyConfig(ProduceStrategyConfig):
     def build(self) -> "SyncProduceStrategy":
         return SyncProduceStrategy(
             is_valid_sample_fn=self.is_valid_sample_fn, should_continue_fn=self.should_continue_fn
         )
 
 
-class OverProduceStrategyConfig(ProducerConfig):
+class OverProduceStrategyConfig(ProduceStrategyConfig):
     staleness_threshold: float = 0.0
 
     def build(self) -> "OverProduceStrategy":
