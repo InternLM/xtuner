@@ -1,10 +1,60 @@
 import atexit
 import signal
 import subprocess
+from typing import Any, Literal, TypeAlias, cast
 
 import torch.nn.functional as F
 
 from xtuner.v1.utils.logger import get_logger
+
+
+DSLOp: TypeAlias = Literal["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$not_in", "$between"]
+DSLRuleType: TypeAlias = dict[DSLOp, Any]
+ALLOWED_DSL_OPS: set[str] = {"$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nnot_inin", "$between"}
+
+
+class DSLRule:
+    @staticmethod
+    def normalize(rule_or_literal: Any) -> DSLRuleType:
+        if isinstance(rule_or_literal, dict) and rule_or_literal:
+            if len(rule_or_literal) != 1:
+                raise ValueError(
+                    f"Rule must use exactly one operator key. Supported operators: {sorted(ALLOWED_DSL_OPS)}"
+                )
+            op = next(iter(rule_or_literal))
+            if op not in ALLOWED_DSL_OPS:
+                raise ValueError(f"Unsupported DSL operator: {op}. Use one of: {sorted(ALLOWED_DSL_OPS)}.")
+            return cast(DSLRuleType, rule_or_literal)
+        return {"$eq": rule_or_literal}
+
+    @classmethod
+    def match(cls, actual: Any, rule_or_literal: Any) -> bool:
+        rule = cls.normalize(rule_or_literal)
+        op, expected = next(iter(rule.items()))
+
+        if op == "$eq":
+            return actual == expected
+        if op == "$ne":
+            return actual != expected
+        if op == "$gt":
+            return actual > expected
+        if op == "$gte":
+            return actual >= expected
+        if op == "$lt":
+            return actual < expected
+        if op == "$lte":
+            return actual <= expected
+        if op == "$in":
+            return actual in expected
+        if op == "$not_in":
+            return actual not in expected
+        if op == "$between":
+            if not isinstance(expected, (list, tuple)) or len(expected) != 2:
+                raise ValueError("$between expects [lower, upper].")
+            lower, upper = expected
+            return lower <= actual <= upper
+
+        raise ValueError(f"Unsupported DSL operator: {op}")
 
 
 def gather_logprobs(logits, shifted_labels):

@@ -1,140 +1,184 @@
 import asyncio
 from abc import ABC, abstractmethod
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
+from itertools import count
+from typing import List
+
+from pydantic import BaseModel
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status
+from xtuner.v1.rl.utils import DSLRule, DSLRuleType
 
 
 @dataclass
-class StorageIndices:
-    # 为不同存储后段提供统一的索引接口
-    task_name: str | None = None
-    group_status: Status | None = None
-    tags: dict = field(default_factory=dict)  # 非等于的条件则使用 scores_gt > 0.8
+class StorageItem:
+    # 存储类型
+    item: List[RolloutState]
+    uid: int
+    timestamp_id: int
+    task_name: str
+    status: Status
+    staleness: int
 
 
-class Storage(ABC):
-    @abstractmethod
-    async def put(self, items: list[RolloutState], storage_indices: StorageIndices): ...
-    @abstractmethod
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]: ...
-    @abstractmethod
-    def count(self, storage_indices: StorageIndices) -> int: ...
-    @abstractmethod
-    def __len__(self): ...
+@dataclass
+class QueryItem:
+    # 查询类型
+    task_name: DSLRuleType | str | None = None  # e.g. {"$eq": "math"}
+    status: DSLRuleType | Status | None = None  # e.g. {"$eq": "completed"}
+    staleness: DSLRuleType | int | None = None  # e.g. {"$between": [1, 5]}
+
+    def match_storage(self, record: StorageItem) -> bool:
+        if self.task_name is not None and not DSLRule.match(record.task_name, self.task_name):
+            return False
+        if self.status is not None and not DSLRule.match(record.status, self.status):
+            return False
+        if self.staleness is not None and not DSLRule.match(record.staleness, self.staleness):
+            return False
+        return True
 
 
-class NaiveStorage(Storage):
+class StorageBackend(ABC):
+    @abstractmethod
+    async def put(self, item: StorageItem) -> int: ...
+
+    @abstractmethod
+    async def get(self, query: QueryItem) -> List[StorageItem]: ...
+
+    @abstractmethod
+    async def delete(self, uids: list[int]) -> None: ...
+
+    @abstractmethod
+    def __len__(self) -> int: ...
+
+
+class ReplayPolicy(ABC):
+    @abstractmethod
+    async def put(self, item: StorageItem, storage_backend: StorageBackend) -> None: ...
+
+    @abstractmethod
+    async def get(self, count: int, query: QueryItem, storage_backend: StorageBackend) -> list[list[RolloutState]]: ...
+
+    async def count(self, query: QueryItem, storage_backend: StorageBackend) -> int:
+        return len(await storage_backend.get(query))
+
+
+class NaiveStorage(StorageBackend):
     def __init__(self):
-        self._storage = defaultdict(list)
+        self._uid_gen = count(1)
+        self._timestamp_id_gen = count(1)
+        self._items: list[StorageItem] = []
 
-    def _hash_storage_indices(self, indices: StorageIndices) -> tuple:
-        base = (indices.task_name, indices.group_status)
+    async def put(self, item: StorageItem) -> int:
+        uid = next(self._uid_gen)
+        timestamp_id = next(self._timestamp_id_gen)
+        stored = replace(item, uid=uid, timestamp_id=timestamp_id)
+        self._items.append(stored)
+        return uid
 
-        if indices.tags:
-            sorted_tags = tuple(sorted(indices.tags.items()))
-            return base + sorted_tags
-        return base
+    async def get(self, query: QueryItem) -> list[StorageItem]:
+        return [record for record in self._items if query.match_storage(record)]
 
-    async def put(self, items: list[RolloutState], storage_indices: StorageIndices):
-        indices = self._hash_storage_indices(storage_indices)
-        self._storage[indices].append(items)
+    async def delete(self, uids: list[int]) -> None:
+        if not uids:
+            return
+        id_set = set(uids)
+        self._items = [record for record in self._items if record.uid not in id_set]
 
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]:
-        indices = self._hash_storage_indices(storage_indices)
-        target_list = self._storage[indices]
-        target_count = min(count, len(target_list))
-        result = target_list[:target_count]
-        self._storage[indices] = target_list[target_count:]
-        return result
-
-    def __len__(self):
-        return sum(len(v) for v in self._storage.values())
-
-    def count(self, storage_indices: StorageIndices) -> int:
-        indices = self._hash_storage_indices(storage_indices)
-        return len(self._storage[indices])
+    def __len__(self) -> int:
+        return len(self._items)
 
 
-class FIFOBackend(NaiveStorage):
-    # 普通的先进先出，用完就丢，不持久保存，目前同步应该就够用了
-    def __init__(self, limit: int = 0):
-        self.limit = limit
-        self._storage = defaultdict(lambda: deque(maxlen=limit) if limit > 0 else deque())
+class FIFOBackend(ReplayPolicy):
+    async def put(self, item: StorageItem, storage_backend: StorageBackend) -> None:
+        if not item.item:
+            return
+        await storage_backend.put(item)
 
-    async def put(self, items: list[RolloutState], storage_indices: StorageIndices):
-        await super().put(items, storage_indices)
+    async def get(self, count: int, query: QueryItem, storage_backend: StorageBackend) -> list[list[RolloutState]]:
+        records = await storage_backend.get(query)
+        records.sort(key=lambda r: r.timestamp_id)
+        selected = records[:count]
+        await storage_backend.delete([record.uid for record in selected])
+        return [record.item for record in selected]
 
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]:
-        indices = self._hash_storage_indices(storage_indices)
-        target_count = min(count, len(self._storage[indices]))
-        return [self._storage[indices].popleft() for _ in range(target_count)]
 
-
-class StalenessBackend(NaiveStorage):
-    # xtuner v1的异步的replay buffer的实现，同样不持久保存
-    # TODO(@duanyanhui): 还没实现completed/aborted/expired状态的切换，这个考虑下在哪里完成
-    def __init__(self, limit: int = 0, max_staleness: int = 0, min_staleness: int = 0):
-        self.limit = limit
+class StalenessBackend(ReplayPolicy):
+    def __init__(self, max_staleness: int = 0, min_staleness: int = 0):
         self.max_staleness = max_staleness
         self.min_staleness = min_staleness
-        self._storage = defaultdict(lambda: {i: deque() for i in range(min_staleness, max_staleness + 1)})
-        self._bucket_counts: defaultdict[tuple, int] = defaultdict(int)
 
-    async def put(self, items: list[RolloutState], storage_indices: StorageIndices):
-        indices = self._hash_storage_indices(storage_indices)
-        group_seq_staleness = max([item.seq_staleness for item in items])
-        self._storage[indices][group_seq_staleness].append(items)
-        self._bucket_counts[indices] += len(items)
+    async def put(self, item: StorageItem, storage_backend: StorageBackend) -> None:
+        if not item.item:
+            return
+        await storage_backend.put(item)
 
-    async def get(self, count: int, storage_indices: StorageIndices) -> list[list[RolloutState]]:
-        indices = self._hash_storage_indices(storage_indices)
-        if self._bucket_counts[indices] == 0:
-            return []
+    async def get(self, count: int, query: QueryItem, storage_backend: StorageBackend) -> list[list[RolloutState]]:
+        # TODO: 目前get性能较差，测试异步功能时再优化
+        records = await storage_backend.get(query)
+        records = [r for r in records if self.min_staleness <= r.staleness <= self.max_staleness]
+        records.sort(key=lambda r: (-r.staleness, r.timestamp_id))
+        selected = records[:count]
+        await storage_backend.delete([record.uid for record in selected])
+        return [record.item for record in selected]
 
-        target_items = []
-        needed = count
-
-        for s in range(self.max_staleness, self.min_staleness - 1, -1):
-            if needed <= 0:
-                break
-            cur_bucket = self._storage[indices][s]
-            take = min(len(cur_bucket), needed)
-            for _ in range(take):
-                target_items.append(cur_bucket.popleft())
-            self._bucket_counts[indices] -= take
-            needed -= take
-        return target_items
-
-    def count(self, storage_indices: StorageIndices) -> int:
-        indices = self._hash_storage_indices(storage_indices)
-        total_len = 0
-        for s in range(self.min_staleness, self.max_staleness + 1):
-            total_len += len(self._storage[indices][s])
-        return total_len
-
-    def __len__(self):
-        return sum(count for count in self._bucket_counts.values())
+    async def count(self, query: QueryItem, storage_backend: StorageBackend) -> int:
+        records = await storage_backend.get(query)
+        return sum(1 for record in records if self.min_staleness <= record.staleness <= self.max_staleness)
 
 
 class ReplayBuffer:
-    def __init__(self, storage_backend: Storage | None = None):
-        self._storage = FIFOBackend() if storage_backend is None else storage_backend
+    def __init__(
+        self,
+        policy: ReplayPolicy,
+        storage_backend: StorageBackend,
+    ):
+        self._policy = policy
+        self._storage = storage_backend
         self._lock = asyncio.Lock()
 
-    async def put(self, items: list[RolloutState], task_name: str, **kwargs) -> None:
-        group_status = update_group_status(items)
-        indices = StorageIndices(task_name=task_name, group_status=group_status, tags=kwargs)
+    async def put(self, items: list[RolloutState], task_name: str) -> None:
+        if not items:
+            return
+        storage_item = StorageItem(
+            item=items,
+            uid=0,  # 占位
+            timestamp_id=0,  # 占位
+            task_name=task_name,
+            status=update_group_status(items),
+            staleness=max(item.seq_staleness for item in items),
+        )
         async with self._lock:
-            await self._storage.put(items, indices)
+            await self._policy.put(storage_item, self._storage)
 
-    async def get(self, batch_size: int, task_name: str, group_status: Status, **kwargs) -> list[list[RolloutState]]:
-        indices = StorageIndices(task_name=task_name, group_status=group_status, tags=kwargs)
+    async def get(self, batch_size: int, task_name: str, group_status: Status) -> list[list[RolloutState]]:
+        query = QueryItem(task_name=task_name, status=group_status)
         async with self._lock:
-            return await self._storage.get(batch_size, indices)
+            return await self._policy.get(batch_size, query, self._storage)
 
-    async def count(self, task_name: str, group_status: Status, **kwargs) -> int:
-        indices = StorageIndices(task_name=task_name, group_status=group_status, tags=kwargs)
+    async def count(self, task_name: str, group_status: Status) -> int:
+        query = QueryItem(task_name=task_name, status=group_status)
         async with self._lock:
-            return self._storage.count(indices)
+            return await self._policy.count(query, self._storage)
+
+    def __len__(self) -> int:
+        return len(self._storage)
+
+
+class SyncReplayBufferConfig(BaseModel):
+    def build(self):
+        policy = FIFOBackend()
+        storage = NaiveStorage()
+        replay_buffer = ReplayBuffer(policy=policy, storage_backend=storage)
+        return replay_buffer
+
+
+class AsyncReplayBufferConfig(BaseModel):
+    min_staleness: int = 0
+    max_staleness: int = 0
+
+    def build(self):
+        policy = StalenessBackend(max_staleness=self.max_staleness, min_staleness=self.min_staleness)
+        storage = NaiveStorage()
+        replay_buffer = ReplayBuffer(policy=policy, storage_backend=storage)
+        return replay_buffer
