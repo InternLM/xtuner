@@ -22,10 +22,12 @@ def _triton_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> t
 
     return rms_norm_fn(x, weight, bias=None, eps=epsilon)
 
+
 def native_zero_centered_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
     # TODO: is native_rms_norm ?
     def _norm(x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + epsilon)
+
     output = _norm(x.float())
     # Llama does x.to(float16) * w whilst Qwen3_5Moe is (x * w).to(float16)
     # See https://github.com/huggingface/transformers/pull/29402
@@ -47,6 +49,7 @@ def get_rms_norm_fn() -> RMSNormProtocol:
         return npu_rms_norm
     else:
         raise NotImplementedError(f"RMSNorm is not implemented on {device}")
+
 
 def get_zero_centered_rms_norm_fn() -> RMSNormProtocol:
     from xtuner.v1.utils import get_device

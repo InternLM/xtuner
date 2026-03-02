@@ -37,8 +37,11 @@ from xtuner.v1.model.base import (
 )
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo, checkpoint_wrapper, module_dict_repr
 from xtuner.v1.module import (
+    GatedDeltaNetConfig,
     GreedyRouterConfig,
     LMHead,
+    MHAConfig,
+    MLAConfig,
     NoAuxRouter,
     NoAuxRouterConfig,
     RMSNorm,
@@ -116,7 +119,7 @@ class MoEConfig(TransformerConfig):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     n_routed_experts: Annotated[int, Parameter(group="moe")]
     n_shared_experts: Annotated[int, Parameter(group="moe")]
-    with_shared_expert_gate: bool = False # enable when n_shared_experts > 0
+    with_shared_expert_gate: bool = False  # enable when n_shared_experts > 0
     num_experts_per_tok: Annotated[int, Parameter(group="moe")]
     first_k_dense_replace: Annotated[int, Parameter(group="moe")] = 0
     hidden_factor: Annotated[float, Parameter(group="moe")] = 1.0
@@ -593,15 +596,20 @@ class MoE(BaseModel):
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，
         # 这样可以保证部分 layer 被切掉后，idx 保持不变
         layers = nn.ModuleDict()
+        attention_config: GatedDeltaNetConfig | MLAConfig | MHAConfig | None = None
         for layer_idx in range(config.num_hidden_layers):
             if config.layers_type[layer_idx] in ["full_attention", "sliding_attention"]:
                 attention_config = config.attention
             elif config.layers_type[layer_idx] == "linear_attention":
                 attention_config = config.linear_attention
-                assert attention_config is not None, "linear_attention config must be provided for linear_attention layer"
+                assert attention_config is not None, (
+                    "linear_attention config must be provided for linear_attention layer"
+                )
             else:
-                raise ValueError(f"Unsupported layer type {config.layers_type[layer_idx]} at layer {layer_idx}. Only 'full_attention', 'sliding_attention' and 'linear_attention' are supported.")
-    
+                raise ValueError(
+                    f"Unsupported layer type {config.layers_type[layer_idx]} at layer {layer_idx}. Only 'full_attention', 'sliding_attention' and 'linear_attention' are supported."
+                )
+
             if layer_idx < config.first_k_dense_replace:
                 layers[str(layer_idx)] = DenseDecoderLayer(
                     hidden_size=config.hidden_size,

@@ -182,9 +182,10 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
 
         if deepstack_visual_embeds is not None and len(deepstack_visual_embeds) == 0:
             assert seq_ctx.position_ids is not None
-            # qwen3.5 does not satisfy this condition
-            # assert seq_ctx.position_ids.ndim == 2, f"position_ids must be 2-dim when deepstack_visual_embeds is None," \
-            #                                        f" but got {seq_ctx.position_ids.ndim}"
+            assert seq_ctx.position_ids.ndim in (2, 3), (
+                f"position_ids must be 2-dim or 3-dim when deepstack_visual_embeds is None,"
+                f" but got {seq_ctx.position_ids.ndim}"
+            )
             deepstack_visual_embeds = None
             visual_pos_masks = None
 

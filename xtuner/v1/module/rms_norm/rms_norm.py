@@ -1,7 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from typing import Literal
+
 import torch
 from torch import nn
-from typing import Literal
 from torch.distributed.tensor import DTensor
 
 from xtuner.v1.ops import rms_norm, zero_centered_rms_norm
@@ -10,19 +11,19 @@ from xtuner.v1.ops import rms_norm, zero_centered_rms_norm
 class RMSNorm(nn.Module):
     weight: torch.Tensor
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6, type: Literal['default', 'zero_centered'] = 'default'):
+    def __init__(self, hidden_size: int, eps: float = 1e-6, type: Literal["default", "zero_centered"] = "default"):
         """RMSNorm is equivalent to T5LayerNorm."""
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
         self._type = type
 
-        if type == 'default':
+        if type == "default":
             self.rms_norm_fn = rms_norm
-        elif type == 'zero_centered':
+        elif type == "zero_centered":
             self.rms_norm_fn = zero_centered_rms_norm
         else:
-            raise ValueError(f'Unsupported RMSNorm type: {type}')
+            raise ValueError(f"Unsupported RMSNorm type: {type}")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if isinstance(self.weight, DTensor):

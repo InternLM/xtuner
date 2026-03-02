@@ -1,28 +1,33 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-from typing import Annotated, Callable, Literal, cast
+from typing import Annotated
 
 import torch
+import torch.nn.functional as F
 from cyclopts import Parameter
-from mmengine import is_installed
 from pydantic import BaseModel, ConfigDict
 from torch import nn
-from torch.distributed.tensor import DTensor
 from typing_extensions import overload
-import torch.nn.functional as F
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
-from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_logger
-from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
+from xtuner.v1.utils import get_logger
 
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
 
-from fla.modules import FusedRMSNormGated
-from fla.ops.gated_delta_rule import chunk_gated_delta_rule
-from causal_conv1d import causal_conv1d_fn
+
+try:
+    from fla.modules import FusedRMSNormGated
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+except ImportError:
+    FusedRMSNormGated = None
+    chunk_gated_delta_rule = None
+
+try:
+    from causal_conv1d import causal_conv1d_fn
+except ImportError:
+    causal_conv1d_fn = None
 
 logger = get_logger()
 
@@ -51,17 +56,19 @@ class GatedDeltaNetConfig(BaseModel):
 
 
 class GatedDeltaNet(nn.Module):
-    def __init__(self, 
-                 hidden_size: int, 
-                 num_value_heads: int, 
-                 num_key_heads: int, 
-                 key_head_dim: int, 
-                 value_head_dim: int, 
-                 conv_kernel_dim: int, 
-                 hidden_act: str, 
-                 rms_norm_eps: float,
-                 layer_idx: int = 0,
-                 float8_cfg: Float8Config | None = None) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_value_heads: int,
+        num_key_heads: int,
+        key_head_dim: int,
+        value_head_dim: int,
+        conv_kernel_dim: int,
+        hidden_act: str,
+        rms_norm_eps: float,
+        layer_idx: int = 0,
+        float8_cfg: Float8Config | None = None,
+    ) -> None:
         super().__init__()
         self.name = f"layers.{layer_idx}.gate_deltanet"
         self.float8_cfg = float8_cfg
@@ -97,14 +104,18 @@ class GatedDeltaNet(nn.Module):
         A = torch.empty(self.num_v_heads).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
 
-        self.causal_conv1d_fn = causal_conv1d_fn
-        self.chunk_gated_delta_rule = chunk_gated_delta_rule
-
-        self.norm = FusedRMSNormGated(
-            self.head_v_dim,
-            eps=self.rms_norm_eps,
-            activation=self.activation
+        assert causal_conv1d_fn is not None, (
+            "causal_conv1d_fn is not available. Please install causal-conv1d to use GatedDeltaNet by `https://github.com/Dao-AILab/causal-conv1d`."
         )
+        self.causal_conv1d_fn = causal_conv1d_fn
+        assert chunk_gated_delta_rule is not None, (
+            "chunk_gated_delta_rule is not available. Please install fla to use GatedDeltaNet by `pip install flash-linear-attention`."
+        )
+        self.chunk_gated_delta_rule = chunk_gated_delta_rule
+        assert FusedRMSNormGated is not None, (
+            "FusedRMSNormGated is not available. Please install fla to use GatedDeltaNet by `pip install flash-linear-attention`."
+        )
+        self.norm = FusedRMSNormGated(self.head_v_dim, eps=self.rms_norm_eps, activation=self.activation)
 
         self.out_proj = build_linear(
             self.value_dim,
@@ -137,15 +148,15 @@ class GatedDeltaNet(nn.Module):
             bias=False,
             float8_cfg=self.float8_cfg,
         )
-    
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         seq_ctx: SequenceContext,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None, # not used
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,  # not used
     ) -> AttnOutputs:
         batch_size, seq_len, _ = hidden_states.shape
-        assert batch_size==1, "Only batch size of 1 is supported for now in GateDeltaNet"
+        assert batch_size == 1, "Only batch size of 1 is supported for now in GateDeltaNet"
         mixed_qkv = self.in_proj_qkv(hidden_states)
         mixed_qkv = mixed_qkv.transpose(1, 2)
 
@@ -154,7 +165,7 @@ class GatedDeltaNet(nn.Module):
 
         b = self.in_proj_b(hidden_states)
         a = self.in_proj_a(hidden_states)
-        
+
         mixed_qkv = self.causal_conv1d_fn(
             x=mixed_qkv,
             weight=self.conv1d.weight.squeeze(1),
@@ -182,19 +193,19 @@ class GatedDeltaNet(nn.Module):
         if self.num_v_heads // self.num_k_heads > 1:
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
-        
+
         core_attn_out, _ = self.chunk_gated_delta_rule(
-                query,
-                key,
-                value,
-                g=g,
-                beta=beta,
-                initial_state=None,
-                output_final_state=False,
-                use_qk_l2norm_in_kernel=True,
-                cu_seqlens=seq_ctx.cu_seq_lens_q,
-            )
-        
+            query,
+            key,
+            value,
+            g=g,
+            beta=beta,
+            initial_state=None,
+            output_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+            cu_seqlens=seq_ctx.cu_seq_lens_q,
+        )
+
         # reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
@@ -206,7 +217,7 @@ class GatedDeltaNet(nn.Module):
             "projected_output": output,
         }
         return attn_outputs
-    
+
     @overload  # type: ignore
     def __call__(  # type: ignore
         self,
@@ -216,4 +227,3 @@ class GatedDeltaNet(nn.Module):
     ) -> AttnOutputs: ...
 
     __call__ = nn.Module.__call__
-    

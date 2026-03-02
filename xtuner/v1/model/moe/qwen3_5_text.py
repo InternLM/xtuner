@@ -1,15 +1,16 @@
-
-from pydantic import computed_field
-from typing import Literal
 import re
-import torch
-from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
-from xtuner.v1.module.attention import MHAConfig, GatedDeltaNetConfig
-from xtuner.v1.module.router.greedy import GreedyRouterConfig
-from xtuner.v1.module.rope import RopeScalingConfig
+from typing import Literal
 
-from xtuner.v1.model.moe.moe import MoEConfig
+import torch
+from pydantic import computed_field
+
+from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
+from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
+from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.module.router.greedy import GreedyRouterConfig
+
 from .qwen3vl_text import Qwen3VLTextMoE
+
 
 class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
     def to_hf_key_list(self, key: str) -> list[str]:
@@ -22,7 +23,7 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
 
             layer_idx = int(re.findall(r"layers\.(\d+)\.", key)[0])
             if self.config.layers_type[layer_idx] == "linear_attention":
-                 key = key.replace("self_attn", "linear_attn")
+                key = key.replace("self_attn", "linear_attn")
 
         if "fused_w1w3.weight" in key:
             key = key.replace("fused_w1w3.weight", "gate_up_proj")
@@ -93,19 +94,21 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
             # hf: num_experts, 2 * expert_dim, hidden_size
             num_experts = self.config.n_routed_experts
             hidden_size = safetensor.size(1)
-            safetensor = safetensor.reshape(num_experts, -1, hidden_size).contiguous()  # num_experts, 2 * expert_dim, hidden_size
+            safetensor = safetensor.reshape(
+                num_experts, -1, hidden_size
+            ).contiguous()  # num_experts, 2 * expert_dim, hidden_size
         elif "down_proj" in hf_param_name and "shared_expert" not in hf_param_name:
             # xtuner: num_experts * hidden_size, expert_dim
             # hf: num_experts, hidden_size, expert_dim
             num_experts = self.config.n_routed_experts
             expert_dim = safetensor.size(1)
             safetensor = safetensor.reshape(num_experts, -1, expert_dim).contiguous()
-        return safetensor    
+        return safetensor
 
 
 class Qwen3_5_VLTextMoEConfig(MoEConfig):
     with_shared_expert_gate: bool = True
-    rms_norm_type: Literal["defalut", "zero_centered"] = "zero_centered"
+    rms_norm_type: Literal["default", "zero_centered"] = "zero_centered"
 
     @computed_field
     def layers_type(self) -> list[Literal["full_attention", "linear_attention"]]:
@@ -126,19 +129,19 @@ class Qwen3_5_VLTextMoE35BA3BConfig(Qwen3_5_VLTextMoEConfig):
     num_hidden_layers: int = 40
     max_window_layers: int = 40
     hidden_size: int = 2048
-    intermediate_size: int = 0 # not used
+    intermediate_size: int = 0  # not used
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000000.0
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         with_gate=True,
-        num_attention_heads=16, 
-        num_key_value_heads=2, 
-        head_dim=256, 
-        qk_norm=True, 
+        num_attention_heads=16,
+        num_key_value_heads=2,
+        head_dim=256,
+        qk_norm=True,
         rms_norm_eps=1e-6,
         rms_norm_type="zero_centered",
-        sliding_window=1024
+        sliding_window=1024,
     )
     linear_attention: GatedDeltaNetConfig = GatedDeltaNetConfig(
         num_value_heads=32,
@@ -146,7 +149,7 @@ class Qwen3_5_VLTextMoE35BA3BConfig(Qwen3_5_VLTextMoEConfig):
         key_head_dim=128,
         value_head_dim=128,
         conv_kernel_dim=4,
-        hidden_act='silu',
+        hidden_act="silu",
         rms_norm_eps=1e-6,
     )
     tie_word_embeddings: bool = False
@@ -161,6 +164,8 @@ class Qwen3_5_VLTextMoE35BA3BConfig(Qwen3_5_VLTextMoEConfig):
         norm_topk_prob=True,
         router_scaling_factor=1.0,
     )
-    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(type="qwen3_vl", mrope_section=[11, 11, 10], partial_rotary_factor=0.25)
+    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(
+        type="qwen3_vl", mrope_section=[11, 11, 10], partial_rotary_factor=0.25
+    )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None

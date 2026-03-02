@@ -38,7 +38,7 @@ class MHAConfig(BaseModel):
     qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     qk_norm: bool = False
     rms_norm_eps: float = 1e-06
-    rms_norm_type: Literal['default', 'zero_centered'] = 'default'
+    rms_norm_type: Literal["default", "zero_centered"] = "default"
     o_bias: Annotated[bool, Parameter(group="attention")] = False
     sliding_window: Annotated[int | None, Parameter(group="attention")] = -1
     with_sink: Annotated[bool, Parameter(group="attention")] = False
@@ -124,7 +124,7 @@ class MultiHeadAttention(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         rms_norm_eps: float = 1e-6,
-        rms_norm_type: Literal['default', 'zero_centered'] = 'default',
+        rms_norm_type: Literal["default", "zero_centered"] = "default",
         o_bias: bool = False,
         with_sink: bool = False,
         with_gate: bool = False,
@@ -158,7 +158,9 @@ class MultiHeadAttention(nn.Module):
 
         self.q_proj = build_linear(
             self.hidden_size,
-            self.num_attention_heads * self.head_dim if not with_gate else self.num_attention_heads * self.head_dim * 2,
+            self.num_attention_heads * self.head_dim
+            if not with_gate
+            else self.num_attention_heads * self.head_dim * 2,
             bias=self.qkv_bias,
             float8_cfg=self.float8_cfg,
         )
@@ -194,7 +196,9 @@ class MultiHeadAttention(nn.Module):
             self.window_size = (sliding_window, sliding_window)
 
         fope_sep_head = rope_scaling_cfg.fope_sep_head if rope_scaling_cfg is not None else None
-        enable_partial_rotary = rope_scaling_cfg.partial_rotary_factor != 1.0 if rope_scaling_cfg is not None else False
+        enable_partial_rotary = (
+            rope_scaling_cfg.partial_rotary_factor != 1.0 if rope_scaling_cfg is not None else False
+        )
         self.apply_rotary_emb = get_apply_rotary_emb(fope_sep_head, enable_partial_rotary=enable_partial_rotary)  # type: ignore
 
         self.attn_impl_func: Callable[..., AttnOpOutputs] = attn_impl_mapping[attn_impl]  # type: ignore[assignment]
@@ -334,7 +338,7 @@ class MultiHeadAttention(nn.Module):
         """
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
-        
+
         if self.with_gate:
             query_states, gate = torch.chunk(
                 self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
@@ -424,8 +428,9 @@ class MultiHeadAttention(nn.Module):
 
         raw_output = raw_output.reshape(*input_shape, -1).contiguous()
         if self.with_gate:
+            assert gate is not None
             raw_output = raw_output * torch.sigmoid(gate)
-        
+
         projected_output = self.o_proj(raw_output)
         attn_outputs: AttnOutputs = {
             "projected_output": projected_output,

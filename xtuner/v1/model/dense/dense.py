@@ -29,7 +29,15 @@ from xtuner.v1.model.base import (
     TransformerConfig,
 )
 from xtuner.v1.model.utils import checkpoint_wrapper
-from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbeddingProtocol, get_rope_embedding
+from xtuner.v1.module import (
+    GatedDeltaNetConfig,
+    LMHead,
+    MHAConfig,
+    MLAConfig,
+    RMSNorm,
+    RotaryEmbeddingProtocol,
+    get_rope_embedding,
+)
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
     get_device,
@@ -116,15 +124,20 @@ class Dense(BaseModel):
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，
         # 这样可以保证部分 layer 被切掉后，idx 保持不变
         layers = nn.ModuleDict()
+        attention_config: GatedDeltaNetConfig | MLAConfig | MHAConfig | None = None
         for layer_idx in range(config.num_hidden_layers):
             if config.layers_type[layer_idx] in ["full_attention", "sliding_attention"]:
                 attention_config = config.attention
             elif config.layers_type[layer_idx] == "linear_attention":
                 attention_config = config.linear_attention
-                assert attention_config is not None, "linear_attention config must be provided for linear_attention layer"
+                assert attention_config is not None, (
+                    "linear_attention config must be provided for linear_attention layer"
+                )
             else:
-                raise ValueError(f"Unsupported layer type {config.layers_type[layer_idx]} at layer {layer_idx}. Only 'full_attention', 'sliding_attention' and 'linear_attention' are supported.")
-    
+                raise ValueError(
+                    f"Unsupported layer type {config.layers_type[layer_idx]} at layer {layer_idx}. Only 'full_attention', 'sliding_attention' and 'linear_attention' are supported."
+                )
+
             layers[str(layer_idx)] = DenseDecoderLayer(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,

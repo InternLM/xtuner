@@ -49,9 +49,16 @@ def apply_rotary_pos_emb_cuda(
     return q_embed, k_embed
 
 
-# Note: Although this function is compatible with apply_rotary_pos_emb_cuda, 
+# Note: Although this function is compatible with apply_rotary_pos_emb_cuda,
 # it is still recommended to separate them into two for efficiency considerations.
-def apply_rotary_pos_emb_cuda_for_partial_rotary(q, k, cos, sin, unsqueeze_dim=1):
+def apply_rotary_pos_emb_cuda_for_partial_rotary(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    position_ids: torch.Tensor | None = None,
+    unsqueeze_dim: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
 
@@ -141,8 +148,9 @@ class ApplyRotaryEmbProtocol(Protocol):
     ) -> Tuple[torch.Tensor, torch.Tensor]: ...
 
 
-def get_apply_rotary_emb(fope_sep_head: bool | None = False,
-                         enable_partial_rotary: bool= False) -> ApplyRotaryEmbProtocol:
+def get_apply_rotary_emb(
+    fope_sep_head: bool | None = False, enable_partial_rotary: bool = False
+) -> ApplyRotaryEmbProtocol:
     from xtuner.v1.utils.device import get_device
 
     device = get_device()
