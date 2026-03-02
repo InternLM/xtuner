@@ -15,7 +15,7 @@ on:
         default: '2.8.0'
       build_only:
         required: false
-        description: 'Whether only build the image, not triggle pushing.'
+        description: 'Only build the docker image, do not triggle pushing.'
         type: boolean
         default: false
   schedule:
