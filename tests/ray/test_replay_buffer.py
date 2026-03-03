@@ -1,6 +1,6 @@
 import unittest
 import asyncio
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer, StorageIndices, FIFOBackend, StalenessBackend
+from xtuner.v1.rl.base.replay_buffer import ReplayBuffer, FIFOBackend, StalenessBackend, SyncReplayBufferConfig, AsyncReplayBufferConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 
 class MockState:
@@ -11,8 +11,8 @@ class MockState:
 
 class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
     async def test_fifo_backend(self):
-        backend = FIFOBackend()
-        buffer = ReplayBuffer(storage_backend=backend)
+        replay_buffer_cfg = SyncReplayBufferConfig()
+        buffer = replay_buffer_cfg.build()
         group_states1 = [MockState(i) for i in range(1, 4)]
         group_states2 = [MockState(i) for i in range(5, 7)]
         
@@ -27,8 +27,8 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res[1][0].id, 5)
 
     async def test_staleness_priority(self):
-        backend = StalenessBackend(min_staleness=0, max_staleness=5)
-        buffer = ReplayBuffer(storage_backend=backend)
+        replay_buffer_cfg = AsyncReplayBufferConfig(min_staleness=1, max_staleness=5)
+        buffer = replay_buffer_cfg.build()
         
         s1 = MockState(id="low", staleness=1)
         s5 = MockState(id="high", staleness=5)
@@ -41,7 +41,8 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res[1][0].id, "low")
 
     async def test_multi_task(self):
-        buffer = ReplayBuffer()
+        replay_buffer_cfg = SyncReplayBufferConfig()
+        buffer = replay_buffer_cfg.build()
         await buffer.put([MockState(100)], "task_a")
         await buffer.put([MockState(200)], "task_b")
         
