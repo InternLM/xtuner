@@ -1,6 +1,8 @@
-from pydantic import BaseModel, ConfigDict, Field
+from collections.abc import Mapping
 from typing import Annotated, Protocol, cast, runtime_checkable
+
 from cyclopts import Parameter
+from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto import RolloutState
 
@@ -11,7 +13,17 @@ class ComputeMetricProtocol(Protocol):
 
 
 def default_compute_metric_func(samples: list[RolloutState]) -> dict[str, float]:
-    return {"accuracy": sum(s.reward["score"] > 0 for s in samples) / len(samples)}
+    if not samples:
+        return {"accuracy": 0.0}
+
+    positive = 0
+    for s in samples:
+        reward = s.reward
+        assert isinstance(reward, Mapping)
+        score = reward["score"]
+        if score > 0:
+            positive += 1
+    return {"accuracy": positive / len(samples)}
 
 
 class Evaluator:
@@ -54,7 +66,9 @@ class EvaluatorConfig(BaseModel):
         if self.eval_sample_num > 0:
             eval_batch_size = self.eval_sample_num
         else:
-            assert total_eval_samples > 0, "Total eval samples must be greater than 0 if eval sample num is not provided"
+            assert total_eval_samples > 0, (
+                "Total eval samples must be greater than 0 if eval sample num is not provided"
+            )
             if self.eval_sample_ratio > 0:
                 eval_batch_size = int(total_eval_samples * self.eval_sample_ratio)
             else:

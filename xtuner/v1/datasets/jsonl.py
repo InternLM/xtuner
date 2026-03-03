@@ -25,7 +25,7 @@ from tqdm import tqdm
 from xtuner.v1.datasets.data_item import CacheItem
 from xtuner.v1.utils import SharedMemory, get_logger
 
-from .utils import CachableTokenizeFunction, CacheObj, calculate_xxhash
+from .utils import CachableTokenizeFunction, CacheDict, CacheObj, calculate_xxhash
 
 
 T = TypeVar("T")
@@ -439,11 +439,11 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
     @staticmethod
     def _tokenize_by_offset(
         data: bytes,
-        tokenize_fn: Callable[[dict], CacheObj],
+        tokenize_fn: Callable[[dict], CacheDict | CacheObj],
     ) -> dict:
         line = data.decode()
         tokenized = tokenize_fn(json.loads(line))
-        if hasattr(tokenized, "num_tokens"):
+        if isinstance(tokenized, CacheObj):
             num_tokens = tokenized.num_tokens
         else:
             num_tokens = tokenized["num_tokens"]

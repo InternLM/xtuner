@@ -2,7 +2,11 @@ import json
 import os
 import socket
 from pathlib import Path
-from typing import Any, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, List, Literal, Optional, Union
+
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
 
 from cyclopts import Group, Parameter
 from pydantic import BaseModel, ConfigDict, PrivateAttr
@@ -312,6 +316,25 @@ class RolloutConfig(BaseModel):
             self.max_retry_per_worker = self.rollout_max_batch_size_per_instance
 
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
+
+    def build(self, placement_group: "PlacementGroup"):
+        """Build and return a Ray remote RolloutController from this config.
+
+        Args:
+            placement_group: The placement group for scheduling RolloutWorker actors.
+
+        Returns:
+            A Ray actor handle (proxy) of RolloutController.
+        """
+        import ray
+
+        from xtuner.v1.ray.rollout.controller import RolloutController
+
+        return (
+            ray.remote(RolloutController)
+            .options(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
+            .remote(self, placement_group)
+        )
 
 
 if __name__ == "__main__":
