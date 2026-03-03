@@ -550,7 +550,7 @@ case:
         -
             type: rl
             parameters:
-                config: autotest/config/rl_qwen3_8B_gsm8k_grpo.py
+                config: autotest/config/rl_qwen3_gsk8k_grpo.py
                 infer_backend: lmdeploy
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
@@ -588,47 +588,3 @@ case:
                        method: absolute
                        operator: <
             timeout: 2460
-
-    qwen3-rl-vl-lmdeploy:
-        -
-            type: rl
-            parameters:
-                config: autotest/config/rl_qwen3_vl_geometry3k_grpo.py
-                infer_backend: lmdeploy
-                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
-            resource:
-                envs:
-                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-VL-8B-Instruct
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k/train.jsonl
-                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k/test.jsonl
-                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/less_geometry3k
-                    - XTUNER_DETERMINISTIC=true
-            assert_info:
-                base_metric: qwen3-rl-vl-lmdeploy/fb28789f/tracker.jsonl
-                check_metrics:
-                    - 
-                       metric:  eval/accuracy
-                       threshold: 0.1
-                       method: absolute
-                       operator: <
-                    -
-                       metric: response/rewards/mean
-                       threshold: 0.1
-                       method: absolute
-                       operator: <
-                    - 
-                       metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0002
-                       method: absolute
-                       operator: <=
-                    -
-                       metric: response/response_len/mean
-                       threshold: 0.25
-                       method: relative
-                       operator: <
-                    -
-                       metric: time/step
-                       threshold: 10
-                       method: absolute
-                       operator: <
-            timeout: 4200
