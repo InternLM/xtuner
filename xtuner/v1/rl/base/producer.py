@@ -35,7 +35,7 @@ class ProduceStrategyConfig(ABC, BaseModel):
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
 
     @abstractmethod
-    def build(self) -> "ProduceStrategyConfig": ...
+    def build(self) -> "ProduceStrategy": ...
 
 
 class SyncProduceStrategyConfig(ProduceStrategyConfig):

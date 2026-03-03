@@ -113,14 +113,14 @@ class LMDeployWorker(RolloutWorker):
                 prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
                 payload["input_ids"] = prompt_token_ids
             sample_params.return_routed_experts = True if self.enable_return_routed_experts else False
-            lmdeploy_sample_params = self._transform_sample_params(sample_params)   
+            lmdeploy_sample_params = self._transform_sample_params(sample_params)
             payload.update(sample_params)
         else:
             payload = {
                 "model": self.model_name,
                 "messages": rollout_state.message,
             }
-            lmdeploy_sample_params = self._transform_sample_params(sample_params)   
+            lmdeploy_sample_params = self._transform_sample_params(sample_params)
             lmdeploy_sample_params.pop("no_stop_trim", None)
             lmdeploy_sample_params.pop("return_logprob", None)
             lmdeploy_sample_params.pop("stop_token_ids", None)
