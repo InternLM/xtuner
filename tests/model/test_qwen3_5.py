@@ -16,7 +16,6 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model.compose.qwen3_vl.modeling_vision import init_world_mesh
 
 
-QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
 @unittest.skipIf(
@@ -26,6 +25,7 @@ VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 class TestQwen3_5_VL(DeterministicDDPTestCase):
 
     def _forward(self, model, type, device, sp_size):
+        QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
         if type == 'image':
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_MOE_PATH)
             tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_MOE_PATH, add_vision_id=True).build(
@@ -88,7 +88,8 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             pixel_values = None
             image_grid_thw = None
             position_ids = None
-        
+            
+        from transformers import Qwen3_5MoeForConditionalGeneration
         is_hf_model = isinstance(model, Qwen3_5MoeForConditionalGeneration)
 
         if is_hf_model:
@@ -160,7 +161,8 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         self.create_pg(device)
         
         from transformers import Qwen3_5MoeForConditionalGeneration
-        
+        QWEN3_VL_MOE_PATH = os.environ["QWEN3_5_MOE_PATH"]
+
         hf_model = Qwen3_5MoeForConditionalGeneration.from_pretrained(
                     QWEN3_VL_MOE_PATH,
                     dtype=torch.bfloat16,
