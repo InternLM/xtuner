@@ -1485,7 +1485,6 @@ class Trainer:
         """
         lr = self._lr_scheduler.get_last_lr()[0]
 
-        # TODO: maybe the local_loss anme should be renamed?
         loss_logs_info = train_step_info["logs_info"] | {"local_loss": train_step_info["total_loss"]}
         loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_logs_info.items() if "loss" in k]
         loss_log_str = ", ".join(loss_log_list)

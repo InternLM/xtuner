@@ -641,6 +641,9 @@ class BaseModel(nn.Module):
             dist.all_reduce(tensor_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
             reduced_other_losses[name] = tensor_loss.item()
 
+        if "reduced_loss" in reduced_other_losses:
+            reduced_other_losses["reduced_llm_loss"] = reduced_other_losses.pop("reduced_loss")
+
         ret = BatchForwardInfo(
             logs_info=reduced_other_losses,
             extra_info=train_engine_extra_info,

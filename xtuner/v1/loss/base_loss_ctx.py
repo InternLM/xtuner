@@ -12,7 +12,6 @@ from torch.distributed.nn.functional import all_reduce
 from typing_extensions import Self
 
 from xtuner.v1.loss.utils import sp_split
-from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 
 from .chunk_loss import ChunkLoss
 
@@ -188,6 +187,7 @@ class BaseLossContext(nn.Module, ABC):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
         assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
         if head_bias is not None:
             raise NotImplementedError("Loss does not support head_bias yet.")

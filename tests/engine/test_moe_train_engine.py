@@ -99,7 +99,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
             engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -190,7 +190,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
             engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
