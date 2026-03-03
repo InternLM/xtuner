@@ -5,7 +5,7 @@ import random
 from datetime import datetime
 from pathlib import Path
 from shutil import rmtree
-from typing import List, cast, Any
+from typing import List, Union, cast, Any
 
 import ray
 import torch
@@ -46,7 +46,8 @@ from xtuner.v1.rl.base.producer import ProduceStrategyConfig, SyncProduceStrateg
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
-from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig, NativeJudgerConfig
+from xtuner.v1.ray.judger import NativeJudgerConfig
+from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.base.sampler import SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
@@ -136,6 +137,60 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
             logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
             return False
     return True
+
+
+class RLColocateTrainerConfig(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    resources: AcceleratorResourcesConfig
+    train_worker_cfg: WorkerConfig
+    rollout_config: RolloutConfig
+    judger_config: NativeJudgerConfig
+    tokenizer_path: Union[str, Path]
+    replay_buffer_config: dict
+    agent_loop_manager_cfg: AgentLoopManagerConfig
+    eval_agent_loop_manager_cfg: AgentLoopManagerConfig
+    evaluator_config: EvaluatorConfig
+    load_from: Union[str, Path]
+    rollout_steps: int
+    global_batch_size: int
+
+    enable_evaluate: bool = True
+    enable_initial_evaluate: bool = False
+    evaluate_step: int = 1
+    work_dir: Union[Path, str, None] = None
+    auto_resume: bool = False
+    log_dir: Union[Path, str, None] = None
+    seed: int = 66
+    debug_rollout: bool = False
+    skip_checkpoint_validation: bool = False
+    exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
+
+    def build(self) -> "RLColocateTrainer":
+        return RLColocateTrainer(
+            resources=self.resources,
+            train_worker_cfg=self.train_worker_cfg,
+            rollout_config=self.rollout_config,
+            judger_config=self.judger_config,
+            tokenizer_path=self.tokenizer_path,
+            replay_buffer_config=self.replay_buffer_config,
+            agent_loop_manager_cfg=self.agent_loop_manager_cfg,
+            eval_agent_loop_manager_cfg=self.eval_agent_loop_manager_cfg,
+            evaluator_config=self.evaluator_config,
+            enable_evaluate=self.enable_evaluate,
+            enable_initial_evaluate=self.enable_initial_evaluate,
+            evaluate_step=self.evaluate_step,
+            work_dir=self.work_dir,
+            auto_resume=self.auto_resume,
+            load_from=self.load_from,
+            log_dir=self.log_dir,
+            seed=self.seed,
+            debug_rollout=self.debug_rollout,
+            skip_checkpoint_validation=self.skip_checkpoint_validation,
+            rollout_steps=self.rollout_steps,
+            global_batch_size=self.global_batch_size,
+            exp_tracker=self.exp_tracker,
+        )
 
 
 class RLColocateTrainer:
@@ -683,213 +738,3 @@ class RLColocateTrainer:
                     global_step=current_global_step,
                 )
         self._global_train_step += len(workers_log_item[0]["train_metrics"])
-
-
-if __name__ == "__main__":
-    if not ray.is_initialized():
-        if os.getenv("RAY_MASTER_ADDR"):
-            master_addr = os.getenv("RAY_MASTER_ADDR", "127.0.0.1")
-            client_port = os.getenv("RAY_CLIENT_PORT", "10001")
-            ray_head_address = f"ray://{master_addr}:{client_port}"
-            ray.init(address=ray_head_address)
-        else:
-            ray.init(num_cpus=128)
-
-    model_path = os.environ["MODEL_PATH"]
-    enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", '0')
-    data_path = os.environ["DATA_PATH"]
-    eval_data_path = os.environ["EVAL_DATA_PATH"]
-    work_dir = os.environ["WORK_DIR"]  # TODO: work_dir
-
-    # total_epochs = 3  # 5000
-    rollout_steps = 45  # 5000
-    evaluate_step = 45  # 1000
-    train_optimizer_steps = 1  # 16
-    global_batch_size = 64 * train_optimizer_steps  # 512
-    prompt_repeat_k = 5  # 16
-    rollout_tp_size = 1  # 2
-    rollout_ep_size = 1
-    max_prompt_length = 512  # 2048
-    max_response_length = 1024  # 20*1024  # 8192
-    pack_max_length = 32*1024  # 1*(max_prompt_length + max_response_length)  # 32768
-
-    from xtuner.v1.config import LRConfig
-    from xtuner.v1.config import FSDPConfig
-    from xtuner.v1.config import AdamWConfig
-    from xtuner.v1.rl.grpo import GRPOLossConfig
-    from xtuner.v1.model import get_model_config_from_hf
-    from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
-    import torch.distributed as dist
-
-    print(f"WORLD_SIZE: {os.environ.get('WORLD_SIZE')}.")
-    WORLD_SIZE = int(os.environ.get("WORLD_SIZE", "1"))
-
-    exp_name = 'test_gsm8k'
-
-    # resources
-    resources = AcceleratorResourcesConfig(
-        accelerator="GPU",
-        num_workers=8 * WORLD_SIZE,
-        num_cpus_per_worker=12,
-        cpu_memory_per_worker=16 * 1024**3,  # 16 GB
-    )
-
-    # rollout config
-    rollout_config = RolloutConfig(
-        env=exp_name,
-        device=resources.accelerator,
-        model_path=model_path,
-        dtype="bfloat16",
-        tensor_parallel_size=rollout_tp_size,
-        expert_parallel_size=rollout_ep_size,
-        gpu_memory_utilization=0.8,
-        context_length = max_response_length + max_prompt_length,
-        # rollout_max_batch_size_per_instance=512,
-        enable_return_routed_experts=True if enable_return_routed_experts == "1" else False,
-    )
-
-    # judger config
-    judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
-
-    # worker config
-    lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-    fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
-
-    model_cfg = get_model_config_from_hf(Path(model_path))
-    if hasattr(model_cfg, "balancing_loss_cfg"):
-        model_cfg.balancing_loss_cfg = None
-    if hasattr(model_cfg, "z_loss_cfg"):
-        model_cfg.z_loss_cfg = None
-    optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
-    
-    loss_cfg = GRPOLossConfig(
-        policy_loss_cfg=dict(
-            cliprange_high=0.28,  # TODO: 0.2
-            cliprange_low=0.2,
-            loss_type=os.environ.get("LOSS_TYPE", "vanilla"),
-            clip_ratio_c=10.0,
-            log_prob_diff_min=-20.0,
-            log_prob_diff_max=20.0,
-        ),
-        ignore_idx=-100,
-        use_kl_loss=False,  # TODO: True
-        kl_loss_coef=0.0,  # TODO: 0.001
-        kl_loss_type="low_var_kl",
-        mode=os.environ.get("LOSS_MODE", "chunk"),
-        chunk_size=512,
-    )
-    train_worker_cfg: WorkerConfig = WorkerConfig(
-        model_cfg=model_cfg,
-        load_from=model_path,
-        optim_cfg=optim_cfg,
-        loss_cfg=loss_cfg,
-        lr_cfg=lr_cfg,
-        fsdp_cfg=fsdp_cfg,
-        sp_size=int(os.environ.get("SP_SIZE", "1")),
-        optimizer_steps=train_optimizer_steps,
-        pack_max_length=pack_max_length,
-    )
-
-    # train agent loop manager config
-    # train sampler config
-    train_dataset = DatasetConfig(name=exp_name, anno_path=data_path)
-    tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
-
-    train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
-    dataloader_cfg = DataloaderConfig(
-        dataset_config_list=train_dataset_cfg,
-        pack_max_length=pack_max_length,
-        collator="fake_collator",
-        pack_level="none",
-    )
-    sampler_config = SamplerConfig(
-        dataloader_cfg=dataloader_cfg,
-        prompt_repeat_k=prompt_repeat_k,
-    )
-
-    # train agent loop config
-    sample_params = SampleParams(
-        max_tokens=max_response_length,
-        top_k=0,
-        top_p=1.0,
-        temperature=1.0,
-        min_tokens=0,
-    )
-    agent_loop_config = SingleTurnAgentLoopConfig(
-        hf_checkpoint=model_path,
-        sample_params=sample_params,
-    )
-    produce_strategy_config = SyncProduceStrategyConfig()
-    agent_loop_manager_cfg = AgentLoopManagerConfig(
-        task_name="train_task",
-        agent_loop_config=agent_loop_config,
-        produce_strategy_config=produce_strategy_config,
-        sampler_config=sampler_config,
-    )
-
-    # eval agent loop manager config
-    eval_dataset = DatasetConfig(name=exp_name, anno_path=eval_data_path, sample_ratio=1.0)
-    eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
-    eval_dataloader_cfg = DataloaderConfig(
-        dataset_config_list=eval_dataset_cfg,
-        pack_max_length=pack_max_length,
-        collator="fake_collator",
-        pack_level="none",
-    )
-    eval_sampler_config = SamplerConfig(
-        dataloader_cfg=eval_dataloader_cfg,
-        prompt_repeat_k=1,
-    )
-
-    eval_sample_params = SampleParams(
-        max_tokens=max_response_length,
-        top_k=1,
-        top_p=1.0,
-        temperature=0.0,
-        min_tokens=0,
-    )
-    eval_agent_loop_config = SingleTurnAgentLoopConfig(
-        hf_checkpoint=model_path,
-        sample_params=eval_sample_params,
-    )
-    eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
-        task_name="eval_task",
-        agent_loop_config=eval_agent_loop_config,
-        sampler_config=eval_sampler_config,
-    )
-
-    # evaluate config
-    evaluator_config = EvaluatorConfig(compute_metric_func=None)
-    # Finally, build the trainer
-    trainer = RLColocateTrainer(
-        resources=resources,
-        train_worker_cfg=train_worker_cfg,
-        rollout_config=rollout_config,
-        judger_config=judger_config,
-        replay_buffer_config=dict(),  # TODO
-        tokenizer_path=model_path,
-
-        # sampler_config=sampler_config,
-        # agent_loop_config=agent_loop_config,
-        # produce_strategy_config=produce_strategy_config,
-        agent_loop_manager_cfg=agent_loop_manager_cfg,
-
-        eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
-        evaluator_config=evaluator_config,
-        enable_evaluate=True,
-        enable_initial_evaluate=False,
-        evaluate_step=evaluate_step,
-
-        load_from=model_path,
-        work_dir=work_dir,
-        seed=123,
-        debug_rollout=False,
-
-        rollout_steps=rollout_steps,
-        global_batch_size=global_batch_size,
-    )
-
-    trainer.fit()
-
-    if dist.is_initialized():
-        dist.destroy_process_group()
