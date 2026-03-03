@@ -184,7 +184,7 @@ class TransformerConfig(XTunerBaseModelConfig):
         return self.attention.head_dim
 
     @computed_field
-    def layers_type(self) -> list[Literal["full_attention", "sliding_attention"]]:
+    def layers_type(self) -> list[Literal["full_attention", "sliding_attention", "linear_attention"]]:
         if not self.use_sliding_window:
             return ["full_attention"] * self.num_hidden_layers
         else:

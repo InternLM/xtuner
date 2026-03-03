@@ -24,7 +24,6 @@ def _triton_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> t
 
 
 def native_zero_centered_rms_norm(x: torch.Tensor, weight: torch.Tensor, epsilon: float) -> torch.Tensor:
-    # TODO: is native_rms_norm ?
     def _norm(x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + epsilon)
 
@@ -62,7 +61,11 @@ def get_zero_centered_rms_norm_fn() -> RMSNormProtocol:
         else:
             return native_zero_centered_rms_norm
     elif device == "npu":
-        raise NotImplementedError("Zero-centered RMSNorm is not implemented on NPU")
+
+        def _not_implemented(*args, **kwargs):
+            raise NotImplementedError("Zero-centered RMSNorm is not implemented on NPU")
+
+        return _not_implemented
     else:
         raise NotImplementedError(f"RMSNorm is not implemented on {device}")
 
