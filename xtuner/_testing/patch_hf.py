@@ -7,8 +7,9 @@ def patch_hf_rms_norm(module: nn.Module) -> None:
     for name, submodule in module.named_modules():
         if "RMSNorm" in submodule.__class__.__name__ and isinstance(submodule, nn.Module):
             dim = submodule.weight.shape
+            device = submodule.weight.device
             eps = submodule.variance_epsilon
-            new_submodule = RMSNorm(hidden_size=dim, eps=eps)
+            new_submodule = RMSNorm(hidden_size=dim, eps=eps).to(device)
             new_submodule.load_state_dict(submodule.state_dict())
             parts = name.split(".")
             parent = module
