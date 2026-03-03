@@ -71,6 +71,18 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
+def check_fa3():
+    if os.environ.get("XTUNER_USE_FA3", "0") != "1":
+        return
+
+    try:
+        from xtuner.v1.ops.flash_attn import get_flash_attn_varlen
+
+        get_flash_attn_varlen()
+    except RuntimeError as e:
+        raise RuntimeError(f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0.")
+
+
 def bind_train_rollout(
     train_controller: TrainingControllerProxy,
     rollout_controller: RolloutControllerProxy,
@@ -248,22 +260,12 @@ class RLColocateTrainer:
         # exp tracker
         exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
     ):
-        # check fa3 first
-        if os.environ.get("XTUNER_USE_FA3", "0") == "1":
-            try:
-                from xtuner.v1.ops.flash_attn import get_flash_attn_varlen
-
-                get_flash_attn_varlen()
-            except RuntimeError as e:
-                raise RuntimeError(
-                    f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0."
-                )
+        check_fa3()
 
         # work_dir
         work_dir = Path(work_dir) if work_dir else Path.cwd() / "work_dirs"
         if get_rank() == 0:
             work_dir.mkdir(parents=True, exist_ok=True)
-        self._work_dir = work_dir
         self._meta = XTunerMeta.build(work_dir, self._META_PATH, auto_resume)
 
         # log
@@ -333,16 +335,12 @@ class RLColocateTrainer:
         if debug_rollout:
             self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
         self._debug_rollout = debug_rollout
-        self._exp_tracker = self._init_tracker(exp_tracker, log_dir / self._EXP_TRACKING_PATH)
+        self._exp_tracker = get_writer(writer_type=exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
 
     @property
     def exp_dir(self) -> Path:
         return Path(self._meta.latest_exp.exp_dir)
-
-    def _init_tracker(self, exp_tracker: Literal["tensorboard", "jsonl"], work_dir: Path):
-        writer = get_writer(writer_type=exp_tracker, log_dir=work_dir)
-        return writer
 
     def fit(self):
         self.logger.info("Start RL training")
@@ -370,7 +368,6 @@ class RLColocateTrainer:
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
-                # rollout_info = self._rollout_step(rollout_idx, step_timer_dict)
                 # TODO: ray.get(self.rollout_controller.check_health.remote())
                 train_batch: list[list[RolloutState]] = asyncio.run(
                     self.agent_loop_manager.produce_batch(self.global_batch_size)
@@ -395,13 +392,6 @@ class RLColocateTrainer:
                         )
                     self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
-                    # train_log_info = self._train_step(
-                    #     rollout_idx,
-                    #     rollout_info["data_groups"],
-                    #     rollout_info["multimodal_train_infos"],
-                    #     step_timer_dict,
-                    # )
-                    # metrics = self.train_controller.fit(train_batch)
                     with timer("training", step_timer_dict):
                         workers_log_item: list[WorkerLogItem] = ray.get(
                             self.train_controller.fit.remote(
