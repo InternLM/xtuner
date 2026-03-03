@@ -1,7 +1,7 @@
 import re
 from typing import Any, Callable, List, Optional, Tuple
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .native import NativeJudgerConfig, RouterJudgerConfig
 
@@ -291,9 +291,8 @@ def compute_reward(response, label, extra_info):
     return {"score": reward, "acc": out["acc"]}
 
 
-class _DapoMathJudgerDefaults:
+class _DapoMathJudgerDefaults(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-
     eos_token: List[str] | str
     enable_overlong_buffer: bool
     score: int = 1
