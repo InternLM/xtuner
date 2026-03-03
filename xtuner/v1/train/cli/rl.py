@@ -10,7 +10,6 @@ from cyclopts import App, Parameter
 from cyclopts.group import Group
 
 from xtuner.v1.rl.utils import register_cleanup
-from xtuner.v1.train.rl_trainer import RLTrainer
 from xtuner.v1.utils import Config
 from xtuner.v1.utils.track_rl_mem import monitor_actor_memory
 
@@ -56,7 +55,8 @@ def main(
         track_thread.start()
 
     trainer_cfg = Config.fromfile(config)["trainer"]
-    trainer = RLTrainer.from_config(trainer_cfg)
+    # trainer = RLTrainer.from_config(trainer_cfg)
+    trainer = trainer_cfg.build()
     trainer.fit()
 
     if dist.is_initialized():
