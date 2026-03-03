@@ -121,7 +121,10 @@ class TestMockRollout(unittest.TestCase):
         del os.environ["XTUNER_USE_FA3"]
 
     def setUp(self):
-        ray.init(num_cpus=80, ignore_reinit_error=True)
+        current_dir = os.path.abspath(os.path.dirname(__file__))
+        python_path = f"{current_dir}:{os.environ.get('PYTHONPATH', '')}"
+        
+        ray.init(num_cpus=80, ignore_reinit_error=True, runtime_env={"env_vars": {"PYTHONPATH": python_path}})
         self.global_batch_size = 3
         self.max_prompt_length = 4096
         self.max_response_length = 128
