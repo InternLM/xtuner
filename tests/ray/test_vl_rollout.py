@@ -65,8 +65,8 @@ class TestRollout(unittest.TestCase):
             context_length=self.max_prompt_length + self.max_response_length,
             worker_log_dir=self.worker_log_dir,
         )
-        from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
-        geo3k_judger_config = GEO3KJudgerConfig()
+        from xtuner.v1.ray.judger.geo3k import GEO3KRouterJudgerConfig
+        geo3k_judger_config = GEO3KRouterJudgerConfig()
         self.judger_cfg = JudgerConfig(reward_judger_configs=[geo3k_judger_config])
 
         self.dataflow_cfg = DataFlowConfig(
