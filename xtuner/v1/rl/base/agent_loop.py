@@ -47,6 +47,11 @@ class AgentLoop(ABC):
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState) -> RolloutState: ...
 
+    async def pause(self) -> None:
+        """Pause the agent loop if supported by the implementation."""
+        # Default implementation is a no-op to keep behavior unchanged.
+        return None
+
     async def generate_group(self, rollout_state: list[RolloutState]) -> list[RolloutState]:
         pending_tasks = []
         for state in rollout_state:

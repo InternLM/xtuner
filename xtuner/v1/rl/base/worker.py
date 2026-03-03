@@ -4,7 +4,13 @@ import os
 import time
 from itertools import chain
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
+from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
+
+
+if TYPE_CHECKING:
+    from ray.util.placement_group import PlacementGroup
+
+    from .controller import TrainingControllerProxy
 
 import ray
 import requests
@@ -166,6 +172,26 @@ class WorkerConfig(BaseModel):
     sft_global_batch_size: int = -1
     rollout_steps_per_sft: int = 1
     sft_loss_cfg: CELossConfig = CELossConfig()
+
+    def build(self, placement_group: "PlacementGroup") -> "TrainingControllerProxy":
+        """Build training workers and controller from this config and placement
+        group."""
+        # import here to avoid circular import
+        from xtuner.v1.ray.base import AutoAcceleratorWorkers
+        from xtuner.v1.rl.base.controller import TrainingController
+
+        TrainingWorkerCls = ray.remote(
+            runtime_env={
+                "env_vars": {
+                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
+                    "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+                }
+            }
+        )(TrainingWorker)
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorkerCls, self, placement_group)
+        ray.wait([w.ready.remote() for w in train_workers])
+        return TrainingController.remote(workers=train_workers)
 
 
 class WorkerInputItem(TypedDict):

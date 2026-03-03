@@ -41,9 +41,10 @@ def ray_method(f: Callable[Concatenate[C, P], T]) -> RemoteMethod[P, T]: ...
 
 
 def ray_method(f=None, *, num_returns=1, concurrency_group=None):
-    """Decorator for Ray actor methods. Compatible with Ray versions that require
-    at least one of num_returns or concurrency_group. Ray.method() must be called
-    with keyword args only, then applied to the function: ray.method(num_returns=1)(f).
+    """Decorator for Ray actor methods.
+
+    Compatible with Ray versions that require at least one of num_returns or concurrency_group. Ray.method() must be
+    called with keyword args only, then applied to the function: ray.method(num_returns=1)(f).
     """
     import ray
 
