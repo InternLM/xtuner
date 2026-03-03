@@ -169,12 +169,10 @@ class CELossContext(BaseLossContext):
         loss_weight = loss_weight.flatten()
 
         rank_grad_tokens = (shifted_labels != self.loss_cfg.ignore_idx).sum()
-        if rank_grad_tokens == 0:
-            loss = logits.sum() * 0
-        else:
-            loss = F.cross_entropy(logits, shifted_labels, reduction="none", ignore_index=self.loss_cfg.ignore_idx)
-            # Step 2.b in the loss calculation: sum the loss over all tokens
-            loss = (loss * loss_weight).sum()
+        loss_when_zero = logits.sum() * 0
+        loss_normal = F.cross_entropy(logits, shifted_labels, reduction="none", ignore_index=self.loss_cfg.ignore_idx)
+        loss_normal = (loss_normal * loss_weight.to(loss_normal.device)).sum()
+        loss = torch.where(rank_grad_tokens == 0, loss_when_zero, loss_normal)
 
         return loss, (logits, {})
 

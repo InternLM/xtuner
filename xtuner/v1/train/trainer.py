@@ -764,7 +764,7 @@ class Trainer:
             self._log_step(
                 loss_log=loss_log,
                 training_metrics=training_metrics,
-                grad_norm=grad_norm.item(),
+                grad_norm=grad_norm,
                 data_time=data_time,
                 step_time=step_time,
                 internal_metrics=internal_metrics,
