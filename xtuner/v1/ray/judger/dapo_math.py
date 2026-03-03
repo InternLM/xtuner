@@ -1,9 +1,9 @@
 import re
 from typing import Any, Callable, List, Optional, Tuple
 
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .native import NativeJudgerConfig
+from .native import NativeJudgerConfig, RouterJudgerConfig
 
 
 # Adapted from https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/math_dapo.py
@@ -291,8 +291,8 @@ def compute_reward(response, label, extra_info):
     return {"score": reward, "acc": out["acc"]}
 
 
-class DapoMathJudgerConfig(NativeJudgerConfig):
-    model_config = ConfigDict(extra="forbid")
+class _DapoMathJudgerDefaults(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     eos_token: List[str] | str
     enable_overlong_buffer: bool
     score: int = 1
@@ -301,62 +301,54 @@ class DapoMathJudgerConfig(NativeJudgerConfig):
     overlong_buffer_len: Optional[int] = None
     overlong_penalty_factor: Optional[float] = None
     tokenizer: Any = Field(default=None, exclude=True)
-    reward_handler: Callable = Field(default=compute_reward, exclude=True)
+    reward_handler: Callable | str = Field(default=compute_reward, exclude=True)
+    extra_info: dict = Field(default_factory=dict, exclude=True)
 
-    def __init__(
-        self,
-        judger_name: str,
-        eos_token: List[str] | str,
-        enable_overlong_buffer: bool,
-        max_response_len: Optional[int],
-        overlong_buffer_len: Optional[int],
-        overlong_penalty_factor: Optional[float],
-        tokenizer: Any,
-        score: int = 1,
-        format_score: int = 0,
-    ):
-        if isinstance(eos_token, str):
-            assert eos_token.strip() != "", "eos_token string must not be empty"
-        elif isinstance(eos_token, list):
-            assert all(isinstance(e, str) and e.strip() != "" for e in eos_token), (
+    @model_validator(mode="after")
+    def _pack_extra_info(self) -> "_DapoMathJudgerDefaults":
+        if isinstance(self.eos_token, str):
+            assert self.eos_token.strip() != "", "eos_token string must not be empty"
+        elif isinstance(self.eos_token, list):
+            assert all(isinstance(e, str) and e.strip() != "" for e in self.eos_token), (
                 "All eos_token list elements must be non-empty strings"
             )
-            assert len(eos_token) > 0, "eos_token list must not be empty"
+            assert len(self.eos_token) > 0, "eos_token list must not be empty"
         else:
             raise TypeError("eos_token must be a non-empty string or a non-empty list of strings")
 
-        # 初始化基类
-        super().__init__(
-            judger_name=judger_name,
-            eos_token=eos_token,
-            enable_overlong_buffer=enable_overlong_buffer,
-            score=score,
-            format_score=format_score,
-            max_response_len=max_response_len,
-            overlong_buffer_len=overlong_buffer_len,
-            overlong_penalty_factor=overlong_penalty_factor,
-            tokenizer=tokenizer,
-        )
-
-        self.extra_info.update(
+        self.extra_info.update(  # type: ignore[attr-defined]
             {
-                "eos_token": eos_token,
-                "score": score,
-                "format_score": format_score,
+                "eos_token": self.eos_token,
+                "score": self.score,
+                "format_score": self.format_score,
             }
         )
 
-        if enable_overlong_buffer:
-            assert max_response_len is not None
-            assert overlong_buffer_len is not None
-            assert overlong_penalty_factor is not None
-            assert tokenizer is not None
-            self.extra_info.update(
+        if self.enable_overlong_buffer:
+            assert self.max_response_len is not None, "max_response_len is required."
+            assert self.overlong_buffer_len is not None, "overlong_buffer_len is required."
+            assert self.overlong_penalty_factor is not None, "overlong_penalty_factor is required."
+            assert self.tokenizer is not None, "tokenizer is required."
+            self.extra_info.update(  # type: ignore[attr-defined]
                 {
-                    "enable_overlong_buffer": enable_overlong_buffer,
-                    "max_response_len": max_response_len,
-                    "overlong_buffer_len": overlong_buffer_len,
-                    "overlong_penalty_factor": overlong_penalty_factor,
-                    "tokenizer": tokenizer,
+                    "enable_overlong_buffer": self.enable_overlong_buffer,
+                    "max_response_len": self.max_response_len,
+                    "overlong_buffer_len": self.overlong_buffer_len,
+                    "overlong_penalty_factor": self.overlong_penalty_factor,
+                    "tokenizer": self.tokenizer,
                 }
             )
+
+        return self
+
+
+class DapoMathNativeJudgerConfig(_DapoMathJudgerDefaults, NativeJudgerConfig):
+    """Configuration for the DapoMath native judger."""
+
+
+class DapoMathRouterJudgerConfig(_DapoMathJudgerDefaults, RouterJudgerConfig):
+    """Configuration for the DapoMath router judger."""
+
+    num_ray_actors: int = 1
+    num_cpus_per_actor: int = 1
+    cpu_memory_per_actor: int = 1024**3
