@@ -1,15 +1,13 @@
 import asyncio
 import os
 import random
-from datetime import datetime
 from pathlib import Path
-from shutil import rmtree
-from typing import List, Union, cast, Any
+from typing import Any, List, Union, cast
 
 import ray
 import torch
-from mmengine import load
 from mmengine.dist import get_rank
+from pydantic import BaseModel, ConfigDict
 from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer
@@ -22,41 +20,18 @@ from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
-from xtuner.v1.ray.judger.native import RouterJudgerConfig
+from xtuner.v1.ray.judger.native import RouterJudgerConfig, NativeJudgerConfig
 from xtuner.v1.ray.rollout.controller import RolloutController, RolloutControllerProxy
 from xtuner.v1.rl.base import (
-    TrainingController,
     TrainingControllerProxy,
-    TrainingWorkerClass,
-    TrainingWorkerProxy,
     WorkerConfig,
     WorkerLogItem,
 )
-from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
-from xtuner.v1.train import ResumeConfig
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer
-from xtuner.v1.utils.device import get_device, get_torch_device_module
-from xtuner.v1.utils.env_check import get_rollout_engine_version
-
-from xtuner.v1.train.trainer import ExpHistory, ExpInfo, GitInfo, LoadCheckpointConfig, XTunerMeta
-
-from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
-from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoop, AgentLoop, AgentLoopConfig
-from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManager, AgentLoopManagerConfig
-from xtuner.v1.rl.base.producer import ProduceStrategyConfig, SyncProduceStrategyConfig
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
-from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
-from xtuner.v1.ray.judger import NativeJudgerConfig
-from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
-from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.base.sampler import SamplerConfig
+from xtuner.v1.rl.base.replay_buffer import ReplayBuffer, SyncReplayBufferConfig, AsyncReplayBufferConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.train.trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
-from xtuner.v1.utils import get_logger, record_git_info, timer
+from xtuner.v1.train.trainer import XTunerMeta
+from xtuner.v1.utils import get_logger, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
@@ -65,6 +40,18 @@ PG_READY_TIMEOUT = 30
 TRAINER_RAY_GET_TIMEOUT = 5 * 3600  # 5 hour
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+
+
+def check_fa3():
+    if os.environ.get("XTUNER_USE_FA3", "0") != "1":
+        return
+
+    try:
+        from xtuner.v1.ops.flash_attn import get_flash_attn_varlen
+
+        get_flash_attn_varlen()
+    except RuntimeError as e:
+        raise RuntimeError(f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0.")
 
 
 def bind_train_rollout(
@@ -77,7 +64,7 @@ def bind_train_rollout(
     return
 
 
-class TrainInfo(TypedDict):
+class TrainInfo(TypedDict, total=False):
     data_info: dict[str, float]
     workers_log_item: list[WorkerLogItem]
 
@@ -148,14 +135,14 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
 
 
 class RLColocateTrainerConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     resources: AcceleratorResourcesConfig
     train_worker_cfg: WorkerConfig
     rollout_config: RolloutConfig
-    judger_config: NativeJudgerConfig
+    judger_config: NativeJudgerConfig | RouterJudgerConfig
     tokenizer_path: Union[str, Path]
-    replay_buffer_config: dict
+    replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
     agent_loop_manager_cfg: AgentLoopManagerConfig
     eval_agent_loop_manager_cfg: AgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
@@ -217,7 +204,7 @@ class RLColocateTrainer:
         # Sampler config
         # sampler_config: SamplerConfig,
         tokenizer_path: str | Path,
-        replay_buffer_config: dict,
+        replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig,
         # agent loop config
         # agent_loop_config: AgentLoopConfig,
         # agent loop manager config
@@ -244,23 +231,13 @@ class RLColocateTrainer:
         # exp tracker
         exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
     ):
-        # check fa3 first
-        if os.environ.get("XTUNER_USE_FA3", "0") == "1":
-            try:
-                from xtuner.v1.ops.flash_attn import get_flash_attn_varlen
-
-                get_flash_attn_varlen()
-            except RuntimeError as e:
-                raise RuntimeError(
-                    f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0."
-                )
+        check_fa3()
 
         # work_dir
         work_dir = Path(work_dir) if work_dir else Path.cwd() / "work_dirs"
         if get_rank() == 0:
             work_dir.mkdir(parents=True, exist_ok=True)
-        self._work_dir = work_dir
-        self._meta = self._init_xtuner_meta(work_dir, auto_resume)
+        self._meta = XTunerMeta.build(work_dir, self._META_PATH, auto_resume)
 
         # log
         log_dir = self.exp_dir / "logs"
@@ -291,23 +268,15 @@ class RLColocateTrainer:
         rollout_config.worker_log_dir = log_dir
 
         # build train controller and rollout controller
-        self.train_controller = self._build_train_controller(train_worker_cfg)
+        self.train_controller = train_worker_cfg.build(self._pg)
 
-        self.rollout_controller = self.init_rollout_controller(rollout_config, self._pg)
+        self.rollout_controller = rollout_config.build(self._pg)
 
         # build judger
         judger = judger_config.build()
 
-        # build agent_loop
-        # agent_loop  = agent_loop_config.build(rollout_controller=self.rollout_controller, judger=judger)
-
-        # build produce_strategy
-        # stragegy = produce_strategy_config.build()
-        # TODO: build replay_buffer
-        replay_buffer = ReplayBuffer()
-        # build sampler
+        replay_buffer = replay_buffer_config.build()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        # sampler = sampler_config.build(tokenizer=self.tokenizer, replay_buffer=replay_buffer)
         # build agnet_loop_manager
         self.agent_loop_manager = agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
@@ -323,7 +292,7 @@ class RLColocateTrainer:
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
         )
-        # eval 相关由 Trainer 持有，Evaluator 只负责 run() 计算指标
+
         self._enable_evaluate = enable_evaluate
         self._enable_initial_evaluate = enable_initial_evaluate
         self._evaluate_step = evaluate_step
@@ -336,136 +305,12 @@ class RLColocateTrainer:
         if debug_rollout:
             self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
         self._debug_rollout = debug_rollout
-        self._exp_tracker = self._init_tracker(exp_tracker, log_dir / self._EXP_TRACKING_PATH)
+        self._exp_tracker = get_writer(writer_type=exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
 
     @property
     def exp_dir(self) -> Path:
         return Path(self._meta.latest_exp.exp_dir)
-
-    # TODO: simplify with XTunerMeta.build()
-    def _init_xtuner_meta(self, work_dir: Path, resume: bool) -> XTunerMeta:
-        if not work_dir.exists():
-            work_dir.mkdir(parents=True, exist_ok=True)
-
-        meta_path = work_dir / self._META_PATH
-        if not meta_path.exists():
-            meta = XTunerMeta(exps=[])
-            with open(meta_path, "w") as f:
-                f.write(meta.model_dump_json(indent=2))
-
-        meta = cast(XTunerMeta, XTunerMeta.model_validate(load(meta_path, file_format="json")))
-
-        resume = resume and bool(meta.exps)
-
-        if resume and meta.exps:
-            latest_exp = meta.exps[-1]
-            latest_exp_history = latest_exp.history[-1]
-
-            begin = cast(int, latest_exp_history.get("end") or latest_exp_history["begin"])
-            exp_dir = Path(latest_exp.exp_dir)
-            git_dir = exp_dir / f"git-info-begin-{begin}"
-
-            if not git_dir:
-                git_dir.mkdir(parents=True, exist_ok=True)
-
-            staged_path, unstaged_path = git_dir / "staged.diff", git_dir / "unstaged.diff"
-
-            if not git_dir.exists():
-                git_dir.mkdir(parents=True, exist_ok=True)
-            commit = record_git_info(staged_path, unstaged_path)
-            git_info = GitInfo(
-                commit=commit,
-                staged=str(staged_path),
-                unstaged=str(unstaged_path),
-            )
-
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            new_exp_history = ExpHistory(
-                begin=begin,
-                timestamp=timestamp,
-                git_info=git_info,
-            )
-            latest_exp.history.append(new_exp_history)
-        else:
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            exp_dir = work_dir / timestamp
-            git_dir = Path(f"{exp_dir}/git-info-begin-{0}")
-
-            if not git_dir.exists():
-                git_dir.mkdir(parents=True, exist_ok=True)
-
-            staged_path, unstaged_path = git_dir / "staged.diff", git_dir / "unstaged.diff"
-            commit = record_git_info(staged_path, unstaged_path)
-            git_info = GitInfo(
-                commit=commit,
-                staged=str(staged_path),
-                unstaged=str(unstaged_path),
-            )
-
-            new_history = ExpHistory(
-                begin=0,
-                timestamp=timestamp,
-                git_info=git_info,
-            )
-            new_exp = ExpInfo(history=[new_history], exp_dir=str(exp_dir))
-            meta.exps.append(new_exp)
-        return meta
-
-    # TODO: simplify with WorkerConfig.build()
-    def _build_train_controller(self, train_worker_cfg: WorkerConfig) -> TrainingControllerProxy:
-        TrainingWorker = cast(
-            TrainingWorkerClass,
-            ray.remote(
-                runtime_env={
-                    "env_vars": {
-                        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                        "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
-                    }
-                },
-            )(BaseTrainingWorker),
-        )
-        train_workers: list[TrainingWorkerProxy]
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorker, train_worker_cfg, self._pg)
-        ray.wait([worker.ready.remote() for worker in train_workers])
-        train_controller = TrainingController.remote(workers=train_workers)
-        return train_controller
-
-    # TODO: simplify with RolloutConfig.build()
-    def init_rollout_controller(self, rollout_cfg: Any, placement_group: Any):
-        """Initializes the rollout controller with the appropriate worker
-        backend.
-
-        Based on the `rollout_cfg`, this method selects and initializes the corresponding
-        rollout worker (e.g., `LMDeployWorker` or `vLLMWorker`). It then creates and
-        returns a `RolloutController` to manage these workers.
-
-        Args:
-            rollout_cfg (Any): The configuration for the rollout controller.
-            placement_group (Any): The placement group for scheduling Ray actors.
-
-        Returns:
-            The initialized rollout controller, or None if `rollout_cfg` is not provided.
-
-        Raises:
-            NotImplementedError: If the specified rollout backend is not supported.
-        """
-
-        rollout_controller = None
-        if rollout_cfg is None:
-            return rollout_controller
-
-        rollout_controller = (
-            ray.remote(RolloutController)
-            .options(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
-            .remote(rollout_cfg, placement_group)
-        )  # type: ignore[attr-defined]
-        return rollout_controller
-
-    def _init_tracker(self, exp_tracker: Literal["tensorboard", "jsonl"], work_dir: Path):
-        writer = get_writer(writer_type=exp_tracker, log_dir=work_dir)
-        return writer
 
     def fit(self):
         self.logger.info("Start RL training")
@@ -493,7 +338,6 @@ class RLColocateTrainer:
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
-                # rollout_info = self._rollout_step(rollout_idx, step_timer_dict)
                 # TODO: ray.get(self.rollout_controller.check_health.remote())
                 train_batch: list[list[RolloutState]] = asyncio.run(
                     self.agent_loop_manager.produce_batch(self.global_batch_size)
@@ -518,13 +362,6 @@ class RLColocateTrainer:
                         )
                     self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
-                    # train_log_info = self._train_step(
-                    #     rollout_idx,
-                    #     rollout_info["data_groups"],
-                    #     rollout_info["multimodal_train_infos"],
-                    #     step_timer_dict,
-                    # )
-                    # metrics = self.train_controller.fit(train_batch)
                     with timer("training", step_timer_dict):
                         workers_log_item: list[WorkerLogItem] = ray.get(
                             self.train_controller.fit.remote(
@@ -582,7 +419,7 @@ class RLColocateTrainer:
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
                 item = group[i].response
-                logprobs = None
+                logprobs: list[float] | None = None
                 if group[i].response_ids is not None:
                     response_ids = group[i].response_ids
                     if isinstance(response_ids, torch.Tensor):
@@ -591,7 +428,7 @@ class RLColocateTrainer:
                     if logprobs is not None:
                         assert len(logprobs) == len(response_ids), f"{len(logprobs)} vs {len(response_ids)}"
                         # 只有 response 部分有 logprobs, 需要前面追加
-                        logprobs = [0] * (len(prompt_ids) - 1) + logprobs
+                        logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs
                     else:
                         logprobs = None
                 else:
@@ -737,10 +574,10 @@ class RLColocateTrainer:
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
                 current_global_step = train_start_step + step_idx
-                metrics = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
+                metrics: dict[str, Any] = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
 
                 self._exp_tracker.add_scalars(
-                    tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": v for k, v in metrics.items()},
+                    tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": float(v) for k, v in metrics.items()},
                     global_step=current_global_step,
                 )
         self._global_train_step += len(workers_log_item[0]["train_metrics"])

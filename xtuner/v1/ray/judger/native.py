@@ -15,6 +15,7 @@ from xtuner.v1.utils.type_helper import ray_method
 
 class Judger(ABC):
     @abstractmethod
+    @ray_method
     async def judge(self, rollout_state: RolloutState) -> RolloutState: ...
 
 
