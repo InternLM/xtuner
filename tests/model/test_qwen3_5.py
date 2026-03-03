@@ -4,8 +4,8 @@ import parametrize
 import torch
 from packaging.version import Version
 from transformers import __version__ as transformers_version
-from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
-from transformers import AutoTokenizer, Qwen3_5MoeForConditionalGeneration,AutoProcessor
+from xtuner._testing import DeterministicDDPTestCase
+from transformers import AutoTokenizer
 import torch.distributed as dist
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.loss.ce_loss import CELossConfig
@@ -158,6 +158,8 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
     )
     def test_qwen3_5_vl_run(self, device, sp_size, tol):
         self.create_pg(device)
+        
+        from transformers import Qwen3_5MoeForConditionalGeneration
         
         hf_model = Qwen3_5MoeForConditionalGeneration.from_pretrained(
                     QWEN3_VL_MOE_PATH,
