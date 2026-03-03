@@ -45,7 +45,8 @@ class SetNode(ConditionNode):
 
 class BetweenNode(ConditionNode):
     def __init__(self, field: str, lower: Any, upper: Any):
-        assert lower <= upper, "lower bound must be <= upper bound"
+        if lower > upper:
+            raise ValueError("lower bound must be less than or equal to upper bound")
         self.field = field
         self.op = "$between"
         self.lower = lower
@@ -81,6 +82,8 @@ def parse_query(expr: Union[dict, QueryNode]) -> QueryNode:
                         if op in typing.get_args(ScalarOperator):
                             conditions.append(ScalarNode(field=key, op=op, value=op_val))
                         elif op in typing.get_args(SetOperator):
+                            if not isinstance(op_val, (list, tuple)):
+                                raise ValueError(f"操作符 '{op}' 需要传入一个列表或元组")
                             conditions.append(SetNode(field=key, op=op, value=op_val))
                         elif op == "$between":
                             if not isinstance(op_val, (list, tuple)) or len(op_val) != 2:

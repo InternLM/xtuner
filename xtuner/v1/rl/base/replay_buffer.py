@@ -370,5 +370,6 @@ class AsyncReplayBufferConfig(BaseModel):
     max_staleness: int = 0
 
     def build(self):
+        assert self.max_staleness >= self.min_staleness, "max_staleness must be greater than or equal to min_staleness"
         policy = StalenessBackend(max_staleness=self.max_staleness, min_staleness=self.min_staleness)
         return ReplayBuffer(policy=policy, storage_backend=NaiveStorage())
