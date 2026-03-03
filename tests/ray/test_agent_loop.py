@@ -11,7 +11,7 @@ from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
 from xtuner.v1.ray.rollout import RolloutController
-from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
+from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
 from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
 from xtuner.v1.rl.base.sampler import SamplerConfig
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
@@ -79,7 +79,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             context_length=self.context_length,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")  
+        judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)
@@ -87,7 +87,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         # 2. 创建 rollout_controller, judger
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
-        gsm8k_judger = judger_config.build_router()
+        gsm8k_judger = judger_config.build()
         # 3. 创建 AgentLoop
         agent_loop = agent_loop_cfg.build(rollout_controller=rollout_controller, judger=gsm8k_judger)
         # 4. 构造输入数据
@@ -118,7 +118,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             context_length=self.context_length,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")  
+        judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)
@@ -148,7 +148,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         # 2. 创建 rollout_controller, judger
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
-        gsm8k_judger = judger_config.build_router()
+        gsm8k_judger = judger_config.build()
         # 3. 创建 AgentLoopManager
         replay_buffer = ReplayBuffer()
         agent_loop_manager = agent_loop_manager_cfg.build(

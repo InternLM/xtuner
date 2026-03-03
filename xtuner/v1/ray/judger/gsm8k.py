@@ -1,7 +1,7 @@
 import re
 from typing import Callable
 
-from .native import NativeJudgerConfig
+from .native import NativeJudgerConfig, RouterJudgerConfig
 
 
 _SOLUTION_CLIP_CHARS = 300
@@ -77,9 +77,21 @@ def compute_reward(response, label, extra_info):
             return {"score": extra_info["format_score"]}
 
 
-class GSM8KJudgerConfig(NativeJudgerConfig):
-    """Configuration for the GSM8K judger."""
+class GSM8KNativeJudgerConfig(NativeJudgerConfig):
+    """Configuration for the GSM8K native judger."""
 
     judger_name: str = "openai/gsm8k"
     extra_info: dict = {"score": 1, "format_score": 0}
-    reward_handler: Callable = compute_reward
+    reward_handler: Callable | str = compute_reward
+
+
+class GSM8KRouterJudgerConfig(RouterJudgerConfig):
+    """Configuration for the GSM8K router judger."""
+
+    judger_name: str = "openai/gsm8k"
+    extra_info: dict = {"score": 1, "format_score": 0}
+    reward_handler: Callable | str = compute_reward
+
+    num_ray_actors: int = 1
+    num_cpus_per_actor: int = 1
+    cpu_memory_per_actor: int = 1024**3

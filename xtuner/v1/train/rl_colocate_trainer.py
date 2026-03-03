@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import random
 from datetime import datetime
@@ -11,17 +10,20 @@ import ray
 import torch
 from mmengine import load
 from mmengine.dist import get_rank
-from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, model_validator
-from ray.util.placement_group import placement_group
-from typing_extensions import Literal, Self, TypedDict
+from typing_extensions import Literal, TypedDict
 
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer
 from xtuner.v1._writer import get_writer
+from xtuner.v1.data_proto import RolloutState, SampleParams, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers, CPUResourcesConfig
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
+from xtuner.v1.ray.judger.native import RouterJudgerConfig
+from xtuner.v1.ray.rollout.controller import RolloutController, RolloutControllerProxy
 from xtuner.v1.rl.base import (
     TrainingController,
     TrainingControllerProxy,
@@ -30,7 +32,6 @@ from xtuner.v1.rl.base import (
     WorkerConfig,
     WorkerLogItem,
 )
-from xtuner.v1.ray.rollout.controller import RolloutController, RolloutControllerProxy
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
 from xtuner.v1.train import ResumeConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer
@@ -49,8 +50,15 @@ from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.ray.judger import NativeJudgerConfig
 from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
+from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
+from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.base.sampler import SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.train.trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
+from xtuner.v1.utils import get_logger, record_git_info, timer
+from xtuner.v1.utils.device import get_device, get_torch_device_module
+
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
@@ -205,8 +213,7 @@ class RLColocateTrainer:
         resources: AcceleratorResourcesConfig,
         train_worker_cfg: WorkerConfig,
         rollout_config: RolloutConfig,
-        judger_config: NativeJudgerConfig,
-
+        judger_config: RouterJudgerConfig,
         # Sampler config
         # sampler_config: SamplerConfig,
         tokenizer_path: str | Path,
@@ -216,29 +223,24 @@ class RLColocateTrainer:
         # agent loop manager config
         # produce_strategy_config: ProduceStrategyConfig,
         agent_loop_manager_cfg: AgentLoopManagerConfig,
-
         # eval configs
         eval_agent_loop_manager_cfg: AgentLoopManagerConfig,
         evaluator_config: EvaluatorConfig,
         enable_evaluate: bool = True,
         enable_initial_evaluate: bool = False,
         evaluate_step: int = 1,
-
         # work_dir and resume
         work_dir: Path | str | None = None,
         auto_resume: bool = False,
-
         # others
         load_from: str | Path,
         log_dir: Path | str | None = None,
         seed: int = 66,
         debug_rollout: bool = False,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
-
         # steps
         rollout_steps: int,
         global_batch_size: int,
-
         # exp tracker
         exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
     ):
@@ -274,7 +276,7 @@ class RLColocateTrainer:
         self._global_train_step = 0
         self.global_batch_size = global_batch_size
 
-        # main components    
+        # main components
         self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
 
         # override train worker config
@@ -294,7 +296,7 @@ class RLColocateTrainer:
         self.rollout_controller = self.init_rollout_controller(rollout_config, self._pg)
 
         # build judger
-        judger = judger_config.build_router()  # TODO: use build instead of build_router
+        judger = judger_config.build()
 
         # build agent_loop
         # agent_loop  = agent_loop_config.build(rollout_controller=self.rollout_controller, judger=judger)
@@ -409,7 +411,7 @@ class RLColocateTrainer:
             new_exp = ExpInfo(history=[new_history], exp_dir=str(exp_dir))
             meta.exps.append(new_exp)
         return meta
-    
+
     # TODO: simplify with WorkerConfig.build()
     def _build_train_controller(self, train_worker_cfg: WorkerConfig) -> TrainingControllerProxy:
         TrainingWorker = cast(
@@ -429,7 +431,7 @@ class RLColocateTrainer:
         ray.wait([worker.ready.remote() for worker in train_workers])
         train_controller = TrainingController.remote(workers=train_workers)
         return train_controller
-    
+
     # TODO: simplify with RolloutConfig.build()
     def init_rollout_controller(self, rollout_cfg: Any, placement_group: Any):
         """Initializes the rollout controller with the appropriate worker
@@ -454,28 +456,29 @@ class RLColocateTrainer:
         if rollout_cfg is None:
             return rollout_controller
 
-
         rollout_controller = (
             ray.remote(RolloutController)
             .options(max_concurrency=int(os.environ.get("RAY_MAX_CONCURRENCY", 1000)))
             .remote(rollout_cfg, placement_group)
         )  # type: ignore[attr-defined]
         return rollout_controller
-    
+
     def _init_tracker(self, exp_tracker: Literal["tensorboard", "jsonl"], work_dir: Path):
         writer = get_writer(writer_type=exp_tracker, log_dir=work_dir)
         return writer
-    
+
     def fit(self):
         self.logger.info("Start RL training")
         if self._cur_step >= self._rollout_steps:
             self.logger.info(f"Rollout steps {self._rollout_steps} reached, stop training")
             return
-        
+
         if self._enable_initial_evaluate and not self._debug_rollout:
             # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
             # TODO: ray.get(self.rollout_controller.restart.remote())
-            eval_batch: list[list[RolloutState]] = asyncio.run(self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size))
+            eval_batch: list[list[RolloutState]] = asyncio.run(
+                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
+            )
             eval_metrics = self.evaluator.run(eval_batch)
             self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
 
@@ -484,7 +487,7 @@ class RLColocateTrainer:
                 tag_scalar_dict=tb_scores,
                 global_step=0,
             )
-        
+
         for rollout_idx in range(self._cur_step + 1, self._rollout_steps + 1):
             self.logger.info(f"Rollout {rollout_idx}/{self._rollout_steps} start")
             step_timer_dict = {}
@@ -492,7 +495,9 @@ class RLColocateTrainer:
                 # 1. Rollout to generate experience
                 # rollout_info = self._rollout_step(rollout_idx, step_timer_dict)
                 # TODO: ray.get(self.rollout_controller.check_health.remote())
-                train_batch: list[list[RolloutState]] = asyncio.run(self.agent_loop_manager.produce_batch(self.global_batch_size))
+                train_batch: list[list[RolloutState]] = asyncio.run(
+                    self.agent_loop_manager.produce_batch(self.global_batch_size)
+                )
                 rollout_info = {}  # TODO: rollout info?
                 # TODO: save train trajectory
                 if not self._debug_rollout:
@@ -513,7 +518,6 @@ class RLColocateTrainer:
                         )
                     self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
-
                     # train_log_info = self._train_step(
                     #     rollout_idx,
                     #     rollout_info["data_groups"],
@@ -524,7 +528,9 @@ class RLColocateTrainer:
                     with timer("training", step_timer_dict):
                         workers_log_item: list[WorkerLogItem] = ray.get(
                             self.train_controller.fit.remote(
-                             data_batches, pack_max_length=self._train_worker_cfg.pack_max_length, rollout_idx=rollout_idx
+                                data_batches,
+                                pack_max_length=self._train_worker_cfg.pack_max_length,
+                                rollout_idx=rollout_idx,
                             )
                         )
                     train_log_info: TrainInfo = {
@@ -540,12 +546,14 @@ class RLColocateTrainer:
                     if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
                         with timer("evaluation", step_timer_dict):
                             # TODO: ray.get(self.rollout_controller.restart.remote())
-                            eval_batch: list[list[RolloutState]] = asyncio.run(self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size))
+                            eval_batch: list[list[RolloutState]] = asyncio.run(
+                                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
+                            )
                             eval_metrics = self.evaluator.run(eval_batch)
                             # TODO: save eval trajectory
                             eval_log_info.update(eval_metrics)
                 else:
-                    train_log_info = {} 
+                    train_log_info = {}
                     eval_log_info = {}
 
             self._log_step(rollout_idx, step_timer_dict, rollout_info, train_log_info, eval_log_info)
@@ -566,9 +574,7 @@ class RLColocateTrainer:
                 continue
 
             prompt_ids = group[0].prompt_ids
-            rewards = [
-                data.reward["score"] for data in group
-            ]
+            rewards = [data.reward["score"] for data in group]
             rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)
             advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
@@ -646,7 +652,7 @@ class RLColocateTrainer:
             "prompt_len/max": prompt_len_t.max().item(),
         }
         return data_batches, info_dict
-    
+
     def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):
         """Synchronizes weights and saves checkpoints."""
         with timer("save_ckpt", step_timer_dict):
@@ -662,7 +668,7 @@ class RLColocateTrainer:
             self.logger.info("Model weights synchronized successfully.")
             ray.get(self.train_controller.offload.remote(target="model"))
             ray.get(self.rollout_controller.onload_kvcache.remote())
-    
+
     def _log_step(
         self,
         rollout_idx: int,
@@ -712,7 +718,7 @@ class RLColocateTrainer:
                 rank_sft_log = log_item["sft_train_metrics"]
                 for k, v in rank_sft_log.items():
                     all_scalars.update({f"sft_train_metrics/worker_{worker_idx}/{k}": v})
-            
+
             self._log_mini_batch_metrics(train_info["workers_log_item"])
 
         if eval_info:
