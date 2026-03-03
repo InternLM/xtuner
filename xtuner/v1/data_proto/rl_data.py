@@ -10,7 +10,7 @@ from typing_extensions import NotRequired, TypedDict
 # ====================================
 # ====== DataFlow 数据流 ==============
 # ====================================
-from xtuner.v1.datasets.utils import CacheObj
+from xtuner.v1.utils.cache import CacheObj
 from xtuner.v1.utils.logger import get_logger
 
 

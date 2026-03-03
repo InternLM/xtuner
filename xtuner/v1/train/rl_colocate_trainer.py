@@ -20,7 +20,7 @@ from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
-from xtuner.v1.ray.judger.native import RouterJudgerConfig
+from xtuner.v1.ray.judger.native import RouterJudgerConfig, NativeJudgerConfig
 from xtuner.v1.ray.rollout.controller import RolloutController, RolloutControllerProxy
 from xtuner.v1.rl.base import (
     TrainingControllerProxy,
@@ -28,7 +28,7 @@ from xtuner.v1.rl.base import (
     WorkerLogItem,
 )
 from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
+from xtuner.v1.rl.base.replay_buffer import ReplayBuffer, SyncReplayBufferConfig, AsyncReplayBufferConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.train.trainer import XTunerMeta
 from xtuner.v1.utils import get_logger, timer
@@ -140,9 +140,9 @@ class RLColocateTrainerConfig(BaseModel):
     resources: AcceleratorResourcesConfig
     train_worker_cfg: WorkerConfig
     rollout_config: RolloutConfig
-    judger_config: NativeJudgerConfig
+    judger_config: NativeJudgerConfig | RouterJudgerConfig
     tokenizer_path: Union[str, Path]
-    replay_buffer_config: dict
+    replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
     agent_loop_manager_cfg: AgentLoopManagerConfig
     eval_agent_loop_manager_cfg: AgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
@@ -204,7 +204,7 @@ class RLColocateTrainer:
         # Sampler config
         # sampler_config: SamplerConfig,
         tokenizer_path: str | Path,
-        replay_buffer_config: dict,
+        replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig,
         # agent loop config
         # agent_loop_config: AgentLoopConfig,
         # agent loop manager config
@@ -275,8 +275,7 @@ class RLColocateTrainer:
         # build judger
         judger = judger_config.build()
 
-        # TODO: build replay_buffer
-        replay_buffer = ReplayBuffer()
+        replay_buffer = replay_buffer_config.build()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         # build agnet_loop_manager
         self.agent_loop_manager = agent_loop_manager_cfg.build(
