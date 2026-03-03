@@ -1,17 +1,15 @@
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto import Status
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from xtuner.v1.data_proto import RolloutState, Status
+from xtuner.v1.ray.judger import Judger
+from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.rl.base.producer import ProduceStrategy, Sampler
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
-from xtuner.v1.data_proto import RolloutState
 
-from .agent_loop import AgentLoop
-from .agent_loop import AgentLoopConfig
+from .agent_loop import AgentLoop, AgentLoopConfig
 from .producer import ProduceStrategyConfig, SyncProduceStrategyConfig
 from .sampler import SamplerConfig
-from xtuner.v1.ray.rollout import RolloutController
-from xtuner.v1.ray.judger import Judger
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 
 class AgentLoopManagerConfig(BaseModel):
@@ -62,7 +60,9 @@ class AgentLoopManager:
         await self._scheduler.produce_batch(
             self._agent_loop, self._data_sampler, self._replay_buffer, batch_size, self.task_name
         )
-        batch_rollout_states: list[list[RolloutState]] = await self._replay_buffer.get(batch_size, self.task_name, Status.COMPLETED)
+        batch_rollout_states: list[list[RolloutState]] = await self._replay_buffer.get(
+            batch_size, self.task_name, Status.COMPLETED
+        )
         return batch_rollout_states
 
     # # 非共卡

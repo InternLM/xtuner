@@ -20,8 +20,12 @@ if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
 
-class CacheObj(TypedDict, total=False):
+class CacheDict(TypedDict, total=False):
     num_tokens: int
+
+
+class CacheObj:
+    num_tokens: int | None = None
 
 
 class CachableTokenizeFunction(ABC, Generic[T]):

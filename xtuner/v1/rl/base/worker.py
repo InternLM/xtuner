@@ -6,6 +6,7 @@ from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
 
+
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
@@ -175,7 +176,8 @@ class WorkerConfig(BaseModel):
     sft_loss_cfg: CELossConfig = CELossConfig()
 
     def build(self, placement_group: "PlacementGroup") -> "TrainingControllerProxy":
-        """Build training workers and controller from this config and placement group."""
+        """Build training workers and controller from this config and placement
+        group."""
         # import here to avoid circular import
         from xtuner.v1.ray.base import AutoAcceleratorWorkers
         from xtuner.v1.rl.base.controller import TrainingController
@@ -189,9 +191,7 @@ class WorkerConfig(BaseModel):
                 }
             }
         )(TrainingWorker)
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
-            TrainingWorkerCls, self, placement_group
-        )
+        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorkerCls, self, placement_group)
         ray.wait([w.ready.remote() for w in train_workers])
         return TrainingController.remote(workers=train_workers)
 

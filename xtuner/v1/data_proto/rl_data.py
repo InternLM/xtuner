@@ -10,13 +10,12 @@ from typing_extensions import NotRequired, TypedDict
 # ====================================
 # ====== DataFlow 数据流 ==============
 # ====================================
+from xtuner.v1.datasets.utils import CacheObj
 from xtuner.v1.utils.logger import get_logger
 
 
 if TYPE_CHECKING:
-    import ray
-
-    RayObjectRef = ray.ObjectRef
+    from ray import ObjectRef as RayObjectRef
 else:
     RayObjectRef: TypeAlias = Any
 
@@ -60,12 +59,12 @@ class Status(Enum):
 
 class MultimodalInfo(TypedDict):
     # 使用TypedDict给出pixel_values的类型提示
-    pixel_values: NotRequired[torch.Tensor | RayObjectRef | None]  # type: ignore[valid-type]
+    pixel_values: NotRequired[torch.Tensor | RayObjectRef | None]
     image_grid_thw: NotRequired[torch.Tensor]
     position_ids: NotRequired[torch.Tensor]
 
 
-class RolloutState(BaseModel):
+class RolloutState(CacheObj, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     # --- 数据 ---
@@ -88,22 +87,22 @@ class RolloutState(BaseModel):
     response: str | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
-    routed_experts: list[int] | RayObjectRef | None = None  # type: ignore[valid-type]
+    routed_experts: list[int] | RayObjectRef | None = None
     finish_reason: str | None = None
 
-    @field_serializer('routed_experts')
+    @field_serializer("routed_experts")
     def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | None:
         """Dump 时跳过 ray.ObjectRef，序列化为 None，避免 PydanticSerializationError。"""
         if value is None:
             return None
         try:
             import ray
+
             if isinstance(value, ray.ObjectRef):
                 return None
         except ImportError:
             pass
-        if type(value).__name__ == 'ObjectRef' and 'ray' in getattr(
-                type(value), '__module__', ''):
+        if type(value).__name__ == "ObjectRef" and "ray" in getattr(type(value), "__module__", ""):
             return None
         return value  # list[int]
 

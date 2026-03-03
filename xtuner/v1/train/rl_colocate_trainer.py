@@ -1,19 +1,14 @@
 import asyncio
 import os
 import random
-from datetime import datetime
 from pathlib import Path
-from shutil import rmtree
-from typing import List, Union, cast, Any
+from typing import Any, List, Union, cast
 
 import ray
 import torch
-from mmengine import load
 from mmengine.dist import get_rank
-from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, model_validator
-from ray.util.placement_group import PlacementGroup
-from typing_extensions import Literal, Self, TypedDict
+from pydantic import BaseModel, ConfigDict
+from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer
 from xtuner.v1._writer import get_writer
@@ -28,39 +23,15 @@ from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
 from xtuner.v1.ray.judger.native import RouterJudgerConfig
 from xtuner.v1.ray.rollout.controller import RolloutController, RolloutControllerProxy
 from xtuner.v1.rl.base import (
-    TrainingController,
     TrainingControllerProxy,
-    TrainingWorkerClass,
-    TrainingWorkerProxy,
     WorkerConfig,
     WorkerLogItem,
 )
-from xtuner.v1.ray.rollout.controller import RolloutControllerProxy
-from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
-from xtuner.v1.train import ResumeConfig
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer
-from xtuner.v1.utils.device import get_device, get_torch_device_module
-from xtuner.v1.utils.env_check import get_rollout_engine_version
-
-from xtuner.v1.train.trainer import ExpHistory, ExpInfo, GitInfo, LoadCheckpointConfig, XTunerMeta
-
-from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
-from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoop, AgentLoop, AgentLoopConfig
-from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManager, AgentLoopManagerConfig
-from xtuner.v1.rl.base.producer import ProduceStrategyConfig, SyncProduceStrategyConfig
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
-from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
-from xtuner.v1.ray.judger import NativeJudgerConfig
-from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
-from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.base.sampler import SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.train.trainer import ExpHistory, ExpInfo, GitInfo, XTunerMeta
-from xtuner.v1.utils import get_logger, record_git_info, timer
+from xtuner.v1.train.trainer import XTunerMeta
+from xtuner.v1.utils import get_logger, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
@@ -93,7 +64,7 @@ def bind_train_rollout(
     return
 
 
-class TrainInfo(TypedDict):
+class TrainInfo(TypedDict, total=False):
     data_info: dict[str, float]
     workers_log_item: list[WorkerLogItem]
 
@@ -164,7 +135,7 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
 
 
 class RLColocateTrainerConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     resources: AcceleratorResourcesConfig
     train_worker_cfg: WorkerConfig
@@ -449,7 +420,7 @@ class RLColocateTrainer:
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
                 item = group[i].response
-                logprobs = None
+                logprobs: list[float] | None = None
                 if group[i].response_ids is not None:
                     response_ids = group[i].response_ids
                     if isinstance(response_ids, torch.Tensor):
@@ -458,7 +429,7 @@ class RLColocateTrainer:
                     if logprobs is not None:
                         assert len(logprobs) == len(response_ids), f"{len(logprobs)} vs {len(response_ids)}"
                         # 只有 response 部分有 logprobs, 需要前面追加
-                        logprobs = [0] * (len(prompt_ids) - 1) + logprobs
+                        logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs
                     else:
                         logprobs = None
                 else:
@@ -604,10 +575,10 @@ class RLColocateTrainer:
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
                 current_global_step = train_start_step + step_idx
-                metrics = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
+                metrics: dict[str, Any] = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
 
                 self._exp_tracker.add_scalars(
-                    tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": v for k, v in metrics.items()},
+                    tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": float(v) for k, v in metrics.items()},
                     global_step=current_global_step,
                 )
         self._global_train_step += len(workers_log_item[0]["train_metrics"])

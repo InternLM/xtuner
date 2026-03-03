@@ -164,10 +164,11 @@ class XTunerMeta(BaseModel):
 
     @classmethod
     def build(cls, work_dir: Path, meta_filename: str, resume: bool) -> "XTunerMeta":
-        """Create or load meta from work_dir and optionally start a new exp or resume.
+        """Create or load meta from work_dir and optionally start a new exp or
+        resume.
 
-        Single-process helper (e.g. for rl_colocate_trainer). For distributed
-        training use the trainer's _init_xtuner_meta.
+        Single-process helper (e.g. for rl_colocate_trainer). For distributed training use the trainer's
+        _init_xtuner_meta.
         """
         if not work_dir.exists():
             work_dir.mkdir(parents=True, exist_ok=True)
