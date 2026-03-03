@@ -1,60 +1,103 @@
 import atexit
 import signal
 import subprocess
-from typing import Any, Literal, TypeAlias, cast
+import typing
+from abc import ABC
+from typing import Any, List, Literal, Union
 
 import torch.nn.functional as F
 
 from xtuner.v1.utils.logger import get_logger
 
 
-DSLOp: TypeAlias = Literal["$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$not_in", "$between"]
-DSLRuleType: TypeAlias = dict[DSLOp, Any]
-ALLOWED_DSL_OPS: set[str] = {"$eq", "$ne", "$gt", "$gte", "$lt", "$lte", "$in", "$nnot_inin", "$between"}
+ScalarOperator = Literal["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"]
+SetOperator = Literal["$in", "$not_in"]
+BetweenOperator = Literal["$between"]
+Operators = Union[ScalarOperator, SetOperator, BetweenOperator]
+LogicOperator = Literal["$and", "$or"]
 
 
-class DSLRule:
-    @staticmethod
-    def normalize(rule_or_literal: Any) -> DSLRuleType:
-        if isinstance(rule_or_literal, dict) and rule_or_literal:
-            if len(rule_or_literal) != 1:
-                raise ValueError(
-                    f"Rule must use exactly one operator key. Supported operators: {sorted(ALLOWED_DSL_OPS)}"
-                )
-            op = next(iter(rule_or_literal))
-            if op not in ALLOWED_DSL_OPS:
-                raise ValueError(f"Unsupported DSL operator: {op}. Use one of: {sorted(ALLOWED_DSL_OPS)}.")
-            return cast(DSLRuleType, rule_or_literal)
-        return {"$eq": rule_or_literal}
+class QueryNode(ABC):
+    """查询语法树的基类，仅作数据结构标记."""
 
-    @classmethod
-    def match(cls, actual: Any, rule_or_literal: Any) -> bool:
-        rule = cls.normalize(rule_or_literal)
-        op, expected = next(iter(rule.items()))
+    pass
 
-        if op == "$eq":
-            return actual == expected
-        if op == "$ne":
-            return actual != expected
-        if op == "$gt":
-            return actual > expected
-        if op == "$gte":
-            return actual >= expected
-        if op == "$lt":
-            return actual < expected
-        if op == "$lte":
-            return actual <= expected
-        if op == "$in":
-            return actual in expected
-        if op == "$not_in":
-            return actual not in expected
-        if op == "$between":
-            if not isinstance(expected, (list, tuple)) or len(expected) != 2:
-                raise ValueError("$between expects [lower, upper].")
-            lower, upper = expected
-            return lower <= actual <= upper
 
-        raise ValueError(f"Unsupported DSL operator: {op}")
+class ConditionNode(QueryNode):
+    """代表一个具体的查询条件."""
+
+    field: str
+
+
+class ScalarNode(ConditionNode):
+    def __init__(self, field: str, op: ScalarOperator, value: Any):
+        self.field = field
+        self.op = op
+        self.value = value
+
+
+class SetNode(ConditionNode):
+    def __init__(self, field: str, op: SetOperator, value: List[Any]):
+        self.field = field
+        self.op = op
+        self.value = value
+
+
+class BetweenNode(ConditionNode):
+    def __init__(self, field: str, lower: Any, upper: Any):
+        assert lower <= upper, "lower bound must be <= upper bound"
+        self.field = field
+        self.op = "$between"
+        self.lower = lower
+        self.upper = upper
+
+
+class LogicNode(QueryNode):
+    """复合逻辑组."""
+
+    def __init__(self, relation: LogicOperator, conditions: List[QueryNode]):
+        self.relation = relation
+        self.conditions = conditions
+
+
+def parse_query(expr: Union[dict, QueryNode]) -> QueryNode:
+    """将基于字典的 DSL 解析为纯粹的 AST 节点树 (ConditionNode, LogicNode)"""
+    if isinstance(expr, QueryNode):
+        return expr
+
+    if isinstance(expr, dict):
+        conditions: list[QueryNode] = []
+        for key, value in expr.items():
+            if key in ("$and", "$or"):
+                if isinstance(value, list):
+                    sub_asts = [parse_query(sub_expr) for sub_expr in value]
+                    conditions.append(LogicNode(key, sub_asts))  # type: ignore
+                else:
+                    raise ValueError(f"逻辑操作符 {key} 的值必须是一个列表")
+            else:
+                if isinstance(value, dict):
+                    # 例如: {"staleness": {"$lt": 5, "$gt": 0}}
+                    for op, op_val in value.items():
+                        if op in typing.get_args(ScalarOperator):
+                            conditions.append(ScalarNode(field=key, op=op, value=op_val))
+                        elif op in typing.get_args(SetOperator):
+                            conditions.append(SetNode(field=key, op=op, value=op_val))
+                        elif op == "$between":
+                            if not isinstance(op_val, (list, tuple)) or len(op_val) != 2:
+                                raise ValueError("操作符 '$between' 需要传入包含2个元素的列表或元组")
+                            conditions.append(BetweenNode(field=key, lower=op_val[0], upper=op_val[1]))
+                        else:
+                            raise ValueError(f"不支持的操作符: {op}")
+                else:
+                    # 隐式等值，例如: {"task_name": "math"} -> "$eq"
+                    conditions.append(ScalarNode(field=key, op="$eq", value=value))
+
+        if len(conditions) > 1:
+            # 默认多个条件之间是 AND 关系，例如: {"uid": "123", "status": {"$in": ["pending", "running]}}}
+            return LogicNode("$and", conditions)  # type: ignore
+        return conditions[0] if conditions else LogicNode("$and", [])
+
+    raise ValueError(f"不支持的查询表达式格式: {expr}")
 
 
 def gather_logprobs(logits, shifted_labels):
