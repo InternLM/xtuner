@@ -77,6 +77,22 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
 MOE_EP_COMPILE_CFG = MOE_NON_EP_COMPILE_CFG.copy()
 MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer.forward")
 
+class _AllReduce(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, op, group, tensor):
+        ctx.group = group
+        ctx.op = op
+        tensor = tensor.clone(memory_format=torch.contiguous_format)
+        tensor = all_reduce(tensor, op, group=group)
+        return tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return (None, None) + (_AllReduce.apply(ctx.op, ctx.group, grad_output),)
+
+
+def all_reduce_autograd(tensor, op, group):
+    return _AllReduce.apply(op, group, tensor)
 
 class MoEModelOutputs(ModelOutputs):
     router_logits: NotRequired[dict[str, torch.Tensor]]
@@ -335,10 +351,13 @@ class MoE(BaseModel):
         cat_position_embeddings = self.rotary_emb(cat_hidden_states, cat_position_ids)  # type: ignore
         position_embeddings_list = list(
             zip(
-                cat_position_embeddings[0].chunk(len(seq_ctx_list), dim=1),
-                cat_position_embeddings[1].chunk(len(seq_ctx_list), dim=1),
+                cat_position_embeddings[0].chunk(len(seq_ctx_list), dim=2),
+                cat_position_embeddings[1].chunk(len(seq_ctx_list), dim=2),
             )
         )
+        
+        mask_list = torch.cat([ctx.mask for ctx in seq_ctx_list], dim=1) 
+        indices = torch.nonzero(mask_list, as_tuple=True)[1]
 
         # Initialize output containers
         output: dict = {}
@@ -353,6 +372,12 @@ class MoE(BaseModel):
 
         for seq_ctx in seq_ctx_list:
             self._mark_dynamic(seq_ctx)
+
+        num_layers = len(self.layers)
+        local_load = torch.zeros(num_layers, self.config.n_routed_experts).to(torch.cuda.current_device()) # (nlayers, ne)
+        local_gating_sum = torch.zeros(num_layers, self.config.n_routed_experts).to(torch.cuda.current_device())
+        local_load_logits = torch.zeros(num_layers, self.config.n_routed_experts, 
+                                        dtype = torch.int64).to(torch.cuda.current_device())
 
         for idx, decoder_layer in self.layers.items():
             layer_idx = int(idx)
@@ -398,16 +423,39 @@ class MoE(BaseModel):
                         position_embeddings=position_embeddings_list,
                         seq_ctx=seq_ctx_list,
                     )
-                hidden_states = layer_results[: len(hidden_states_list)]
-                router_logits = layer_results[len(hidden_states_list) : len(hidden_states_list) * 2]
-                router_weights = layer_results[len(hidden_states_list) * 2 :]
-
-                # Update hidden states and collect router results
-                for i, hidden_states in enumerate(hidden_states):
-                    hidden_states_list[i] = hidden_states
-                    router_logits_list[i][f"layer{idx}"] = router_logits[i]
-                    router_weights_list[i][f"layer{idx}"] = router_weights[i]
-
+                    
+                hidden_states_list = layer_results[:len(hidden_states_list)]
+                if self.balancing_loss:
+                    router_weights_list = torch.cat(layer_results[len(hidden_states_list)*2:], dim=0).unsqueeze(0)
+                    router_weights = (
+                        torch.index_select(router_weights_list, 1, indices).contiguous().float()
+                    ) 
+                    _, selected_experts = torch.topk(router_weights, self.config.num_experts_per_tok, dim=-1)
+                    tokens_per_expert = torch.histc(
+                        selected_experts.view(-1),
+                        bins=self.config.n_routed_experts,
+                        min=0,
+                        max=self.config.n_routed_experts,
+                    ).float()
+                    local_load[layer_idx] = tokens_per_expert
+                    local_gating_sum[layer_idx] = router_weights.sum(dim = 1)
+        
+                router_logits_list = torch.cat(layer_results[len(hidden_states_list):len(hidden_states_list)*2], dim=0).unsqueeze(0)
+                router_logits = (
+                        torch.index_select(router_logits_list, 1, indices).contiguous().float()
+                    ) 
+                _, selected_experts = torch.topk(router_logits, self.config.num_experts_per_tok, dim=-1)
+                tokens_per_expert = torch.histc(
+                    selected_experts.view(-1),
+                    bins=self.config.n_routed_experts,
+                    min=0,
+                    max=self.config.n_routed_experts,
+                ).to(torch.long) 
+                local_load_logits[layer_idx] = tokens_per_expert
+                
+                if self.z_loss:
+                    z_loss = self.z_loss(router_logits=router_logits)
+                    output["z_loss"] = output.get("z_loss", 0) + z_loss
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
         cat_hidden_states = self.norm(cat_hidden_states)
@@ -423,48 +471,30 @@ class MoE(BaseModel):
             moe_extra_info.append(extra_info)
         output["extra_info"] = moe_extra_info
 
-        # Handle router results for all micro-batches
-        all_router_logits = []
-        all_router_weights = []
+        if self.balancing_loss:
+            if self.balancing_loss.global_average and dist.is_initialized(): 
+                tokens_per_expert_global = all_reduce(local_load, "sum", dist.group.WORLD)
+                tokens_global = tokens_per_expert_global.sum(-1) 
+                seqlen_global = tokens_global // self.config.num_experts_per_tok 
 
-        for micro_batch_idx, (micro_batch_router_logits, micro_batch_router_weights) in enumerate(
-            zip(router_logits_list, router_weights_list)
-        ):
-            if micro_batch_router_logits:
-                _router_logits_list = list(micro_batch_router_logits.values())
-                _router_weights_list = list(micro_batch_router_weights.values())
-
-                attn_mask = seq_ctx_list[micro_batch_idx].mask
-                router_logits = self._select_non_pad_router_logits(_router_logits_list, attn_mask)
-                router_weights = self._select_non_pad_router_logits(_router_weights_list, attn_mask)
-                all_router_logits.append(router_logits)
-                all_router_weights.append(router_weights)
-
-        if all_router_logits:
-            # Concatenate router logits from all micro-batches
-            combined_router_logits = torch.cat(all_router_logits, dim=1)  # [num_layers, total_seq, num_experts]
-            combined_router_weights = torch.cat(all_router_weights, dim=1)
-
-            # Calculate balancing loss across all micro-batches
-            if self.balancing_loss:
-                balancing_loss = self.balancing_loss(
-                    router_weights=combined_router_weights,
-                    n_routed_experts=self.config.n_routed_experts,
-                    num_experts_per_tok=self.config.num_experts_per_tok,
+                routing_weights_sum_global = all_reduce_autograd(
+                    local_gating_sum, "sum", dist.group.WORLD
                 )
-                output["balancing_loss"] = balancing_loss
+                routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
+                scale_global = self.config.n_routed_experts / tokens_global
+            else:
+                scale_global = self.config.n_routed_experts / (router_weights.shape[1] * self.config.num_experts_per_tok)
+                routing_weights_mean_global = local_gating_sum / router_weights.shape[1] 
+            loss = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1) 
+            loss = loss.sum()
+            output["balancing_loss"] = loss * self.balancing_loss.loss_weight
 
-            # Calculate z-loss across all micro-batches
-            if self.z_loss:
-                z_loss = self.z_loss(router_logits=combined_router_logits)
-                output["z_loss"] = z_loss
-
-            # Calculate tokens per expert for bias update (if applicable)
-            tokens_per_expert_global = self._cal_tokens_per_expert(combined_router_logits)
-            output["tokens_per_expert_global"] = tokens_per_expert_global
-
-            del combined_router_logits
-
+        # Calculate tokens per expert for bias update (if applicable)
+        if dist.is_initialized():
+            tokens_per_expert_global = all_reduce(local_load_logits, "sum", dist.group.WORLD)
+        else:
+            tokens_per_expert_global = local_load_logits
+        output["tokens_per_expert_global"] = tokens_per_expert_global
         if self.config.return_router_results or return_router_logits:
             # raise NotImplementedError
 
@@ -511,6 +541,14 @@ class MoE(BaseModel):
 
         self._mark_dynamic(seq_ctx)
 
+        indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
+        
+        num_layers = len(self.layers)
+        local_load = torch.zeros(num_layers, self.config.n_routed_experts).to(torch.cuda.current_device())
+        local_gating_sum = torch.zeros(num_layers, self.config.n_routed_experts).to(torch.cuda.current_device())
+        local_load_logits = torch.zeros(num_layers, self.config.n_routed_experts, 
+                                        dtype = torch.int64).to(torch.cuda.current_device())
+
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
                 hidden_states = decoder_layer(
@@ -540,8 +578,36 @@ class MoE(BaseModel):
                         seq_ctx=seq_ctx,
                     )
                 hidden_states, router_results, router_weights = layer_results
-                output["router_logits"][f"layer{idx}"] = router_results
-                output["router_weights"][f"layer{idx}"] = router_weights
+                if self.balancing_loss:
+                    router_weights = (
+                        torch.index_select(router_weights, 0, indices).contiguous().float()
+                    )
+                    _, selected_experts = torch.topk(router_weights, self.config.num_experts_per_tok, dim=-1)
+                    tokens_per_expert = torch.histc(
+                        selected_experts.view(-1),
+                        bins=self.config.n_routed_experts,
+                        min=0,
+                        max=self.config.n_routed_experts,
+                    ).float()
+                    layer_idx = int(idx)
+                    local_load[layer_idx] = tokens_per_expert
+                    local_gating_sum[layer_idx] = router_weights.sum(dim = 0)
+        
+                router_logits = (
+                        torch.index_select(router_results, 0, indices).contiguous().float()
+                    ) 
+                _, selected_experts = torch.topk(router_logits, self.config.num_experts_per_tok, dim=-1)
+                tokens_per_expert = torch.histc(
+                    selected_experts.view(-1),
+                    bins=self.config.n_routed_experts,
+                    min=0,
+                    max=self.config.n_routed_experts,
+                ).to(torch.long) # (ne,)
+                local_load_logits[layer_idx] = tokens_per_expert
+                
+                if self.z_loss:
+                    z_loss = self.z_loss(router_logits=router_logits)
+                    output["z_loss"] = output.get("z_loss", 0) + z_loss
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
@@ -553,27 +619,31 @@ class MoE(BaseModel):
         output["logits"] = logits
         output["extra_info"] = extra_info
 
-        router_logits_list = list(output["router_logits"].values())  # type: ignore
-        router_weights_list = list(output["router_weights"].values())  # type: ignore
-        router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
-        router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
-
         if self.balancing_loss:
-            balancing_loss = self.balancing_loss(
-                router_weights=router_weights,
-                n_routed_experts=self.config.n_routed_experts,
-                num_experts_per_tok=self.config.num_experts_per_tok,
-            )
-            output["balancing_loss"] = balancing_loss
+            if self.balancing_loss.global_average and dist.is_initialized(): 
+                tokens_per_expert_global = all_reduce(local_load, "sum", dist.group.WORLD)
+                tokens_global = tokens_per_expert_global.sum(-1)  
+                seqlen_global = tokens_global // self.config.num_experts_per_tok 
+                
+                routing_weights_sum_global = all_reduce_autograd(
+                    local_gating_sum, "sum", dist.group.WORLD
+                )
+                routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
+                scale_global = self.config.n_routed_experts / tokens_global
+            else:
+                scale_global = self.config.n_routed_experts / (router_weights.shape[0] * self.config.num_experts_per_tok)
+                routing_weights_mean_global = local_gating_sum / router_weights.shape[0] 
+            loss = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1) 
+            loss = loss.sum()
+            output["balancing_loss"] = loss * self.balancing_loss.loss_weight     
 
-        if self.z_loss:
-            z_loss = self.z_loss(router_logits=router_logits)
-            output["z_loss"] = z_loss
-
-        tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
+        # Calculate tokens per expert for bias update (if applicable)
+        if dist.is_initialized():
+            tokens_per_expert_global = all_reduce(local_load_logits, "sum", dist.group.WORLD)
+        else:
+            tokens_per_expert_global = local_load_logits
         output["tokens_per_expert_global"] = tokens_per_expert_global
 
-        del router_logits
 
         if self.config.return_router_results or return_router_logits:
             # raise NotImplementedError

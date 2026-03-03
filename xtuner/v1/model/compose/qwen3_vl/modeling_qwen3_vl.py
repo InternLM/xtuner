@@ -137,63 +137,93 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
             seq_ctx: SequenceContext,
             loss_ctx: CELossContext
     ) -> MoEModelOutputs:
-        input_ids = seq_ctx.input_ids
-        pixel_values = seq_ctx.pixel_values
-        image_grid_thw = seq_ctx.image_grid_thw
-        sequence_parallel_mesh = seq_ctx.sequence_parallel_mesh
-
-        inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore
-
-        if pixel_values is not None:
-            assert image_grid_thw is not None
-            assert input_ids is not None
-            visual_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values,
-                                                                              image_grid_thw,
-                                                                              sequence_parallel_mesh)
-            try:
-                # To simplify and facilitate the processing of deepstack_visual_embeds inside language_model,
-                # we all-gather visual_embeds, and then split them based on the input_ids,
-                # then non-uniformly split them based on the input_ids
-                visual_pos_masks, visual_features, deepstack_visual_embeds = self.get_placeholder_mask(
-                    input_ids,
-                    visual_features=visual_embeds,
-                    deepstack_visual_embeds=deepstack_visual_embeds,
-                    sequence_parallel_mesh=sequence_parallel_mesh,
-                    origin_pixel_len=pixel_values.size(0)
-                )
-                inputs_embeds[visual_pos_masks] = inputs_embeds[visual_pos_masks] * 0.0 + visual_features
-            except Exception as e:
-                logger.error(f"!!!Warning: {e}, but continue anyway!!!!")
-                inputs_embeds = inputs_embeds + visual_embeds.sum() * 0.0
+        def _prepare_llm_inputs(single_seq_ctx): 
+            sp_mesh = single_seq_ctx.sequence_parallel_mesh
+            img_thw = single_seq_ctx.image_grid_thw
+            pixel_val = single_seq_ctx.pixel_values
+            input_ids = single_seq_ctx.input_ids
+            inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore
+            if pixel_val is not None:
+                assert img_thw is not None
+                assert input_ids is not None
+                visual_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_val,
+                                                                                img_thw,
+                                                                                sp_mesh)
+                try:
+                    # To simplify and facilitate the processing of deepstack_visual_embeds inside language_model,
+                    # we all-gather visual_embeds, and then split them based on the input_ids,
+                    # then non-uniformly split them based on the input_ids
+                    visual_pos_masks, visual_features, deepstack_visual_embeds = self.get_placeholder_mask(
+                        input_ids,
+                        visual_features=visual_embeds,
+                        deepstack_visual_embeds=deepstack_visual_embeds,
+                        sequence_parallel_mesh=sp_mesh,
+                        origin_pixel_len=pixel_val.size(0)
+                    )
+                    inputs_embeds[visual_pos_masks] = inputs_embeds[visual_pos_masks] * 0.0 + visual_features
+                except Exception as e:
+                    logger.error(f"!!!Warning: {e}, but continue anyway!!!!")
+                    inputs_embeds = inputs_embeds + visual_embeds.sum() * 0.0
+                    for deepstack_visual_embed in deepstack_visual_embeds:
+                        inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
+                    deepstack_visual_embeds = None
+                    visual_pos_masks = None
+            else:
+                pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+                img_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
+                viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values_dump, img_thw)
+                inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
                 for deepstack_visual_embed in deepstack_visual_embeds:
                     inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
+
                 deepstack_visual_embeds = None
                 visual_pos_masks = None
+
+            if deepstack_visual_embeds is not None and len(deepstack_visual_embeds) == 0:
+                assert single_seq_ctx.position_ids is not None
+                assert single_seq_ctx.position_ids.ndim == 2, f"position_ids must be 2-dim when deepstack_visual_embeds is None," \
+                                                f" but got {single_seq_ctx.position_ids.ndim}"
+            
+                deepstack_visual_embeds = None
+                visual_pos_masks = None
+            return inputs_embeds
+
+        if isinstance(seq_ctx, list):
+            lang_seq_ctx = []
+            for single_seq_ctx in seq_ctx:
+                inputs_embeds = _prepare_llm_inputs(single_seq_ctx)
+                lang_seq_ctx.append(
+                    SequenceContext(
+                        input_ids=None,
+                        cu_seq_lens_q=single_seq_ctx.cu_seq_lens_q,
+                        cu_seq_lens_k=single_seq_ctx.cu_seq_lens_k,
+                        max_length_q=single_seq_ctx.max_length_q,
+                        max_length_k=single_seq_ctx.max_length_k,
+                        position_ids=single_seq_ctx.position_ids,
+                        num_padding=single_seq_ctx.num_padding,
+                        sequence_parallel_mesh=single_seq_ctx.sequence_parallel_mesh,
+                        inputs_embeds=inputs_embeds,
+                        rollout_routed_experts=single_seq_ctx.rollout_routed_experts,
+                        deepstack_visual_embeds=None,
+                        visual_pos_masks=None
+                    )
+                )
+        elif isinstance(seq_ctx, SequenceContext):
+            inputs_embeds = _prepare_llm_inputs(seq_ctx)
+            lang_seq_ctx = SequenceContext(input_ids=None,
+                cu_seq_lens_q=seq_ctx.cu_seq_lens_q,
+                cu_seq_lens_k=seq_ctx.cu_seq_lens_k,
+                max_length_q=seq_ctx.max_length_q,
+                max_length_k=seq_ctx.max_length_k,
+                position_ids=seq_ctx.position_ids,
+                num_padding=seq_ctx.num_padding,
+                sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
+                inputs_embeds=inputs_embeds,
+                rollout_routed_experts=seq_ctx.rollout_routed_experts,
+                deepstack_visual_embeds=None,
+                visual_pos_masks=None)
         else:
-            pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-            image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
-            viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values_dump, image_grid_thw)
-            inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
-            for deepstack_visual_embed in deepstack_visual_embeds:
-                inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
-
-            deepstack_visual_embeds = None
-            visual_pos_masks = None
-
-        if deepstack_visual_embeds is not None and len(deepstack_visual_embeds) == 0:
-            assert seq_ctx.position_ids is not None
-            assert seq_ctx.position_ids.ndim == 2, f"position_ids must be 2-dim when deepstack_visual_embeds is None," \
-                                                   f" but got {seq_ctx.position_ids.ndim}"
-            deepstack_visual_embeds = None
-            visual_pos_masks = None
-
-        # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
-        lang_seq_ctx = seq_ctx.copy(
-            input_ids=None,
-            inputs_embeds=inputs_embeds,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-            visual_pos_masks=visual_pos_masks,
-        )
+            raise NotImplementedError
         outputs = self.language_model(
             lang_seq_ctx,
             loss_ctx

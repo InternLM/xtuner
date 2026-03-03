@@ -169,8 +169,11 @@ class VisionComposeTrainEngine(TrainEngine):
                 efficient_forward_tokens += (num_tokens.long() ** 2).sum()
                 total_forward_tokens += (num_tokens.long().sum()) ** 2
 
-            # todo: support intra_layer_micro_batch
-            output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
+            if len(seq_ctx_list) == 1:
+                output = self.model(seq_ctx=seq_ctx_list[0],loss_ctx=loss_ctx_list[0])
+            else:
+                output = self.model(seq_ctx=seq_ctx_list,loss_ctx=loss_ctx_list)
+                
             # llm loss has been global averaged
             llm_loss = output["loss"]
             step_llm_loss += llm_loss.detach().clone()
@@ -208,25 +211,25 @@ class VisionComposeTrainEngine(TrainEngine):
             maxvio = maxvio_all_layers.mean()
             if moe_need_update_bias:
                 self.model.language_model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
-            other_log["maxvio"] = maxvio.item()
+            other_log["maxvio"] = maxvio
 
         reduced_llm_loss = step_llm_loss
         dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
 
-        loss_log["local_loss"] = step_loss.item()
-        loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
+        loss_log["local_loss"] = step_loss
+        loss_log["reduced_llm_loss"] = reduced_llm_loss
         if step_balancing_loss is not None:
             reduced_balancing_loss = step_balancing_loss
             dist.all_reduce(reduced_balancing_loss.div_(dist.get_world_size()))
-            loss_log["reduced_balancing_loss"] = reduced_balancing_loss.item()
+            loss_log["reduced_balancing_loss"] = reduced_balancing_loss
         if step_z_loss is not None:
             reduced_z_loss = step_z_loss
             dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
-            loss_log["reduced_z_loss"] = reduced_z_loss.item()
+            loss_log["reduced_z_loss"] = reduced_z_loss
 
-        other_log["step_consumed_tokens"] = int(step_consumed_tokens.item())
+        other_log["step_consumed_tokens"] = int(step_consumed_tokens)
         other_log["extra_info"] = train_engine_extra_info  # type: ignore[assignment]
-        other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
+        other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens)
         other_log["step_consumed_img_tokens"] = int(step_consumed_img_tokens)
 
         extra_info = other_log.get("extra_info", {})  # type: ignore

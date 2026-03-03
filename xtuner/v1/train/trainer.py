@@ -578,7 +578,7 @@ class Trainer:
         self.sp_mesh = self.data_mesh["sp"]
 
         if global_batch_size is None:
-            global_batch_size = self.data_mesh["dp"].size()
+            global_batch_size = self.data_mesh["dp"].size() * intra_layer_micro_batch
         self._global_batch_size = global_batch_size
 
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg, fsdp_cfg)
@@ -764,7 +764,7 @@ class Trainer:
             self._log_step(
                 loss_log=loss_log,
                 training_metrics=training_metrics,
-                grad_norm=grad_norm.item(),
+                grad_norm=grad_norm,
                 data_time=data_time,
                 step_time=step_time,
                 internal_metrics=internal_metrics,
