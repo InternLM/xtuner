@@ -79,24 +79,25 @@ class TestJudgerController(unittest.TestCase):
         return await asyncio.gather(*(judger_router.judge(s) for s in states))
     
     def test_gsm8k_judger(self):
-        from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
-        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k")
+        from xtuner.v1.ray.judger.gsm8k import GSM8KNativeJudgerConfig, GSM8KRouterJudgerConfig
+
+        gsm8k_judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
         # Test Case 1: NativeJudger
-        native_judger = gsm8k_judger_config.build()
+        native_judger = GSM8KNativeJudgerConfig(judger_name="openai/gsm8k").build()
         res1 = asyncio.run(native_judger.judge(FAKE_JUDGER_INPUT_ITEM))
         self.assertEqual(res1.reward["score"], 1.0)
 
-        # Test Case 2: NativeJudger with cpu resource + 从外面传入pg
+        # Test Case 2: RouterJudger with given pg
         cpu_cfg = CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1)
         pg = AutoCPUWorkers.build_placement_group(cpu_cfg)
         ray.get(pg.ready())
-        native_judger_actors = gsm8k_judger_config.build_router(pg, 0)
+        native_judger_actors = gsm8k_judger_config.build(pg, 0)
         res2 = asyncio.run(native_judger_actors.judge(FAKE_JUDGER_INPUT_ITEM))
         self.assertEqual(res2.reward["score"], 1.0)
         del native_judger_actors
 
-        # Test Case 3: NativeJudgerRouter + 一批数据的分数是否正确
-        judger_router = gsm8k_judger_config.build_router(pg)
+        # Test Case 3: RouterJudger + 一批数据的分数是否正确
+        judger_router = gsm8k_judger_config.build(pg)
         states, history_reward = construct_gsm8k_judger_data(VERL_ROLLOUT_DATA_PATH)
         rollout_states = asyncio.run(self._judger_batch(judger_router, states))
         rewards = [s.reward["score"] for s in rollout_states]
@@ -104,8 +105,8 @@ class TestJudgerController(unittest.TestCase):
         self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
         
     def test_dapo_batch_judge_score(self):
-        # 测试dapo judger + 1个实例 + NativeJudgerRouter的评判分数是否正确
-        from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
+        # 测试dapo judger + 1个实例 + RouterJudger的评判分数是否正确
+        from xtuner.v1.ray.judger.dapo_math import DapoMathRouterJudgerConfig
         from xtuner.v1.utils.rl_test_utils import get_eos_token
         from transformers import AutoTokenizer
         # 构建数据
@@ -114,7 +115,7 @@ class TestJudgerController(unittest.TestCase):
         eos_token = get_eos_token(MODEL_PATH)
         eos_token_str = tokenizer.convert_ids_to_tokens(eos_token)
         # 定义 Judger Config
-        config = DapoMathJudgerConfig(
+        config = DapoMathRouterJudgerConfig(
             judger_name="dapo_math",
             eos_token=eos_token_str,
             enable_overlong_buffer=True,
@@ -123,18 +124,18 @@ class TestJudgerController(unittest.TestCase):
             overlong_penalty_factor=1.0,
             tokenizer=tokenizer
         )
-        router = config.build_router()
+        router = config.build()
         rollout_states = asyncio.run(self._judger_batch(router, states))
         rewards = [s.reward["score"] for s in rollout_states]
         expected_avg_score = np.mean(history_reward)
         self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
 
     def test_geo_batch_judge_score(self):
-        # 测试geo judger + 4个实例 + NativeJudgerRouter的评判分数是否正确
-        from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
-        config = GEO3KJudgerConfig(judger_name="geo3k", num_ray_actors=4)
+        # 测试geo judger + 4个实例 + RouterJudger的评判分数是否正确
+        from xtuner.v1.ray.judger.geo3k import GEO3KRouterJudgerConfig
+        config = GEO3KRouterJudgerConfig(judger_name="geo3k", num_ray_actors=4)
         states, history_reward = construct_geo3k_dapo_judger_data(GEO_ROLLOUT_DATA_PATH)
-        router = config.build_router()
+        router = config.build()
         rollout_states = asyncio.run(self._judger_batch(router, states))
         rewards = [s.reward["score"] for s in rollout_states]
         expected_avg_score = np.mean(history_reward)
@@ -144,13 +145,13 @@ class TestJudgerController(unittest.TestCase):
 
     def test_multi_judger_router(self):
         import time
-        from xtuner.v1.ray.judger.gsm8k import GSM8KJudgerConfig
+        from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
 
-        gsm8k_config_1 = GSM8KJudgerConfig(judger_name="openai/gsm8k_1", num_ray_actors=2, num_cpus_per_actor=1)
-        gsm8k_config_2 = GSM8KJudgerConfig(judger_name="openai/gsm8k_2", num_ray_actors=8, num_cpus_per_actor=2)
+        gsm8k_config_1 = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k_1", num_ray_actors=2, num_cpus_per_actor=1)
+        gsm8k_config_2 = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k_2", num_ray_actors=8, num_cpus_per_actor=2)
 
-        gsm8k_router_1 = gsm8k_config_1.build_router()
-        gsm8k_router_2 = gsm8k_config_2.build_router() 
+        gsm8k_router_1 = gsm8k_config_1.build()
+        gsm8k_router_2 = gsm8k_config_2.build() 
 
         states, history_reward = construct_gsm8k_judger_data(VERL_ROLLOUT_DATA_PATH)
         gsm8k_results_1 = asyncio.run(self._judger_batch(gsm8k_router_1, states))

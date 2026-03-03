@@ -5,7 +5,7 @@ from typing import Callable
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto import RolloutState, SampleParams, Status
-from xtuner.v1.ray.judger import NativeJudger, NativeJudgerRouter
+from xtuner.v1.ray.judger import NativeJudger, RouterJudger
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
@@ -35,7 +35,7 @@ class AgentLoop(ABC):
         rollout_ctl: RolloutController,
         sample_params: SampleParams,
         hf_checkpoint: str,
-        judger: Callable | NativeJudger | NativeJudgerRouter | None = None,
+        judger: Callable | NativeJudger | RouterJudger | None = None,
     ) -> None:
         self.rollout_ctl = rollout_ctl
         self.hf_checkpoint = hf_checkpoint
@@ -62,7 +62,7 @@ class AgentLoop(ABC):
             return rollout_state
         if callable(self.judger):
             rollout_state = await self.judger(rollout_state)
-        elif isinstance(self.judger, NativeJudgerRouter) or isinstance(self.judger, NativeJudger):
+        elif isinstance(self.judger, RouterJudger) or isinstance(self.judger, NativeJudger):
             rollout_state = await self.judger.judge(rollout_state)
         else:
             raise ValueError(f"Invalid judger type: {type(self.judger)}")

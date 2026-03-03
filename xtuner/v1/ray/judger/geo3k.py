@@ -8,7 +8,7 @@ except Exception:
     extract_boxed_content = None
     grade_answer = None
 
-from .native import NativeJudgerConfig
+from .native import NativeJudgerConfig, RouterJudgerConfig
 
 
 def format_reward(predict_str: str) -> float:
@@ -35,9 +35,21 @@ def compute_reward(response, label, extra_info) -> dict:
     return {"score": score, "acc": acc}
 
 
-class GEO3KJudgerConfig(NativeJudgerConfig):
-    """Configuration for the GEO3K judger."""
+class GEO3KNativeJudgerConfig(NativeJudgerConfig):
+    """Configuration for the GEO3K native judger."""
 
     judger_name: str = "hiyouga/geometry3k"
     extra_info: dict = {"format_score": 0.1, "use_boxed": True}
-    reward_handler: Callable = compute_reward
+    reward_handler: Callable | str = compute_reward
+
+
+class GEO3KRouterJudgerConfig(RouterJudgerConfig):
+    """Configuration for the GEO3K router judger."""
+
+    judger_name: str = "hiyouga/geometry3k"
+    extra_info: dict = {"format_score": 0.1, "use_boxed": True}
+    reward_handler: Callable | str = compute_reward
+
+    num_ray_actors: int = 1
+    num_cpus_per_actor: int = 1
+    cpu_memory_per_actor: int = 1024**3
