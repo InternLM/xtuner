@@ -4,7 +4,7 @@ import tempfile
 import ray
 
 from xtuner.v1.ray.rollout import RolloutController
-from xtuner.v1.data_proto.rl_data import SampleParams
+from xtuner.v1.data_proto.rl_data import SampleParams, RolloutState
 from xtuner.v1.config import (
     AdamWConfig,
     FSDPConfig,
@@ -121,10 +121,11 @@ class TestUpdateWeight(unittest.TestCase):
             self.pg,
         )
 
-        res_baseline = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params)) 
+        input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
+        res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state)) 
         
         # start update weight test
-        info_dict = ray.get(rollout_controller.get_rollout_info.remote())
+        info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
         ray.get(train_controller.update_rollout_info.remote(info_dict))
         
         # update weights
@@ -136,7 +137,7 @@ class TestUpdateWeight(unittest.TestCase):
         ray.get(train_controller.offload.remote(["model"]))
         ray.get(rollout_controller.onload_kvcache.remote())
 
-        res_update_weight = ray.get(rollout_controller.rollout.remote(prompt=TEST_TEXT_MESSAGES, sample_params=sample_params))       
+        res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state)) 
         self.assertEqual(res_update_weight.response, res_baseline.response)
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
 

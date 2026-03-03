@@ -1,7 +1,8 @@
 import unittest
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
-from xtuner.v1.rl.base.producer import Sampler, SamplerWithReplayBuffer, SyncProduceStrategy, AsyncProduceStrategy
+from xtuner.v1.rl.base.sampler import SamplerConfig, Sampler
+from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig, OverProduceStrategyConfig
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer, StalenessBackend
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 
@@ -30,8 +31,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
     async def test_sampler_with_replay_buffer(self):
         task_name = "test_task"
-        sampler = SamplerWithReplayBuffer(self.mock_dataloader_cfg, self.mock_tokenizer, self.replay_buffer)
-        
+        sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg)
+        sampler = sampler_cfg.build(self.mock_tokenizer, self.replay_buffer)
+
         # 场景 A: ReplayBuffer 为空，从 Dataloader 拿
         data = await sampler.sample(task_name)
         self.assertEqual(data[0].id, 0)
@@ -44,6 +46,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data[0].id, 999)
 
     async def test_sync_produce_strategy(self):
+        task_name = "test_task"
         mock_agent_loop = MagicMock()
         async def mock_gen(rs):
             for r in rs:
@@ -51,11 +54,14 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             return rs
         mock_agent_loop.generate_group = mock_gen
 
-        sampler = Sampler(self.mock_dataloader_cfg, self.mock_tokenizer)
-        strategy = SyncProduceStrategy(self.replay_buffer)
+        sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg)
+        produce_strategy_cfg = SyncProduceStrategyConfig()
+
+        sampler = sampler_cfg.build(self.mock_tokenizer, self.replay_buffer)
+        strategy = produce_strategy_cfg.build()
 
         # 执行：生产 batch_size 为 2 的数据
-        await strategy.produce_batch(mock_agent_loop, sampler, batch_size=2, task_name="test_task")
+        await strategy.produce_batch(mock_agent_loop, sampler, self.replay_buffer, batch_size=2, task_name=task_name)
 
         # 验证：ReplayBuffer 中应该有 2 条 COMPLETED 数据
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
@@ -83,13 +89,15 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
         mock_agent_loop.generate_group = mock_gen
 
-        sampler = SamplerWithReplayBuffer(self.mock_dataloader_cfg, self.mock_tokenizer, self.replay_buffer)
-        strategy = AsyncProduceStrategy(self.replay_buffer, staleness_threshold = 1)
+        sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg)
+        produce_strategy_cfg = OverProduceStrategyConfig(staleness_threshold = 1)
+        sampler = sampler_cfg.build(self.mock_tokenizer, self.replay_buffer)
+        strategy = produce_strategy_cfg.build()
         # 预处理
         aborted_item = MockRolloutState(999, status=Status.ABORTED)
         await self.replay_buffer.put([aborted_item], task_name)
         # 执行
-        await strategy.produce_batch(mock_agent_loop, sampler, batch_size=2, task_name=task_name)
+        await strategy.produce_batch(mock_agent_loop, sampler, self.replay_buffer, batch_size=2, task_name=task_name)
 
         # 验证：ReplayBuffer 中应该有 4 条 COMPLETED 数据，
         # NOTE(@duanyanhui): 目前还没实现暂停功能，所以4条都会推理完成,4条数据按照新鲜度顺序排列，999 是最旧的，0 是最新的
