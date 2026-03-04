@@ -12,23 +12,20 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
-from xtuner.v1.ray.judger.native import RouterJudgerConfig, NativeJudgerConfig
-from xtuner.v1.ray.rollout.controller import RolloutController, RolloutControllerProxy
+from xtuner.v1.ray.judger.native import NativeJudgerConfig, RouterJudgerConfig
+from xtuner.v1.ray.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.base import (
     TrainingControllerProxy,
     WorkerConfig,
     WorkerLogItem,
 )
 from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer, SyncReplayBufferConfig, AsyncReplayBufferConfig
+from xtuner.v1.rl.base.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.train.trainer import XTunerMeta
 from xtuner.v1.utils import get_logger, timer
@@ -411,28 +408,43 @@ class RLColocateTrainer:
                 continue
 
             prompt_ids = group[0].prompt_ids
-            rewards = [data.reward["score"] for data in group]
+            assert prompt_ids is not None, "prompt_ids cannot be None"
+
+            rewards = []
+            for data in group:
+                if isinstance(data.reward, dict):
+                    rewards.append(float(data.reward.get("score", 0.0)))
+                elif isinstance(data.reward, (float, int)):
+                    rewards.append(float(data.reward))
+                else:
+                    rewards.append(0.0)
+
             rewards_list.extend(rewards)
-            rewards = torch.tensor(rewards, dtype=torch.float32)
-            advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
+            rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
+            advantages = (rewards_tensor - rewards_tensor.mean(0)) / (rewards_tensor.std(0) + 1e-8)
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
                 item = group[i].response
                 logprobs: list[float] | None = None
+
+                response_ids: List[int] = []
                 if group[i].response_ids is not None:
-                    response_ids = group[i].response_ids
-                    if isinstance(response_ids, torch.Tensor):
-                        response_ids = response_ids.flatten().tolist()
+                    resp_ids_raw = group[i].response_ids
+                    if isinstance(resp_ids_raw, torch.Tensor):
+                        response_ids = resp_ids_raw.flatten().tolist()
+                    else:
+                        response_ids = cast(List[int], resp_ids_raw)
+
                     logprobs = group[i].logprobs
                     if logprobs is not None:
                         assert len(logprobs) == len(response_ids), f"{len(logprobs)} vs {len(response_ids)}"
                         # 只有 response 部分有 logprobs, 需要前面追加
                         logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs
-                    else:
-                        logprobs = None
                 else:
+                    assert item is not None, "response item cannot be None"
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
+
                 # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
                 input_ids = prompt_ids + response_ids[:-1]
 
@@ -442,22 +454,23 @@ class RLColocateTrainer:
 
                 shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
-                input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
-                shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+                input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
+                shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
                 if logprobs is not None:
                     rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
-                    assert rollout_logprobs.size() == shifted_labels.size(), (
-                        f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
+                    assert rollout_logprobs.size() == shifted_labels_t.size(), (
+                        f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
                     )
                 else:
                     rollout_logprobs = None
 
                 multimodal_train_info = group[i].mm_info
-                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids) - 1)
+                multi_info_cast = cast(dict | None, multimodal_train_info)
+                seq_ctx = get_train_seq_ctx(input_ids_t, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
                 data_dict = {
                     "seq_ctx": seq_ctx,
-                    "shifted_labels": shifted_labels,
+                    "shifted_labels": shifted_labels_t,
                     "advantage": advantages[i].item(),
                     "rollout_logprobs": rollout_logprobs,
                 }
@@ -574,7 +587,9 @@ class RLColocateTrainer:
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
                 current_global_step = train_start_step + step_idx
-                metrics: dict[str, Any] = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
+
+                metrics: dict[str, Any] = dict(mini_batch_log["loss_log"])
+                metrics.update(mini_batch_log["rl_other_log"])
 
                 self._exp_tracker.add_scalars(
                     tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": float(v) for k, v in metrics.items()},
