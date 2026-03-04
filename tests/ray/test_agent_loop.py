@@ -14,7 +14,7 @@ from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
 from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
 from xtuner.v1.rl.base.sampler import SamplerConfig
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
+from xtuner.v1.rl.base.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 
@@ -150,7 +150,8 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
         gsm8k_judger = judger_config.build()
         # 3. 创建 AgentLoopManager
-        replay_buffer = ReplayBuffer()
+        replay_buffer_cfg = SyncReplayBufferConfig()
+        replay_buffer = replay_buffer_cfg.build()
         agent_loop_manager = agent_loop_manager_cfg.build(
             rollout_controller=rollout_controller,
             judger=gsm8k_judger,

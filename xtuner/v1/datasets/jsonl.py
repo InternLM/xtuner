@@ -27,12 +27,9 @@ from torch import distributed as dist
 from tqdm import tqdm
 
 from xtuner.v1.datasets.data_item import CacheItem
-from xtuner.v1.datasets.pt_tokenize_fn.long_text import LongTextPretrainTokenizeFunction
-from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFn
-from xtuner.v1.utils import SharedMemory, get_logger
-from xtuner.v1.utils.dist_utils import get_local_process_group, get_local_world_size, is_local_rank0
+from xtuner.v1.utils import CacheDict, CacheObj, SharedMemory, get_logger
 
-from .utils import CachableTokenizeFunction, CacheDict, CacheObj, calculate_xxhash
+from .utils import CachableTokenizeFunction, calculate_xxhash
 
 
 T = TypeVar("T")
