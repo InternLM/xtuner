@@ -336,9 +336,11 @@ class RLColocateTrainer:
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
                 # TODO: ray.get(self.rollout_controller.check_health.remote())
+                self.logger.info("start to generate rollout experience for training")
                 train_batch: list[list[RolloutState]] = asyncio.run(
                     self.agent_loop_manager.produce_batch(self.global_batch_size)
                 )
+                self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
                 rollout_info = {}  # TODO: rollout info?
                 # TODO: save train trajectory
                 if not self._debug_rollout:
@@ -407,7 +409,7 @@ class RLColocateTrainer:
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
 
-            prompt_ids = group[0].prompt_ids
+            prompt_ids = group[0].tokens
             assert prompt_ids is not None and len(prompt_ids) > 0, (
                 f"Prompt ids cannot be None or empty in data: {group[0]}"
             )
@@ -437,7 +439,9 @@ class RLColocateTrainer:
 
                     logprobs = group[i].logprobs
                     if logprobs is not None:
-                        assert len(logprobs) == len(response_ids), f"{len(logprobs)} vs {len(response_ids)}"
+                        assert len(logprobs) == len(response_ids), (
+                            f"{len(logprobs)} vs {len(response_ids)}, data: {group[i]}"
+                        )
                         # 只有 response 部分有 logprobs, 需要前面追加
                         logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs  # type: ignore[arg-type]
                 else:
@@ -449,9 +453,31 @@ class RLColocateTrainer:
 
                 prompt_len_list.append(len(prompt_ids))
                 response_len_list.append(len(response_ids))
-                advantages_list.extend([advantages[i]] * len(response_ids))
 
-                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
+                response_labels: list[int] = []
+                response_mask: list[int] = []
+                if group[i].response_mask is None:
+                    response_labels = response_ids
+                    response_mask = [1] * len(response_ids)
+                else:
+                    response_mask = cast(list[int], group[i].response_mask)
+                    for idx, mask_id in enumerate(response_mask):
+                        if mask_id == 0:
+                            response_labels.append(-100)
+                        else:
+                            response_labels.append(response_ids[idx])
+
+                # 根据 response_mask 计算新的 advantages
+                actual_advantages: list[float] = [advantages[i].item()] * len(prompt_ids)
+                for mask in response_mask:
+                    if mask == 0:
+                        actual_advantages.append(0.0)
+                    else:
+                        actual_advantages.append(advantages[i].item())
+                advantages_list.extend(actual_advantages[:-1])
+
+                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
+
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
@@ -463,14 +489,13 @@ class RLColocateTrainer:
                     )
                 else:
                     rollout_logprobs = None
-
                 multimodal_train_info = group[i].mm_info
                 multi_info_cast = cast(dict | None, multimodal_train_info)
                 seq_ctx = get_train_seq_ctx(input_ids_t, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
                 data_dict = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels_t,
-                    "advantage": advantages[i].item(),
+                    "advantage": actual_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
 
