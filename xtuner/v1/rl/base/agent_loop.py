@@ -68,7 +68,7 @@ class AgentLoop(ABC):
         if callable(self.judger):
             rollout_state = await self.judger(rollout_state)
         elif isinstance(self.judger, RouterJudger) or isinstance(self.judger, NativeJudger):
-            rollout_state = await self.judger.judge(rollout_state)
+            rollout_state = await self.judger.judge(rollout_state)  # type: ignore[operator]
         else:
             raise ValueError(f"Invalid judger type: {type(self.judger)}")
         return rollout_state
