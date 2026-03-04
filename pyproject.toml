@@ -88,7 +88,8 @@ all = [
   "liger-kernel",
   "parametrize",
   "mathruler",
-  "pylatexenc"
+  "pylatexenc",
+  "flash-linear-attention"
 ]
 
 [tool.mypy]
