@@ -10,8 +10,6 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, TypeAlias, Typ
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
-    from .controller import TrainingControllerProxy
-
 import ray
 import requests
 import torch
@@ -173,7 +171,7 @@ class WorkerConfig(BaseModel):
     rollout_steps_per_sft: int = 1
     sft_loss_cfg: CELossConfig = CELossConfig()
 
-    def build(self, placement_group: "PlacementGroup") -> "TrainingControllerProxy":
+    def build(self, placement_group: "PlacementGroup"):
         """Build training workers and controller from this config and placement
         group."""
         # import here to avoid circular import
