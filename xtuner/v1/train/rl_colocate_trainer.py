@@ -408,16 +408,15 @@ class RLColocateTrainer:
                 continue
 
             prompt_ids = group[0].prompt_ids
-            assert prompt_ids is not None, "prompt_ids cannot be None"
-
+            assert prompt_ids is not None and len(prompt_ids) > 0, (
+                f"Prompt ids cannot be None or empty in data: {group[0]}"
+            )
             rewards = []
             for data in group:
-                if isinstance(data.reward, dict):
-                    rewards.append(float(data.reward.get("score", 0.0)))
-                elif isinstance(data.reward, (float, int)):
-                    rewards.append(float(data.reward))
-                else:
-                    rewards.append(0.0)
+                assert data.reward is not None and "score" in data.reward, (
+                    f"Reward is missing or does not contain 'score' key in data: {data}"
+                )
+                rewards.append(data.reward["score"])
 
             rewards_list.extend(rewards)
             rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
@@ -440,7 +439,7 @@ class RLColocateTrainer:
                     if logprobs is not None:
                         assert len(logprobs) == len(response_ids), f"{len(logprobs)} vs {len(response_ids)}"
                         # 只有 response 部分有 logprobs, 需要前面追加
-                        logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs
+                        logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs  # type: ignore[arg-type]
                 else:
                     assert item is not None, "response item cannot be None"
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()

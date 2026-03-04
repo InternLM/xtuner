@@ -85,7 +85,7 @@ class RolloutState(CacheObj, BaseModel):
 
     # --- InferEngine 输出 ---
     response: str | None = None
-    response_ids: list[int] | None = None
+    response_ids: list[int] | torch.Tensor | None = None
     logprobs: list[float] | None = None
     routed_experts: list[int] | RayObjectRef | None = None
     finish_reason: str | None = None
@@ -107,7 +107,7 @@ class RolloutState(CacheObj, BaseModel):
         return value  # list[int]
 
     #  --- Judger 输出 ---
-    reward: float | list[float] | dict[str, Any] | None = None
+    reward: dict[str, Any] | None = None
 
     #  --- 状态 ---
     task_name: str | None = None
