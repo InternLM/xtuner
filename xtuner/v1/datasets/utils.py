@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 import numpy as np
 import xxhash
 from PIL import Image
-from xtuner.v1.utils.cache import CacheDict, CacheObj
 
 from .data_item import CacheItem
 

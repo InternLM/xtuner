@@ -23,9 +23,9 @@ from torch import distributed as dist
 from tqdm import tqdm
 
 from xtuner.v1.datasets.data_item import CacheItem
-from xtuner.v1.utils import SharedMemory, get_logger
+from xtuner.v1.utils import CacheDict, CacheObj, SharedMemory, get_logger
 
-from .utils import CachableTokenizeFunction, CacheDict, CacheObj, calculate_xxhash
+from .utils import CachableTokenizeFunction, calculate_xxhash
 
 
 T = TypeVar("T")
