@@ -37,7 +37,7 @@ class ScalarNode(ConditionNode):
 
 
 class SetNode(ConditionNode):
-    def __init__(self, field: str, op: SetOperator, value: List[Any]):
+    def __init__(self, field: str, op: SetOperator, value: list[Any] | tuple[Any]):
         self.field = field
         self.op = op
         self.value = value

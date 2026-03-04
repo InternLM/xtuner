@@ -3,7 +3,7 @@ import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
 from xtuner.v1.rl.base.sampler import SamplerConfig, Sampler
 from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig, OverProduceStrategyConfig
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer, StalenessBackend
+from xtuner.v1.rl.base.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 
 class MockRolloutState:
@@ -26,8 +26,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.mock_tokenizer = MagicMock()
 
         # 3. 准备 ReplayBuffer
-        self.backend = StalenessBackend(limit=10, max_staleness=5)
-        self.replay_buffer = ReplayBuffer(storage_backend=self.backend)
+        replay_buffer_cfg = AsyncReplayBufferConfig(min_staleness=1, max_staleness=5)
+        self.replay_buffer = replay_buffer_cfg.build()
 
     async def test_sampler_with_replay_buffer(self):
         task_name = "test_task"
@@ -49,6 +49,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         task_name = "test_task"
         mock_agent_loop = MagicMock()
         async def mock_gen(rs):
+            await asyncio.sleep(0.01 * rs[0].id) 
             for r in rs:
                 r.status = Status.COMPLETED
             return rs
@@ -65,6 +66,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
         # 验证：ReplayBuffer 中应该有 2 条 COMPLETED 数据
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
+        print(final_data[0][0].id, final_data[0][0].status)
+        print(final_data[1][0].id, final_data[1][0].status)
         self.assertEqual(len(final_data), 2)
         self.assertEqual(final_data[0][0].id, 0)
         self.assertEqual(final_data[1][0].id, 1)
@@ -73,6 +76,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 这个async_produce_strategy的测试主要验证超发逻辑 + staleness 优先get的逻辑
         # 异步的其他功能如 partial_rollout, tail_batch不在这里进行验证 
         mock_agent_loop = MagicMock()
+        mock_agent_loop.pause = AsyncMock() 
         task_name = "test_task"
         call_count = 0
         async def mock_gen(rs):

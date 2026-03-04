@@ -15,12 +15,10 @@ from xtuner.v1.utils.type_helper import ray_method
 
 class Judger(ABC):
     @abstractmethod
-    @ray_method
     async def judge(self, rollout_state: RolloutState) -> RolloutState: ...
 
 
 class NativeJudger(Judger):
-    # 默认使用NativeJudger的Judger为ray.actor，如果为function，则通过用户自己调用
     """Base class for judgers, providing a standard interface for executing a
     judging process, which can be either a local function or a remote service.
 
