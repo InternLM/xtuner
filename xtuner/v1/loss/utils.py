@@ -3,6 +3,7 @@ from typing import Any
 import torch
 from mmengine.dist import dist
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.nn import functional as dist_functional
 
 from xtuner.v1.data_proto.utils import pad_to_multiple_of, split_for_sequence_parallel
 from xtuner.v1.utils.device import get_device
@@ -13,22 +14,43 @@ DEVICE = get_device()
 
 def sp_split(
     tensor,
-    sp_mesh: DeviceMesh,
+    sp_mesh: DeviceMesh | None,
     split_dim: int,
     padding_value: Any,
 ):
-    if sp_mesh.size() == 1:
+    if tensor is None or sp_mesh is None or sp_mesh.size() == 1:
         return tensor
     tensor = pad_to_multiple_of(tensor, padding_value, sp_mesh.size(), split_dim)
     tensor = split_for_sequence_parallel(tensor, dim=split_dim, sp_mesh=sp_mesh)
     return tensor
 
 
-def sp_gather(tensor, sp_mesh: DeviceMesh, dim: int):
-    if sp_mesh.size() == 1:
+def sp_gather(tensor, sp_mesh: DeviceMesh | None, dim: int):
+    if tensor is None or sp_mesh is None or sp_mesh.size() == 1:
         return tensor
     tensor_list = dist.all_gather(tensor, group=sp_mesh.get_group())
     return torch.cat(tensor_list, dim=dim)
+
+
+def sp_gather_autograd(tensor, sp_mesh: DeviceMesh | None, dim: int):
+    """Differentiable version of sp_gather.
+
+    Use this when gradients need to flow back through the gather operation,
+    e.g., for hidden_states in chunk_linear mode.
+
+    Args:
+        tensor: Input tensor to gather.
+        sp_mesh: Sequence parallel device mesh.
+        dim: Dimension to gather along.
+
+    Returns:
+        Gathered tensor with gradient support.
+    """
+    if tensor is None or sp_mesh is None or sp_mesh.size() == 1:
+        return tensor
+    tensor_list = dist_functional.all_gather(tensor, group=sp_mesh.get_group())
+    output = torch.cat(tensor_list, dim=dim).contiguous()
+    return output
 
 
 def len2weight(x, loss_reduction):

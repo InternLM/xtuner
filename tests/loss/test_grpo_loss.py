@@ -22,6 +22,8 @@ class TestGRPOLoss(DistributedTestBase):
             (1, 1, 0, "eager", None, 1e-4, 1e-4),
             (2, 2, 0, "eager", None, 1e-4, 1e-4),
             (2, 2, 0, "chunk", 100, 1e-4, 1e-4),
+            (2, 2, 0, "chunk_linear", 100, 1e-4, 1e-4),
+            (2, 1, 0, "chunk_linear", 100, 1e-4, 1e-4),
             (1, 1, 1, "eager", None, 1e-4, 1e-4),
         ],
     )
@@ -36,33 +38,8 @@ class TestGRPOLoss(DistributedTestBase):
         cliprange_high = 0.2
         torch.manual_seed(42)
         random.seed(42)
-        emb1 = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
-        emb2 = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
-        emb2.weight.data = emb1.weight.data.clone()
-        lm_head1 = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
-        lm_head2 = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
-        lm_head2.weight.data = lm_head1.weight.data.clone()
 
-        noise = torch.randn(emb1.weight.shape, device='cuda', dtype=emb1.weight.dtype) * 0.01
-        emb1_old = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
-        emb1_old.weight.data = emb1.weight.data.clone() + noise
-        emb2_old = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
-        emb2_old.weight.data = emb2.weight.data.clone() + noise
-        lm_head1_old = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
-        lm_head1_old.weight.data = lm_head1.weight.data.clone() + noise
-        lm_head2_old = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
-        lm_head2_old.weight.data = lm_head2.weight.data.clone() + noise
-
-        emb1.train()
-        lm_head1.train()
-        emb2.train()
-        lm_head2.train()
-        emb1_old.eval()
-        lm_head1_old.eval()
-        emb2_old.eval()
-        lm_head2_old.eval()
-
-        torch.manual_seed(42)
+        # 0.0 create data
         world_size = dist.get_world_size()
         dp_size = world_size // sp_size
         data_mesh = init_data_mesh("cuda", sp_size)
@@ -84,13 +61,29 @@ class TestGRPOLoss(DistributedTestBase):
             input_ids_list.append(input_ids)
             shifted_labels_list.append(shifted_labels)
             advantage_list.append(random.random() * (-1) ** random.randint(0, 1))
+
+        num_tokens = [ids.shape[1] for ids in input_ids_list]
+        num_tokens = torch.tensor(num_tokens, dtype=torch.int32, device=device)
         
-        # 1 gpu, pack inputs and labels
+        # 1.1 create ref model and data
+        torch.manual_seed(42)
+        emb1 = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
+        lm_head1 = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        noise = torch.randn(emb1.weight.shape, device='cuda', dtype=emb1.weight.dtype) * 0.01
+        emb1_old = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
+        emb1_old.weight.data = emb1.weight.data.clone() + noise
+        lm_head1_old = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head1_old.weight.data = lm_head1.weight.data.clone() + noise
+
+        emb1.train()
+        lm_head1.train()
+        emb1_old.eval()
+        lm_head1_old.eval()
+
+        # create ref data, uses 1 gpu, pack inputs and labels
         input_ids_ref = torch.cat(input_ids_list, dim=1)
         shifted_labels_ref = torch.cat(shifted_labels_list, dim=1)
         advantages_ref = torch.tensor(advantage_list, dtype=torch.float32, device=device).unsqueeze(0)
-        num_tokens = [ids.shape[1] for ids in input_ids_list]
-        num_tokens = torch.tensor(num_tokens, dtype=torch.int32, device=device)
         advantages_ref = torch.repeat_interleave(advantages_ref, num_tokens, dim=1)
         
         with torch.no_grad():
@@ -99,6 +92,7 @@ class TestGRPOLoss(DistributedTestBase):
             if kl_loss_coef > 0:
                 ref_logprobs_ref = old_logprobs_ref.clone()
 
+        # 1.2 operate ref
         logits_ref = lm_head1(emb1(input_ids_ref)).float()
         logprobs_ref = gather_logprobs(logits_ref, shifted_labels_ref.clip(0))
         ratio = (logprobs_ref - old_logprobs_ref.detach()).exp()
@@ -116,6 +110,23 @@ class TestGRPOLoss(DistributedTestBase):
             loss = loss + kl_loss
         loss.backward()
 
+        ############################## for testee #############################
+        # 2.1 create testee model and data
+        emb2 = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
+        emb2.weight.data = emb1.weight.data.clone()
+        lm_head2 = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head2.weight.data = lm_head1.weight.data.clone()
+
+        emb2_old = nn.Embedding(vocab_size, input_dim).to(device=device, dtype=dtype)
+        emb2_old.weight.data = emb2.weight.data.clone() + noise
+        lm_head2_old = nn.Linear(input_dim , vocab_size, bias=False).to(device=device, dtype=dtype)
+        lm_head2_old.weight.data = lm_head2.weight.data.clone() + noise
+
+        emb2.train()
+        lm_head2.train()
+        emb2_old.eval()
+        lm_head2_old.eval()
+
         # 8 gpus
         loss_cfg = GRPOLossConfig(
             policy_loss_cfg=dict(
@@ -130,6 +141,7 @@ class TestGRPOLoss(DistributedTestBase):
             kl_loss_type="low_var_kl",
         )
 
+        # create testee data
         input_ids_list_rank = input_ids_list[dp_rank::dp_size]
         shifted_labels_list_rank = shifted_labels_list[dp_rank::dp_size]
         advantages_list_rank = advantage_list[dp_rank::dp_size]
@@ -163,6 +175,7 @@ class TestGRPOLoss(DistributedTestBase):
         LossContext = loss_cfg.loss_ctx_cls
         loss_ctx_list = LossContext.build_batches(loss_ctx_list)
 
+        # 2.2 operate testee
         for iter_idx in range(grad_acc):
             seq_ctx = seq_ctx_list[iter_idx]
             loss_ctx = loss_ctx_list[iter_idx]
@@ -174,8 +187,10 @@ class TestGRPOLoss(DistributedTestBase):
 
         dist.all_reduce(emb2.weight.grad, op=dist.ReduceOp.AVG)
         dist.all_reduce(lm_head2.weight.grad, op=dist.ReduceOp.AVG)
-        self.assertTrue(torch.allclose(lm_head1.weight.grad, lm_head2.weight.grad, atol=atol, rtol=rtol))
-        self.assertTrue(torch.allclose(emb1.weight.grad, emb2.weight.grad, atol=atol, rtol=rtol))
+
+        # 3. check
+        torch.testing.assert_close(lm_head1.weight.grad, lm_head2.weight.grad, atol=atol, rtol=rtol)
+        torch.testing.assert_close(emb1.weight.grad, emb2.weight.grad, atol=atol, rtol=rtol)
     
     @property
     def world_size(self) -> int:

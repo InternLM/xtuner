@@ -57,7 +57,7 @@ class RolloutImportanceSampling(BaseModel):
         self,
         old_log_prob: torch.Tensor,
         rollout_log_prob: torch.Tensor,
-        num_tokens: torch.Tensor,
+        num_tokens: torch.Tensor | list,
         response_mask: torch.Tensor,
     ) -> tuple[Optional[torch.Tensor], torch.Tensor, dict[str, Any], dict[str, Any]]:
         mismatch_metrics = compute_mismatch_metrics(
@@ -87,7 +87,7 @@ class RolloutImportanceSampling(BaseModel):
 def compute_rollout_importance_weights(
     old_log_prob: torch.Tensor,
     rollout_log_prob: torch.Tensor,
-    num_tokens: torch.Tensor,
+    num_tokens: torch.Tensor | list,
     response_mask: torch.Tensor,
     rollout_is_level: str = "token",
     rollout_is_mode: str = "truncate",
