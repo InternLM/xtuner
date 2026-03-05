@@ -12,11 +12,32 @@ from typing_extensions import overload
 
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
-from xtuner.v1.utils import get_logger
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
+from xtuner.v1.utils import get_logger
 
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
+
+
+# Temporary solution: use separate function objects for each call site, Dynamo will cache them separately
+def _all_to_all_conv_pre(x, scatter_dim, gather_dim, mesh):
+    return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
+
+
+def _all_to_all_conv_post(x, scatter_dim, gather_dim, mesh):
+    return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
+
+
+def _all_to_all_qkv(x, scatter_dim, gather_dim, mesh):
+    return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
+
+
+def _all_to_all_g(x, scatter_dim, gather_dim, mesh):
+    return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
+
+
+def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
+    return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
 
 try:
@@ -204,6 +225,8 @@ class GatedDeltaNet(nn.Module):
         else:
             seq_idx = seq_ctx.seq_idx
 
+        # TODOl: due to the limitation of scatter_dim=1 in ulysses_all_to_all,
+        # the implementation is very inelegant and inefficient, and needs to be refactored in the future.
         mixed_qkv = mixed_qkv.transpose(1, 2)
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
             sp_rank = seq_ctx.sequence_parallel_mesh.get_local_rank()
@@ -211,16 +234,17 @@ class GatedDeltaNet(nn.Module):
             bias = self.conv1d.bias
             if bias is not None:
                 bias = bias.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
-            mixed_qkv = ulysses_all_to_all(
-                mixed_qkv,
-                scatter_dim=1,
+            mixed_qkv = _all_to_all_conv_pre(
+                mixed_qkv,  # (1, 8192, L/sp_size)
+                scatter_dim=1,  # must be 1
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
-            mixed_qkv=mixed_qkv.transpose(1, 2).contiguous().transpose(1, 2)
-        
+            # contiguout -> non contiguous
+            mixed_qkv = mixed_qkv.transpose(1, 2).contiguous().transpose(1, 2)
+
         mixed_qkv = self.causal_conv1d_fn(
-            x=mixed_qkv,
+            x=mixed_qkv,  # need non contiguous
             weight=weight,
             bias=bias,
             activation=self.activation,
@@ -228,13 +252,13 @@ class GatedDeltaNet(nn.Module):
         )
         mixed_qkv = mixed_qkv.transpose(1, 2)
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
-            mixed_qkv = ulysses_all_to_all(
-                mixed_qkv,
+            mixed_qkv = _all_to_all_conv_post(
+                mixed_qkv,  # (1, L, 8192/sp_size)
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
-        
+
         query, key, value = torch.split(
             mixed_qkv,
             [
@@ -258,7 +282,7 @@ class GatedDeltaNet(nn.Module):
             dt_bias = dt_bias.to_local()
 
         g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
-        
+
         if self.num_v_heads // self.num_k_heads > 1:
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
@@ -268,26 +292,26 @@ class GatedDeltaNet(nn.Module):
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
             g = g.transpose(1, 2)
-            query = ulysses_all_to_all(
-                query,
+            query = _all_to_all_qkv(
+                query,  # (1, num_q_heads, L/sp_size, head_dim)
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
-            key = ulysses_all_to_all(
-                key,
+            key = _all_to_all_qkv(
+                key,  # (1, num_k_heads, L/sp_size, head_dim)
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
-            value = ulysses_all_to_all(
-                value,
+            value = _all_to_all_qkv(
+                value,  # (1, num_v_heads, L/sp_size, head_dim)
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
-            g = ulysses_all_to_all(
-                g,
+            g = _all_to_all_g(
+                g,  # (1, num_v_heads, L/sp_size)
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
@@ -296,7 +320,7 @@ class GatedDeltaNet(nn.Module):
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
             g = g.transpose(1, 2)
-        
+
         core_attn_out, _ = self.chunk_gated_delta_rule(
             query,
             key,
@@ -309,8 +333,8 @@ class GatedDeltaNet(nn.Module):
             cu_seqlens=seq_ctx.cu_seq_lens_q,
         )
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
-            core_attn_out = ulysses_all_to_all(
-                core_attn_out,
+            core_attn_out = _all_to_all_out(
+                core_attn_out,  # (1, L, num_v_head/sp_size, head_dim)
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
