@@ -66,5 +66,11 @@ jobs:
                 Bash(cat:*),Bash(test:*),Bash(printf:*),Bash(jq:*),Bash(head:*),Bash(git:*),Bash(gh:*),
                 mcp__github_inline_comment__create_inline_comment,
                 "
+          settings: |
+            {
+              "env": {
+                "DEBUG": "true"
+              }
+            }
           allowed_non_write_users: "*"
           track_progress: false
