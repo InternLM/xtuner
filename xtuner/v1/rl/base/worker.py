@@ -388,7 +388,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         shifted_labels_list: list[torch.Tensor],
     ) -> list[torch.Tensor]:
         # precompute float8 dynamic scale only once
-        self._engine.maybe_precompute_float8_dynamic_scale_for_fsdp()
+        self._engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
         old_logprobs_list: list[torch.Tensor] = []
         for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
             output = self._engine.forward_only(seq_ctx=seq_ctx)
