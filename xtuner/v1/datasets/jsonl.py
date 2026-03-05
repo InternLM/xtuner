@@ -149,10 +149,11 @@ def tokenize_worker(
     out_queue: Queue,
     cpu_ids: list[int],
 ):
-    try:
-        os.sched_setaffinity(os.getpid(), cpu_ids)
-    except OSError as e:
-        logger.debug(f"Failed to set CPU affinity: {e}")
+    # For offline caching script to work, cpu affinity has to be turned off.
+    # try:
+    #     os.sched_setaffinity(os.getpid(), cpu_ids)
+    # except OSError as e:
+    #     logger.debug(f"Failed to set CPU affinity: {e}")
 
     shared_memory = SharedMemory(name=shm_name, create=False)
     while True:
