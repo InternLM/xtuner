@@ -6,7 +6,7 @@ import torch.nn as nn
 from xtuner.v1.config import GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
-from xtuner.v1.module import AttnOutputs, MHAConfig, MLAConfig, RMSNorm
+from xtuner.v1.module import AttnOutputs, GatedDeltaNetConfig, MHAConfig, MLAConfig, RMSNorm
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
@@ -44,7 +44,8 @@ class DenseDecoderLayer(nn.Module):
         mlp_bias: bool = False,
         hidden_act: str,
         rms_norm_eps: float = 1e-6,
-        attention_config: MLAConfig | MHAConfig,
+        rms_norm_type: Literal["default", "zero_centered"] = "default",
+        attention_config: MLAConfig | MHAConfig | GatedDeltaNetConfig,
         rope_scaling_cfg: RopeScalingConfig | None = None,
         generate_config: GenerateConfig | None = None,
         float8_cfg: Float8Config | None = None,
@@ -68,8 +69,8 @@ class DenseDecoderLayer(nn.Module):
             hidden_act=hidden_act,
             float8_cfg=float8_cfg,
         )
-        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps, type=rms_norm_type)
 
     def forward(
         self,
@@ -110,7 +111,7 @@ class DenseDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
-        hidden_states = self.self_attn.prefilling(
+        hidden_states = self.self_attn.prefilling(  # type: ignore
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
@@ -156,7 +157,7 @@ class DenseDecoderLayer(nn.Module):
     def build_kv_cache(
         self, max_batch_size: int | None = None, max_length: int | None = None, block_size: int | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.self_attn.build_kv_cache(
+        return self.self_attn.build_kv_cache(  # type: ignore
             max_batch_size=max_batch_size,
             max_length=max_length,
             block_size=block_size,
