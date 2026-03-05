@@ -87,6 +87,8 @@ class Qwen3VLBaseConfig(BaseComposeConfig):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
+    # If true, skip the forward of vit+projector. Only enable when the whole training process is pure text task.
+    only_llm_forward: bool = False
 
     def build(self):
         from .modeling_qwen3_vl import Qwen3VLForConditionalGeneration
