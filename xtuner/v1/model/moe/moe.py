@@ -82,10 +82,22 @@ MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDeco
 
 
 class MoEModelOutputs(ModelOutputs):
-    router_logits: NotRequired[dict[str, torch.Tensor]]
-    balancing_loss: NotRequired[torch.Tensor]
-    z_loss: NotRequired[torch.Tensor]
-    tokens_per_expert_global: NotRequired[torch.Tensor]
+    router_logits: dict[str, torch.Tensor] | None = None
+    balancing_loss: torch.Tensor | None = None
+    z_loss: torch.Tensor | None = None
+    tokens_per_expert_global: torch.Tensor
+
+    def free_nongrad_feature(self):
+        """Release large intermediate tensors not needed for backward or
+        logging.
+
+        This method is called immediately after forward() in the micro-batch loop.
+        It releases large tensors (logits, hidden_states) while keeping:
+        - loss: needed for backward pass
+        - extra_info: lightweight logging info needed by post_micro_batch_forward()
+        """
+        super().free_nongrad_feature()
+        self.router_logits = None
 
 
 class BalancingLossConfig(PydanticBaseModel):
@@ -486,7 +498,7 @@ class MoE(BaseModel):
 
             output["router_logits"] = router_logits_dict
 
-        return MoEModelOutputs(**output, logits=logits)  # type: ignore[typeddict-item]
+        return MoEModelOutputs(**output, logits=logits)
 
     def _forward(
         self,
@@ -587,7 +599,7 @@ class MoE(BaseModel):
         else:
             output["router_logits"] = None
 
-        return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
+        return MoEModelOutputs(**output)
 
     def build_embeddings(self, config: MoEConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
