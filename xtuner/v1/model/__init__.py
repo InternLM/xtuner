@@ -11,6 +11,7 @@ from .compose.internvl import (
     InternVL3P5MoE30BA3Config,
     InternVLBaseConfig,
 )
+from .compose.qwen3_5 import Qwen3_5_VLMoE35BA3Config
 from .compose.qwen3_vl import (
     Qwen3VLDense4BConfig,
     Qwen3VLDense8BConfig,
@@ -98,4 +99,5 @@ __all__ = [
     "TorchCompileOption",
     "DEFAULT_FLOAT8_CFG",
     "XTunerBaseModelConfig",
+    "Qwen3_5_VLMoE35BA3Config",
 ]

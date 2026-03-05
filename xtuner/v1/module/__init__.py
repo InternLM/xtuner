@@ -1,5 +1,7 @@
 from .attention import (
     AttnOutputs,
+    GatedDeltaNet,
+    GatedDeltaNetConfig,
     MHAConfig,
     MLAConfig,
     MultiHeadAttention,
@@ -26,6 +28,8 @@ __all__ = [
     "MultiLatentAttention",
     "MHAConfig",
     "MLAConfig",
+    "GatedDeltaNetConfig",
+    "GatedDeltaNet",
     "AttnOutputs",
     "RopeScalingConfig",
     "RotaryEmbedding",

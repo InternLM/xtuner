@@ -38,8 +38,11 @@ from xtuner.v1.model.base import (
 )
 from xtuner.v1.model.utils import ModelForwardExtraLogInfo, checkpoint_wrapper, module_dict_repr
 from xtuner.v1.module import (
+    GatedDeltaNetConfig,
     GreedyRouterConfig,
     LMHead,
+    MHAConfig,
+    MLAConfig,
     NoAuxRouter,
     NoAuxRouterConfig,
     RMSNorm,
@@ -136,6 +139,7 @@ class MoEConfig(TransformerConfig):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     n_routed_experts: Annotated[int, Parameter(group="moe")]
     n_shared_experts: Annotated[int, Parameter(group="moe")]
+    with_shared_expert_gate: bool = False  # enable when n_shared_experts > 0
     num_experts_per_tok: Annotated[int, Parameter(group="moe")]
     first_k_dense_replace: Annotated[int, Parameter(group="moe")] = 0
     hidden_factor: Annotated[float, Parameter(group="moe")] = 1.0
@@ -186,7 +190,7 @@ class MoE(BaseModel):
         else:
             self.ep_mesh = None
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
 
         self.layers = self.build_layers(config)
@@ -333,27 +337,23 @@ class MoE(BaseModel):
         base_info = super().post_micro_batch_forward(batch_outputs)
         logs_info = base_info["logs_info"]
 
-        tokens_per_expert_global_for_bias = None
-        if self.need_update_bias:
-            tokens_per_expert_global_for_bias = torch.zeros(
-                self.config.num_hidden_layers - self.config.first_k_dense_replace,
-                self.config.n_routed_experts,
-                dtype=torch.int64,
-                device=DEVICE,
-            )
-            for output in batch_outputs:
-                tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
+        tokens_per_expert_global = torch.zeros(
+            self.config.num_hidden_layers - self.config.first_k_dense_replace,
+            self.config.n_routed_experts,
+            dtype=torch.int64,
+            device=DEVICE,
+        )
+        for output in batch_outputs:
+            tokens_per_expert_global += output["tokens_per_expert_global"]
+
+        avg_count_load = tokens_per_expert_global.float().mean(1)
+        max_load_i, _ = torch.max(tokens_per_expert_global, dim=1)
+        maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
+        maxvio = maxvio_all_layers.mean()
+        logs_info["maxvio"] = maxvio.item()
 
         if self.need_update_bias:
-            assert tokens_per_expert_global_for_bias is not None
-            avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
-            max_load_i, _ = torch.max(tokens_per_expert_global_for_bias, dim=1)
-
-            maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
-            maxvio = maxvio_all_layers.mean()
-
-            self.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
-            logs_info["maxvio"] = maxvio.item()
+            self.update_bias(tokens_per_expert_global, avg_count_load)  # type: ignore
 
         moe_info = cast(MoEBatchForwardInfo, base_info)
         return moe_info
@@ -503,13 +503,13 @@ class MoE(BaseModel):
                         n_routed_experts=self.config.n_routed_experts,
                         num_experts_per_tok=self.config.num_experts_per_tok,
                     )
-                    / batch_size
+                    / batch_size * len(seq_ctx)
                 )
                 output["balancing_loss"] = balancing_loss
 
             # Calculate z-loss across all micro-batches
             if self.z_loss:
-                z_loss = self.z_loss(router_logits=combined_router_logits) / batch_size
+                z_loss = self.z_loss(router_logits=combined_router_logits) / batch_size * len(seq_ctx)
                 output["z_loss"] = z_loss
 
             # Calculate tokens per expert for bias update (if applicable)
@@ -649,7 +649,20 @@ class MoE(BaseModel):
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，
         # 这样可以保证部分 layer 被切掉后，idx 保持不变
         layers = nn.ModuleDict()
+        attention_config: GatedDeltaNetConfig | MLAConfig | MHAConfig | None = None
         for layer_idx in range(config.num_hidden_layers):
+            if config.layers_type[layer_idx] in ["full_attention", "sliding_attention"]:
+                attention_config = config.attention
+            elif config.layers_type[layer_idx] == "linear_attention":
+                attention_config = config.linear_attention
+                assert attention_config is not None, (
+                    "linear_attention config must be provided for linear_attention layer"
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported layer type {config.layers_type[layer_idx]} at layer {layer_idx}. Only 'full_attention', 'sliding_attention' and 'linear_attention' are supported."
+                )
+
             if layer_idx < config.first_k_dense_replace:
                 layers[str(layer_idx)] = DenseDecoderLayer(
                     hidden_size=config.hidden_size,
@@ -657,7 +670,8 @@ class MoE(BaseModel):
                     mlp_bias=config.mlp_bias,
                     hidden_act=config.hidden_act,
                     rms_norm_eps=config.rms_norm_eps,
-                    attention_config=config.attention,
+                    rms_norm_type=config.rms_norm_type,
+                    attention_config=attention_config,
                     layer_type=config.layers_type[layer_idx],
                     rope_scaling_cfg=config.rope_scaling_cfg,
                     generate_config=config.generate_config,
@@ -674,12 +688,14 @@ class MoE(BaseModel):
                     moe_bias=config.moe_bias,
                     hidden_act=config.hidden_act,
                     rms_norm_eps=config.rms_norm_eps,
+                    rms_norm_type=config.rms_norm_type,
                     num_experts_per_tok=config.num_experts_per_tok,
                     n_routed_experts=config.n_routed_experts,
                     n_shared_experts=config.n_shared_experts,
+                    with_shared_expert_gate=config.with_shared_expert_gate,
                     hidden_factor=config.hidden_factor,
                     layer_type=config.layers_type[layer_idx],
-                    attention_config=config.attention,
+                    attention_config=attention_config,
                     rope_scaling_cfg=config.rope_scaling_cfg,
                     generate_config=config.generate_config,
                     router_config=config.router,

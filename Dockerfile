@@ -41,6 +41,7 @@ ARG CODESPACE=/root/codespace
 ARG FLASH_ATTN3_DIR=/tmp/flash-attn3
 ARG ADAPTIVE_GEMM_DIR=/tmp/adaptive_gemm
 ARG GROUPED_GEMM_DIR=/tmp/grouped_gemm
+ARG CAUSAL_CONV1D_DIR=/tmp/causal_conv1d
 ARG DEEP_EP_DIR=/tmp/deep_ep
 ARG DEEP_GEMM_DIR=/tmp/deep_gemm
 ARG NVSHMEM_PREFIX=/usr/local/nvshmem
@@ -100,6 +101,23 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 WORKDIR ${CODESPACE}/GroupedGEMM
 
 RUN pip wheel -w ${GROUPED_GEMM_DIR} -v --no-deps .
+
+# compile causal_conv1d
+FROM setup_env AS causal_conv1d
+
+ARG CODESPACE
+ARG CAUSAL_CONV1D_DIR
+ARG CAUSAL_CONV1D_URL
+
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    git clone $(echo ${CAUSAL_CONV1D_URL} | cut -d '@' -f 1) && \
+    cd ${CODESPACE}/causal-conv1d && \
+    git checkout $(echo ${CAUSAL_CONV1D_URL} | cut -d '@' -f 2) && \
+    git submodule update --init --recursive --force
+
+WORKDIR ${CODESPACE}/causal-conv1d
+
+RUN CAUSAL_CONV1D_FORCE_BUILD=TRUE pip wheel -w ${CAUSAL_CONV1D_DIR} -v --no-deps --no-build-isolation .
 
 # pypi install nvshmem and compile deepep
 FROM setup_env AS deep_ep
@@ -167,6 +185,7 @@ ARG ADAPTIVE_GEMM_DIR
 ARG GROUPED_GEMM_DIR
 ARG DEEP_EP_DIR
 ARG DEEP_GEMM_DIR
+ARG CAUSAL_CONV1D_DIR
 
 COPY --from=flash_attn ${FLASH_ATTN3_DIR} ${FLASH_ATTN3_DIR}
 COPY --from=flash_attn ${FLASH_ATTN_DIR} ${FLASH_ATTN_DIR}
@@ -175,6 +194,7 @@ COPY --from=grouped_gemm ${GROUPED_GEMM_DIR} ${GROUPED_GEMM_DIR}
 COPY --from=deep_ep ${DEEP_EP_DIR} ${DEEP_EP_DIR}
 COPY --from=deep_ep ${NVSHMEM_PREFIX} ${NVSHMEM_PREFIX}
 COPY --from=deep_gemm ${DEEP_GEMM_DIR} ${DEEP_GEMM_DIR}
+COPY --from=causal_conv1d ${CAUSAL_CONV1D_DIR} ${CAUSAL_CONV1D_DIR}
 
 RUN unzip ${FLASH_ATTN_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${FLASH_ATTN3_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
@@ -182,6 +202,7 @@ RUN unzip ${ADAPTIVE_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${GROUPED_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${DEEP_EP_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${DEEP_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
+RUN unzip ${CAUSAL_CONV1D_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 
 # install sglang and its runtime requirements
 ARG SGLANG_VERSION
