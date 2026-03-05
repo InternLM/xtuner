@@ -27,7 +27,7 @@ def build_text_ctx_labels(
     pack_max_length: int,
     padding_token_idx: int,
     pack_to_max_length: bool,
-) -> tuple[SequenceContext, torch.Tensor, Sequence[DataItem] | DataItem]:
+) -> tuple[SequenceContext, torch.Tensor, Sequence[DataItem]]:
     if isinstance(instance, dict):
         instance = [instance]
 
@@ -214,7 +214,7 @@ def qwen3_vl_sft_collator(
     ret: list[ColateItem] = []
     for instance in instances:
         # If the token number of the packed sample is larger than the packed_max_length
-        seq_ctx, shifted_labels, instance = build_text_ctx_labels(
+        seq_ctx, shifted_labels, instance = build_text_ctx_labels(  # type: ignore
             instance,
             pack_max_length,
             padding_token_idx,
