@@ -45,6 +45,7 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
         message = item["prompt"]
 
         raw_prompt = self.tokenizer.apply_chat_template(message, add_generation_prompt=True, tokenize=False)
+        extra_info["raw_prompt"] = raw_prompt
         data = self.tokenizer(raw_prompt, add_special_tokens=False)
         prompt_token_ids = data["input_ids"]
         num_tokens = len(data["input_ids"])
