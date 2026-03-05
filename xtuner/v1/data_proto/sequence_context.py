@@ -36,6 +36,7 @@ class SequenceContext:
     block_table: torch.Tensor | None
     device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None
+    seq_idx: torch.IntTensor | None
 
     # Qwen3VL
     image_grid_thw: torch.Tensor | None
@@ -98,6 +99,7 @@ class SequenceContext:
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
+        self.seq_idx = None
 
         seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
         seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
