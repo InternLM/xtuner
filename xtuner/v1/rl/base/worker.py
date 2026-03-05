@@ -24,10 +24,7 @@ from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
-from xtuner.v1.engine.train_engine import LossLog, OtherLog, TrainEngine
-from xtuner.v1.engine.vision_compose_train_engine import (
-    VisionComposeTrainEngine,
-)
+from xtuner.v1.engine.train_engine import TrainEngine, TrainStepInfo
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.loss.ce_loss import CELossContext
@@ -35,6 +32,7 @@ from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
+from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.rl.base.loss import BaseRLLossContext
@@ -177,19 +175,10 @@ class WorkerInputItem(TypedDict):
     rollout_logprobs: torch.Tensor | None
 
 
-class RLOtherLog(TypedDict):
-    maxvio: NotRequired[float]
+class WorkerTrainLogItem(TypedDict, total=False):
     step_consumed_tokens: int
-    step_consumed_img_tokens: NotRequired[float]
     efficient_attn_ratio: float
-    max_ratio: NotRequired[float]
-    loss: NotRequired[float]
-    grad_norm: NotRequired[float]
-
-
-class WorkerTrainLogItem(TypedDict):
-    loss_log: LossLog
-    rl_other_log: RLOtherLog
+    grad_norm: float
 
 
 class WorkerLogItem(TypedDict):
@@ -299,19 +288,12 @@ class TrainingWorker(SingleAcceleratorWorker):
     def _set_random_seed(self, seed: None | int):
         set_random_seed(seed)
 
-    def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine | VisionComposeTrainEngine:
-        if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
-            engine = VisionComposeTrainEngine(
-                optim_cfg=worker_cfg.optim_cfg,
-                fsdp_cfg=worker_cfg.fsdp_cfg,
-                model_cfg=worker_cfg.model_cfg,
-            )
-        else:
-            engine = TrainEngine(  # type: ignore
-                optim_cfg=worker_cfg.optim_cfg,
-                fsdp_cfg=worker_cfg.fsdp_cfg,
-                model_cfg=worker_cfg.model_cfg,
-            )
+    def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine:
+        engine = TrainEngine(  # type: ignore
+            optim_cfg=worker_cfg.optim_cfg,
+            fsdp_cfg=worker_cfg.fsdp_cfg,
+            model_cfg=worker_cfg.model_cfg,
+        )
 
         if worker_cfg.load_from is not None:
             engine.from_hf(worker_cfg.load_from)
@@ -409,30 +391,6 @@ class TrainingWorker(SingleAcceleratorWorker):
             ref_logprobs_list.append(ref_logprobs)
         self._ref_model.to_device("cpu")
         return ref_logprobs_list
-
-    def _get_rl_other_log(self, other_log: OtherLog) -> RLOtherLog:
-        from xtuner.v1.model.utils import ModelForwardExtraLogInfo
-
-        extra_info: ModelForwardExtraLogInfo | dict = other_log.get("extra_info", {})
-        if isinstance(extra_info, ModelForwardExtraLogInfo):
-            extra_info_dict = extra_info.get()
-        else:
-            extra_info_updated = ModelForwardExtraLogInfo(extra_info)
-            extra_info_dict = extra_info_updated.get()
-
-        for k, v in extra_info_dict.items():
-            if isinstance(v, torch.Tensor):
-                extra_info_dict[k] = v.item()
-
-        rl_other_log: RLOtherLog = {
-            "maxvio": other_log.get("maxvio", 0.0),
-            "step_consumed_tokens": other_log["step_consumed_tokens"],
-            "step_consumed_img_tokens": float(other_log.get("step_consumed_img_tokens", 0.0)),
-            "efficient_attn_ratio": other_log["efficient_attn_ratio"],
-            "max_ratio": extra_info_dict.get("max_ratio", 0.0),
-            "loss": extra_info_dict.get("loss", 0.0),
-        }
-        return rl_other_log
 
     def _add_rollout_routed_experts(
         self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
@@ -647,27 +605,48 @@ class TrainingWorker(SingleAcceleratorWorker):
                 for seq_ctx, loss_ctx in zip(batches_seq_ctx, batches_loss_ctx)
             ]
 
-            loss_log, other_log = self._engine.train_step(
+            train_step_info = self._engine.train_step(
                 data_batches=engine_input,
             )
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
-            rl_other_log = self._get_rl_other_log(other_log)  # type: ignore[arg-type]
-            rl_other_log["grad_norm"] = grad_norm.item()
-            worker_log_item["train_metrics"].append(WorkerTrainLogItem(loss_log=loss_log, rl_other_log=rl_other_log))
 
-            log_info = {**loss_log, **rl_other_log}
+            engine_logs_info = cast(dict[str, float], train_step_info.pop("logs_info"))  # type: ignore[misc]
+            engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
+
+            if isinstance(engine_extra_info, ModelForwardExtraLogInfo):
+                extra_info_dict = engine_extra_info.get()
+            else:
+                extra_info_dict = cast(dict, engine_extra_info)
+
+            extra_info_dict = {k: v.item() for k, v in extra_info_dict.items() if isinstance(v, torch.Tensor)}
+            train_step_info.pop("total_loss")  # type: ignore[misc]
+
+            train_log_item = WorkerTrainLogItem(
+                **engine_logs_info,  # type: ignore[typeddict-item]
+                **train_step_info,
+                **extra_info_dict,
+                grad_norm=grad_norm.item(),
+            )
+            worker_log_item["train_metrics"].append(train_log_item)
+
+            # Extract logs_info for logging
             log_str = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
-                for key, value in log_info.items()
+                for key, value in train_log_item.items()
             )
             log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
 
         self._rollout_step += 1
         if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
-            loss_log = self._fit_sft()
-            worker_log_item["sft_train_metrics"] = loss_log
+            train_step_info = self._fit_sft()
+            engine_logs_info = train_step_info["logs_info"]
+            worker_log_item["sft_train_metrics"] = {
+                **engine_logs_info,
+                **train_step_info["extra_info"].get(),
+                "efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
+            }
 
         return worker_log_item
 
@@ -683,34 +662,27 @@ class TrainingWorker(SingleAcceleratorWorker):
         DEVICE_MODULE.reset_peak_memory_stats()
         cur_sample_num = len(data_batch)
 
-        loss_log, other_log, grad_norm = self._train_one_step_sft(data_batch)
+        train_step_info, grad_norm = self._train_one_step_sft(data_batch)
 
         time_after_train_step = time.time()
         step_time = time_after_train_step - time_before_train_step
-        step_consumed_tokens = other_log["step_consumed_tokens"]
+        step_consumed_tokens = train_step_info["step_consumed_tokens"]
 
         self._sft_total_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
         reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
         self._sft_total_consumed_tokens += reduced_step_consumed_tokens
 
         self._sft_log_step(
-            loss_log=loss_log,
+            train_step_info=train_step_info,
             local_step_consumed_tokens=step_consumed_tokens,
             step_consumed_tokens=reduced_step_consumed_tokens,
             total_consumed_tokens=self._sft_total_consumed_tokens,
             data_time=data_time,
             step_time=step_time,
             grad_norm=grad_norm,
-            efficient_attn_ratio=other_log["efficient_attn_ratio"],
         )
 
-        # to return sft log
-        loss_log["grad_norm"] = grad_norm.item()
-        loss_log["data_time"] = data_time
-        loss_log["step_time"] = step_time
-        loss_log["tgs"] = step_consumed_tokens / step_time
-        loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
-        return loss_log
+        return train_step_info
 
     def _next_sft_data_batch(self):
         try:
@@ -745,25 +717,26 @@ class TrainingWorker(SingleAcceleratorWorker):
             ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
         ]
 
-        loss_log, other_log = self._engine.train_step(engine_input)
+        train_step_info = self._engine.train_step(engine_input)
         grad_norm = self._engine.clip_grad_norm()
         self._engine.step_optimizer(grad_norm)
-        return loss_log, other_log, grad_norm
+        return train_step_info, grad_norm
 
     def _sft_log_step(
         self,
-        loss_log: LossLog,
+        train_step_info: TrainStepInfo,
         local_step_consumed_tokens: int,
         step_consumed_tokens: int,
         total_consumed_tokens: int,
         data_time: float,
         step_time: float,
-        grad_norm: float,
-        efficient_attn_ratio: float,
+        grad_norm: torch.Tensor,
     ):
         tgs = local_step_consumed_tokens / step_time
-        loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
-        loss_log_str = ", ".join(loss_log_list)
+        logs_info = train_step_info.get("logs_info", {})
+        log_items = [f"{k}: {v:.8f}" for k, v in logs_info.items() if "loss" in k]
+        log_items.append(f"total_loss: {train_step_info['total_loss']:.8f}")
+        loss_log_str = ", ".join(log_items)
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
@@ -773,12 +746,12 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"text_tokens: {local_step_consumed_tokens} "
             f"step_consumed_tokens: {step_consumed_tokens} "
             f"total_consumed_tokens: {total_consumed_tokens} "
-            f"efficient_attn_ratio: {efficient_attn_ratio:.4f} "
+            f"efficient_attn_ratio: {train_step_info['efficient_attn_ratio']:.4f} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"tgs: {tgs:.1f} "
+            f"tgs: {tgs:.4f}"
         )
 
     def _reduce_number_across_rank(self, rank_number: int) -> int:
