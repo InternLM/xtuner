@@ -93,7 +93,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
             engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -171,7 +171,7 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
             engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -270,11 +270,11 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
             engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            logs_info = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
-            losses.append(loss_log["reduced_llm_loss"])
+            losses.append(logs_info["reduced_llm_loss"])
         losses_ref = torch.tensor([2.41, 2.41, 2.47, 2.42, 2.44, 2.44, 2.42, 2.38, 2.31, 2.30])
         losses = torch.tensor(losses)
         self._check_loss_curve(losses, losses_ref)

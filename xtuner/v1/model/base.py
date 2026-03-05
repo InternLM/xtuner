@@ -8,7 +8,7 @@ from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Iterable, Literal, Mapping, cast
+from typing import Annotated, Generator, Iterable, Literal, Mapping, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -28,12 +28,13 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-from typing_extensions import NotRequired, Self, TypedDict
+from typing_extensions import NotRequired, Self, TypedDict, overload
 
 from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
+from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
     WeightWithDynamicTilewiseFloat8CastTensor,
@@ -55,6 +56,16 @@ logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
+
+
+class DataBatchInfo(TypedDict):
+    step_consumed_tokens: int
+    efficient_attn_ratio: float
+
+
+class BatchForwardInfo(TypedDict):
+    logs_info: dict[str, float]
+    extra_info: ModelForwardExtraLogInfo
 
 
 class TorchCompileOption(TypedDict):
@@ -200,8 +211,8 @@ class ModelOutputs(PydanticBaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     hidden_states: list[torch.Tensor] | None = None
     logits: torch.Tensor | None = None
-    loss: torch.Tensor
-    extra_info: ModelForwardExtraLogInfo | None = None
+    loss: torch.Tensor | None = None  # TODO: `forward_only` mode for RL
+    extra_info: ModelForwardExtraLogInfo | dict | None = None  # TODO: `forward_only` mode for RL
 
     def free_nongrad_feature(self):
         """Release large intermediate tensors not needed for backward or
@@ -264,6 +275,7 @@ class BaseModel(nn.Module):
         self._hf_path: Path | None = None  # type: ignore
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
+        self._float8_handler: Float8Handler | None = None
 
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
@@ -581,6 +593,64 @@ class BaseModel(nn.Module):
             gathered_tensor_list_new.extend([gathered_tensor_fp8, scale])
             name_list_new.extend([name, f"{name}_scale_inv"])
         return gathered_tensor_list_new, name_list_new
+
+    def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
+        step_consumed_tokens = torch.tensor(0, device=DEVICE)
+        efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+
+        for data in data_batches:
+            seq_ctx = data["seq_ctx"]
+            step_consumed_tokens += seq_ctx.mask.sum()
+            num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
+            efficient_forward_tokens += (num_tokens.long() ** 2).sum()
+            total_forward_tokens += (num_tokens.long().sum()) ** 2
+
+        efficient_attn_ratio = efficient_forward_tokens.float() / total_forward_tokens.float()
+
+        batch_info: DataBatchInfo = {
+            "step_consumed_tokens": cast(int, step_consumed_tokens.item()),
+            "efficient_attn_ratio": cast(float, efficient_attn_ratio.item()),
+        }
+        return batch_info
+
+    def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
+        train_engine_extra_info = ModelForwardExtraLogInfo()
+
+        local_total_loss = torch.tensor(0.0, device=DEVICE)
+        reduced_other_losses: dict[str, float] = {}
+
+        for output in batch_outputs:
+            output_copy = output.model_copy()
+            for name in output_copy.model_fields:
+                obj = getattr(output_copy, name)
+                if "loss" in name and isinstance(obj, torch.Tensor):
+                    loss_item = obj.item()
+                    local_total_loss += loss_item
+                    reduced_name = f"reduced_{name}"
+
+                    if reduced_name not in reduced_other_losses:
+                        reduced_other_losses[reduced_name] = loss_item
+                    else:
+                        reduced_other_losses[reduced_name] += loss_item
+
+            if "extra_info" in output_copy:
+                extra_info = output["extra_info"]
+                train_engine_extra_info.append(extra_info)
+
+        for name, loss in reduced_other_losses.items():
+            tensor_loss = torch.tensor(loss, device=DEVICE)
+            dist.all_reduce(tensor_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
+            reduced_other_losses[name] = tensor_loss.item()
+
+        if "reduced_loss" in reduced_other_losses:
+            reduced_other_losses["reduced_llm_loss"] = reduced_other_losses.pop("reduced_loss")
+
+        ret = BatchForwardInfo(
+            logs_info=reduced_other_losses,
+            extra_info=train_engine_extra_info,
+        )
+        return ret
 
     def _get_shard_hf_param(
         self,
@@ -1563,3 +1633,20 @@ class BaseModel(nn.Module):
                 param = param.full_tensor()
             ret[name] = param
         return ret
+
+    # NOTE: Add this overload for inferring the return type for easier type checking and using
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        seq_ctx: SequenceContext,
+        loss_ctx: BaseLossContext | None,
+    ) -> ModelOutputs: ...
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        seq_ctx: list[SequenceContext],
+        loss_ctx: list[BaseLossContext],
+    ) -> ModelOutputs: ...
+
+    __call__ = nn.Module.__call__

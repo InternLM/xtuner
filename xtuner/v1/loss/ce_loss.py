@@ -146,6 +146,7 @@ class CELossContext(BaseLossContext):
             dist.all_reduce(global_denominator, op=dist.ReduceOp.SUM)
 
         for loss_ctx in loss_ctx_list:
+            loss_ctx._batch_size = len(loss_ctx_list)
             loss_ctx.loss_kwargs.loss_weight /= global_denominator + 1e-12
         return loss_ctx_list
 
@@ -204,3 +205,7 @@ class CELossContext(BaseLossContext):
             w = loss_weight.sum() / mask.sum()  # w equals to 1/global_denominator
             loss = loss * w
             return loss, (None, {})
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size

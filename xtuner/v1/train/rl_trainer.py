@@ -681,8 +681,7 @@ class RLTrainer:
                     break
                 mini_batch_metrics: dict[str, List[float]] = {}
                 for mini_batch_log in log_item["train_metrics"]:
-                    rl_worker_log = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
-                    for k, v in rl_worker_log.items():
+                    for k, v in mini_batch_log.items():
                         mini_batch_metrics.setdefault(k, []).append(cast(float, v))
 
                 for key, value in mini_batch_metrics.items():
@@ -705,11 +704,10 @@ class RLTrainer:
     def _log_mini_batch_metrics(self, workers_log_item: List[WorkerLogItem]):
         train_start_step = self._global_train_step
         for worker_idx, log_item in enumerate(workers_log_item):
-            for step_idx, mini_batch_log in enumerate(log_item["train_metrics"]):
+            for step_idx, metrics in enumerate(log_item["train_metrics"]):
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
                 current_global_step = train_start_step + step_idx
-                metrics = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
 
                 self._exp_tracker.add_scalars(
                     tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": v for k, v in metrics.items()},
