@@ -646,6 +646,12 @@ def ftdp_tokenize(
     # HACK for delivery format
     if isinstance(messages, dict) and "dialogs" in messages:
         messages = messages["dialogs"]
+    elif isinstance(messages, dict) and "messages" in messages:
+        messages = messages["messages"]
+
+    if not isinstance(messages, list):
+        raise TypeError(f"Expected `messages` to be a list, but got {type(messages)}. Please check the input format.")
+
     messages = cast(list[dict], messages)
     _processed_data = format_sub_role(messages, template_config)
 
