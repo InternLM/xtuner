@@ -503,13 +503,14 @@ class MoE(BaseModel):
                         n_routed_experts=self.config.n_routed_experts,
                         num_experts_per_tok=self.config.num_experts_per_tok,
                     )
-                    / batch_size * len(seq_ctx)
+                    / batch_size
+                    * len(seq_ctx_list)
                 )
                 output["balancing_loss"] = balancing_loss
 
             # Calculate z-loss across all micro-batches
             if self.z_loss:
-                z_loss = self.z_loss(router_logits=combined_router_logits) / batch_size * len(seq_ctx)
+                z_loss = self.z_loss(router_logits=combined_router_logits) / batch_size * len(seq_ctx_list)
                 output["z_loss"] = z_loss
 
             # Calculate tokens per expert for bias update (if applicable)
