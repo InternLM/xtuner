@@ -39,6 +39,9 @@ jobs:
 
               If user require you to review the PR, please follow the following step.
 
+              ```text
+              # PR review guide
+
               You are in repository without that patch applied. Do not apply it.
               Assume the patch will be build and tested by other GitHub Actions workflows.
 
@@ -58,6 +61,9 @@ jobs:
 
               When linking to code in inline comments, follow the following format precisely, otherwise the Markdown preview
               won't render correctly: https://github.com/${{ github.repository }}/blob/${{ github.event.pull_request.head.sha }}/README.md#L10-L15
+              ```
+
+              If the user is asking for help or asking a question (rather than requesting a code review), fetch the PR content using the method above as context, then respond directly to the user's request. Do not perform or output a code review in this case.
           claude_args: |
               --max-turns 30
               --model claude-opus-4-6
