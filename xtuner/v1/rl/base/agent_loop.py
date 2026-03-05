@@ -11,7 +11,7 @@ from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
 
 class AgentLoopConfig(ABC, BaseModel):
-    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)  # TODO: extra="forbid"
     hf_checkpoint: str
     sample_params: SampleParams
 

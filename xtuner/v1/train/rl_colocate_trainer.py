@@ -449,6 +449,7 @@ class RLColocateTrainer:
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
 
                 # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
+                # TODO: verl tool agent loop 是否需要？
                 input_ids = prompt_ids + response_ids[:-1]
 
                 prompt_len_list.append(len(prompt_ids))
