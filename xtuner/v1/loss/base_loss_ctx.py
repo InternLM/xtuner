@@ -187,6 +187,7 @@ class BaseLossContext(nn.Module, ABC):
         head_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
+
         assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
         if head_bias is not None:
             raise NotImplementedError("Loss does not support head_bias yet.")
