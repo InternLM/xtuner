@@ -229,7 +229,8 @@ def qwen3_vl_sft_collator(
         if not all_position_ids_none:
             for _instance in instance:
                 if "position_ids" in _instance and _instance["position_ids"] is not None:
-                    position_ids_list.append(_instance["position_ids"])
+                    position_ids_ = _instance["position_ids"][..., :pack_max_length]
+                    position_ids_list.append(position_ids_)
                 else:
                     position_ids_ = (
                         torch.arange(len(_instance["input_ids"]))
@@ -273,6 +274,11 @@ def qwen3_vl_sft_collator(
         seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.num_img_tokens = num_img_tokens
 
+        if position_ids is not None:
+            assert seq_ctx.input_ids is not None, "input_ids should not be None"
+            assert position_ids.shape[-1] == seq_ctx.input_ids.shape[-1], (
+                f"position_ids length {position_ids.shape[-1]} != input_ids length {seq_ctx.input_ids.shape[-1]}"
+            )
         ret.append(
             {
                 "seq_ctx": seq_ctx,
