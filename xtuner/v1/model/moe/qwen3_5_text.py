@@ -26,7 +26,7 @@ MOE_NON_EP_COMPILE_CFG: dict[str, TorchCompileOption] = {
     ),
     "xtuner.v1.module.attention.mha.MultiHeadAttention.forward": TorchCompileOption(fullgraph=True),
     # TODO: GatedDeltaNet does not currently support torch.compile(full_graph=True); support will be added in the future.
-    "xtuner.v1.module.attention.gated_deltanet.GatedDeltaNet.forward": TorchCompileOption(fullgraph=False),
+    "xtuner.v1.module.attention.gated_deltanet.GatedDeltaNet.forward": TorchCompileOption(fullgraph=True),
     "xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDecoderLayer._shared_experts_forward": TorchCompileOption(
         fullgraph=True
     ),

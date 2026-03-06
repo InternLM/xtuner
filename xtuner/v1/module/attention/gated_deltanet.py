@@ -15,6 +15,10 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
 
+from ...ops.gated_deltanet.gen_seq_idx import gen_seq_idx
+from ...ops.gated_deltanet.chunk_gated_delta_rule import chunk_gated_delta_rule
+from ...ops.gated_deltanet.causal_conv1d import causal_conv1d_fn
+from ...ops.gated_deltanet.rms_norm_gated import rms_norm_gated
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
 
@@ -38,8 +42,6 @@ def _all_to_all_out(x, scatter_dim, gather_dim, mesh):
 
 try:
     from fla.modules import FusedRMSNormGated as FLA_FusedRMSNormGated
-    from fla.modules.fused_norm_gate import rms_norm_gated
-    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 
     class FusedRMSNormGated(FLA_FusedRMSNormGated):
         def forward(
@@ -68,12 +70,6 @@ try:
 
 except ImportError:
     FusedRMSNormGated = None  # type: ignore
-    chunk_gated_delta_rule = None
-
-try:
-    from causal_conv1d import causal_conv1d_fn
-except ImportError:
-    causal_conv1d_fn = None
 
 logger = get_logger()
 
@@ -150,13 +146,7 @@ class GatedDeltaNet(nn.Module):
         A = torch.empty(self.num_v_heads).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
 
-        assert causal_conv1d_fn is not None, (
-            "causal_conv1d_fn is not available. Please install causal-conv1d to use GatedDeltaNet by `https://github.com/Dao-AILab/causal-conv1d`."
-        )
         self.causal_conv1d_fn = causal_conv1d_fn
-        assert chunk_gated_delta_rule is not None, (
-            "chunk_gated_delta_rule is not available. Please install fla to use GatedDeltaNet by `pip install flash-linear-attention`."
-        )
         self.chunk_gated_delta_rule = chunk_gated_delta_rule
         assert FusedRMSNormGated is not None, (
             "FusedRMSNormGated is not available. Please install fla to use GatedDeltaNet by `pip install flash-linear-attention`."
@@ -208,15 +198,12 @@ class GatedDeltaNet(nn.Module):
         if bias and isinstance(bias, DTensor):
             bias = bias.to_local()
 
-        # TODO: If full_graph mode is supported in the future, it needs to be modified to custom_op
+        assert seq_ctx.sequence_parallel_mesh is not None, "sequence_parallel_mesh is required for forward_for_sp"
+        sp_rank = seq_ctx.sequence_parallel_mesh.get_local_rank()
+        sp_size = seq_ctx.sequence_parallel_mesh.size()
         if seq_ctx.seq_idx is None:
-            seq_idx = torch.cat(
-                [
-                    torch.full((s,), i, dtype=torch.int32, device=mixed_qkv.device)
-                    for i, s in enumerate(seq_ctx.seq_lens_q)
-                ],
-                dim=0,
-            )[None]
+            # SP restores the full packed sequence before convolution, so seq_idx uses the global length.
+            seq_idx = gen_seq_idx(seq_len * sp_size, seq_ctx.cu_seq_lens_q)
             seq_ctx.seq_idx = cast(torch.IntTensor, seq_idx)
         else:
             seq_idx = seq_ctx.seq_idx
@@ -230,7 +217,6 @@ class GatedDeltaNet(nn.Module):
             ],
             dim=-1,
         )
-        # (1, L, 8192/sp_size)
         query = query.transpose(1, 2)  # (1, dim, L/sp_size)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
@@ -254,7 +240,6 @@ class GatedDeltaNet(nn.Module):
             mesh=seq_ctx.sequence_parallel_mesh,
         )
 
-        # query =  (1, dim/sp_size, L)
         query_weight, key_weight, value_weight = torch.split(
             weight,  # (8192, 4)
             [
@@ -264,35 +249,32 @@ class GatedDeltaNet(nn.Module):
             ],
             dim=0,
         )
-
-        assert seq_ctx.sequence_parallel_mesh is not None, "sequence_parallel_mesh is required for forward_for_sp"
-        sp_rank = seq_ctx.sequence_parallel_mesh.get_local_rank()
-        sp_size = seq_ctx.sequence_parallel_mesh.size()
-        query_weight = query_weight.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
-        key_weight = key_weight.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
-        value_weight = value_weight.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
+        query_weight = query_weight.chunk(sp_size, dim=0)[sp_rank]
+        key_weight = key_weight.chunk(sp_size, dim=0)[sp_rank]
+        value_weight = value_weight.chunk(sp_size, dim=0)[sp_rank]
         if bias is not None:
-            bias = bias.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
+            bias = bias.chunk(sp_size, dim=0)[sp_rank]
 
-        query = query.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
-        key = key.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
-        value = value.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
-        query = self.causal_conv1d_fn(  # query (batch, dim, seqlen)
-            x=query,  # need non contiguous
+        # The local causal-conv custom op consumes channel-last tensors when seq_idx is set.
+        query = query.transpose(1, 2).contiguous()
+        key = key.transpose(1, 2).contiguous()
+        value = value.transpose(1, 2).contiguous()
+        query = self.causal_conv1d_fn(
+            x=query,
             weight=query_weight,
             bias=bias,
             activation=self.activation,
             seq_idx=seq_idx,
         )
         key = self.causal_conv1d_fn(
-            x=key,  # need non contiguous
+            x=key,
             weight=key_weight,
             bias=bias,
             activation=self.activation,
             seq_idx=seq_idx,
         )
         value = self.causal_conv1d_fn(
-            x=value,  # need non contiguous
+            x=value,
             weight=value_weight,
             bias=bias,
             activation=self.activation,
@@ -310,16 +292,9 @@ class GatedDeltaNet(nn.Module):
 
         g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
 
-        # (1,key_dim/sp_size, L)
-        query = query.transpose(1, 2).reshape(
-            batch_size, seq_len * sp_size, -1, self.head_k_dim
-        )  # (1, L, num_k_heads/sp_size, head_k_dim)
-        key = key.transpose(1, 2).reshape(
-            batch_size, seq_len * sp_size, -1, self.head_k_dim
-        )  # (1, L, num_k_heads/sp_size, head_k_dim)
-        value = value.transpose(1, 2).reshape(
-            batch_size, seq_len * sp_size, -1, self.head_v_dim
-        )  # (1, L, num_v_heads/sp_size, head_v_dim)
+        query = query.reshape(batch_size, seq_len * sp_size, -1, self.head_k_dim)
+        key = key.reshape(batch_size, seq_len * sp_size, -1, self.head_k_dim)
+        value = value.reshape(batch_size, seq_len * sp_size, -1, self.head_v_dim)
 
         if self.num_v_heads // self.num_k_heads > 1:
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
@@ -403,22 +378,13 @@ class GatedDeltaNet(nn.Module):
         if bias and isinstance(bias, DTensor):
             bias = bias.to_local()
 
-        # TODO: If full_graph mode is supported in the future, it needs to be modified to custom_op
         if seq_ctx.seq_idx is None:
-            seq_idx = torch.cat(
-                [
-                    torch.full((s,), i, dtype=torch.int32, device=mixed_qkv.device)
-                    for i, s in enumerate(seq_ctx.seq_lens_q)
-                ],
-                dim=0,
-            )[None]
+            # Keep seq_idx generation in a custom op so full-graph compile avoids Python tensor construction.
+            seq_idx = gen_seq_idx(seq_len, seq_ctx.cu_seq_lens_q)
             seq_ctx.seq_idx = cast(torch.IntTensor, seq_idx)
         else:
             seq_idx = seq_ctx.seq_idx
 
-        # TODO: due to the limitation of scatter_dim=1 in ulysses_all_to_all,
-        # the implementation is very inelegant and inefficient, and needs to be refactored in the future.
-        mixed_qkv = mixed_qkv.transpose(1, 2)
         mixed_qkv = self.causal_conv1d_fn(
             x=mixed_qkv,  # need non contiguous
             weight=weight,
@@ -426,7 +392,7 @@ class GatedDeltaNet(nn.Module):
             activation=self.activation,
             seq_idx=seq_idx,
         )
-        mixed_qkv = mixed_qkv.transpose(1, 2)
+        # mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
             mixed_qkv,
             [
