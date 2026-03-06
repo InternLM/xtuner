@@ -3,6 +3,7 @@ import hashlib
 import inspect
 from typing import Annotated
 
+from copy import deepcopy
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 
@@ -42,11 +43,20 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
             tools = item["tools"]
         if isinstance(item, dict) and "messages" in item:
             item = item["messages"]
-        messages = ChatMessages(messages=item, tools=tools)
-        tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
-        input_ids = tokenized["input_ids"]
-        labels = tokenized["labels"]
+        if isinstance(item, dict) and "dialogs" in item:
+            item = item["dialogs"]
+        
+        if 'content' in item:
+            # 临时 代码
+            input_ids = self.tokenizer.encode(item['content'], add_special_tokens=False)
+            labels = deepcopy(input_ids)
+        else:
+            messages = ChatMessages(messages=item, tools=tools)
+            tokenized = messages.tokenize(self.tokenizer, self.chat_template)
+
+            input_ids = tokenized["input_ids"]
+            labels = tokenized["labels"]
         if self.max_length is not None and len(input_ids) > self.max_length:
             logger.info(
                 f"WARNING: input_ids length {len(input_ids)} exceeds model_max_length {self.max_length}. truncated!"
