@@ -184,7 +184,7 @@ print(f"Sandbox server address: {sandbox_address}")
 tool_config = {
     "tools": [
         {
-            "class_name": "sandbox.SandboxTool",
+            "class_name": "xtuner._testing.sandbox.SandboxTool",
             "config": {
                 "type": "native",
                 "sandbox_fusion_url": f"http://{sandbox_address}/run_code",
@@ -200,9 +200,8 @@ with open(tool_config_path, "w") as f:
 # 5.0 verl config
 rollout_name = "sglang"
 tool_call_parser_name = "hermes"
-# model_path = os.path.expanduser("~/Qwen/Qwen3-1.7B")
-train_file = os.path.expanduser("~/verl-team/lighteval-MATH-preprocessed/train.parquet")  # TODO: fake path
-test_file = os.path.expanduser("~/verl-team/lighteval-MATH-preprocessed/test_100.parquet")
+train_file = "/fake/path/to/train.parquet"
+test_file = "/fake/path/to/test.parquet"
 
 from hydra import compose, initialize_config_dir
 import verl

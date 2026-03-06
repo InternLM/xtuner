@@ -23,6 +23,8 @@ else
   ACCELERATOR_PER_NODE=${7:-8}
 fi
 
+ulimit -n 65536  # OSError: [Errno 24] Too many open files
+
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
 # ray 环境变量
