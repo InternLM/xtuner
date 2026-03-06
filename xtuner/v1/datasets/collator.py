@@ -27,7 +27,7 @@ def build_text_ctx_labels(
     pack_max_length: int,
     padding_token_idx: int,
     pack_to_max_length: bool,
-) -> tuple[SequenceContext, torch.Tensor]:
+) -> tuple[SequenceContext, torch.Tensor, Sequence[DataItem]]:
     if isinstance(instance, dict):
         instance = [instance]
 
@@ -92,7 +92,7 @@ def build_text_ctx_labels(
         max_length_k=max(num_tokens),
         num_padding=pad_len,
     )
-    return seq_ctx, shifted_labels
+    return seq_ctx, shifted_labels, instance
 
 
 def sft_llm_collator(
@@ -101,7 +101,7 @@ def sft_llm_collator(
     ret: list[ColateItem] = []
     for instance in instances:
         # If the token number of the packed sample is larger than the packed_max_length
-        seq_ctx, shifted_labels = build_text_ctx_labels(
+        seq_ctx, shifted_labels, _ = build_text_ctx_labels(
             instance,
             pack_max_length,
             padding_token_idx,
@@ -214,7 +214,7 @@ def qwen3_vl_sft_collator(
     ret: list[ColateItem] = []
     for instance in instances:
         # If the token number of the packed sample is larger than the packed_max_length
-        seq_ctx, shifted_labels = build_text_ctx_labels(
+        seq_ctx, shifted_labels, instance = build_text_ctx_labels(  # type: ignore
             instance,
             pack_max_length,
             padding_token_idx,
@@ -229,7 +229,8 @@ def qwen3_vl_sft_collator(
         if not all_position_ids_none:
             for _instance in instance:
                 if "position_ids" in _instance and _instance["position_ids"] is not None:
-                    position_ids_list.append(_instance["position_ids"])
+                    position_ids_ = _instance["position_ids"][..., :pack_max_length]
+                    position_ids_list.append(position_ids_)
                 else:
                     position_ids_ = (
                         torch.arange(len(_instance["input_ids"]))
@@ -247,6 +248,8 @@ def qwen3_vl_sft_collator(
         if len(position_ids_list) > 0:
             position_ids = torch.cat(position_ids_list, dim=-1)
             position_ids = position_ids[:, :, :-1]
+            if pack_to_max_length and pack_max_length - position_ids.shape[-1] > 0:
+                position_ids = pad_to_max_length(position_ids, 0, max_length=pack_max_length, dim=-1)
 
         num_img_tokens: list[int] = []
         for data in instance:
@@ -271,6 +274,11 @@ def qwen3_vl_sft_collator(
         seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.num_img_tokens = num_img_tokens
 
+        if position_ids is not None:
+            assert seq_ctx.input_ids is not None, "input_ids should not be None"
+            assert position_ids.shape[-1] == seq_ctx.input_ids.shape[-1], (
+                f"position_ids length {position_ids.shape[-1]} != input_ids length {seq_ctx.input_ids.shape[-1]}"
+            )
         ret.append(
             {
                 "seq_ctx": seq_ctx,

@@ -198,7 +198,7 @@ class InternalMetricsRecorder:
 
                 if (
                     self.internal_metrics_cfg.monitor_moe_load_balance_stats
-                    and (cur_tokens_per_expert := output.get("tokens_per_expert_global")) is not None
+                    and (cur_tokens_per_expert := output.tokens_per_expert_global) is not None
                 ):
                     # At this point, tokens_per_expert_global is already all-reduced into current rank.
                     # [num_layers, num_experts]
@@ -209,7 +209,7 @@ class InternalMetricsRecorder:
 
                 if (
                     self.internal_metrics_cfg.monitor_moe_router_logits_stats
-                    and (cur_router_logits := output.get("router_logits")) is not None
+                    and (cur_router_logits := output.router_logits) is not None
                 ):
                     for layer_name, router_logits in cur_router_logits.items():
                         # [bsz, packed_len, num_experts]

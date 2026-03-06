@@ -3,12 +3,11 @@ import os
 import threading
 from concurrent.futures import wait
 from pathlib import Path
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, cast
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from pydantic import ConfigDict
 from safetensors import safe_open
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -17,19 +16,21 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torch.distributed.device_mesh import DeviceMesh
 from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
 )
-from typing_extensions import NotRequired, TypedDict
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.model.base import BaseModel, ModelItem, XTunerBaseModelConfig
-from xtuner.v1.model.utils import ModelForwardExtraLogInfo
-from xtuner.v1.module.router import NoAuxRouterConfig
+from xtuner.v1.model.base import (
+    BaseModel,
+    BatchForwardInfo,
+    DataBatchInfo,
+    ModelItem,
+    ModelOutputs,
+    XTunerBaseModelConfig,
+)
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.utils.grad_norm import cal_grad_norm
@@ -38,28 +39,15 @@ from xtuner.v1.engine.xtuner_storage import XTunerCacheWriter
 from xtuner.v1.engine.xtuner_cache_planner import XtunerCacheSavePlanner
 
 
+class TrainStepInfo(DataBatchInfo, BatchForwardInfo):
+    total_loss: float
+
+
 logger = get_logger()
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 threading_lock = threading.Lock()
-
-
-class LossLog(TypedDict):
-    __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
-    local_loss: float
-    reduced_llm_loss: float
-    reduced_balancing_loss: NotRequired[float]
-    reduced_z_loss: NotRequired[float]
-
-
-class OtherLog(TypedDict):
-    __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
-    maxvio: NotRequired[float]
-    step_consumed_tokens: int
-    step_consumed_img_tokens: NotRequired[int]
-    extra_info: ModelForwardExtraLogInfo
-    efficient_attn_ratio: float
 
 
 class CPUThreadTaskCoordinator:
@@ -141,7 +129,6 @@ class TrainEngine:
     model: BaseModel
     optimizer: torch.optim.Optimizer
     scheduler: torch.optim.lr_scheduler.LRScheduler
-    float8_handler: Optional[Float8Handler]
 
     def __init__(
         self,
@@ -171,19 +158,10 @@ class TrainEngine:
         with torch.device("meta"):
             model = self.model_cfg.build()
 
-        self.float8_handler = None
-        if self.model_cfg.float8_cfg is not None and self.model_cfg.float8_cfg.enable_float8:
-            self.float8_handler = Float8Handler(
-                scaling_granularity_gemm=self.model_cfg.float8_cfg.scaling_granularity_gemm,
-                scaling_granularity_grouped_gemm=self.model_cfg.float8_cfg.scaling_granularity_grouped_gemm,
-            )
         model = model.fully_shard(self.fsdp_cfg)
 
         if dist.get_rank() == 0:
             logger.info(model)
-
-        if self.float8_handler:
-            self.float8_handler.build_reduce_mesh(model, cast(DeviceMesh, model.fsdp_mesh))
         return model
 
     def build_optimizer(self, optim_cfg: OptimConfig) -> torch.optim.Optimizer:
@@ -203,71 +181,36 @@ class TrainEngine:
         intra_layer_micro_batch = self.intra_layer_micro_batch
         return data_batches_len // intra_layer_micro_batch
 
-    # this method can be called outside, e.g., at the beginning of compute_actor_logprobs or compute_ref_logprobs during rl training
-    def maybe_precompute_float8_dynamic_scale_for_fsdp(self):
-        if self.float8_handler is not None:
-            self.float8_handler.precompute_float8_dynamic_scale_for_fsdp(self.model)
-
-    def train_step(self, data_batches: list[ModelItem]) -> tuple[LossLog, OtherLog]:
+    def train_step(self, data_batches: list[ModelItem]) -> TrainStepInfo:
         """Perform a training step with the given data batches and mesh.
 
         Args:
             data_batches (List[Dict]): The input data batches for the training step.
         """
-        self.maybe_precompute_float8_dynamic_scale_for_fsdp()
+        self._maybe_precompute_float8_dynamic_scale_for_fsdp()
 
-        loss_log: LossLog = {}  # type: ignore[typeddict-item]
-        other_log: OtherLog = {}  # type: ignore[typeddict-item]
         intra_layer_micro_batch = self.intra_layer_micro_batch
         assert len(data_batches) % intra_layer_micro_batch == 0, (
             f"data_batches length {len(data_batches)} is not divisible by intra_layer_micro_batch {intra_layer_micro_batch}"
         )
         iters_per_step = self.grad_accumulation_steps(len(data_batches))
 
-        moe_need_update_bias = (
-            isinstance(getattr(self.model_cfg, "router", None), NoAuxRouterConfig)
-            and self.model_cfg.router.router_bias_update_speed > 0
-        )
-        moe_need_log_maxvio = getattr(self.model_cfg, "router", None) is not None
-
-        if moe_need_log_maxvio:
-            tokens_per_expert_global_for_bias = torch.zeros(
-                self.model_cfg.num_hidden_layers - self.model_cfg.first_k_dense_replace,
-                self.model_cfg.n_routed_experts,
-                dtype=torch.int64,
-                device=DEVICE,
-            )
-
-        step_loss = torch.tensor(0.0, device=DEVICE)
-        step_llm_loss = torch.tensor(0.0, device=DEVICE)
-        step_balancing_loss: torch.Tensor | None = None
-        step_z_loss: torch.Tensor | None = None
-        step_consumed_tokens = torch.tensor(0, device=DEVICE)
-
         if self._count == 0:
             logger.info(f"grad_accumulation_steps: {iters_per_step}")
             self._count += 1
 
-        train_engine_extra_info = ModelForwardExtraLogInfo()
         micro_batch_iter = 0
-        efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
-        total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        micro_batch_results = []
+
+        data_batch_info = self.model.pre_micro_batch_forward(data_batches)
+        total_loss = torch.tensor(0.0, device=DEVICE)
+
         for i in range(0, len(data_batches), intra_layer_micro_batch):
             ProberList.set_micro_batch_iter(micro_batch_iter)
             micro_batch_iter += 1
             data_batch = data_batches[i : i + intra_layer_micro_batch]
-            seq_ctx_list = []
-            loss_ctx_list = []
-            for data in data_batch:
-                seq_ctx = data["seq_ctx"]
-                loss_ctx = data["loss_ctx"]
-                seq_ctx_list.append(seq_ctx)
-                loss_ctx_list.append(loss_ctx)
-                step_consumed_tokens += seq_ctx.mask.sum()
-
-                num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
-                efficient_forward_tokens += (num_tokens.long() ** 2).sum()
-                total_forward_tokens += (num_tokens.long().sum()) ** 2
+            seq_ctx_list = [i["seq_ctx"] for i in data_batch]
+            loss_ctx_list = [i["loss_ctx"] for i in data_batch]
 
             if self.intra_layer_micro_batch == 1:
                 output = self.model(seq_ctx=seq_ctx_list[0], loss_ctx=loss_ctx_list[0])
@@ -278,79 +221,18 @@ class TrainEngine:
                     seq_ctx=seq_ctx_list,
                     loss_ctx=loss_ctx_list,
                 )
+            output.free_nongrad_feature()
 
-            # llm loss has been global averaged
-            llm_loss = output["loss"]
-            step_llm_loss += llm_loss.detach().clone()
+            micro_batch_results.append(output)
 
-            loss = llm_loss
-            if "extra_info" in output:
-                train_engine_extra_info.append(output["extra_info"])
-
-            if "balancing_loss" in output:
-                balancing_loss = output["balancing_loss"] / iters_per_step
-                loss = loss + balancing_loss
-                if step_balancing_loss is None:
-                    step_balancing_loss = balancing_loss
-                else:
-                    step_balancing_loss += balancing_loss
-
-            if "z_loss" in output:
-                z_loss = output["z_loss"] / iters_per_step
-                loss = loss + z_loss
-
-                if step_z_loss is None:
-                    step_z_loss = z_loss
-                else:
-                    step_z_loss += z_loss
-
-            if moe_need_log_maxvio:
-                assert "tokens_per_expert_global" in output, "tokens_per_expert_global is required for bias update."
-                tokens_per_expert_global_for_bias += output["tokens_per_expert_global"]
-
-            del output
+            loss = self._get_total_loss(output)
             loss.backward()
+            total_loss += loss.detach()
             # call dump_forward_records after backward to record the recomputed activations
             ProberList.after_micro_iter_forward()
-            step_loss += loss.detach().clone()
 
-        if moe_need_log_maxvio:
-            avg_count_load = tokens_per_expert_global_for_bias.float().mean(1)
-            max_load_i, _ = torch.max(tokens_per_expert_global_for_bias, dim=1)
-            maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
-            maxvio = maxvio_all_layers.mean()
-            if moe_need_update_bias:
-                self.model.update_bias(tokens_per_expert_global_for_bias, avg_count_load)  # type: ignore
-            other_log["maxvio"] = maxvio.item()
-
-        reduced_llm_loss = step_llm_loss
-        dist.all_reduce(reduced_llm_loss.div_(dist.get_world_size()))
-
-        loss_log["local_loss"] = step_loss.item()
-        loss_log["reduced_llm_loss"] = reduced_llm_loss.item()
-        if step_balancing_loss is not None:
-            reduced_balancing_loss = step_balancing_loss
-            dist.all_reduce(reduced_balancing_loss.div_(dist.get_world_size()))
-            loss_log["reduced_balancing_loss"] = reduced_balancing_loss.item()
-        if step_z_loss is not None:
-            reduced_z_loss = step_z_loss
-            dist.all_reduce(reduced_z_loss.div_(dist.get_world_size()))
-            loss_log["reduced_z_loss"] = reduced_z_loss.item()
-        other_log["step_consumed_tokens"] = int(step_consumed_tokens.item())
-        other_log["extra_info"] = train_engine_extra_info
-        other_log["efficient_attn_ratio"] = (efficient_forward_tokens / total_forward_tokens).item()
-
-        extra_info = other_log.get("extra_info", {})  # type: ignore
-
-        # TODO: @duanyanhui `extra_info` should be redesigned.
-        if not isinstance(extra_info, ModelForwardExtraLogInfo):
-            extra_info = ModelForwardExtraLogInfo(extra_info)
-        loss_log.update(extra_info.get())
-
-        if "maxvio" in other_log:
-            loss_log["maxvio"] = other_log["maxvio"]  # type: ignore
-        loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]  # type: ignore
-        return loss_log, other_log
+        batch_forward_info = self.model.post_micro_batch_forward(micro_batch_results)
+        return TrainStepInfo(total_loss=total_loss.item(), **data_batch_info, **batch_forward_info)
 
     def from_hf(self, hf_path: str | Path, strict: bool = False):
         self.model.from_hf(hf_path=hf_path, strict=strict)
@@ -540,3 +422,22 @@ class TrainEngine:
                         state[key] = val.to(device, non_blocking=True)
         DEVICE_MODULE.synchronize()
         return
+
+    def _maybe_precompute_float8_dynamic_scale_for_fsdp(self):
+        for model in self.model.modules():
+            if isinstance(model, BaseModel) and model.float8_handler is not None:
+                model.float8_handler.precompute_float8_dynamic_scale_for_fsdp(model)
+
+    def _get_total_loss(self, model_outputs: ModelOutputs) -> torch.Tensor:
+        # TODO: This logic should be moved into the model layer. The model should be responsible
+        # for aggregating all losses (CE loss, balancing loss, z loss, etc.) and returning a
+        # single total_loss. The engine should only call model.forward() and use the returned
+        # total_loss directly, rather than iterating through fields to sum losses here.
+        # This would provide better separation of concerns and make the loss computation logic
+        # more explicit and maintainable.
+        loss = torch.tensor(0.0, device=DEVICE)
+        for key in model_outputs.model_fields:
+            value = getattr(model_outputs, key)
+            if "loss" in key and isinstance(value, torch.Tensor):
+                loss += value
+        return loss
