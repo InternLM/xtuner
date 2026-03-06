@@ -184,7 +184,7 @@ class RouterJudgerConfig(BaseModel):
         """
         if pg is None:
             # NOTE: 这里直接在build_workers里创建PlacementGroup是为了简化用户使用，用户不需要关心PlacementGroup的细节。
-            from xtuner.v1.ray.base import CPUResourcesConfig
+            from xtuner.v1.rl.utils.cpu import CPUResourcesConfig
 
             cpu_resource_cfg = CPUResourcesConfig(
                 num_workers=self.num_ray_actors,

@@ -10,7 +10,7 @@ import ray
 if TYPE_CHECKING:
     import ray.actor
 
-    from xtuner.v1.ray.base.accelerator import AcceleratorType
+    from xtuner.v1.rl.utils.accelerator import AcceleratorType
 
 
 def get_ray_accelerator() -> "AcceleratorType":
