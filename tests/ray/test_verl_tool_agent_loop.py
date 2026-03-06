@@ -217,7 +217,7 @@ class TestVerlToolAgentLoop(unittest.IsolatedAsyncioTestCase):
         tool_config = {
             "tools": [
                 {
-                    "class_name": "sandbox.SandboxTool",
+                    "class_name": "xtuner._testing.sandbox.SandboxTool",
                     "config": {
                         "type": "native",
                         "sandbox_fusion_url": f"http://{sandbox_address}/run_code",
