@@ -7,14 +7,14 @@ import torch.nn.functional as F
 
 from xtuner.v1.utils import get_logger
 
-from ..base import (
+from ..utils import gather_logprobs
+from .loss import (
     BaseRLLossConfig,
     BaseRLLossContext,
     BaseRLLossKwargs,
     compute_kl_loss_weight,
 )
-from ..loss_fn import get_policy_loss_fn, kl_penalty
-from ..utils import gather_logprobs
+from .loss_fn import get_policy_loss_fn, kl_penalty
 
 
 logger = get_logger()

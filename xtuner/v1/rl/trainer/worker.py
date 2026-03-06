@@ -39,10 +39,11 @@ from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
-from xtuner.v1.ray.base import SingleAcceleratorWorker
-from xtuner.v1.ray.config import RolloutConfig
-from xtuner.v1.rl.base.loss import BaseRLLossContext
+from xtuner.v1.rl.config import RolloutConfig
+from xtuner.v1.rl.trainer.loss import BaseRLLossContext
+from xtuner.v1.rl.trainer.loss_fn import kl_penalty
 from xtuner.v1.rl.utils import gather_logprobs
+from xtuner.v1.rl.utils.accelerator import SingleAcceleratorWorker
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -55,7 +56,6 @@ from xtuner.v1.utils import (
 )
 from xtuner.v1.utils.load_spec import LoadEnum
 
-from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig
 from .rollout_is import merge_rollout_is_metrics
 
@@ -177,8 +177,8 @@ class WorkerConfig(BaseModel):
         """Build training workers and controller from this config and placement
         group."""
         # import here to avoid circular import
-        from xtuner.v1.ray.base import AutoAcceleratorWorkers
-        from xtuner.v1.rl.base.controller import TrainingController
+        from xtuner.v1.rl.trainer.controller import TrainingController
+        from xtuner.v1.rl.utils.accelerator import AutoAcceleratorWorkers
 
         TrainingWorkerCls = ray.remote(
             runtime_env={

@@ -17,8 +17,8 @@ from ray.util.placement_group import PlacementGroup
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.ray.base import AutoAcceleratorWorkers
-from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.rl.config.worker import RolloutConfig
+from xtuner.v1.rl.utils.accelerator import AutoAcceleratorWorkers
 from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker

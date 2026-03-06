@@ -15,7 +15,7 @@ from ray.util.placement_group import (
 )
 from typing_extensions import Annotated
 
-from ..utils import find_master_addr_and_port, get_accelerator_ids
+from .utils import find_master_addr_and_port, get_accelerator_ids
 
 
 PG_READY_TIMEOUT = os.getenv("XTUNER_PG_READY_TIMEOUT", 30)  # default 30 seconds

@@ -2,14 +2,13 @@ from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto import RolloutState, Status
-from xtuner.v1.ray.judger import Judger
-from xtuner.v1.ray.rollout import RolloutController
-from xtuner.v1.rl.base.producer import ProduceStrategy, Sampler
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
+from xtuner.v1.rl.judger import Judger
+from xtuner.v1.rl.replay_buffer import ReplayBuffer
+from xtuner.v1.rl.rollout import RolloutController
 
 from .agent_loop import AgentLoop, AgentLoopConfig
-from .producer import ProduceStrategyConfig, SyncProduceStrategyConfig
-from .sampler import SamplerConfig
+from .producer import ProduceStrategy, ProduceStrategyConfig, SyncProduceStrategyConfig
+from .sampler import Sampler, SamplerConfig
 
 
 class AgentLoopManagerConfig(BaseModel):

@@ -5,7 +5,7 @@ import requests
 from urllib3.exceptions import NewConnectionError
 
 from transformers import AutoTokenizer
-from xtuner.v1.ray.config import RolloutConfig
+from xtuner.v1.rl.config import RolloutConfig
 
 from .worker import RolloutWorker
 
