@@ -90,16 +90,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      - name: Configure git credential
-        run: |
-          echo "https://x-access-token:${{ steps.pr.outputs.token }}@github.com" > ~/.git-credentials
-          git config --global credential.helper store
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ steps.pr.outputs.token }}
           show_full_output: true
           prompt: |
               REPO: ${{ github.repository }}
@@ -113,10 +108,13 @@ jobs:
               You can use multiple subagents to parallelize tasks. Each subagent should be told the PR title and
               description.
 
-              Use `gh pr comment ${{ github.event.pull_request.number }} --body "..."` to summarize the result.
+              If a user requests PR modifications, push the changes to the forked repository for fork PRs:
 
-              If a user requests PR modifications, push the changes to the forked repository for fork PRs; otherwise, push directly to the origin repository.
+              ```console
+              git push https://x-access-token:${{ steps.pr.outputs.token }}@github.com/<fork-repo-path>.git HEAD:<fork-branch>
+              ```
 
+              otherwise, push directly to the origin repository.
           claude_args: |
               --max-turns 30
               --model claude-opus-4-6
