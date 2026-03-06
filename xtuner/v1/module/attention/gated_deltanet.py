@@ -14,14 +14,16 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.utils import get_logger
 
+from ...ops.gated_deltanet.gen_seq_idx import gen_seq_idx
+from ...ops.gated_deltanet.chunk_gated_delta_rule import chunk_gated_delta_rule
+from ...ops.gated_deltanet.causal_conv1d import causal_conv1d_fn
+from ...ops.gated_deltanet.rms_norm_gated import rms_norm_gated
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
 
 
 try:
     from fla.modules import FusedRMSNormGated as FLA_FusedRMSNormGated
-    from fla.modules.fused_norm_gate import rms_norm_gated
-    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 
     class FusedRMSNormGated(FLA_FusedRMSNormGated):
         def forward(
@@ -50,12 +52,6 @@ try:
 
 except ImportError:
     FusedRMSNormGated = None  # type: ignore
-    chunk_gated_delta_rule = None
-
-try:
-    from causal_conv1d import causal_conv1d_fn
-except ImportError:
-    causal_conv1d_fn = None
 
 logger = get_logger()
 
@@ -132,13 +128,7 @@ class GatedDeltaNet(nn.Module):
         A = torch.empty(self.num_v_heads).uniform_(0, 16)
         self.A_log = nn.Parameter(torch.log(A))
 
-        assert causal_conv1d_fn is not None, (
-            "causal_conv1d_fn is not available. Please install causal-conv1d to use GatedDeltaNet by `https://github.com/Dao-AILab/causal-conv1d`."
-        )
         self.causal_conv1d_fn = causal_conv1d_fn
-        assert chunk_gated_delta_rule is not None, (
-            "chunk_gated_delta_rule is not available. Please install fla to use GatedDeltaNet by `pip install flash-linear-attention`."
-        )
         self.chunk_gated_delta_rule = chunk_gated_delta_rule
         assert FusedRMSNormGated is not None, (
             "FusedRMSNormGated is not available. Please install fla to use GatedDeltaNet by `pip install flash-linear-attention`."
@@ -176,7 +166,6 @@ class GatedDeltaNet(nn.Module):
         batch_size, seq_len, _ = hidden_states.shape
         assert batch_size == 1, "Only batch size of 1 is supported for now in GateDeltaNet"
         mixed_qkv = self.in_proj_qkv(hidden_states)
-        mixed_qkv = mixed_qkv.transpose(1, 2)
 
         z = self.in_proj_z(hidden_states)
         z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
@@ -191,19 +180,15 @@ class GatedDeltaNet(nn.Module):
         if bias and isinstance(bias, DTensor):
             bias = bias.to_local()
 
-        # TODO: If full_graph mode is supported in the future, it needs to be modified to custom_op
         if seq_ctx.seq_idx is None:
-            seq_idx = torch.cat(
-                [
-                    torch.full((s,), i, dtype=torch.int32, device=mixed_qkv.device)
-                    for i, s in enumerate(seq_ctx.seq_lens_q)
-                ],
-                dim=0,
-            )[None]
+            # Use Triton kernel to fill seq_idx based on cu_seq_lens_q
+            # Pre-allocate empty tensor with shape (1, seq_len)
+            seq_idx = gen_seq_idx(seq_len, seq_ctx.cu_seq_lens_q)
             seq_ctx.seq_idx = cast(torch.IntTensor, seq_idx)
         else:
             seq_idx = seq_ctx.seq_idx
 
+        # mixed_qkv = mixed_qkv.transpose(1, 2)
         mixed_qkv = self.causal_conv1d_fn(
             x=mixed_qkv,
             weight=weight,
@@ -211,7 +196,7 @@ class GatedDeltaNet(nn.Module):
             activation=self.activation,
             seq_idx=seq_idx,
         )
-        mixed_qkv = mixed_qkv.transpose(1, 2)
+        # mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
             mixed_qkv,
             [
