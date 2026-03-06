@@ -280,6 +280,7 @@ class RLColocateTrainer:
             judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
+            logger=self.logger,
         )
 
         # build eval agent loop manager
@@ -288,6 +289,7 @@ class RLColocateTrainer:
             judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
+            logger=self.logger,
         )
 
         self._enable_evaluate = enable_evaluate

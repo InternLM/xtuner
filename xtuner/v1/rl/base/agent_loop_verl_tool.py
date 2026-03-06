@@ -17,7 +17,10 @@ class VerlToolAgentLoopConfig(AgentLoopConfig):
     config: DictConfig
 
     def build(
-        self, rollout_controller: RolloutControllerProxy, judger: Callable | NativeJudger | RouterJudger | None = None
+        self,
+        rollout_controller: RolloutControllerProxy,
+        judger: Callable | NativeJudger | RouterJudger | None = None,
+        logger=None,
     ) -> "VerlToolAgentLoop":
         verl_tool_agent_loop = VerlToolAgentLoop(
             rollout_controller=rollout_controller,
@@ -80,8 +83,9 @@ class VerlToolAgentLoop(AgentLoop):
         hf_checkpoint: str,
         config: DictConfig,
         judger: Callable | NativeJudger | RouterJudger | None = None,
+        logger=None,
     ):
-        super().__init__(rollout_controller, sample_params, hf_checkpoint, judger)
+        super().__init__(rollout_controller, sample_params, hf_checkpoint, judger, logger)
 
         server_manager = XtunerAsyncLLMServerManager(rollout_controller)
 
@@ -98,6 +102,7 @@ class VerlToolAgentLoop(AgentLoop):
 
     async def generate_sample(self, rollout_state: RolloutState) -> RolloutState:
         assert rollout_state.sample_params is not None, "sample_params must be set in rollout_state"
+        # self.verl_tool_agent_loop.loop = asyncio.get_running_loop()  # TODO: check if this is needed
 
         # convert rollout_state to verl_tool_agent_loop input
         sp = rollout_state.sample_params
@@ -120,6 +125,7 @@ class VerlToolAgentLoop(AgentLoop):
         except Exception as e:
             rollout_state.status = Status.FAILED
             rollout_state.error_msg = str(e)
+            self.logger.error(f"[VerlToolAgentLoop][{rollout_state.session_uid}] generate_sample failed: {e}")
             return rollout_state
         # TODO: handle samples with corrupted tool tokens ?
 
@@ -141,5 +147,6 @@ class VerlToolAgentLoop(AgentLoop):
 
         # judge rollout_state
         rollout_state = await self.judge_sample(rollout_state)
+        # self.logger.info(f"[VerlToolAgentLoop][{rollout_state.session_uid}] generate_sample completed with raw_prompt:\n    {rollout_state.extra_fields['raw_prompt']}\n and response:\n    {rollout_state.response}")
 
         return rollout_state
