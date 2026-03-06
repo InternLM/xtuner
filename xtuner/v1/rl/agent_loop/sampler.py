@@ -1,4 +1,4 @@
-from typing import Iterator, Optional
+from typing import Iterator, Optional, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -6,8 +6,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
-
-from .replay_buffer import ReplayBuffer
+from xtuner.v1.rl.replay_buffer import ReplayBuffer
 
 
 class SamplerConfig(BaseModel):
@@ -50,7 +49,7 @@ class _DatasetSampler:
             self.dataloader_iter = iter(self.dataloader)
             data = next(self.dataloader_iter)[0]
         group_data = [data] * self.prompt_repeat_k
-        return group_data
+        return cast(list[RolloutState], group_data)
 
 
 class Sampler(_DatasetSampler):

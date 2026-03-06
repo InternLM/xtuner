@@ -6,7 +6,7 @@ from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.utils import FlexibleArgumentParser
 
-from xtuner.v1.ray.config import RolloutConfig
+from xtuner.v1.rl.config import RolloutConfig
 
 from .worker import RolloutWorker
 

@@ -5,8 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing_extensions import Annotated
 
 from xtuner.v1.engine.config import EngineConfig
-from xtuner.v1.ray.base import AcceleratorResourcesConfig
-from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.rl.config.worker import RolloutConfig
+from xtuner.v1.rl.utils.accelerator import AcceleratorResourcesConfig
 
 
 grpo_group = Group("GRPO", sort_key=1, help="GRPO Trainer Configuration")

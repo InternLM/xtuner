@@ -9,7 +9,7 @@ from ray.util.placement_group import placement_group_table
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
-from xtuner.v1.ray.config import RolloutConfig
+from xtuner.v1.rl.config import RolloutConfig
 
 from .worker import RolloutWorker
 

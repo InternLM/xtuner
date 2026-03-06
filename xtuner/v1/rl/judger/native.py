@@ -99,7 +99,7 @@ class RouterJudger(Judger):
 
     def __init__(self, workers: List[RayJudgerProxy], judger_name: str):
         self.workers = workers
-        self._worker_loads = {worker: 0 for worker in workers}
+        self._worker_loads = dict.fromkeys(workers, 0)
         self._rr_index = 0
         self._lock = asyncio.Lock()
         self._judger_name = judger_name
@@ -184,7 +184,7 @@ class RouterJudgerConfig(BaseModel):
         """
         if pg is None:
             # NOTE: 这里直接在build_workers里创建PlacementGroup是为了简化用户使用，用户不需要关心PlacementGroup的细节。
-            from xtuner.v1.ray.base import CPUResourcesConfig
+            from xtuner.v1.rl.utils.cpu import CPUResourcesConfig
 
             cpu_resource_cfg = CPUResourcesConfig(
                 num_workers=self.num_ray_actors,
