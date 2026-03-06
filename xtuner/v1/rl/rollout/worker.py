@@ -17,9 +17,9 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, update_status_from_finish_reason
-from xtuner.v1.rl.utils.utils import find_master_addr_and_port
-from xtuner.v1.rl.utils.accelerator import AutoAcceleratorWorkers, SingleAcceleratorWorker
 from xtuner.v1.rl.config import RolloutConfig
+from xtuner.v1.rl.utils.accelerator import AutoAcceleratorWorkers, SingleAcceleratorWorker
+from xtuner.v1.rl.utils.utils import find_master_addr_and_port
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
