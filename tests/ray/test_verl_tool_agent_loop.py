@@ -21,6 +21,7 @@ from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
+from xtuner.v1.ray.utils import create_task
 from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
 from xtuner.v1.rl.base.sampler import SamplerConfig
 from xtuner.v1.rl.base.replay_buffer import SyncReplayBufferConfig
@@ -30,8 +31,8 @@ from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
-VERL_TRAIN_DATA_PATH = os.environ["VERL_TRAIN_DATA_PATH"]
-VERL_TEST_DATA_PATH = os.environ["VERL_TEST_DATA_PATH"]
+VERL_TRAIN_DATA_PATH = "/fake/path/to/train.parquet"
+VERL_TEST_DATA_PATH = "/fake/path/to/test.parquet"
 
 FAKE_INPUT_ITEM = RolloutState(
     message=[{
@@ -54,7 +55,7 @@ class Sandbox:
     def __init__(self):
         self.address = ray._private.services.get_node_ip_address()
         self.port = self._get_free_port()
-        asyncio.create_task(self._start_fastapi_server())
+        create_task(self._start_fastapi_server())
 
     async def code_execution(self, request: Request):
         request_json = await request.json()
@@ -210,6 +211,7 @@ class TestVerlToolAgentLoop(unittest.IsolatedAsyncioTestCase):
         """Create sandbox actor and verl config, return (verl_config, tool_config_path)."""
         sandbox = Sandbox.remote()
         self._sandbox = sandbox
+        # TODO: replace with a real sandbox server address
         sandbox_address = ray.get(sandbox.get_server_address.remote())
 
         tool_config = {
@@ -289,6 +291,9 @@ class TestVerlToolAgentLoop(unittest.IsolatedAsyncioTestCase):
         # 5. 执行 generate_group && generate_sample
         group_rollout_state = await agent_loop.generate_group(group_in_rollout_state)
         single_rollout_state = await agent_loop.generate_sample(rollout_state)
+        
+        print(f"prompt: {single_rollout_state.extra_fields['raw_prompt']}")
+        print(f"response: {single_rollout_state.response}")
 
         # 6. 验证结果
         self.assertEqual(len(group_rollout_state), prompt_repeat_k)
