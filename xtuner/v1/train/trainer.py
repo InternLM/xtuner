@@ -1483,15 +1483,18 @@ class Trainer:
             step_time (float): Time spent on training step in seconds.
             internal_metrics (InternalMetrics | None): Internal metrics from the model.
         """
+        train_step_info = train_step_info.copy()
         lr = self._lr_scheduler.get_last_lr()[0]
 
-        loss_logs_info = train_step_info["logs_info"] | {"local_loss": train_step_info["total_loss"]}
-        loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_logs_info.items() if "loss" in k]
+        loss_logs_info = train_step_info.pop("logs_info") | {"local_loss": train_step_info.pop("total_loss")}  # type: ignore[misc]
+        loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_logs_info.items()]
         loss_log_str = ", ".join(loss_log_list)
 
-        extra_info = train_step_info["extra_info"]
+        extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
         extra_info_log_list = [f"{k}: {v:.4f}" for k, v in extra_info.get().items()]
         extra_info_str = ", ".join(extra_info_log_list)
+
+        data_info_str = ", ".join([f"{k}: {v:.8f}" for k, v in train_step_info.items()])
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
@@ -1512,6 +1515,7 @@ class Trainer:
             f"step_consumed_tokens: {training_metrics['step_consumed_tokens']} "
             f"total_consumed_tokens: {training_metrics['total_consumed_tokens']} "
             f"{loss_log_str} "
+            f"{data_info_str} "
             f"{extra_info_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
