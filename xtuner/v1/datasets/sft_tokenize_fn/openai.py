@@ -42,7 +42,6 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
             tools = item["tools"]
         if isinstance(item, dict) and "messages" in item:
             item = item["messages"]
-
         messages = ChatMessages(messages=item, tools=tools)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
