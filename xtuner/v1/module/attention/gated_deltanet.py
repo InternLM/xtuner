@@ -32,7 +32,7 @@ def _all_to_all_qkv(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
 
-def _all_to_all_g(x, scatter_dim, gather_dim, mesh):
+def _all_to_all_gb(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
 
@@ -225,7 +225,7 @@ class GatedDeltaNet(nn.Module):
         else:
             seq_idx = seq_ctx.seq_idx
 
-        # TODOl: due to the limitation of scatter_dim=1 in ulysses_all_to_all,
+        # TODO: due to the limitation of scatter_dim=1 in ulysses_all_to_all,
         # the implementation is very inelegant and inefficient, and needs to be refactored in the future.
         mixed_qkv = mixed_qkv.transpose(1, 2)
         if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
@@ -240,7 +240,7 @@ class GatedDeltaNet(nn.Module):
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
-            # contiguout -> non contiguous
+            # contiguous -> non-contiguous
             mixed_qkv = mixed_qkv.transpose(1, 2).contiguous().transpose(1, 2)
 
         mixed_qkv = self.causal_conv1d_fn(
@@ -292,6 +292,7 @@ class GatedDeltaNet(nn.Module):
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
             g = g.transpose(1, 2)
+            beta = beta.transpose(1, 2)
             query = _all_to_all_qkv(
                 query,  # (1, num_q_heads, L/sp_size, head_dim)
                 scatter_dim=1,
@@ -310,16 +311,24 @@ class GatedDeltaNet(nn.Module):
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
-            g = _all_to_all_g(
+            g = _all_to_all_gb(
                 g,  # (1, num_v_heads, L/sp_size)
                 scatter_dim=1,
                 gather_dim=2,
                 mesh=seq_ctx.sequence_parallel_mesh,
             )
+            beta = _all_to_all_gb(
+                beta,  # (1, num_v_heads, L/sp_size)
+                scatter_dim=1,
+                gather_dim=2,
+                mesh=seq_ctx.sequence_parallel_mesh,
+            )
+
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
             g = g.transpose(1, 2)
+            beta = beta.transpose(1, 2)
 
         core_attn_out, _ = self.chunk_gated_delta_rule(
             query,
