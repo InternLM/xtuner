@@ -5,8 +5,8 @@ from typing import Callable
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto import RolloutState, SampleParams, Status
-from xtuner.v1.ray.judger import NativeJudger, RouterJudger
-from xtuner.v1.ray.rollout import RolloutController
+from xtuner.v1.rl.judger import NativeJudger, RouterJudger
+from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
 

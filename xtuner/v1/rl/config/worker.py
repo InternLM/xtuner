@@ -328,7 +328,7 @@ class RolloutConfig(BaseModel):
         """
         import ray
 
-        from xtuner.v1.ray.rollout.controller import RolloutController
+        from xtuner.v1.rl.rollout.controller import RolloutController
 
         return (
             ray.remote(RolloutController)

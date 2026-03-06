@@ -9,7 +9,7 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from xtuner.v1.ray.judger.native import NativeJudgerConfig
+from xtuner.v1.rl.judger.native import NativeJudgerConfig
 
 
 app = FastAPI()
@@ -45,7 +45,7 @@ class JudgeResponse(BaseModel):
 
 @app.post("/judge", response_model=JudgeResponse)
 async def judge(request: JudgeRequest):
-    from xtuner.v1.ray.judger.gsm8k import compute_reward
+    from xtuner.v1.rl.judger.gsm8k import compute_reward
 
     """Endpoint to compute reward for a given response and label."""
     # The compute_reward function returns a float, we wrap it in a dict

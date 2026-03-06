@@ -15,10 +15,10 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.judger.native import NativeJudgerConfig, RouterJudgerConfig
-from xtuner.v1.ray.rollout.controller import RolloutControllerProxy
+from xtuner.v1.rl.utils.accelerator import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.config.worker import RolloutConfig
+from xtuner.v1.rl.judger.native import NativeJudgerConfig, RouterJudgerConfig
+from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.base import (
     TrainingControllerProxy,
     WorkerConfig,
