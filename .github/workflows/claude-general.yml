@@ -167,6 +167,9 @@ jobs:
               ```
 
               otherwise, push directly to the origin repository.
+
+              If you update the branch, you **MUST** provide the URL of the new commit.
+
           claude_args: |
               --max-turns 30
               --model claude-opus-4-6
