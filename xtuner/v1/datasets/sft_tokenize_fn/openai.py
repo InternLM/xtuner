@@ -44,6 +44,8 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
             tools = item["tools"]
         if isinstance(item, dict) and "messages" in item:
             item = item["messages"]
+        if isinstance(item, dict) and "dialogs" in item:
+            item = item["dialogs"]
 
         if self.chat_template_name == "qwen3.5-vl":
             messages = Qwen35ChatMessages(messages=item, tools=tools)
