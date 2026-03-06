@@ -113,6 +113,8 @@ class LMDeployWorker(RolloutWorker):
             payload = {
                 "model": self.model_name,
                 "messages": rollout_state.message,
+                "tools": tools,
+                "tool_choice": tool_choice,
             }
             lmdeploy_sample_params = self._transform_sample_params(sample_params)
             lmdeploy_sample_params.pop("no_stop_trim", None)
