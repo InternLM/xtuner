@@ -1,4 +1,3 @@
-import asyncio
 import os
 import random
 from pathlib import Path
@@ -19,6 +18,7 @@ from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorker
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.native import NativeJudgerConfig, RouterJudgerConfig
 from xtuner.v1.ray.rollout.controller import RolloutControllerProxy
+from xtuner.v1.ray.utils import asyncio_run
 from xtuner.v1.rl.base import (
     TrainingControllerProxy,
     WorkerConfig,
@@ -318,7 +318,7 @@ class RLColocateTrainer:
         if self._enable_initial_evaluate and not self._debug_rollout:
             # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
             # TODO: ray.get(self.rollout_controller.restart.remote())
-            eval_batch: list[list[RolloutState]] = asyncio.run(
+            eval_batch: list[list[RolloutState]] = asyncio_run(
                 self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
             )
             eval_metrics = self.evaluator.run(eval_batch)
@@ -335,8 +335,8 @@ class RLColocateTrainer:
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
-                # TODO: ray.get(self.rollout_controller.check_health.remote())
-                train_batch: list[list[RolloutState]] = asyncio.run(
+                ray.get(self.rollout_controller.check_health.remote())
+                train_batch: list[list[RolloutState]] = asyncio_run(
                     self.agent_loop_manager.produce_batch(self.global_batch_size)
                 )
                 rollout_info = {}  # TODO: rollout info?
@@ -380,7 +380,7 @@ class RLColocateTrainer:
                     if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
                         with timer("evaluation", step_timer_dict):
                             # TODO: ray.get(self.rollout_controller.restart.remote())
-                            eval_batch: list[list[RolloutState]] = asyncio.run(
+                            eval_batch: list[list[RolloutState]] = asyncio_run(
                                 self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
                             )
                             eval_metrics = self.evaluator.run(eval_batch)

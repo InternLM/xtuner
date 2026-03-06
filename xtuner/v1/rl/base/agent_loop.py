@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto import RolloutState, SampleParams, Status
 from xtuner.v1.ray.judger import NativeJudger, RouterJudger
 from xtuner.v1.ray.rollout import RolloutController
+from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
 
@@ -56,7 +57,7 @@ class AgentLoop(ABC):
         pending_tasks = []
         for state in rollout_state:
             state.sample_params = self.sample_params
-            task = asyncio.create_task(self.generate_sample(state))
+            task = create_task(self.generate_sample(state))
             pending_tasks.append(task)
         generated_samples = asyncio.gather(*pending_tasks)
         group_samples = await generated_samples

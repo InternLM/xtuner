@@ -2,7 +2,7 @@ import asyncio
 import importlib
 import socket
 from asyncio import AbstractEventLoop, Task
-from typing import TYPE_CHECKING, Callable, Coroutine, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, List, Optional, cast
 
 import ray
 
@@ -176,6 +176,39 @@ def handle_task_exception(task: Task):
             raise exc
     except asyncio.CancelledError:
         pass  # Task was cancelled, ignore
+
+
+_ASYNCIO_RUN_LOOP: AbstractEventLoop | None = None
+
+
+def _get_default_asyncio_loop() -> AbstractEventLoop:
+    """Get a module-level event loop reused by ``asyncio_run``."""
+    global _ASYNCIO_RUN_LOOP
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+    if _ASYNCIO_RUN_LOOP is None or _ASYNCIO_RUN_LOOP.is_closed() or _ASYNCIO_RUN_LOOP is not loop:
+        _ASYNCIO_RUN_LOOP = loop
+    return _ASYNCIO_RUN_LOOP
+
+
+def asyncio_run(coro: Coroutine, loop: Optional[AbstractEventLoop] = None) -> Any:
+    """Synchronously run a coroutine on a shared/explicit event loop.
+
+    This is a safer replacement for ``asyncio.run`` in environments that call async
+    workloads repeatedly from sync code, to avoid repeatedly creating new loops.
+    """
+    if loop is None:
+        loop = _get_default_asyncio_loop()
+    if loop.is_running():
+        raise RuntimeError("asyncio_run does not support being called from a running event loop.")
+    return loop.run_until_complete(coro)
 
 
 def create_task(

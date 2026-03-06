@@ -15,6 +15,7 @@ from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.ray.base import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
+from xtuner.v1.ray.utils import create_task
 from xtuner.v1.rl.base.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
@@ -43,7 +44,7 @@ prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 1
 max_prompt_length = 512
-max_response_length = 4096
+max_response_length = 2048
 pack_max_length = 32 * 1024
 
 # 1. resources
@@ -126,7 +127,7 @@ class Sandbox:
     def __init__(self):
         self.address = ray._private.services.get_node_ip_address()
         self.port = self._get_free_port()
-        asyncio.create_task(self._start_fastapi_server())
+        create_task(self._start_fastapi_server())
 
     async def code_execution(self, request: Request):
         request_json = await request.json()
@@ -200,7 +201,7 @@ with open(tool_config_path, "w") as f:
 rollout_name = "sglang"
 tool_call_parser_name = "hermes"
 # model_path = os.path.expanduser("~/Qwen/Qwen3-1.7B")
-train_file = os.path.expanduser("~/verl-team/lighteval-MATH-preprocessed/train.parquet")
+train_file = os.path.expanduser("~/verl-team/lighteval-MATH-preprocessed/train.parquet")  # TODO: fake path
 test_file = os.path.expanduser("~/verl-team/lighteval-MATH-preprocessed/test_100.parquet")
 
 from hydra import compose, initialize_config_dir
@@ -347,5 +348,5 @@ trainer = RLColocateTrainerConfig(
     evaluate_step=evaluate_step,
     work_dir=work_dir,
     seed=123,
-    debug_rollout=True,
+    debug_rollout=False,
 )
