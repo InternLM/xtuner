@@ -201,8 +201,27 @@ def _get_default_asyncio_loop() -> AbstractEventLoop:
 def asyncio_run(coro: Coroutine, loop: Optional[AbstractEventLoop] = None) -> Any:
     """Synchronously run a coroutine on a shared/explicit event loop.
 
-    This is a safer replacement for ``asyncio.run`` in environments that call async
-    workloads repeatedly from sync code, to avoid repeatedly creating new loops.
+    This helper is used by `RLColocateTrainer.fit` for rollout collection:
+    1) Trainer runs in sync code and repeatedly calls:
+       - self.eval_agent_loop_manager.produce_batch(...)
+       - self.agent_loop_manager.produce_batch(...)
+    2) `produce_batch` is async, and internally runs `ProduceStrategy.produce_batch`,
+       which launches many nested async tasks (`create_task`) and ultimately calls
+       `AgentLoop.generate_group -> generate_sample`.
+    3) In `VerlToolAgentLoop`, `generate_sample` awaits `self.verl_tool_agent_loop.run()`,
+       where the tool loop stays on the same loop.
+
+    In this pattern, if sync code uses `asyncio.run` every call, each invocation
+    creates/closes a fresh loop, but `VerlToolAgentLoop` keeps internal work
+    on one loop, the wrapped `generate_sample -> run -> Ray futures` chain can see
+    mismatched loop ownership and trigger:
+    ``Future attached to a different loop``.
+
+    `asyncio_run` keeps calls bound to a stable loop instance so nested task/future
+    chains stay compatible across repeated rollout phases.
+
+    This helper is for sync-to-async boundaries only and should not be used from
+    within an already running event loop.
     """
     if loop is None:
         loop = _get_default_asyncio_loop()
