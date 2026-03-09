@@ -10,7 +10,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.ray.utils import free_object_refs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
-from xtuner.v1.utils import ray_method
+from xtuner.v1.utils import get_logger, ray_method
 
 from .worker import TrainingWorker, WorkerLogItem
 
@@ -28,6 +28,7 @@ class ColateItem(TypedDict):
 class RawTrainingController:
     def __init__(self, workers: list[TrainingWorker]) -> None:
         self.workers = workers
+        self.logger = get_logger()
 
     # TODO(hha): 这个逻辑不够通用，应该复用 sft 函数，从而支持 expand soft pack
     def _get_pack_infos(self, dataset, num_tokens, target, random=None):
@@ -116,6 +117,7 @@ class RawTrainingController:
                     dtype=data_batches[0]["shifted_labels"].dtype,
                     device=data_batches[0]["shifted_labels"].device,
                 )
+                pad_advantages = [-100] * pad_len
                 if is_qwen3_vl:
                     _position_ids_list = []
                     for pad_token in pad_tokens:
@@ -129,10 +131,7 @@ class RawTrainingController:
 
                 seq_ctx_list.append(pad_seq_ctx)
                 label_list.append(pad_labels)
-                advantage_list.extend(
-                    [-100] * math.ceil(pad_len / 1024)
-                )  # can be any number, pad tokens are excluded from the calculation of the loss function.
-
+                advantage_list.append(pad_advantages)
                 if rollout_logprobs_list is not None:
                     pad_rollout_logprobs = torch.zeros(
                         1,
@@ -144,10 +143,8 @@ class RawTrainingController:
 
             seq_ctx = SequenceContext.cat(seq_ctx_list)
             shifted_labels = torch.cat(label_list, dim=1)  # (1, max_len)
-            advantages = torch.tensor(advantage_list).float().unsqueeze(0)  # (1, num_samples)
-            cu_seq_lens_q = seq_ctx.cu_seq_lens_q
-            num_tokens = cu_seq_lens_q[1:] - cu_seq_lens_q[:-1]
-            advantages = torch.repeat_interleave(advantages, num_tokens, dim=1)  # (1, max_len)
+            advantage_flat = [item for sublist in advantage_list for item in sublist]
+            advantages = torch.tensor(advantage_flat, dtype=torch.float32).unsqueeze(0)
 
             rollout_logprobs = None
             if rollout_logprobs_list is not None:

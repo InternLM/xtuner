@@ -5,10 +5,14 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.utils import get_logger
 
 from .agent_loop import AgentLoop
 from .replay_buffer import ReplayBuffer
 from .sampler import Sampler
+
+
+logger = get_logger()
 
 
 def default_is_valid_sample_fn(samples: list[RolloutState]) -> bool:
@@ -94,6 +98,8 @@ class SyncProduceStrategy(ProduceStrategy):
             task = asyncio.create_task(agent_loop.generate_group(rollout_state))
             pending_tasks.add(task)
 
+        logger.info(f"Started {len(pending_tasks)} initial tasks for SyncProduceStrategy.")
+
         while self.should_continue_fn(completed_sample_count, batch_size):
             if not pending_tasks:
                 print("All tasks are done but not enough samples collected.")
@@ -107,6 +113,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 items = task.result()
                 if self.is_valid_sample_fn(items):
                     completed_sample_count += 1
+                    logger.info(f"Collected {completed_sample_count}/{batch_size} valid samples for task {task_name}.")
                 await replay_buffer.put(items, task_name)
 
             while len(pending_tasks) + completed_sample_count < batch_size and self.should_continue_fn(

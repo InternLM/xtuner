@@ -90,6 +90,18 @@ class RolloutState(CacheObj, BaseModel):
     routed_experts: list[int] | RayObjectRef | None = None
     finish_reason: str | None = None
 
+    #  --- Judger 输出 ---
+    reward: dict[str, Any] | None = None
+
+    #  --- 状态 ---
+    task_name: str | None = None
+    status: Status = Status.INIT
+    error_msg: str | None = None
+    seq_staleness: int = 0  # 整条序列的staleness，一般为最大的token_staleness
+    token_staleness: list[int] | None = None  # 每一个token的staleness，长度和tokens保持一致
+    response_mask: list[int] | None = None  # response_ids的长度
+    extra_fields: dict[str, Any] = {}
+
     @field_serializer("routed_experts")
     def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | None:
         """Dump 时跳过 ray.ObjectRef，序列化为 None，避免 PydanticSerializationError。"""
@@ -105,18 +117,6 @@ class RolloutState(CacheObj, BaseModel):
         if type(value).__name__ == "ObjectRef" and "ray" in getattr(type(value), "__module__", ""):
             return None
         return value  # list[int]
-
-    #  --- Judger 输出 ---
-    reward: dict[str, Any] | None = None
-
-    #  --- 状态 ---
-    task_name: str | None = None
-    status: Status = Status.INIT
-    error_msg: str | None = None
-    seq_staleness: int = 0  # 整条序列的staleness，一般为最大的token_staleness
-    token_staleness: list[int] | None = None  # 每一个token的staleness，长度和tokens保持一致
-    loss_mask: list[int] | None = None  # tokens + response_ids的长度
-    extra_fields: dict[str, Any] = {}
 
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
