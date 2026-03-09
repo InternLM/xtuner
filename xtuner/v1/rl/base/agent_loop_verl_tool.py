@@ -47,11 +47,11 @@ class XtunerAsyncLLMServerManager:
     ) -> TokenOutput:
         sample_params = SampleParams(
             return_token_ids=True,
-            temperature=1.0,  # sampling_params.get("temperature", 1.0),  # TODO
-            top_p=1.0,  # sampling_params.get("top_p", 1.0),
-            top_k=0,  # sampling_params.get("top_k", 0),
-            repetition_penalty=1.0,
-            return_logprob=True,  # bool(sampling_params.get("logprobs", True)),
+            temperature=sampling_params.get("temperature", 1.0),
+            top_p=sampling_params.get("top_p", 1.0),
+            top_k=sampling_params.get("top_k", 0),
+            repetition_penalty=sampling_params.get("repetition_penalty", 1.0),
+            return_logprob=bool(sampling_params.get("logprobs", True)),
         )
 
         rollout_state = RolloutState(
