@@ -25,7 +25,7 @@ from xtuner.v1.rl.base.sampler import SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
-from xtuner.v1.rl.base.agent_loop_verl_tool import VerlToolAgentLoopConfig
+from recipe.verl_agent.common.agent_loop_verl_tool import VerlToolAgentLoopConfig
 # env
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -184,7 +184,7 @@ print(f"Sandbox server address: {sandbox_address}")
 tool_config = {
     "tools": [
         {
-            "class_name": "xtuner._testing.sandbox.SandboxTool",
+            "class_name": "recipe.verl_agent.sandbox_example.sandbox.SandboxTool",
             "config": {
                 "type": "native",
                 "sandbox_fusion_url": f"http://{sandbox_address}/run_code",

@@ -9,8 +9,7 @@ from verl.workers.rollout.replica import TokenOutput
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.ray.judger import NativeJudger, RouterJudger
 from xtuner.v1.ray.rollout.controller import RolloutControllerProxy
-
-from .agent_loop import AgentLoop, AgentLoopConfig
+from xtuner.v1.rl.base.agent_loop import AgentLoop, AgentLoopConfig
 
 
 class VerlToolAgentLoopConfig(AgentLoopConfig):
@@ -152,6 +151,5 @@ class VerlToolAgentLoop(AgentLoop):
 
         # judge rollout_state
         rollout_state = await self.judge_sample(rollout_state)
-        # self.logger.info(f"[VerlToolAgentLoop][{rollout_state.session_uid}] generate_sample completed with raw_prompt:\n    {rollout_state.extra_fields['raw_prompt']}\n and response:\n    {rollout_state.response}")
 
         return rollout_state

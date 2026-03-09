@@ -16,7 +16,7 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.base.agent_loop_verl_tool import VerlToolAgentLoopConfig
+from recipe.verl_agent.common.agent_loop_verl_tool import VerlToolAgentLoopConfig
 from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams
 from xtuner.v1.ray.rollout import RolloutController
@@ -217,7 +217,7 @@ class TestVerlToolAgentLoop(unittest.IsolatedAsyncioTestCase):
         tool_config = {
             "tools": [
                 {
-                    "class_name": "xtuner._testing.sandbox.SandboxTool",
+                    "class_name": "recipe.verl_agent.sandbox_example.sandbox.SandboxTool",
                     "config": {
                         "type": "native",
                         "sandbox_fusion_url": f"http://{sandbox_address}/run_code",
