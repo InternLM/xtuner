@@ -336,9 +336,11 @@ class RLColocateTrainer:
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
                 # TODO: ray.get(self.rollout_controller.check_health.remote())
+                self.logger.info("start to generate rollout experience for training")
                 train_batch: list[list[RolloutState]] = asyncio.run(
                     self.agent_loop_manager.produce_batch(self.global_batch_size)
                 )
+                self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
                 rollout_info = {}  # TODO: rollout info?
                 # TODO: save train trajectory
                 if not self._debug_rollout:
@@ -437,7 +439,9 @@ class RLColocateTrainer:
 
                     logprobs = group[i].logprobs
                     if logprobs is not None:
-                        assert len(logprobs) == len(response_ids), f"{len(logprobs)} vs {len(response_ids)}"
+                        assert len(logprobs) == len(response_ids), (
+                            f"{len(logprobs)} vs {len(response_ids)}, data: {group[i]}"
+                        )
                         # 只有 response 部分有 logprobs, 需要前面追加
                         logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs  # type: ignore[arg-type]
                 else:
@@ -449,12 +453,29 @@ class RLColocateTrainer:
 
                 prompt_len_list.append(len(prompt_ids))
                 response_len_list.append(len(response_ids))
-                advantages_list.extend([advantages[i]] * len(response_ids))
 
-                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
+                # 根据 response_mask 计算 response_ids 对应的shifted_labels
+                if group[i].response_mask is None:
+                    response_mask = [1] * len(response_ids)
+                    response_labels = response_ids
+                else:
+                    response_mask = cast(list[int], group[i].response_mask)
+                    response_labels = [
+                        response_id if mask_id != 0 else -100
+                        for response_id, mask_id in zip(response_ids, response_mask)
+                    ]
+                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
+                shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+
+                # 根据 response_mask 计算新的 advantages
+                advatnages_val = advantages[i].item()
+                actual_advantages = [advatnages_val] * len(prompt_ids) + [
+                    0.0 if mask == 0 else advatnages_val for mask in response_mask
+                ]
+                advantages_list.extend(actual_advantages[:-1])
+
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
-                shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
                 if logprobs is not None:
                     rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
@@ -463,14 +484,13 @@ class RLColocateTrainer:
                     )
                 else:
                     rollout_logprobs = None
-
                 multimodal_train_info = group[i].mm_info
                 multi_info_cast = cast(dict | None, multimodal_train_info)
                 seq_ctx = get_train_seq_ctx(input_ids_t, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
                 data_dict = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels_t,
-                    "advantage": advantages[i].item(),
+                    "advantage": actual_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
 
