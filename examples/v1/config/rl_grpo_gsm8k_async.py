@@ -1,3 +1,9 @@
+"""RL Colocate Trainer 示例配置（GRPO + GSM8K）。
+
+用法：通过环境变量传入路径后，由 CLI 加载本配置并 trainer_cfg.build().fit()。
+需设置: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH
+可选: WORLD_SIZE, ENABLE_RETURN_ROUTED_EXPERTS, LOSS_TYPE, LOSS_MODE, SP_SIZE
+"""
 import os
 from pathlib import Path
 
@@ -6,16 +12,19 @@ from xtuner.v1.data_proto import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, create_task
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
-from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
+from xtuner.v1.rl.trainer.worker import WorkerConfig
+from xtuner.v1.rl.agent_loop.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerConfig
+from xtuner.v1.rl.agent_loop.producer import OverProduceStrategyConfig
+from xtuner.v1.rl.agent_loop.sampler import SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
-from recipe.verl_agent.common.agent_loop_verl_tool import VerlToolAgentLoopConfig
+
 # env
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -25,7 +34,7 @@ enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
-experimental_name = "verl_gsm8k_tool"
+experimental_name = "grpo_gsm8k"
 rollout_steps = 45
 evaluate_step = 45
 train_optimizer_steps = 1
@@ -33,7 +42,7 @@ global_batch_size = 64 * train_optimizer_steps
 prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 1
-max_prompt_length = 1024
+max_prompt_length = 512
 max_response_length = 1024
 pack_max_length = 32 * 1024
 
@@ -98,45 +107,7 @@ train_worker_cfg = WorkerConfig(
     pack_max_length=pack_max_length,
 )
 
-# 5.0 verl config
-# gsm8k tool config
-tool_config_path = "recipe/verl_agent/gsm8k_tool_example/tool_config/gsm8k_tool_config.yaml"
-tool_call_parser_name = "hermes"
-
-from hydra import compose, initialize_config_dir
-import verl
-
-verl_config_dir = os.path.join(os.path.dirname(verl.__file__), "trainer/config")
-with initialize_config_dir(config_dir=verl_config_dir):
-    verl_config = compose(
-        config_name="ppo_trainer",
-        overrides=[
-            "data.max_prompt_length=" + str(max_prompt_length),  # also set rollout.prompt_length by OmegaConf's oc.select 
-            "data.max_response_length=" + str(max_response_length),  # also set rollout.response_length
-            "+data.apply_chat_template_kwargs.enable_thinking=False",
-            "actor_rollout_ref.rollout.multi_turn.format=" + tool_call_parser_name,
-            "actor_rollout_ref.rollout.multi_turn.tool_config_path=" + tool_config_path,
-            "actor_rollout_ref.rollout.multi_turn.max_tool_response_length=" + str(max_response_length),
-            "actor_rollout_ref.rollout.multi_turn.max_assistant_turns=5",
-            "actor_rollout_ref.rollout.multi_turn.enable=True",
-        ],
-    )
-
-# 5.1 train agent loop
-training_sample_params = SampleParams(
-    max_tokens=max_response_length,
-    top_k=0,
-    top_p=1.0,
-    temperature=1.0,
-    min_tokens=0,
-)
-verl_tool_agent_loop_config = VerlToolAgentLoopConfig(
-    hf_checkpoint=model_path,
-    sample_params=training_sample_params,
-    config=verl_config,
-)
-
-# 5.2 train agent loop manager
+# 5. train agent loop manager
 train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
 tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
 train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
@@ -150,29 +121,26 @@ sampler_config = SamplerConfig(
     dataloader_cfg=dataloader_cfg,
     prompt_repeat_k=prompt_repeat_k,
 )
-produce_strategy_config = SyncProduceStrategyConfig()
+training_sample_params = SampleParams(
+    max_tokens=max_response_length,
+    top_k=0,
+    top_p=1.0,
+    temperature=1.0,
+    min_tokens=0,
+)
+agent_loop_config = SingleTurnAgentLoopConfig(
+    hf_checkpoint=model_path,
+    sample_params=training_sample_params,
+)
+produce_strategy_config = OverProduceStrategyConfig()
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     task_name="train_task",
-    agent_loop_config=verl_tool_agent_loop_config,
+    agent_loop_config=agent_loop_config,
     produce_strategy_config=produce_strategy_config,
     sampler_config=sampler_config,
 )
 
-# 6.1 eval agent loop
-evaluation_sample_params = SampleParams(
-    max_tokens=max_response_length,
-    top_k=1,
-    top_p=1.0,
-    temperature=0.0,
-    min_tokens=0,
-)
-eval_verl_tool_agent_loop_config = VerlToolAgentLoopConfig(
-    hf_checkpoint=model_path,
-    sample_params=evaluation_sample_params,
-    config=verl_config,
-)
-
-# 6.2 eval agent loop manager
+# 6. eval agent loop manager
 eval_dataset = DatasetConfig(
     name=experimental_name, anno_path=eval_data_path, sample_ratio=1.0
 )
@@ -187,9 +155,20 @@ eval_sampler_config = SamplerConfig(
     dataloader_cfg=eval_dataloader_cfg,
     prompt_repeat_k=1,
 )
+evaluation_sample_params = SampleParams(
+    max_tokens=max_response_length,
+    top_k=1,
+    top_p=1.0,
+    temperature=0.0,
+    min_tokens=0,
+)
+eval_agent_loop_config = SingleTurnAgentLoopConfig(
+    hf_checkpoint=model_path,
+    sample_params=evaluation_sample_params,
+)
 eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
     task_name="eval_task",
-    agent_loop_config=eval_verl_tool_agent_loop_config,
+    agent_loop_config=eval_agent_loop_config,
     sampler_config=eval_sampler_config,
 )
 
@@ -203,7 +182,7 @@ trainer = RLColocateTrainerConfig(
     rollout_config=rollout_config,
     judger_config=judger_config,
     tokenizer_path=model_path,
-    replay_buffer_config=SyncReplayBufferConfig(),
+    replay_buffer_config=AsyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,

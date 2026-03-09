@@ -7,8 +7,10 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto import RolloutState, SampleParams, Status
 from xtuner.v1.rl.judger import NativeJudger, RouterJudger
 from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.utils import create_task
+from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
-from xtuner.v1.rl.utils import create_task, get_logger
+
 
 class AgentLoopConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)  # TODO: extra="forbid"

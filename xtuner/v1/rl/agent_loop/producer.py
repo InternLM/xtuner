@@ -5,9 +5,10 @@ from typing import Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.utils import get_logger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.utils import create_task
+from xtuner.v1.rl.utils import create_task
+from xtuner.v1.utils import get_logger
+
 from .agent_loop import AgentLoop
 from .sampler import Sampler
 
