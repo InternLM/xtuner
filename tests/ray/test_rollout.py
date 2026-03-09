@@ -1,27 +1,16 @@
+import asyncio
 import os
 import subprocess
-from functools import wraps
 import unittest
 import tempfile
 import ray
 import torch
-from pathlib import Path
 from transformers import AutoTokenizer
 import tempfile
-from xtuner.v1.ray.config.worker import RolloutConfig
-# from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-# from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.data_proto.rl_data import Status, SampleParams, RolloutState
-# from xtuner.v1.ray.environment import SingleTurnEnvironment
-from xtuner.v1.ray.rollout import RolloutController
-# from xtuner.v1.ray.judger import JudgerController
-# from xtuner.v1.datasets import RLTokenizeFnConfig, build_datasets, build_dataloader
-# from xtuner.v1.datasets.config import (
-#     DataloaderConfig,
-#     DatasetConfig,
-# )
-import asyncio
+from xtuner.v1.rl.rollout import RolloutController
 
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]

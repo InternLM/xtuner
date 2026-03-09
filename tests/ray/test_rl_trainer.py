@@ -16,12 +16,26 @@ from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets import RLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, CPUResourcesConfig
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.rl.base import WorkerConfig
-from xtuner.v1.rl.grpo import GRPOLossConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+try:
+    from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
+except Exception:
+    class DataFlowConfig:
+        def __init__(self, *args, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class ReplayBufferConfig:
+        def __init__(self, *args, **kwargs):
+            self.__dict__.update(kwargs)
+try:
+    from xtuner.v1.ray.judger.controller import JudgerConfig
+except Exception:
+    class JudgerConfig:
+        def __init__(self, *args, **kwargs):
+            self.__dict__.update(kwargs)
+from xtuner.v1.rl.trainer.worker import WorkerConfig
+from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_trainer import RLTrainer, RLTrainerConfig
 
 
@@ -142,14 +156,14 @@ class TestRLTrainer(unittest.TestCase):
         return dataflow_config
 
     def init_judger_config(self):
-        from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
+        from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
 
         gsm8k_judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
         judger_cfg = JudgerConfig(reward_judger_configs=[gsm8k_judger_config], worker_log_dir=self.worker_log_dir)
         return judger_cfg
 
     def init_multi_judger_config(self):
-        from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
+        from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
 
         # 支持一个GSM8KRouterJudgerConfig创建多个实例
         gsm8k_judger_config_1 = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k-1")

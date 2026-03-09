@@ -6,7 +6,7 @@ from typing import Dict
 import httpx
 import ray
 
-from xtuner.v1.ray.base import AutoCPUWorkers, BaseCPUWorker, CPUResourcesConfig
+from xtuner.v1.rl.utils import AutoCPUWorkers, BaseCPUWorker, CPUResourcesConfig
 
 
 @ray.remote(num_cpus=1)

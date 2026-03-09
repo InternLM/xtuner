@@ -6,11 +6,11 @@ from transformers import AutoTokenizer
 import torch
 import tempfile
 import httpx
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.rollout.lmdeploy import LMDeployWorker
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.rollout.lmdeploy import LMDeployWorker
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.ray.rollout.controller import RolloutController
+from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]

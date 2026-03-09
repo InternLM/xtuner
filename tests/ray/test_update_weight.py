@@ -3,17 +3,17 @@ import unittest
 import tempfile
 import ray
 
-from xtuner.v1.ray.rollout import RolloutController
+from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.data_proto.rl_data import SampleParams, RolloutState
 from xtuner.v1.config import (
     AdamWConfig,
     FSDPConfig,
     LRConfig,
 )
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.base import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
-from xtuner.v1.rl.grpo.loss import GRPOLossConfig as LossConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.trainer import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
+from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense4BConfig
 
 TEST_TEXT_MESSAGES = [{"role": "user", "content": "Hello!"}]

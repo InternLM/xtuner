@@ -5,7 +5,7 @@ import unittest
 import tempfile
 import numpy as np
 import asyncio
-from xtuner.v1.ray.base import AutoCPUWorkers, CPUResourcesConfig
+from xtuner.v1.rl.utils import AutoCPUWorkers, CPUResourcesConfig
 from xtuner.v1.data_proto.rl_data import RolloutState
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
@@ -79,7 +79,7 @@ class TestJudgerController(unittest.TestCase):
         return await asyncio.gather(*(judger_router.judge(s) for s in states))
     
     def test_gsm8k_judger(self):
-        from xtuner.v1.ray.judger.gsm8k import GSM8KNativeJudgerConfig, GSM8KRouterJudgerConfig
+        from xtuner.v1.rl.judger.gsm8k import GSM8KNativeJudgerConfig, GSM8KRouterJudgerConfig
 
         gsm8k_judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
         # Test Case 1: NativeJudger
@@ -106,7 +106,7 @@ class TestJudgerController(unittest.TestCase):
         
     def test_dapo_batch_judge_score(self):
         # 测试dapo judger + 1个实例 + RouterJudger的评判分数是否正确
-        from xtuner.v1.ray.judger.dapo_math import DapoMathRouterJudgerConfig
+        from xtuner.v1.rl.judger.dapo_math import DapoMathRouterJudgerConfig
         from xtuner.v1.utils.rl_test_utils import get_eos_token
         from transformers import AutoTokenizer
         # 构建数据
@@ -132,7 +132,7 @@ class TestJudgerController(unittest.TestCase):
 
     def test_geo_batch_judge_score(self):
         # 测试geo judger + 4个实例 + RouterJudger的评判分数是否正确
-        from xtuner.v1.ray.judger.geo3k import GEO3KRouterJudgerConfig
+        from xtuner.v1.rl.judger.geo3k import GEO3KRouterJudgerConfig
         config = GEO3KRouterJudgerConfig(judger_name="geo3k", num_ray_actors=4)
         states, history_reward = construct_geo3k_dapo_judger_data(GEO_ROLLOUT_DATA_PATH)
         router = config.build()
@@ -145,7 +145,7 @@ class TestJudgerController(unittest.TestCase):
 
     def test_multi_judger_router(self):
         import time
-        from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
+        from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
 
         gsm8k_config_1 = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k_1", num_ray_actors=2, num_cpus_per_actor=1)
         gsm8k_config_2 = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k_2", num_ray_actors=8, num_cpus_per_actor=2)

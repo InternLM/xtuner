@@ -92,7 +92,7 @@ replay_buffer_cfg = ReplayBufferConfig(
 
 ```{code-block} python
 :caption: 配置推理环境
-from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 model_path = "/path/to/qwen3-8B"  # 替换为您的模型路径
 
@@ -145,7 +145,7 @@ judger_cfg = JudgerConfig(
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
 from xtuner.v1.rl.base import WorkerConfig
-from xtuner.v1.rl.grpo import GRPOLossConfig
+from xtuner.v1.rl.loss import GRPOLossConfig
 
 model_path = "/path/to/qwen3-8B"        # 填入您的模型路径
 train_optimizer_steps = 4               # 训练优化步数

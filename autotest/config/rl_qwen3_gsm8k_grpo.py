@@ -1,9 +1,9 @@
 """RL Colocate Trainer 示例配置（GRPO + GSM8K）。
 
-用法：通过环境变量传入路径后，由 CLI 加载本配置并 trainer_cfg.build().fit()。
-需设置: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH
-可选: WORLD_SIZE, ENABLE_RETURN_ROUTED_EXPERTS, LOSS_TYPE, LOSS_MODE, SP_SIZE
+用法：通过环境变量传入路径后，由 CLI 加载本配置并 trainer_cfg.build().fit()。 需设置: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH 可选:
+WORLD_SIZE, ENABLE_RETURN_ROUTED_EXPERTS, LOSS_TYPE, LOSS_MODE, SP_SIZE
 """
+
 import os
 from pathlib import Path
 
@@ -12,15 +12,20 @@ from xtuner.v1.data_proto import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig
-from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.judger import GSM8KRouterJudgerConfig
-from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SingleTurnAgentLoopConfig, SyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import (
+    AgentLoopManagerConfig,
+    SamplerConfig,
+    SingleTurnAgentLoopConfig,
+    SyncProduceStrategyConfig,
+)
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
+
 
 # env
 work_dir = os.environ["WORK_DIR"]
@@ -138,9 +143,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
 )
 
 # 6. eval agent loop manager
-eval_dataset = DatasetConfig(
-    name=experimental_name, anno_path=eval_data_path, sample_ratio=1.0
-)
+eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path, sample_ratio=1.0)
 eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
 eval_dataloader_cfg = DataloaderConfig(
     dataset_config_list=eval_dataset_cfg,
@@ -179,7 +182,7 @@ trainer = RLColocateTrainerConfig(
     rollout_config=rollout_config,
     judger_config=judger_config,
     tokenizer_path=model_path,
-    replay_buffer_config=SyncReplayBufferConfig(),
+    replay_buffer_config=dict(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,

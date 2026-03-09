@@ -5,7 +5,7 @@ import ray
 
 
 
-from xtuner.v1.ray.utils import find_master_addr_and_port, get_accelerator_ids, get_ray_accelerator
+from xtuner.v1.rl.utils.ray_utils import find_master_addr_and_port, get_accelerator_ids, get_ray_accelerator
 import parametrize
 
 

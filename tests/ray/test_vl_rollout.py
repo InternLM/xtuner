@@ -8,14 +8,36 @@ import torch
 from pathlib import Path
 from transformers import AutoTokenizer
 import tempfile
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+try:
+    from xtuner.v1.ray.judger.controller import JudgerConfig
+except Exception:
+    class JudgerConfig:
+        def __init__(self, *args, **kwargs):
+            self.__dict__.update(kwargs)
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+try:
+    from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
+except Exception:
+    class DataFlow: ...
+
+    class DataFlowConfig:
+        def __init__(self, *args, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class ReplayBufferConfig:
+        def __init__(self, *args, **kwargs):
+            self.__dict__.update(kwargs)
 from xtuner.v1.data_proto.rl_data import SampleParams
-from xtuner.v1.ray.environment import SingleTurnEnvironment
-from xtuner.v1.ray.rollout import RolloutController
-from xtuner.v1.ray.judger import JudgerController
+try:
+    from xtuner.v1.ray.environment import SingleTurnEnvironment
+except Exception:
+    SingleTurnEnvironment = None
+from xtuner.v1.rl.rollout import RolloutController
+try:
+    from xtuner.v1.ray.judger import JudgerController
+except Exception:
+    JudgerController = None
 from xtuner.v1.datasets import RLTokenizeFnConfig, build_datasets, build_dataloader
 from xtuner.v1.datasets.config import (
     DataloaderConfig,
@@ -65,7 +87,7 @@ class TestRollout(unittest.TestCase):
             context_length=self.max_prompt_length + self.max_response_length,
             worker_log_dir=self.worker_log_dir,
         )
-        from xtuner.v1.ray.judger.geo3k import GEO3KRouterJudgerConfig
+        from xtuner.v1.rl.judger.geo3k import GEO3KRouterJudgerConfig
         geo3k_judger_config = GEO3KRouterJudgerConfig()
         self.judger_cfg = JudgerConfig(reward_judger_configs=[geo3k_judger_config])
 

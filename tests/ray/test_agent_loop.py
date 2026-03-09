@@ -5,16 +5,13 @@ import ray
 import tempfile
 import torch
 from transformers import AutoTokenizer
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
-from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig, AgentLoopManagerConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
-from xtuner.v1.ray.rollout import RolloutController
-from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
-from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
-from xtuner.v1.rl.base.sampler import SamplerConfig
-from xtuner.v1.rl.base.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
+from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 
