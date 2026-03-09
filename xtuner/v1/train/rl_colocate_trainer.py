@@ -1,4 +1,3 @@
-import asyncio
 import os
 import random
 from pathlib import Path
@@ -19,6 +18,7 @@ from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorker
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.judger.native import NativeJudgerConfig, RouterJudgerConfig
 from xtuner.v1.ray.rollout.controller import RolloutControllerProxy
+from xtuner.v1.ray.utils import asyncio_run
 from xtuner.v1.rl.base import (
     TrainingControllerProxy,
     WorkerConfig,
@@ -280,6 +280,7 @@ class RLColocateTrainer:
             judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
+            logger=self.logger,
         )
 
         # build eval agent loop manager
@@ -288,6 +289,7 @@ class RLColocateTrainer:
             judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
+            logger=self.logger,
         )
 
         self._enable_evaluate = enable_evaluate
@@ -318,7 +320,7 @@ class RLColocateTrainer:
         if self._enable_initial_evaluate and not self._debug_rollout:
             # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
             # TODO: ray.get(self.rollout_controller.restart.remote())
-            eval_batch: list[list[RolloutState]] = asyncio.run(
+            eval_batch: list[list[RolloutState]] = asyncio_run(
                 self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
             )
             eval_metrics = self.evaluator.run(eval_batch)
@@ -337,7 +339,7 @@ class RLColocateTrainer:
                 # 1. Rollout to generate experience
                 # TODO: ray.get(self.rollout_controller.check_health.remote())
                 self.logger.info("start to generate rollout experience for training")
-                train_batch: list[list[RolloutState]] = asyncio.run(
+                train_batch: list[list[RolloutState]] = asyncio_run(
                     self.agent_loop_manager.produce_batch(self.global_batch_size)
                 )
                 self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
@@ -382,7 +384,7 @@ class RLColocateTrainer:
                     if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
                         with timer("evaluation", step_timer_dict):
                             # TODO: ray.get(self.rollout_controller.restart.remote())
-                            eval_batch: list[list[RolloutState]] = asyncio.run(
+                            eval_batch: list[list[RolloutState]] = asyncio_run(
                                 self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
                             )
                             eval_metrics = self.evaluator.run(eval_batch)
@@ -449,6 +451,7 @@ class RLColocateTrainer:
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
 
                 # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
+                # TODO: verl tool agent loop 是否需要？
                 input_ids = prompt_ids + response_ids[:-1]
 
                 prompt_len_list.append(len(prompt_ids))

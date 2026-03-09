@@ -1,3 +1,5 @@
+import time
+
 from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -6,6 +8,7 @@ from xtuner.v1.ray.judger import Judger
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.rl.base.producer import ProduceStrategy, Sampler
 from xtuner.v1.rl.base.replay_buffer import ReplayBuffer
+from xtuner.v1.utils import get_logger
 
 from .agent_loop import AgentLoop, AgentLoopConfig
 from .producer import ProduceStrategyConfig, SyncProduceStrategyConfig
@@ -26,8 +29,9 @@ class AgentLoopManagerConfig(BaseModel):
         judger: Judger,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
         replay_buffer: ReplayBuffer,
+        logger=None,
     ) -> "AgentLoopManager":
-        agent_loop = self.agent_loop_config.build(rollout_controller=rollout_controller, judger=judger)
+        agent_loop = self.agent_loop_config.build(rollout_controller=rollout_controller, judger=judger, logger=logger)
         produce_strategy = self.produce_strategy_config.build()
         sampler = self.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
         return AgentLoopManager(
@@ -36,6 +40,7 @@ class AgentLoopManagerConfig(BaseModel):
             sampler=sampler,
             replay_buffer=replay_buffer,
             task_name=self.task_name,
+            logger=logger,
         )
 
 
@@ -47,6 +52,7 @@ class AgentLoopManager:
         sampler: Sampler,
         replay_buffer: ReplayBuffer,
         task_name: str,
+        logger=None,
     ):
         self._agent_loop: AgentLoop = agent_loop  # 负责一条或者一组样本生成
         # TODO(@duanyanhui): ProduceStrategy是用config来build还是直接使用实例，后续再统一改，目前先使用实例
@@ -54,14 +60,27 @@ class AgentLoopManager:
         self._replay_buffer: ReplayBuffer = replay_buffer
         self._data_sampler: Sampler = sampler  # 负责采样数据，提供给 ProduceStrategy 来生成样本
         self.task_name = task_name
+        if logger is None:
+            self.logger = get_logger()
+        else:
+            self.logger = logger
 
     # 共卡
     async def produce_batch(self, batch_size: int) -> list[list[RolloutState]]:
+        start = time.perf_counter()
+        self.logger.info(f"[AgentLoopManager][{self.task_name}] produce_batch start batch={batch_size}")
         await self._scheduler.produce_batch(
             self._agent_loop, self._data_sampler, self._replay_buffer, batch_size, self.task_name
         )
+        self.logger.info(
+            f"[AgentLoopManager][{self.task_name}] produce scheduler done elapsed={time.perf_counter() - start:.3f}, and start replay_buffer.get"
+        )
+        start = time.perf_counter()
         batch_rollout_states: list[list[RolloutState]] = await self._replay_buffer.get(
             batch_size, self.task_name, Status.COMPLETED
+        )
+        self.logger.info(
+            f"[AgentLoopManager][{self.task_name}] replay_buffer.get done completed_groups={len(batch_rollout_states)} elapsed={time.perf_counter() - start:.3f}"
         )
         return batch_rollout_states
 

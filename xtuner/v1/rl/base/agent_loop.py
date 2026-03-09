@@ -7,25 +7,28 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto import RolloutState, SampleParams, Status
 from xtuner.v1.ray.judger import NativeJudger, RouterJudger
 from xtuner.v1.ray.rollout import RolloutController
+from xtuner.v1.ray.utils import create_task
+from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
 
 
 class AgentLoopConfig(ABC, BaseModel):
-    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)  # TODO: extra="forbid"
     hf_checkpoint: str
     sample_params: SampleParams
 
     @abstractmethod
-    def build(self, rollout_controller, judger=None) -> "AgentLoop": ...
+    def build(self, rollout_controller, judger=None, logger=None) -> "AgentLoop": ...
 
 
 class SingleTurnAgentLoopConfig(AgentLoopConfig):
-    def build(self, rollout_controller, judger=None) -> "SingleTurnAgentLoop":
+    def build(self, rollout_controller, judger=None, logger=None) -> "SingleTurnAgentLoop":
         return SingleTurnAgentLoop(
             rollout_ctl=rollout_controller,
             hf_checkpoint=self.hf_checkpoint,
             sample_params=self.sample_params,
             judger=judger,
+            logger=logger,
         )
 
 
@@ -36,6 +39,7 @@ class AgentLoop(ABC):
         sample_params: SampleParams,
         hf_checkpoint: str,
         judger: Callable | NativeJudger | RouterJudger | None = None,
+        logger=None,
     ) -> None:
         self.rollout_ctl = rollout_ctl
         self.hf_checkpoint = hf_checkpoint
@@ -43,6 +47,10 @@ class AgentLoop(ABC):
         self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
         self.sample_params = sample_params
         self.judger = judger
+        if logger is None:
+            self.logger = get_logger()
+        else:
+            self.logger = logger
 
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState) -> RolloutState: ...
@@ -56,7 +64,7 @@ class AgentLoop(ABC):
         pending_tasks = []
         for state in rollout_state:
             state.sample_params = self.sample_params
-            task = asyncio.create_task(self.generate_sample(state))
+            task = create_task(self.generate_sample(state))
             pending_tasks.append(task)
         generated_samples = asyncio.gather(*pending_tasks)
         group_samples = await generated_samples
