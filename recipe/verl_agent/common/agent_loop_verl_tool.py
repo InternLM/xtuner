@@ -138,9 +138,7 @@ class VerlToolAgentLoop(AgentLoop):
         rollout_state.response_ids = output.response_ids
         rollout_state.logprobs = output.response_logprobs
         rollout_state.routed_experts = output.routed_experts
-        rollout_state.loss_mask = [0] * len(
-            output.prompt_ids
-        ) + output.response_mask  # TODO: use loss_mask in Training
+        rollout_state.response_mask = output.response_mask
         rollout_state.status = Status.COMPLETED
         rollout_state.extra_fields.update(output.extra_fields)
         # judger needs response in text format
