@@ -24,7 +24,7 @@ from xtuner.v1.rl.base.sampler import SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
-from xtuner.v1.rl.agent_loop.gsm8k_with_tool import ToolAgentLoopConfig
+from xtuner.v1.rl.agent_loop.gsm8k_with_tool import GSM8KToolAgentLoopConfig
 # env
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -108,8 +108,27 @@ train_worker_cfg = WorkerConfig(
 )
 
 # 5. train agent loop manager
+gsm8k_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "calc_gsm8k_reward",
+            "description": "A tool for calculating the reward of gsm8k. (1.0 if parsed answer is correct, 0.0 if parsed answer is incorrect or not correctly parsed)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "answer": {
+                        "type": "string",
+                        "description": "The model's answer to the GSM8K math problem, must be a digits",
+                    },
+                    "required": ["answer"],
+                },
+            },
+        },
+    }
+]
 train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
-tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
+tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length, tools_schema=gsm8k_tools)
 train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
 dataloader_cfg = DataloaderConfig(
     dataset_config_list=train_dataset_cfg,
@@ -128,7 +147,7 @@ training_sample_params = SampleParams(
     temperature=1.0,
     min_tokens=0,
 )
-agent_loop_config = ToolAgentLoopConfig(
+agent_loop_config = GSM8KToolAgentLoopConfig(
     max_turns=2,
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
@@ -163,7 +182,7 @@ evaluation_sample_params = SampleParams(
     temperature=0.0,
     min_tokens=0,
 )
-eval_agent_loop_config = ToolAgentLoopConfig(
+eval_agent_loop_config = GSM8KToolAgentLoopConfig(
     max_turns=2,
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
