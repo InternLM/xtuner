@@ -237,9 +237,9 @@ with initialize_config_dir(config_dir=verl_config_dir):
             "+actor_rollout_ref.rollout.engine_kwargs.sglang.tool_call_parser=qwen25",
             "actor_rollout_ref.rollout.multi_turn.format=" + tool_call_parser_name,
             "actor_rollout_ref.rollout.multi_turn.tool_config_path=" + tool_config_path,
-            # hydra.errors.ConfigCompositionException: Could not override 'actor_rollout_ref.rollout.multi_turn.multi_turn.max_tool_response_length'.
-            # To append to your config use +actor_rollout_ref.rollout.multi_turn.multi_turn.max_tool_response_length=10384
-            "+actor_rollout_ref.rollout.multi_turn.multi_turn.max_tool_response_length=" + str(max_response_length),
+            "actor_rollout_ref.rollout.multi_turn.max_tool_response_length=" + str(max_response_length),
+            "actor_rollout_ref.rollout.multi_turn.max_assistant_turns=5",
+            "actor_rollout_ref.rollout.multi_turn.enable=True",
             "actor_rollout_ref.rollout.agent.default_agent_loop=tool_agent",
             "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8",
             # trainer related
