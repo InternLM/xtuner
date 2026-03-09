@@ -409,7 +409,7 @@ class RLColocateTrainer:
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
 
-            prompt_ids = group[0].tokens
+            prompt_ids = group[0].prompt_ids
             assert prompt_ids is not None and len(prompt_ids) > 0, (
                 f"Prompt ids cannot be None or empty in data: {group[0]}"
             )
@@ -454,33 +454,28 @@ class RLColocateTrainer:
                 prompt_len_list.append(len(prompt_ids))
                 response_len_list.append(len(response_ids))
 
-                response_labels: list[int] = []
-                response_mask: list[int] = []
+                # 根据 response_mask 计算 response_ids 对应的shifted_labels
                 if group[i].response_mask is None:
-                    response_labels = response_ids
                     response_mask = [1] * len(response_ids)
+                    response_labels = response_ids
                 else:
                     response_mask = cast(list[int], group[i].response_mask)
-                    for idx, mask_id in enumerate(response_mask):
-                        if mask_id == 0:
-                            response_labels.append(-100)
-                        else:
-                            response_labels.append(response_ids[idx])
+                    response_labels = [
+                        response_id if mask_id != 0 else -100
+                        for response_id, mask_id in zip(response_ids, response_mask)
+                    ]
+                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
+                shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
                 # 根据 response_mask 计算新的 advantages
-                actual_advantages: list[float] = [advantages[i].item()] * len(prompt_ids)
-                for mask in response_mask:
-                    if mask == 0:
-                        actual_advantages.append(0.0)
-                    else:
-                        actual_advantages.append(advantages[i].item())
+                advatnages_val = advantages[i].item()
+                actual_advantages = [advatnages_val] * len(prompt_ids) + [
+                    0.0 if mask == 0 else advatnages_val for mask in response_mask
+                ]
                 advantages_list.extend(actual_advantages[:-1])
-
-                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
 
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
                 input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
-                shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
 
                 if logprobs is not None:
                     rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)

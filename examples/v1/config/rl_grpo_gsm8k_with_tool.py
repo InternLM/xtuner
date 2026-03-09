@@ -34,7 +34,7 @@ enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0
 WORLD_SIZE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
-experimental_name = "grpo_gsm8k"
+experimental_name = "grpo_gsm8k_with_tool"
 rollout_steps = 45
 evaluate_step = 45
 train_optimizer_steps = 1

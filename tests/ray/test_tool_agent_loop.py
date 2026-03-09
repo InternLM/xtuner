@@ -17,7 +17,7 @@ from xtuner.v1.rl.base.sampler import SamplerConfig
 from xtuner.v1.rl.base.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
-from xtuner.v1.rl.agent_loop.gsm8k_with_tool import ToolAgentLoopConfig
+from xtuner.v1.rl.agent_loop.gsm8k_with_tool import GSM8KToolAgentLoopConfig
 
 MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 MOE_MODEL_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -83,7 +83,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             worker_log_dir=self.worker_log_dir,
         )
         judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
-        agent_loop_cfg = ToolAgentLoopConfig(
+        agent_loop_cfg = GSM8KToolAgentLoopConfig(
             max_turns=5,
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0) #, return_token_ids=False)

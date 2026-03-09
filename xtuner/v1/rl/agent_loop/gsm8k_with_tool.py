@@ -33,12 +33,12 @@ gsm8k_tools = [
 ]
 
 
-class ToolAgentLoopConfig(AgentLoopConfig):
+class GSM8KToolAgentLoopConfig(AgentLoopConfig):
     max_turns: int
     tools: list[dict[str, Any]] | None = gsm8k_tools  # TODO: 明确tools如何定义，目前先写死
 
-    def build(self, rollout_controller, judger=None) -> "ToolAgentLoop":
-        return ToolAgentLoop(
+    def build(self, rollout_controller, judger=None) -> "GSM8KToolAgentLoop":
+        return GSM8KToolAgentLoop(
             max_turns=self.max_turns,
             tools=self.tools,
             rollout_ctl=rollout_controller,
@@ -53,7 +53,7 @@ class FunctionCall(BaseModel):
     arguments: dict
 
 
-class ToolAgentLoop(AgentLoop):
+class GSM8KToolAgentLoop(AgentLoop):
     def __init__(
         self,
         max_turns: int,
@@ -128,7 +128,6 @@ class ToolAgentLoop(AgentLoop):
             rollout_state.tokens = cur_turn_tokens
             rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
             cur_turn += 1
-            cur_turn_tokens = cast(list[int], rollout_state.tokens)
             response_ids = cast(list[int], rollout_state.response_ids)
             cur_turn_tokens.extend(response_ids)
 
