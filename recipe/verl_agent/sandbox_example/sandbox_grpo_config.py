@@ -198,10 +198,7 @@ with open(tool_config_path, "w") as f:
     json.dump(tool_config, f)
 
 # 5.0 verl config
-rollout_name = "sglang"
 tool_call_parser_name = "hermes"
-train_file = "/fake/path/to/train.parquet"
-test_file = "/fake/path/to/test.parquet"
 
 from hydra import compose, initialize_config_dir
 import verl
@@ -211,46 +208,14 @@ with initialize_config_dir(config_dir=verl_config_dir):
     verl_config = compose(
         config_name="ppo_trainer",
         overrides=[
-            "algorithm.adv_estimator=grpo",
-            "data.train_files=" + train_file,
-            "data.val_files=" + test_file,
-            "data.return_raw_chat=True",
-            "data.train_batch_size=32",
-            "data.max_prompt_length=" + str(max_prompt_length),
-            "data.max_response_length=" + str(max_response_length),
+            "data.max_prompt_length=" + str(max_prompt_length),  # also set rollout.prompt_length by OmegaConf's oc.select 
+            "data.max_response_length=" + str(max_response_length),  # also set rollout.response_length
             "+data.apply_chat_template_kwargs.enable_thinking=False",
-            # actor related
-            "actor_rollout_ref.model.path=" + model_path,
-            "actor_rollout_ref.actor.ppo_mini_batch_size=8",
-            "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=8",
-            "actor_rollout_ref.actor.fsdp_config.param_offload=True",
-            "actor_rollout_ref.actor.fsdp_config.optimizer_offload=True",
-            # rollout related
-            "actor_rollout_ref.rollout.name=" + rollout_name,
-            "actor_rollout_ref.rollout.mode=async",
-            "actor_rollout_ref.rollout.tensor_model_parallel_size=1",
-            "actor_rollout_ref.rollout.n=8",
-            "actor_rollout_ref.rollout.response_length=" + str(max_response_length),
-            "actor_rollout_ref.rollout.skip_tokenizer_init=False",
-            "+actor_rollout_ref.rollout.engine_kwargs.vllm.enable_auto_tool_choice=True",
-            "+actor_rollout_ref.rollout.engine_kwargs.vllm.tool_call_parser=hermes",
-            "+actor_rollout_ref.rollout.engine_kwargs.sglang.tool_call_parser=qwen25",
             "actor_rollout_ref.rollout.multi_turn.format=" + tool_call_parser_name,
             "actor_rollout_ref.rollout.multi_turn.tool_config_path=" + tool_config_path,
             "actor_rollout_ref.rollout.multi_turn.max_tool_response_length=" + str(max_response_length),
             "actor_rollout_ref.rollout.multi_turn.max_assistant_turns=5",
             "actor_rollout_ref.rollout.multi_turn.enable=True",
-            "actor_rollout_ref.rollout.agent.default_agent_loop=tool_agent",
-            "actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8",
-            # trainer related
-            "trainer.val_before_train=True",
-            "trainer.log_val_generations=10",
-            "trainer.n_gpus_per_node=8",
-            "trainer.test_freq=-1",
-            "trainer.total_training_steps=5",
-            "trainer.logger=['console','tensorboard']",
-            "trainer.project_name=verl",
-            "trainer.experiment_name=" + experimental_name,
         ],
     )
 
