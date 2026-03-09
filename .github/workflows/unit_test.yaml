@@ -51,4 +51,4 @@ jobs:
     - name: unit-test
       run: |
         export PYTHONPYCACHEPREFIX=/tmp
-        python ci/scripts/xtuner_unittest.py "$IMAGE" "source ${{env.WORKSPACE_PREFIX}}/BASE_ENV.sh;source ci/scripts/CI_ENV.sh" "pytest tests --ignore=tests/ray/test_evaluator.py --ignore=tests/ray/test_rl_trainer.py --ignore=tests/ray/test_vl_rollout.py --ignore=tests/ray/test_rl_train_with_sft.py"
+        python ci/scripts/xtuner_unittest.py "$IMAGE" "source ${{env.WORKSPACE_PREFIX}}/BASE_ENV.sh;source ci/scripts/CI_ENV.sh" "pytest tests/ray --ignore=tests/ray/test_evaluator.py --ignore=tests/ray/test_rl_trainer.py --ignore=tests/ray/test_vl_rollout.py --ignore=tests/ray/test_rl_train_with_sft.py"
