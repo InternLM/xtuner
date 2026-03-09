@@ -42,9 +42,9 @@ global_batch_size = 64 * train_optimizer_steps
 prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 1
-max_prompt_length = 512
-max_response_length = 1024
-pack_max_length = 32 * 1024
+max_prompt_length = 1024
+max_response_length = 2048
+pack_max_length = 8 * 1024
 
 # 1. resources
 resources = AcceleratorResourcesConfig(

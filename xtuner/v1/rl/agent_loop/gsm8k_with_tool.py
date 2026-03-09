@@ -68,7 +68,6 @@ class ToolAgentLoop(AgentLoop):
         )
         self.max_turns = max_turns
         self.tools = tools
-        self.cur_turn = 0
         self.tool_call_pattern = re.compile(r"\n*<tool_call>(.*?)</tool_call>", re.DOTALL)
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
@@ -85,9 +84,7 @@ class ToolAgentLoop(AgentLoop):
 
         extra_info = {"score": 1.0, "format_score": 0}
         actual_answer = answer.get("answer", "")
-        if actual_answer.startswith("#### "):
-            actual_answer = actual_answer
-        else:
+        if not actual_answer.startswith("#### "):
             actual_answer = "#### " + actual_answer
         return compute_reward(actual_answer, ground_truth, extra_info)
 
@@ -104,7 +101,7 @@ class ToolAgentLoop(AgentLoop):
                 name, arguments = function_call["name"], function_call["arguments"]
                 function_calls.append(FunctionCall(name=name, arguments=arguments))
             except Exception as e:
-                print(f"Error parsing tool call JSON: {e}")
+                logger.error(f"Error parsing tool call JSON: {e}")
                 continue
 
         content = self.tool_call_pattern.sub("", text)
@@ -119,8 +116,10 @@ class ToolAgentLoop(AgentLoop):
         final_response_mask = []
         final_response_ids = []
         final_logprobs = []
-        cur_turn_tokens = rollout_state.tokens
-        init_tokens = cur_turn_tokens
+
+        max_len = self.sample_params.max_tokens
+        cur_turn_tokens = cast(list[int], rollout_state.tokens)
+        init_tokens = list(cur_turn_tokens)  # 深拷贝以保护原始Prompt
         cur_turn = 0
         while True:
             if cur_turn >= self.max_turns:
@@ -138,6 +137,9 @@ class ToolAgentLoop(AgentLoop):
             final_logprobs.extend(cast(list[float], rollout_state.logprobs))
             final_response_mask.extend([1] * len(response_ids))
             # TODO: 处理 routed_experts, 要注意这里涉及到是否要解引用的问题
+
+            if len(final_response_ids) >= max_len:
+                break
 
             _, function_calls = self.extract_tool_calls(rollout_state)
             if not function_calls:
@@ -164,11 +166,14 @@ class ToolAgentLoop(AgentLoop):
             final_logprobs.extend([0.0] * len(tools_response_ids))
             final_response_mask.extend([0] * len(tools_response_ids))
 
-        tokens = cast(list[int], rollout_state.tokens)
-        raw_prompt_ids = len(tokens) - len(final_response_mask)
-        final_tokens = tokens[:raw_prompt_ids]
-        final_response_ids = tokens[raw_prompt_ids:]
-        rollout_state.tokens = final_tokens
+            if len(final_response_ids) >= max_len:
+                break
+
+        final_response_ids = final_response_ids[:max_len]
+        final_response_mask = final_response_mask[:max_len]
+        final_logprobs = final_logprobs[:max_len]
+
+        rollout_state.tokens = init_tokens
         rollout_state.response_ids = final_response_ids
         rollout_state.response_mask = final_response_mask
         rollout_state.logprobs = final_logprobs
@@ -176,7 +181,5 @@ class ToolAgentLoop(AgentLoop):
         assert len(rollout_state.response_ids) == len(rollout_state.response_mask) == len(rollout_state.logprobs), (
             f"{len(rollout_state.response_ids)} vs {len(rollout_state.response_mask)} vs {len(rollout_state.logprobs)}"
         )
-        init_tokens = cast(list[int], init_tokens)
-        assert len(final_tokens) == len(init_tokens), f"{len(final_tokens)} vs {len(init_tokens)}"
         rollout_state = await self.judge_sample(rollout_state)
         return rollout_state

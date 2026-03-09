@@ -102,7 +102,6 @@ class RolloutState(CacheObj, BaseModel):
     response_mask: list[int] | None = None  # response_ids的长度
     extra_fields: dict[str, Any] = {}
 
-
     @field_serializer("routed_experts")
     def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | None:
         """Dump 时跳过 ray.ObjectRef，序列化为 None，避免 PydanticSerializationError。"""
@@ -118,6 +117,7 @@ class RolloutState(CacheObj, BaseModel):
         if type(value).__name__ == "ObjectRef" and "ray" in getattr(type(value), "__module__", ""):
             return None
         return value  # list[int]
+
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
     """Updates the internal status based on the inference engine's finish
