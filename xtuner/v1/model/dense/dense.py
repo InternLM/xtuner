@@ -172,11 +172,6 @@ class Dense(BaseModel):
 
     __call__ = nn.Module.__call__
 
-    def _apply(self, fn, recurse: bool = True):
-        super()._apply(fn)
-        self.rotary_emb.to(torch.float32)  # type: ignore
-        return self
-
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
