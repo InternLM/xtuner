@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.utils import get_logger
+from xtuner.v1.ray.utils import create_task
 
 from .agent_loop import AgentLoop
 from .replay_buffer import ReplayBuffer
@@ -95,7 +96,7 @@ class SyncProduceStrategy(ProduceStrategy):
 
         for _ in range(batch_size):
             rollout_state = await sampler.sample(task_name=task_name)
-            task = asyncio.create_task(agent_loop.generate_group(rollout_state))
+            task = create_task(agent_loop.generate_group(rollout_state))
             pending_tasks.add(task)
 
         logger.info(f"Started {len(pending_tasks)} initial tasks for SyncProduceStrategy.")
@@ -120,7 +121,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 completed_sample_count, batch_size
             ):
                 rollout_state = await sampler.sample(task_name=task_name)
-                task = asyncio.create_task(agent_loop.generate_group(rollout_state))
+                task = create_task(agent_loop.generate_group(rollout_state))
                 pending_tasks.add(task)
 
 
@@ -148,7 +149,7 @@ class OverProduceStrategy(ProduceStrategy):
 
         for _ in range(data_concurrency):
             rollout_state = await sampler.sample(task_name=task_name)
-            task = asyncio.create_task(agent_loop.generate_group(rollout_state))
+            task = create_task(agent_loop.generate_group(rollout_state))
             pending_tasks.add(task)
 
         completed_sample_count = init_completed_sample_count
@@ -174,7 +175,7 @@ class OverProduceStrategy(ProduceStrategy):
                 completed_sample_count, batch_size
             ):
                 rollout_state = await sampler.sample(task_name=task_name)
-                task = asyncio.create_task(agent_loop.generate_group(rollout_state))
+                task = create_task(agent_loop.generate_group(rollout_state))
                 pending_tasks.add(task)
 
         if len(pending_tasks) > 0:
