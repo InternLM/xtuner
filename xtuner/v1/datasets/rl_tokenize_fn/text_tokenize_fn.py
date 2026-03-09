@@ -16,9 +16,11 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
         self,
         tokenizer: PreTrainedTokenizer,
         max_length: int | None = None,
+        tools_schema: list | None = None,
     ):
         super().__init__(tokenizer)
         self.max_length = max_length
+        self.tools_schema = tools_schema if tools_schema is not None else []
 
     def __call__(self, item: dict, **kwargs) -> RolloutState:
         """example:
@@ -44,7 +46,9 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
         extra_info = item.get("extra_info", {})
         message = item["prompt"]
 
-        raw_prompt = self.tokenizer.apply_chat_template(message, add_generation_prompt=True, tokenize=False)
+        raw_prompt = self.tokenizer.apply_chat_template(
+            message, tools=self.tools_schema, add_generation_prompt=True, tokenize=False
+        )
         data = self.tokenizer(raw_prompt, add_special_tokens=False)
         prompt_token_ids = data["input_ids"]
         num_tokens = len(data["input_ids"])
@@ -73,6 +77,7 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
 class RLTextTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Base RL dataset config for xtuner", extra="forbid")
     max_length: int | None = None
+    tools_schema: list | None = None
 
     def build(self, tokenizer: PreTrainedTokenizer, **kwargs) -> RLTextTokenizeFn:
-        return RLTextTokenizeFn(tokenizer=tokenizer, max_length=self.max_length)
+        return RLTextTokenizeFn(tokenizer=tokenizer, max_length=self.max_length, tools_schema=self.tools_schema)
