@@ -51,9 +51,8 @@ jobs:
           name: xtuner-e2e-${{ github.run_id }}
 
       - name: Copy deploy action
-        if: ${{ !cancelled() }}
         run: cp -r ../JamesIves ./
-          
+
       - name: Deploy to GitHub Pages
         if: ${{ !cancelled() }}
         uses: ./JamesIves/github-pages-deploy-action/v4
