@@ -106,7 +106,6 @@ class VerlToolAgentLoop(AgentLoop):
 
     async def generate_sample(self, rollout_state: RolloutState) -> RolloutState:
         assert rollout_state.sample_params is not None, "sample_params must be set in rollout_state"
-        # self.verl_tool_agent_loop.loop = asyncio.get_running_loop()  # TODO: check if this is needed
 
         # convert rollout_state to verl_tool_agent_loop input
         sp = rollout_state.sample_params

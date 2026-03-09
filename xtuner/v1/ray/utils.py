@@ -184,6 +184,9 @@ _ASYNCIO_RUN_LOOP: AbstractEventLoop | None = None
 def _get_default_asyncio_loop() -> AbstractEventLoop:
     """Get a module-level event loop reused by ``asyncio_run``."""
     global _ASYNCIO_RUN_LOOP
+    if _ASYNCIO_RUN_LOOP is not None and not _ASYNCIO_RUN_LOOP.is_closed():
+        return _ASYNCIO_RUN_LOOP
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -193,8 +196,7 @@ def _get_default_asyncio_loop() -> AbstractEventLoop:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-    if _ASYNCIO_RUN_LOOP is None or _ASYNCIO_RUN_LOOP.is_closed() or _ASYNCIO_RUN_LOOP is not loop:
-        _ASYNCIO_RUN_LOOP = loop
+    _ASYNCIO_RUN_LOOP = loop
     return _ASYNCIO_RUN_LOOP
 
 
