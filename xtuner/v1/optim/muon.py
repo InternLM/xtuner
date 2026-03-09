@@ -274,7 +274,9 @@ class Muon(Optimizer):
     """Distributed Muon optimizer for PyTorch FSDP2. Also compatible with DDP.
 
     Args:
-        params: Parameters for the optimizer.
+        params: Parameters for the optimizer. Can be a list of parameters or a list of
+            parameter groups. Each parameter group can specify 'num_experts' to enable
+            per-expert orthogonalization for MoE models.
         distributed_mesh: DeviceMesh or ProcessGroup for distributed training.
             Use DeviceMesh for FSDP2 and ProcessGroup for DistributedDataParallel.
         lr: Base learning rate. For Muon, this will be scaled based on the matrix dimensions.
@@ -293,7 +295,7 @@ class Muon(Optimizer):
             False: Tensors are not flattened. 3D+ tensors are treated as batches of 2D matrices.
         use_triton: Whether to use Triton kernel for Newton-Schulz. Ignored if custom function is provided.
         newton_schulz_func: Use a custom Newton-Schulz function for orthogonalization.
-            Signature is `func(input: Tensor, epsilon: float) -> Tensor`.
+            Signature is `func(input: Tensor, epsilon: float, num_experts: int) -> Tensor`.
 
     Muon optimizer algorithm by Keller Jordan: https://kellerjordan.github.io/posts/muon/
     FSDP2 Muon uses all-to-all communications: https://www.essential.ai/blog/infra
@@ -337,6 +339,7 @@ class Muon(Optimizer):
             nesterov=nesterov,
             flatten=flatten,
             adjust_lr=adjust_lr,
+            num_experts=1,  # Default: no MoE expert handling
         )
         super().__init__(params, defaults)
 
@@ -442,6 +445,7 @@ class Muon(Optimizer):
             nesterov = group["nesterov"]
             flatten = group["flatten"]
             adjust_lr = group["adjust_lr"]
+            num_experts = group.get("num_experts", 1)
 
             # Create batches of parameters of size self._world_size
             for params in create_param_batches(group_params, batch_size=self._world_size):
@@ -497,6 +501,7 @@ class Muon(Optimizer):
                         shard_dim=sharded_tensor_dim,
                         process_group=self._process_group,
                         newton_schulz_func=self._newton_schulz_func,
+                        num_experts=num_experts,
                     )
                 )
 
@@ -558,6 +563,7 @@ def muon_update_batch_async(
     shard_dim: Optional[int] = None,  # Shard dimension for DTensor (if applicable)
     process_group: Optional[ProcessGroup] = None,
     newton_schulz_func: Optional[Callable] = None,
+    num_experts: int = 1,  # Number of experts for MoE models
 ) -> Generator[None, None, None]:
     """Batched version of Muon update.
 
@@ -620,6 +626,7 @@ def muon_update_batch_async(
             newton_schulz_func=newton_schulz_func,
             flatten=flatten,
             epsilon=epsilon,
+            num_experts=num_experts,
         )
 
         # Prepare to scatter results back
@@ -659,6 +666,7 @@ def muon_update_batch_async(
             newton_schulz_func=newton_schulz_func,
             flatten=flatten,
             epsilon=epsilon,
+            num_experts=num_experts,
         )
 
         if process_group is not None and process_group.size() > 1:
@@ -779,6 +787,7 @@ def muon_update_newton_schulz(
     newton_schulz_func: Callable,
     flatten: bool,
     epsilon: Tensor,
+    num_experts: int = 1,
 ) -> Tensor:
     """Flatten the input tensor if needed and call the Newton-Schulz
     function."""
@@ -790,7 +799,7 @@ def muon_update_newton_schulz(
         # Given 4D+ batch, flatten to 3D batch
         X = X.flatten(end_dim=-3)
 
-    return newton_schulz_func(X, epsilon=epsilon).reshape(original_shape)
+    return newton_schulz_func(X, epsilon=epsilon, num_experts=num_experts).reshape(original_shape)
 
 
 def adjust_lr_rms_norm(lr, param_shape):
@@ -811,9 +820,34 @@ def adjust_lr_spectral_norm(lr, param_shape):
 
 
 @torch.compile(fullgraph=True)
-def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
-    """Newton-Schulz iteration to approximate the orthogonalization of X."""
-    # Newton-Schulz constants
+def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: int = 1):
+    """Newton-Schulz iteration to approximate the orthogonalization of X.
+
+    This function handles both regular matrices and MoE expert weight matrices.
+    For MoE models, each expert's weight matrix is orthogonalized independently,
+    rather than orthogonalizing the concatenated large matrix.
+
+    Unified algorithm for both cases:
+    1. Reshape input to (num_experts, M, N) - for regular case this is (1, M, N)
+    2. Apply Newton-Schulz iteration to each expert matrix independently using
+       batch matrix multiplication
+    3. Reshape back to original shape
+
+    Mathematical equivalence:
+    - num_experts=1:  X.view(1, M, N) -> process -> X.view(M, N)
+      This is mathematically equivalent to processing X directly, but allows
+      unified code path with the MoE case.
+    - num_experts>1:  X.view(num_experts, M, N) -> process each expert -> X.view(num_experts*M, N)
+      Each expert matrix is orthogonalized independently with its own spectral norm.
+
+    Args:
+        G: Input tensor to orthogonalize. Shape: (num_experts * M, N) for MoE,
+           or (M, N) for regular matrices.
+        epsilon: Small value to avoid division by zero.
+        num_experts: Number of experts for MoE models. Default 1 for regular matrices.
+            When > 1, the input is treated as concatenated expert matrices.
+    """
+    # Newton-Schulz constants - fixed coefficients for 5th order iteration
     ns_consts = [
         (4.0848, -6.8946, 2.9270),
         (3.9505, -6.3029, 2.6377),
@@ -823,17 +857,39 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
     ]
 
     X = G.to(dtype=torch.bfloat16)
-    if G.size(-2) > G.size(-1):
-        X = X.mT
+    original_shape = X.shape
 
-    # Ensure spectral norm is at most 1
+    # Unified handling: reshape to (num_experts, M, N) for both cases
+    # For regular case (num_experts=1), this adds a batch dimension of size 1
+    M = X.size(-2) // num_experts
+    N = X.size(-1)
+    X = X.view(num_experts, M, N)
+
+    # Transpose if needed (when rows > cols) for numerical stability in NS iteration
+    # This ensures X @ X.mT produces a smaller square matrix
+    need_transpose = G.size(-2) > G.size(-1)
+    if need_transpose:
+        X = X.mT  # (num_experts, N, M) if rows > cols, else (num_experts, M, N)
+
+    # Ensure spectral norm is at most 1 for each expert matrix independently
+    # norm shape: (num_experts, 1, 1) - each expert has its own normalization factor
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)
 
+    # Newton-Schulz iteration: orthogonalize each expert matrix
+    # Using batch matrix multiplication (@) to process all experts in parallel
     for a, b, c in ns_consts:
-        A = X @ X.mT
+        # A = X @ X^T: compute Gram matrix for each expert
+        A = X @ X.mT  # shape: (num_experts, M, M) or (num_experts, N, N)
+        # B = b * A + c * A @ A: polynomial combination for convergence
         B = b * A + c * (A @ A)
+        # X = a * X + B @ X: update step
         X = a * X + B @ X
 
-    if G.size(-2) > G.size(-1):
+    # Undo transpose if applied
+    if need_transpose:
         X = X.mT
+
+    # Reshape back to original shape: (num_experts, M, N) -> (num_experts * M, N)
+    X = X.view(original_shape)
+
     return X
