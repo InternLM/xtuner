@@ -3,7 +3,7 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .native import NativeJudgerConfig, RouterJudgerConfig
+from .native import JudgerConfig
 
 
 # Adapted from https://github.com/volcengine/verl/blob/main/verl/utils/reward_score/math_dapo.py
@@ -342,12 +342,8 @@ class _DapoMathJudgerDefaults(BaseModel):
         return self
 
 
-class DapoMathNativeJudgerConfig(_DapoMathJudgerDefaults, NativeJudgerConfig):
-    """Configuration for the DapoMath native judger."""
-
-
-class DapoMathRouterJudgerConfig(_DapoMathJudgerDefaults, RouterJudgerConfig):
-    """Configuration for the DapoMath router judger."""
+class DapoMathJudgerConfig(_DapoMathJudgerDefaults, JudgerConfig):
+    """Configuration for the DapoMath judger."""
 
     num_ray_actors: int = 1
     num_cpus_per_actor: int = 1

@@ -79,11 +79,11 @@ class TestJudgerController(unittest.TestCase):
         return await asyncio.gather(*(judger_router.judge(s) for s in states))
     
     def test_gsm8k_judger(self):
-        from xtuner.v1.rl.judger.gsm8k import GSM8KNativeJudgerConfig, GSM8KRouterJudgerConfig
+        from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 
-        gsm8k_judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
+        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
         # Test Case 1: NativeJudger
-        native_judger = GSM8KNativeJudgerConfig(judger_name="openai/gsm8k").build()
+        native_judger = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="native").build()
         res1 = asyncio.run(native_judger.judge(FAKE_JUDGER_INPUT_ITEM))
         self.assertEqual(res1.reward["score"], 1.0)
 
@@ -106,7 +106,7 @@ class TestJudgerController(unittest.TestCase):
         
     def test_dapo_batch_judge_score(self):
         # 测试dapo judger + 1个实例 + RouterJudger的评判分数是否正确
-        from xtuner.v1.rl.judger.dapo_math import DapoMathRouterJudgerConfig
+        from xtuner.v1.rl.judger.dapo_math import DapoMathJudgerConfig
         from xtuner.v1.utils.rl_test_utils import get_eos_token
         from transformers import AutoTokenizer
         # 构建数据
@@ -115,7 +115,7 @@ class TestJudgerController(unittest.TestCase):
         eos_token = get_eos_token(MODEL_PATH)
         eos_token_str = tokenizer.convert_ids_to_tokens(eos_token)
         # 定义 Judger Config
-        config = DapoMathRouterJudgerConfig(
+        config = DapoMathJudgerConfig(judger_type="router", 
             judger_name="dapo_math",
             eos_token=eos_token_str,
             enable_overlong_buffer=True,
@@ -132,8 +132,8 @@ class TestJudgerController(unittest.TestCase):
 
     def test_geo_batch_judge_score(self):
         # 测试geo judger + 4个实例 + RouterJudger的评判分数是否正确
-        from xtuner.v1.rl.judger.geo3k import GEO3KRouterJudgerConfig
-        config = GEO3KRouterJudgerConfig(judger_name="geo3k", num_ray_actors=4)
+        from xtuner.v1.rl.judger.geo3k import GEO3KJudgerConfig
+        config = GEO3KJudgerConfig(judger_name="geo3k", judger_type="router", num_ray_actors=4)
         states, history_reward = construct_geo3k_dapo_judger_data(GEO_ROLLOUT_DATA_PATH)
         router = config.build()
         rollout_states = asyncio.run(self._judger_batch(router, states))
@@ -145,10 +145,10 @@ class TestJudgerController(unittest.TestCase):
 
     def test_multi_judger_router(self):
         import time
-        from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
+        from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 
-        gsm8k_config_1 = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k_1", num_ray_actors=2, num_cpus_per_actor=1)
-        gsm8k_config_2 = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k_2", num_ray_actors=8, num_cpus_per_actor=2)
+        gsm8k_config_1 = GSM8KJudgerConfig(judger_name="openai/gsm8k_1", judger_type="router", num_ray_actors=2, num_cpus_per_actor=1)
+        gsm8k_config_2 = GSM8KJudgerConfig(judger_name="openai/gsm8k_2", judger_type="router", num_ray_actors=8, num_cpus_per_actor=2)
 
         gsm8k_router_1 = gsm8k_config_1.build()
         gsm8k_router_2 = gsm8k_config_2.build() 
