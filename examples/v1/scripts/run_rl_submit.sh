@@ -21,6 +21,8 @@ else
   ACCELERATOR_PER_NODE=${7:-8}
 fi
 
+ulimit -n 65536  # OSError: [Errno 24] Too many open files
+
 export PYTHONPATH=$(pwd):$PYTHONPATH
 # NOTE: if you add new env vars, please also add them to RUNTIME_ENV_JSON in step 4.
 # master 节点的 IP 地址
