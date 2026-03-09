@@ -15,7 +15,7 @@ from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
-from xtuner.v1.rl.utils
+from xtuner.v1.ray.utils import create_task
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SyncProduceStrategyConfig, SamplerConfig
