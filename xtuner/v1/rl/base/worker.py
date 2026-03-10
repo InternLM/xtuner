@@ -26,7 +26,7 @@ from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.engine.train_engine import TrainEngine, TrainStepInfo
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import CELossConfig
+from xtuner.v1.loss import CELossConfig, LogProbContext
 from xtuner.v1.loss.ce_loss import CELossContext
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
@@ -249,6 +249,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
 
+        self.logprob_chunk_size = worker_cfg.loss_cfg.chunk_size
+
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
         self._sft_dataloader: Dataloader | None = None
@@ -373,8 +375,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
         old_logprobs_list: list[torch.Tensor] = []
         for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
-            output = self._engine.forward_only(seq_ctx=seq_ctx)
-            old_logprobs = gather_logprobs(output["logits"], shifted_labels)
+            if self.logprob_chunk_size is not None:
+                loss_ctx = LogProbContext(chunk_size=self.logprob_chunk_size, shifted_labels=shifted_labels)
+            else:
+                loss_ctx = None
+            output = self._engine.forward_only(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+            old_logprobs = output["loss"]
             old_logprobs_list.append(old_logprobs)
         return old_logprobs_list
 
