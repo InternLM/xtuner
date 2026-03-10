@@ -130,18 +130,20 @@ class JudgerConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     judger_name: str
     judger_type: Literal["native", "ray.actor", "router"] = "native"
-    num_ray_actors: int = 1
-    num_cpus_per_actor: int = 1
-    cpu_memory_per_actor: int = 1024**3
     reward_handler: Callable | str = Field(default=None, exclude=True)
     request_timeout: float = 30.0
     extra_info: dict = Field(default={}, exclude=True)
+    num_ray_actors: int = 1  # The number of Ray actor instances to create when judger_type is "router". Must be 1 when judger_type is "ray.actor".
+    num_cpus_per_actor: int = 1  # The number of CPU cores to allocate for each Ray actor instance. Only applicable when judger_type is "ray.actor" or "router".
+    cpu_memory_per_actor: int = (
+        1024**3
+    )  # The amount of CPU memory (in bytes) to allocate for each Ray actor instance. Only applicable when judger_type is "ray.actor" or "router".
 
     def _build_worker(self, pg: PlacementGroup | None = None, bundle_idx: int = 0) -> RayJudgerProxy:
         pg_options = {"num_cpus": self.num_cpus_per_actor, "memory": self.cpu_memory_per_actor}
         if pg is None:
             # NOTE: 保持与 router 构建逻辑一致，默认创建 PlacementGroup。
-            from xtuner.v1.rl.utils.cpu import CPUResourcesConfig
+            from xtuner.v1.rl.utils.ray_worker import CPUResourcesConfig
 
             cpu_resource_cfg = CPUResourcesConfig(
                 num_workers=self.num_ray_actors,
@@ -219,6 +221,8 @@ class JudgerConfig(BaseModel):
             )
 
         if self.judger_type == "ray.actor":
+            if self.num_ray_actors > 1:
+                raise ValueError("num_ray_actors must be 1 when judger_type is 'ray.actor'.")
             return self._build_worker(pg=pg, bundle_idx=start_bundle_idx)
 
         workers_list = self._build_workers(pg=pg, start_bundle_idx=start_bundle_idx)
