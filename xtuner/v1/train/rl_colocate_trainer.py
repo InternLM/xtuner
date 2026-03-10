@@ -16,7 +16,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.judger import NativeJudgerConfig, RouterJudgerConfig
+from xtuner.v1.rl.judger import JudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
@@ -133,7 +133,7 @@ class RLColocateTrainerConfig(BaseModel):
     resources: AcceleratorResourcesConfig
     train_worker_cfg: WorkerConfig
     rollout_config: RolloutConfig
-    judger_config: NativeJudgerConfig | RouterJudgerConfig
+    judger_config: JudgerConfig
     tokenizer_path: Union[str, Path]
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
     agent_loop_manager_cfg: AgentLoopManagerConfig
@@ -193,7 +193,7 @@ class RLColocateTrainer:
         resources: AcceleratorResourcesConfig,
         train_worker_cfg: WorkerConfig,
         rollout_config: RolloutConfig,
-        judger_config: RouterJudgerConfig,
+        judger_config: JudgerConfig,
         # Sampler config
         # sampler_config: SamplerConfig,
         tokenizer_path: str | Path,
