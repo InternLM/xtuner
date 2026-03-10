@@ -91,7 +91,7 @@ If you need more fine-grained control (such as distributed inference, inference 
 
 ```{code-block} python
 :caption: Configure Inference Environment
-from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 model_path = "/path/to/qwen3-8B"  # Replace with your model path
 
@@ -143,8 +143,8 @@ For more configuration parameters, please refer to the API documentation: {class
 :caption: Configure Training Strategy
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
-from xtuner.v1.rl.base import WorkerConfig
-from xtuner.v1.rl.grpo import GRPOLossConfig
+from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.loss import GRPOLossConfig
 
 model_path = "/path/to/qwen3-8B"        # Fill in your model path
 train_optimizer_steps = 4               # Training optimization steps
