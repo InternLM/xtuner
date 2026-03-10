@@ -25,10 +25,10 @@ from .collator import (
     qwen3_vl_sft_collator,
     sft_llm_collator,
 )
-from .dataloader import BaseDataloader, Dataloader
-from .jsonl import JsonlDataset
 from .custom_pack import CustomPackDataset
 from .custom_sampler import CustomSampler, _load_sampler_config
+from .dataloader import BaseDataloader, Dataloader
+from .jsonl import JsonlDataset
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
@@ -427,6 +427,7 @@ class DataloaderConfig(BaseDataloaderConfig):
         sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler | CustomSampler
         if self.pack_level == "custom":
             assert isinstance(dataset, CustomPackDataset)
+            assert self.custom_sampler_config_path is not None
             global_order = _load_sampler_config(self.custom_sampler_config_path)
             sampler = CustomSampler(
                 dataset=dataset,
@@ -446,7 +447,11 @@ class DataloaderConfig(BaseDataloaderConfig):
             )
         else:
             sampler = ParallelSampler(
-                dataset=dataset, dp_mesh=dp_mesh, global_batch_size=global_batch_size, shuffle=shuffle, seed=seed
+                dataset=dataset,  # type: ignore[arg-type]
+                dp_mesh=dp_mesh,
+                global_batch_size=global_batch_size,
+                shuffle=shuffle,
+                seed=seed,
             )
 
         ctx = torch.multiprocessing.get_context("fork")

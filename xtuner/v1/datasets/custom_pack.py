@@ -14,7 +14,7 @@ token_end == 0  means "take to the end of the sample".
 
 import json
 import os
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import torch.utils.data as tud
@@ -31,11 +31,10 @@ logger = get_logger()
 def _load_pack_config_jsonl(path: str) -> list[list[list[int]]]:
     """Load pack config from a JSONL file.
 
-    Returns a list of packs, each pack is a list of slices
-    [dataset_id, sample_idx, token_start, token_end].
+    Returns a list of packs, each pack is a list of slices [dataset_id, sample_idx, token_start, token_end].
     """
     packs: list[list[list[int]]] = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
@@ -78,9 +77,7 @@ def _load_pack_config_npy(path: str) -> list[list[list[int]]]:
     flat_samples = np.load(samples_path)
 
     if flat_samples.ndim != 2 or flat_samples.shape[1] != 4:
-        raise ValueError(
-            f"pack_samples.npy must have shape (N, 4), got {flat_samples.shape}"
-        )
+        raise ValueError(f"pack_samples.npy must have shape (N, 4), got {flat_samples.shape}")
     if boundaries.ndim != 1 or len(boundaries) < 2:
         raise ValueError(
             f"pack_boundaries.npy must be a 1-D array with at least 2 elements, got shape {boundaries.shape}"
@@ -145,9 +142,7 @@ class CustomPackDataset(tud.Dataset):
         # 1. Load pack config file
         # ------------------------------------------------------------------
         raw_packs = _load_pack_config(pack_config_path)
-        logger.info(
-            f"CustomPackDataset: loaded {len(raw_packs)} raw packs from {pack_config_path}."
-        )
+        logger.info(f"CustomPackDataset: loaded {len(raw_packs)} raw packs from {pack_config_path}.")
 
         # ------------------------------------------------------------------
         # 2. Pre-compute per-dataset token counts indexed by sampled position
@@ -199,9 +194,7 @@ class CustomPackDataset(tud.Dataset):
             ds_used = sum(1 for (d, _) in used_pairs if d == ds_id)
             ds_pct = 100.0 * ds_used / ds_total if ds_total > 0 else 0.0
             ds_name = getattr(ds, "name", str(ds_id))
-            logger.info(
-                f"  dataset[{ds_id}] ({ds_name}): {ds_used}/{ds_total} samples ({ds_pct:.1f}%)"
-            )
+            logger.info(f"  dataset[{ds_id}] ({ds_name}): {ds_used}/{ds_total} samples ({ds_pct:.1f}%)")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -225,16 +218,12 @@ class CustomPackDataset(tud.Dataset):
 
             # Hard errors – always raise, not skippable.
             if ds_id < 0 or ds_id >= len(self.datasets):
-                raise ValueError(
-                    f"Pack {pack_idx}: dataset_id {ds_id} is out of range "
-                    f"[0, {len(self.datasets)})."
-                )
+                raise ValueError(f"Pack {pack_idx}: dataset_id {ds_id} is out of range [0, {len(self.datasets)}).")
             ds_num_tokens = self._sample_num_tokens[ds_id]
             n_samples = len(ds_num_tokens)
             if s_idx < 0 or s_idx >= n_samples:
                 raise ValueError(
-                    f"Pack {pack_idx}: sample_idx {s_idx} is out of range "
-                    f"[0, {n_samples}) for dataset {ds_id}."
+                    f"Pack {pack_idx}: sample_idx {s_idx} is out of range [0, {n_samples}) for dataset {ds_id}."
                 )
             tok_len = int(ds_num_tokens[s_idx])
             # Resolve token_end == 0
@@ -251,8 +240,7 @@ class CustomPackDataset(tud.Dataset):
         if total_tokens < self.pack_max_length:
             if self.short_pack_strategy == "error":
                 raise ValueError(
-                    f"Pack {pack_idx}: total tokens {total_tokens} < pack_max_length "
-                    f"{self.pack_max_length}."
+                    f"Pack {pack_idx}: total tokens {total_tokens} < pack_max_length {self.pack_max_length}."
                 )
             elif self.short_pack_strategy == "skip":
                 logger.warning(
@@ -265,8 +253,7 @@ class CustomPackDataset(tud.Dataset):
         elif total_tokens > self.pack_max_length:
             if self.long_pack_strategy == "error":
                 raise ValueError(
-                    f"Pack {pack_idx}: total tokens {total_tokens} > pack_max_length "
-                    f"{self.pack_max_length}."
+                    f"Pack {pack_idx}: total tokens {total_tokens} > pack_max_length {self.pack_max_length}."
                 )
             elif self.long_pack_strategy == "skip":
                 logger.warning(
@@ -300,7 +287,7 @@ class CustomPackDataset(tud.Dataset):
         items: list[DataItem] = []
 
         for ds_id, s_idx, t_start, t_end in pack:
-            raw_item: DataItem = self.datasets[ds_id][s_idx]
+            raw_item: DataItem = cast(DataItem, self.datasets[ds_id][s_idx])
             sliced: DataItem = {
                 "input_ids": raw_item["input_ids"][t_start:t_end],
                 "labels": raw_item["labels"][t_start:t_end],
