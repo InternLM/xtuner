@@ -12,18 +12,15 @@ from xtuner.v1.data_proto import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.ray.base import AcceleratorResourcesConfig
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
-from xtuner.v1.ray.utils import create_task
-from xtuner.v1.rl.base.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.base import WorkerConfig
-from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
-from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
-from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
-from xtuner.v1.rl.base.sampler import SamplerConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
+from xtuner.v1.rl.utils import create_task
+from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.grpo import GRPOLossConfig
+from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
 from recipe.verl_agent.common.agent_loop_verl_tool import VerlToolAgentLoopConfig
 # env
