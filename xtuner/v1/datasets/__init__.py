@@ -1,4 +1,6 @@
 from .build import build_dataloader, build_datasets
+from .custom_pack import CustomPackDataset
+from .custom_sampler import CustomSampler
 from .collator import fake_collator, intern_s1_vl_sft_collator, qwen3_vl_sft_collator, sft_llm_collator
 from .config import (
     BaseTokenizeFnConfig,
@@ -30,6 +32,8 @@ from . import _hardcode_patch  # isort: skip
 
 
 __all__ = [
+    "CustomPackDataset",
+    "CustomSampler",
     "JsonlDataset",
     "CachableTokenizeFunction",
     "CacheObj",

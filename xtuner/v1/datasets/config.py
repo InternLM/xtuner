@@ -27,6 +27,8 @@ from .collator import (
 )
 from .dataloader import BaseDataloader, Dataloader
 from .jsonl import JsonlDataset
+from .custom_pack import CustomPackDataset
+from .custom_sampler import CustomSampler, _load_sampler_config
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
@@ -277,7 +279,8 @@ class DataloaderConfig(BaseDataloaderConfig):
     ] = "sft_llm_collator"
     pack_to_max_length: Annotated[bool, Parameter(help="whether to pack to max length")] = True
     pack_level: Annotated[
-        Literal["soft", "none", "__legacy", "hard", "mllm_hybrid"], Parameter(help="__legacy is only for debug")
+        Literal["soft", "none", "__legacy", "hard", "mllm_hybrid", "custom"],
+        Parameter(help="__legacy is only for debug; custom requires pack config files"),
     ] = "soft"
     pack_max_length: Annotated[int, Parameter(help="pack max length")] = 32768
     pack_chunk_size: Annotated[int, Parameter(help="pack chunk size")] = 10000
@@ -290,6 +293,13 @@ class DataloaderConfig(BaseDataloaderConfig):
     num_workers: Annotated[int, Parameter(help="dataloader num workers")] = 0
     pad_token_id: Annotated[int | None, Parameter(help="padding token id")] = None
     tokenizer_hash: Annotated[str | None, Parameter(help="tokenizer hash")] = None
+    custom_pack_config_path: Annotated[
+        str | None, Parameter(help="path to custom pack config (JSONL or NPY-CSR); required when pack_level='custom'")
+    ] = None
+    custom_sampler_config_path: Annotated[
+        str | None,
+        Parameter(help="path to custom sampler order file (JSONL or NPY); required when pack_level='custom'"),
+    ] = None
 
     def build_collator(self):
         if self.collator == "sft_llm_collator":
@@ -310,7 +320,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     @classmethod
     def _infer_group_by_length(cls, data) -> None:
         if "pack_level" in data and "group_by_length" not in data:
-            if data["pack_level"] == "none":
+            if data["pack_level"] in ("none", "custom"):
                 data["group_by_length"] = False
             else:
                 data["group_by_length"] = True
@@ -318,6 +328,8 @@ class DataloaderConfig(BaseDataloaderConfig):
         if "group_by_length" in data and "pack_level" in data:
             if data["pack_level"] == "none" and data["group_by_length"] is True:
                 raise ValueError("group_by_length must be False when pack_level is none.")
+            if data["pack_level"] == "custom" and data["group_by_length"] is True:
+                raise ValueError("group_by_length must be False when pack_level is custom.")
         return data
 
     def build(
@@ -349,6 +361,7 @@ class DataloaderConfig(BaseDataloaderConfig):
                 | ConcatDataset
                 | HardPackDataset
                 | MLLMPretrainHybridPackDataset
+                | CustomPackDataset
             )
             if self.pack_level == "soft":
                 logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
@@ -390,6 +403,18 @@ class DataloaderConfig(BaseDataloaderConfig):
                     global_pack=self.global_pack,
                     seed=seed,
                 )
+            elif self.pack_level == "custom":
+                if self.custom_pack_config_path is None or self.custom_sampler_config_path is None:
+                    raise ValueError(
+                        "pack_level='custom' requires both 'custom_pack_config_path' and "
+                        "'custom_sampler_config_path' to be set."
+                    )
+                logger.info("[Dataset] Start loading CustomPackDataset.")
+                dataset = CustomPackDataset(
+                    datasets,
+                    pack_config_path=self.custom_pack_config_path,
+                    pack_max_length=self.pack_max_length,
+                )
             else:
                 raise NotImplementedError(f"Unsupported pack level: {self.pack_level}")
 
@@ -399,8 +424,18 @@ class DataloaderConfig(BaseDataloaderConfig):
             logger.info(f"[Dataset] (Original) {ori_samples} samples.")
             logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
-        sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler
-        if self.group_by_length:
+        sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler | CustomSampler
+        if self.pack_level == "custom":
+            assert isinstance(dataset, CustomPackDataset)
+            global_order = _load_sampler_config(self.custom_sampler_config_path)
+            sampler = CustomSampler(
+                dataset=dataset,
+                global_order=global_order,
+                global_batch_size=global_batch_size,
+                dp_mesh=dp_mesh,
+                seed=seed,
+            )
+        elif self.group_by_length:
             assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
             assert isinstance(dataset, (ExpandSoftPackDataset, _LegacySoftPackDataset, HardPackDataset)), (
                 "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset or _LegacySoftPackDataset, "
