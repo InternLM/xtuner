@@ -1,7 +1,6 @@
 # Rule Summary: xtuner/v1/datasets Pretrain Dataloader Pipeline
 
-> Status: Awaiting specific development requirements from user.
-> This file documents the existing pipeline rules to guide the new implementation.
+> Status: Updated 2026-03-10 — added Rule 2b (LongTextPretrainTokenizeFunction), updated Rules 3 & 4 for chunked tokenization.
 
 ---
 
@@ -11,6 +10,7 @@
 |------|------|
 | Pipeline orchestration | `xtuner/v1/datasets/config.py` — `DataloaderConfig.build()` |
 | Tokenize fn (pretrain) | `xtuner/v1/datasets/pt_tokenize_fn/text.py` — `PretrainTokenizeFunction` |
+| Tokenize fn (long text) | `xtuner/v1/datasets/pt_tokenize_fn/long_text.py` — `LongTextPretrainTokenizeFunction` |
 | Single-file dataset | `xtuner/v1/datasets/jsonl.py` — `JsonlDataset` |
 | Packing | `xtuner/v1/datasets/packing.py` — `HardPackDataset`, `ExpandSoftPackDataset` |
 | Sampler | `xtuner/v1/datasets/sampler.py` — `LengthGroupedSampler`, `ParallelSampler` |
@@ -49,6 +49,53 @@ Every layer must produce / consume `DataItem`:
 
 ---
 
+## Rule 2b — LongTextPretrainTokenizeFunction (chunked tokenization)
+
+**Purpose:** Avoid 5-minute tokenizer blocks on 1M-token documents by splitting at the character level with overlapping windows and LCS-based boundary merging.
+
+**Parameters:**
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `chunk_size` | 4096 | Target tokens per output chunk |
+| `tokenizer_chunk_chars` | 4096 | Characters fed to the tokenizer per call |
+| `overlap_chars` | 512 | Overlap window for boundary accuracy |
+| `min_chunk_tokens` | 0 | Drop trailing chunk if below this size |
+
+**Two-phase behavior:**
+
+| Phase (`state`) | `__call__` output |
+|-----------------|-------------------|
+| `"cache"` | `{"num_tokens": int, "chunks": [{"char_start", "char_end", "num_tokens"}]}` — always returned, even for short texts (1 chunk) |
+| `"runtime"` | `{"input_ids", "labels", "num_tokens"}` — tokenizes only `text[char_start:char_end]` |
+
+**`shard_char_boundaries(text)` algorithm:**
+1. Tokenize `text[start : start + tokenizer_chunk_chars]` (fast tokenizer: with `return_offsets_mapping`; slow tokenizer: approximate char offsets + warning).
+2. For non-first chunks: compute overlap token count, reverse-LCS match against previous chunk tail → roll back buffer by `match.a`, skip `overlap_len - match.b` tokens from current chunk head.
+3. Accumulate into `buffer_tokens` / `buffer_abs_chars`.
+4. Flush one chunk whenever `len(buffer) >= 2 * chunk_size`.
+5. Advance pointer by `tokenizer_chunk_chars - overlap_chars`.
+6. After document end: append EOS and flush remaining buffer.
+
+**BOS / EOS placement:**
+- BOS prepended only when `char_start == 0`.
+- EOS appended only when `char_end >= len(text)` (or `char_end is None`).
+
+**Hash** = `"{tokenizer_hash}_{source_hash}_{add_bos_token}_{add_eos_token}_{chunk_size}_{tokenizer_chunk_chars}_{overlap_chars}_{min_chunk_tokens}"`
+- Any parameter change → new cache subdirectory.
+
+**Config:**
+```python
+LongTextPretrainTokenizeFunctionConfig(
+    chunk_size=4096,
+    tokenizer_chunk_chars=4096,
+    overlap_chars=512,
+)
+```
+Drop-in replacement for `PretrainTokenizeFunctionConfig` — no other pipeline changes required.
+
+---
+
 ## Rule 3 — JsonlDataset: Shared Memory + Offset Table
 
 - Entire file is loaded into **shared memory** once at init; freed afterwards.
@@ -56,6 +103,26 @@ Every layer must produce / consume `DataItem`:
 - `num_tokens: np.ndarray` — token count per raw line; computed by tokenizing (cached or live).
 - `sampled: list[int]` — final list of indices after filtering (0-token removed, max_length filter) and `sample_ratio` repetition.
 - `__len__` = `len(sampled)`, `__getitem__(i)` → seek to `offsets[sampled[i]]`, read JSON, call `tokenize_fn`.
+
+**Chunked mode (activated when `chunks.npy` exists in the tokenize cache dir):**
+
+After `sample_ratio` is applied, `sampled` is expanded into per-chunk entries:
+
+| Array | Shape | Meaning |
+|-------|-------|---------|
+| `offsets` | `(total_chunks,)` | Byte offset of the owning line for each chunk entry |
+| `num_tokens` | `(total_chunks,)` | Token count of each chunk |
+| `sampled` | `list[range(total_chunks)]` | Identity mapping after expansion |
+| `_chunk_char_starts` | `(total_chunks,)` | `char_start` for each chunk |
+| `_chunk_char_ends` | `(total_chunks,)` | `char_end` for each chunk; `-1` means end-of-line |
+
+`__getitem__(i)` calls `tokenize_fn(raw_data, char_start=cs, char_end=ce)` instead of `tokenize_fn(raw_data)`.
+
+Short lines (1 chunk, `cs=0, ce=-1`) follow the same code path as long lines — no special casing needed.
+
+**`max_length` filter is skipped** when `chunks.npy` exists: filtering by total doc length would incorrectly discard valid long-text samples that have been split.
+
+**`__len__` semantics change:** returns chunk count (not line count) when in chunked mode. Downstream consumers (`HardPackDataset`, `LengthGroupedSampler`, etc.) treat each chunk as an independent `DataItem` — correct behavior since `num_tokens` per entry reflects the chunk size.
 
 ---
 
@@ -67,12 +134,25 @@ cache_dir/
   {file_xxhash}/
     offsets.npy                   # line byte offsets
     {tokenize_fn_hash}/
-      num_tokens.npy              # one int per raw sample
+      num_tokens.npy              # one int per raw line (always present)
+      chunks.npy                  # (total_chunks, 4): [line_idx, char_start, char_end, num_tokens]
+                                  # only present when tokenize_fn returns "chunks" key (LongText mode)
 ```
 
 **Cache key triple:** `(file xxhash, tokenizer hash, tokenize_fn source hash)`
 
 Cache is **tag-based**: `cache_tag` on `DatasetConfig` allows look-up by name instead of recomputing the file hash. Rank 0 writes; all ranks sync at barriers.
+
+**`chunks.npy` format:** shape `(total_chunks, 4)`, dtype `int64`.
+
+| Column | Field | Notes |
+|--------|-------|-------|
+| 0 | `line_idx` | 0-based index into the raw JSONL file |
+| 1 | `char_start` | Start character offset within the line's text |
+| 2 | `char_end` | End character offset; `-1` means end-of-line (short/single-chunk lines) |
+| 3 | `num_tokens` | Token count of this chunk (including BOS/EOS as applicable) |
+
+Short lines (< `chunk_size` tokens) also appear in `chunks.npy` with a single row (`char_start=0, char_end=-1`), making `JsonlDataset` expansion logic uniform.
 
 ---
 

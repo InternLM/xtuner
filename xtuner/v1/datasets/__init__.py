@@ -1,6 +1,4 @@
 from .build import build_dataloader, build_datasets
-from .custom_pack import CustomPackDataset
-from .custom_sampler import CustomSampler
 from .collator import fake_collator, intern_s1_vl_sft_collator, qwen3_vl_sft_collator, sft_llm_collator
 from .config import (
     BaseTokenizeFnConfig,
@@ -10,6 +8,8 @@ from .config import (
     DatasetConfigList,
     DatasetConfigListAdatper,
 )
+from .custom_pack import CustomPackDataset
+from .custom_sampler import CustomSampler
 from .ftdp import FTDPTokenizeFnConfig, FtdpTokenizeFunction
 from .jsonl import JsonlDataset
 from .mllm_tokenize_fn import (
@@ -19,7 +19,12 @@ from .mllm_tokenize_fn import (
     Qwen3VLTokenizeFunction,
 )
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
-from .pt_tokenize_fn import PretrainTokenizeFunction, PretrainTokenizeFunctionConfig
+from .pt_tokenize_fn import (
+    LongTextPretrainTokenizeFunction,
+    LongTextPretrainTokenizeFunctionConfig,
+    PretrainTokenizeFunction,
+    PretrainTokenizeFunctionConfig,
+)
 from .resume import get_dataloader_state, load_dataloader_state
 from .rl_tokenize_fn import RLTokenizeFnConfig
 from .sampler import LengthGroupedSampler, ParallelSampler
@@ -44,6 +49,8 @@ __all__ = [
     "ExpandSoftPackDataset",
     "HardPackDataset",
     "MLLMPretrainHybridPackDataset",
+    "LongTextPretrainTokenizeFunction",
+    "LongTextPretrainTokenizeFunctionConfig",
     "PretrainTokenizeFunctionConfig",
     "PretrainTokenizeFunction",
     "ParallelSampler",
