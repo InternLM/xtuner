@@ -1,12 +1,11 @@
-from .dapo_math import DapoMathNativeJudgerConfig, DapoMathRouterJudgerConfig
-from .geo3k import GEO3KNativeJudgerConfig, GEO3KRouterJudgerConfig
-from .gsm8k import GSM8KNativeJudgerConfig, GSM8KRouterJudgerConfig
+from .dapo_math import DapoMathJudgerConfig
+from .geo3k import GEO3KJudgerConfig
+from .gsm8k import GSM8KJudgerConfig
 from .native import (
     Judger,
+    JudgerConfig,
     NativeJudger,
-    NativeJudgerConfig,
     RayJudger,
     RayJudgerProxy,
     RouterJudger,
-    RouterJudgerConfig,
 )
