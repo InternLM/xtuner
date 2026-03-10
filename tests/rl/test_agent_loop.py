@@ -10,7 +10,7 @@ from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorker
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig, AgentLoopManagerConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
+from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
@@ -76,7 +76,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             context_length=self.context_length,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
+        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)
@@ -115,7 +115,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             context_length=self.context_length,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
+        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)

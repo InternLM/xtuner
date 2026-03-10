@@ -9,7 +9,7 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from xtuner.v1.rl.judger.native import NativeJudgerConfig
+from xtuner.v1.rl.judger.native import JudgerConfig
 
 
 app = FastAPI()
@@ -90,7 +90,7 @@ class JudgerServer:
             print("Server stopped.")
 
 
-class GSM8KRemoteJudgerConfig(NativeJudgerConfig):
+class GSM8KRemoteJudgerConfig(JudgerConfig):
     judger_name: str
     reward_handler: str
     extra_info: dict = {"score": 1, "format_score": 0}
