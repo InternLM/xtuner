@@ -83,7 +83,3 @@ class GSM8KJudgerConfig(JudgerConfig):
     judger_name: str = "openai/gsm8k"
     extra_info: dict = {"score": 1, "format_score": 0}
     reward_handler: Callable | str = compute_reward
-
-    num_ray_actors: int = 1
-    num_cpus_per_actor: int = 1
-    cpu_memory_per_actor: int = 1024**3

@@ -151,7 +151,7 @@ class JudgerConfig(BaseModel):
     def _validate_ray_actor_config(self) -> "JudgerConfig":
         if self.judger_type == "ray.actor" and self.num_ray_actors > 1:
             logger.warning(
-                "num_ray_actors will be set to 1 when judger_type is 'ray.actor'. num_ray_actors will be set to 1"
+                "num_ray_actors will be set to 1 when judger_type is 'ray.actor'."
             )
             self.num_ray_actors = 1
         if self.judger_type == "native":

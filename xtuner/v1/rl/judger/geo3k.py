@@ -41,7 +41,3 @@ class GEO3KJudgerConfig(JudgerConfig):
     judger_name: str = "hiyouga/geometry3k"
     extra_info: dict = {"format_score": 0.1, "use_boxed": True}
     reward_handler: Callable | str = compute_reward
-
-    num_ray_actors: int = 1
-    num_cpus_per_actor: int = 1
-    cpu_memory_per_actor: int = 1024**3
