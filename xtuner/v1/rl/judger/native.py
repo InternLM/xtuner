@@ -5,12 +5,16 @@ from typing import Callable, List, Literal, TypeAlias, cast
 
 import httpx
 import ray
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.utils.logger import get_logger
 from xtuner.v1.utils.type_helper import ray_method
+
+
+logger = get_logger()
 
 
 class Judger(ABC):
@@ -133,11 +137,29 @@ class JudgerConfig(BaseModel):
     reward_handler: Callable | str = Field(default=None, exclude=True)
     request_timeout: float = 30.0
     extra_info: dict = Field(default={}, exclude=True)
-    num_ray_actors: int = 1  # The number of Ray actor instances to create when judger_type is "router". Must be 1 when judger_type is "ray.actor".
-    num_cpus_per_actor: int = 1  # The number of CPU cores to allocate for each Ray actor instance. Only applicable when judger_type is "ray.actor" or "router".
-    cpu_memory_per_actor: int = (
-        1024**3
-    )  # The amount of CPU memory (in bytes) to allocate for each Ray actor instance. Only applicable when judger_type is "ray.actor" or "router".
+    num_ray_actors: int = Field(
+        default=1, description="Number of Ray actor instances. Must be 1 when judger_type is 'ray.actor'."
+    )
+    num_cpus_per_actor: int = Field(
+        default=1, description="CPU cores per Ray actor. Only for 'ray.actor' or 'router'."
+    )
+    cpu_memory_per_actor: int = Field(
+        default=1024**3, description="CPU memory in bytes per Ray actor. Only for 'ray.actor' or 'router'."
+    )
+
+    @model_validator(mode="after")
+    def _validate_ray_actor_config(self) -> "JudgerConfig":
+        if self.judger_type == "ray.actor" and self.num_ray_actors > 1:
+            logger.warning(
+                "num_ray_actors will be set to 1 when judger_type is 'ray.actor'. num_ray_actors will be set to 1"
+            )
+            self.num_ray_actors = 1
+        if self.judger_type == "native":
+            if self.num_ray_actors > 1 or self.num_cpus_per_actor > 1 or self.cpu_memory_per_actor != 1024**3:
+                logger.warning(
+                    "num_ray_actors, num_cpus_per_actor and cpu_memory_per_actor settings will be ignored when judger_type is 'native'."
+                )
+        return self
 
     def _build_worker(self, pg: PlacementGroup | None = None, bundle_idx: int = 0) -> RayJudgerProxy:
         pg_options = {"num_cpus": self.num_cpus_per_actor, "memory": self.cpu_memory_per_actor}
@@ -221,8 +243,6 @@ class JudgerConfig(BaseModel):
             )
 
         if self.judger_type == "ray.actor":
-            if self.num_ray_actors > 1:
-                raise ValueError("num_ray_actors must be 1 when judger_type is 'ray.actor'.")
             return self._build_worker(pg=pg, bundle_idx=start_bundle_idx)
 
         workers_list = self._build_workers(pg=pg, start_bundle_idx=start_bundle_idx)

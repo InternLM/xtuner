@@ -1,7 +1,7 @@
 import re
 from typing import Any, Callable, List, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 
 from .native import JudgerConfig
 
@@ -291,8 +291,7 @@ def compute_reward(response, label, extra_info):
     return {"score": reward, "acc": out["acc"]}
 
 
-class _DapoMathJudgerDefaults(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+class DapoMathJudgerConfig(JudgerConfig):
     eos_token: List[str] | str
     enable_overlong_buffer: bool
     score: int = 1
@@ -305,7 +304,7 @@ class _DapoMathJudgerDefaults(BaseModel):
     extra_info: dict = Field(default_factory=dict, exclude=True)
 
     @model_validator(mode="after")
-    def _pack_extra_info(self) -> "_DapoMathJudgerDefaults":
+    def _pack_extra_info(self) -> "DapoMathJudgerConfig":
         if isinstance(self.eos_token, str):
             assert self.eos_token.strip() != "", "eos_token string must not be empty"
         elif isinstance(self.eos_token, list):
@@ -340,11 +339,3 @@ class _DapoMathJudgerDefaults(BaseModel):
             )
 
         return self
-
-
-class DapoMathJudgerConfig(_DapoMathJudgerDefaults, JudgerConfig):
-    """Configuration for the DapoMath judger."""
-
-    num_ray_actors: int = 1
-    num_cpus_per_actor: int = 1
-    cpu_memory_per_actor: int = 1024**3
