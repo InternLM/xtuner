@@ -150,9 +150,7 @@ class JudgerConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_ray_actor_config(self) -> "JudgerConfig":
         if self.judger_type == "ray.actor" and self.num_ray_actors > 1:
-            logger.warning(
-                "num_ray_actors will be set to 1 when judger_type is 'ray.actor'."
-            )
+            logger.warning("num_ray_actors will be set to 1 when judger_type is 'ray.actor'.")
             self.num_ray_actors = 1
         if self.judger_type == "native":
             if self.num_ray_actors > 1 or self.num_cpus_per_actor > 1 or self.cpu_memory_per_actor != 1024**3:
