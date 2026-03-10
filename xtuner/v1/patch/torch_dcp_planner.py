@@ -1,9 +1,11 @@
 import inspect
 import warnings
+from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 import torch.distributed.checkpoint.default_planner as torch_default_runner
 from torch.distributed.checkpoint import state_dict_saver
 from torch.distributed.checkpoint.default_planner import DefaultSavePlanner
@@ -102,3 +104,29 @@ def patch_dcp_save_state_dict():
         original = getattr(state_dict_saver, "_save_state_dict")
         if callable(original):
             state_dict_saver._save_state_dict = _xtuner_save_state_dict
+
+
+def patch_dcp_save_with_cache_storage():
+    original_dcp_save = dcp.save
+
+    def dcp_save_with_cache_storage(state_dict, **kwargs):
+        checkpoint_id = kwargs.get("checkpoint_id", None)
+        assert checkpoint_id is not None, "checkpoint_id is required for caching mechanism."
+        checkpoint_id = checkpoint_id if isinstance(checkpoint_id, Path) else Path(checkpoint_id)
+        planner = kwargs.get("planner", None)
+        storage_writer = kwargs.get("storage_writer", None)
+
+        if storage_writer is None and planner is None:
+            from xtuner.v1.patch.xtuner_cache_planner import XtunerCacheSavePlanner
+            from xtuner.v1.patch.xtuner_storage import XtunerCacheWriter
+
+            planner = XtunerCacheSavePlanner(enable_plan_caching=True, cache_key_prefix=checkpoint_id.stem)
+            storage_writer = XtunerCacheWriter(
+                checkpoint_id, enable_write_result_caching=True, cache_key_prefix=checkpoint_id.stem
+            )
+            kwargs["planner"] = planner
+            kwargs["storage_writer"] = storage_writer
+
+        return original_dcp_save(state_dict, **kwargs)
+
+    dcp.save = dcp_save_with_cache_storage

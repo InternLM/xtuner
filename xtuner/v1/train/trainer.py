@@ -35,7 +35,7 @@ from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig, CELossContext
 from xtuner.v1.model.base import ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.moe.moe import MoEConfig
-from xtuner.v1.patch import patch_dcp_save_state_dict, patch_default_save_plan
+from xtuner.v1.patch import patch_dcp_save_state_dict, patch_dcp_save_with_cache_storage, patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.profiler.prober_utils import setup_prober_list
@@ -500,6 +500,7 @@ class Trainer:
         if patch_for_dcp_finish:
             if torch.__version__.startswith("2.7."):
                 patch_dcp_save_state_dict()
+                patch_dcp_save_with_cache_storage()
 
         if isinstance(profile_step, int):
             profile_step = [profile_step]
