@@ -1,0 +1,353 @@
+import os
+from argparse import Namespace
+from itertools import chain
+from typing import List
+
+import ray
+import requests
+import torch
+from ray.util.placement_group import placement_group_table
+
+from transformers import AutoTokenizer
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
+
+from .worker import RolloutConfig, RolloutWorker
+
+
+SHARED_STORE = "shared_store"
+SHARED_STORE_NAMESPACE = "lmdeploy"
+
+
+def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
+    """Wrapper function to run the LMDeploy API server.
+
+    This function unpacks the configuration and starts the server. It also
+    handles environment variable setup for the PyTorch backend.
+
+    Args:
+        lmdeploy_config_namespace (Namespace): A namespace object containing
+            the configuration for the LMDeploy server.
+    """
+    # unload_module("torch")
+    from lmdeploy.serve.openai.api_server import serve
+
+    lmdeploy_serve_kwargs = vars(lmdeploy_config_namespace)
+    env = lmdeploy_serve_kwargs.get("env", {})
+    if lmdeploy_serve_kwargs.get("backend") == "pytorch":
+        for k, v in env.items():
+            os.environ[k] = str(v)
+    else:  # turbomind
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    serve(**lmdeploy_serve_kwargs)
+
+
+class LMDeployWorker(RolloutWorker):
+    """A Ray actor that runs a text generation server using LMDeploy."""
+
+    def __init__(
+        self,
+        config: RolloutConfig,
+        rank: int,
+        master_addr: str,
+        master_port: int,
+        world_size: int,
+        accelerator: str = "GPU",
+    ):
+        """Initialize the LMDeployWorker.
+
+        Args:
+            config (RolloutConfig): The configuration for the rollout worker.
+            rank (int): The rank of this worker in the distributed setup.
+            master_addr (str): The address of the master worker.
+            master_port (int): The port of the master worker.
+            world_size (int): The total number of workers.
+            accelerator (str): The type of accelerator to use (e.g., "GPU").
+                Defaults to "GPU".
+        """
+        super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
+        self.server_func = run_lmdeploy_server_wrapper
+        self.router_func_str = "lmdeploy.serve.proxy.proxy.proxy"
+        self.endpoints["health_generate"] = "health"
+        self.endpoints["generate"] = "generate"
+        self.endpoints["v1/chat/completions"] = "v1/chat/completions"
+        self.endpoints["output_ids"] = "output_ids"
+        self.endpoints["response"] = "text"
+        self.endpoints["sleep"] = "sleep"
+        self.endpoints["wake_up"] = "wakeup"
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.tokenizer_path, trust_remote_code=True)
+        self.api_keys = self.config.api_key
+        self.model_name = self.config.model_name
+        self.enable_return_routed_experts = self.config.enable_return_routed_experts
+        self.lmdeploy_actor = None
+
+    def offload(self):
+        """Offloads the model weights and KV cache."""
+        return self._sleep(level=2)
+
+    def onload_weights(self):
+        """Onloads the model weights by waking up the model."""
+        return self._wake_up(tags=["weights"])
+
+    def onload_kvcache(self):
+        """Onloads the KV cache by waking up the model."""
+        return self._wake_up(tags=["kv_cache"])
+
+    def _get_request_payload(self, rollout_state: RolloutState) -> dict:
+        tools = rollout_state.tools
+        tool_choice = rollout_state.tool_choice
+        sample_params = rollout_state.sample_params
+        message = rollout_state.message
+        input_tokens = rollout_state.tokens
+
+        if sample_params.return_token_ids:
+            payload = {
+                "model": self.model_name,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+            if input_tokens is not None:
+                payload["input_ids"] = input_tokens
+            else:
+                text_prompt = self.tokenizer.apply_chat_template(message, tokenize=False, add_generation_prompt=True)
+                prompt_token_ids = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+                payload["input_ids"] = prompt_token_ids
+            sample_params.return_routed_experts = True if self.enable_return_routed_experts else False
+            lmdeploy_sample_params = self._transform_sample_params(sample_params)
+            payload.update(sample_params)
+        else:
+            payload = {
+                "model": self.model_name,
+                "messages": rollout_state.message,
+                "tools": tools,
+                "tool_choice": tool_choice,
+            }
+            lmdeploy_sample_params = self._transform_sample_params(sample_params)
+            lmdeploy_sample_params.pop("no_stop_trim", None)
+            lmdeploy_sample_params.pop("return_logprob", None)
+            lmdeploy_sample_params.pop("stop_token_ids", None)
+            lmdeploy_sample_params["min_new_tokens"] = sample_params.min_tokens
+            payload.update(lmdeploy_sample_params)
+        return payload
+
+    def _sleep(self, level: int = 1):
+        """Put the model into a sleep state to save resources.
+
+        Args:
+            level (int): The sleep level. Defaults to 1.
+
+        Returns:
+            str: The response text from the server.
+        """
+        url = f"{self.server_url}/{self.endpoints['sleep']}"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
+        data = {"level": level}
+        response = requests.post(url, headers=headers, params=data)
+        assert response.status_code == 200, response.status_code
+        return response.text
+
+    def _wake_up(self, tags: List[str] | None = None):
+        """Wakes up the model from a sleep state.
+
+        Args:
+            tags (List[str] | None, optional): A list of tags to specify what
+                to wake up. Defaults to None.
+
+        Returns:
+            str: The response text from the server.
+        """
+        url = f"{self.server_url}/{self.endpoints['wake_up']}"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_keys}"}
+        data = {"tags": tags}
+        response = requests.post(url, headers=headers, params=data)
+        assert response.status_code == 200, response.status_code
+        return response.text
+
+    def _transform_rollout_config_to_server_configs(self) -> Namespace:
+        """Transform the RolloutConfig into a Namespace suitable for the
+        LMDeploy server.
+
+        This method configures the backend engine (PyTorch or Turbomind),
+        sets up distributed training parameters, and prepares environment
+        variables for Ray integration.
+
+        Returns:
+            Namespace: A namespace object containing the server configuration.
+        """
+        from lmdeploy import PytorchEngineConfig, TurbomindEngineConfig
+        from lmdeploy.messages import SpeculativeConfig
+
+        accelerator_to_device_type = {
+            "GPU": "cuda",
+            "NPU": "ascend",
+        }
+
+        extra_config = self.config.extra_rollout_config or dict()
+        lmdeploy_config_kwargs = {
+            k.replace("lmdeploy_", ""): v for k, v in extra_config.items() if k.startswith("lmdeploy_")
+        }
+
+        backend = lmdeploy_config_kwargs.get("backend", "pytorch")
+        tp_size = self.config.tensor_parallel_size
+        dp_size = ep_size = self.config.expert_parallel_size
+        # RolloutController plays the role of proxy server in LMDeploy, which balances dp requests.
+        # Therefore, each server only needs to handle 1 / dp_size of the total requests
+        max_batch_size = self.config.rollout_max_batch_size_per_instance // dp_size
+        distributed_executor_backend = lmdeploy_config_kwargs.get("distributed_executor_backend", "ray")
+        lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "ERROR")
+        lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
+        lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
+
+        speculative_config = None
+        speculative_algorithm = lmdeploy_config_kwargs.pop("speculative_algorithm", None)
+        speculative_num_draft_tokens = lmdeploy_config_kwargs.pop("speculative_num_draft_tokens", None)
+        if speculative_algorithm is not None:
+            assert speculative_num_draft_tokens is not None, (
+                "lmdeploy_speculative_num_draft_tokens is required when speculative_algorithm is set"
+            )
+            speculative_config = SpeculativeConfig(
+                method=speculative_algorithm,
+                num_speculative_tokens=speculative_num_draft_tokens,
+            )
+
+        extra_engine_config: Dict[str, Any] = {}
+        if backend == "pytorch" and self.config.enable_return_routed_experts:
+            extra_engine_config["enable_return_routed_experts"] = True
+        if backend == "pytorch" and self.config.router_n_groups:
+            hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
+            hf_overrides.update(router_n_groups=self.config.router_n_groups)
+        if backend == "pytorch" and self.config.fp32_lm_head:
+            hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
+            hf_overrides.update(fp32_lm_head=self.config.fp32_lm_head)
+        if backend == "pytorch" and self.config.max_prefill_token_num:
+            extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
+
+        dp_rank = 0
+        if backend == "pytorch":
+            # currently only support ep > 1 and tp == 1 / ep == 1 and tp > 1
+            assert ep_size == 1 or tp_size == 1
+            if ep_size > 1:
+                dp_rank_found = False
+                # In the case of pure expert parallelism, each worker from all ranks serve url.
+                # `engine_rank_mesh_array` would miss the ep_size information in inner list,
+                # Therefore, we need to regroup them into `engine_rank_mesh_array_for_ep`.
+                # For example, ep_size = 2, work_size = 8:
+                # engine_rank_mesh_array = [[0],[1],[2],[3],[4],[5],[6],[7]] ->
+                # engine_rank_mesh_array_for_ep = [[0,1],[2,3],[4,5],[6,7]]
+                engine_rank_mesh_array_for_ep = [
+                    list(chain.from_iterable(self.engine_rank_mesh_array[i : i + ep_size]))
+                    for i in range(0, len(self.engine_rank_mesh_array), ep_size)
+                ]
+                # dp_rank is the index of self.rank in the inner list of rank mesh array.
+                # For example, ep_size = 2, work_size = 8:
+                # engine_rank_mesh_array_for_ep = [[0,1],[2,3],[4,5],[6,7]]
+                # rank 3 is in [2, 3], dp_rank = [2, 3].index(3) = 1
+                for engine_rank_mesh in engine_rank_mesh_array_for_ep:
+                    if self.rank in engine_rank_mesh:
+                        dp_rank = engine_rank_mesh.index(self.rank)
+                        dp_rank_found = True
+                        break
+                assert dp_rank_found, (
+                    f"self.rank: {self.rank} should be found in "
+                    f"engine_rank_mesh_array_for_ep: {engine_rank_mesh_array_for_ep}"
+                )
+
+        backend_config = (
+            PytorchEngineConfig(
+                tp=tp_size,
+                ep=ep_size,
+                dp=dp_size,
+                dp_rank=dp_rank,
+                max_batch_size=max_batch_size,
+                empty_init=self.config.skip_load_weights,
+                distributed_executor_backend=distributed_executor_backend,
+                mp_engine_backend="ray",  # force ray to pass placement group
+                device_type=accelerator_to_device_type[self.accelerator],
+                logprobs_mode="raw_logprobs",
+                session_len=self.config.context_length,
+                model_format="fp8" if self.config.enable_float8 else None,
+                cache_max_entry_count=self.config.gpu_memory_utilization,
+                **extra_engine_config,
+            )
+            if backend == "pytorch"
+            else TurbomindEngineConfig(
+                tp=tp_size,
+                max_batch_size=self.config.rollout_max_batch_size_per_instance,
+                devices=[bundle_idxs % self.config.gpus_per_node for bundle_idxs in self.engine_bundle_idxs],
+                empty_init=self.config.skip_load_weights,
+                session_len=self.config.context_length,
+                model_format="fp8" if self.config.enable_float8 else None,
+                cache_max_entry_count=self.config.gpu_memory_utilization,
+            )
+        )
+        if backend == "pytorch" and self.accelerator == "NPU":
+            backend_config.eager_mode = True
+
+        env = dict()
+        if backend == "pytorch":
+            ray_runtime_ctx = ray.get_runtime_context()
+            current_pg = ray.util.get_current_placement_group()
+            current_pg_name = placement_group_table(current_pg).get("name")
+            env = {
+                "LMDEPLOY_RAY_EXTERNAL_NS": ray_runtime_ctx.namespace,
+                "LMDEPLOY_RAY_EXTERNAL_PG_NAME": current_pg_name,
+                "LMDEPLOY_RAY_EXTERNAL_PG_BUNDLES": ",".join(map(str, self.engine_bundle_idxs)),
+            }
+
+            if self.accelerator == "NPU":
+                env.update(
+                    {
+                        "ASCEND_SET_RT_VISIBLE_DEVICES_BY_RAY": "1",
+                        "HCCL_NPU_SOCKET_PORT_RANGE": "auto",
+                        "DLINFER_RESET_MOE_UPDATE_WEIGHTS": "1",
+                    }
+                )
+
+            if tp_size > 1:
+                dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
+                env.update(
+                    {
+                        "LMDEPLOY_DIST_MASTER_ADDR": dist_addr,
+                        "LMDEPLOY_DIST_MASTER_PORT": dist_port,
+                    }
+                )
+            elif ep_size > 1:
+                dist_addr, dist_port = self.dist_init_addr.split(":")[:2]
+                env.update(
+                    {
+                        "LMDEPLOY_DP_MASTER_ADDR": dist_addr,
+                        "LMDEPLOY_DP_MASTER_PORT": dist_port,
+                        # DEEPEP_MAX_TOKENS_PER_RANK is required by DLBlas's DeepEP
+                        # token dispatcher used in lmdeploy EP mode. Without it,
+                        # lmdeploy will fail during warmup.
+                        # Ref: https://github.com/DeepLink-org/DLBlas/blob/aae23445/dlblas/layers/moe/token_dispatcher.py#L81
+                        # Ref: https://github.com/InternLM/lmdeploy/blob/81627e3d/lmdeploy/utils.py#L375
+                        "DEEPEP_MAX_TOKENS_PER_RANK": str(max_batch_size),
+                    }
+                )
+            if "uvicorn_log_level" in lmdeploy_config_kwargs:
+                env.update({"UVICORN_LOG_LEVEL": lmdeploy_config_kwargs["uvicorn_log_level"]})
+        else:
+            env.update({"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
+            if "tm_log_level" in lmdeploy_config_kwargs:
+                env.update({"TM_LOG_LEVEL": lmdeploy_config_kwargs["tm_log_level"]})
+
+        if "backend" in lmdeploy_config_kwargs:
+            lmdeploy_config_kwargs.pop("backend")
+
+        return Namespace(
+            model_path=self.config.model_path,
+            model_name=self.model_name,
+            backend=backend,
+            backend_config=backend_config,
+            server_name=self.host,
+            server_port=self.server_port,
+            api_key=self.api_keys,
+            api_keys=self.api_keys,
+            ray_runtime_env={"env_vars": env},
+            enable_abort_handling=True,
+            speculative_config=speculative_config,
+            **lmdeploy_config_kwargs,
+        )
+
+    def _transform_sample_params(self, sample_params: SampleParams) -> dict:
+        return sample_params.model_dump(exclude_none=True)

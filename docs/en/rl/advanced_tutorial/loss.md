@@ -9,8 +9,7 @@ All loss calculations in XTuner involve two core components: `LossConfig` and `L
 ```python
 import torch
 import torch.nn as nn
-from xtuner.v1.rl.grpo import GRPOLossConfig, GRPOLossContext
-from xtuner.v1.rl.base import RLLossContextInputItem
+from xtuner.v1.rl.loss import GRPOLossConfig, GRPOLossContext, RLLossContextInputItem
 from xtuner.v1.data_proto import SequenceContext
 
 def gather_logprobs(logits, shifted_labels):

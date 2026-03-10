@@ -6,8 +6,8 @@ from typing import cast
 from pydantic import BaseModel
 
 from xtuner.v1.data_proto import RolloutState, SampleParams
-from xtuner.v1.ray.rollout import RolloutController
-from xtuner.v1.rl.base.agent_loop import AgentLoop, AgentLoopConfig
+from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
+from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
 
 
@@ -17,7 +17,7 @@ logger = get_logger()
 class GSM8KToolAgentLoopConfig(AgentLoopConfig):
     max_turns: int
 
-    def build(self, rollout_controller, judger=None) -> "GSM8KToolAgentLoop":
+    def build(self, rollout_controller, judger=None, logger=None) -> "GSM8KToolAgentLoop":
         return GSM8KToolAgentLoop(
             max_turns=self.max_turns,
             rollout_ctl=rollout_controller,
@@ -50,7 +50,7 @@ class GSM8KToolAgentLoop(AgentLoop):
         self.tool_call_end_token: str = "</tool_call>"
 
     def calc_gsm8k_reward(self, answer: dict, ground_truth: str) -> float:
-        from xtuner.v1.ray.judger.gsm8k import compute_reward
+        from xtuner.v1.rl.judger.gsm8k import compute_reward
 
         extra_info = {"score": 1.0, "format_score": 0}
         actual_answer = answer.get("answer", "")

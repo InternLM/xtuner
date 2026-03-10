@@ -7,9 +7,9 @@ from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.workers.rollout.replica import TokenOutput
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.ray.judger import NativeJudger, RouterJudger
-from xtuner.v1.ray.rollout.controller import RolloutControllerProxy
-from xtuner.v1.rl.base.agent_loop import AgentLoop, AgentLoopConfig
+from xtuner.v1.rl.judger import NativeJudger, RouterJudger
+from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
+from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
 
 
 class VerlToolAgentLoopConfig(AgentLoopConfig):

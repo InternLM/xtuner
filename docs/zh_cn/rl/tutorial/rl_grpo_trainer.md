@@ -92,7 +92,7 @@ replay_buffer_cfg = ReplayBufferConfig(
 
 ```{code-block} python
 :caption: 配置推理环境
-from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 model_path = "/path/to/qwen3-8B"  # 替换为您的模型路径
 
@@ -144,8 +144,8 @@ judger_cfg = JudgerConfig(
 :caption: 配置训练策略
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
-from xtuner.v1.rl.base import WorkerConfig
-from xtuner.v1.rl.grpo import GRPOLossConfig
+from xtuner.v1.rl.rollout.worker import WorkerConfig
+from xtuner.v1.rl.loss import GRPOLossConfig
 
 model_path = "/path/to/qwen3-8B"        # 填入您的模型路径
 train_optimizer_steps = 4               # 训练优化步数
@@ -201,7 +201,7 @@ evaluator_cfg = EvaluatorConfig(
 除以上的生成和训练配置外，我们需要配置系统所需资源（如GPU、CPU、内存）等，此处我们使用默认的资源配置，示例如下。
 
 ```{code-block} python
-from xtuner.v1.ray.base import AcceleratorResourcesConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
     num_accelerators_per_worker=1,
