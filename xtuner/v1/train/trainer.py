@@ -35,7 +35,7 @@ from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig, CELossContext
 from xtuner.v1.model.base import ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.moe.moe import MoEConfig
-from xtuner.v1.patch import patch_default_save_plan
+from xtuner.v1.patch import patch_dcp_save_state_dict, patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
 from xtuner.v1.profiler.prober import ProberList
 from xtuner.v1.profiler.prober_utils import setup_prober_list
@@ -337,6 +337,7 @@ class TrainerConfig(BaseModel):
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
+    patch_for_dcp_finish: bool = False
     snapshot_interval: int | None = None
     check_health_interval: int | None = None
     hf_interval: int | None = None
@@ -409,6 +410,7 @@ class Trainer:
         strict_load (bool): Whether to strictly load model weights.
         checkpoint_interval (int | None): Interval for saving checkpoints.
         checkpoint_maxkeep (int | None): Maximum number of checkpoints to keep.
+        patch_for_dcp_finish (bool): If True, skip returning finish_checkpoint result.
         hf_interval (int | None): Interval for saving Huggingface format checkpoints.
         hf_max_keep (int | None): Maximum number of Huggingface checkpoints to keep.
         profile_step (list[int] | int | None): Step to perform profiling.
@@ -459,6 +461,7 @@ class Trainer:
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
+        patch_for_dcp_finish: bool = False,
         snapshot_interval: int | None = None,
         check_health_interval: int | None = None,
         hf_interval: int | None = None,
@@ -493,6 +496,10 @@ class Trainer:
         self._micro_batch_size: int | None = None
         if skip_checkpoint_validation:
             patch_default_save_plan()
+
+        if patch_for_dcp_finish:
+            if torch.__version__.startswith("2.7."):
+                patch_dcp_save_state_dict()
 
         if isinstance(profile_step, int):
             profile_step = [profile_step]
@@ -675,6 +682,7 @@ class Trainer:
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
+            patch_for_dcp_finish=config.patch_for_dcp_finish,
             snapshot_interval=config.snapshot_interval,
             check_health_interval=config.check_health_interval,
             hf_interval=config.hf_interval,
