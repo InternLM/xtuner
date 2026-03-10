@@ -1,7 +1,9 @@
 import os
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
+import torch
+from packaging import version
 from torch.distributed.checkpoint import FileSystemWriter, Metadata, SavePlan, SavePlanner
 from torch.distributed.checkpoint._extension import (
     StreamTransformExtension,
@@ -10,6 +12,10 @@ from torch.distributed.checkpoint.storage import (
     WriteResult,
 )
 from torch.futures import Future
+
+
+# PyTorch 2.7+ introduced _extensions parameter for FileSystemWriter
+_TORCH_DCP_FSWRITER_HAS_EXTENSIONS = version.parse(torch.__version__) >= version.parse("2.7.0")
 
 
 def _compare_write_results(write_results: list[WriteResult], other_write_results: list[WriteResult]) -> bool:
@@ -64,6 +70,10 @@ class XtunerCacheWriter(FileSystemWriter):
         enable_write_result_caching: bool = False,
         cache_key_prefix: str = "",
     ) -> None:
+        # Build kwargs conditionally to support both PyTorch 2.6 and 2.7+
+        kwargs: dict[str, Any] = dict()
+        if _TORCH_DCP_FSWRITER_HAS_EXTENSIONS:
+            kwargs["_extensions"] = _extensions
         super().__init__(
             path,
             single_file_per_rank=single_file_per_rank,
@@ -72,7 +82,7 @@ class XtunerCacheWriter(FileSystemWriter):
             per_thread_copy_ahead=per_thread_copy_ahead,
             cache_staged_state_dict=cache_staged_state_dict,
             overwrite=overwrite,
-            _extensions=_extensions,
+            **kwargs,
         )
         self._enable_write_result_caching = enable_write_result_caching
         self._cached_write_results_key = cache_key_prefix + self.__class__.__name__

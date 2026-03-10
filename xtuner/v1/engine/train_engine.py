@@ -23,8 +23,6 @@ from torch.utils._foreach_utils import (
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.engine.xtuner_cache_planner import XtunerCacheSavePlanner
-from xtuner.v1.engine.xtuner_storage import XtunerCacheWriter
 from xtuner.v1.model.base import (
     BaseModel,
     BatchForwardInfo,
@@ -311,37 +309,18 @@ class TrainEngine:
         _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params)
         with profile_time_and_memory(f"[DCP Checkpoint to {model_dir}]"):
             model_state = get_model_state_dict(self.model, options=_options)
-            if torch.__version__.startswith("2.7."):
-                # Only enable for torch 2.7.x: CacheSavePlanner not supported in 2.6.x, patch not needed for 2.8.x+
-                dcp.save(
-                    model_state,
-                    storage_writer=XtunerCacheWriter(
-                        model_dir, enable_write_result_caching=True, cache_key_prefix="model"
-                    ),
-                    planner=XtunerCacheSavePlanner(enable_plan_caching=True, cache_key_prefix="model"),
-                )
-            else:
-                dcp.save(
-                    model_state,
-                    checkpoint_id=model_dir,
-                )
+            dcp.save(
+                model_state,
+                checkpoint_id=model_dir,
+            )
 
         with profile_time_and_memory(f"[DCP Checkpoint to {optimizer_dir}]"):
             if optimizer_dir is not None:
                 shard_optimizer_state_dict = get_optimizer_state_dict(self.model, self.optimizer, options=_options)
-                if torch.__version__.startswith("2.7."):
-                    dcp.save(
-                        shard_optimizer_state_dict,
-                        storage_writer=XtunerCacheWriter(
-                            optimizer_dir, enable_write_result_caching=True, cache_key_prefix="optimizer"
-                        ),
-                        planner=XtunerCacheSavePlanner(enable_plan_caching=True, cache_key_prefix="optimizer"),
-                    )
-                else:
-                    dcp.save(
-                        shard_optimizer_state_dict,
-                        checkpoint_id=optimizer_dir,
-                    )
+                dcp.save(
+                    shard_optimizer_state_dict,
+                    checkpoint_id=optimizer_dir,
+                )
 
     def load_dcp(
         self,

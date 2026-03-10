@@ -1,7 +1,7 @@
 from typing import Optional
 
 from torch.distributed.checkpoint import DefaultSavePlanner, Metadata, SavePlan, SavePlanner
-from torch.distributed.checkpoint.planner_helpers import (
+from torch.distributed.checkpoint.planner_helpers import (  # type: ignore[attr-defined]
     _compare_save_plans,
     _merge_delta_local_plans,
 )
@@ -16,7 +16,7 @@ def _contains_usable_plan(delta_plans: list[SavePlan]) -> bool:
     Returns:
         True if any delta plan is usable, False otherwise.
     """
-    return any(delta_plan and delta_plan.usable for delta_plan in delta_plans)
+    return any(delta_plan and delta_plan.usable for delta_plan in delta_plans)  # type: ignore[attr-defined]
 
 
 class XtunerCacheSavePlanner(DefaultSavePlanner):
@@ -38,7 +38,7 @@ class XtunerCacheSavePlanner(DefaultSavePlanner):
             flatten_sharded_tensors,
             dedup_replicated_tensors,
             dedup_save_to_lowest_rank,
-            enable_plan_caching,
+            enable_plan_caching,  # type: ignore[call-arg]
         )
         self._cached_plans_key: str = cache_key_prefix + self.__class__.__name__
 
@@ -47,20 +47,20 @@ class XtunerCacheSavePlanner(DefaultSavePlanner):
     ) -> tuple[list[SavePlan], list[SavePlan], Metadata]:
         if hasattr(SavePlanner, "_cached_metadata"):
             # adaptor for torch >= 2.8.0
-            return super()._create_global_plan_with_caching(all_plans)
+            return super()._create_global_plan_with_caching(all_plans)  # type: ignore[misc]
 
         # ONLY cache ``_cached_metadata`` in XtunerCacheSavePlanner
         global_plan_delta: list[SavePlan] = []
 
-        if self._cached_plans_key not in SavePlanner._cached_all_plans:
+        if self._cached_plans_key not in SavePlanner._cached_all_plans:  # type: ignore[attr-defined]
             # Case 1: If the plans are not cached, the cache will be hydrated with the
             # all_plans, global_plans (Deduped), and metadata.
 
             # Cache the original all_plans
-            SavePlanner._cached_all_plans[self._cached_plans_key] = all_plans
-            global_plan, metadata = self._create_global_plan(all_plans)
+            SavePlanner._cached_all_plans[self._cached_plans_key] = all_plans  # type: ignore[attr-defined]
+            global_plan, metadata = self._create_global_plan(all_plans)  # type: ignore[attr-defined]
             # Cache the deduped and validated global_plan
-            SavePlanner._cached_global_plan[self._cached_plans_key] = global_plan
+            SavePlanner._cached_global_plan[self._cached_plans_key] = global_plan  # type: ignore[attr-defined]
             # Cache the metadata
             XtunerCacheSavePlanner._cached_metadata[self._cached_plans_key] = metadata
             # If plans are not cached, global_plan delta will be the same as global plan.
@@ -71,8 +71,8 @@ class XtunerCacheSavePlanner(DefaultSavePlanner):
             # Case 2.1: Plans are cached and the local plans have NOT changed (No usable plans).
             # Global plan delta will be empty plans to avoid the collective overhead.
             # We can reuse the deduped global plan and metadata from the cache directly.
-            global_plan_delta = [SavePlan([], usable=False)] * len(all_plans)
-            global_plan = SavePlanner._cached_global_plan[self._cached_plans_key]
+            global_plan_delta = [SavePlan([], usable=False)] * len(all_plans)  # type: ignore[call-arg]
+            global_plan = SavePlanner._cached_global_plan[self._cached_plans_key]  # type: ignore[attr-defined]
             metadata = XtunerCacheSavePlanner._cached_metadata[self._cached_plans_key]
         else:
             # Case 2.2: Plans are cached but the local plans have changed.
@@ -80,20 +80,20 @@ class XtunerCacheSavePlanner(DefaultSavePlanner):
             # Updated plans will overwrite the cached plans. New global plan and metadata will be created and cached.
             # Global plan delta will be created by comparing the new global plan with the cached global plan.
             # Only the global plan delta (updated ones) will be sent to the coordinator to avoid the collective overhead.
-            merged_plans = _merge_delta_local_plans(SavePlanner._cached_all_plans[self._cached_plans_key], all_plans)
+            merged_plans = _merge_delta_local_plans(SavePlanner._cached_all_plans[self._cached_plans_key], all_plans)  # type: ignore[attr-defined]
             # Cache the updated local plans
-            SavePlanner._cached_all_plans[self._cached_plans_key] = merged_plans
-            global_plan, metadata = self._create_global_plan(merged_plans)
+            SavePlanner._cached_all_plans[self._cached_plans_key] = merged_plans  # type: ignore[attr-defined]
+            global_plan, metadata = self._create_global_plan(merged_plans)  # type: ignore[attr-defined]
 
-            if self._cached_plans_key in self._cached_global_plan:
-                for cached_plan, new_plan in zip(SavePlanner._cached_global_plan[self._cached_plans_key], global_plan):
+            if self._cached_plans_key in self._cached_global_plan:  # type: ignore[attr-defined]
+                for cached_plan, new_plan in zip(SavePlanner._cached_global_plan[self._cached_plans_key], global_plan):  # type: ignore[attr-defined]
                     if _compare_save_plans(cached_plan, new_plan):
-                        global_plan_delta.append(SavePlan([], usable=False))
+                        global_plan_delta.append(SavePlan([], usable=False))  # type: ignore[call-arg]
                     else:
                         global_plan_delta.append(new_plan)
 
             # Cache the new global plan and the metadata
-            SavePlanner._cached_global_plan[self._cached_plans_key] = global_plan
+            SavePlanner._cached_global_plan[self._cached_plans_key] = global_plan  # type: ignore[attr-defined]
             XtunerCacheSavePlanner._cached_metadata[self._cached_plans_key] = metadata
 
         return global_plan_delta, global_plan, metadata

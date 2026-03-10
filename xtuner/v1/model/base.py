@@ -208,7 +208,7 @@ class TransformerConfig(XTunerBaseModelConfig):
 
 
 class ModelOutputs(PydanticBaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     hidden_states: list[torch.Tensor] | None = None
     logits: torch.Tensor | None = None
     loss: torch.Tensor | None = None  # TODO: `forward_only` mode for RL
