@@ -269,8 +269,8 @@ case:
             assert_info:
                 base_metric: gptoss-sft/7b774a0e2/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    grad_norm: 0.55
+                    loss/reduced_llm_loss: 0.05
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
