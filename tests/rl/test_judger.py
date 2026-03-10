@@ -116,7 +116,7 @@ class TestJudgerController(unittest.TestCase):
         eos_token_str = tokenizer.convert_ids_to_tokens(eos_token)
         # 定义 Judger Config
         config = DapoMathJudgerConfig(
-            judger_type="router", 
+            judger_type="router",
             judger_name="dapo_math",
             eos_token=eos_token_str,
             enable_overlong_buffer=True,
