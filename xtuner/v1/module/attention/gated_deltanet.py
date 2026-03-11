@@ -309,7 +309,7 @@ class GatedDeltaNet(nn.Module):
             dt_bias = dt_bias.to_local()
 
         g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
-        
+
         # (1,key_dim/sp_size, L)
         query = query.transpose(1, 2).reshape(
             batch_size, seq_len * sp_size, -1, self.head_k_dim
