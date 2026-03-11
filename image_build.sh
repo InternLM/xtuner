@@ -10,7 +10,7 @@ export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c
 export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@c9f8b34dcdacc20aa746b786f983492c51072870 # v2.1.1.post3
 export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a919967f14d3fd031da1288ad5025 # v1.6.0
 
-export TORCH_VERSION=${TORCH_VERSION:-"2.8.0"}
+export TORCH_VERSION=${TORCH_VERSION:-"2.9.0"}
 export LMDEPLOY_VERSION="0.11.0"
 # export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@a9a24fbd8985374cb01ecb6021d1ce9668253c9c
 export PPA_SOURCE="https://mirrors.aliyun.com"
