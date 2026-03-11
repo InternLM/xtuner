@@ -23,8 +23,10 @@ from .attn_outputs import AttnOutputs
 def _all_to_all_conv_pre_qk(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
+
 def _all_to_all_conv_pre_v(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
+
 
 def _all_to_all_gb(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
@@ -228,42 +230,31 @@ class GatedDeltaNet(nn.Module):
             ],
             dim=-1,
         )
-        query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)  # 1, L/sp_size, num_k_heads, head_k_dim
-        key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
-        value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
-
-        query = query.transpose(1, 2)  # (1, num_k_heads, L/sp_size, head_k_dim)
+        # (1, L, 8192/sp_size)
+        query = query.transpose(1, 2)  # (1, dim, L/sp_size)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
         query = _all_to_all_conv_pre_qk(
-            query,  # (1, num_k_heads, L/sp_size, head_k_dim)
+            query,
             scatter_dim=1,
             gather_dim=2,
             mesh=seq_ctx.sequence_parallel_mesh,
         )
         key = _all_to_all_conv_pre_qk(
-            key,  # (1, num_k_heads, L/sp_size, head_k_dim)
+            key,
             scatter_dim=1,
             gather_dim=2,
             mesh=seq_ctx.sequence_parallel_mesh,
         )
         value = _all_to_all_conv_pre_v(
-            value,  # (1, num_k_heads, L/sp_size, head_k_dim)
+            value,
             scatter_dim=1,
             gather_dim=2,
             mesh=seq_ctx.sequence_parallel_mesh,
         )
 
-        # query = (1, num_k_heads/sp_size, L, head_k_dim)
-        query = query.transpose(2, 3).flatten(1, 2)  # (1,key_dim/sp_size, L)
-        key = key.transpose(2, 3).flatten(1, 2)  # (1,key_dim/sp_size, L)
-        value = value.transpose(2, 3).flatten(1, 2)  # (1,key_dim/sp_size, L)
-
-        query = query.transpose(1, 2).contiguous().transpose(1, 2)  # (1, L, key_dim/sp_size)
-        key = key.transpose(1, 2).contiguous().transpose(1, 2)
-        value = value.transpose(1, 2).contiguous().transpose(1, 2)
-
+        # query =  (1, dim/sp_size, L)
         query_weight, key_weight, value_weight = torch.split(
             weight,  # (8192, 4)
             [
@@ -283,6 +274,9 @@ class GatedDeltaNet(nn.Module):
         if bias is not None:
             bias = bias.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
 
+        query = query.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
+        key = key.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
+        value = value.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
         query = self.causal_conv1d_fn(  # query (batch, dim, seqlen)
             x=query,  # need non contiguous
             weight=query_weight,
