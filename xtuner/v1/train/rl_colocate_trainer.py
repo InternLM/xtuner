@@ -24,7 +24,7 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer.controller import TrainingControllerProxy
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run
-from xtuner.v1.train.trainer import XTunerMeta
+from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import get_logger, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
@@ -149,6 +149,10 @@ class RLColocateTrainerConfig(BaseModel):
     evaluate_step: int = 1
     work_dir: Union[Path, str, None] = None
     auto_resume: bool = False
+    load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
+    checkpoint_interval: int | None = -1
+    checkpoint_maxkeep: int | None = -1
+    checkpoint_no_save_optimizer: bool = False
     log_dir: Union[Path, str, None] = None
     seed: int = 66
     debug_rollout: bool = False
@@ -171,6 +175,10 @@ class RLColocateTrainerConfig(BaseModel):
             evaluate_step=self.evaluate_step,
             work_dir=self.work_dir,
             auto_resume=self.auto_resume,
+            load_checkpoint_cfg=self.load_checkpoint_cfg,
+            checkpoint_interval=self.checkpoint_interval,
+            checkpoint_maxkeep=self.checkpoint_maxkeep,
+            checkpoint_no_save_optimizer=self.checkpoint_no_save_optimizer,
             load_from=self.load_from,
             log_dir=self.log_dir,
             seed=self.seed,
@@ -185,6 +193,8 @@ class RLColocateTrainerConfig(BaseModel):
 class RLColocateTrainer:
     _META_PATH = ".xtuner_rl_colocate_trainer"
     _EXP_TRACKING_PATH = "exp_tracking"
+    _CHECKPOINT_DIR = "checkpoints"
+    _SAVE_TRAIN_STATE_PATH = "train_state.json"
 
     # 弱化Trainer：Trainer中代码尽量少，尽量用componet来组织代码。
     # 目标是像torch一样，让用户自己写init 和 train loop，我们只提供组件。
@@ -213,6 +223,10 @@ class RLColocateTrainer:
         # work_dir and resume
         work_dir: Path | str | None = None,
         auto_resume: bool = False,
+        load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig(),
+        checkpoint_interval: int | None = -1,
+        checkpoint_maxkeep: int | None = -1,
+        checkpoint_no_save_optimizer: bool = False,
         # others
         load_from: str | Path,
         log_dir: Path | str | None = None,
@@ -232,6 +246,12 @@ class RLColocateTrainer:
         if get_rank() == 0:
             work_dir.mkdir(parents=True, exist_ok=True)
         self._meta = XTunerMeta.build(work_dir, self._META_PATH, auto_resume)
+
+        # checkpoint config
+        self._checkpoint_interval = checkpoint_interval
+        self._checkpoint_maxkeep = checkpoint_maxkeep
+        self._checkpoint_no_save_optimizer = checkpoint_no_save_optimizer
+        self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(auto_resume, load_checkpoint_cfg)
 
         # log
         log_dir = self.exp_dir / "logs"
@@ -261,8 +281,23 @@ class RLColocateTrainer:
         # override rollout config
         rollout_config.worker_log_dir = log_dir
 
+        # If resuming from checkpoint, skip loading weights in rollout workers
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            rollout_config.skip_load_weights = True
+            self.logger.info(
+                f"Skip load rollout weights due to resume from checkpoint {self._load_checkpoint_cfg.checkpoint_path}"
+            )
+
         # build train controller and rollout controller
         self.train_controller = train_worker_cfg.build(self._pg)
+
+        # Resume train worker if checkpoint exists
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            ray.get(self.train_controller.resume.remote(self._load_checkpoint_cfg))
+            train_state_path = Path(self._load_checkpoint_cfg.checkpoint_path) / self._SAVE_TRAIN_STATE_PATH
+            with train_state_path.open("r") as f:
+                train_state = json.load(f)
+                self._cur_step = train_state["cur_step"]
 
         self.rollout_controller = rollout_config.build(self._pg)
 
@@ -297,6 +332,23 @@ class RLColocateTrainer:
         total_eval_samples = len(self.eval_agent_loop_manager._data_sampler)
         self.evaluator = evaluator_config.build(total_eval_samples=total_eval_samples)
 
+        # Resume sampler and sync weights if checkpoint exists
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            self.logger.info(f"Resume sampler from {self._load_checkpoint_cfg.checkpoint_path}")
+            self.agent_loop_manager.resume(self._load_checkpoint_cfg.checkpoint_path)
+
+            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+            self.logger.info("Rollout workers skip load weights, update weights from train workers.")
+            ray.get(self.train_controller.offload.remote(target="optimizer"))
+            ray.get(self.rollout_controller.offload.remote())
+            ray.get(self.rollout_controller.onload_weights.remote())
+            ray.get(self.train_controller.update_weights.remote())
+            ray.get(self.train_controller.offload.remote(target="model"))
+            ray.get(self.rollout_controller.onload_kvcache.remote())
+            self.logger.info("Rollout workers updated weights from train workers.")
+        else:
+            ray.get(self.train_controller.offload.remote(target="all"))
+
         # others
         if debug_rollout:
             self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
@@ -307,6 +359,59 @@ class RLColocateTrainer:
     @property
     def exp_dir(self) -> Path:
         return Path(self._meta.latest_exp.exp_dir)
+
+    def _resolve_load_checkpoint_cfg(
+        self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
+    ) -> LoadCheckpointConfig:
+        """Resolve checkpoint path for auto-resume."""
+        latest_checkpoint = self._meta.latest_checkpoint
+        if latest_checkpoint is not None and auto_resume:
+            load_checkpoint_cfg.checkpoint_path = Path(latest_checkpoint)
+        return load_checkpoint_cfg
+
+    def _maybe_save_checkpoint(self, cur_step: int) -> None:
+        """Save checkpoint if interval condition is met."""
+        ckp_interval = self._checkpoint_interval
+        if ckp_interval is None or ckp_interval == -1:
+            return
+        if cur_step % ckp_interval != 0:
+            return
+
+        checkpoint_path = self.exp_dir / self._CHECKPOINT_DIR / f"ckpt-step-{cur_step}"
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+        # 1. Save sampler (dataloader) state
+        self.logger.info(f"Saving sampler state to {checkpoint_path}")
+        self.agent_loop_manager.save(checkpoint_path)
+
+        # 2. Save DCP checkpoint (model + optimizer)
+        self.logger.info(f"Saving DCP checkpoint to {checkpoint_path}")
+        ray.get(self.train_controller.save.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer))
+
+        # 3. Save train state JSON
+        train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+        with train_state_path.open("w") as f:
+            json.dump({"cur_step": cur_step}, f)
+
+        # 4. Update meta
+        current_exp = self._meta.latest_exp
+        current_exp.checkpoint_list.append(str(checkpoint_path))
+
+        # 5. Prune old checkpoints
+        ckp_maxkeep = self._checkpoint_maxkeep
+        ckp_list = current_exp.checkpoint_list
+        if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
+            from shutil import rmtree
+
+            for deleted in ckp_list[:-ckp_maxkeep]:
+                if Path(deleted).exists():
+                    rmtree(deleted, ignore_errors=True)
+            current_exp.checkpoint_list = ckp_list[-ckp_maxkeep:]
+
+        # 6. Persist meta to disk
+        meta_path = self.exp_dir.parent / self._META_PATH
+        with meta_path.open("w") as f:
+            f.write(self._meta.model_dump_json(indent=2))
 
     def fit(self):
         self.logger.info("Start RL training")
@@ -536,9 +641,8 @@ class RLColocateTrainer:
         """Synchronizes weights and saves checkpoints."""
         with timer("save_ckpt", step_timer_dict):
             ray.get(self.train_controller.offload.remote(target="optimizer"))
-            # TODO:
-            # self._maybe_save_hf()
-            # self._maybe_save_checkpoint()
+            self._maybe_save_checkpoint(rollout_idx)
+            # TODO: self._maybe_save_hf()
 
         with timer("sync_weight", step_timer_dict):
             bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
