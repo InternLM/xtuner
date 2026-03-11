@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import hashlib
-from copy import deepcopy
+import inspect
 from typing import Annotated
 
 from cyclopts import Parameter
@@ -42,24 +42,15 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
             tools = item["tools"]
         if isinstance(item, dict) and "messages" in item:
             item = item["messages"]
+        messages = ChatMessages(messages=item, tools=tools)
+        tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
-        if isinstance(item, dict) and "dialogs" in item:
-            item = item["dialogs"]
-
-        if "content" in item:
-            # 临时 代码
-            input_ids = self.tokenizer.encode(item["content"], add_special_tokens=False)
-            labels = deepcopy(input_ids)
-        else:
-            messages = ChatMessages(messages=item, tools=tools)
-            tokenized = messages.tokenize(self.tokenizer, self.chat_template)
-
-            input_ids = tokenized["input_ids"]
-            labels = tokenized["labels"]
+        input_ids = tokenized["input_ids"]
+        labels = tokenized["labels"]
         if self.max_length is not None and len(input_ids) > self.max_length:
-            # logger.info(
-            #     f"WARNING: input_ids length {len(input_ids)} exceeds model_max_length {self.max_length}. truncated!"
-            # )
+            logger.info(
+                f"WARNING: input_ids length {len(input_ids)} exceeds model_max_length {self.max_length}. truncated!"
+            )
             input_ids = input_ids[: self.max_length]
             labels = labels[: self.max_length]
 
@@ -77,13 +68,13 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
             else:
                 _tokenizer_hash = self._tokenizer_hash
             _template_hash = hashlib.sha256(repr(self.chat_template).encode()).hexdigest()[:16]
-            # _source_hash = (
-            #     # hashlib.sha256(inspect.getsource(ftdp_tokenize).encode()).hexdigest()[:16]
-            #     hashlib.sha256(inspect.getsource(self.__class__.__call__).encode()).hexdigest()[:16]
-            #     + hashlib.sha256(inspect.getsource(self.__class__.__init__).encode()).hexdigest()[:16]
-            # )
+            _source_hash = (
+                # hashlib.sha256(inspect.getsource(ftdp_tokenize).encode()).hexdigest()[:16]
+                hashlib.sha256(inspect.getsource(self.__class__.__call__).encode()).hexdigest()[:16]
+                + hashlib.sha256(inspect.getsource(self.__class__.__init__).encode()).hexdigest()[:16]
+            )
 
-            self._hash = f"{_tokenizer_hash}_{_template_hash}"
+            self._hash = f"{_tokenizer_hash}_{_template_hash}_{_source_hash}"
         else:
             assert isinstance(self._hash, str), (
                 "hash is not a valid string, it means `FtdpTokenizeFunction._hash` is modified by user."
