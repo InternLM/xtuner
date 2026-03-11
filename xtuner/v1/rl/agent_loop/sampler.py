@@ -1,7 +1,9 @@
+from pathlib import Path
 import copy
 from typing import Iterator, Optional, cast
 from uuid import uuid4
 
+import torch
 from pydantic import BaseModel, ConfigDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -9,10 +11,10 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils.logger import get_logger
 
 
-logger = get_logger()
+logger = get_logger(__name__)
 
 
 class SamplerConfig(BaseModel):
@@ -39,6 +41,7 @@ class _DatasetSampler:
         self.dataloader_iter: Optional[Iterator] = None
         self.cur_epoch = 0
         self.prompt_repeat_k = prompt_repeat_k
+        self._consumed_samples: int = 0
 
     def __len__(self) -> int:
         return len(self.dataloader)
@@ -60,10 +63,13 @@ class _DatasetSampler:
             new_data = copy.deepcopy(data)
             new_data.uid = uuid4().int
             group_data.append(new_data)
+        self._consumed_samples += 1
         return cast(list[RolloutState], group_data)
 
 
 class Sampler(_DatasetSampler):
+    _DATALOADER_FILE = "dataloader"
+
     def __init__(
         self,
         dataloader: Dataloader,
@@ -79,3 +85,22 @@ class Sampler(_DatasetSampler):
             if buffer_data:
                 return buffer_data[0]
         return self.sample_from_dataloader()
+
+    def save(self, checkpoint_path: Path | str) -> None:
+        """Save the sampler's dataloader state to checkpoint."""
+        checkpoint_path = Path(checkpoint_path)
+        dataloader_state = self.dataloader.get_state_dict(self._consumed_samples)
+        torch.save(dataloader_state, checkpoint_path / self._DATALOADER_FILE)
+
+    def resume(self, checkpoint_path: Path | str) -> None:
+        """Resume the sampler's dataloader state from checkpoint."""
+        checkpoint_path = Path(checkpoint_path)
+        dataloader_path = checkpoint_path / self._DATALOADER_FILE
+        if not dataloader_path.exists():
+            logger.warning(f"Dataloader state {dataloader_path} not found, skipping resume.")
+            return
+        state = torch.load(dataloader_path, map_location="cpu")
+        self.dataloader.load_state_dict(state)
+        self.dataloader_iter = iter(self.dataloader)
+        self._consumed_samples = state["sampler"]["step"]
+        self.cur_epoch = state["sampler"]["epoch"]
