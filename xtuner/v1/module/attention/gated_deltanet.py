@@ -20,9 +20,11 @@ from .attn_outputs import AttnOutputs
 
 
 # Temporary solution: use separate function objects for each call site, Dynamo will cache them separately
-def _all_to_all_conv_pre_qkv(x, scatter_dim, gather_dim, mesh):
+def _all_to_all_conv_pre_qk(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
+def _all_to_all_conv_pre_v(x, scatter_dim, gather_dim, mesh):
+    return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
 def _all_to_all_gb(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
@@ -234,19 +236,19 @@ class GatedDeltaNet(nn.Module):
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        query = _all_to_all_conv_pre_qkv(
+        query = _all_to_all_conv_pre_qk(
             query,  # (1, num_k_heads, L/sp_size, head_k_dim)
             scatter_dim=1,
             gather_dim=2,
             mesh=seq_ctx.sequence_parallel_mesh,
         )
-        key = _all_to_all_conv_pre_qkv(
+        key = _all_to_all_conv_pre_qk(
             key,  # (1, num_k_heads, L/sp_size, head_k_dim)
             scatter_dim=1,
             gather_dim=2,
             mesh=seq_ctx.sequence_parallel_mesh,
         )
-        value = _all_to_all_conv_pre_qkv(
+        value = _all_to_all_conv_pre_v(
             value,  # (1, num_k_heads, L/sp_size, head_k_dim)
             scatter_dim=1,
             gather_dim=2,
