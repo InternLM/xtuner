@@ -23,10 +23,8 @@ from .attn_outputs import AttnOutputs
 def _all_to_all_conv_pre_qk(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
-
 def _all_to_all_conv_pre_v(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
-
 
 def _all_to_all_gb(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
@@ -236,7 +234,7 @@ class GatedDeltaNet(nn.Module):
         value = value.transpose(1, 2)
 
         query = _all_to_all_conv_pre_qk(
-            query,
+            query,  
             scatter_dim=1,
             gather_dim=2,
             mesh=seq_ctx.sequence_parallel_mesh,
@@ -248,7 +246,7 @@ class GatedDeltaNet(nn.Module):
             mesh=seq_ctx.sequence_parallel_mesh,
         )
         value = _all_to_all_conv_pre_v(
-            value,
+            value, 
             scatter_dim=1,
             gather_dim=2,
             mesh=seq_ctx.sequence_parallel_mesh,
@@ -273,10 +271,10 @@ class GatedDeltaNet(nn.Module):
         value_weight = value_weight.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
         if bias is not None:
             bias = bias.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
-
-        query = query.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
-        key = key.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
-        value = value.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
+        
+        query = query.transpose(1,2).contiguous().transpose(1,2)  # make it contiguous for causal_conv1d_fn
+        key = key.transpose(1,2).contiguous().transpose(1,2)  # make it contiguous for causal_conv1d_fn
+        value = value.transpose(1,2).contiguous().transpose(1,2)  # make it contiguous for causal_conv1d_fn
         query = self.causal_conv1d_fn(  # query (batch, dim, seqlen)
             x=query,  # need non contiguous
             weight=query_weight,
@@ -309,7 +307,7 @@ class GatedDeltaNet(nn.Module):
             dt_bias = dt_bias.to_local()
 
         g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
-        
+
         # (1,key_dim/sp_size, L)
         query = query.transpose(1, 2).reshape(
             batch_size, seq_len * sp_size, -1, self.head_k_dim
@@ -318,8 +316,8 @@ class GatedDeltaNet(nn.Module):
             batch_size, seq_len * sp_size, -1, self.head_k_dim
         )  # (1, L, num_k_heads/sp_size, head_k_dim)
         value = value.transpose(1, 2).reshape(
-            batch_size, seq_len * sp_size, -1, self.head_v_dim
-        )  # (1, L, num_v_heads/sp_size, head_v_dim)
+            batch_size, seq_len * sp_size, -1, self.head_k_dim
+        )  # (1, L, num_k_heads/sp_size, head_k_dim)
 
         if self.num_v_heads // self.num_k_heads > 1:
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)

@@ -23,10 +23,8 @@ from .attn_outputs import AttnOutputs
 def _all_to_all_conv_pre_qk(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
 
-
 def _all_to_all_conv_pre_v(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
-
 
 def _all_to_all_gb(x, scatter_dim, gather_dim, mesh):
     return ulysses_all_to_all(x, scatter_dim=scatter_dim, gather_dim=gather_dim, mesh=mesh)
@@ -185,6 +183,9 @@ class GatedDeltaNet(nn.Module):
         self.in_proj_b = build_linear(self.hidden_size, self.num_v_heads, bias=False)
         self.in_proj_a = build_linear(self.hidden_size, self.num_v_heads, bias=False)
 
+        # Dedicated stream for overlapping q/k/v all2all with z/b/a/g computation
+        self.comm_stream = torch.cuda.Stream()
+
     def forward_for_sp(
         self,
         hidden_states: torch.Tensor,
@@ -194,12 +195,6 @@ class GatedDeltaNet(nn.Module):
         batch_size, seq_len, _ = hidden_states.shape
         assert batch_size == 1, "Only batch size of 1 is supported for now in GateDeltaNet"
         mixed_qkv = self.in_proj_qkv(hidden_states)
-
-        z = self.in_proj_z(hidden_states)
-        z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
-
-        b = self.in_proj_b(hidden_states)
-        a = self.in_proj_a(hidden_states)
 
         weight = self.conv1d.weight.squeeze(1)
         bias = self.conv1d.bias
@@ -230,74 +225,55 @@ class GatedDeltaNet(nn.Module):
             ],
             dim=-1,
         )
-        # (1, L, 8192/sp_size)
-        query = query.transpose(1, 2)  # (1, dim, L/sp_size)
+        query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)  # 1, L/sp_size, num_k_heads, head_k_dim
+        key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
+        value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
+
+        query = query.transpose(1, 2)  # (1, num_k_heads, L/sp_size, head_k_dim)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        query = _all_to_all_conv_pre_qk(
-            query,
-            scatter_dim=1,
-            gather_dim=2,
-            mesh=seq_ctx.sequence_parallel_mesh,
-        )
-        key = _all_to_all_conv_pre_qk(
-            key,
-            scatter_dim=1,
-            gather_dim=2,
-            mesh=seq_ctx.sequence_parallel_mesh,
-        )
-        value = _all_to_all_conv_pre_v(
-            value,
-            scatter_dim=1,
-            gather_dim=2,
-            mesh=seq_ctx.sequence_parallel_mesh,
-        )
+        # Launch q/k/v all2all sequentially on comm_stream, record an event after each.
+        # This allows the main stream to synchronize at fine granularity:
+        #   causal_conv1d_fn(q) overlaps with k_all2all
+        #   causal_conv1d_fn(k) overlaps with v_all2all
+        current_stream = torch.cuda.current_stream()
+        self.comm_stream.wait_stream(current_stream)
 
-        # query =  (1, dim/sp_size, L)
-        query_weight, key_weight, value_weight = torch.split(
-            weight,  # (8192, 4)
-            [
-                self.key_dim,
-                self.key_dim,
-                self.value_dim,
-            ],
-            dim=0,
-        )
+        q_event = torch.cuda.Event()
+        k_event = torch.cuda.Event()
+        v_event = torch.cuda.Event()
 
-        assert seq_ctx.sequence_parallel_mesh is not None, "sequence_parallel_mesh is required for forward_for_sp"
-        sp_rank = seq_ctx.sequence_parallel_mesh.get_local_rank()
-        sp_size = seq_ctx.sequence_parallel_mesh.size()
-        query_weight = query_weight.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
-        key_weight = key_weight.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
-        value_weight = value_weight.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
-        if bias is not None:
-            bias = bias.chunk(seq_ctx.sequence_parallel_mesh.size(), dim=0)[sp_rank]
+        with torch.cuda.stream(self.comm_stream):
+            query = _all_to_all_conv_pre_qk(
+                query,  # (1, num_k_heads, L/sp_size, head_k_dim)
+                scatter_dim=1,
+                gather_dim=2,
+                mesh=seq_ctx.sequence_parallel_mesh,
+            )
+            q_event.record()  # fires when q all2all is done
+            key = _all_to_all_conv_pre_qk(
+                key,  # (1, num_k_heads, L/sp_size, head_k_dim)
+                scatter_dim=1,
+                gather_dim=2,
+                mesh=seq_ctx.sequence_parallel_mesh,
+            )
+            k_event.record()  # fires when k all2all is done
+            value = _all_to_all_conv_pre_v(
+                value,  # (1, num_k_heads, L/sp_size, head_k_dim)
+                scatter_dim=1,
+                gather_dim=2,
+                mesh=seq_ctx.sequence_parallel_mesh,
+            )
+            v_event.record()  # fires when v all2all is done
 
-        query = query.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
-        key = key.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
-        value = value.transpose(1, 2).contiguous().transpose(1, 2)  # make it contiguous for causal_conv1d_fn
-        query = self.causal_conv1d_fn(  # query (batch, dim, seqlen)
-            x=query,  # need non contiguous
-            weight=query_weight,
-            bias=bias,
-            activation=self.activation,
-            seq_idx=seq_idx,
-        )
-        key = self.causal_conv1d_fn(
-            x=key,  # need non contiguous
-            weight=key_weight,
-            bias=bias,
-            activation=self.activation,
-            seq_idx=seq_idx,
-        )
-        value = self.causal_conv1d_fn(
-            x=value,  # need non contiguous
-            weight=value_weight,
-            bias=bias,
-            activation=self.activation,
-            seq_idx=seq_idx,
-        )
+        # Overlap: compute z/b/a/beta/g and weight slicing on main stream
+        # while q/k/v all2all pipeline runs concurrently on comm_stream
+        z = self.in_proj_z(hidden_states)
+        z = z.reshape(batch_size, seq_len, -1, self.head_v_dim)
+
+        b = self.in_proj_b(hidden_states)
+        a = self.in_proj_a(hidden_states)
 
         beta = b.sigmoid()
         # If the model is loaded in fp16, without the .float() here, A might be -inf
@@ -309,7 +285,64 @@ class GatedDeltaNet(nn.Module):
             dt_bias = dt_bias.to_local()
 
         g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
-        
+
+        assert seq_ctx.sequence_parallel_mesh is not None, "sequence_parallel_mesh is required for forward_for_sp"
+        sp_rank = seq_ctx.sequence_parallel_mesh.get_local_rank()
+        sp_size = seq_ctx.sequence_parallel_mesh.size()
+
+        query_weight, key_weight, value_weight = torch.split(
+            weight,  # (8192, 4)
+            [
+                self.key_dim,
+                self.key_dim,
+                self.value_dim,
+            ],
+            dim=0,
+        )
+        query_weight = query_weight.chunk(sp_size, dim=0)[sp_rank]
+        key_weight = key_weight.chunk(sp_size, dim=0)[sp_rank]
+        value_weight = value_weight.chunk(sp_size, dim=0)[sp_rank]
+        if bias is not None:
+            bias = bias.chunk(sp_size, dim=0)[sp_rank]
+
+        # Pipeline stage 1: wait for q all2all → run q conv1d
+        # k_all2all runs concurrently on comm_stream during q conv1d
+        current_stream.wait_event(q_event)
+        query = query.transpose(2, 3).flatten(1, 2)  # (1, key_dim/sp_size, L)
+        query = query.transpose(1, 2).contiguous().transpose(1, 2)  # (1, L, key_dim/sp_size)
+        query = self.causal_conv1d_fn(  # query (1, dim, seqlen)
+            x=query,  # need non contiguous
+            weight=query_weight,
+            bias=bias,
+            activation=self.activation,
+            seq_idx=seq_idx,
+        )
+
+        # Pipeline stage 2: wait for k all2all → run k conv1d
+        # v_all2all runs concurrently on comm_stream during k conv1d
+        current_stream.wait_event(k_event)
+        key = key.transpose(2, 3).flatten(1, 2)  # (1, key_dim/sp_size, L)
+        key = key.transpose(1, 2).contiguous().transpose(1, 2)
+        key = self.causal_conv1d_fn(
+            x=key,  # need non contiguous
+            weight=key_weight,
+            bias=bias,
+            activation=self.activation,
+            seq_idx=seq_idx,
+        )
+
+        # Pipeline stage 3: wait for v all2all → run v conv1d
+        current_stream.wait_event(v_event)
+        value = value.transpose(2, 3).flatten(1, 2)  # (1, key_dim/sp_size, L)
+        value = value.transpose(1, 2).contiguous().transpose(1, 2)
+        value = self.causal_conv1d_fn(
+            x=value,  # need non contiguous
+            weight=value_weight,
+            bias=bias,
+            activation=self.activation,
+            seq_idx=seq_idx,
+        )
+
         # (1,key_dim/sp_size, L)
         query = query.transpose(1, 2).reshape(
             batch_size, seq_len * sp_size, -1, self.head_k_dim
@@ -318,8 +351,8 @@ class GatedDeltaNet(nn.Module):
             batch_size, seq_len * sp_size, -1, self.head_k_dim
         )  # (1, L, num_k_heads/sp_size, head_k_dim)
         value = value.transpose(1, 2).reshape(
-            batch_size, seq_len * sp_size, -1, self.head_v_dim
-        )  # (1, L, num_v_heads/sp_size, head_v_dim)
+            batch_size, seq_len * sp_size, -1, self.head_k_dim
+        )  # (1, L, num_k_heads/sp_size, head_k_dim)
 
         if self.num_v_heads // self.num_k_heads > 1:
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
