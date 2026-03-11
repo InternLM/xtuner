@@ -122,10 +122,10 @@ class _AsyncDispatch(Function):
             if USE_CUSTOM_AG:
                 global ag_manager, ag_symm
                 if ag_symm is None:
-                    ag_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=2)
+                    ag_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=1)
                 if ag_manager is None:
                     # agrs dispatcher do not need to select comm sm
-                    ag_manager = AllGatherManager(num_buffers=2, select_comm_sm=False)
+                    ag_manager = AllGatherManager(num_buffers=1, select_comm_sm=False)
                 send_bytes = hidden_states.element_size() * hidden_states.numel()
                 recv_bytes = send_bytes * process_group.size()
                 recv_numel = hidden_states.numel() * process_group.size()
@@ -199,7 +199,7 @@ class _AsyncDispatch(Function):
                 if rs_symm is None:
                     rs_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=1)
                 if rs_manager is None:
-                    rs_manager = ReduceScatterManager(num_buffers=2, select_comm_sm=False)
+                    rs_manager = ReduceScatterManager(num_buffers=1, select_comm_sm=False)
 
                 process_group = ctx.process_group
                 comm_stream = ctx.comm_stream
@@ -280,7 +280,7 @@ class _AsyncCombine(Function):
                 if rs_symm is None:
                     rs_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=1)
                 if rs_manager is None:
-                    rs_manager = ReduceScatterManager(num_buffers=2, select_comm_sm=False)
+                    rs_manager = ReduceScatterManager(num_buffers=1, select_comm_sm=False)
 
                 send_bytes = hidden_states.element_size() * hidden_states.numel()
                 recv_bytes = send_bytes // process_group.size()
@@ -340,10 +340,10 @@ class _AsyncCombine(Function):
             if USE_CUSTOM_AG:
                 global ag_manager, ag_symm
                 if ag_symm is None:
-                    ag_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=2)
+                    ag_symm = SymmBufferManager(int(os.getenv("SYMM_BUF_SIZE", 0)), num_buffers=1)
                 if ag_manager is None:
                     # agrs dispatcher do not need to select comm sm
-                    ag_manager = AllGatherManager(num_buffers=2, select_comm_sm=False)
+                    ag_manager = AllGatherManager(num_buffers=1, select_comm_sm=False)
 
                 send_bytes = grad_output.element_size() * grad_output.numel()
                 recv_bytes = send_bytes * ctx.process_group.size()
