@@ -79,7 +79,10 @@ class MuonConfig(OptimConfig):
         is_moe_model = num_experts > 1
 
         # Expert parameter patterns for MoE models
-        expert_param_patterns = ("fused_w1w3", "fused_w2", "fused_w1", "fused_w3")
+        # Note: fused_w1w3 contains both w1 and w3 weights, so num_experts = 2 * n_routed_experts
+        fused_w1w3_patterns = ("fused_w1w3",)
+        other_expert_patterns = ("fused_w2", "fused_w1", "fused_w3")
+        all_expert_patterns = fused_w1w3_patterns + other_expert_patterns
 
         for name, p in model.named_parameters():
             n = p.numel()
@@ -89,7 +92,7 @@ class MuonConfig(OptimConfig):
                 is_muon_tensor = p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
                 if is_muon_tensor:
                     # Check if this is an MoE expert parameter
-                    if is_moe_model and any(pattern in name for pattern in expert_param_patterns):
+                    if is_moe_model and any(pattern in name for pattern in all_expert_patterns):
                         num_muon_moe += n
                     else:
                         num_muon += n
@@ -99,14 +102,20 @@ class MuonConfig(OptimConfig):
                 untrainable_names.append(name)
 
         # Separate Muon params into regular and MoE expert params
+        # fused_w1w3 has 2 * num_experts (w1 and w3 each have num_experts)
+        # other expert params have num_experts
         muon_params_regular = []
-        muon_params_moe = []
+        muon_params_moe_fused_w1w3 = []  # num_experts = 2 * n_routed_experts
+        muon_params_moe_other = []  # num_experts = n_routed_experts
+
         for name, p in model.named_parameters():
             if name in trainable_names:
                 is_muon_tensor = p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
                 if is_muon_tensor:
-                    if is_moe_model and any(pattern in name for pattern in expert_param_patterns):
-                        muon_params_moe.append(p)
+                    if is_moe_model and any(pattern in name for pattern in fused_w1w3_patterns):
+                        muon_params_moe_fused_w1w3.append(p)
+                    elif is_moe_model and any(pattern in name for pattern in other_expert_patterns):
+                        muon_params_moe_other.append(p)
                     else:
                         muon_params_regular.append(p)
 
@@ -120,8 +129,12 @@ class MuonConfig(OptimConfig):
         param_groups = []
         if muon_params_regular:
             param_groups.append(dict(params=muon_params_regular))
-        if muon_params_moe:
-            param_groups.append(dict(params=muon_params_moe, num_experts=num_experts))
+        # fused_w1w3: w1 and w3 are fused, so num_experts = 2 * n_routed_experts
+        if muon_params_moe_fused_w1w3:
+            param_groups.append(dict(params=muon_params_moe_fused_w1w3, num_experts=2 * num_experts))
+        # Other expert params: num_experts = n_routed_experts
+        if muon_params_moe_other:
+            param_groups.append(dict(params=muon_params_moe_other, num_experts=num_experts))
         param_groups.append(dict(params=adamw_params, algorithm="adamw"))
 
         if dist.get_rank() == 0:
@@ -134,7 +147,11 @@ class MuonConfig(OptimConfig):
                     f"(regular: {num_muon // 1e6}M, MoE expert: {num_muon_moe // 1e6}M), "
                     f"AdamW params: {num_adamw // 1e6}M (counts by numel)"
                 )
-                logger.info(f"Detected MoE model with {num_experts} experts, " f"enabling per-expert orthogonalization")
+                logger.info(
+                    f"Detected MoE model with {num_experts} routed experts, "
+                    f"fused_w1w3 uses num_experts={2 * num_experts} (w1+w3), "
+                    f"other expert params use num_experts={num_experts}"
+                )
             else:
                 logger.info(f"Muon params: {num_muon // 1e6}M, AdamW params: {num_adamw // 1e6}M (counts by numel)")
             logger.info(f"Untrainable parameters names: {untrainable_names}")
