@@ -1,3 +1,4 @@
+import json
 import os
 import random
 from pathlib import Path
@@ -340,7 +341,11 @@ class RLColocateTrainer:
                 )
                 self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
                 rollout_info = {}  # TODO: rollout info?
-                # TODO: save train trajectory
+                train_trajectory_dir = self.exp_dir / "train_rollout"
+                train_trajectory_dir.mkdir(parents=True, exist_ok=True)
+                train_trajectory_path = train_trajectory_dir / f"train_rollout_{rollout_idx}.jsonl"
+                self._save_trajectories(train_batch, train_trajectory_path)
+                self.logger.info(f"Rollout {rollout_idx} train trajectories saved to {train_trajectory_path}")
                 if not self._debug_rollout:
                     # TODO: ray.get(self.rollout_controller.pause_generation.remote())
                     ray.get(self.rollout_controller.offload.remote())
@@ -384,7 +389,13 @@ class RLColocateTrainer:
                                 self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
                             )
                             eval_metrics = self.evaluator.run(eval_batch)
-                            # TODO: save eval trajectory
+                            eval_trajectory_dir = self.exp_dir / "eval_rollout"
+                            eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
+                            eval_trajectory_path = eval_trajectory_dir / f"eval_rollout_{rollout_idx}.jsonl"
+                            self._save_trajectories(eval_batch, eval_trajectory_path)
+                            self.logger.info(
+                                f"Rollout {rollout_idx} eval trajectories saved to {eval_trajectory_path}"
+                            )
                             eval_log_info.update(eval_metrics)
                 else:
                     train_log_info = {}
@@ -597,6 +608,65 @@ class RLColocateTrainer:
         if eval_str:
             self.logger.info(f"Eval: {eval_str}")
         self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=rollout_idx)
+
+    def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
+        rewards = []
+        response_len_list = []
+
+        for group in data_groups:
+            if not is_valid_for_training(group, self.logger):
+                continue
+            for data in group:
+                assert data.reward is not None
+                rewards.append(data.reward["score"])
+                if data.response_ids is not None:
+                    if isinstance(data.response_ids, torch.Tensor):
+                        response_ids = data.response_ids.flatten().tolist()
+                    else:
+                        response_ids = data.response_ids
+                    response_len_list.append(len(response_ids))
+                elif data.response is not None:
+                    response_ids = self.tokenizer.encode(data.response, add_special_tokens=False)
+                    response_len_list.append(len(response_ids))
+
+        rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
+        response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
+
+        _count = 0
+        with open(save_path, "w", encoding="utf-8") as f:
+            summary = {
+                "reward_mean": rewards_tensor.mean().item(),
+                "reward_std": rewards_tensor.std().item(),
+                "reward_max": rewards_tensor.max().item(),
+                "reward_min": rewards_tensor.min().item(),
+                "response_len_mean": response_lens.mean().item(),
+                "response_len_std": response_lens.std().item(),
+                "response_len_max": response_lens.max().item(),
+                "response_len_min": response_lens.min().item(),
+                "total_len": len(rewards),
+            }
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            for group in data_groups:
+                if not is_valid_for_training(group, self.logger):
+                    continue
+                for data in group:
+                    assert data.reward is not None
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
+                    item = {
+                        "prompt": data.message,
+                        "raw_prompt": data.extra_fields.get("raw_prompt", None),
+                        "response": data.response,
+                        "response_len": response_len_list[_count],
+                        "label": ground_truth,
+                        "reward": data.reward["score"],
+                        "finish_reason": data.finish_reason,
+                    }
+                    json.dump(item, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+                    _count += 1
 
     def _log_mini_batch_metrics(self, workers_log_item: List[WorkerLogItem]):
         train_start_step = self._global_train_step + 1
