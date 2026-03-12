@@ -121,8 +121,25 @@ class BaseLossConfig(BaseModel):
     def _loss_kwargs_cls(self) -> type["BaseLossKwargs"]:
         raise NotImplementedError
 
-    def build(self, *args, **kwargs) -> "BaseLossContext":
-        raise NotImplementedError
+    @abstractmethod
+    def build(
+        self,
+        data: dict,
+        sp_mesh: "DeviceMesh | None" = None,
+    ) -> "BaseLossContext | None":
+        """Build loss context from data dict.
+
+        Subclasses should extract required fields from data dict and construct loss_kwargs.
+
+        Args:
+            data (dict): Data dict containing all possible loss-related fields.
+                Different loss configs extract different fields as needed.
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+
+        Returns:
+            BaseLossContext: Built loss context.
+        """
+        ...
 
 
 # NOTE: Self type for BaseLossContext subclasses (F-bounded polymorphism)

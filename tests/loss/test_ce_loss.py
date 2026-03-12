@@ -72,7 +72,7 @@ class TestCELoss(TestCase):
         for data in data_batch:
             seq_ctx = data["seq_ctx"]
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=None)
             loss_ctx_list.append(loss_ctx)
         loss_ctx_list = CELossContext.build_batches(loss_ctx_list, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list])
 
@@ -172,7 +172,7 @@ class TestCELoss(TestCase):
         for data in data_batch:
             seq_ctx = data["seq_ctx"]
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=None)
             loss_ctx_list.append(loss_ctx)
         loss_ctx_list = CELossContext.build_batches(loss_ctx_list, cu_seq_lens_list=[seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list])
 
@@ -310,7 +310,7 @@ class TestCELossWithSP(DistributedTestBase):
         sp_mesh = data_mesh['sp']
         seq_ctx.sequence_parallel_mesh = sp_mesh
         seq_ctx_list = [seq_ctx]
-        loss_ctx = loss_cfg.build(shifted_labels=target, sp_mesh=sp_mesh)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": target}, sp_mesh=sp_mesh)
         loss_ctx_list = [loss_ctx]
         if sp_size > 1:
             seq_ctx_list[0] = seq_ctx_list[0].split(sequence_parallel_mesh=sp_mesh)
@@ -397,7 +397,7 @@ class TestCELossWithSP(DistributedTestBase):
         sp_mesh = data_mesh['sp']
         seq_ctx.sequence_parallel_mesh = sp_mesh
         seq_ctx_list = [seq_ctx]
-        loss_ctx = loss_cfg.build(shifted_labels=target, sp_mesh=sp_mesh)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": target}, sp_mesh=sp_mesh)
         loss_ctx_list = [loss_ctx]
         if sp_size > 1:
             seq_ctx_list[0] = seq_ctx_list[0].split(sequence_parallel_mesh=sp_mesh)
