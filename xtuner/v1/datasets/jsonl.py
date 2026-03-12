@@ -534,50 +534,32 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             for _, (start, end) in tqdm(range_list_shard, desc=desc, smoothing=0.001):
                 tokenized.append(worker(bytes(self._shared_memory.buf[start:end])))
 
-        _num_tokens = [data["num_tokens"] for data in tokenized]
-        _num_tokens = np.array(_num_tokens)
-
-        # Collect chunk info if present (LongTextPretrainTokenizeFunction)
-        _chunk_infos_local = [data.get("chunks") for data in tokenized]
-        has_chunks = any(c is not None for c in _chunk_infos_local)
-
         if dist.is_initialized():
             # TODO:
             # This is a workaround for `all_gather_object` would hang when
             # using `nccl` backend. Maybe we could find a better way to
             # synchronize the `num_tokens` since datasets are not always initialized
             # with the world size.
-            num_tokens = [None] * world_size
-            dist.all_gather_object(num_tokens, _num_tokens, group=self.process_group)
-            num_tokens = np.concatenate(num_tokens, axis=0)
-
-            if has_chunks:
-                all_chunk_infos = [None] * world_size
-                dist.all_gather_object(all_chunk_infos, _chunk_infos_local, group=self.process_group)
-                # Reconstruct global order: rank r processed lines [r*num_per_rank, (r+1)*num_per_rank)
-                # all_chunk_infos[r] is a list of length num_per_rank (or less for last rank)
-                chunk_infos_global = []
-                for r in range(world_size):
-                    r_start = r * num_per_rank
-                    for local_idx, chunks in enumerate(all_chunk_infos[r]):
-                        line_idx = r_start + local_idx
-                        if chunks is None:
-                            # No chunks field: treat as single chunk covering whole line
-                            chunk_infos_global.append((line_idx, 0, -1, int(num_tokens[line_idx])))
-                        else:
-                            for cs, ce, nt in chunks:
-                                chunk_infos_global.append((line_idx, cs, ce, nt))
+            all_tokenized = [None] * world_size
+            dist.all_gather_object(all_tokenized, tokenized, group=self.process_group)
+            tokenized_global = []
+            for r in range(world_size):
+                tokenized_global.extend(all_tokenized[r])
         else:
-            num_tokens = _num_tokens
+            tokenized_global = tokenized
 
-            if has_chunks:
-                chunk_infos_global = []
-                for line_idx, chunks in enumerate(_chunk_infos_local):
-                    if chunks is None:
-                        chunk_infos_global.append((line_idx, 0, -1, int(num_tokens[line_idx])))
-                    else:
-                        for cs, ce, nt in chunks:
-                            chunk_infos_global.append((line_idx, cs, ce, nt))
+        num_tokens = np.array([data["num_tokens"] for data in tokenized_global])
+
+        has_chunks = any(data.get("chunks") is not None for data in tokenized_global)
+        if has_chunks:
+            chunk_infos_global = []
+            for line_idx, data in enumerate(tokenized_global):
+                chunks = data.get("chunks")
+                if chunks is None:
+                    chunk_infos_global.append((line_idx, 0, -1, int(num_tokens[line_idx])))
+                else:
+                    for cs, ce, nt in chunks:
+                        chunk_infos_global.append((line_idx, cs, ce, nt))
 
         chunks_arr = np.array(chunk_infos_global, dtype=np.int64) if has_chunks else None
 
