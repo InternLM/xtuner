@@ -5,7 +5,7 @@ from typing import Callable, Self, Sequence, cast
 import torch
 import torch.distributed as dist
 from pydantic import ConfigDict
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     FSDPModule,
@@ -15,6 +15,7 @@ from torch.distributed.fsdp import (
 from typing_extensions import override
 
 from xtuner.v1.config import FSDPConfig
+from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model import BaseModel
 from xtuner.v1.model.base import DataBatchInfo, ModelItem, XTunerBaseModelConfig
 from xtuner.v1.utils import get_device, get_logger
@@ -168,6 +169,15 @@ class BaseComposeModel(BaseModel):
 
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()
+
+    @override
+    def build_loss_ctx_batch(  # type: ignore[override]
+        self,
+        data_batch: list[dict],
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list[dict[str, BaseLossContext]]:
+        """Delegate loss_ctx building to the language model."""
+        return self.language_model.build_loss_ctx_batch(data_batch, sp_mesh=sp_mesh)
 
     def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
         data_batch_info = cast(ComposeDataBatchInfo, super().pre_micro_batch_forward(data_batches))
