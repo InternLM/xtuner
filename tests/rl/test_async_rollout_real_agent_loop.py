@@ -8,8 +8,8 @@ import ray
 import torch
 from transformers import AutoTokenizer
 
-from xtuner.v1.data_proto import RolloutState, SampleParams, Status
-from xtuner.v1.rl.agent_loop.agent_loop import SingleTurnAgentLoop
+from xtuner.v1.data_proto import RolloutState, SampleParams, Status, update_expired_status
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoop
 from xtuner.v1.rl.agent_loop.producer import AsyncProduceStrategy
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.rl.rollout import RolloutController
@@ -92,24 +92,24 @@ class TestAsyncRolloutRealAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         # 1. Simulate a long-running sample: started at step 1, now process at step 5
         sample_1 = make_sample(base_uid=501, base_steps=[1, 2])
-        out_state_1 = await agent_loop._generate_pipeline(sample_1, rollout_step=5, enable_partial_rollout=True)
+        out_state_1 = (await agent_loop.generate_group([sample_1], rollout_step=5, enable_partial_rollout=True))[0]
         # verify dynamic staleness: max(0, 5 - min([1, 2, 5])) = 4
         self.assertEqual(out_state_1.seq_staleness, 4)
         out_state_1.status = Status.ABORTED
 
         samples_t1 = [out_state_1]
-        strategy.mark_expired_samples(samples_t1)
+        samples_t1 = update_expired_status(samples_t1, strategy.tail_batch_stale_threshold)
         self.assertEqual(samples_t1[0].status, Status.EXPIRED)
 
         # 2. Simulate a fresher sample: started at step 4, process at step 6
         sample_2 = make_sample(base_uid=502, base_steps=[4, 5])
-        out_state_2 = await agent_loop._generate_pipeline(sample_2, rollout_step=6, enable_partial_rollout=True)
+        out_state_2 = (await agent_loop.generate_group([sample_2], rollout_step=6, enable_partial_rollout=True))[0]
         # verify dynamic staleness: max(0, 6 - min([4, 5, 6])) = 2
         self.assertEqual(out_state_2.seq_staleness, 2)
         out_state_2.status = Status.ABORTED
 
         samples_t2 = [out_state_2]
-        strategy.mark_expired_samples(samples_t2)
+        samples_t2 = update_expired_status(samples_t2, strategy.tail_batch_stale_threshold)
         self.assertEqual(samples_t2[0].status, Status.ABORTED)
 
     async def test_real_partial_rollout_short_circuit_keeps_response_ids(self):
@@ -128,7 +128,7 @@ class TestAsyncRolloutRealAgentLoop(unittest.IsolatedAsyncioTestCase):
         state_len.response_ids = [11, 12, 13, 14, 15, 16, 17, 18]
         state_len.response = "abcdefgh"
 
-        out_len = await agent_loop_len._generate_pipeline(state_len, rollout_step=1, enable_partial_rollout=True)
+        out_len = (await agent_loop_len.generate_group([state_len], rollout_step=1, enable_partial_rollout=True))[0]
         self.assertEqual(out_len.response_ids, [11, 12, 13, 14, 15, 16, 17, 18])
 
         # case 2: EOS already reached in partial rollout -> response_ids should remain unchanged
@@ -147,7 +147,7 @@ class TestAsyncRolloutRealAgentLoop(unittest.IsolatedAsyncioTestCase):
         state_eos.response = "done"
 
         # The short-circuit logic should realize it already hit EOS in preprocess and immediately return
-        out_eos = await agent_loop_eos._generate_pipeline(state_eos, rollout_step=2, enable_partial_rollout=True)
+        out_eos = (await agent_loop_eos.generate_group([state_eos], rollout_step=2, enable_partial_rollout=True))[0]
         
         # Check that it did indeed stop generation
         self.assertEqual(out_eos.status, Status.COMPLETED)
@@ -172,7 +172,7 @@ class TestAsyncRolloutRealAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         for step in range(3, 9):
             multi.status = Status.ABORTED
-            multi = await agent_loop_multi._generate_pipeline(multi, rollout_step=step, enable_partial_rollout=True)
+            multi = (await agent_loop_multi.generate_group([multi], rollout_step=step, enable_partial_rollout=True))[0]
 
         self.assertLessEqual(len(multi.response_ids), total_max_tokens)
 
@@ -184,7 +184,7 @@ class TestAsyncRolloutRealAgentLoop(unittest.IsolatedAsyncioTestCase):
                 self.uid = 0
                 self.sampled_from_aborted = 0
 
-            async def sample(self, task_name: str, sample_from_expired_storage: bool = False):
+            async def sample(self, task_name: str, sample_from_expired_storage: bool = False, expired_sample_count: int = 0, **kwargs):
                 aborted = await self.replay_buffer.get(1, task_name, Status.ABORTED)
                 if aborted:
                     self.sampled_from_aborted += 1
@@ -256,7 +256,7 @@ class TestAsyncRolloutRealAgentLoop(unittest.IsolatedAsyncioTestCase):
                 self.sample_from_expired_flags: list[bool] = []
                 self.uid = 0
 
-            async def sample(self, task_name: str, sample_from_expired_storage: bool = False):
+            async def sample(self, task_name: str, sample_from_expired_storage: bool = False, expired_sample_count: int = 0, **kwargs):
                 self.sample_from_expired_flags.append(sample_from_expired_storage)
                 if sample_from_expired_storage:
                     expired = await self.replay_buffer.get(1, task_name, Status.EXPIRED)

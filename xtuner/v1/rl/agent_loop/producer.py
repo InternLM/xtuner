@@ -178,10 +178,12 @@ class AsyncProduceStrategy(ProduceStrategy):
 
             for task in done_task:
                 paused_items: list[RolloutState] = task.result()
-                paused_items = update_expired_status(paused_items)
+                paused_items = update_expired_status(
+                    paused_items, tail_batch_stale_threshold=self.tail_batch_stale_threshold
+                )
                 for item in paused_items:
                     logger.debug(
-                        f"[{self.__class__.__name__}] Task '{task_name}' | Collecting aborted sample (uid: {item.uid}, status: {item.status}, length: {len(item.response_ids or [])}) after pausing generation."
+                        f"[{self.__class__.__name__}] Task {task_name} | Collecting aborted sample (uid: {item.uid}, status: {item.status}, length: {len(item.response_ids or [])}) after pausing generation."
                     )
                 await replay_buffer.put(paused_items, task_name)
             if len(pending_tasks) > 0:
@@ -229,7 +231,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             data_concurrency = batch_size - previously_completed_count
 
         logger.info(
-            f"[{self.__class__.__name__}] Task '{task_name}' | Starting produce: data_concurrency: {data_concurrency}, previously_completed: {previously_completed_count}, expired_sample_count: {expired_sample_count}"
+            f"[{self.__class__.__name__}] Task {task_name} | Starting produce: data_concurrency: {data_concurrency}, previously_completed: {previously_completed_count}, expired_sample_count: {expired_sample_count}"
         )
 
         # 3. 初始下发任务
@@ -241,7 +243,11 @@ class AsyncProduceStrategy(ProduceStrategy):
                 sample_from_expired_storage=sample_from_expired_storage,
                 expired_sample_count=expired_sample_count,
             )
-            task = create_task(agent_loop.generate_group(rollout_state, enable_partial_rollout=self.enable_partial_rollout, rollout_step=rollout_step))
+            task = create_task(
+                agent_loop.generate_group(
+                    rollout_state, enable_partial_rollout=self.enable_partial_rollout, rollout_step=rollout_step
+                )
+            )
             pending_tasks.add(task)
 
         # 4. 循环收集样本
@@ -258,10 +264,12 @@ class AsyncProduceStrategy(ProduceStrategy):
                 running_items: list[RolloutState] = task.result()
                 if self.is_valid_sample_fn(running_items):
                     completed_sample_count += 1
-                running_items = update_expired_status(running_items)
+                running_items = update_expired_status(
+                    running_items, tail_batch_stale_threshold=self.tail_batch_stale_threshold
+                )
                 await replay_buffer.put(running_items, task_name)
                 logger.debug(
-                    f"[{self.__class__.__name__}] Task '{task_name}' | Collected {completed_sample_count}/{batch_size} valid samples."
+                    f"[{self.__class__.__name__}] Task {task_name} | Collected {completed_sample_count}/{batch_size} valid samples."
                 )
 
             # 动态补充任务
@@ -276,7 +284,11 @@ class AsyncProduceStrategy(ProduceStrategy):
                     sample_from_expired_storage=sample_from_expired_storage,
                     expired_sample_count=expired_sample_count,
                 )
-                task = create_task(agent_loop.generate_group(rollout_state, enable_partial_rollout=self.enable_partial_rollout, rollout_step=rollout_step))
+                task = create_task(
+                    agent_loop.generate_group(
+                        rollout_state, enable_partial_rollout=self.enable_partial_rollout, rollout_step=rollout_step
+                    )
+                )
                 pending_tasks.add(task)
 
         # 5. 清理正在执行的任务
@@ -288,8 +300,5 @@ class AsyncProduceStrategy(ProduceStrategy):
         aborted_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.ABORTED)
         expired_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
         logger.info(
-            f"[AsyncProduceStrategy] Task '{task_name}' | Finished! Final completed count: {completed_sample_count}, aborted count: {aborted_sample_count}, expired count: {expired_sample_count} in replay buffer."
-        )
-        logger.info(
-            f"[AsyncProduceStrategy] Task '{task_name}' | All worker tasks completed after pausing env controller."
+            f"[AsyncProduceStrategy] Task {task_name} | Finished! Final completed count: {completed_sample_count}, aborted count: {aborted_sample_count}, expired count: {expired_sample_count} in replay buffer."
         )

@@ -22,7 +22,7 @@ class SingleTurnAgentLoop(AgentLoop):
     ):
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_tokens = self.sample_params.max_tokens
-        self.partial_rollout_handler = PartialRolloutHandler(max_tokens=self.max_tokens, logger=logger)
+        self.partial_rollout_handler = PartialRolloutHandler(max_tokens=self.max_tokens)
 
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
         enable_partial_rollout = kwargs.get("enable_partial_rollout", False)

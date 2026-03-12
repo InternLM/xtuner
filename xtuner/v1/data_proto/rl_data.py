@@ -211,6 +211,9 @@ def update_seq_staleness(rollout_state: RolloutState, rollout_step: int) -> Roll
 
     cur_rollout_steps = min(rollout_state.response_steps, default=rollout_step)
     rollout_state.seq_staleness = rollout_step - cur_rollout_steps
+    logger.debug(
+        f"Updated seq_staleness for sample {rollout_state.uid} | Current rollout step: {rollout_step} | Earliest response token rollout step: {cur_rollout_steps} | Updated seq_staleness: {rollout_state.seq_staleness}"
+    )
     return rollout_state
 
 
