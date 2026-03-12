@@ -205,11 +205,18 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         logger.info(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
 
         tok_cache_dir: str | None = None  # set inside cache_dir branch when tokenize_fn is CachableTokenizeFunction
+        _cached_chunks_arr: np.ndarray | None = None
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
             logger.info(f"[Dataset] Load cached [{self.name}]{self.path} of cache tgs {cache_tag}.")
-            offset_path, num_tokens_path = cached["offsets"], cached["num_tokens"]
+            offset_path = cached["offsets"]
+            meta_path = cached.get("jsonl_meta") or cached.get("num_tokens")
             offsets = np.load(offset_path)
-            num_tokens = np.load(num_tokens_path)
+            if meta_path and meta_path.endswith(".npz"):
+                _meta = np.load(meta_path)
+                num_tokens = _meta["num_tokens"]
+                _cached_chunks_arr = _meta["chunks"] if "chunks" in _meta else None
+            else:
+                num_tokens = np.load(meta_path)
         elif cache_dir:
             self._shared_memory = self._init_shared_memory(anno_path)
             assert self.meta_path is not None
@@ -246,7 +253,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 #         "offsets": [
                 #             "<file cache path>"
                 #         ],
-                #         "num_tokens": {
+                #         "jsonl_meta": {
                 #             "<tokenize hash>": [
                 #                 <tokenize cache path>
                 #             ]
@@ -256,7 +263,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 #         "<tag name>": {
                 #             "<file path>": {
                 #                 "<tokenize hash>": {
-                #                     "num_tokens": "<tokenize cache path>",
+                #                     "jsonl_meta": "<tokenize cache path>/jsonl_meta.npz",
                 #                     "offsets": "<file cache path>",
                 #                     "datetime": "2025-06-30 09:40:24"
                 #                 }
@@ -288,24 +295,26 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                         mkdir_or_exist(tok_cache_dir)
                 barrier()
 
-                if "num_tokens.npy" in os.listdir(tok_cache_dir):
-                    _cached_file = os.path.join(tok_cache_dir, "num_tokens.npy")
-                    logger.info(f"Loading `num_tokens` from cache: {_cached_file}")
-                    num_tokens = np.load(_cached_file)
+                _meta_file = os.path.join(tok_cache_dir, "jsonl_meta.npz")
+                if os.path.exists(_meta_file):
+                    logger.info(f"Loading tokenize meta from cache: {_meta_file}")
+                    _meta = np.load(_meta_file)
+                    num_tokens = _meta["num_tokens"]
+                    _cached_chunks_arr = _meta["chunks"] if "chunks" in _meta else None
                 else:
-                    num_tokens = self.count_tokens(offsets, tok_cache_dir)
+                    num_tokens, _cached_chunks_arr = self.count_tokens(offsets, tok_cache_dir)
 
                 if get_rank() == 0:
                     with open(self.meta_path, "r+") as f:
                         origin_data = json.load(f)
                         data = origin_data[file_hash]
-                        if "num_tokens" not in data:
-                            data["num_tokens"] = {}
-                        if tok_hash not in data["num_tokens"]:
-                            data["num_tokens"][tok_hash] = [self.path]
+                        if "jsonl_meta" not in data:
+                            data["jsonl_meta"] = {}
+                        if tok_hash not in data["jsonl_meta"]:
+                            data["jsonl_meta"][tok_hash] = [self.path]
                         else:
-                            if self.path not in data["num_tokens"][tok_hash]:
-                                data["num_tokens"][tok_hash].append(self.path)
+                            if self.path not in data["jsonl_meta"][tok_hash]:
+                                data["jsonl_meta"][tok_hash].append(self.path)
 
                         if cache_tag is not None:
                             if "tags" not in origin_data:
@@ -320,7 +329,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
                             if tok_hash not in tag_data[self.path]:
                                 tag_data[self.path][tok_hash] = {
-                                    "num_tokens": os.path.join(tok_cache_dir, "num_tokens.npy"),
+                                    "jsonl_meta": os.path.join(tok_cache_dir, "jsonl_meta.npz"),
                                     "offsets": os.path.join(file_cache_dir, "offsets.npy"),
                                     "datetime": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 }
@@ -336,7 +345,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                     "`CachableTokenizeFunction`, data will always "
                     "be re-tokenized during training!"
                 )
-                num_tokens = self.count_tokens(offsets)
+                num_tokens, _ = self.count_tokens(offsets)
             else:
                 num_tokens = None
 
@@ -347,7 +356,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             offsets = self.count_offsets()
             num_tokens = None
             if tokenize_fn is not None:
-                num_tokens = self.count_tokens(offsets)
+                num_tokens, _ = self.count_tokens(offsets)
 
         # offset starts from 0 and endwith `file_size`
         # The size of offsets is `num_samples + 1`
@@ -361,10 +370,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         if num_tokens is not None and max_length is not None:
             assert isinstance(max_length, int)
-            # Skip max_length filter when chunks.npy exists: long docs are already split into chunks,
+            # Skip max_length filter when chunks exist: long docs are already split into chunks,
             # so filtering by total doc length would incorrectly discard valid long-text samples.
-            _chunks_npy = os.path.join(tok_cache_dir, "chunks.npy") if tok_cache_dir else None
-            if _chunks_npy is None or not os.path.exists(_chunks_npy):
+            if _cached_chunks_arr is None:
                 _filtered = [i for i in _sampled if num_tokens[i] <= max_length]
 
                 if len(_filtered) < len(_sampled):
@@ -380,11 +388,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         else:
             self.sampled.extend(random.sample(_sampled, _target_num_samples - len(self.sampled)))
 
-        # Expand sampled by chunks if chunks.npy exists
-        _chunks_npy_path = os.path.join(tok_cache_dir, "chunks.npy") if tok_cache_dir else None
-        if _chunks_npy_path and os.path.exists(_chunks_npy_path):
-            chunks_arr = np.load(_chunks_npy_path)
-            # chunks_arr shape: (total_chunks, 4) — [line_idx, char_start, char_end, num_tokens]
+        if _cached_chunks_arr is not None:
+            chunks_arr = _cached_chunks_arr
             line_to_chunks: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
             for row in chunks_arr:
                 line_idx, cs, ce, nt = int(row[0]), int(row[1]), int(row[2]), int(row[3])
@@ -574,16 +579,16 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                         for cs, ce, nt in chunks:
                             chunk_infos_global.append((line_idx, cs, ce, nt))
 
-        if rank == 0 and cache_dir:
-            save_path = os.path.join(cache_dir, "num_tokens.npy")
-            np.save(save_path, num_tokens)
+        chunks_arr = np.array(chunk_infos_global, dtype=np.int64) if has_chunks else None
 
-            if has_chunks:
-                chunks_path = os.path.join(cache_dir, "chunks.npy")
-                np.save(chunks_path, np.array(chunk_infos_global, dtype=np.int64))
+        if rank == 0 and cache_dir:
+            meta_save = {"num_tokens": num_tokens}
+            if chunks_arr is not None:
+                meta_save["chunks"] = chunks_arr
+            np.savez(os.path.join(cache_dir, "jsonl_meta.npz"), **meta_save)
 
         self.tokenize_fn.set_state("runtime")
-        return num_tokens
+        return num_tokens, chunks_arr
 
     def __len__(self):
         return len(self.offsets)
