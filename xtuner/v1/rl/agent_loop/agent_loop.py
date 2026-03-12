@@ -4,7 +4,7 @@ from typing import Callable
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto import RolloutState, SampleParams, Status, update_seq_staleness
 from xtuner.v1.rl.judger import NativeJudger, RouterJudger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
@@ -62,6 +62,17 @@ class AgentLoop(ABC):
         if not enable_partial_rollout or not rollout_state.response_ids or rollout_state.status == Status.COMPLETED:
             return rollout_state
 
+        # 如果状态是 EXPIRED，重置 tokens, sample_params和responses, 重新生成
+        if rollout_state.status == Status.EXPIRED:
+            rollout_state.tokens = rollout_state.prompt_ids
+            rollout_state.sample_params = rollout_state.sample_params.copy(update={"max_tokens": self.max_tokens})
+            rollout_state.response_ids = []
+            rollout_state.response = ""
+            rollout_state.logprobs = []
+            rollout_state.response_mask = []
+            rollout_state.response_steps = []
+            return rollout_state
+
         # Set up token and length variable
         response_ids = rollout_state.response_ids
         prompt_ids = list(rollout_state.prompt_ids or [])
@@ -84,11 +95,13 @@ class AgentLoop(ABC):
         }
         return rollout_state
 
-    async def _postprocess(self, rollout_state: RolloutState) -> RolloutState:
+    async def _postprocess(self, rollout_state: RolloutState, rollout_step: int) -> RolloutState:
         history_dict = rollout_state.extra_fields.pop("history_response_dict", None)
         if not history_dict:
             return rollout_state
 
+        # 需要在拼接历史response_ids前更新seq_staleness
+        rollout_state = update_seq_staleness(rollout_state, rollout_step)  # 计算 seq_staleness
         rollout_state.response_ids = history_dict.get("response_ids", []) + (rollout_state.response_ids or [])
         rollout_state.response = history_dict.get("response", "") + (rollout_state.response or "")
         rollout_state.logprobs = history_dict.get("logprobs", []) + (rollout_state.logprobs or [])
@@ -97,20 +110,20 @@ class AgentLoop(ABC):
         return rollout_state
 
     async def _generate_pipeline(
-        self, rollout_state: RolloutState, enable_partial_rollout: bool = False
+        self, rollout_state: RolloutState, enable_partial_rollout: bool, rollout_step: int
     ) -> RolloutState:
         rollout_state = await self._preprocess(rollout_state, enable_partial_rollout)  # preprocess for partial rollout
         rollout_state = await self.generate_sample(rollout_state)
-        rollout_state = await self._postprocess(rollout_state)  # postprocess for partial rollout
+        rollout_state = await self._postprocess(rollout_state, rollout_step)  # postprocess for partial rollout
         return rollout_state
 
     async def generate_group(
-        self, rollout_state: list[RolloutState], enable_partial_rollout: bool = False
+        self, rollout_state: list[RolloutState], enable_partial_rollout: bool = False, rollout_step: int = 0
     ) -> list[RolloutState]:
         pending_tasks = []
         for state in rollout_state:
             state.sample_params = self.sample_params
-            task = create_task(self._generate_pipeline(state, enable_partial_rollout))
+            task = create_task(self._generate_pipeline(state, enable_partial_rollout, rollout_step))
             pending_tasks.append(task)
         generated_samples = asyncio.gather(*pending_tasks)
         group_samples = await generated_samples

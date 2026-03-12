@@ -317,7 +317,7 @@ class RLColocateTrainer:
             # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
             # TODO: ray.get(self.rollout_controller.restart.remote())
             eval_batch: list[list[RolloutState]] = asyncio_run(
-                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
+                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size, rollout_step=0)
             )
             eval_metrics = self.evaluator.run(eval_batch)
             self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
@@ -336,7 +336,7 @@ class RLColocateTrainer:
                 # TODO: ray.get(self.rollout_controller.check_health.remote())
                 self.logger.info("start to generate rollout experience for training")
                 train_batch: list[list[RolloutState]] = asyncio_run(
-                    self.agent_loop_manager.produce_batch(self.global_batch_size)
+                    self.agent_loop_manager.produce_batch(self.global_batch_size, rollout_step=rollout_idx)
                 )
                 self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
                 rollout_info = {}  # TODO: rollout info?
@@ -381,7 +381,9 @@ class RLColocateTrainer:
                         with timer("evaluation", step_timer_dict):
                             # TODO: ray.get(self.rollout_controller.restart.remote())
                             eval_batch: list[list[RolloutState]] = asyncio_run(
-                                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
+                                self.eval_agent_loop_manager.produce_batch(
+                                    self.evaluator.eval_batch_size, rollout_step=rollout_idx
+                                )
                             )
                             eval_metrics = self.evaluator.run(eval_batch)
                             # TODO: save eval trajectory
@@ -454,10 +456,13 @@ class RLColocateTrainer:
                 response_len_list.append(len(response_ids))
 
                 # 根据 response_mask 计算 response_ids 对应的shifted_labels
-                if group[i].response_mask is None:
+                if group[i].response_mask:
                     response_mask = [1] * len(response_ids)
                     response_labels = response_ids
                 else:
+                    assert len(group[i].response_mask) == len(response_ids), (  # type: ignore[arg-type]
+                        f"{len(group[i].response_mask)} vs {len(response_ids)}"  # type: ignore[arg-type]
+                    )
                     response_mask = cast(list[int], group[i].response_mask)
                     response_labels = [
                         response_id if mask_id != 0 else -100
