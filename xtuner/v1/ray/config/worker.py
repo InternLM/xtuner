@@ -228,6 +228,27 @@ class RolloutConfig(BaseModel):
             help="Maximum number of retries per sample before marking it as failed.",
         ),
     ] = 1
+    max_prefill_token_num: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="The number of tokens each iteration during prefill.",
+        ),
+    ] = None
+    router_n_groups: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="The number of groups in MoE model with group router, e.g. Intern-S1-Pro.",
+        ),
+    ] = None
+    fp32_lm_head: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Use float32 for language model head.",
+        ),
+    ] = False
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
     _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
 

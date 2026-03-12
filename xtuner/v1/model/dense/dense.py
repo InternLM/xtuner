@@ -224,6 +224,10 @@ class Dense(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        if self.fsdp_config.fp32_lm_head:
+            lm_head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
+        else:
+            lm_head_mp_policy = mp_policy
         num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
 
         generator = torch.Generator()
@@ -260,7 +264,7 @@ class Dense(BaseModel):
         fully_shard(
             self.embed_tokens,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
+            mp_policy=lm_head_mp_policy if self.config.tie_word_embeddings else mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
@@ -276,7 +280,7 @@ class Dense(BaseModel):
         fully_shard(
             self.lm_head,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
+            mp_policy=lm_head_mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
