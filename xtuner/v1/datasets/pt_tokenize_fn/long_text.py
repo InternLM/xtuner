@@ -189,14 +189,16 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
         if self.state == "cache":
             boundaries = self.shard_char_boundaries(text)
             chunks = []
+            num_tokens_list = []
             for cs, ce in boundaries:
                 chunk_text = self._make_chunk_text(text, cs, ce)
                 nt = len(self.tokenizer.encode(chunk_text, add_special_tokens=False))
                 if nt < self.min_chunk_tokens and (cs, ce) == boundaries[-1]:
                     continue  # drop trailing short chunk
-                chunks.append({"char_start": cs, "char_end": ce, "num_tokens": nt})
-            total = sum(c["num_tokens"] for c in chunks)
-            return cast(CacheItem, {"num_tokens": total, "chunks": chunks})
+                num_tokens_list.append(nt)
+                chunks.append({"char_start": cs, "char_end": ce})
+            # total = sum(c["num_tokens"] for c in chunks)
+            return cast(CacheItem, {"num_tokens": num_tokens_list, "chunks": chunks})
 
         # Runtime: tokenize specified char range
         if char_start is not None:
