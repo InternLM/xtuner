@@ -315,7 +315,6 @@ class RLColocateTrainer:
 
         if self._enable_initial_evaluate and not self._debug_rollout:
             # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
-            # TODO: ray.get(self.rollout_controller.restart.remote())
             eval_batch: list[list[RolloutState]] = asyncio_run(
                 self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size, rollout_step=0)
             )
@@ -342,7 +341,6 @@ class RLColocateTrainer:
                 rollout_info = {}  # TODO: rollout info?
                 # TODO: save train trajectory
                 if not self._debug_rollout:
-                    # TODO: ray.get(self.rollout_controller.pause_generation.remote())
                     ray.get(self.rollout_controller.offload.remote())
 
                 if not self._debug_rollout:
@@ -379,7 +377,6 @@ class RLColocateTrainer:
                     eval_log_info = {}
                     if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
                         with timer("evaluation", step_timer_dict):
-                            # TODO: ray.get(self.rollout_controller.restart.remote())
                             eval_batch: list[list[RolloutState]] = asyncio_run(
                                 self.eval_agent_loop_manager.produce_batch(
                                     self.evaluator.eval_batch_size, rollout_step=rollout_idx
@@ -456,7 +453,7 @@ class RLColocateTrainer:
                 response_len_list.append(len(response_ids))
 
                 # 根据 response_mask 计算 response_ids 对应的shifted_labels
-                if group[i].response_mask:
+                if not group[i].response_mask:
                     response_mask = [1] * len(response_ids)
                     response_labels = response_ids
                 else:
