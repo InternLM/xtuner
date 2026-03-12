@@ -1,4 +1,4 @@
-from .agent_loop import AgentLoop, AgentLoopConfig, SingleTurnAgentLoop, SingleTurnAgentLoopConfig
+from .agent_loop import AgentLoop, AgentLoopConfig
 from .agent_loop_manager import AgentLoopManager, AgentLoopManagerConfig
 from .producer import (
     AsyncProduceStrategy,
@@ -9,6 +9,7 @@ from .producer import (
     SyncProduceStrategyConfig,
 )
 from .sampler import Sampler, SamplerConfig
+from .single_turn_agent_loop import SingleTurnAgentLoop, SingleTurnAgentLoopConfig
 
 
 __all__ = [

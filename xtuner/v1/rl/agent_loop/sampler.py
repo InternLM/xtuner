@@ -73,14 +73,9 @@ class Sampler(_DatasetSampler):
         super().__init__(dataloader, prompt_repeat_k)
         self.replay_buffer = replay_buffer
 
-    async def sample(self, task_name: str, sample_from_expired_storage: bool = False) -> list[RolloutState]:
-        status_to_check = [Status.EXPIRED, Status.ABORTED] if sample_from_expired_storage else [Status.ABORTED]
-
-        for status in status_to_check:
-            buffer_data = await self.replay_buffer.get(1, task_name=task_name, group_status=status)
+    async def sample(self, task_name: str, group_status: Status | None = None) -> list[RolloutState]:
+        if group_status is not None:
+            buffer_data = await self.replay_buffer.get(1, task_name=task_name, group_status=group_status)
             if buffer_data:
-                status_name = "expired" if status == Status.EXPIRED else "aborted"
-                logger.debug(f"Sampled {status_name} item(s) from replay buffer for task '{task_name}'.")
                 return buffer_data[0]
-
         return self.sample_from_dataloader()
