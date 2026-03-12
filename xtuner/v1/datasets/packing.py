@@ -13,6 +13,7 @@ from torch.utils.data import ConcatDataset
 from tqdm import tqdm
 
 from xtuner.v1.utils import get_logger
+from xtuner.v1.data_proto.utils import unpack_sequence
 
 from .jsonl import JsonlDataset
 from .vlm_jsonl import VLMJsonlDataset
@@ -64,10 +65,15 @@ class _LegacySoftPackDataset(torch.utils.data.Dataset):
 
         if global_pack:
             num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
+            num_img_tokens = [np.concatenate([dset.num_img_tokens for dset in datasets])]
+            num_img_counts = [np.concatenate([dset.num_img_counts for dset in datasets])]
+            assert len(num_tokens[0]) == len(num_img_counts[0]), "num_tokens and num_img_counts should have the same length after concatenation. but got {} and {}".format(len(num_tokens[0]), len(num_img_counts[0]))
             datasets = [ConcatDataset(datasets)]
         else:
             num_tokens = [dset.num_tokens for dset in datasets]
-
+            num_img_tokens = [dset.num_img_tokens for dset in datasets]
+            num_img_counts = [dset.num_img_counts for dset in datasets]
+        
         self.datasets = datasets
         self.seed = seed
         self.global_pack = global_pack
@@ -75,7 +81,7 @@ class _LegacySoftPackDataset(torch.utils.data.Dataset):
 
         pack_infos = []
         for i, dataset in enumerate(self.datasets):
-            _infos = self.get_pack_infos(dataset, i, num_tokens[i])
+            _infos = self.get_pack_infos(dataset, i, num_tokens[i], num_img_tokens[i], num_img_counts[i])
             pack_infos.append(_infos)
         self.pack_infos = concatenate_datasets(pack_infos)
 
@@ -83,7 +89,7 @@ class _LegacySoftPackDataset(torch.utils.data.Dataset):
     def longest(self):
         return self.pack_infos["longest"]
 
-    def get_pack_infos(self, dataset, dataset_id, num_tokens):
+    def get_pack_infos(self, dataset, dataset_id, num_tokens, num_img_tokens, num_img_counts):
         inds = list(range(len(dataset)))
         self.random.shuffle(inds)
 
@@ -142,6 +148,11 @@ def closest_sum_indices(buffer, value):
 
     return closest_indices
 
+def calc_num_patch(num_tokens, num_img_tokens, flash_attn_block_size):
+    llm_num_patch = (round(num_tokens / flash_attn_block_size)) ** 2
+    img_num_patch = ((num_img_tokens/flash_attn_block_size) ** 2).sum()
+    return llm_num_patch + img_num_patch
+
 
 def get_pack_chunk_infos(
     inds,
@@ -151,14 +162,30 @@ def get_pack_chunk_infos(
     pack_len_type,
     pack_extra_buffer_size,
     num_tokens=None,
+    num_img_tokens=None,
+    num_img_counts=None,
     shm_name=None,
     shape=None,
     dtype=None,
+    img_tokens_shm_name=None,
+    img_tokens_shape=None,
+    img_tokens_dtype=None,
+    img_counts_shm_name=None,
+    img_counts_shape=None,
+    img_counts_dtype=None,
 ):
     if num_tokens is None:
         existing_shm = shared_memory.SharedMemory(name=shm_name)
         num_tokens = np.ndarray(shape, dtype=dtype, buffer=existing_shm.buf)
-
+    if num_img_tokens is None:
+        existing_img_shm = shared_memory.SharedMemory(name=img_tokens_shm_name)
+        num_img_tokens = np.ndarray(img_tokens_shape, dtype=img_tokens_dtype, buffer=existing_img_shm.buf)
+    if num_img_counts is None:
+        existing_img_counts_shm = shared_memory.SharedMemory(name=img_counts_shm_name)
+        num_img_counts = np.ndarray(img_counts_shape, dtype=img_counts_dtype, buffer=existing_img_counts_shm.buf)
+    
+    num_img_tokens_list = unpack_sequence(num_img_tokens, num_img_counts)
+    
     item_buffer = []
     length_buffer = []
     longest = 0
@@ -172,7 +199,7 @@ def get_pack_chunk_infos(
         if num_tokens[shfl_i] + sum(length_buffer) <= target:
             item_buffer.append(shfl_i)
             length_buffer.append(num_tokens[shfl_i])
-            num_patch += (round(num_tokens[shfl_i] / flash_attn_block_size)) ** 2
+            num_patch += calc_num_patch(num_tokens[shfl_i], num_img_tokens_list[shfl_i], flash_attn_block_size)
             longest = max(longest, num_tokens[shfl_i])
         else:
             if len(item_buffer) > 0:
@@ -197,7 +224,7 @@ def get_pack_chunk_infos(
                             indices_to_remove.append(closest_inds + len(inds) - len(buffer_index))
                             item_buffer.append(buffer_index[closest_inds])
                             length_buffer.append(num_tokens[buffer_index[closest_inds]])
-                            num_patch += (round(num_tokens[buffer_index[closest_inds]] / flash_attn_block_size)) ** 2
+                            num_patch += calc_num_patch(num_tokens[buffer_index[closest_inds]], num_img_tokens_list[buffer_index[closest_inds]], flash_attn_block_size)
                             longest = max(longest, num_tokens[buffer_index[closest_inds]])
 
                         indices_to_remove = sorted(indices_to_remove, reverse=True)
@@ -218,7 +245,7 @@ def get_pack_chunk_infos(
             item_buffer = [shfl_i]
             length_buffer = [num_tokens[shfl_i]]
             longest = num_tokens[shfl_i]
-            num_patch = (round(num_tokens[shfl_i] / flash_attn_block_size)) ** 2
+            num_patch += calc_num_patch(num_tokens[shfl_i], num_img_tokens_list[shfl_i], flash_attn_block_size)
 
     if len(item_buffer) > 0:
         info = {
@@ -237,13 +264,15 @@ def get_pack_infos_by_expand_soft_split(
     inds: list[int],
     dataset_id: int,
     num_tokens: np.ndarray,
+    num_img_tokens: np.ndarray,
+    num_img_counts: np.ndarray,
     pack_max_length: int,
     pack_workers: int = 8,
     pack_chunk_size: int = 10000,
     flash_attn_block_size: int = 128,
     pack_len_type: str = "total_block",
     pack_extra_buffer_size: int = 1000,
-):
+):  
     if pack_workers <= 1:
         pack_infos = []
         for i in range(0, len(inds), pack_chunk_size):
@@ -256,6 +285,8 @@ def get_pack_infos_by_expand_soft_split(
                 pack_len_type,
                 pack_extra_buffer_size,
                 num_tokens,
+                num_img_tokens,
+                num_img_counts,
             )
             pack_infos.extend(chunk_pack_infos)
     else:
@@ -264,6 +295,14 @@ def get_pack_infos_by_expand_soft_split(
         shm = shared_memory.SharedMemory(create=True, size=num_tokens.nbytes)
         shm_array = np.ndarray(num_tokens.shape, dtype=num_tokens.dtype, buffer=shm.buf)
         np.copyto(shm_array, num_tokens)
+
+        img_tokens_shm = shared_memory.SharedMemory(create=True, size=num_img_tokens.nbytes)
+        img_tokens_shm_array = np.ndarray(num_img_tokens.shape, dtype=num_img_tokens.dtype, buffer=img_tokens_shm.buf)
+        np.copyto(img_tokens_shm_array, num_img_tokens)
+
+        img_counts_shm = shared_memory.SharedMemory(create=True, size=num_img_counts.nbytes)
+        img_counts_shm_array = np.ndarray(num_img_counts.shape, dtype=num_img_counts.dtype, buffer=img_counts_shm.buf)
+        np.copyto(img_counts_shm_array, num_img_counts)
 
         mp_context = multiprocessing.get_context("fork")
         process_chunk_with_args = partial(
@@ -276,6 +315,12 @@ def get_pack_infos_by_expand_soft_split(
             shm_name=shm.name,
             shape=num_tokens.shape,
             dtype=num_tokens.dtype,
+            img_tokens_shm_name=img_tokens_shm.name,
+            img_tokens_shape=num_img_tokens.shape,
+            img_tokens_dtype=num_img_tokens.dtype,
+            img_counts_shm_name=img_counts_shm.name,
+            img_counts_shape=num_img_counts.shape,
+            img_counts_dtype=num_img_counts.dtype,
         )
         with ProcessPoolExecutor(max_workers=pack_workers, mp_context=mp_context) as executor:
             results = list(tqdm(executor.map(process_chunk_with_args, chunks_inds)))
@@ -320,12 +365,14 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
             seed=seed,
         )
 
-    def get_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray):
+    def get_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, num_img_tokens: np.ndarray, num_img_counts: np.ndarray):
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
         pack_infos = get_pack_infos_by_expand_soft_split(
             inds,
             dataset_id,
             num_tokens,
+            num_img_tokens,
+            num_img_counts,
             pack_max_length=self.pack_max_length,
             pack_workers=self.pack_workers,
             pack_chunk_size=self.pack_chunk_size,

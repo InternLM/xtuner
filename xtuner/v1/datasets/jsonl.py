@@ -408,6 +408,22 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         if self._shared_memory is not None:
             self._release_shared_memory()
+    
+    @property
+    def num_img_tokens(self):
+        if 'num_img_tokens' in self._meta:
+            return self._meta['num_img_tokens']
+        else:
+            zero_array = np.zeros_like(self._meta['num_tokens'])
+            return zero_array
+        
+    @property
+    def num_img_counts(self):
+        if 'num_img_counts' in self._meta:
+            return self._meta['num_img_counts']
+        else:
+            zero_array = np.ones_like(self._meta['num_tokens'])
+            return zero_array
 
     def _init_shared_memory(self, path: str) -> SharedMemory:
         if dist.is_initialized():
@@ -473,6 +489,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         res = {"num_tokens": tokenized["num_tokens"]}
         if "chunks" in tokenized:
             res["chunks"] = tokenized["chunks"]
+        if 'num_img_tokens' in tokenized:
+            res['num_img_tokens'] = tokenized['num_img_tokens']
         return res
 
     def count_tokens(self, offsets, cache_dir=None):
@@ -537,7 +555,21 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             serialized_tokenized = {
                 "num_tokens": np.array([data["num_tokens"] for data in tokenized]),
             }
-
+            if 'num_img_tokens' in tokenized[0]:
+                assert all('num_img_tokens' in data for data in tokenized), "num_img_tokens should be in all tokenized data if exists"
+                total_num_img_tokens = []
+                total_num_img_counts = []
+                for data in tokenized:
+                    num_img_tokens = data['num_img_tokens']
+                    if isinstance(num_img_tokens, int):
+                        num_img_tokens = [num_img_tokens]
+                    total_num_img_tokens.extend(num_img_tokens)
+                    total_num_img_counts.append(len(num_img_tokens))
+                # The lengths of num_img_tokens and num_img_counts are inconsistent
+                serialized_tokenized['num_img_tokens'] = np.array(total_num_img_tokens)
+                serialized_tokenized['num_img_counts'] = np.array(total_num_img_counts)
+                assert len(serialized_tokenized['num_img_counts']) == len(serialized_tokenized['num_tokens']), "The length of num_img_counts should be the same as num_tokens. but got {} and {}".format(len(serialized_tokenized['num_img_counts']), len(serialized_tokenized['num_tokens']))
+                   
         if dist.is_initialized():
             # TODO:
             # This is a workaround for `all_gather_object` would hang when

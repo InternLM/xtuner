@@ -4,6 +4,7 @@ from typing_extensions import TypedDict
 
 class CacheItem(TypedDict):
     num_tokens: int
+    num_img_tokens: int | list[int]
 
 
 class DataItem(CacheItem):

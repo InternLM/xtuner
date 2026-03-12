@@ -175,7 +175,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
-        return {"num_tokens": len(input_ids)}
+        return {"num_tokens": len(input_ids), 'num_img_tokens':0}
 
     def pure_text_get_item(self, data_item: Any) -> BaseMLLMDataItem:
         raise NotImplementedError
