@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 import numpy as np
 import xxhash
 from PIL import Image
-from typing_extensions import TypedDict
 
 from .data_item import CacheItem
 
@@ -18,10 +17,6 @@ T = TypeVar("T")
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
-
-
-class CacheObj(TypedDict, total=False):
-    num_tokens: int
 
 
 class CachableTokenizeFunction(ABC, Generic[T]):

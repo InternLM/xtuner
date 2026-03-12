@@ -84,6 +84,7 @@ MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDeco
 
 class MoEModelOutputs(ModelOutputs):
     router_logits: dict[str, torch.Tensor] | None = None
+    router_weights: dict[str, torch.Tensor] | None = None
     balancing_loss: torch.Tensor | None = None
     z_loss: torch.Tensor | None = None
     tokens_per_expert_global: torch.Tensor

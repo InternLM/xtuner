@@ -29,7 +29,7 @@ from .resume import get_dataloader_state, load_dataloader_state
 from .rl_tokenize_fn import RLTokenizeFnConfig
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .sft_tokenize_fn import OpenaiTokenizeFunction, OpenaiTokenizeFunctionConfig
-from .utils import CachableTokenizeFunction, CacheObj, calculate_file_sha256, calculate_xxhash, tokenizer_hash
+from .utils import CachableTokenizeFunction, calculate_file_sha256, calculate_xxhash, tokenizer_hash
 from .vlm_jsonl import VLMJsonlDataset
 
 
@@ -41,7 +41,6 @@ __all__ = [
     "CustomSampler",
     "JsonlDataset",
     "CachableTokenizeFunction",
-    "CacheObj",
     "calculate_file_sha256",
     "calculate_xxhash",
     "tokenizer_hash",
