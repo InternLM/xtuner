@@ -1,4 +1,4 @@
-from xtuner.v1.model.base import TransformerConfig
+from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.model.moe.qwen3_5_text import Qwen3_5_VLTextMoE35BA3BConfig
 from xtuner.v1.utils import get_logger
 
@@ -19,7 +19,7 @@ class Qwen3_5_ProjectorConfig(Qwen3VLProjectorConfig):
 class Qwen3_5_BaseConfig(Qwen3VLBaseConfig):
     vision_config: Qwen3_5_VisionConfig
     projector_config: Qwen3_5_ProjectorConfig
-    text_config: TransformerConfig
+    text_config: MoEConfig
 
     image_token_id: int = 248056
     video_token_id: int = 248057
@@ -30,4 +30,4 @@ class Qwen3_5_BaseConfig(Qwen3VLBaseConfig):
 class Qwen3_5_VLMoE35BA3Config(Qwen3_5_BaseConfig):
     vision_config: Qwen3_5_VisionConfig = Qwen3_5_VisionConfig()
     projector_config: Qwen3_5_ProjectorConfig = Qwen3_5_ProjectorConfig()
-    text_config: TransformerConfig = Qwen3_5_VLTextMoE35BA3BConfig()
+    text_config: MoEConfig = Qwen3_5_VLTextMoE35BA3BConfig()
