@@ -16,11 +16,9 @@ elements, then slices indices for the local rank.
 
 import json
 import math
-import os
 from typing import Iterator
 
 import numpy as np
-import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import Sampler
 
@@ -44,7 +42,7 @@ def _load_sampler_config(path: str) -> list[int]:
         return arr.tolist()
     else:
         # JSONL: single line containing a JSON array.
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             content = f.read().strip()
         try:
             order = json.loads(content)
@@ -124,14 +122,14 @@ class CustomSampler(Sampler):
         if rounded_len > raw_len:
             # Repeat tail elements
             extra = rounded_len - raw_len
-            tail = global_order[-(extra % raw_len or raw_len):]
+            tail = global_order[-(extra % raw_len or raw_len) :]
             padded: list[int] = list(global_order) + (tail * (extra // raw_len + 1))[:extra]
         else:
             padded = list(global_order)
 
         # Local indices for this rank: interleaved slicing
         self._local_indices: list[int] = padded[self.rank :: self.world_size]
-        self.total_size = rounded_len              # global total (all ranks)
+        self.total_size = rounded_len  # global total (all ranks)
         self.num_samples = len(self._local_indices)  # per-rank
 
         self.epoch = 0
@@ -153,7 +151,7 @@ class CustomSampler(Sampler):
     # ------------------------------------------------------------------
 
     def __iter__(self) -> Iterator[int]:
-        yield from self._local_indices[self.step:]
+        yield from self._local_indices[self.step :]
         self.step = 0
 
     def __len__(self) -> int:
