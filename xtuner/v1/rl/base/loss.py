@@ -96,14 +96,36 @@ class BaseRLLossConfig(BaseLossConfig):
 
     def build(
         self,
-        sp_mesh: DeviceMesh | None,
-        shifted_labels: torch.Tensor,
-        advantages: torch.Tensor,
-        rollout_logprobs: torch.Tensor | None = None,
-        old_logprobs: torch.Tensor | None = None,
-        rollout_is_weights: torch.Tensor | None = None,
-        ref_logprobs: torch.Tensor | None = None,
-    ) -> "BaseRLLossContext":
+        data: dict,
+        sp_mesh: DeviceMesh | None = None,
+    ) -> "BaseRLLossContext | None":
+        """Build RL loss context from data dict.
+
+        Args:
+            data (dict): Data dictionary containing RL-specific fields:
+                - shifted_labels (torch.Tensor): The shifted labels
+                - advantages (torch.Tensor): Advantage estimates
+                - rollout_logprobs (torch.Tensor | None): Rollout log probabilities
+                - old_logprobs (torch.Tensor | None): Old policy log probabilities (optional, can be set later)
+                - rollout_is_weights (torch.Tensor | None): Importance sampling weights
+                - ref_logprobs (torch.Tensor | None): Reference model log probabilities
+            sp_mesh (DeviceMesh | None): Sequence parallel device mesh
+
+        Returns:
+            BaseRLLossContext | None: The built loss context, or None if required fields are missing
+        """
+        # Check for required fields
+        if "shifted_labels" not in data or "advantages" not in data:
+            return None
+
+        # Extract RL-specific fields from data
+        shifted_labels = data["shifted_labels"]
+        advantages = data["advantages"]
+        rollout_logprobs = data.get("rollout_logprobs", None)
+        old_logprobs = data.get("old_logprobs", None)
+        rollout_is_weights = data.get("rollout_is_weights", None)
+        ref_logprobs = data.get("ref_logprobs", None)
+
         LossKwargs = self._loss_kwargs_cls
         loss_kwargs = LossKwargs(
             shifted_labels=shifted_labels,

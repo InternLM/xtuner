@@ -497,10 +497,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             rollout_logprobs = data.get("rollout_logprobs", None)
             rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
             loss_ctx = loss_cfg.build(
-                self.sp_mesh, shifted_labels=shifted_labels, advantages=advantages, rollout_logprobs=rollout_logprobs
+                data={
+                    "shifted_labels": shifted_labels,
+                    "advantages": advantages,
+                    "rollout_logprobs": rollout_logprobs,
+                },
+                sp_mesh=self.sp_mesh,
             )
 
             seq_ctx_list.append(seq_ctx)
+            assert loss_ctx is not None
             loss_ctx_list.append(loss_ctx)
 
         del data_batches
@@ -592,8 +598,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         LossContext = loss_cfg.loss_ctx_cls
         for i in range(0, len(loss_ctx_list), iters_per_step):
             batches_loss_ctx = loss_ctx_list[i : i + iters_per_step]
-            batches_loss_ctx = LossContext.build_batches(batches_loss_ctx)
-            batched_loss_ctx_list.extend(batches_loss_ctx)
+            batched_loss_ctx_list.extend(
+                LossContext.build_batches(batches_loss_ctx)  # type: ignore[arg-type]
+            )
 
         # train optimizer steps
         for i in range(0, len(seq_ctx_list), iters_per_step):
@@ -601,7 +608,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             batches_loss_ctx = batched_loss_ctx_list[i : i + iters_per_step]
 
             engine_input = [
-                ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+                ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)  # type: ignore[typeddict-item]
                 for seq_ctx, loss_ctx in zip(batches_seq_ctx, batches_loss_ctx)
             ]
 
@@ -703,7 +710,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=self.sp_mesh)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=self.sp_mesh)
             loss_ctx_list.append(loss_ctx)
 
         del data_batch
