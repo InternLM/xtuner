@@ -43,9 +43,25 @@ class CELossConfig(BaseLossConfig):
 
     def build(
         self,
-        shifted_labels: torch.Tensor,
+        data: dict,
         sp_mesh: DeviceMesh | None = None,
-    ) -> "CELossContext":
+    ) -> "CELossContext | None":
+        """Build CELossContext from data dict.
+
+        Args:
+            data (dict): Data dict containing loss-related fields.
+                Required: shifted_labels
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+
+        Returns:
+            CELossContext | None: Built loss context. Returns None if shifted_labels
+                is not present in data dict.
+        """
+        if "shifted_labels" not in data:
+            return None
+        # Extract required fields from data
+        shifted_labels = data["shifted_labels"]
+
         loss_kwargs = CELossKwargs(shifted_labels=shifted_labels).to(DEVICE)
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
