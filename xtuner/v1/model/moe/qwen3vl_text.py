@@ -109,12 +109,15 @@ class Qwen3VLTextMoE(Qwen3MoE):
         hidden_states[visual_pos_masks, :] = local_this
         return hidden_states
 
-    def _forward(
+    def _forward(  # type: ignore[override]
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext | None,
         return_router_logits: bool = False,
     ) -> MoEModelOutputs:
+        if seq_ctx.deepstack_visual_embeds is None:
+            return super()._forward(seq_ctx, loss_ctx, return_router_logits)  # type: ignore[arg-type]
+
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
 
@@ -194,7 +197,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
         router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
 
         if self.balancing_loss:
-            balancing_loss = self.balancing_loss(
+            balancing_loss = self.balancing_loss(  # type: ignore[operator]
                 router_weights=router_weights,
                 n_routed_experts=self.config.n_routed_experts,
                 num_experts_per_tok=self.config.num_experts_per_tok,
@@ -202,7 +205,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
             output["balancing_loss"] = balancing_loss
 
         if self.z_loss:
-            z_loss = self.z_loss(router_logits=router_logits)
+            z_loss = self.z_loss(router_logits=router_logits)  # type: ignore[operator]
             output["z_loss"] = z_loss
 
         tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
