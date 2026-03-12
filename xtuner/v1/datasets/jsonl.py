@@ -199,9 +199,6 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         self.name = name
         self._shared_memory = None
 
-        self.line_idxs: np.ndarray | None = None
-        self.chunks: np.ndarray | None = None
-
         self.tokenizer_workers = int(os.environ.get("XTUNER_TOKENIZE_WORKERS", 8))
         self.meta_path = os.path.join(cache_dir, CACHE_META) if cache_dir else None
 
