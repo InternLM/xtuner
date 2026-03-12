@@ -25,7 +25,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.mock_tokenizer = MagicMock()
 
         # 3. 准备 ReplayBuffer
-        replay_buffer_cfg = AsyncReplayBufferConfig(min_staleness=1, max_staleness=5)
+        replay_buffer_cfg = AsyncReplayBufferConfig()
         self.replay_buffer = replay_buffer_cfg.build()
 
     async def test_sampler_with_replay_buffer(self):
