@@ -34,7 +34,7 @@ class Qwen3VLTextDense(Qwen3Dense):
         hidden_states[visual_pos_masks, :] = local_this
         return hidden_states
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
         loss_ctx: CELossContext,
