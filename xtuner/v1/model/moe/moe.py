@@ -2,7 +2,7 @@
 import os
 import types
 from pathlib import Path
-from typing import Annotated, Literal, Self, Sequence, cast
+from typing import Annotated, Literal, Self, Sequence, cast, TypedDict
 
 import torch
 import torch.distributed as dist
@@ -27,7 +27,18 @@ from typing_extensions import overload, override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
+from xtuner.v1.loss import (
+    BalancingLoss,
+    BalancingLossConfig,
+    BalancingLossContext,
+    BalancingLossKwargs,
+    CELossContext,
+    ZLoss,
+    ZLossConfig,
+    ZLossContext,
+    ZLossKwargs,
+    BaseLossContext,
+)
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -109,31 +120,10 @@ class MoEBatchForwardInfo(BatchForwardInfo):
     maxvio: float
 
 
-class BalancingLossConfig(PydanticBaseModel):
-    model_config = ConfigDict(extra="forbid")
-    balancing_loss_alpha: float = 0.001
-    balancing_loss_global_average: bool = True
-
-    def build(self, router_scoring_func) -> BalancingLoss:
-        return BalancingLoss(
-            self.balancing_loss_alpha,
-            self.balancing_loss_global_average,
-            router_scoring_func=router_scoring_func,
-        )
-
-
-class ZLossConfig(PydanticBaseModel):
-    model_config = ConfigDict(extra="forbid")
-    z_loss_alpha: float = 0.001
-    z_loss_global_average: bool = True
-
-    def build(self) -> "ZLoss":
-        from xtuner.v1.loss import ZLoss
-
-        return ZLoss(
-            self.z_loss_alpha,
-            self.z_loss_global_average,
-        )
+class MoELossContextDict(TypedDict):
+    lm: BaseLossContext
+    balancing: BalancingLossContext | None
+    z_loss: ZLossContext | None
 
 
 class MoEConfig(TransformerConfig):
@@ -204,17 +194,6 @@ class MoE(BaseModel):
         # _init_load_spec 放到 post init 里
         self._init_load_spec()
         self._maybe_enable_compile(self.compile_cfg)
-
-        self.balancing_loss: BalancingLoss | None
-        self.z_loss: ZLoss | None
-        if self.config.balancing_loss_cfg is not None:
-            self.balancing_loss = self.config.balancing_loss_cfg.build(self.config.router.scoring_func)
-        else:
-            self.balancing_loss = None
-        if self.config.z_loss_cfg is not None:
-            self.z_loss = self.config.z_loss_cfg.build()
-        else:
-            self.z_loss = None
 
         self.offload_stream = torch.cuda.Stream()
 
@@ -304,10 +283,44 @@ class MoE(BaseModel):
 
             e_score_correction_bias.add_(updates)
 
+    def build_loss_ctx_batch(
+        self,
+        data_batch: list["ColateItem"],
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list[MoELossContextDict]:
+        """Build and calibrate loss contexts for MoE model.
+
+        Args:
+            data_batch (list[dict]): All microbatch data
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh
+            cu_seq_lens_list (list[torch.IntTensor] | None): For calibration
+
+        Returns:
+            list[dict]: Loss context dict for each microbatch.
+                Each dict contains:
+                - "lm": LM loss context
+                - "balancing": Balancing loss context (if configured)
+                - "z_loss": Z-loss context (if configured)
+
+        Note:
+            Auxiliary loss contexts are built without parameters.
+            All data is passed to forward() at runtime:
+            - balancing_ctx(router_weights, n_routed_experts, num_experts_per_tok)
+            - z_loss_ctx(router_logits)
+        """
+        # Build LM loss context
+        res = super().build_loss_ctx_batch(data_batch, sp_mesh)
+
+        # Add auxiliary losses
+        self._add_auxiliary_loss("balancing", self.config.balancing_loss_cfg, data_batch, res)
+        self._add_auxiliary_loss("z_loss", self.config.z_loss_cfg, data_batch, res)
+
+        return res
+
     def forward(
         self,
         seq_ctx: list[SequenceContext] | SequenceContext,
-        loss_ctx: list[CELossContext] | CELossContext | None,
+        loss_ctx: list[MoELossContextDict] | MoELossContextDict | None,
         return_router_logits: bool = False,
     ):
         # TODO: caoweihan: Recover this assertion after the refactor of LossContext
@@ -362,7 +375,7 @@ class MoE(BaseModel):
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
-        loss_ctx_list: list[CELossContext],
+        loss_ctx_list: list[MoELossContextDict],
         return_router_logits: bool = False,
     ) -> MoEModelOutputs:
         """Micro-batch forward pass for MoE model.
@@ -463,7 +476,9 @@ class MoE(BaseModel):
         cat_hidden_states = self.norm(cat_hidden_states)
 
         # Process final outputs for each micro-batch
-        cat_loss_ctx = CELossContext.cat(loss_ctx_list)
+        # Extract LM loss context from dict
+        lm_loss_ctx_list = [loss_ctx_dict["lm"] for loss_ctx_dict in loss_ctx_list]
+        cat_loss_ctx = type(lm_loss_ctx_list[0]).cat(lm_loss_ctx_list)
         loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cat_loss_ctx)
 
         # Aggregate losses (mean across micro-batches)
@@ -495,23 +510,35 @@ class MoE(BaseModel):
             combined_router_logits = torch.cat(all_router_logits, dim=1)  # [num_layers, total_seq, num_experts]
             combined_router_weights = torch.cat(all_router_weights, dim=1)
 
-            # Calculate balancing loss across all micro-batches
-            batch_size = loss_ctx_list[0].batch_size if loss_ctx_list else 1
-            if self.balancing_loss:
-                balancing_loss = (
-                    self.balancing_loss(
-                        router_weights=combined_router_weights,
-                        n_routed_experts=self.config.n_routed_experts,
-                        num_experts_per_tok=self.config.num_experts_per_tok,
+            # Build balancing loss contexts
+            balancing_loss_ctx_list: list[BalancingLossContext] = []
+            for loss_ctx_dict in loss_ctx_list:
+                bal_ctx = loss_ctx_dict.get("balancing")
+                if bal_ctx is not None:
+                    balancing_loss_ctx_list.append(bal_ctx)
+
+            if balancing_loss_ctx_list:
+                # Compute balancing loss by passing all parameters to forward
+                balancing_loss = sum(
+                    ctx(
+                        combined_router_weights,
+                        self.config.n_routed_experts,
+                        self.config.num_experts_per_tok,
                     )
-                    / batch_size
-                    * len(seq_ctx_list)
+                    for ctx in balancing_loss_ctx_list
                 )
                 output["balancing_loss"] = balancing_loss
 
-            # Calculate z-loss across all micro-batches
-            if self.z_loss:
-                z_loss = self.z_loss(router_logits=combined_router_logits) / batch_size * len(seq_ctx_list)
+            # Calculate z-loss across all micro-batches using loss context
+            z_loss_ctx_list: list[ZLossContext] = []
+            for loss_ctx_dict in loss_ctx_list:
+                z_ctx = loss_ctx_dict.get("z_loss")
+                if z_ctx is not None:
+                    z_loss_ctx_list.append(z_ctx)
+
+            if z_loss_ctx_list:
+                # Compute z-loss by passing router_logits to forward
+                z_loss = sum(ctx(combined_router_logits) for ctx in z_loss_ctx_list)
                 output["z_loss"] = z_loss
 
             # Calculate tokens per expert for bias update (if applicable)
@@ -542,7 +569,7 @@ class MoE(BaseModel):
     def _forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: CELossContext | None,
+        loss_ctx: MoELossContextDict | None,
         return_router_logits: bool = False,
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
@@ -603,7 +630,9 @@ class MoE(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)  # type: ignore
+        # Get LM loss context from dict
+        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
+        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
         output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info
@@ -613,21 +642,25 @@ class MoE(BaseModel):
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
         router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
 
-        batch_size = loss_ctx.batch_size if loss_ctx is not None else 1
-        if self.balancing_loss:
-            balancing_loss = (
-                self.balancing_loss(
-                    router_weights=router_weights,
-                    n_routed_experts=self.config.n_routed_experts,
-                    num_experts_per_tok=self.config.num_experts_per_tok,
+        # Calculate balancing loss using loss context
+        if loss_ctx is not None:
+            balancing_ctx = loss_ctx.get("balancing")
+            if balancing_ctx is not None:
+                # Compute balancing loss by passing all parameters to forward
+                balancing_loss = balancing_ctx(
+                    router_weights,
+                    self.config.n_routed_experts,
+                    self.config.num_experts_per_tok,
                 )
-                / batch_size
-            )
-            output["balancing_loss"] = balancing_loss
+                output["balancing_loss"] = balancing_loss
 
-        if self.z_loss:
-            z_loss = self.z_loss(router_logits=router_logits) / batch_size
-            output["z_loss"] = z_loss
+        # Calculate z-loss using loss context
+        if loss_ctx is not None:
+            z_loss_ctx = loss_ctx.get("z_loss")
+            if z_loss_ctx is not None:
+                # Compute z-loss by passing router_logits to forward
+                z_loss = z_loss_ctx(router_logits)
+                output["z_loss"] = z_loss
 
         tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
         output["tokens_per_expert_global"] = tokens_per_expert_global
@@ -987,14 +1020,14 @@ class MoE(BaseModel):
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        loss_ctx: CELossContext | None,
+        loss_ctx: MoELossContextDict | None,
     ) -> MoEModelOutputs: ...
 
     @overload  # type: ignore
     def __call__(  # type: ignore
         self,
         seq_ctx: list[SequenceContext],
-        loss_ctx: list[CELossContext],
+        loss_ctx: list[MoELossContextDict],
     ) -> MoEModelOutputs: ...
 
     __call__ = nn.Module.__call__
