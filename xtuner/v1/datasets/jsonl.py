@@ -400,6 +400,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         else:
             self.sampled.extend(random.sample(_sampled, _target_num_samples - len(self.sampled)))
 
+        if num_tokens is not None:
+            num_tokens = num_tokens[self.sampled]
         self.num_tokens = num_tokens
         self.offsets = offsets[self.sampled]
 
