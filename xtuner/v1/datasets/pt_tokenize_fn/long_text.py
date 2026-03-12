@@ -197,7 +197,6 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
                     continue  # drop trailing short chunk
                 num_tokens_list.append(nt)
                 chunks.append({"char_start": cs, "char_end": ce})
-            # total = sum(c["num_tokens"] for c in chunks)
             return cast(CacheItem, {"num_tokens": num_tokens_list, "chunks": chunks})
 
         # Runtime: tokenize specified char range

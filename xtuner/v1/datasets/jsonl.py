@@ -354,15 +354,14 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 num_tokens = serialized_tokenized_global["num_tokens"]
                 _meta = serialized_tokenized_global
             else:
-                num_tokens = None
-
                 offsets = offsets
-                num_tokens = num_tokens
+                num_tokens = None
                 _meta = {}
         else:
             self._shared_memory = self._init_shared_memory(anno_path)
             offsets = self.count_offsets()
             num_tokens = None
+            _meta = {}
             if tokenize_fn is not None:
                 serialized_tokenized_global = self.count_tokens(offsets)
                 num_tokens = serialized_tokenized_global["num_tokens"]
@@ -371,9 +370,13 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         if self._has_chunk:
             line_idxs = _meta["line_idxs"]
             offsets = offsets[line_idxs]
-        # offset starts from 0 and endwith `file_size`
-        # The size of offsets is `num_samples + 1`
-        _sampled = list(range(len(offsets) - 1))
+            # After line_idxs indexing, offsets has exactly num_chunks elements
+            # (no trailing sentinel), so use len(offsets) directly.
+            _sampled = list(range(len(offsets)))
+        else:
+            # offset starts from 0 and ends with `file_size`
+            # The size of offsets is `num_samples + 1`
+            _sampled = list(range(len(offsets) - 1))
         # Filter out samples with num_tokens=0, 0 means the sample is damaged
         if num_tokens is not None:
             orig_sample_num = len(num_tokens)
