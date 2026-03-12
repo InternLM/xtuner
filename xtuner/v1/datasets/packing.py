@@ -155,8 +155,6 @@ def get_pack_chunk_infos(
     inds,
     dataset_id,
     target,
-    flash_attn_block_size,
-    pack_len_type,
     pack_extra_buffer_size,
     num_tokens=None,
     total_num_patch=None,
@@ -193,11 +191,8 @@ def get_pack_chunk_infos(
                     info = {
                         "dataset_id": dataset_id,
                         "indices": item_buffer,
+                        "longest": int(num_patch),
                     }
-                    if pack_len_type == "total_block":
-                        info["longest"] = int(num_patch)
-                    elif pack_len_type == "max_block":
-                        info["longest"] = int(longest)
                     pack_infos.append(info)
                 else:
                     if pack_extra_buffer_size > 0:
@@ -220,12 +215,8 @@ def get_pack_chunk_infos(
                     info = {
                         "dataset_id": dataset_id,
                         "indices": item_buffer,
+                        "longest": int(num_patch),
                     }
-                    if pack_len_type == "total_block":
-                        info["longest"] = int(num_patch)
-                    elif pack_len_type == "max_block":
-                        info["longest"] = int(longest)
-
                     pack_infos.append(info)
 
             item_buffer = [shfl_i]
@@ -237,11 +228,8 @@ def get_pack_chunk_infos(
         info = {
             "dataset_id": dataset_id,
             "indices": item_buffer,
+            "longest": int(num_patch),
         }
-        if pack_len_type == "total_block":
-            info["longest"] = int(num_patch)
-        elif pack_len_type == "max_block":
-            info["longest"] = int(longest)
         pack_infos.append(info)
     return pack_infos
 
@@ -254,8 +242,6 @@ def get_pack_infos_by_expand_soft_split(
     pack_max_length: int,
     pack_workers: int = 8,
     pack_chunk_size: int = 10000,
-    flash_attn_block_size: int = 128,
-    pack_len_type: str = "total_block",
     pack_extra_buffer_size: int = 1000,
 ):  
     if pack_workers <= 1:
@@ -266,8 +252,6 @@ def get_pack_infos_by_expand_soft_split(
                 chunk_inds,
                 dataset_id,
                 pack_max_length,
-                flash_attn_block_size,
-                pack_len_type,
                 pack_extra_buffer_size,
                 num_tokens,
                 total_num_patch,
@@ -289,8 +273,6 @@ def get_pack_infos_by_expand_soft_split(
             get_pack_chunk_infos,
             dataset_id=dataset_id,
             target=pack_max_length,
-            flash_attn_block_size=flash_attn_block_size,
-            pack_len_type=pack_len_type,
             pack_extra_buffer_size=pack_extra_buffer_size,
             shm_name=shm.name,
             shape=num_tokens.shape,
@@ -306,6 +288,8 @@ def get_pack_infos_by_expand_soft_split(
 
         shm.close()
         shm.unlink()
+        patch_shm.close()
+        patch_shm.unlink()
     return pack_infos
 
 
@@ -315,16 +299,11 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
         datasets: list[JsonlDataset],
         pack_max_length: int = 2048,
         global_pack: bool = False,
-        pack_len_type="total_block", # unused
-        flash_attn_block_size: int = 128, # unused
         pack_extra_buffer_size: int = 1000,
         pack_chunk_size: int = 10000,
         pack_workers: int = 8,
         seed: int | None = None,
     ):
-        self.pack_len_type = pack_len_type
-        assert self.pack_len_type in ["total_block", "max_block"], f"Invalid pack_len_type: {self.pack_len_type}"
-        self.flash_attn_block_size = flash_attn_block_size
         self.pack_extra_buffer_size = pack_extra_buffer_size
         self.pack_workers = pack_workers
         self.torch_random_generator = torch.Generator()
@@ -350,8 +329,6 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
             pack_max_length=self.pack_max_length,
             pack_workers=self.pack_workers,
             pack_chunk_size=self.pack_chunk_size,
-            flash_attn_block_size=self.flash_attn_block_size,
-            pack_len_type=self.pack_len_type,
             pack_extra_buffer_size=self.pack_extra_buffer_size,
         )
         total_index = []
@@ -558,14 +535,9 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
         global_pack: bool = False,
         pack_workers: int = 8,
         seed: int | None = None,
-        pack_len_type="total_block",  # for ExpandSoftPackDataset
-        flash_attn_block_size: int = 128,  # for ExpandSoftPackDataset
         pack_extra_buffer_size: int = 1000,  # for ExpandSoftPackDataset
         pack_chunk_size: int = 10000,  # for ExpandSoftPackDataset
     ):
-        self.pack_len_type = pack_len_type
-        assert self.pack_len_type in ["total_block", "max_block"], f"Invalid pack_len_type: {self.pack_len_type}"
-        self.flash_attn_block_size = flash_attn_block_size
         self.pack_extra_buffer_size = pack_extra_buffer_size
         self.pack_workers = pack_workers
         self.torch_random_generator = torch.Generator()
@@ -601,9 +573,11 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
             soft_pack_datasets: list[Sized] = []
             if len(soft_pack_groups) > 0:
                 num_tokens = [np.concatenate([dset.num_tokens for dset in soft_pack_groups])]
+                total_num_patch = [np.concatenate([dset.total_num_patch for dset in datasets])]
+
                 soft_pack_datasets = [ConcatDataset(soft_pack_groups)]
                 for i, dataset in enumerate(soft_pack_datasets):
-                    _infos = self.get_soft_pack_infos(dataset, i, num_tokens[i])
+                    _infos = self.get_soft_pack_infos(dataset, i, num_tokens[i], total_num_patch[i])
                     pack_infos_list.extend(_infos)
             pack_infos = Dataset.from_list(pack_infos_list)
 
@@ -662,7 +636,7 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
         )
         return pack_infos_list
 
-    def get_soft_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray):
+    def get_soft_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray):
         # shuffled indices
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
 
@@ -670,11 +644,10 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
             inds,
             dataset_id,
             num_tokens,
+            total_num_patch,
             pack_max_length=self.pack_max_length,
             pack_workers=self.pack_workers,
             pack_chunk_size=self.pack_chunk_size,
-            flash_attn_block_size=self.flash_attn_block_size,
-            pack_len_type=self.pack_len_type,
             pack_extra_buffer_size=self.pack_extra_buffer_size,
         )
         return pack_infos_list
