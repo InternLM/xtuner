@@ -1,4 +1,4 @@
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
@@ -6,7 +6,6 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch import distributed as dist
 from torch.distributed._functional_collectives import all_reduce
-from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.utils.device import get_device
 
@@ -223,7 +222,7 @@ class BalancingLossContext(nn.Module):
 
         tokens_per_expert_global = tokens_per_expert.to(router_weights.dtype)  # (nlayers, ne)
         if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
-            tokens_per_expert_global = all_reduce(tokens_per_expert_global, "sum", dist.group.WORLD)
+            tokens_per_expert_global = all_reduce(tokens_per_expert_global, "sum", dist.group.WORLD)  # type: ignore
             tokens_global = tokens_per_expert_global.sum(-1)  # (nlayers, )
             seqlen_global = tokens_global // num_experts_per_tok
             routing_weights_sum_global = all_reduce_autograd(router_weights.sum(dim=1), "sum", dist.group.WORLD)
@@ -327,7 +326,9 @@ class ZLossContext(nn.Module):
         if self.loss_cfg.z_loss_global_average and dist.is_initialized():
             unmasked_num = router_logits.shape[1]
             unmasked_num_rank = torch.tensor(unmasked_num, device=router_logits.device, dtype=torch.int64)
-            unmasked_num_global = all_reduce(unmasked_num_rank, "sum", dist.group.WORLD)
+            group = dist.group.WORLD
+            assert group is not None
+            unmasked_num_global = all_reduce(unmasked_num_rank, "sum", group)
             world_size = dist.get_world_size()
             loss = loss * unmasked_num * world_size / unmasked_num_global
 
