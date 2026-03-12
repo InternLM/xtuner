@@ -8,7 +8,7 @@ from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Sequence, TypedDict, cast
+from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -620,7 +620,8 @@ class BaseModel(nn.Module):
         if lm_loss_ctx_list is not None:
             loss_ctx_cls = lm_loss_ctx_list[0].__class__
             lm_loss_ctx_list = loss_ctx_cls.build_batches(
-                lm_loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=sp_mesh)
+                lm_loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=sp_mesh
+            )
 
             if lm_loss_ctx_list is not None:
                 for i, lm_loss_ctx in enumerate(lm_loss_ctx_list):
@@ -1711,10 +1712,7 @@ class BaseModel(nn.Module):
         return ret
 
     def _build_loss_ctx(
-            self,
-            loss_ctx_cfg: BaseLossConfig | None,
-            data_batch: list[dict],
-            sp_mesh: DeviceMesh | None
+        self, loss_ctx_cfg: BaseLossConfig | None, data_batch: list[dict], sp_mesh: DeviceMesh | None
     ) -> list[BaseLossContext] | None:
         if loss_ctx_cfg is None:
             return None
@@ -1725,9 +1723,9 @@ class BaseModel(nn.Module):
         if first_loss_ctx is None:
             return None
         else:
-            ret = [first_loss_ctx] + [
-                loss_ctx_cfg.build(data=data, sp_mesh=sp_mesh) for data in data_batch[1:]]
-            return ret
+            ret = [first_loss_ctx] + [loss_ctx_cfg.build(data=data, sp_mesh=sp_mesh) for data in data_batch[1:]]
+            return ret  # type: ignore[return-value]
+
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
     def __call__(  # type: ignore
