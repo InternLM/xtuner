@@ -38,6 +38,19 @@ from .vlm_jsonl import VLMJsonlDataset
 logger = get_logger()
 
 
+def default_calc_patch(num_tokens: int, num_img_tokens: list[int] | int = 0, flash_attn_block_size=128):
+    llm_num_patch = (round(num_tokens / flash_attn_block_size)) ** 2
+    if isinstance(num_img_tokens, int):
+        num_img_tokens = [num_img_tokens]
+    img_num_patch = sum(((n / flash_attn_block_size) ** 2 for n in num_img_tokens))
+    return llm_num_patch + img_num_patch
+
+
+_CALC_TOTAL_PATCHS_FN_MAP = {
+    'default': default_calc_patch,
+}
+
+
 # TODO: Enhance the configurable fields of dataset config
 class DatasetConfig(BaseModel):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="forbid")
@@ -49,11 +62,13 @@ class DatasetConfig(BaseModel):
     sample_ratio: Annotated[float, Parameter(group="dataset")] = 1.0
     enable_sequential_sampler: Annotated[bool, Parameter(group="dataset")] = False
     media_root: Annotated[str | None, Parameter(group="dataset")] = ""
+    calc_total_patch_fn: Literal["default"] | str = "default"
 
     def build(
         self,
         tokenize_fn: Optional["CachableTokenizeFunction"] = None,
     ) -> "JsonlDataset":
+        assert self.calc_total_patch_fn in _CALC_TOTAL_PATCHS_FN_MAP, f"Unsupported calc_total_patch function: {self.calc_total_patch_fn}. Supported functions: {list(_CALC_TOTAL_PATCHS_FN_MAP.keys())}"
         if self.class_name == "JsonlDataset":
             return JsonlDataset(
                 tokenize_fn=tokenize_fn,
@@ -61,6 +76,7 @@ class DatasetConfig(BaseModel):
                 sample_ratio=self.sample_ratio,
                 enable_sequential_sampler=self.enable_sequential_sampler,
                 name=self.name,
+                calc_total_patch_fn=_CALC_TOTAL_PATCHS_FN_MAP[self.calc_total_patch_fn],
                 cache_dir=self.cache_dir,
                 cache_tag=self.cache_tag,
             )
@@ -71,6 +87,7 @@ class DatasetConfig(BaseModel):
                 sample_ratio=self.sample_ratio,
                 enable_sequential_sampler=self.enable_sequential_sampler,
                 name=self.name,
+                calc_total_patch_fn=_CALC_TOTAL_PATCHS_FN_MAP[self.calc_total_patch_fn],
                 media_root=self.media_root,
                 cache_dir=self.cache_dir,
                 cache_tag=self.cache_tag,

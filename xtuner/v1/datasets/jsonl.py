@@ -27,7 +27,7 @@ from xtuner.v1.datasets.pt_tokenize_fn.long_text import LongTextPretrainTokenize
 from xtuner.v1.utils import SharedMemory, get_logger
 
 from .utils import CachableTokenizeFunction, calculate_xxhash
-
+from .config import _CALC_TOTAL_PATCHS_FN_MAP
 
 T = TypeVar("T")
 logger = get_logger()
@@ -187,6 +187,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         sample_ratio: float = 1.0,
         tokenize_fn: CachableTokenizeFunction[T] | None = None,
         name: str = "default",
+        calc_total_patch_fn: Callable[[dict], int]  = _CALC_TOTAL_PATCHS_FN_MAP['default'],
         cache_dir: str | Path | None = None,
         max_length: int | None = None,  # TODO: Remove max_length in dataset
         cache_tag: str | None = None,
@@ -201,6 +202,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         self.tokenizer_workers = int(os.environ.get("XTUNER_TOKENIZE_WORKERS", 8))
         self.meta_path = os.path.join(cache_dir, CACHE_META) if cache_dir else None
+        self.calc_total_patch_fn = calc_total_patch_fn
 
         logger.info(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
 
@@ -412,21 +414,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             self._release_shared_memory()
     
     @property
-    def num_img_tokens(self):
-        if 'num_img_tokens' in self._meta:
-            return self._meta['num_img_tokens']
-        else:
-            zero_array = np.zeros_like(self._meta['num_tokens'])
-            return zero_array
+    def total_num_patch(self):
+        return self._meta['total_num_patch']
         
-    @property
-    def num_img_counts(self):
-        if 'num_img_counts' in self._meta:
-            return self._meta['num_img_counts']
-        else:
-            zero_array = np.ones_like(self._meta['num_tokens'])
-            return zero_array
-
     def _init_shared_memory(self, path: str) -> SharedMemory:
         if dist.is_initialized():
             rank = dist.get_rank()
@@ -557,21 +547,19 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             serialized_tokenized = {
                 "num_tokens": np.array([data["num_tokens"] for data in tokenized]),
             }
-            if 'num_img_tokens' in tokenized[0]:
-                assert all('num_img_tokens' in data for data in tokenized), "num_img_tokens should be in all tokenized data if exists"
-                total_num_img_tokens = []
-                total_num_img_counts = []
-                for data in tokenized:
+            
+            serialized_tokenized['total_num_patch'] = []
+            for data in tokenized:
+                num_tokens = data["num_tokens"]
+                num_img_tokens = [0]
+                if 'num_img_tokens' in data:
                     num_img_tokens = data['num_img_tokens']
                     if isinstance(num_img_tokens, int):
                         num_img_tokens = [num_img_tokens]
-                    total_num_img_tokens.extend(num_img_tokens)
-                    total_num_img_counts.append(len(num_img_tokens))
-                # The lengths of num_img_tokens and num_img_counts are inconsistent
-                serialized_tokenized['num_img_tokens'] = np.array(total_num_img_tokens)
-                serialized_tokenized['num_img_counts'] = np.array(total_num_img_counts)
-                assert len(serialized_tokenized['num_img_counts']) == len(serialized_tokenized['num_tokens']), "The length of num_img_counts should be the same as num_tokens. but got {} and {}".format(len(serialized_tokenized['num_img_counts']), len(serialized_tokenized['num_tokens']))
-                   
+                total_num_patch = self.calc_total_patch_fn(num_tokens, num_img_tokens)  
+                serialized_tokenized['total_num_patch'].append(total_num_patch)
+            serialized_tokenized['total_num_patch'] = np.array(serialized_tokenized['total_num_patch'])  
+            
         if dist.is_initialized():
             # TODO:
             # This is a workaround for `all_gather_object` would hang when
