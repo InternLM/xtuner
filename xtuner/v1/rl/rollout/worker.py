@@ -526,7 +526,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         # 2. 需要看下新的输入输出(RolloutState)怎么适配PartialRollout的逻辑，先跑起来
         # 3. 对于流式返回的response先删掉，目前还用不上，等需要的时候再加上
 
-        uid = rollout_state.message_uid
+        uid = rollout_state.uid
         sample_params: SampleParams = rollout_state.sample_params
 
         if sample_params.return_token_ids:
@@ -541,7 +541,32 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         max_retries = self.config.max_retry_per_sample
         payload = self._get_request_payload(rollout_state)
-        self.logger.debug(f"Worker {self.rank} sending request for msg {uid} to {endpoint_url} with payload {payload}")
+
+        # 早退逻辑 1：检查是否已被标记为完成
+        if rollout_state.status == Status.COMPLETED:
+            self.logger.debug(f"Request {uid} is already marked as COMPLETED, skipping generation.")
+            return rollout_state
+
+        # 早退逻辑 2：检测输入是否还需要 generation (安全获取变量)
+        input_ids = payload.get("input_ids", [])
+        max_tokens = payload.get("max_tokens")
+
+        last_id = input_ids[-1] if len(input_ids) > 0 else "None"
+        is_max_tokens_zero = max_tokens is not None and max_tokens <= 0
+        is_eos_reached = len(input_ids) > 0 and input_ids[-1] in self.eos_token
+
+        if is_max_tokens_zero or is_eos_reached:
+            self.logger.debug(
+                f"No generation needed for request {uid}: max_tokens={max_tokens} or last input_id={last_id} is in eos_token."
+            )
+            rollout_state.status = Status.COMPLETED
+            rollout_state.response_ids = []
+            rollout_state.response = ""
+            rollout_state.logprobs = []
+            rollout_state.response_mask = []
+            rollout_state.response_steps = []
+            rollout_state.finish_reason = "stop" if is_eos_reached else "length"
+            return rollout_state
 
         for attempt in range(max_retries + 1):
             is_last_attempt = attempt == max_retries
