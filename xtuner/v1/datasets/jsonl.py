@@ -403,18 +403,11 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         else:
             self.sampled.extend(random.sample(_sampled, _target_num_samples - len(self.sampled)))
 
-        if self._has_chunk:
-            self.num_tokens = _meta["num_tokens"][self.sampled]
-            self.offsets = offsets[self.sampled]
+        self.num_tokens = num_tokens
+        self.offsets = offsets[self.sampled]
 
-            self.line_idxs = _meta["line_idxs"][self.sampled]
-            self.chunks = _meta["chunks"][self.sampled]
-        else:
-            if num_tokens is not None:
-                num_tokens = num_tokens[self.sampled]
-
-            self.num_tokens = num_tokens
-            self.offsets = offsets[self.sampled]
+        _meta = {k: v[self.sampled] for k, v in _meta.items()}
+        self._meta = _meta
 
         if self._shared_memory is not None:
             self._release_shared_memory()
@@ -589,9 +582,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         if self.tokenize_fn is not None:
             if self._has_chunk:
-                assert self.chunks is not None
-                cs = int(self.chunks[item][0])
-                ce = int(self.chunks[item][1])
+                assert "chunks" in self._meta, "chunks must be in _meta"
+                cs = int(self._meta["chunks"][item][0])
+                ce = int(self._meta["chunks"][item][1])
                 return self.tokenize_fn(raw_data, char_start=cs, char_end=(None if ce == -1 else ce))
             return self.tokenize_fn(raw_data)
         else:
