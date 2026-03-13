@@ -1,7 +1,7 @@
 import unittest
 import asyncio
 from unittest.mock import MagicMock, AsyncMock, patch
-from xtuner.v1.rl.agent_loop import SamplerConfig, SyncProduceStrategyConfig, OverProduceStrategyConfig
+from xtuner.v1.rl.agent_loop import SamplerConfig, SyncProduceStrategyConfig, AsyncProduceStrategyConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 
@@ -25,7 +25,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.mock_tokenizer = MagicMock()
 
         # 3. 准备 ReplayBuffer
-        replay_buffer_cfg = AsyncReplayBufferConfig(min_staleness=1, max_staleness=5)
+        replay_buffer_cfg = AsyncReplayBufferConfig()
         self.replay_buffer = replay_buffer_cfg.build()
 
     async def test_sampler_with_replay_buffer(self):
@@ -41,7 +41,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         aborted_item = MockRolloutState(999, status=Status.ABORTED)
         await self.replay_buffer.put([aborted_item], task_name)
         
-        data = await sampler.sample(task_name)
+        data = await sampler.sample(task_name, group_status=Status.ABORTED)
         self.assertEqual(data[0].id, 999)
 
     async def test_sync_produce_strategy(self):
@@ -75,10 +75,11 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 这个async_produce_strategy的测试主要验证超发逻辑 + staleness 优先get的逻辑
         # 异步的其他功能如 partial_rollout, tail_batch不在这里进行验证 
         mock_agent_loop = MagicMock()
-        mock_agent_loop.pause = AsyncMock() 
+        mock_agent_loop.pause = AsyncMock()
+        mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
         task_name = "test_task"
         call_count = 0
-        async def mock_gen(rs):
+        async def mock_gen(rs, **kwargs):
             nonlocal call_count
             call_count += 1
             for r in rs:
@@ -93,7 +94,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop.generate_group = mock_gen
 
         sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg)
-        produce_strategy_cfg = OverProduceStrategyConfig(staleness_threshold = 1)
+        produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold= 1)
         sampler = sampler_cfg.build(self.mock_tokenizer, self.replay_buffer)
         strategy = produce_strategy_cfg.build()
         # 预处理

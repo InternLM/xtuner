@@ -276,43 +276,16 @@ class FIFOBackend(ReplayPolicy):
 
 
 class StalenessBackend(ReplayPolicy):
-    def __init__(self, max_staleness: int = 0, min_staleness: int = 0):
-        self.max_staleness = max_staleness
-        self.min_staleness = min_staleness
-
     async def put(self, item: StorageItem, storage_backend: StorageBackend) -> None:
         if not item.item:
             return
         await storage_backend.put(item)
 
-    def _hybrid_query(self, base_query: QueryType) -> QueryType:
-        staleness_cond: QueryDict = {"staleness": {"$between": [self.min_staleness, self.max_staleness]}}
-
-        # 1. 修复：如果穿进来的是已经解析的 AST 节点
-        if isinstance(base_query, QueryNode):
-            return LogicNode(
-                "$and",
-                [
-                    base_query,
-                    parse_query(staleness_cond),  # 将新的字典也解析为节点后组合
-                ],
-            )
-
-        # 2. 如果传进来的是字典形式的 DSL
-        base_dict = base_query if isinstance(base_query, dict) else {}
-        return {
-            "$and": [
-                base_dict,  # type: ignore
-                staleness_cond,
-            ]
-        }
-
     async def get(self, count: int, query: QueryType, storage_backend: StorageBackend) -> list[list[RolloutState]]:
         if count <= 0:
             return []
 
-        hybrid_query = self._hybrid_query(query)
-        records = await storage_backend.get(hybrid_query)
+        records = await storage_backend.get(query)
         records.sort(key=lambda r: (-r.staleness, r.timestamp_id))
         selected = records[:count]
         if selected:
@@ -320,8 +293,7 @@ class StalenessBackend(ReplayPolicy):
         return [record.item for record in selected]
 
     async def count(self, query: QueryType, storage_backend: StorageBackend) -> int:
-        hybrid_query = self._hybrid_query(query)
-        return await storage_backend.count(hybrid_query)
+        return await storage_backend.count(query)
 
 
 class ReplayBuffer:
@@ -366,10 +338,6 @@ class SyncReplayBufferConfig(BaseModel):
 
 
 class AsyncReplayBufferConfig(BaseModel):
-    min_staleness: int = 0
-    max_staleness: int = 0
-
     def build(self):
-        assert self.max_staleness >= self.min_staleness, "max_staleness must be greater than or equal to min_staleness"
-        policy = StalenessBackend(max_staleness=self.max_staleness, min_staleness=self.min_staleness)
+        policy = StalenessBackend()
         return ReplayBuffer(policy=policy, storage_backend=NaiveStorage())

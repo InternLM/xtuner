@@ -10,3 +10,5 @@ if os.environ.get("XTUNER_USE_VLLM", "0") == "1":
     from .vllm import vLLMWorker
 if os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "1":
     from .lmdeploy import LMDeployWorker
+
+from .utils import continue_generation, pause_generation
