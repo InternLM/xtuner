@@ -4,7 +4,7 @@ from typing import Callable
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto import RolloutState, SampleParams
 from xtuner.v1.rl.judger import NativeJudger, RouterJudger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
@@ -19,17 +19,6 @@ class AgentLoopConfig(ABC, BaseModel):
 
     @abstractmethod
     def build(self, rollout_controller, judger=None, logger=None) -> "AgentLoop": ...
-
-
-class SingleTurnAgentLoopConfig(AgentLoopConfig):
-    def build(self, rollout_controller, judger=None, logger=None) -> "SingleTurnAgentLoop":
-        return SingleTurnAgentLoop(
-            rollout_ctl=rollout_controller,
-            hf_checkpoint=self.hf_checkpoint,
-            sample_params=self.sample_params,
-            judger=judger,
-            logger=logger,
-        )
 
 
 class AgentLoop(ABC):
@@ -53,18 +42,13 @@ class AgentLoop(ABC):
             self.logger = logger
 
     @abstractmethod
-    async def generate_sample(self, rollout_state: RolloutState) -> RolloutState: ...
+    async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
 
-    async def pause(self) -> None:
-        """Pause the agent loop if supported by the implementation."""
-        # Default implementation is a no-op to keep behavior unchanged.
-        return None
-
-    async def generate_group(self, rollout_state: list[RolloutState]) -> list[RolloutState]:
+    async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         pending_tasks = []
         for state in rollout_state:
             state.sample_params = self.sample_params
-            task = create_task(self.generate_sample(state))
+            task = create_task(self.generate_sample(state, **kwargs))
             pending_tasks.append(task)
         generated_samples = asyncio.gather(*pending_tasks)
         group_samples = await generated_samples
@@ -79,15 +63,4 @@ class AgentLoop(ABC):
             rollout_state = await self.judger.judge(rollout_state)  # type: ignore[operator]
         else:
             raise ValueError(f"Invalid judger type: {type(self.judger)}")
-        return rollout_state
-
-
-class SingleTurnAgentLoop(AgentLoop):
-    async def generate_sample(self, rollout_state: RolloutState) -> RolloutState:
-        assert rollout_state.sample_params is not None, "sample_params must be set in rollout_state"
-        rollout_state.tokens = rollout_state.prompt_ids
-        rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
-        if rollout_state.status != Status.COMPLETED:
-            return rollout_state
-        rollout_state = await self.judge_sample(rollout_state)
         return rollout_state

@@ -85,7 +85,7 @@ class RolloutState(CacheObj, BaseModel):
 
     # --- InferEngine 输出 ---
     response: str | None = None
-    response_ids: list[int] | torch.Tensor | None = None
+    response_ids: list[int] | None = None
     logprobs: list[float] | None = None
     routed_experts: list[int] | RayObjectRef | None = None
     finish_reason: str | None = None
@@ -94,12 +94,13 @@ class RolloutState(CacheObj, BaseModel):
     reward: dict[str, Any] | None = None
 
     #  --- 状态 ---
+    uid: int | None = None
     task_name: str | None = None
     status: Status = Status.INIT
     error_msg: str | None = None
-    seq_staleness: int = 0  # 整条序列的staleness，一般为最大的token_staleness
-    token_staleness: list[int] | None = None  # 每一个token的staleness，长度和tokens保持一致
+    seq_staleness: int = 0
     response_mask: list[int] | None = None  # response_ids的长度
+    response_rollout_steps: list[int] | None = None  # 记录 response_ids 中每个 token 是在哪个 rollout_step 生成的
     extra_fields: dict[str, Any] = {}
 
     @field_serializer("routed_experts")
@@ -199,3 +200,42 @@ def update_group_status(rollout_states: list[RolloutState]) -> Status:
         # If there are other statuses, we can determine the group status based on a defined priority order.
         # For now, we will default to COMPLETED if none of the above conditions are met.
         return Status.COMPLETED
+
+
+def update_seq_staleness(rollout_state: RolloutState, rollout_step: int) -> RolloutState:
+    """计算 response_rollout_steps 列表，表示 rollout_state.response_ids 中的每个 token
+    是在哪个 rollout_step 生成的。"""
+    response_len = len(rollout_state.response_ids or [])
+    response_rollout_steps = [rollout_step] * response_len
+    rollout_state.response_rollout_steps = (rollout_state.response_rollout_steps or []) + response_rollout_steps
+
+    cur_rollout_steps = min(rollout_state.response_rollout_steps, default=rollout_step)
+    rollout_state.seq_staleness = rollout_step - cur_rollout_steps
+    logger.debug(
+        f"Updated seq_staleness for sample {rollout_state.uid} | Current rollout step: {rollout_step} | Earliest response token rollout step: {cur_rollout_steps} | Updated seq_staleness: {rollout_state.seq_staleness}"
+    )
+    return rollout_state
+
+
+def update_expired_status(samples: list[RolloutState], tail_batch_stale_threshold: int = 0) -> list[RolloutState]:
+    if tail_batch_stale_threshold <= 0:
+        return samples
+    is_group_expired = False
+
+    # 1. 检查组内是否存过期的样本
+    for sample in samples:
+        if sample.status == Status.ABORTED and sample.seq_staleness >= tail_batch_stale_threshold:
+            logger.debug(
+                f"Sample {sample.uid} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({tail_batch_stale_threshold}). Triggering group expiration."
+            )
+            is_group_expired = True
+            break  # 一旦发现过期，直接跳出，无需检查剩余样本
+
+    # 2. 如果存在过期样本，将组内所有样本置为过期
+    if is_group_expired:
+        # NOTE: 当一组数据中有一个样本被标记为过期后，这组数据中就可能出现未超过过期阈值但状态是 aborted 的样本。
+        # 这些样本在后续的生成过程中也不应该被继续生成了，所以直接把它们都标记为过期, 才能在preprocess中将之前的response清掉。
+        for sample in samples:
+            sample.status = Status.EXPIRED
+
+    return samples
