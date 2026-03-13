@@ -28,7 +28,7 @@ from .collator import (
 from .custom_pack import CustomPackDataset
 from .custom_sampler import CustomSampler, _load_sampler_config
 from .dataloader import BaseDataloader, Dataloader
-from .jsonl import _CALC_TOTAL_PATCHS_FN_MAP, JsonlDataset
+from .jsonl import _CALC_TOTAL_PATCHES_FN_MAP, JsonlDataset
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
@@ -49,14 +49,14 @@ class DatasetConfig(BaseModel):
     sample_ratio: Annotated[float, Parameter(group="dataset")] = 1.0
     enable_sequential_sampler: Annotated[bool, Parameter(group="dataset")] = False
     media_root: Annotated[str | None, Parameter(group="dataset")] = ""
-    calc_total_patch_fn: Literal["default"] | str = "default"
+    calc_total_patch_fn: str = "default"
 
     def build(
         self,
         tokenize_fn: Optional["CachableTokenizeFunction"] = None,
     ) -> "JsonlDataset":
-        assert self.calc_total_patch_fn in _CALC_TOTAL_PATCHS_FN_MAP, (
-            f"Unsupported calc_total_patch function: {self.calc_total_patch_fn}. Supported functions: {list(_CALC_TOTAL_PATCHS_FN_MAP.keys())}"
+        assert self.calc_total_patch_fn in _CALC_TOTAL_PATCHES_FN_MAP, (
+            f"Unsupported calc_total_patch function: {self.calc_total_patch_fn}. Supported functions: {list(_CALC_TOTAL_PATCHES_FN_MAP.keys())}"
         )
         if self.class_name == "JsonlDataset":
             return JsonlDataset(
@@ -65,7 +65,7 @@ class DatasetConfig(BaseModel):
                 sample_ratio=self.sample_ratio,
                 enable_sequential_sampler=self.enable_sequential_sampler,
                 name=self.name,
-                calc_total_patch_fn=_CALC_TOTAL_PATCHS_FN_MAP[self.calc_total_patch_fn],
+                calc_total_patch_fn=_CALC_TOTAL_PATCHES_FN_MAP[self.calc_total_patch_fn],
                 cache_dir=self.cache_dir,
                 cache_tag=self.cache_tag,
             )
@@ -76,7 +76,7 @@ class DatasetConfig(BaseModel):
                 sample_ratio=self.sample_ratio,
                 enable_sequential_sampler=self.enable_sequential_sampler,
                 name=self.name,
-                calc_total_patch_fn=_CALC_TOTAL_PATCHS_FN_MAP[self.calc_total_patch_fn],
+                calc_total_patch_fn=_CALC_TOTAL_PATCHES_FN_MAP[self.calc_total_patch_fn],
                 media_root=self.media_root,
                 cache_dir=self.cache_dir,
                 cache_tag=self.cache_tag,

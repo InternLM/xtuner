@@ -47,7 +47,7 @@ def default_calc_total_patch(num_tokens: int, num_img_tokens: list[int], flash_a
     return llm_num_patch + img_num_patch
 
 
-_CALC_TOTAL_PATCHS_FN_MAP = {
+_CALC_TOTAL_PATCHES_FN_MAP = {
     "default": default_calc_total_patch,
 }
 
@@ -197,7 +197,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         sample_ratio: float = 1.0,
         tokenize_fn: CachableTokenizeFunction[T] | None = None,
         name: str = "default",
-        calc_total_patch_fn: Callable[[int, list[int]], float] = _CALC_TOTAL_PATCHS_FN_MAP["default"],
+        calc_total_patch_fn: Callable[[int, list[int]], float] = _CALC_TOTAL_PATCHES_FN_MAP["default"],
         cache_dir: str | Path | None = None,
         max_length: int | None = None,  # TODO: Remove max_length in dataset
         cache_tag: str | None = None,

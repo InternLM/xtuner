@@ -161,13 +161,14 @@ def get_pack_chunk_infos(
     shm_name=None,
     shape=None,
     dtype=None,
+    patch_dtype=None,
 ):
     if num_tokens is None:
         existing_shm = shared_memory.SharedMemory(name=shm_name)
         num_tokens = np.ndarray(shape, dtype=dtype, buffer=existing_shm.buf)
 
         existing_patch_shm = shared_memory.SharedMemory(name=patch_shm_name)
-        total_num_patch = np.ndarray(shape, dtype=dtype, buffer=existing_patch_shm.buf)
+        total_num_patch = np.ndarray(shape, dtype=patch_dtype, buffer=existing_patch_shm.buf)
 
     item_buffer = []
     length_buffer = []
@@ -259,12 +260,15 @@ def get_pack_infos_by_expand_soft_split(
     else:
         chunks_inds = [inds[i : i + pack_chunk_size] for i in range(0, len(inds), pack_chunk_size)]
 
+        assert len(num_tokens) == len(total_num_patch), (
+            "num_tokens and total_num_patch should have the same length for shared memory."
+        )
         shm = shared_memory.SharedMemory(create=True, size=num_tokens.nbytes)
         shm_array = np.ndarray(num_tokens.shape, dtype=num_tokens.dtype, buffer=shm.buf)
         np.copyto(shm_array, num_tokens)
 
         patch_shm = shared_memory.SharedMemory(create=True, size=total_num_patch.nbytes)
-        patch_shm_array = np.ndarray(num_tokens.shape, dtype=num_tokens.dtype, buffer=patch_shm.buf)
+        patch_shm_array = np.ndarray(num_tokens.shape, dtype=total_num_patch.dtype, buffer=patch_shm.buf)
         np.copyto(patch_shm_array, total_num_patch)
 
         mp_context = multiprocessing.get_context("fork")
@@ -277,6 +281,7 @@ def get_pack_infos_by_expand_soft_split(
             shape=num_tokens.shape,
             dtype=num_tokens.dtype,
             patch_shm_name=patch_shm.name,
+            patch_dtype=total_num_patch.dtype,
         )
         with ProcessPoolExecutor(max_workers=pack_workers, mp_context=mp_context) as executor:
             results = list(tqdm(executor.map(process_chunk_with_args, chunks_inds)))
