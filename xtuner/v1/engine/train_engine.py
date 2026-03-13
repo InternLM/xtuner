@@ -170,8 +170,8 @@ class TrainEngine:
         return self.fsdp_cfg.tp_size
 
     @torch.no_grad()
-    def forward_only(self, seq_ctx: SequenceContext):
-        output = self.model(seq_ctx=seq_ctx, loss_ctx=None)
+    def forward_only(self, seq_ctx: SequenceContext, loss_ctx):
+        output = self.model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
         return output
 
     def grad_accumulation_steps(self, data_batches_len: int):
