@@ -13,9 +13,11 @@ from io import BytesIO
 from multiprocessing import Process, Queue
 from pathlib import Path
 from threading import Lock
-from typing import Callable, TypeVar, cast
+from typing import Callable, Dict, List, Type, TypeVar, Union, cast
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 from mmengine import mkdir_or_exist
 from mmengine.dist import barrier, get_rank
@@ -38,8 +40,101 @@ CACHE_META = ".xpuyu-cache-meta.json"
 XTUNER_FILE_OPEN_CONCURRENCY = int(os.environ.get("XTUNER_FILE_OPEN_CONCURRENCY", "8"))
 
 
-# TODO: (yehaochen) chunk size and tokenize workers should be parameters of the dataset.
 XTUNER_TOKENIZE_CHUNK_SIZE = int(os.environ.get("XTUNER_TOKENIZE_CHUNK_SIZE", "10"))
+
+
+def _convert_to_pyarrow_array(data: Union[np.ndarray, List[List[int] | List[float]]]) -> pa.Array:
+    """内部函数：将 np.array 或 list[list[int|float]] 转换为 PyArrow Array
+    自动适配维度、数据类型，保证通用性."""
+    # 处理 numpy 数组
+    if isinstance(data, np.ndarray):
+        # 转为嵌套列表，保留维度信息
+        nested_list = data.tolist()
+        # 自动推断 PyArrow 类型（适配任意维度）
+        base_type = pa.from_numpy_dtype(data.dtype)
+        pa_type = base_type
+        for _ in range(data.ndim):
+            pa_type = pa.list_(pa_type)
+        return pa.array(nested_list, type=pa_type)
+
+    # 处理 list[list[int|float]]
+    elif isinstance(data, list):
+        # 自动推断元素类型（int/float，兼容空列表）
+        element_type = pa.float64()  # 默认浮点型
+        element_py_type: Type[int] | Type[float] = float
+        for sublist in data:
+            if sublist:
+                first_elem = sublist[0]
+                element_type = pa.int64() if isinstance(first_elem, int) else pa.float64()
+                element_py_type = int if isinstance(first_elem, int) else float
+                break
+        # 检查所有元素的python类型一致
+        for i, sublist in enumerate(data):
+            for j, elem in enumerate(sublist):
+                if not isinstance(elem, element_py_type):
+                    raise ValueError(
+                        f"All elements must have the same type: first {element_py_type} vs current {type(elem)} at index ({i}, {j})"
+                    )
+
+        # 构建嵌套列表类型
+        pa_type = pa.list_(element_type)
+        return pa.array(data, type=pa_type)
+
+    else:
+        raise TypeError(f"不支持的数据类型: {type(data)}，仅支持 np.ndarray 或 list[list[int|float]]")
+
+
+def save_mixed_dict_to_parquet(
+    data: Dict[str, Union[np.ndarray, List[List[int] | List[float]]]], file_path: str
+) -> None:
+    """通用保存函数：将 dict[str, np.array | list[list[int|float]]] 保存为 Parquet 文件 :param
+    data: 混合类型字典（键为字符串，值为 np.array 或 list[list[int|float]]） :param file_path:
+    保存路径（如 "data.parquet"）"""
+    # 校验输入格式
+    if not isinstance(data, dict):
+        raise ValueError("输入必须是字典类型")
+
+    # 逐个处理字典值，构建 PyArrow Table
+    fields = []
+    arrays = []
+    for key, value in data.items():
+        # 转换为 PyArrow 数组
+        pa_arr = _convert_to_pyarrow_array(value)
+        # 构建字段和数组列表
+        fields.append(pa.field(key, pa_arr.type))
+        arrays.append(pa_arr)
+
+    # 构建 Schema 并写入 Parquet
+    schema = pa.schema(fields)
+    table = pa.Table.from_arrays(arrays, schema=schema)
+    pq.write_table(table, file_path)
+    print(f"数据已成功保存到: {file_path}")
+
+
+def load_mixed_dict_from_parquet(file_path: str) -> Dict[str, Union[np.ndarray, List[List[int] | List[float]]]]:
+    """通用恢复函数：从 Parquet 文件恢复 dict[str, np.array | list[list[int|float]]] :param
+    file_path: Parquet 文件路径 :return: 与保存时一致的混合类型字典."""
+    # 读取 Parquet 表
+    table = pq.read_table(file_path)
+    result = {}
+
+    # 逐个恢复列（自动识别类型并还原）
+    for col in table.columns:
+        col_name = col.name
+        # 转换为 Python 原生嵌套列表
+        pylist = col.to_pylist()
+
+        # 判断原始类型：如果是多维列表且可转为 numpy 数组（保存时是 np.array），则还原为 np.array
+        # 核心判断：np.array 保存的是「规则维度」的嵌套列表，而 list[list] 可能是不规则的
+        try:
+            # 尝试转为 numpy 数组（规则维度会成功，不规则会报错）
+            np_arr = np.array(pylist)
+            result[col_name] = np_arr
+        except (ValueError, TypeError):
+            # 转换失败 = 原始是不规则的 list[list]，直接保留列表
+            result[col_name] = pylist
+
+    return result
 
 
 def _streaming_parallel_open_inplace(path: str, buf, executor: ThreadPoolExecutor):
@@ -213,7 +308,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             meta_path = cached.get("jsonl_meta")
             offsets = np.load(offset_path)
             if meta_path:
-                _meta = np.load(meta_path)
+                _meta = load_mixed_dict_from_parquet(meta_path)
                 num_tokens = _meta["num_tokens"]
         elif cache_dir:
             self._shared_memory = self._init_shared_memory(anno_path)
@@ -261,7 +356,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 #         "<tag name>": {
                 #             "<file path>": {
                 #                 "<tokenize hash>": {
-                #                     "jsonl_meta": "<tokenize cache path>/jsonl_meta.npz",
+                #                     "jsonl_meta": "<tokenize cache path>/jsonl_meta.parquet",
                 #                     "offsets": "<file cache path>",
                 #                     "datetime": "2025-06-30 09:40:24"
                 #                 }
@@ -293,10 +388,10 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                         mkdir_or_exist(tok_cache_dir)
                 barrier()
 
-                _meta_file = os.path.join(tok_cache_dir, "jsonl_meta.npz")
+                _meta_file = os.path.join(tok_cache_dir, "jsonl_meta.parquet")
                 if os.path.exists(_meta_file):
                     logger.info(f"Loading tokenize meta from cache: {_meta_file}")
-                    _meta = np.load(_meta_file)
+                    _meta = load_mixed_dict_from_parquet(_meta_file)
                     num_tokens = _meta["num_tokens"]
                 else:
                     serialized_tokenized_global = self.count_tokens(offsets, tok_cache_dir)
@@ -328,7 +423,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
                             if tok_hash not in tag_data[self.path]:
                                 tag_data[self.path][tok_hash] = {
-                                    "jsonl_meta": os.path.join(tok_cache_dir, "jsonl_meta.npz"),
+                                    "jsonl_meta": os.path.join(tok_cache_dir, "jsonl_meta.parquet"),
                                     "offsets": os.path.join(file_cache_dir, "offsets.npy"),
                                     "datetime": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 }
@@ -382,6 +477,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         # so filtering by total doc length would incorrectly discard valid long-text samples.
         if num_tokens is not None and max_length is not None and not self._has_chunk:
             assert isinstance(max_length, int)
+            assert isinstance(num_tokens, np.ndarray)
             _filtered = [i for i in _sampled if num_tokens[i] <= max_length]
 
             if len(_filtered) < len(_sampled):
@@ -398,12 +494,19 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             self.sampled.extend(random.sample(_sampled, _target_num_samples - len(self.sampled)))
 
         if num_tokens is not None:
+            assert isinstance(num_tokens, np.ndarray)
             num_tokens = num_tokens[self.sampled]
-        self.num_tokens = num_tokens
+        self.num_tokens: np.ndarray | None = num_tokens
         self.offsets = offsets[self.sampled]
 
-        _meta = {k: v[self.sampled] for k, v in _meta.items()}
-        self._meta = _meta
+        self._meta = {}
+        for k, v in _meta.items():
+            if isinstance(v, np.ndarray):
+                self._meta[k] = v[self.sampled]
+            elif isinstance(v, list):
+                self._meta[k] = [v[i] for i in self.sampled]
+            else:
+                raise ValueError(f"Unsupported type: {type(v)}")
 
         if self._shared_memory is not None:
             self._release_shared_memory()
@@ -552,8 +655,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             serialized_tokenized_global = serialized_tokenized
 
         if rank == 0 and cache_dir:
-            meta_save = serialized_tokenized_global
-            np.savez(os.path.join(cache_dir, "jsonl_meta.npz"), **meta_save)
+            save_mixed_dict_to_parquet(serialized_tokenized_global, os.path.join(cache_dir, "jsonl_meta.parquet"))
 
         self.tokenize_fn.set_state("runtime")
         return serialized_tokenized_global
