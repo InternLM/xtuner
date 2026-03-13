@@ -112,7 +112,7 @@ class SessionRouter:
                     self._map[sid] = ((mapped_worker[0], is_active), last_used)
             self.logger.debug(f"SessionRouter updated worker {worker} status to {is_active}.")
 
-    async def get_worker(self, session_id: int) -> Any:
+    async def get_worker(self, session_id: int) -> Optional[Any]:
         with self._lock:
             self._evict_expired()
 
@@ -123,7 +123,8 @@ class SessionRouter:
                     return worker[0]
 
             if not any(is_active for _, is_active in self._workers):
-                raise RuntimeError("No active rollout workers available in SessionRouter.")
+                self.logger.warning("No active rollout workers available in SessionRouter.")
+                return None
 
             worker = next(self._worker_cycler)
             while worker[1] is False:
@@ -289,11 +290,19 @@ class RolloutController:
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         session_id = rollout_state.session_uid if rollout_state.session_uid else uuid4().int
         worker = await self.router.get_worker(session_id)
+        if worker is None:
+            rollout_state.status = Status.FAILED
+            rollout_state.error_msg = "No active rollout worker available. Will retry after next produce_batch restart."
+            return rollout_state
         # TODO(#@duanyanhui):
         # 1. 现在的worker_info的管理写的不好，由于打印和计数都不太合理，实际用处不大，仅在debug时才会打开，先去掉这部分逻辑，后面加上
         # 2. 目前先去掉根据失败的样本的数量来判断worker是否可用的逻辑，实际上这部分逻辑也用不到，需要更好的check_health的机制来判断worker是否可用
         active_worker_to_url_map = self._get_active_worker_to_url_map()
         server_url = active_worker_to_url_map.get(worker)
+        if server_url is None or server_url not in self.workers_info:
+            rollout_state.status = Status.FAILED
+            rollout_state.error_msg = "Selected rollout worker is unavailable in workers_info mapping."
+            return rollout_state
         self.workers_info[server_url].running_count += 1
         response_ref = worker.generate.remote(rollout_state=rollout_state)  # type: ignore[attr-defined]
         try:
