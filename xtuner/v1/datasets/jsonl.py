@@ -509,6 +509,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         # calc the proxy attention flops
         _total_proxy_attn_flops = []
         for i in range(len(self.sampled)):
+            assert self.num_tokens is not None, "num_tokens must be calculated to compute proxy attention flops."
             _num_tokens = self.num_tokens[i]
             _num_image_tokens = self._meta["num_img_tokens"][i]
             if self._proxy_attention_flops_fn is not None:

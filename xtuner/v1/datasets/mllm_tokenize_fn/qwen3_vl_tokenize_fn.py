@@ -912,6 +912,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             add_vision_id=self.add_vision_id,
             max_length=self.max_length,
             system_message=self.system_message,
+            visual_llm_attn_ratio_for_pack=self.visual_llm_attn_ratio_for_pack,
             tokenizer_hash=tokenizer_hash,
             hash=self.hash,
             debug=self.debug,
