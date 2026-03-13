@@ -477,7 +477,12 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         self.offsets = offsets[self.sampled]
 
         # check all values in _meta are same length
-        assert all(len(v) == len(self.sampled) for v in _meta.values())
+        v_len = None
+        for _, v in _meta.items():
+            if v_len is None:
+                v_len = len(v)
+            else:
+                assert len(v) == v_len
 
         self._meta = {}
         for k, v in _meta.items():
