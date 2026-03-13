@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import datetime
+import itertools
 import json
 import math
 import multiprocessing
@@ -40,6 +41,12 @@ CACHE_META = ".xpuyu-cache-meta.json"
 XTUNER_FILE_OPEN_CONCURRENCY = int(os.environ.get("XTUNER_FILE_OPEN_CONCURRENCY", "8"))
 
 XTUNER_TOKENIZE_CHUNK_SIZE = int(os.environ.get("XTUNER_TOKENIZE_CHUNK_SIZE", "10"))
+
+
+def _concat_values(values):
+    if isinstance(values[0], np.ndarray):
+        return np.concatenate(values, axis=0)
+    return list(itertools.chain.from_iterable(values))
 
 
 def save_mixed_dict_to_parquet(
@@ -661,7 +668,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             all_tokenized = [None] * world_size
             dist.all_gather_object(all_tokenized, serialized_tokenized, group=self.process_group)
             serialized_tokenized_global = {
-                k: np.concatenate([data[k] for data in all_tokenized], axis=0) for k in serialized_tokenized.keys()
+                k: _concat_values([data[k] for data in all_tokenized]) for k in serialized_tokenized.keys()
             }
         else:
             serialized_tokenized_global = serialized_tokenized
