@@ -13,7 +13,7 @@ from io import BytesIO
 from multiprocessing import Process, Queue
 from pathlib import Path
 from threading import Lock
-from typing import Callable, Dict, List, Type, TypeVar, Union, cast
+from typing import Callable, Dict, List, TypeVar, Union, cast
 
 import numpy as np
 import pyarrow as pa
@@ -43,96 +43,73 @@ XTUNER_FILE_OPEN_CONCURRENCY = int(os.environ.get("XTUNER_FILE_OPEN_CONCURRENCY"
 XTUNER_TOKENIZE_CHUNK_SIZE = int(os.environ.get("XTUNER_TOKENIZE_CHUNK_SIZE", "10"))
 
 
-def _convert_to_pyarrow_array(data: Union[np.ndarray, List[List[int] | List[float]]]) -> pa.Array:
-    """内部函数：将 np.array 或 list[list[int|float]] 转换为 PyArrow Array
-    自动适配维度、数据类型，保证通用性."""
-    # 处理 numpy 数组
-    if isinstance(data, np.ndarray):
-        # 转为嵌套列表，保留维度信息
-        nested_list = data.tolist()
-        # 自动推断 PyArrow 类型（适配任意维度）
-        base_type = pa.from_numpy_dtype(data.dtype)
-        pa_type = base_type
-        for _ in range(data.ndim):
-            pa_type = pa.list_(pa_type)
-        return pa.array(nested_list, type=pa_type)
-
-    # 处理 list[list[int|float]]
-    elif isinstance(data, list):
-        # 自动推断元素类型（int/float，兼容空列表）
-        element_type = pa.float64()  # 默认浮点型
-        element_py_type: Type[int] | Type[float] = float
-        for sublist in data:
-            if sublist:
-                first_elem = sublist[0]
-                element_type = pa.int64() if isinstance(first_elem, int) else pa.float64()
-                element_py_type = int if isinstance(first_elem, int) else float
-                break
-        # 检查所有元素的python类型一致
-        for i, sublist in enumerate(data):
-            for j, elem in enumerate(sublist):
-                if not isinstance(elem, element_py_type):
-                    raise ValueError(
-                        f"All elements must have the same type: first {element_py_type} vs current {type(elem)} at index ({i}, {j})"
-                    )
-
-        # 构建嵌套列表类型
-        pa_type = pa.list_(element_type)
-        return pa.array(data, type=pa_type)
-
-    else:
-        raise TypeError(f"不支持的数据类型: {type(data)}，仅支持 np.ndarray 或 list[list[int|float]]")
-
-
 def save_mixed_dict_to_parquet(
     data: Dict[str, Union[np.ndarray, List[List[int] | List[float]]]], file_path: str
 ) -> None:
-    """通用保存函数：将 dict[str, np.array | list[list[int|float]]] 保存为 Parquet 文件 :param
-    data: 混合类型字典（键为字符串，值为 np.array 或 list[list[int|float]]） :param file_path:
-    保存路径（如 "data.parquet"）"""
-    # 校验输入格式
+    """通用保存函数：将 dict[str, np.array | list[list[int|float]]] 保存为 Parquet 文件.
+
+    每个 value 整体存为单行单 cell，避免不同 key 长度不一致导致 Arrow 报错。 通过 schema metadata 记录原始类型（np / list），确保 load 时正确还原。
+
+    :param data: 混合类型字典（键为字符串，值为 np.array 或 list[list[int|float]]）
+    :param file_path: 保存路径（如 "data.parquet"）
+    """
     if not isinstance(data, dict):
         raise ValueError("输入必须是字典类型")
 
-    # 逐个处理字典值，构建 PyArrow Table
+    type_map: Dict[str, str] = {}
     fields = []
     arrays = []
     for key, value in data.items():
-        # 转换为 PyArrow 数组
-        pa_arr = _convert_to_pyarrow_array(value)
-        # 构建字段和数组列表
+        if isinstance(value, np.ndarray):
+            py_val = value.tolist()
+            type_map[key] = "np"
+        elif isinstance(value, list):
+            py_val = value
+            type_map[key] = "list"
+        else:
+            raise TypeError(f"不支持的数据类型: {type(value)}，仅支持 np.ndarray 或 list[list[int|float]]")
+
+        pa_arr = pa.array([py_val])
         fields.append(pa.field(key, pa_arr.type))
         arrays.append(pa_arr)
 
-    # 构建 Schema 并写入 Parquet
-    schema = pa.schema(fields)
+    schema = pa.schema(fields, metadata={b"__type_map__": json.dumps(type_map).encode()})
     table = pa.Table.from_arrays(arrays, schema=schema)
     pq.write_table(table, file_path)
     print(f"数据已成功保存到: {file_path}")
 
 
 def load_mixed_dict_from_parquet(file_path: str) -> Dict[str, Union[np.ndarray, List[List[int] | List[float]]]]:
-    """通用恢复函数：从 Parquet 文件恢复 dict[str, np.array | list[list[int|float]]] :param
-    file_path: Parquet 文件路径 :return: 与保存时一致的混合类型字典."""
-    # 读取 Parquet 表
-    table = pq.read_table(file_path)
-    result = {}
+    """通用恢复函数：从 Parquet 文件恢复 dict[str, np.array | list[list[int|float]]].
 
-    # 逐个恢复列（自动识别类型并还原）
-    for col in table.columns:
-        col_name = col.name
-        # 转换为 Python 原生嵌套列表
+    :param file_path: Parquet 文件路径
+    :return: 与保存时一致的混合类型字典
+    """
+    table = pq.read_table(file_path)
+
+    metadata = table.schema.metadata or {}
+    type_map_raw = metadata.get(b"__type_map__")
+    type_map: Dict[str, str] = json.loads(type_map_raw) if type_map_raw else {}
+
+    result: Dict[str, Union[np.ndarray, List[List[int] | List[float]]]] = {}
+    for col_name in table.column_names:
+        col = table.column(col_name)
         pylist = col.to_pylist()
 
-        # 判断原始类型：如果是多维列表且可转为 numpy 数组（保存时是 np.array），则还原为 np.array
-        # 核心判断：np.array 保存的是「规则维度」的嵌套列表，而 list[list] 可能是不规则的
-        try:
-            # 尝试转为 numpy 数组（规则维度会成功，不规则会报错）
-            np_arr = np.array(pylist)
-            result[col_name] = np_arr
-        except (ValueError, TypeError):
-            # 转换失败 = 原始是不规则的 list[list]，直接保留列表
-            result[col_name] = pylist
+        # 新格式：每列只有 1 行，cell 内是完整的值
+        if len(table) == 1:
+            val = pylist[0]
+        else:
+            val = pylist
+
+        orig_type = type_map.get(col_name)
+        if orig_type == "list":
+            result[col_name] = val
+        else:
+            try:
+                result[col_name] = np.array(val)
+            except (ValueError, TypeError):
+                result[col_name] = val
 
     return result
 
@@ -498,6 +475,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             num_tokens = num_tokens[self.sampled]
         self.num_tokens: np.ndarray | None = num_tokens
         self.offsets = offsets[self.sampled]
+
+        # check all values in _meta are same length
+        assert all(len(v) == len(self.sampled) for v in _meta.values())
 
         self._meta = {}
         for k, v in _meta.items():
