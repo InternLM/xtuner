@@ -65,7 +65,7 @@ class AgentLoopManager:
             self.logger = logger
 
     # 共卡
-    async def produce_batch(self, batch_size: int, rollout_step: int) -> list[list[RolloutState]]:
+    async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> list[list[RolloutState]]:
         start = time.perf_counter()
         self.logger.info(f"[AgentLoopManager][{self.task_name}] produce_batch start batch={batch_size}")
         await self._scheduler.produce_batch(
