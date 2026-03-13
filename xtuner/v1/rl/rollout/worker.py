@@ -51,15 +51,19 @@ class RolloutConfig(BaseModel):
         model_path (str | Path): Path to the inference model.
         model_name (str): Model name for the backend engine.
         tokenizer_path (str): Path to the model tokenizer. Defaults to "".
-        api_key (Optional[Union[List[str], str]]): API keys for rollout service. Supports single key or list of keys. Defaults to None.
-        api_port (Optional[int]): Port number for the rollout API server. If not set, it will find an available port starting from 8000. Defaults to 8000.
+        api_key (Optional[Union[List[str], str]]): API keys for rollout service. Supports single key or
+            list of keys. Defaults to None.
+        api_port (Optional[int]): Port number for the rollout API server. If not set, it will find an
+            available port starting from 8000. Defaults to 8000.
         gpus_per_node (int): Number of GPUs per node. Defaults to 8.
         dtype (str): Model data type ('bfloat16', 'float16', 'int8'). Defaults to "bfloat16".
         gpu_memory_utilization (float): GPU memory utilization ratio. Defaults to 0.85.
         random_seed (int): Random seed for reproducible generation. Defaults to 1024.
         rollout_cross_node_comm (bool): Enable cross-node communication. Defaults to False.
-        rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it will be determined automatically based on `context_length`. Defaults to 512.
-        allow_over_concurrency_ratio (float): Factor to allow over-concurrency in HTTP requests for the rollout worker to improve GPU utilization. Defaults to 1.2.
+        rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it
+            will be determined automatically based on `context_length`. Defaults to 512.
+        allow_over_concurrency_ratio (float): Factor to allow over-concurrency in HTTP requests for the
+            rollout worker to improve GPU utilization. Defaults to 1.2.
         tensor_parallel_size (int): GPUs per inference engine (tensor parallelism). Defaults to 1.
         expert_parallel_size (int): Experts per inference engine (expert parallelism). Defaults to 1.
         enable_chunked_prefill (bool): Enable chunked prefill for memory efficiency. Defaults to False.
