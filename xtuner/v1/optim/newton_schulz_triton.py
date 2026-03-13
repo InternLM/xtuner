@@ -283,8 +283,18 @@ def ns_line_2(A: Tensor, alpha: float, beta: float, *, out: Tensor | None = None
 
 
 # @torch.compile(dynamic=False, fullgraph=True)
-def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
-    """Reference implementation of Newton-Schulz without Triton."""
+def newton_schulz_triton(G: Tensor, epsilon: float = 1e-7, num_experts: int = 1):
+    """Triton implementation of Newton-Schulz iteration.
+
+    Unified implementation for both regular matrices and MoE expert matrices.
+    Uses reshape to (num_experts, M, N) to handle both cases with the same code path.
+
+    Args:
+        G: Input tensor to orthogonalize. Shape: (num_experts * M, N) for MoE,
+           or (M, N) for regular matrices.
+        epsilon: Small value to avoid division by zero.
+        num_experts: Number of experts for MoE models. Default 1 for regular matrices.
+    """
     # Newton-Schulz constants
     ns_consts = [
         (4.0848, -6.8946, 2.9270),
@@ -295,56 +305,40 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
     ]
 
     X = G.to(dtype=torch.bfloat16)
-    if G.size(-2) > G.size(-1):
+    original_shape = X.shape
+
+    # Unified reshape: (num_experts * M, N) -> (num_experts, M, N)
+    # For num_experts=1, this is (M, N) -> (1, M, N), adding a batch dim
+    M = X.size(-2) // num_experts
+    N = X.size(-1)
+    X = X.view(num_experts, M, N)
+
+    # Transpose if rows > cols for numerical stability
+    need_transpose = G.size(-2) > G.size(-1)
+    if need_transpose:
         X = X.mT
 
-    # Ensure spectral norm is at most 1
+    # Normalize each expert matrix independently
+    # norm shape: (num_experts, 1, 1) - each expert has its own normalization factor
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)
 
-    for a, b, c in ns_consts:
-        A = X @ X.mT
-        B = b * A + c * (A @ A)
-        X = a * X + B @ X
-
-    if G.size(-2) > G.size(-1):
-        X = X.mT
-    return X
-
-
-# @torch.compile(dynamic=False, fullgraph=True)
-def newton_schulz_triton(G: Tensor, epsilon: float = 1e-7):
-    """Triton implementation of Newton-Schulz iteration."""
-    # Newton-Schulz constants
-    ns_consts = [
-        (4.0848, -6.8946, 2.9270),
-        (3.9505, -6.3029, 2.6377),
-        (3.7418, -5.5913, 2.3037),
-        (2.8769, -3.1427, 1.2046),
-        (2.8366, -3.0525, 1.2012),
-    ]
-
-    X = G.to(dtype=torch.bfloat16)
-    if G.size(-2) > G.size(-1):
-        X = X.mT
-
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + epsilon)
-
-    # Allocate buffers
+    # Allocate buffers for 3D tensors
     X = X.contiguous()
-    A = torch.empty((*X.shape[:-1], X.size(-2)), device=X.device, dtype=X.dtype)
+    A = torch.empty((num_experts, X.size(-2), X.size(-2)), device=X.device, dtype=X.dtype)
     B = torch.empty_like(A)
     C = torch.empty_like(X)
 
-    ns_line_3 = torch.baddbmm if X.ndim > 2 else torch.addmm
-
-    # Perform the NS iterations
+    # Perform the NS iterations using batch matrix operations
     for a, b, c in ns_consts:
         ns_line_1(X, out=A)  # A = X @ X.mT
         ns_line_2(A, alpha=c, beta=b, out=B)  # B = b * A + c * A @ A
-        ns_line_3(X, B, X, beta=a, out=C)  # C = a * X + B @ X
+        torch.baddbmm(X, B, X, beta=a, out=C)  # C = a * X + B @ X
         X, C = C, X  # Swap references to avoid unnecessary copies
 
-    if G.size(-2) > G.size(-1):
+    if need_transpose:
         X = X.mT
+
+    # Reshape back to original shape
+    X = X.reshape(original_shape)
+
     return X
