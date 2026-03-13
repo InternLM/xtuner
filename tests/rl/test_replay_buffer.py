@@ -26,7 +26,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res[1][0].id, 5)
 
     async def test_staleness_priority(self):
-        replay_buffer_cfg = AsyncReplayBufferConfig(min_staleness=1, max_staleness=5)
+        replay_buffer_cfg = AsyncReplayBufferConfig()
         buffer = replay_buffer_cfg.build()
         
         s1 = MockState(id="low", staleness=1)

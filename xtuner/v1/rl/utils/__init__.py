@@ -12,6 +12,7 @@ from .misc import (
     SetNode,
     SetOperator,
     gather_logprobs,
+    get_eos_token,
     load_function,
     parse_query,
 )
@@ -62,4 +63,5 @@ __all__ = [
     "BetweenOperator",
     "LogicOperator",
     "Operators",
+    "get_eos_token",
 ]

@@ -1,4 +1,6 @@
+import copy
 from typing import Iterator, Optional, cast
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
@@ -7,6 +9,10 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
+from xtuner.v1.utils import get_logger
+
+
+logger = get_logger()
 
 
 class SamplerConfig(BaseModel):
@@ -48,7 +54,12 @@ class _DatasetSampler:
             self.dataloader.set_epoch(self.cur_epoch)
             self.dataloader_iter = iter(self.dataloader)
             data = next(self.dataloader_iter)[0]
-        group_data = [data] * self.prompt_repeat_k
+
+        group_data = []
+        for _ in range(self.prompt_repeat_k):
+            new_data = copy.deepcopy(data)
+            new_data.uid = uuid4().int
+            group_data.append(new_data)
         return cast(list[RolloutState], group_data)
 
 
@@ -62,9 +73,9 @@ class Sampler(_DatasetSampler):
         super().__init__(dataloader, prompt_repeat_k)
         self.replay_buffer = replay_buffer
 
-    async def sample(self, task_name: str) -> list[RolloutState]:
-        buffer_data = await self.replay_buffer.get(1, task_name=task_name, group_status=Status.ABORTED)
-        if len(buffer_data) == 0:
-            return self.sample_from_dataloader()
-        else:
-            return buffer_data[0]
+    async def sample(self, task_name: str, group_status: Status | None = None) -> list[RolloutState]:
+        if group_status is not None:
+            buffer_data = await self.replay_buffer.get(1, task_name=task_name, group_status=group_status)
+            if buffer_data:
+                return buffer_data[0]
+        return self.sample_from_dataloader()

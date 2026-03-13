@@ -1,7 +1,9 @@
 import importlib
+import json
 import socket
 import typing
 from abc import ABC
+from pathlib import Path
 from typing import Any, List, Literal, Union
 
 import torch.nn.functional as F
@@ -127,3 +129,20 @@ def _is_port_available(check_socket: socket.socket, port: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def get_eos_token(model_path: str) -> int | List[int]:
+    generation_config_path = Path(model_path) / "generation_config.json"
+    if not generation_config_path.exists():
+        logger.warning(
+            f"Config {generation_config_path} does not exist and thus cannot get eos_token. You must provide eos_token manually."
+        )
+        return []
+    with open(generation_config_path) as f:
+        generation_config = json.load(f)
+    eos_token_id = generation_config.get("eos_token_id")
+    if eos_token_id is None:
+        raise ValueError(
+            f"eos_token_id is not found in {generation_config_path}. You must provide eos_token manually."
+        )
+    return eos_token_id
