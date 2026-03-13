@@ -2,7 +2,7 @@
 import os
 import types
 from pathlib import Path
-from typing import Annotated, Literal, Self, cast
+from typing import Annotated, Literal, Self, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -22,7 +22,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from tqdm import tqdm
-from typing_extensions import NotRequired, overload, override
+from typing_extensions import overload, override
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
@@ -31,6 +31,7 @@ from xtuner.v1.loss import BalancingLoss, CELossContext, ZLoss
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
+    BatchForwardInfo,
     ModelOutputs,
     TorchCompileOption,
     TransformerConfig,
@@ -82,10 +83,30 @@ MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDeco
 
 
 class MoEModelOutputs(ModelOutputs):
-    router_logits: NotRequired[dict[str, torch.Tensor]]
-    balancing_loss: NotRequired[torch.Tensor]
-    z_loss: NotRequired[torch.Tensor]
-    tokens_per_expert_global: NotRequired[torch.Tensor]
+    router_logits: dict[str, torch.Tensor] | None = None
+    router_weights: dict[str, torch.Tensor] | None = None
+    balancing_loss: torch.Tensor | None = None
+    z_loss: torch.Tensor | None = None
+    tokens_per_expert_global: torch.Tensor
+
+    def free_nongrad_feature(self):
+        """Release large intermediate tensors not needed for backward or
+        logging.
+
+        This method is called immediately after forward() in the micro-batch loop.
+        It releases large tensors (logits, hidden_states) while keeping:
+        - loss: needed for backward pass
+        - extra_info: lightweight logging info needed by post_micro_batch_forward()
+        """
+        super().free_nongrad_feature()
+        self.router_logits = None
+
+
+class MoEBatchForwardInfo(BatchForwardInfo):
+    step_balancing_loss: float
+    z_loss: float
+    tokens_per_expert_global: int
+    maxvio: float
 
 
 class BalancingLossConfig(PydanticBaseModel):
@@ -313,6 +334,31 @@ class MoE(BaseModel):
                 return_router_logits=return_router_logits,
             )
 
+    def post_micro_batch_forward(self, batch_outputs: Sequence[MoEModelOutputs]) -> MoEBatchForwardInfo:
+        base_info = super().post_micro_batch_forward(batch_outputs)
+        logs_info = base_info["logs_info"]
+
+        tokens_per_expert_global = torch.zeros(
+            self.config.num_hidden_layers - self.config.first_k_dense_replace,
+            self.config.n_routed_experts,
+            dtype=torch.int64,
+            device=DEVICE,
+        )
+        for output in batch_outputs:
+            tokens_per_expert_global += output["tokens_per_expert_global"]
+
+        avg_count_load = tokens_per_expert_global.float().mean(1)
+        max_load_i, _ = torch.max(tokens_per_expert_global, dim=1)
+        maxvio_all_layers = (max_load_i - avg_count_load) / avg_count_load
+        maxvio = maxvio_all_layers.mean()
+        logs_info["maxvio"] = maxvio.item()
+
+        if self.need_update_bias:
+            self.update_bias(tokens_per_expert_global, avg_count_load)  # type: ignore
+
+        moe_info = cast(MoEBatchForwardInfo, base_info)
+        return moe_info
+
     def _micro_batch_forward(
         self,
         seq_ctx_list: list[SequenceContext],
@@ -450,17 +496,22 @@ class MoE(BaseModel):
             combined_router_weights = torch.cat(all_router_weights, dim=1)
 
             # Calculate balancing loss across all micro-batches
+            batch_size = loss_ctx_list[0].batch_size if loss_ctx_list else 1
             if self.balancing_loss:
-                balancing_loss = self.balancing_loss(
-                    router_weights=combined_router_weights,
-                    n_routed_experts=self.config.n_routed_experts,
-                    num_experts_per_tok=self.config.num_experts_per_tok,
+                balancing_loss = (
+                    self.balancing_loss(
+                        router_weights=combined_router_weights,
+                        n_routed_experts=self.config.n_routed_experts,
+                        num_experts_per_tok=self.config.num_experts_per_tok,
+                    )
+                    / batch_size
+                    * len(seq_ctx_list)
                 )
                 output["balancing_loss"] = balancing_loss
 
             # Calculate z-loss across all micro-batches
             if self.z_loss:
-                z_loss = self.z_loss(router_logits=combined_router_logits)
+                z_loss = self.z_loss(router_logits=combined_router_logits) / batch_size * len(seq_ctx_list)
                 output["z_loss"] = z_loss
 
             # Calculate tokens per expert for bias update (if applicable)
@@ -486,7 +537,7 @@ class MoE(BaseModel):
 
             output["router_logits"] = router_logits_dict
 
-        return MoEModelOutputs(**output, logits=logits)  # type: ignore[typeddict-item]
+        return MoEModelOutputs(**output, logits=logits)
 
     def _forward(
         self,
@@ -562,16 +613,20 @@ class MoE(BaseModel):
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
         router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
 
+        batch_size = loss_ctx.batch_size if loss_ctx is not None else 1
         if self.balancing_loss:
-            balancing_loss = self.balancing_loss(
-                router_weights=router_weights,
-                n_routed_experts=self.config.n_routed_experts,
-                num_experts_per_tok=self.config.num_experts_per_tok,
+            balancing_loss = (
+                self.balancing_loss(
+                    router_weights=router_weights,
+                    n_routed_experts=self.config.n_routed_experts,
+                    num_experts_per_tok=self.config.num_experts_per_tok,
+                )
+                / batch_size
             )
             output["balancing_loss"] = balancing_loss
 
         if self.z_loss:
-            z_loss = self.z_loss(router_logits=router_logits)
+            z_loss = self.z_loss(router_logits=router_logits) / batch_size
             output["z_loss"] = z_loss
 
         tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
@@ -587,7 +642,7 @@ class MoE(BaseModel):
         else:
             output["router_logits"] = None
 
-        return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
+        return MoEModelOutputs(**output)
 
     def build_embeddings(self, config: MoEConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
@@ -690,6 +745,10 @@ class MoE(BaseModel):
         self.mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        if self.fsdp_config.fp32_lm_head:
+            lm_head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
+        else:
+            lm_head_mp_policy = self.mp_policy
         self._init_device_mesh(fsdp_config)
 
         if self.config.float8_cfg is not None:
@@ -768,7 +827,7 @@ class MoE(BaseModel):
         fully_shard(
             self.lm_head,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
+            mp_policy=lm_head_mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
@@ -796,6 +855,11 @@ class MoE(BaseModel):
             return MOE_EP_COMPILE_CFG
         else:
             return MOE_NON_EP_COMPILE_CFG
+
+    @property
+    def need_update_bias(self) -> bool:
+        router_config = self.config.router
+        return isinstance(router_config, NoAuxRouterConfig) and router_config.router_bias_update_speed > 0
 
     @torch.no_grad  # type: ignore
     def scale_and_reduce_grad(self):

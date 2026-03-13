@@ -26,7 +26,6 @@ from xtuner.v1.train.trainer import HooksConfig, Trainer, ResumeConfig, HookStag
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.train.trainer import TrainerConfig
-from xtuner.v1.engine.train_engine import LossLog, OtherLog
 from xtuner.v1.loss import CELossConfig
 from xtuner._testing import DeterministicDDPTestCase
 from unittest import TestCase
@@ -34,6 +33,7 @@ from xtuner.v1.train.trainer import XTunerMeta, ExpInfo, ExpHistory, GitInfo
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.datasets.dataloader import Dataloader
 from torch.optim.lr_scheduler import SequentialLR
+from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 
 
 DEVICE = get_device()
@@ -55,10 +55,8 @@ class FakeEngine:
 
     def train_step(self, *args, **kwargs):
         self.train_step_calls += 1
-        return (
-            {"local_loss": 1.0, "reduced_llm_loss": 0.8},
-            {"step_consumed_tokens": 100, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5}
-        )
+        return {"total_loss": 1.8, "step_consumed_tokens": 100, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5, "logs_info": {"local_loss": 1.0, "reduced_llm_loss": 0.8}, "extra_info": ModelForwardExtraLogInfo()}
+        
 
     def save_hf(self, hf_path):
         self.save_hf_calls.append(hf_path)
@@ -647,14 +645,12 @@ class TestHooksConfig(DeterministicDDPTestCase):
         self.create_pg(DEVICE)
         checkpoint_function_call_times = 0
         train_step_function_call_times = 0
-        losslog_adapater = TypeAdapter(LossLog)
-        otherlog_adapter = TypeAdapter(OtherLog)
 
         def checkpoint_hook(checkpoint, step, epoch, total_step, total_epoch):
             nonlocal checkpoint_function_call_times
             checkpoint_function_call_times += 1
 
-        def train_step_hook(loss_log, other_log, step, epoch, total_step, total_epoch):
+        def train_step_hook(train_step_info, step, epoch, total_step, total_epoch):
             nonlocal train_step_function_call_times
             train_step_function_call_times += 1
 
@@ -673,10 +669,7 @@ class TestHooksConfig(DeterministicDDPTestCase):
             def __init__(self) -> None:
                 self.count = 0
 
-            def __call__(self, loss_log, other_log, step, epoch, total_step, total_epoch):
-                losslog_adapater.validate_python(loss_log)
-                otherlog_adapter.validate_python(other_log)
-
+            def __call__(self, train_step_info, step, epoch, total_step, total_epoch):
                 assert self.trainer().cur_step == step
                 assert self.trainer().cur_epoch == epoch
                 assert self.trainer().total_step == total_step

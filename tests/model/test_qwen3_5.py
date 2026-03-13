@@ -76,13 +76,8 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             image_grid_thw = tokenized_data['image_grid_thw'].cuda()
             position_ids = tokenized_data['position_ids'].cuda()
         else:
-            rank = dist.get_rank()
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_MOE_PATH)
-            if sp_size == 1:
-                input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+1 等于多少？",
-                                      return_tensors="pt").input_ids.to(device)
-            else:
-                input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+{rank} 等于多少？",
+            input_ids = tokenizer(f"今天天气不错，是学习的好日子。请听题： 1+1 等于多少？",
                                       return_tensors="pt").input_ids.to(device)
             labels = input_ids.clone()
             pixel_values = None
@@ -112,6 +107,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
                         position_ids=position_ids,
                         use_cache = False
                     )
+            dist.all_reduce(output.loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
             return output.loss
         else:
             loss_cfg = CELossConfig()
@@ -155,6 +151,8 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         "device,sp_size,tol",
         [
             ("cuda", 1, 1e-2),
+            ("cuda", 2, 1e-2),
+            ("cuda", 4, 1e-2),
         ],
     )
     def test_qwen3_5_vl_run(self, device, sp_size, tol):
@@ -190,7 +188,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         loss_xtuner_text = self._forward(qwen3vl_model, type='text',device=device, sp_size=sp_size)
         loss_xtuner_image = self._forward(qwen3vl_model, type='image',device=device, sp_size=sp_size)
         loss_xtuner_video = self._forward(qwen3vl_model, type='video',device=device, sp_size=sp_size)
-
+        
         self.assertTrue(torch.allclose(loss_xtuner_text, loss_hf_text.to(loss_xtuner_text.dtype), atol=tol, rtol=tol))
         self.assertTrue(torch.allclose(loss_xtuner_image, loss_hf_image.to(loss_xtuner_image.dtype), atol=tol, rtol=tol))
         # self.assertTrue(torch.allclose(loss_xtuner_video, loss_hf_video.to(loss_xtuner_video.dtype), atol=tol, rtol=tol))

@@ -140,6 +140,7 @@ class BaseLossContext(nn.Module, ABC):
         super().__init__()
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
+        self._batch_size = 1
 
     @staticmethod
     @abstractmethod
@@ -186,6 +187,8 @@ class BaseLossContext(nn.Module, ABC):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
+
         assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
         if head_bias is not None:
             raise NotImplementedError("Loss does not support head_bias yet.")
@@ -194,6 +197,10 @@ class BaseLossContext(nn.Module, ABC):
             loss, (logits, extra_info) = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
         else:
             loss, (logits, extra_info) = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+
+        # TODO: yanhuida, should be removed
+        if not isinstance(extra_info, ModelForwardExtraLogInfo):
+            extra_info = ModelForwardExtraLogInfo(extra_info)
 
         extra_info["local_base_loss"] = loss.detach().clone()
 
@@ -213,3 +220,7 @@ class BaseLossContext(nn.Module, ABC):
         loss_kwargs = type(first.loss_kwargs).cat(loss_kwargs_chunks)
 
         return cls(loss_cfg, loss_kwargs)
+
+    @property
+    def batch_size(self) -> int:
+        return self._batch_size

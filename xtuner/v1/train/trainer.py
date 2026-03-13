@@ -30,11 +30,10 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.config import FSDPConfig, LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
-from xtuner.v1.engine import LossLog, OtherLog, TrainEngine
-from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
+from xtuner.v1.engine import TrainEngine
+from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig, CELossContext
 from xtuner.v1.model.base import ModelItem, XTunerBaseModelConfig
-from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
@@ -194,8 +193,7 @@ class CheckpointHook(CheckpointHookBase, Protocol):
 class TrainStepHookBase(Protocol):
     def __call__(
         self,
-        loss_log: LossLog,
-        other_log: OtherLog,
+        train_step_info: TrainStepInfo,
         step: int,
         epoch: int | None,
         total_step: int,
@@ -624,8 +622,6 @@ class Trainer:
             loss_cfg = CELossConfig()
         self.loss_cfg = loss_cfg
 
-        # TODO: TMP hardcode here
-        #
         if debug:
             self._register_debug_hook()
 
@@ -721,13 +717,12 @@ class Trainer:
             engine_input = self._prepare_model_input(data_batch)
 
             with self._maybe_profiling():
-                loss_log, other_log = self._engine.train_step(engine_input)
+                train_step_info = self._engine.train_step(engine_input)
 
             hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
             for hook in hooks:
                 hook(
-                    loss_log=loss_log,
-                    other_log=other_log,
+                    train_step_info=train_step_info,
                     step=self.cur_step,
                     epoch=self._cur_epoch,
                     total_step=self.total_step,
@@ -746,7 +741,7 @@ class Trainer:
             internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
 
             self._cur_step += 1
-            reduced_step_consumed_tokens = self._reduce_number_across_rank(other_log["step_consumed_tokens"])
+            reduced_step_consumed_tokens = self._reduce_number_across_rank(train_step_info["step_consumed_tokens"])
             self._total_consumed_tokens += reduced_step_consumed_tokens
             self._exp_consumed_tokens += reduced_step_consumed_tokens
             self._total_consumed_samples += self._reduce_number_across_rank(consumed_samples)
@@ -754,15 +749,15 @@ class Trainer:
 
             # Compute training metrics
             training_metrics = self._compute_performance_metrics(
-                local_step_consumed_tokens=other_log["step_consumed_tokens"],
-                local_step_consumed_img_tokens=other_log.get("step_consumed_img_tokens"),
+                local_step_consumed_tokens=train_step_info["step_consumed_tokens"],
+                local_step_consumed_img_tokens=train_step_info.get("step_consumed_img_tokens"),
                 step_consumed_tokens=reduced_step_consumed_tokens,
                 step_time=step_time,
             )
 
             # TODO: This log should be move before lr_scheduler.step, but for CI BC, keep it temporarily
             self._log_step(
-                loss_log=loss_log,
+                train_step_info=train_step_info,
                 training_metrics=training_metrics,
                 grad_norm=grad_norm.item(),
                 data_time=data_time,
@@ -1012,20 +1007,12 @@ class Trainer:
         Returns:
             TrainEngine: Initialized training engine.
         """
-        if isinstance(model_config, BaseComposeConfig):
-            engine = VisionComposeTrainEngine(
-                optim_cfg=optim_config,
-                fsdp_cfg=fsdp_config,
-                model_cfg=model_config,
-                intra_layer_micro_batch=intra_layer_micro_batch,
-            )
-        else:
-            engine = TrainEngine(  # type: ignore
-                optim_cfg=optim_config,
-                fsdp_cfg=fsdp_config,
-                model_cfg=model_config,
-                intra_layer_micro_batch=intra_layer_micro_batch,
-            )
+        engine = TrainEngine(  # type: ignore
+            optim_cfg=optim_config,
+            fsdp_cfg=fsdp_config,
+            model_cfg=model_config,
+            intra_layer_micro_batch=intra_layer_micro_batch,
+        )
         if model_path is not None and (model_config.dcp_ignore_frozen_params or load_checkpoint_path is None):
             engine.from_hf(hf_path=model_path, strict=strict)
         elif load_checkpoint_path is None:
@@ -1479,7 +1466,7 @@ class Trainer:
 
     def _log_step(
         self,
-        loss_log: LossLog,
+        train_step_info: TrainStepInfo,
         training_metrics: PerformanceStatistics,
         grad_norm: float,
         data_time: float,
@@ -1496,10 +1483,18 @@ class Trainer:
             step_time (float): Time spent on training step in seconds.
             internal_metrics (InternalMetrics | None): Internal metrics from the model.
         """
+        train_step_info = train_step_info.copy()
         lr = self._lr_scheduler.get_last_lr()[0]
 
-        loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
+        loss_logs_info = train_step_info.pop("logs_info") | {"local_loss": train_step_info.pop("total_loss")}  # type: ignore[misc]
+        loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_logs_info.items()]
         loss_log_str = ", ".join(loss_log_list)
+
+        extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
+        extra_info_log_list = [f"{k}: {v:.4f}" for k, v in extra_info.get().items()]
+        extra_info_str = ", ".join(extra_info_log_list)
+
+        data_info_str = ", ".join([f"{k}: {v:.8f}" for k, v in train_step_info.items()])
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
@@ -1520,6 +1515,8 @@ class Trainer:
             f"step_consumed_tokens: {training_metrics['step_consumed_tokens']} "
             f"total_consumed_tokens: {training_metrics['total_consumed_tokens']} "
             f"{loss_log_str} "
+            f"{data_info_str} "
+            f"{extra_info_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
@@ -1546,7 +1543,7 @@ class Trainer:
             "grad_norm": grad_norm,
             **flattened_internal_metrics,
         }
-        log_scalars.update({f"loss/{k}": v for k, v in loss_log.items()})
+        log_scalars.update({f"loss/{k}": v for k, v in loss_logs_info.items()})
         self._exp_tracker.add_scalars(tag_scalar_dict=log_scalars, global_step=self.cur_step)
 
         DEVICE_MODULE.reset_peak_memory_stats()  # type: ignore[attr-defined]
