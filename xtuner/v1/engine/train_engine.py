@@ -216,7 +216,7 @@ class TrainEngine:
                 # Here we assume that the model can handle a list of seq_ctx and loss_ctx.
                 output = self.model(
                     seq_ctx=seq_ctx_list,
-                    loss_ctx=loss_ctx_list,
+                    loss_ctx=loss_ctx_list,  # type: ignore[arg-type]
                 )
             output.free_nongrad_feature()
 

@@ -136,7 +136,7 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
     def forward(
             self,
             seq_ctx: SequenceContext,
-            loss_ctx: CELossContext
+            loss_ctx: dict[str, CELossContext] | None = None
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
