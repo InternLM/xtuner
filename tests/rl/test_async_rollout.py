@@ -279,6 +279,8 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
                 f"got sampled_from_aborted={sampled_from_aborted}"
             ),
         )
+
+
 class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
     """Partial-rollout tests.
 
@@ -562,6 +564,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
             max_tokens,
             msg=f"Final response_ids length {len(target_sample.response_ids)} > max_tokens {max_tokens}",
         )
+
 
 class TestTailBatch(unittest.IsolatedAsyncioTestCase):
     BATCH_SIZE = 2
