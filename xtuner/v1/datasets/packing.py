@@ -150,12 +150,6 @@ def closest_sum_indices(buffer, value):
     return closest_indices
 
 
-def calc_num_patch(num_tokens, num_img_tokens, flash_attn_block_size):
-    llm_num_patch = (round(num_tokens / flash_attn_block_size)) ** 2
-    img_num_patch = ((num_img_tokens / flash_attn_block_size) ** 2).sum()
-    return llm_num_patch + img_num_patch
-
-
 def get_pack_chunk_infos(
     inds,
     dataset_id,
@@ -227,7 +221,7 @@ def get_pack_chunk_infos(
             item_buffer = [shfl_i]
             length_buffer = [num_tokens[shfl_i]]
             longest = num_tokens[shfl_i]
-            num_patch += total_num_patch[shfl_i]
+            num_patch = total_num_patch[shfl_i]
 
     if len(item_buffer) > 0:
         info = {
@@ -282,7 +276,7 @@ def get_pack_infos_by_expand_soft_split(
             shm_name=shm.name,
             shape=num_tokens.shape,
             dtype=num_tokens.dtype,
-            patch_shm_name=patch_shm_array.name,
+            patch_shm_name=patch_shm.name,
         )
         with ProcessPoolExecutor(max_workers=pack_workers, mp_context=mp_context) as executor:
             results = list(tqdm(executor.map(process_chunk_with_args, chunks_inds)))
@@ -582,7 +576,7 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
             soft_pack_datasets: list[Sized] = []
             if len(soft_pack_groups) > 0:
                 num_tokens = [np.concatenate([dset.num_tokens for dset in soft_pack_groups])]
-                total_num_patch = [np.concatenate([dset.total_num_patch for dset in datasets])]
+                total_num_patch = [np.concatenate([dset.total_num_patch for dset in soft_pack_groups])]
 
                 soft_pack_datasets = [ConcatDataset(soft_pack_groups)]
                 for i, dataset in enumerate(soft_pack_datasets):

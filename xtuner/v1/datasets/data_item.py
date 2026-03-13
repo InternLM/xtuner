@@ -2,7 +2,7 @@ import torch
 from typing_extensions import NotRequired, TypedDict
 
 
-class CacheItem(TypedDict, total=False):
+class CacheItem(TypedDict):
     num_tokens: int
     num_img_tokens: NotRequired[list[int]]
 
