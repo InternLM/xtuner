@@ -121,6 +121,7 @@ autodoc_mock_imports = [
     "fastapi",
     "huggingface_hub",
     "more_itertools",
+    "pyarrow",
 ]
 
 
