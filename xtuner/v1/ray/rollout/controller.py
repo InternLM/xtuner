@@ -114,21 +114,24 @@ class SessionRouter:
 
     async def get_worker(self, session_id: int) -> Any:
         with self._lock:
-                self._evict_expired()
+            self._evict_expired()
 
-                if session_id in self._map:
-                    worker, _ = self._map.pop(session_id)
-                    self._map[session_id] = (worker, self._now())
-                    if worker[1]:  # worker is healthy
-                        return worker[0]
-
-                worker = next(self._worker_cycler)
-                while worker[1] is False:
-                    worker = next(self._worker_cycler)
+            if session_id in self._map:
+                worker, _ = self._map.pop(session_id)
                 self._map[session_id] = (worker, self._now())
+                if worker[1]:  # worker is healthy
+                    return worker[0]
 
-                self._evict_lru_to_capacity()
-                return worker[0]
+            if not any(is_active for _, is_active in self._workers):
+                raise RuntimeError("No active rollout workers available in SessionRouter.")
+
+            worker = next(self._worker_cycler)
+            while worker[1] is False:
+                worker = next(self._worker_cycler)
+            self._map[session_id] = (worker, self._now())
+
+            self._evict_lru_to_capacity()
+            return worker[0]
 
 
 class RolloutHealthChecker:
@@ -415,6 +418,8 @@ class RolloutController:
     def _deactivate_worker(self, url: str):
         """A helper function to deactivate a worker, update all related states,
         and shut it down."""
+        worker_actor = None
+        actor_to_disable = None
         with self._workers_state_lock:
             worker_info = self.workers_info.get(url)
             if not worker_info or not worker_info.is_active:
@@ -422,9 +427,12 @@ class RolloutController:
 
             self.logger.warning(f"Deactivating rollout worker {worker_info.actor} with URL {url} due to failures.")
             worker_info.is_active = False
-            self.router.update_worker_status(worker_info.actor, False)
             worker_info.failure_count = 0
             worker_actor = worker_info.actor
+            actor_to_disable = worker_info.actor
+
+        if actor_to_disable is not None:
+            self.router.update_worker_status(actor_to_disable, False)
 
         try:
             ray.get(worker_actor.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
@@ -451,14 +459,16 @@ class RolloutController:
             self.logger.error(f"Failed to restart rollout worker {url}: {e}", exc_info=True)
             return
 
+        actor_to_enable = worker_info.actor
         with self._workers_state_lock:
             if url != new_url:
                 self.workers_info.pop(url, None)
             worker_info.is_active = True
             worker_info.failure_count = 0
             self.workers_info[new_url] = worker_info
-            self.router.update_worker_status(worker_info.actor, True)
             self.worker_server_urls_map[worker_info.rank] = new_url
+
+        self.router.update_worker_status(actor_to_enable, True)
         self.logger.info(f"Successfully restarted rollout worker: {url} -> {new_url}.")
 
     def _get_worker_status_for_router(self) -> Dict[RolloutWorker, bool]:
