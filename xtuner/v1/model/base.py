@@ -61,6 +61,7 @@ DEVICE = get_device()
 class DataBatchInfo(TypedDict):
     step_consumed_tokens: int
     efficient_attn_ratio: float
+    img_efficient_attn_ratio: float
 
 
 class BatchForwardInfo(TypedDict):
@@ -598,6 +599,8 @@ class BaseModel(nn.Module):
         step_consumed_tokens = torch.tensor(0, device=DEVICE)
         efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
         total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        img_efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        img_total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
 
         for data in data_batches:
             seq_ctx = data["seq_ctx"]
@@ -606,11 +609,17 @@ class BaseModel(nn.Module):
             efficient_forward_tokens += (num_tokens.long() ** 2).sum()
             total_forward_tokens += (num_tokens.long().sum()) ** 2
 
+            num_img_tokens = torch.tensor(seq_ctx.num_img_tokens)  # list[int]
+            img_efficient_forward_tokens += (num_img_tokens.long() ** 2).sum()
+            img_total_forward_tokens += (num_img_tokens.long().sum()) ** 2
+
         efficient_attn_ratio = efficient_forward_tokens.float() / total_forward_tokens.float()
+        img_efficient_attn_ratio = img_efficient_forward_tokens.float() / (img_total_forward_tokens.float() + 1e-8)
 
         batch_info: DataBatchInfo = {
             "step_consumed_tokens": cast(int, step_consumed_tokens.item()),
             "efficient_attn_ratio": cast(float, efficient_attn_ratio.item()),
+            "img_efficient_attn_ratio": cast(float, img_efficient_attn_ratio.item()),
         }
         return batch_info
 

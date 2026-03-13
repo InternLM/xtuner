@@ -20,8 +20,12 @@ if TYPE_CHECKING:
 
 
 class CachableTokenizeFunction(ABC, Generic[T]):
-    def __init__(self, tokenizer, *args, **kwargs):
+    def __init__(self, tokenizer, *args, visual_llm_attn_ratio_for_pack: float = 0.0, **kwargs):
         self.tokenizer = tokenizer
+        assert visual_llm_attn_ratio_for_pack >= 0, (
+            f"visual_llm_attn_ratio_for_pack must be greater than 0. but got {visual_llm_attn_ratio_for_pack}"
+        )
+        self.visual_llm_attn_ratio_for_pack = visual_llm_attn_ratio_for_pack
         self.state = "runtime"
 
     @abstractmethod
@@ -34,6 +38,13 @@ class CachableTokenizeFunction(ABC, Generic[T]):
 
     def set_state(self, state: Literal["cache", "runtime"]):
         self.state = state
+
+    def proxy_attention_flops(
+        self, num_tokens: int, num_img_tokens: list[int], flash_attn_block_size: int = 128
+    ) -> float:
+        llm_num_patch = (round(num_tokens / flash_attn_block_size)) ** 2
+        img_num_patch = sum((n / flash_attn_block_size) ** 2 for n in num_img_tokens)
+        return llm_num_patch + self.visual_llm_attn_ratio_for_pack * img_num_patch
 
 
 def calculate_file_sha256(path):

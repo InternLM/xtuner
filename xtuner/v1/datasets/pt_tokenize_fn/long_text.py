@@ -209,7 +209,11 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
             else:
                 labels = copy.deepcopy(input_ids)
                 labels[0] = -100
-            return {"input_ids": input_ids, "labels": labels, "num_tokens": num_tokens}
+            return DataItem(
+                input_ids=input_ids,
+                labels=labels,
+                num_tokens=num_tokens,
+            )
 
         # Full-text fallback (no char range specified)
         return super().__call__(item)
