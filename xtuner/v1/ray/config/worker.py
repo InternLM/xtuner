@@ -232,6 +232,20 @@ class RolloutConfig(BaseModel):
             help="Maximum number of retries per sample before marking it as failed.",
         ),
     ] = 1
+    health_check_interval_seconds: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help="Interval in seconds between rollout worker health checks.",
+        ),
+    ] = 30.0
+    health_check_failure_threshold: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of consecutive health check failures required before marking a worker inactive.",
+        ),
+    ] = 3
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
     _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
 
