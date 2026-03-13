@@ -61,8 +61,7 @@ class SessionRouter:
         # OrderedDict: key=session_id -> value=(worker, last_used_ts)
         self._map: OrderedDict[int, tuple[Any, float]] = OrderedDict()
         self._worker_cycler = cycle(self._workers)
-        self._lock = asyncio.Lock()
-        self._state_lock = threading.RLock()
+        self._lock = threading.RLock()
         self.logger = get_logger()
 
     def _now(self) -> float:
@@ -87,13 +86,13 @@ class SessionRouter:
             self._map.popitem(last=False)
 
     def update_active_workers(self, worker_status: Dict[Any, bool]):
-        with self._state_lock:
+        with self._lock:
             self._workers = list(worker_status.items())
             self.logger.debug(f"SessionRouter update active workers: {self._workers}")
             self._worker_cycler = cycle(self._workers)
 
     def update_worker_status(self, worker: Any, is_active: bool):
-        with self._state_lock:
+        with self._lock:
             updated = False
             next_workers = []
             for known_worker, known_status in self._workers:
@@ -114,8 +113,7 @@ class SessionRouter:
             self.logger.debug(f"SessionRouter updated worker {worker} status to {is_active}.")
 
     async def get_worker(self, session_id: int) -> Any:
-        async with self._lock:
-            with self._state_lock:
+        with self._lock:
                 self._evict_expired()
 
                 if session_id in self._map:
@@ -144,7 +142,6 @@ class RolloutHealthChecker:
         self,
         workers_info: Dict[str, WorkerInfo],
         workers_state_lock: threading.RLock,
-        session_router: SessionRouter,
         deactivate_worker: Callable[[str], None],
         logger,
         interval_seconds: float = 30.0,
@@ -152,7 +149,6 @@ class RolloutHealthChecker:
     ):
         self._workers_info = workers_info
         self._workers_state_lock = workers_state_lock
-        self._session_router = session_router
         self._deactivate_worker = deactivate_worker
         self._logger = logger
         self._interval_seconds = max(interval_seconds, 0.0)
@@ -264,7 +260,6 @@ class RolloutController:
         self.health_checker = RolloutHealthChecker(
             workers_info=self.workers_info,
             workers_state_lock=self._workers_state_lock,
-            session_router=self.router,
             deactivate_worker=self._deactivate_worker,
             logger=self.logger,
             interval_seconds=self.config.health_check_interval_seconds,
