@@ -15,7 +15,7 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig
+from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, ProduceBatchResult
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import JudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
@@ -316,10 +316,10 @@ class RLColocateTrainer:
 
         if self._enable_initial_evaluate and not self._debug_rollout:
             # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
-            eval_batch: list[list[RolloutState]] = asyncio_run(
+            eval_produce_result = asyncio_run(
                 self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size, rollout_step=0)
             )
-            eval_metrics = self.evaluator.run(eval_batch)
+            eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
             self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
 
             tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
@@ -335,16 +335,17 @@ class RLColocateTrainer:
                 # 1. Rollout to generate experience
                 # TODO: ray.get(self.rollout_controller.check_health.remote())
                 self.logger.info("start to generate rollout experience for training")
-                train_batch: list[list[RolloutState]] = asyncio_run(
+                produce_result: ProduceBatchResult = asyncio_run(
                     self.agent_loop_manager.produce_batch(self.global_batch_size, rollout_step=rollout_idx)
                 )
+                train_batch = produce_result.rollout_states
                 self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
-                rollout_info = {}  # TODO: rollout info?
                 train_trajectory_dir = self.exp_dir / "train_rollout"
                 train_trajectory_dir.mkdir(parents=True, exist_ok=True)
                 train_trajectory_path = train_trajectory_dir / f"train_rollout_{rollout_idx}.jsonl"
                 self._save_trajectories(train_batch, train_trajectory_path)
                 self.logger.info(f"Rollout {rollout_idx} train trajectories saved to {train_trajectory_path}")
+                # TODO: save train trajectory
                 if not self._debug_rollout:
                     ray.get(self.rollout_controller.offload.remote())
 
@@ -382,11 +383,12 @@ class RLColocateTrainer:
                     eval_log_info = {}
                     if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
                         with timer("evaluation", step_timer_dict):
-                            eval_batch: list[list[RolloutState]] = asyncio_run(
+                            eval_produce_result = asyncio_run(
                                 self.eval_agent_loop_manager.produce_batch(
                                     self.evaluator.eval_batch_size, rollout_step=rollout_idx
                                 )
                             )
+                            eval_batch = eval_produce_result.rollout_states
                             eval_metrics = self.evaluator.run(eval_batch)
                             eval_trajectory_dir = self.exp_dir / "eval_rollout"
                             eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
@@ -400,7 +402,7 @@ class RLColocateTrainer:
                     train_log_info = {}
                     eval_log_info = {}
 
-            self._log_step(rollout_idx, step_timer_dict, rollout_info, train_log_info, eval_log_info)
+            self._log_step(rollout_idx, step_timer_dict, produce_result, train_log_info, eval_log_info)
             self._cur_step = rollout_idx
 
     # TODO: simplify with Packer.pack_pad_dispatch()
@@ -554,7 +556,7 @@ class RLColocateTrainer:
         self,
         rollout_idx: int,
         step_timer_dict: dict,
-        rollout_info: dict,  # RolloutInfo,  # TODO
+        produce_result: ProduceBatchResult,
         train_info: TrainInfo,
         eval_info: dict[str, float],
     ):
@@ -567,9 +569,16 @@ class RLColocateTrainer:
             log_time_str = f"\nRollout {rollout_idx} finished and timing listed:\n"
             log_time_str += "\n".join([f" - {k:<25}: {v:.2f}s" for k, v in step_timer_dict.items()])
 
-        if rollout_info:
-            all_scalars.update(rollout_info.get("task_time", {}))
-            all_scalars.update({f"async/{k}": v for k, v in rollout_info.get("replay_buffer_info", {}).items()})
+        if produce_result.timing_n is not None:
+            all_scalars["timing/task_n"] = produce_result.timing_n
+            all_scalars["timing/task_mean_s"] = produce_result.timing_mean_s
+            all_scalars["timing/task_p50_s"] = produce_result.timing_p50_s
+            all_scalars["timing/task_p99_s"] = produce_result.timing_p99_s
+            all_scalars["timing/task_p99_p50_ratio"] = produce_result.timing_p99_p50_ratio
+            all_scalars["timing/pause_s"] = produce_result.timing_pause_time_s
+        all_scalars["async/completed_samples"] = produce_result.completed_samples
+        all_scalars["async/aborted_samples"] = produce_result.aborted_samples
+        all_scalars["async/expired_samples"] = produce_result.expired_samples
 
         if train_info:
             all_scalars.update({f"response/{k}": v for k, v in train_info.get("data_info", {}).items()})

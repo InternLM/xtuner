@@ -1,4 +1,5 @@
 import time
+from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict
 
@@ -10,8 +11,24 @@ from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
 
 from .agent_loop import AgentLoop, AgentLoopConfig
-from .producer import ProduceStrategy, ProduceStrategyConfig, SyncProduceStrategyConfig
+from .producer import ProduceBatchStats, ProduceStrategy, ProduceStrategyConfig, SyncProduceStrategyConfig
 from .sampler import Sampler, SamplerConfig
+
+
+@dataclass
+class ProduceBatchResult:
+    rollout_states: list[list[RolloutState]]
+    # generate timing (all None if no generations occurred)
+    timing_n: int | None = None
+    timing_mean_s: float | None = None
+    timing_p50_s: float | None = None
+    timing_p99_s: float | None = None
+    timing_p99_p50_ratio: float | None = None
+    timing_pause_time_s: float | None = None
+    # replay buffer state after get
+    completed_samples: int = 0
+    aborted_samples: int = 0
+    expired_samples: int = 0
 
 
 class AgentLoopManagerConfig(BaseModel):
@@ -65,15 +82,30 @@ class AgentLoopManager:
             self.logger = logger
 
     # 共卡
-    async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> list[list[RolloutState]]:
+    async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
         start = time.perf_counter()
         self.logger.info(f"[AgentLoopManager][{self.task_name}] produce_batch start batch={batch_size}")
-        await self._scheduler.produce_batch(
+        stats: ProduceBatchStats = await self._scheduler.produce_batch(
             self._agent_loop, self._data_sampler, self._replay_buffer, batch_size, self.task_name, rollout_step
         )
         self.logger.info(
             f"[AgentLoopManager][{self.task_name}] produce scheduler done elapsed={time.perf_counter() - start:.3f}, and start replay_buffer.get"
         )
+        result = ProduceBatchResult(rollout_states=[])
+        if stats.generate_times_s:
+            sorted_times = sorted(stats.generate_times_s)
+            n = len(sorted_times)
+            mean_s = sum(sorted_times) / n
+            p50_s = sorted_times[n // 2]
+            p99_s = sorted_times[int(n * 0.99)]
+            ratio = p99_s / p50_s if p50_s > 0 else float("inf")
+            result.timing_n = n
+            result.timing_mean_s = mean_s
+            result.timing_p50_s = p50_s
+            result.timing_p99_s = p99_s
+            result.timing_p99_p50_ratio = ratio
+            result.timing_pause_time_s = stats.pause_time_s
+
         start = time.perf_counter()
         batch_rollout_states: list[list[RolloutState]] = await self._replay_buffer.get(
             batch_size, self.task_name, Status.COMPLETED
@@ -81,7 +113,17 @@ class AgentLoopManager:
         self.logger.info(
             f"[AgentLoopManager][{self.task_name}] replay_buffer.get done completed_groups={len(batch_rollout_states)} elapsed={time.perf_counter() - start:.3f}"
         )
-        return batch_rollout_states
+        result.rollout_states = batch_rollout_states
+        completed_sample_count = await self._replay_buffer.count(
+            task_name=self.task_name, group_status=Status.COMPLETED
+        )
+        aborted_sample_count = await self._replay_buffer.count(task_name=self.task_name, group_status=Status.ABORTED)
+        expired_sample_count = await self._replay_buffer.count(task_name=self.task_name, group_status=Status.EXPIRED)
+
+        result.completed_samples = completed_sample_count
+        result.aborted_samples = aborted_sample_count
+        result.expired_samples = expired_sample_count
+        return result
 
     # # 非共卡
     # async def disaggregate_produce_batch(self, batch_size: int):
