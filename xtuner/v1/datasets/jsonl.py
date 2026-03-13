@@ -321,11 +321,11 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 # {
                 #     "<file hash>": {
                 #         "offsets": [
-                #             "<file cache path>"
+                #             "<original file path>"  # for mapping to <file hash>
                 #         ],
                 #         "jsonl_meta": {
                 #             "<tokenize hash>": [
-                #                 <tokenize cache path>
+                #                 <original file path>
                 #             ]
                 #         }
                 #     },
@@ -345,10 +345,10 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 with open(self.meta_path, "r+") as f:
                     origin_data = json.load(f)
                     if file_hash not in origin_data:
-                        origin_data[file_hash] = {"offsets": [_cached_file]}
+                        origin_data[file_hash] = {"offsets": [self.path]}
                     else:
-                        if _cached_file not in origin_data[file_hash]["offsets"]:
-                            origin_data[file_hash]["offsets"].append(_cached_file)
+                        if self.path not in origin_data[file_hash]["offsets"]:
+                            origin_data[file_hash]["offsets"].append(self.path)
                     f.seek(0)
                     f.truncate(0)
                     f.write(json.dumps(origin_data, indent=4, ensure_ascii=False))
@@ -382,10 +382,10 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                         if "jsonl_meta" not in data:
                             data["jsonl_meta"] = {}
                         if tok_hash not in data["jsonl_meta"]:
-                            data["jsonl_meta"][tok_hash] = [_meta_file]
+                            data["jsonl_meta"][tok_hash] = [self.path]
                         else:
-                            if _meta_file not in data["jsonl_meta"][tok_hash]:
-                                data["jsonl_meta"][tok_hash].append(_meta_file)
+                            if self.path not in data["jsonl_meta"][tok_hash]:
+                                data["jsonl_meta"][tok_hash].append(self.path)
 
                         if cache_tag is not None:
                             if "tags" not in origin_data:
