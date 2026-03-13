@@ -24,7 +24,7 @@ class PartialRolloutHandler:
             rollout_state.response = ""
             rollout_state.logprobs = []
             rollout_state.response_mask = []
-            rollout_state.response_steps = []
+            rollout_state.response_rollout_steps = []
             return rollout_state
 
         # Set up token and length variable

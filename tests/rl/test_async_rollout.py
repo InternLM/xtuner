@@ -318,7 +318,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         ray.shutdown()
 
     def _make_aborted_state(self, uid: int, prompt: str, response_ids: list[int],
-                            response_steps: list[int] | None = None,
+                            response_rollout_steps: list[int] | None = None,
                             max_tokens: int = MAX_RESPONSE_LENGTH) -> "RolloutState":
         """Helper: build an ABORTED RolloutState with given response_ids."""
         from xtuner.v1.data_proto import RolloutState, SampleParams, Status
@@ -339,7 +339,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
             response="placeholder",
             logprobs=[0.0] * len(response_ids),
             response_mask=[1] * len(response_ids),
-            response_steps=response_steps if response_steps is not None else [0] * len(response_ids),
+            response_rollout_steps=response_rollout_steps if response_rollout_steps is not None else [0] * len(response_ids),
             seq_staleness=0,
             extra_fields={},
         )
@@ -587,7 +587,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
 
         staleness 积累路径（enable_partial_rollout=True）：
           Round 1 (step=1): 6 个并发任务，2 个完成后其余被 abort。
-            被 abort 的样本携带 step=1 生成的分段 response，response_steps=[1,...].
+            被 abort 的样本携带 step=1 生成的分段 response，response_rollout_steps=[1,...].
           Round 2 (step=2): round1 的 ABORTED 样本被续写，多数在 round2 内完成（COMPLETED）。
             postprocess 更新 seq_staleness = 2 - min([1,...]) = 1。
             但 update_expired_status 只对 status==ABORTED 的样本触发，COMPLETED 不受影响。
@@ -647,8 +647,8 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
         流程 (最多 10 轮):
           - 在调用 produce_batch 之前读取 expired_before。
           - 若 expired_before >= trigger_size，本轮由 strategy 进入 tail-batch 模式：
-              从 EXPIRED 池取样 → preprocess 重置 response_ids=[], response_steps=[]
-              → 全新生成 → postprocess: response_steps=[rollout_step, ...]
+              从 EXPIRED 池取样 → preprocess 重置 response_ids=[], response_rollout_steps=[]
+              → 全新生成 → postprocess: response_rollout_steps=[rollout_step, ...]
               → staleness = rollout_step - rollout_step = 0。
           - 取到第一个 tail-batch 完成样本后退出循环。
 

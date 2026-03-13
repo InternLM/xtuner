@@ -100,7 +100,7 @@ class RolloutState(CacheObj, BaseModel):
     error_msg: str | None = None
     seq_staleness: int = 0
     response_mask: list[int] | None = None  # response_ids的长度
-    response_steps: list[int] | None = None  # 记录 response_ids 中每个 token 是在哪个 rollout_step 生成的
+    response_rollout_steps: list[int] | None = None  # 记录 response_ids 中每个 token 是在哪个 rollout_step 生成的
     extra_fields: dict[str, Any] = {}
 
     @field_serializer("routed_experts")
@@ -203,13 +203,13 @@ def update_group_status(rollout_states: list[RolloutState]) -> Status:
 
 
 def update_seq_staleness(rollout_state: RolloutState, rollout_step: int) -> RolloutState:
-    """计算 response_steps 列表，表示 rollout_state.response_ids 中的每个 token 是在哪个
-    rollout_step 生成的。"""
+    """计算 response_rollout_steps 列表，表示 rollout_state.response_ids 中的每个 token
+    是在哪个 rollout_step 生成的。"""
     response_len = len(rollout_state.response_ids or [])
-    response_steps = [rollout_step] * response_len
-    rollout_state.response_steps = (rollout_state.response_steps or []) + response_steps
+    response_rollout_steps = [rollout_step] * response_len
+    rollout_state.response_rollout_steps = (rollout_state.response_rollout_steps or []) + response_rollout_steps
 
-    cur_rollout_steps = min(rollout_state.response_steps, default=rollout_step)
+    cur_rollout_steps = min(rollout_state.response_rollout_steps, default=rollout_step)
     rollout_state.seq_staleness = rollout_step - cur_rollout_steps
     logger.debug(
         f"Updated seq_staleness for sample {rollout_state.uid} | Current rollout step: {rollout_step} | Earliest response token rollout step: {cur_rollout_steps} | Updated seq_staleness: {rollout_state.seq_staleness}"
