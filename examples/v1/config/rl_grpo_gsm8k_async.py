@@ -15,9 +15,9 @@ from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
-from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SingleTurnAgentLoopConfig, SyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SingleTurnAgentLoopConfig, AsyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
@@ -39,9 +39,9 @@ global_batch_size = 64 * train_optimizer_steps
 prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 1
-max_prompt_length = 512
-max_response_length = 1024
-pack_max_length = 32 * 1024
+max_prompt_length = 2048
+max_response_length = 8192
+pack_max_length = 10 * 1024
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -129,7 +129,12 @@ agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
 )
-produce_strategy_config = SyncProduceStrategyConfig()
+produce_strategy_config = AsyncProduceStrategyConfig(
+    over_sample_threshold = 0.8,
+    enable_partial_rollout = True,
+    tail_batch_stale_threshold=1,
+    tail_batch_trigger_size=64
+)
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     task_name="train_task",
     agent_loop_config=agent_loop_config,
@@ -179,7 +184,7 @@ trainer = RLColocateTrainerConfig(
     rollout_config=rollout_config,
     judger_config=judger_config,
     tokenizer_path=model_path,
-    replay_buffer_config=SyncReplayBufferConfig(),
+    replay_buffer_config=AsyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,

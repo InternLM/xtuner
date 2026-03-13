@@ -77,15 +77,15 @@ class GSM8KToolAgentLoop(AgentLoop):
         content = self.tool_call_pattern.sub("", text)
         return content, function_calls
 
-    async def generate_sample(self, rollout_state: RolloutState) -> RolloutState:
-        # NOTE: 使用过程中发现很容易忘了给rollout_state传sample_params
-        rollout_state.sample_params = self.sample_params
+    async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState:
+        # Respect state passed from preprocess for partial rollout continuation.
+        base_sample_params = copy.deepcopy(rollout_state.sample_params or self.sample_params)
         final_response_mask: list[int] = []
         final_response_ids: list[int] = []
         final_logprobs: list[float] = []
 
-        max_len = self.sample_params.max_tokens
-        cur_turn_tokens = list(rollout_state.prompt_ids or [])
+        max_len = base_sample_params.max_tokens
+        cur_turn_tokens = list(rollout_state.tokens or rollout_state.prompt_ids or [])
         remaining_max_tokens = max_len - len(final_response_ids)
         cur_turn = 0
         while True:
@@ -93,7 +93,7 @@ class GSM8KToolAgentLoop(AgentLoop):
                 break
 
             rollout_state.tokens = cur_turn_tokens
-            rollout_state.sample_params = copy.deepcopy(self.sample_params)
+            rollout_state.sample_params = copy.deepcopy(base_sample_params)
             rollout_state.sample_params.max_tokens = remaining_max_tokens
 
             rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]

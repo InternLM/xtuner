@@ -65,11 +65,11 @@ class AgentLoopManager:
             self.logger = logger
 
     # 共卡
-    async def produce_batch(self, batch_size: int) -> list[list[RolloutState]]:
+    async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> list[list[RolloutState]]:
         start = time.perf_counter()
         self.logger.info(f"[AgentLoopManager][{self.task_name}] produce_batch start batch={batch_size}")
         await self._scheduler.produce_batch(
-            self._agent_loop, self._data_sampler, self._replay_buffer, batch_size, self.task_name
+            self._agent_loop, self._data_sampler, self._replay_buffer, batch_size, self.task_name, rollout_step
         )
         self.logger.info(
             f"[AgentLoopManager][{self.task_name}] produce scheduler done elapsed={time.perf_counter() - start:.3f}, and start replay_buffer.get"

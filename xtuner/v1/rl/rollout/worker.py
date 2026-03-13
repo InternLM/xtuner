@@ -22,7 +22,12 @@ from typing_extensions import Annotated
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, update_status_from_finish_reason
-from xtuner.v1.rl.utils import AutoAcceleratorWorkers, SingleAcceleratorWorker, find_master_addr_and_port
+from xtuner.v1.rl.utils import (
+    AutoAcceleratorWorkers,
+    SingleAcceleratorWorker,
+    find_master_addr_and_port,
+    get_eos_token,
+)
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
@@ -32,22 +37,6 @@ if TYPE_CHECKING:
 
 
 infer_group = Group("inference", help="Inference worker configuration.")
-
-
-def get_eos_token(model_path: str) -> int | List[int]:
-    from xtuner.v1.utils.logger import get_logger
-
-    logger = get_logger()
-    generation_config_path = os.path.join(model_path, "generation_config.json")
-    if not os.path.exists(generation_config_path):
-        logger.warning(
-            f"Config {generation_config_path} does not exist and thus cannot get eos_token. You must provide eos_token manually."
-        )
-        return []
-    with open(generation_config_path) as f:
-        generation_config = json.load(f)
-    eos_token_id = generation_config.get("eos_token_id")
-    return eos_token_id
 
 
 class RolloutConfig(BaseModel):
@@ -62,15 +51,19 @@ class RolloutConfig(BaseModel):
         model_path (str | Path): Path to the inference model.
         model_name (str): Model name for the backend engine.
         tokenizer_path (str): Path to the model tokenizer. Defaults to "".
-        api_key (Optional[Union[List[str], str]]): API keys for rollout service. Supports single key or list of keys. Defaults to None.
-        api_port (Optional[int]): Port number for the rollout API server. If not set, it will find an available port starting from 8000. Defaults to 8000.
+        api_key (Optional[Union[List[str], str]]): API keys for rollout service. Supports single key or
+            list of keys. Defaults to None.
+        api_port (Optional[int]): Port number for the rollout API server. If not set, it will find an
+            available port starting from 8000. Defaults to 8000.
         gpus_per_node (int): Number of GPUs per node. Defaults to 8.
         dtype (str): Model data type ('bfloat16', 'float16', 'int8'). Defaults to "bfloat16".
         gpu_memory_utilization (float): GPU memory utilization ratio. Defaults to 0.85.
         random_seed (int): Random seed for reproducible generation. Defaults to 1024.
         rollout_cross_node_comm (bool): Enable cross-node communication. Defaults to False.
-        rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it will be determined automatically based on `context_length`. Defaults to 512.
-        allow_over_concurrency_ratio (float): Factor to allow over-concurrency in HTTP requests for the rollout worker to improve GPU utilization. Defaults to 1.2.
+        rollout_max_batch_size_per_instance (int): Maximum batch size for the rollout worker. If not set, it
+            will be determined automatically based on `context_length`. Defaults to 512.
+        allow_over_concurrency_ratio (float): Factor to allow over-concurrency in HTTP requests for the
+            rollout worker to improve GPU utilization. Defaults to 1.2.
         tensor_parallel_size (int): GPUs per inference engine (tensor parallelism). Defaults to 1.
         expert_parallel_size (int): Experts per inference engine (expert parallelism). Defaults to 1.
         enable_chunked_prefill (bool): Enable chunked prefill for memory efficiency. Defaults to False.
@@ -554,7 +547,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         # 2. 需要看下新的输入输出(RolloutState)怎么适配PartialRollout的逻辑，先跑起来
         # 3. 对于流式返回的response先删掉，目前还用不上，等需要的时候再加上
 
-        uid = rollout_state.message_uid
+        uid = rollout_state.uid
         sample_params: SampleParams = rollout_state.sample_params
 
         if sample_params.return_token_ids:
@@ -569,7 +562,32 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         max_retries = self.config.max_retry_per_sample
         payload = self._get_request_payload(rollout_state)
-        self.logger.debug(f"Worker {self.rank} sending request for msg {uid} to {endpoint_url} with payload {payload}")
+
+        # 早退逻辑 1：检查是否已被标记为完成
+        if rollout_state.status == Status.COMPLETED:
+            self.logger.debug(f"Request {uid} is already marked as COMPLETED, skipping generation.")
+            return rollout_state
+
+        # 早退逻辑 2：检测输入是否还需要 generation (安全获取变量)
+        input_ids = payload.get("input_ids", [])
+        max_tokens = payload.get("max_tokens")
+
+        last_id = input_ids[-1] if len(input_ids) > 0 else "None"
+        is_max_tokens_zero = max_tokens is not None and max_tokens <= 0
+        is_eos_reached = len(input_ids) > 0 and input_ids[-1] in self.eos_token
+
+        if is_max_tokens_zero or is_eos_reached:
+            self.logger.debug(
+                f"No generation needed for request {uid}: max_tokens={max_tokens} or last input_id={last_id} is in eos_token."
+            )
+            rollout_state.status = Status.COMPLETED
+            rollout_state.response_ids = []
+            rollout_state.response = ""
+            rollout_state.logprobs = []
+            rollout_state.response_mask = []
+            rollout_state.response_rollout_steps = []
+            rollout_state.finish_reason = "stop" if is_eos_reached else "length"
+            return rollout_state
 
         for attempt in range(max_retries + 1):
             is_last_attempt = attempt == max_retries
