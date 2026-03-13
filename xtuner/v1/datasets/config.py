@@ -28,7 +28,7 @@ from .collator import (
 from .custom_pack import CustomPackDataset
 from .custom_sampler import CustomSampler, _load_sampler_config
 from .dataloader import BaseDataloader, Dataloader
-from .jsonl import JsonlDataset
+from .jsonl import _CALC_TOTAL_PATCHS_FN_MAP, JsonlDataset
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
@@ -36,19 +36,6 @@ from .vlm_jsonl import VLMJsonlDataset
 
 
 logger = get_logger()
-
-
-def default_calc_patch(num_tokens: int, num_img_tokens: list[int] | int = 0, flash_attn_block_size=128):
-    llm_num_patch = (round(num_tokens / flash_attn_block_size)) ** 2
-    if isinstance(num_img_tokens, int):
-        num_img_tokens = [num_img_tokens]
-    img_num_patch = sum(((n / flash_attn_block_size) ** 2 for n in num_img_tokens))
-    return llm_num_patch + img_num_patch
-
-
-_CALC_TOTAL_PATCHS_FN_MAP = {
-    'default': default_calc_patch,
-}
 
 
 # TODO: Enhance the configurable fields of dataset config
@@ -68,7 +55,9 @@ class DatasetConfig(BaseModel):
         self,
         tokenize_fn: Optional["CachableTokenizeFunction"] = None,
     ) -> "JsonlDataset":
-        assert self.calc_total_patch_fn in _CALC_TOTAL_PATCHS_FN_MAP, f"Unsupported calc_total_patch function: {self.calc_total_patch_fn}. Supported functions: {list(_CALC_TOTAL_PATCHS_FN_MAP.keys())}"
+        assert self.calc_total_patch_fn in _CALC_TOTAL_PATCHS_FN_MAP, (
+            f"Unsupported calc_total_patch function: {self.calc_total_patch_fn}. Supported functions: {list(_CALC_TOTAL_PATCHS_FN_MAP.keys())}"
+        )
         if self.class_name == "JsonlDataset":
             return JsonlDataset(
                 tokenize_fn=tokenize_fn,

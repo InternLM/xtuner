@@ -3,6 +3,7 @@
 import io
 import math
 import os
+from itertools import chain
 from types import SimpleNamespace
 from typing import Optional, Union
 
@@ -11,7 +12,6 @@ import torch
 from packaging import version
 from PIL import Image
 from pydantic import ConfigDict
-from itertools import chain
 
 import transformers
 from transformers import AutoProcessor, PreTrainedTokenizer
@@ -380,10 +380,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             for size in self._image_wh_list:
                 if size[0] == 0 or size[1] == 0:
                     # Image is corrupted, flag=0, and this data will be removed later
-                    return {"num_tokens": 0, 'num_img_tokens':0}  # type: ignore
+                    return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
         except Exception as e:
             print(f"ERROR of image_wh: {e}, data_name: {self.data_name}")
-            return {"num_tokens": 0, 'num_img_tokens':0}  # type: ignore
+            return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
 
         # 图片宽高比可能不符合 qwen3vl 要求
         try:
@@ -394,7 +394,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             sum_media_grid_thw = media_grid_thw.prod(dim=1) // self.merge_length  # type: ignore
         except ValueError as e:
             print(f"ERROR of {self._image_wh_list}: {e}, data_name: {self.data_name}")
-            return {"num_tokens": 0, 'num_img_tokens':0}  # type: ignore
+            return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
 
         messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         replace_image_token(messages, self.chat_template, sum_media_grid_thw, add_vision_id=self.add_vision_id)
@@ -420,9 +420,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 f"num_image_tokens of input_ids {num_image_tokens_1} != num_image_tokens of media_grid_thw {num_image_tokens_2}, "
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
-            return {"num_tokens": 0, 'num_img_tokens':0}
+            return {"num_tokens": 0, "num_img_tokens": [0]}
 
-        return {"num_tokens": len(input_ids), 'num_img_tokens': sum_media_grid_thw.tolist()}
+        return {"num_tokens": len(input_ids), "num_img_tokens": sum_media_grid_thw.tolist()}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
         image_data_list = []
@@ -662,7 +662,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 )
             except ValueError as e:
                 print(f"ERROR of {self._video_wh_list}: {e}, data_name: {self.data_name}")
-                return {"num_tokens": 0, 'num_img_tokens':0}  # type: ignore
+                return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
 
             assert num_frames % self.video_processor.merge_size == 0, "num_frames must be divisible by merge_size"
 
@@ -706,9 +706,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 f"num_video_tokens of input_ids {num_image_tokens_1} != num_video_tokens of media_grid_thw {num_image_tokens_2}, "
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
-            return {"num_tokens": 0, 'num_img_tokens': 0}
+            return {"num_tokens": 0, "num_img_tokens": [0]}
 
-        return {"num_tokens": len(input_ids),'num_img_tokens': list(chain.from_iterable(num_image_token_list))}
+        return {"num_tokens": len(input_ids), "num_img_tokens": list(chain.from_iterable(num_image_token_list))}
 
     def video_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
         num_image_tokens_list = []

@@ -65,7 +65,9 @@ class _LegacySoftPackDataset(torch.utils.data.Dataset):
         if global_pack:
             num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
             total_num_patch = [np.concatenate([dset.total_num_patch for dset in datasets])]
-            assert len(num_tokens[0]) == len(total_num_patch[0]), "num_tokens and total_num_patch should have the same length after concatenation. but got {} and {}".format(len(num_tokens[0]), len(total_num_patch[0]))
+            assert len(num_tokens[0]) == len(total_num_patch[0]), (
+                f"num_tokens and total_num_patch should have the same length after concatenation. but got {len(num_tokens[0])} and {len(total_num_patch[0])}"
+            )
             datasets = [ConcatDataset(datasets)]
         else:
             num_tokens = [dset.num_tokens for dset in datasets]
@@ -86,7 +88,9 @@ class _LegacySoftPackDataset(torch.utils.data.Dataset):
     def longest(self):
         return self.pack_infos["longest"]
 
-    def get_pack_infos(self, dataset, dataset_id, num_tokens, total_num_patch):
+    def get_pack_infos(
+        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray | None = None
+    ):
         inds = list(range(len(dataset)))
         self.random.shuffle(inds)
 
@@ -145,9 +149,10 @@ def closest_sum_indices(buffer, value):
 
     return closest_indices
 
+
 def calc_num_patch(num_tokens, num_img_tokens, flash_attn_block_size):
     llm_num_patch = (round(num_tokens / flash_attn_block_size)) ** 2
-    img_num_patch = ((num_img_tokens/flash_attn_block_size) ** 2).sum()
+    img_num_patch = ((num_img_tokens / flash_attn_block_size) ** 2).sum()
     return llm_num_patch + img_num_patch
 
 
@@ -243,7 +248,7 @@ def get_pack_infos_by_expand_soft_split(
     pack_workers: int = 8,
     pack_chunk_size: int = 10000,
     pack_extra_buffer_size: int = 1000,
-):  
+):
     if pack_workers <= 1:
         pack_infos = []
         for i in range(0, len(inds), pack_chunk_size):
@@ -319,7 +324,9 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
             seed=seed,
         )
 
-    def get_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray):
+    def get_pack_infos(
+        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray | None = None
+    ):
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
         pack_infos = get_pack_infos_by_expand_soft_split(
             inds,
@@ -474,7 +481,9 @@ class HardPackDataset(_LegacySoftPackDataset):
             seed=seed,
         )
 
-    def get_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray):
+    def get_pack_infos(
+        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray | None = None
+    ):
         # shuffled indices
         inds = list(range(len(dataset)))
         self.random.shuffle(inds)
@@ -636,7 +645,9 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
         )
         return pack_infos_list
 
-    def get_soft_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray):
+    def get_soft_pack_infos(
+        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray
+    ):
         # shuffled indices
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
 

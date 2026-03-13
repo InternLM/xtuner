@@ -27,7 +27,7 @@ from xtuner.v1.datasets.pt_tokenize_fn.long_text import LongTextPretrainTokenize
 from xtuner.v1.utils import SharedMemory, get_logger
 
 from .utils import CachableTokenizeFunction, calculate_xxhash
-from .config import _CALC_TOTAL_PATCHS_FN_MAP
+
 
 T = TypeVar("T")
 logger = get_logger()
@@ -37,9 +37,19 @@ _lock = Lock()
 CACHE_META = ".xpuyu-cache-meta.json"
 XTUNER_FILE_OPEN_CONCURRENCY = int(os.environ.get("XTUNER_FILE_OPEN_CONCURRENCY", "8"))
 
-
 # TODO: (yehaochen) chunk size and tokenize workers should be parameters of the dataset.
 XTUNER_TOKENIZE_CHUNK_SIZE = int(os.environ.get("XTUNER_TOKENIZE_CHUNK_SIZE", "10"))
+
+
+def default_calc_total_patch(num_tokens: int, num_img_tokens: list[int], flash_attn_block_size: int = 128) -> float:
+    llm_num_patch = (round(num_tokens / flash_attn_block_size)) ** 2
+    img_num_patch = sum((n / flash_attn_block_size) ** 2 for n in num_img_tokens)
+    return llm_num_patch + img_num_patch
+
+
+_CALC_TOTAL_PATCHS_FN_MAP = {
+    "default": default_calc_total_patch,
+}
 
 
 def _streaming_parallel_open_inplace(path: str, buf, executor: ThreadPoolExecutor):
@@ -146,7 +156,7 @@ def parallel_execute(
     local_cpu_ids = cpu_ids[rank::local_rank_concurrency]
 
     processes: list[Process] = []
-    data_queue: Queue[tuple[int, tuple[int, int]]] = Queue()  # idx, (start, end)
+    data_queue: Queue[tuple[int, tuple[int, int], int]] = Queue()  # idx, (start, end)
     output_queue: Queue[dict] = Queue()  # {"num_tokens": int}
     # task_id = bar.add_task(total=task_num, description=description)
     chunk_data_to_queue(data_queue, offsets, chunksize, nproc)
@@ -187,7 +197,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         sample_ratio: float = 1.0,
         tokenize_fn: CachableTokenizeFunction[T] | None = None,
         name: str = "default",
-        calc_total_patch_fn: Callable[[dict], int]  = _CALC_TOTAL_PATCHS_FN_MAP['default'],
+        calc_total_patch_fn: Callable[[int, list[int]], float] = _CALC_TOTAL_PATCHS_FN_MAP["default"],
         cache_dir: str | Path | None = None,
         max_length: int | None = None,  # TODO: Remove max_length in dataset
         cache_tag: str | None = None,
@@ -412,11 +422,11 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         if self._shared_memory is not None:
             self._release_shared_memory()
-    
+
     @property
     def total_num_patch(self):
-        return self._meta['total_num_patch']
-        
+        return self._meta["total_num_patch"]
+
     def _init_shared_memory(self, path: str) -> SharedMemory:
         if dist.is_initialized():
             rank = dist.get_rank()
@@ -481,8 +491,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         res = {"num_tokens": tokenized["num_tokens"]}
         if "chunks" in tokenized:
             res["chunks"] = tokenized["chunks"]
-        if 'num_img_tokens' in tokenized:
-            res['num_img_tokens'] = tokenized['num_img_tokens']
+        if "num_img_tokens" in tokenized:
+            res["num_img_tokens"] = tokenized["num_img_tokens"]
         return res
 
     def count_tokens(self, offsets, cache_dir=None):
@@ -547,19 +557,19 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             serialized_tokenized = {
                 "num_tokens": np.array([data["num_tokens"] for data in tokenized]),
             }
-            
-            serialized_tokenized['total_num_patch'] = []
+
+            serialized_tokenized["total_num_patch"] = []
             for data in tokenized:
                 num_tokens = data["num_tokens"]
                 num_img_tokens = [0]
-                if 'num_img_tokens' in data:
-                    num_img_tokens = data['num_img_tokens']
+                if "num_img_tokens" in data:
+                    num_img_tokens = data["num_img_tokens"]
                     if isinstance(num_img_tokens, int):
                         num_img_tokens = [num_img_tokens]
-                total_num_patch = self.calc_total_patch_fn(num_tokens, num_img_tokens)  
-                serialized_tokenized['total_num_patch'].append(total_num_patch)
-            serialized_tokenized['total_num_patch'] = np.array(serialized_tokenized['total_num_patch'])  
-            
+                total_num_patch = self.calc_total_patch_fn(num_tokens, num_img_tokens)
+                serialized_tokenized["total_num_patch"].append(total_num_patch)
+            serialized_tokenized["total_num_patch"] = np.array(serialized_tokenized["total_num_patch"])
+
         if dist.is_initialized():
             # TODO:
             # This is a workaround for `all_gather_object` would hang when
