@@ -142,6 +142,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         hash: str | None = None,
         hash_str: str = "",
         data_name: str | None = None,
+        visual_llm_attn_ratio_for_pack: float = 0.0,
     ):
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
@@ -155,7 +156,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._image_wh_list: list[list] = []
         self._video_wh_list: list[list] = []
         self._video_extra_info_list: list[dict] = []
-        super().__init__(tokenizer)
+        super().__init__(tokenizer, visual_llm_attn_ratio_for_pack=visual_llm_attn_ratio_for_pack)
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         raise NotImplementedError
@@ -250,6 +251,10 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
     oss_time_log_thr: int = 10  # 10s
     add_eos_token: bool = True  # for mllm pretrain
     add_bos_token: bool = False  # for mllm pretrain
+    # 0 means not considering visual computation when packing samples,
+    # 1 means the same ratio,
+    # 2 means visual computation is twice that of text
+    visual_llm_attn_ratio_for_pack: float = 0.0
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs

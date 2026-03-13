@@ -64,14 +64,14 @@ class _LegacySoftPackDataset(torch.utils.data.Dataset):
 
         if global_pack:
             num_tokens = [np.concatenate([dset.num_tokens for dset in datasets])]
-            total_num_patch = [np.concatenate([dset.total_num_patch for dset in datasets])]
-            assert len(num_tokens[0]) == len(total_num_patch[0]), (
-                f"num_tokens and total_num_patch should have the same length after concatenation. but got {len(num_tokens[0])} and {len(total_num_patch[0])}"
+            proxy_attn_flops = [np.concatenate([dset.proxy_attn_flops for dset in datasets])]
+            assert len(num_tokens[0]) == len(proxy_attn_flops[0]), (
+                f"num_tokens and proxy_attn_flops should have the same length after concatenation. but got {len(num_tokens[0])} and {len(proxy_attn_flops[0])}"
             )
             datasets = [ConcatDataset(datasets)]
         else:
             num_tokens = [dset.num_tokens for dset in datasets]
-            total_num_patch = [dset.total_num_patch for dset in datasets]
+            proxy_attn_flops = [dset.proxy_attn_flops for dset in datasets]
 
         self.datasets = datasets
         self.seed = seed
@@ -80,7 +80,7 @@ class _LegacySoftPackDataset(torch.utils.data.Dataset):
 
         pack_infos = []
         for i, dataset in enumerate(self.datasets):
-            _infos = self.get_pack_infos(dataset, i, num_tokens[i], total_num_patch[i])
+            _infos = self.get_pack_infos(dataset, i, num_tokens[i], proxy_attn_flops[i])
             pack_infos.append(_infos)
         self.pack_infos = concatenate_datasets(pack_infos)
 
@@ -89,7 +89,7 @@ class _LegacySoftPackDataset(torch.utils.data.Dataset):
         return self.pack_infos["longest"]
 
     def get_pack_infos(
-        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray | None = None
+        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, proxy_attn_flops: np.ndarray | None = None
     ):
         inds = list(range(len(dataset)))
         self.random.shuffle(inds)
@@ -156,24 +156,24 @@ def get_pack_chunk_infos(
     target,
     pack_extra_buffer_size,
     num_tokens=None,
-    total_num_patch=None,
-    patch_shm_name=None,
+    proxy_attn_flops=None,
     shm_name=None,
     shape=None,
     dtype=None,
-    patch_dtype=None,
+    proxy_attn_flops_shm_name=None,
+    proxy_attn_flops_dtype=None,
 ):
     if num_tokens is None:
         existing_shm = shared_memory.SharedMemory(name=shm_name)
         num_tokens = np.ndarray(shape, dtype=dtype, buffer=existing_shm.buf)
 
-        existing_patch_shm = shared_memory.SharedMemory(name=patch_shm_name)
-        total_num_patch = np.ndarray(shape, dtype=patch_dtype, buffer=existing_patch_shm.buf)
+        existing_attn_shm = shared_memory.SharedMemory(name=proxy_attn_flops_shm_name)
+        proxy_attn_flops = np.ndarray(shape, dtype=proxy_attn_flops_dtype, buffer=existing_attn_shm.buf)
 
     item_buffer = []
     length_buffer = []
     longest = 0
-    num_patch = 0
+    pack_proxy_attn_flops = 0
 
     pack_infos = []
 
@@ -183,7 +183,7 @@ def get_pack_chunk_infos(
         if num_tokens[shfl_i] + sum(length_buffer) <= target:
             item_buffer.append(shfl_i)
             length_buffer.append(num_tokens[shfl_i])
-            num_patch += total_num_patch[shfl_i]
+            pack_proxy_attn_flops += proxy_attn_flops[shfl_i]
             longest = max(longest, num_tokens[shfl_i])
         else:
             if len(item_buffer) > 0:
@@ -191,7 +191,7 @@ def get_pack_chunk_infos(
                     info = {
                         "dataset_id": dataset_id,
                         "indices": item_buffer,
-                        "longest": int(num_patch),
+                        "longest": int(pack_proxy_attn_flops),
                     }
                     pack_infos.append(info)
                 else:
@@ -205,7 +205,7 @@ def get_pack_chunk_infos(
                             indices_to_remove.append(closest_inds + len(inds) - len(buffer_index))
                             item_buffer.append(buffer_index[closest_inds])
                             length_buffer.append(num_tokens[buffer_index[closest_inds]])
-                            num_patch += total_num_patch[buffer_index[closest_inds]]
+                            pack_proxy_attn_flops += proxy_attn_flops[buffer_index[closest_inds]]
                             longest = max(longest, num_tokens[buffer_index[closest_inds]])
 
                         indices_to_remove = sorted(indices_to_remove, reverse=True)
@@ -215,20 +215,20 @@ def get_pack_chunk_infos(
                     info = {
                         "dataset_id": dataset_id,
                         "indices": item_buffer,
-                        "longest": int(num_patch),
+                        "longest": int(pack_proxy_attn_flops),
                     }
                     pack_infos.append(info)
 
             item_buffer = [shfl_i]
             length_buffer = [num_tokens[shfl_i]]
             longest = num_tokens[shfl_i]
-            num_patch = total_num_patch[shfl_i]
+            pack_proxy_attn_flops = proxy_attn_flops[shfl_i]
 
     if len(item_buffer) > 0:
         info = {
             "dataset_id": dataset_id,
             "indices": item_buffer,
-            "longest": int(num_patch),
+            "longest": int(pack_proxy_attn_flops),
         }
         pack_infos.append(info)
     return pack_infos
@@ -238,12 +238,15 @@ def get_pack_infos_by_expand_soft_split(
     inds: list[int],
     dataset_id: int,
     num_tokens: np.ndarray,
-    total_num_patch: np.ndarray,
+    proxy_attn_flops: np.ndarray,
     pack_max_length: int,
     pack_workers: int = 8,
     pack_chunk_size: int = 10000,
     pack_extra_buffer_size: int = 1000,
 ):
+    assert len(num_tokens) == len(proxy_attn_flops), (
+        "num_tokens and proxy_attn_flops should have the same length for shared memory."
+    )
     if pack_workers <= 1:
         pack_infos = []
         for i in range(0, len(inds), pack_chunk_size):
@@ -254,22 +257,20 @@ def get_pack_infos_by_expand_soft_split(
                 pack_max_length,
                 pack_extra_buffer_size,
                 num_tokens,
-                total_num_patch,
+                proxy_attn_flops,
             )
             pack_infos.extend(chunk_pack_infos)
     else:
         chunks_inds = [inds[i : i + pack_chunk_size] for i in range(0, len(inds), pack_chunk_size)]
-
-        assert len(num_tokens) == len(total_num_patch), (
-            "num_tokens and total_num_patch should have the same length for shared memory."
-        )
         shm = shared_memory.SharedMemory(create=True, size=num_tokens.nbytes)
         shm_array = np.ndarray(num_tokens.shape, dtype=num_tokens.dtype, buffer=shm.buf)
         np.copyto(shm_array, num_tokens)
 
-        patch_shm = shared_memory.SharedMemory(create=True, size=total_num_patch.nbytes)
-        patch_shm_array = np.ndarray(num_tokens.shape, dtype=total_num_patch.dtype, buffer=patch_shm.buf)
-        np.copyto(patch_shm_array, total_num_patch)
+        proxy_attn_flops_shm = shared_memory.SharedMemory(create=True, size=proxy_attn_flops.nbytes)
+        proxy_attn_flops_shm_array = np.ndarray(
+            num_tokens.shape, dtype=proxy_attn_flops.dtype, buffer=proxy_attn_flops_shm.buf
+        )
+        np.copyto(proxy_attn_flops_shm_array, proxy_attn_flops)
 
         mp_context = multiprocessing.get_context("fork")
         process_chunk_with_args = partial(
@@ -280,8 +281,8 @@ def get_pack_infos_by_expand_soft_split(
             shm_name=shm.name,
             shape=num_tokens.shape,
             dtype=num_tokens.dtype,
-            patch_shm_name=patch_shm.name,
-            patch_dtype=total_num_patch.dtype,
+            proxy_attn_flops_shm_name=proxy_attn_flops_shm.name,
+            proxy_attn_flops_dtype=proxy_attn_flops.dtype,
         )
         with ProcessPoolExecutor(max_workers=pack_workers, mp_context=mp_context) as executor:
             results = list(tqdm(executor.map(process_chunk_with_args, chunks_inds)))
@@ -292,8 +293,8 @@ def get_pack_infos_by_expand_soft_split(
 
         shm.close()
         shm.unlink()
-        patch_shm.close()
-        patch_shm.unlink()
+        proxy_attn_flops_shm.close()
+        proxy_attn_flops_shm.unlink()
     return pack_infos
 
 
@@ -324,14 +325,14 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
         )
 
     def get_pack_infos(
-        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray | None = None
+        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, proxy_attn_flops: np.ndarray | None = None
     ):
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
         pack_infos = get_pack_infos_by_expand_soft_split(
             inds,
             dataset_id,
             num_tokens,
-            total_num_patch,
+            proxy_attn_flops,
             pack_max_length=self.pack_max_length,
             pack_workers=self.pack_workers,
             pack_chunk_size=self.pack_chunk_size,
@@ -383,37 +384,6 @@ def _hard_pack_chunk_core(
                 "longest": longest,
             }
         )
-    return out
-
-
-def _hard_pack_chunk(
-    i_chunk: list[int],
-    *,
-    dataset_id: int,
-    pack_max_length: int,
-    cu_shm_name: str,
-    cu_shape,
-    cu_dtype,
-    inds_shm_name: str,
-    inds_shape,
-    inds_dtype,
-):
-    existing_cu = shared_memory.SharedMemory(name=cu_shm_name)
-    cu: np.ndarray = np.ndarray(cu_shape, dtype=cu_dtype, buffer=existing_cu.buf)
-
-    existing_inds = shared_memory.SharedMemory(name=inds_shm_name)
-    inds_arr: np.ndarray = np.ndarray(inds_shape, dtype=inds_dtype, buffer=existing_inds.buf)
-
-    out = _hard_pack_chunk_core(
-        i_chunk,
-        dataset_id=dataset_id,
-        pack_max_length=pack_max_length,
-        cu=cu,
-        inds_arr=inds_arr,
-    )
-
-    existing_cu.close()
-    existing_inds.close()
     return out
 
 
@@ -481,7 +451,7 @@ class HardPackDataset(_LegacySoftPackDataset):
         )
 
     def get_pack_infos(
-        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray | None = None
+        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, proxy_attn_flops: np.ndarray | None = None
     ):
         # shuffled indices
         inds = list(range(len(dataset)))
@@ -581,11 +551,11 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
             soft_pack_datasets: list[Sized] = []
             if len(soft_pack_groups) > 0:
                 num_tokens = [np.concatenate([dset.num_tokens for dset in soft_pack_groups])]
-                total_num_patch = [np.concatenate([dset.total_num_patch for dset in soft_pack_groups])]
+                proxy_attn_flops = [np.concatenate([dset.proxy_attn_flops for dset in soft_pack_groups])]
 
                 soft_pack_datasets = [ConcatDataset(soft_pack_groups)]
                 for i, dataset in enumerate(soft_pack_datasets):
-                    _infos = self.get_soft_pack_infos(dataset, i, num_tokens[i], total_num_patch[i])
+                    _infos = self.get_soft_pack_infos(dataset, i, num_tokens[i], proxy_attn_flops[i])
                     pack_infos_list.extend(_infos)
             pack_infos = Dataset.from_list(pack_infos_list)
 
@@ -645,7 +615,7 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
         return pack_infos_list
 
     def get_soft_pack_infos(
-        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, total_num_patch: np.ndarray
+        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, proxy_attn_flops: np.ndarray
     ):
         # shuffled indices
         inds = torch.randperm(len(dataset), generator=self.torch_random_generator).tolist()
@@ -654,7 +624,7 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
             inds,
             dataset_id,
             num_tokens,
-            total_num_patch,
+            proxy_attn_flops,
             pack_max_length=self.pack_max_length,
             pack_workers=self.pack_workers,
             pack_chunk_size=self.pack_chunk_size,

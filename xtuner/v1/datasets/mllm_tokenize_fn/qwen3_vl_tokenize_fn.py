@@ -218,6 +218,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         enable_3d_rope: bool = True,
         add_vision_id: bool = True,
         max_length: int | None = None,
+        visual_llm_attn_ratio_for_pack: float = 0.0,
         oss_loader_cfg: OSSLoaderConfig | None = None,
         debug: bool = False,
         oss_time_log_thr: int = 10,  # 10s
@@ -321,6 +322,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             hash,
             hash_str=_hash_str,
             data_name=self.data_name,
+            visual_llm_attn_ratio_for_pack=visual_llm_attn_ratio_for_pack,
         )
 
     def _truncated_data_item(

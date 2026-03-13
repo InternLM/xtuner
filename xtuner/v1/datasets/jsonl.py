@@ -41,17 +41,6 @@ XTUNER_FILE_OPEN_CONCURRENCY = int(os.environ.get("XTUNER_FILE_OPEN_CONCURRENCY"
 XTUNER_TOKENIZE_CHUNK_SIZE = int(os.environ.get("XTUNER_TOKENIZE_CHUNK_SIZE", "10"))
 
 
-def default_calc_total_patch(num_tokens: int, num_img_tokens: list[int], flash_attn_block_size: int = 128) -> float:
-    llm_num_patch = (round(num_tokens / flash_attn_block_size)) ** 2
-    img_num_patch = sum((n / flash_attn_block_size) ** 2 for n in num_img_tokens)
-    return llm_num_patch + img_num_patch
-
-
-_CALC_TOTAL_PATCHES_FN_MAP = {
-    "default": default_calc_total_patch,
-}
-
-
 def _streaming_parallel_open_inplace(path: str, buf, executor: ThreadPoolExecutor):
     file_size = os.path.getsize(path)
     max_workers = min(executor._max_workers, file_size)
@@ -156,7 +145,7 @@ def parallel_execute(
     local_cpu_ids = cpu_ids[rank::local_rank_concurrency]
 
     processes: list[Process] = []
-    data_queue: Queue[tuple[int, tuple[int, int], int]] = Queue()  # idx, (start, end)
+    data_queue: Queue[tuple[int, tuple[int, int]]] = Queue()  # idx, (start, end)
     output_queue: Queue[dict] = Queue()  # {"num_tokens": int}
     # task_id = bar.add_task(total=task_num, description=description)
     chunk_data_to_queue(data_queue, offsets, chunksize, nproc)
@@ -197,7 +186,6 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         sample_ratio: float = 1.0,
         tokenize_fn: CachableTokenizeFunction[T] | None = None,
         name: str = "default",
-        calc_total_patch_fn: Callable[[int, list[int]], float] = _CALC_TOTAL_PATCHES_FN_MAP["default"],
         cache_dir: str | Path | None = None,
         max_length: int | None = None,  # TODO: Remove max_length in dataset
         cache_tag: str | None = None,
@@ -212,11 +200,14 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         self.tokenizer_workers = int(os.environ.get("XTUNER_TOKENIZE_WORKERS", 8))
         self.meta_path = os.path.join(cache_dir, CACHE_META) if cache_dir else None
-        self.calc_total_patch_fn = calc_total_patch_fn
 
         logger.info(f"[Dataset] Start loading [{self.name}]{self.path} with sample_ratio={sample_ratio}.")
 
         self._has_chunk = isinstance(tokenize_fn, LongTextPretrainTokenizeFunction)
+
+        self._proxy_attention_flops_fn = None
+        if tokenize_fn is not None:
+            self._proxy_attention_flops_fn = tokenize_fn.proxy_attention_flops
 
         tok_cache_dir: str | None = None  # set inside cache_dir branch when tokenize_fn is CachableTokenizeFunction
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
@@ -423,9 +414,18 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         if self._shared_memory is not None:
             self._release_shared_memory()
 
+        # calc the proxy attention flops
+        _total_proxy_attn_flops = []
+        for i in range(len(self.sampled)):
+            _num_tokens = self.num_tokens[i]
+            _num_image_tokens = self._meta["num_img_tokens"][i]
+            if self._proxy_attention_flops_fn is not None:
+                _total_proxy_attn_flops.append(self._proxy_attention_flops_fn(_num_tokens, _num_image_tokens))
+        self._meta["proxy_attn_flops"] = np.array(_total_proxy_attn_flops)
+
     @property
-    def total_num_patch(self):
-        return self._meta["total_num_patch"]
+    def proxy_attn_flops(self):
+        return self._meta["proxy_attn_flops"]
 
     def _init_shared_memory(self, path: str) -> SharedMemory:
         if dist.is_initialized():
@@ -558,17 +558,14 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 "num_tokens": np.array([data["num_tokens"] for data in tokenized]),
             }
 
-            serialized_tokenized["total_num_patch"] = []
+            serialized_tokenized["num_img_tokens"] = []
             for data in tokenized:
-                num_tokens = data["num_tokens"]
                 num_img_tokens = [0]
                 if "num_img_tokens" in data:
                     num_img_tokens = data["num_img_tokens"]
                     if isinstance(num_img_tokens, int):
                         num_img_tokens = [num_img_tokens]
-                total_num_patch = self.calc_total_patch_fn(num_tokens, num_img_tokens)
-                serialized_tokenized["total_num_patch"].append(total_num_patch)
-            serialized_tokenized["total_num_patch"] = np.array(serialized_tokenized["total_num_patch"])
+                serialized_tokenized["num_img_tokens"].append(num_img_tokens)
 
         if dist.is_initialized():
             # TODO:
