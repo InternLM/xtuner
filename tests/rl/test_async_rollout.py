@@ -565,7 +565,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
 class TestTailBatch(unittest.IsolatedAsyncioTestCase):
     BATCH_SIZE = 2
-    OVER_SAMPLE = 5.0  # data_concurrency = (1 + 2.0) * BATCH_SIZE = 6
+    OVER_SAMPLE = 5.0  # data_concurrency = (1 + 5.0) * BATCH_SIZE = 12
 
     @classmethod
     def setUpClass(cls) -> None:

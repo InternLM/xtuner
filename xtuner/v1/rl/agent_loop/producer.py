@@ -162,7 +162,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                 for sample in group:
                     if self.tail_batch_stale_threshold > 0 and sample.seq_staleness >= self.tail_batch_stale_threshold:
                         sample.status = Status.EXPIRED
-                    if not self.enable_partial_rollout:
+                    elif not self.enable_partial_rollout:
                         sample.status = Status.ABORTED
                 await replay_buffer.put(group, task_name)
 
@@ -189,17 +189,6 @@ class AsyncProduceStrategy(ProduceStrategy):
             if len(pending_tasks) > 0:
                 await pause_generation(rollout_ctl)
                 await asyncio.sleep(1)
-
-    async def _async_sample(
-        self, sampler: Sampler, task_name: str, sample_from_expired_storage: bool, expired_sample_count: int
-    ) -> list[RolloutState]:
-        if sample_from_expired_storage and expired_sample_count > 0:
-            group_status = Status.EXPIRED
-            expired_sample_count -= 1
-        else:
-            group_status = Status.ABORTED
-        rollout_state = await sampler.sample(task_name=task_name, group_status=group_status)
-        return rollout_state
 
     async def produce_batch(
         self,
@@ -237,12 +226,12 @@ class AsyncProduceStrategy(ProduceStrategy):
         # 3. 初始下发任务
         pending_tasks = set()
         for _ in range(data_concurrency):
-            rollout_state = await self._async_sample(
-                sampler,
-                task_name=task_name,
-                sample_from_expired_storage=sample_from_expired_storage,
-                expired_sample_count=expired_sample_count,
-            )
+            if sample_from_expired_storage and expired_sample_count > 0:
+                group_status = Status.EXPIRED
+                expired_sample_count -= 1
+            else:
+                group_status = Status.ABORTED
+            rollout_state = await sampler.sample(task_name=task_name, group_status=group_status)
             task = create_task(
                 agent_loop.generate_group(
                     rollout_state, enable_partial_rollout=self.enable_partial_rollout, rollout_step=rollout_step
@@ -278,12 +267,12 @@ class AsyncProduceStrategy(ProduceStrategy):
             ) + completed_sample_count < data_concurrency + previously_completed_count and self.should_continue_fn(
                 completed_sample_count, batch_size
             ):
-                rollout_state = await self._async_sample(
-                    sampler,
-                    task_name=task_name,
-                    sample_from_expired_storage=sample_from_expired_storage,
-                    expired_sample_count=expired_sample_count,
-                )
+                if sample_from_expired_storage and expired_sample_count > 0:
+                    group_status = Status.EXPIRED
+                    expired_sample_count -= 1
+                else:
+                    group_status = Status.ABORTED
+                rollout_state = await sampler.sample(task_name=task_name, group_status=group_status)
                 task = create_task(
                     agent_loop.generate_group(
                         rollout_state, enable_partial_rollout=self.enable_partial_rollout, rollout_step=rollout_step

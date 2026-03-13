@@ -4,11 +4,13 @@ import httpx
 
 from xtuner.v1.utils import get_logger
 
+from .controller import RolloutControllerProxy
+
 
 logger = get_logger()
 
 
-async def send_abort_request(client: httpx.AsyncClient, url: str, timeout: int = 60) -> tuple[str, bool]:
+async def send_abort_request(client: httpx.AsyncClient, url: str, timeout: float = 60.0) -> tuple[str, bool]:
     worker_url = f"{url}/abort_request"
     try:
         response = await client.post(worker_url, json={"abort_all": True}, timeout=timeout)
@@ -20,7 +22,7 @@ async def send_abort_request(client: httpx.AsyncClient, url: str, timeout: int =
         return url, False
 
 
-async def pause_generation(rollout_ctl, pause_time_out=60.0):
+async def pause_generation(rollout_ctl: RolloutControllerProxy, pause_time_out: float = 60.0) -> None:
     rollout_ctl_metadata = await rollout_ctl.get_rollout_metadata.remote()
     infer_server_url = list(rollout_ctl_metadata["server_url_dict"].values())
     async with httpx.AsyncClient() as client:
@@ -39,5 +41,5 @@ async def pause_generation(rollout_ctl, pause_time_out=60.0):
         logger.info(f"All {succeeded_count} abort requests sent successfully.")
 
 
-async def continue_generation(rollout_ctl):
+async def continue_generation(rollout_ctl: RolloutControllerProxy) -> None:
     return await rollout_ctl.continue_generation.remote()

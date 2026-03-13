@@ -22,7 +22,12 @@ from typing_extensions import Annotated
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, update_status_from_finish_reason
-from xtuner.v1.rl.utils import AutoAcceleratorWorkers, SingleAcceleratorWorker, find_master_addr_and_port
+from xtuner.v1.rl.utils import (
+    AutoAcceleratorWorkers,
+    SingleAcceleratorWorker,
+    find_master_addr_and_port,
+    get_eos_token,
+)
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
 
@@ -32,22 +37,6 @@ if TYPE_CHECKING:
 
 
 infer_group = Group("inference", help="Inference worker configuration.")
-
-
-def get_eos_token(model_path: str) -> int | List[int]:
-    from xtuner.v1.utils.logger import get_logger
-
-    logger = get_logger()
-    generation_config_path = os.path.join(model_path, "generation_config.json")
-    if not os.path.exists(generation_config_path):
-        logger.warning(
-            f"Config {generation_config_path} does not exist and thus cannot get eos_token. You must provide eos_token manually."
-        )
-        return []
-    with open(generation_config_path) as f:
-        generation_config = json.load(f)
-    eos_token_id = generation_config.get("eos_token_id")
-    return eos_token_id
 
 
 class RolloutConfig(BaseModel):
