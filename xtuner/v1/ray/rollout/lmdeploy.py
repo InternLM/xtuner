@@ -242,9 +242,17 @@ class LMDeployWorker(RolloutWorker):
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
 
-        extra_engine_config = {}
+        extra_engine_config: Dict[str, Any] = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
+        if backend == "pytorch" and self.config.router_n_groups:
+            hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
+            hf_overrides.update(router_n_groups=self.config.router_n_groups)
+        if backend == "pytorch" and self.config.fp32_lm_head:
+            hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
+            hf_overrides.update(fp32_lm_head=self.config.fp32_lm_head)
+        if backend == "pytorch" and self.config.max_prefill_token_num:
+            extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
 
         dp_rank = 0
         if backend == "pytorch":
