@@ -55,8 +55,24 @@ class AgentLoopManager:
         self._data_sampler: Sampler = sampler  # 负责采样数据，提供给 ProduceStrategy 来生成样本
         self.task_name = task_name
 
+    async def _restart_inactive_rollout_workers(self):
+        rollout_ctl = self._agent_loop.rollout_ctl
+        restart_fn = getattr(rollout_ctl, "restart_inactive_workers", None)
+        if restart_fn is None:
+            return
+
+        remote_restart = getattr(restart_fn, "remote", None)
+        if callable(remote_restart):
+            await remote_restart()
+            return
+
+        result = restart_fn()
+        if hasattr(result, "__await__"):
+            await result
+
     # 共卡
     async def produce_batch(self, batch_size: int) -> list[list[RolloutState]]:
+        await self._restart_inactive_rollout_workers()
         await self._scheduler.produce_batch(
             self._agent_loop, self._data_sampler, self._replay_buffer, batch_size, self.task_name
         )

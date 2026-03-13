@@ -111,3 +111,35 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_data[1][0].id, 2)
         self.assertEqual(final_data[2][0].id, 1)
         self.assertEqual(final_data[3][0].id, 0)
+
+
+class TestAgentLoopManager(unittest.IsolatedAsyncioTestCase):
+
+    async def test_restart_inactive_workers_before_produce_batch(self):
+        from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManager
+
+        mock_agent_loop = MagicMock()
+        mock_agent_loop.rollout_ctl = MagicMock()
+        mock_agent_loop.rollout_ctl.restart_inactive_workers = MagicMock()
+        mock_agent_loop.rollout_ctl.restart_inactive_workers.remote = AsyncMock()
+
+        mock_strategy = MagicMock()
+        mock_strategy.produce_batch = AsyncMock()
+
+        mock_sampler = MagicMock()
+        replay_buffer = MagicMock()
+        replay_buffer.get = AsyncMock(return_value=[[MockRolloutState(1)]])
+
+        manager = AgentLoopManager(
+            agent_loop=mock_agent_loop,
+            produce_strategy=mock_strategy,
+            sampler=mock_sampler,
+            replay_buffer=replay_buffer,
+            task_name="test_task",
+        )
+
+        await manager.produce_batch(batch_size=1)
+
+        mock_agent_loop.rollout_ctl.restart_inactive_workers.remote.assert_awaited_once()
+        mock_strategy.produce_batch.assert_awaited_once()
+

@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from itertools import cycle
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Callable, Dict, List, Optional, TypedDict
 from uuid import uuid4
 
 import ray
@@ -61,7 +61,7 @@ class SessionRouter:
         # OrderedDict: key=session_id -> value=(worker, last_used_ts)
         self._map: OrderedDict[int, tuple[Any, float]] = OrderedDict()
         self._worker_cycler = cycle(self._workers)
-        self._lock = asyncio.Lock()
+        self._lock = threading.RLock()
         self.logger = get_logger()
 
     def _now(self) -> float:
@@ -86,12 +86,34 @@ class SessionRouter:
             self._map.popitem(last=False)
 
     def update_active_workers(self, worker_status: Dict[Any, bool]):
-        self._workers = list(worker_status.items())
-        self.logger.debug(f"SessionRouter update active workers: {self._workers}")
-        self._worker_cycler = cycle(self._workers)
+        with self._lock:
+            self._workers = list(worker_status.items())
+            self.logger.debug(f"SessionRouter update active workers: {self._workers}")
+            self._worker_cycler = cycle(self._workers)
 
-    async def get_worker(self, session_id: int) -> Any:
-        async with self._lock:
+    def update_worker_status(self, worker: Any, is_active: bool):
+        with self._lock:
+            updated = False
+            next_workers = []
+            for known_worker, known_status in self._workers:
+                if known_worker == worker:
+                    next_workers.append((known_worker, is_active))
+                    updated = True
+                else:
+                    next_workers.append((known_worker, known_status))
+            if not updated:
+                self.logger.warning(f"SessionRouter could not find worker {worker} while updating status to {is_active}.")
+                return
+
+            self._workers = next_workers
+            self._worker_cycler = cycle(self._workers)
+            for sid, (mapped_worker, last_used) in list(self._map.items()):
+                if mapped_worker[0] == worker:
+                    self._map[sid] = ((mapped_worker[0], is_active), last_used)
+            self.logger.debug(f"SessionRouter updated worker {worker} status to {is_active}.")
+
+    async def get_worker(self, session_id: int) -> Optional[Any]:
+        with self._lock:
             self._evict_expired()
 
             if session_id in self._map:
@@ -100,6 +122,10 @@ class SessionRouter:
                 if worker[1]:  # worker is healthy
                     return worker[0]
 
+            if not any(is_active for _, is_active in self._workers):
+                self.logger.warning("No active rollout workers available in SessionRouter.")
+                return None
+
             worker = next(self._worker_cycler)
             while worker[1] is False:
                 worker = next(self._worker_cycler)
@@ -107,6 +133,93 @@ class SessionRouter:
 
             self._evict_lru_to_capacity()
             return worker[0]
+
+
+class RolloutHealthChecker:
+    """Minimal background health checker for rollout workers.
+
+    The checker periodically probes active workers with ``check_health`` and
+    deactivates workers that fail consecutively over a threshold.
+    """
+
+    def __init__(
+        self,
+        workers_info: Dict[str, WorkerInfo],
+        workers_state_lock: threading.RLock,
+        deactivate_worker: Callable[[str], None],
+        logger,
+        interval_seconds: float = 30.0,
+        failure_threshold: int = 3,
+    ):
+        self._workers_info = workers_info
+        self._workers_state_lock = workers_state_lock
+        self._deactivate_worker = deactivate_worker
+        self._logger = logger
+        self._interval_seconds = max(interval_seconds, 0.0)
+        self._failure_threshold = max(failure_threshold, 1)
+        self._last_check_ts = 0.0
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._interval_seconds <= 0:
+            self._logger.warning("Health check interval is <= 0, background health checks are disabled.")
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    def run_once(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._last_check_ts < self._interval_seconds:
+            return
+        self._last_check_ts = now
+
+        with self._workers_state_lock:
+            active_workers = [(url, info.actor) for url, info in self._workers_info.items() if info.is_active]
+        if not active_workers:
+            return
+
+        urls, actors = zip(*active_workers)
+        health_statuses = ray.get([actor.check_health.remote() for actor in actors], timeout=ROLLOUT_RAY_GET_TIMEOUT)
+
+        for url, is_healthy in zip(urls, health_statuses):
+            should_deactivate = False
+            with self._workers_state_lock:
+                worker_info = self._workers_info.get(url)
+                if worker_info is None:
+                    continue
+                if is_healthy:
+                    if worker_info.failure_count > 0:
+                        self._logger.info(f"Rollout worker {url} health recovered.")
+                    worker_info.failure_count = 0
+                    continue
+
+                worker_info.failure_count += 1
+                self._logger.warning(
+                    f"Rollout worker {url} failed health check {worker_info.failure_count}/{self._failure_threshold}."
+                )
+                should_deactivate = worker_info.failure_count >= self._failure_threshold
+
+            if should_deactivate:
+                self._deactivate_worker(url)
+
+    def _run_loop(self) -> None:
+        self._logger.info(
+            f"Starting rollout background health check thread with interval={self._interval_seconds}s, "
+            f"failure_threshold={self._failure_threshold}."
+        )
+        while not self._stop_event.wait(self._interval_seconds):
+            try:
+                self.run_once(force=True)
+            except Exception as e:
+                self._logger.error(f"Background health check loop error: {e}", exc_info=True)
 
 
 class RolloutController:
@@ -147,27 +260,16 @@ class RolloutController:
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
-
-    def check_health(self) -> None:
-        """Check the health of all active rollout workers.
-
-        Returns:
-            List[bool]: A list of booleans indicating the health status of
-                each active rollout worker.
-        """
-        active_workers = [(url, info) for url, info in self.workers_info.items() if info.is_active]
-        if not active_workers:
-            return
-
-        urls, infos = zip(*active_workers)
-        actors = [info.actor for info in infos]
-
-        health_statuses = ray.get([actor.check_health.remote() for actor in actors], timeout=ROLLOUT_RAY_GET_TIMEOUT)
-
-        for url, is_healthy in zip(urls, health_statuses):
-            if not is_healthy:
-                self.logger.warning(f"Rollout worker {url} is unhealthy.")
-                self._deactivate_worker(url)
+        self._workers_state_lock = threading.RLock()
+        self.health_checker = RolloutHealthChecker(
+            workers_info=self.workers_info,
+            workers_state_lock=self._workers_state_lock,
+            deactivate_worker=self._deactivate_worker,
+            logger=self.logger,
+            interval_seconds=self.config.health_check_interval_seconds,
+            failure_threshold=self.config.health_check_failure_threshold,
+        )
+        self.health_checker.start()
 
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
         """Get information about the current rollout setup.
@@ -188,11 +290,19 @@ class RolloutController:
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         session_id = rollout_state.session_uid if rollout_state.session_uid else uuid4().int
         worker = await self.router.get_worker(session_id)
+        if worker is None:
+            rollout_state.status = Status.FAILED
+            rollout_state.error_msg = "No active rollout worker available. Will retry after next produce_batch restart."
+            return rollout_state
         # TODO(#@duanyanhui):
         # 1. 现在的worker_info的管理写的不好，由于打印和计数都不太合理，实际用处不大，仅在debug时才会打开，先去掉这部分逻辑，后面加上
         # 2. 目前先去掉根据失败的样本的数量来判断worker是否可用的逻辑，实际上这部分逻辑也用不到，需要更好的check_health的机制来判断worker是否可用
         active_worker_to_url_map = self._get_active_worker_to_url_map()
         server_url = active_worker_to_url_map.get(worker)
+        if server_url is None or server_url not in self.workers_info:
+            rollout_state.status = Status.FAILED
+            rollout_state.error_msg = "Selected rollout worker is unavailable in workers_info mapping."
+            return rollout_state
         self.workers_info[server_url].running_count += 1
         response_ref = worker.generate.remote(rollout_state=rollout_state)  # type: ignore[attr-defined]
         try:
@@ -233,6 +343,7 @@ class RolloutController:
         Args:
             block (bool): Whether to block until the operation completes.
         """
+        self.health_checker.stop()
         self._broadcast_to_active_workers("shutdown")
 
     def _update_dist_init_addr(self, nodes_per_engine, server_urls_per_engine, dist_init_addrs, tp_size):
@@ -316,16 +427,58 @@ class RolloutController:
     def _deactivate_worker(self, url: str):
         """A helper function to deactivate a worker, update all related states,
         and shut it down."""
-        worker_info = self.workers_info.get(url)
-        if not worker_info or not worker_info.is_active:
+        worker_actor = None
+        actor_to_disable = None
+        with self._workers_state_lock:
+            worker_info = self.workers_info.get(url)
+            if not worker_info or not worker_info.is_active:
+                return
+
+            self.logger.warning(f"Deactivating rollout worker {worker_info.actor} with URL {url} due to failures.")
+            worker_info.is_active = False
+            worker_info.failure_count = 0
+            worker_actor = worker_info.actor
+            actor_to_disable = worker_info.actor
+
+        if actor_to_disable is not None:
+            self.router.update_worker_status(actor_to_disable, False)
+
+        try:
+            ray.get(worker_actor.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+        except Exception as e:
+            self.logger.error(f"Failed to offload worker {url} during deactivation: {e}", exc_info=True)
+        try:
+            ray.get(worker_actor.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+        except Exception as e:
+            self.logger.error(f"Failed to shutdown worker {url} during deactivation: {e}", exc_info=True)
+
+    def restart_inactive_workers(self) -> None:
+        """Restart inactive workers before the next rollout batch starts."""
+        with self._workers_state_lock:
+            inactive_workers = [(url, info) for url, info in self.workers_info.items() if not info.is_active]
+        for url, worker_info in inactive_workers:
+            self._restart_worker(url, worker_info)
+
+    def _restart_worker(self, url: str, worker_info: WorkerInfo):
+        self.logger.warning(f"Restarting rollout worker at {url}.")
+        try:
+            dist_init_addr = ray.get(worker_info.actor.init_dist_port.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            _, new_url = ray.get(worker_info.actor.init.remote(dist_init_addr), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+        except Exception as e:
+            self.logger.error(f"Failed to restart rollout worker {url}: {e}", exc_info=True)
             return
 
-        self.logger.warning(f"Deactivating rollout worker {worker_info.actor} with URL {url} due to failures.")
-        worker_info.is_active = False
-        self.router.update_active_workers(self._get_worker_status_for_router())
+        actor_to_enable = worker_info.actor
+        with self._workers_state_lock:
+            if url != new_url:
+                self.workers_info.pop(url, None)
+            worker_info.is_active = True
+            worker_info.failure_count = 0
+            self.workers_info[new_url] = worker_info
+            self.worker_server_urls_map[worker_info.rank] = new_url
 
-        ray.get(worker_info.actor.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-        ray.get(worker_info.actor.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+        self.router.update_worker_status(actor_to_enable, True)
+        self.logger.info(f"Successfully restarted rollout worker: {url} -> {new_url}.")
 
     def _get_worker_status_for_router(self) -> Dict[RolloutWorker, bool]:
         """Helper to generate the status dict required by the SessionRouter."""
