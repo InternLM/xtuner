@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from itertools import cycle
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Callable, Dict, List, Optional, TypedDict
 from uuid import uuid4
 
 import ray
@@ -133,6 +133,95 @@ class SessionRouter:
                 return worker[0]
 
 
+class RolloutHealthChecker:
+    """Minimal background health checker for rollout workers.
+
+    The checker periodically probes active workers with ``check_health`` and
+    deactivates workers that fail consecutively over a threshold.
+    """
+
+    def __init__(
+        self,
+        workers_info: Dict[str, WorkerInfo],
+        workers_state_lock: threading.RLock,
+        session_router: SessionRouter,
+        deactivate_worker: Callable[[str], None],
+        logger,
+        interval_seconds: float = 30.0,
+        failure_threshold: int = 3,
+    ):
+        self._workers_info = workers_info
+        self._workers_state_lock = workers_state_lock
+        self._session_router = session_router
+        self._deactivate_worker = deactivate_worker
+        self._logger = logger
+        self._interval_seconds = max(interval_seconds, 0.0)
+        self._failure_threshold = max(failure_threshold, 1)
+        self._last_check_ts = 0.0
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._interval_seconds <= 0:
+            self._logger.warning("Health check interval is <= 0, background health checks are disabled.")
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    def run_once(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._last_check_ts < self._interval_seconds:
+            return
+        self._last_check_ts = now
+
+        with self._workers_state_lock:
+            active_workers = [(url, info.actor) for url, info in self._workers_info.items() if info.is_active]
+        if not active_workers:
+            return
+
+        urls, actors = zip(*active_workers)
+        health_statuses = ray.get([actor.check_health.remote() for actor in actors], timeout=ROLLOUT_RAY_GET_TIMEOUT)
+
+        for url, is_healthy in zip(urls, health_statuses):
+            should_deactivate = False
+            with self._workers_state_lock:
+                worker_info = self._workers_info.get(url)
+                if worker_info is None:
+                    continue
+                if is_healthy:
+                    if worker_info.failure_count > 0:
+                        self._logger.info(f"Rollout worker {url} health recovered.")
+                    worker_info.failure_count = 0
+                    continue
+
+                worker_info.failure_count += 1
+                self._logger.warning(
+                    f"Rollout worker {url} failed health check {worker_info.failure_count}/{self._failure_threshold}."
+                )
+                should_deactivate = worker_info.failure_count >= self._failure_threshold
+
+            if should_deactivate:
+                self._deactivate_worker(url)
+
+    def _run_loop(self) -> None:
+        self._logger.info(
+            f"Starting rollout background health check thread with interval={self._interval_seconds}s, "
+            f"failure_threshold={self._failure_threshold}."
+        )
+        while not self._stop_event.wait(self._interval_seconds):
+            try:
+                self.run_once(force=True)
+            except Exception as e:
+                self._logger.error(f"Background health check loop error: {e}", exc_info=True)
+
+
 class RolloutController:
     """Controller for managing and coordinating multiple RolloutWorker
     actors."""
@@ -171,80 +260,17 @@ class RolloutController:
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
-        self.health_check_interval_seconds = max(self.config.health_check_interval_seconds, 0.0)
-        self.health_check_failure_threshold = max(self.config.health_check_failure_threshold, 1)
-        self._last_health_check_ts = 0.0
         self._workers_state_lock = threading.RLock()
-        self._health_check_stop_event = threading.Event()
-        self._health_check_thread: Optional[threading.Thread] = None
-        self._start_health_check_loop()
-
-    def check_health(self, force: bool = False) -> None:
-        """Check the health of active rollout workers and deactivate unhealthy ones."""
-        now = time.time()
-        if not force and now - self._last_health_check_ts < self.health_check_interval_seconds:
-            return
-        self._last_health_check_ts = now
-
-        with self._workers_state_lock:
-            active_workers = [(url, info) for url, info in self.workers_info.items() if info.is_active]
-        if not active_workers:
-            return
-
-        urls, infos = zip(*active_workers)
-        actors = [info.actor for info in infos]
-
-        health_statuses = ray.get([actor.check_health.remote() for actor in actors], timeout=ROLLOUT_RAY_GET_TIMEOUT)
-
-        for url, is_healthy in zip(urls, health_statuses):
-            with self._workers_state_lock:
-                worker_info = self.workers_info.get(url)
-                if worker_info is None:
-                    continue
-
-                if is_healthy:
-                    if worker_info.failure_count > 0:
-                        self.logger.info(f"Rollout worker {url} health recovered.")
-                    worker_info.failure_count = 0
-                    continue
-
-                worker_info.failure_count += 1
-                self.logger.warning(
-                    f"Rollout worker {url} failed health check {worker_info.failure_count}/"
-                    f"{self.health_check_failure_threshold}."
-                )
-                should_deactivate = worker_info.failure_count >= self.health_check_failure_threshold
-
-            if should_deactivate:
-                self._deactivate_worker(url)
-
-    def _health_check_loop(self) -> None:
-        if self.health_check_interval_seconds <= 0:
-            return
-
-        self.logger.info(
-            f"Starting rollout background health check thread with interval={self.health_check_interval_seconds}s, "
-            f"failure_threshold={self.health_check_failure_threshold}."
+        self.health_checker = RolloutHealthChecker(
+            workers_info=self.workers_info,
+            workers_state_lock=self._workers_state_lock,
+            session_router=self.router,
+            deactivate_worker=self._deactivate_worker,
+            logger=self.logger,
+            interval_seconds=self.config.health_check_interval_seconds,
+            failure_threshold=self.config.health_check_failure_threshold,
         )
-        while not self._health_check_stop_event.wait(self.health_check_interval_seconds):
-            try:
-                self.check_health(force=True)
-            except Exception as e:
-                self.logger.error(f"Background health check loop error: {e}", exc_info=True)
-
-    def _start_health_check_loop(self) -> None:
-        if self.health_check_interval_seconds <= 0:
-            self.logger.warning("Health check interval is <= 0, background health checks are disabled.")
-            return
-        if self._health_check_thread and self._health_check_thread.is_alive():
-            return
-        self._health_check_thread = threading.Thread(target=self._health_check_loop, daemon=True)
-        self._health_check_thread.start()
-
-    def _stop_health_check_loop(self) -> None:
-        self._health_check_stop_event.set()
-        if self._health_check_thread and self._health_check_thread.is_alive():
-            self._health_check_thread.join(timeout=5)
+        self.health_checker.start()
 
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
         """Get information about the current rollout setup.
@@ -310,7 +336,7 @@ class RolloutController:
         Args:
             block (bool): Whether to block until the operation completes.
         """
-        self._stop_health_check_loop()
+        self.health_checker.stop()
         self._broadcast_to_active_workers("shutdown")
 
     def _update_dist_init_addr(self, nodes_per_engine, server_urls_per_engine, dist_init_addrs, tp_size):
