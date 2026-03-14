@@ -1,3 +1,4 @@
+import types
 from abc import abstractmethod
 from typing import Literal, Optional, Tuple
 
@@ -8,9 +9,11 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
 from xtuner.v1.optim import Muon
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_device, get_logger, get_torch_device_module
 
 
+DEVICE = get_device()
+DEVICE_MODULE = get_torch_device_module()
 logger = get_logger()
 
 
@@ -32,6 +35,7 @@ class AdamWConfig(OptimConfig):
     betas: Annotated[Tuple[float, float], Parameter(help="Beta coefficients for Adam optimizer")] = (0.9, 0.95)
     eps: Annotated[float, Parameter(help="Epsilon value for numerical stability in Adam optimizer")] = 1e-8
     foreach: Annotated[Optional[bool], Parameter(help="Use foreach implementation for AdamW")] = None
+    swap_optimizer: Annotated[Optional[bool], Parameter(help="Swap optimizer states to host memory.")] = False
 
     def build(self, model):
         params = [p for p in model.parameters() if p.requires_grad]
@@ -52,9 +56,13 @@ class AdamWConfig(OptimConfig):
                 f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
             )
             logger.info(f"Untrainable parameters names: {untrainable_names}")
-        return torch.optim.AdamW(
+        optimizer = torch.optim.AdamW(
             params, lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.weight_decay, foreach=self.foreach
         )
+        if self.swap_optimizer:
+            SwapOptimizerOperate(optimizer).opt_states_initialization()
+            optimizer.step = types.MethodType(swap_adamw_step, optimizer)
+        return optimizer
 
 
 class MuonConfig(OptimConfig):
@@ -134,3 +142,160 @@ class LRConfig(BaseModel):
     )
     warmup_ratio: Annotated[float, Parameter(help="Ratio of warmup steps to total training steps")] = 0.03
     lr_min: Annotated[float, Parameter(help="Minimum learning rate for optimization")] = 1e-6
+
+
+class SwapOptimizerOperate:
+    swap_to_device_events_map: dict[int, torch.cuda.Event] = {}
+    swap_to_host_events_map: dict[int, torch.cuda.Event] = {}
+
+    param_to_cpu_states_map: dict[torch.Tensor, dict[str, torch.Tensor]] = {}
+    param_to_device_states_map: dict[torch.Tensor, dict[str, torch.Tensor]] = {}
+
+    state_keys = ["exp_avg", "exp_avg_sq", "max_exp_avg_sq"]
+
+    def __init__(self, optimizer, swap_optimizer_times=16):
+        self.optimizer = optimizer
+        self.swap_optimizer_times = swap_optimizer_times
+
+        # create all parameters list for step
+        self.optimizer.param_to_group_map = {}
+
+        for group in self.optimizer.param_groups:
+            for p in group["params"]:
+                self.optimizer.param_to_group_map[p] = group
+
+        # logger.info swap param num and size
+        swap_num = sum([main_param.to_local().numel() for main_param in self.optimizer.param_to_group_map])
+        swap_numel = swap_num // self.swap_optimizer_times
+        self.optimizer.swap_numel = swap_numel
+
+        swap_memory = swap_num * 8 / 1024 / 1024
+        logger.info(
+            f"[Rank {DEVICE_MODULE.current_device()}] swap optimizer param num: {swap_num},  param size: {swap_memory}MB\n",
+            end="",
+        )
+
+    def opt_states_initialization(self):
+        for group in self.optimizer.param_groups:
+            for param in group["params"]:
+                device_state_dtensor = self.optimizer.state[param]
+                device_state_tensor = {}
+                cpu_state = {}
+
+                amsgrad = self.optimizer.param_to_group_map[param]["amsgrad"]
+
+                for key in self.state_keys:
+                    if key == "max_exp_avg_sq" and not amsgrad:
+                        device_state_dtensor[key] = None
+                        device_state_tensor[key] = None
+                        cpu_state[key] = None
+                    else:
+                        device_state_dtensor[key] = torch.zeros_like(param, memory_format=torch.preserve_format)
+                        # convert dtensor to tensor
+                        device_state_tensor[key] = device_state_dtensor[key].to_local()
+
+                        cpu_state[key] = torch.empty_like(device_state_tensor[key], pin_memory=True, device="cpu")
+                        cpu_state[key].copy_(device_state_tensor[key], non_blocking=True)
+
+                        device_state_tensor[key].storage().resize_(0)
+
+                self.param_to_device_states_map[param] = device_state_tensor
+                self.param_to_cpu_states_map[param] = cpu_state
+        DEVICE_MODULE.synchronize()
+
+    @classmethod
+    def swap_all_to_host(cls):
+        for param in cls.param_to_cpu_states_map.keys():
+            cls.swap_tensors_to_host(param)
+        for param in cls.param_to_cpu_states_map.keys():
+            event = cls.swap_to_host_events_map.get(param, None)
+            if event is not None:
+                DEVICE_MODULE.current_stream().wait_event(event)
+                cls.swap_to_host_events_map[param] = None
+
+    @classmethod
+    def swap_all_to_device(cls):
+        dist.barrier(dist.group.WORLD)
+        for param in cls.param_to_cpu_states_map.keys():
+            cls.swap_tensors_to_device(param)
+        for param in cls.param_to_cpu_states_map.keys():
+            event = cls.swap_to_device_events_map.get(param, None)
+            if event is not None:
+                DEVICE_MODULE.current_stream().wait_event(event)
+                cls.swap_to_device_events_map[param] = None
+
+    @classmethod
+    def swap_tensors_to_device(cls, param):
+        cpu_state = cls.param_to_cpu_states_map[param]
+
+        if param in cls.param_to_device_states_map:
+            device_state = cls.param_to_device_states_map[param]
+            for key in cls.state_keys:
+                if device_state[key] is not None and device_state[key].storage().size() == 0:
+                    device_state[key].storage().resize_(cpu_state[key].storage().size())
+                    device_state[key].copy_(cpu_state[key], non_blocking=True)
+
+        cls.swap_to_device_events_map[param] = DEVICE_MODULE.current_stream().record_event()
+
+    @classmethod
+    def swap_tensors_to_host(cls, param):
+        cpu_state = cls.param_to_cpu_states_map[param]
+
+        if param in cls.param_to_device_states_map:
+            device_state = cls.param_to_device_states_map[param]
+            for key in cls.state_keys:
+                if key in device_state and device_state[key] is not None and device_state[key].storage().size() != 0:
+                    cpu_state[key].copy_(device_state[key], non_blocking=True)
+                    device_state[key].storage().resize_(0)
+
+        cls.swap_to_host_events_map[param] = DEVICE_MODULE.current_stream().record_event()
+
+
+def swap_adamw_step(self, closure=None):
+    loss = None
+    if closure is not None:
+        with torch.enable_grad():
+            loss = closure()
+
+    for group in self.param_groups:
+        if "step" in group:
+            group["step"] += 1
+            if group["step"].is_cpu:
+                group["step"] = group["step"].to(DEVICE)
+        else:
+            group["step"] = torch.tensor(1, dtype=torch.int64, device=DEVICE_MODULE.current_device())
+
+    params_list = list(self.param_to_group_map.keys())
+
+    SwapOptimizerOperate.swap_all_to_device()
+
+    for i, param in enumerate(params_list):
+        if param.grad is None:
+            continue
+        if param.grad.is_sparse:
+            raise RuntimeError("AdamW does not support sparse gradients")
+
+        group = self.param_to_group_map[param]
+        amsgrad = group["amsgrad"]
+        beta1, beta2 = group["betas"]
+        state = self.state[param]
+
+        torch._fused_adamw_(
+            [param.to_local()],
+            [param.grad.to_local()],
+            [state["exp_avg"].to_local()],
+            [state["exp_avg_sq"].to_local()],
+            [state["max_exp_avg_sq"]] if amsgrad else [],
+            [group["step"]],
+            amsgrad=amsgrad,
+            lr=group["lr"],
+            beta1=beta1,
+            beta2=beta2,
+            weight_decay=group["weight_decay"],
+            eps=group["eps"],
+            maximize=group["maximize"],
+        )
+
+    # it maybe removed
+    DEVICE_MODULE.synchronize()
+    return loss
