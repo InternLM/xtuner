@@ -26,6 +26,7 @@ from xtuner.v1.utils.compile import maybe_compile
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
+    OffloadPolicy,
     fully_shard,
 )
 from xtuner.v1.ops.attn_imp import attn_impl_mapping, AttnOpOutputs
@@ -400,7 +401,7 @@ class InternS1VisionModel(BaseModel):
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy()
                 if fsdp_config.cpu_offload
-                else None,
+                else OffloadPolicy(),
             )
 
         for layer_cur, layer_next in zip(self.encoder.layer[:-1], self.encoder.layer[1:]):
@@ -411,6 +412,6 @@ class InternS1VisionModel(BaseModel):
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=True,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else OffloadPolicy(),
         )
         return self

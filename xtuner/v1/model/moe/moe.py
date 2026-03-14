@@ -18,6 +18,7 @@ from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
+    OffloadPolicy,
     fully_shard,
 )
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
@@ -799,7 +800,7 @@ class MoE(BaseModel):
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
                 reshard_after_forward=reshard_after_forward,
-                offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+                offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
             )
 
         for layer_cur, layer_next in zip(
@@ -813,7 +814,7 @@ class MoE(BaseModel):
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
         )
 
         fully_shard(
@@ -821,7 +822,7 @@ class MoE(BaseModel):
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
         )
 
         fully_shard(
@@ -829,7 +830,7 @@ class MoE(BaseModel):
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=lm_head_mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
         )
 
         fully_shard(
@@ -837,7 +838,7 @@ class MoE(BaseModel):
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
 
