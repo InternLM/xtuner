@@ -12,8 +12,20 @@
 ## Current Completion Status
 1/4 features passing
 
+### Feature 2 — Rewrite __init__ and _validate_pack (COMPLETED)
+- Build _path_to_ds_idx: dict[str, int] from datasets list (using ds.path)
+- Removed 'skip' from short_pack_strategy and long_pack_strategy Literal types
+- Fixed token count: ds.num_tokens[s_idx] directly (no double-indexing)
+- New char-range validation: both -1 OK (plain DataItem); else require char_start>=0 and char_end>char_start
+- pack_infos now stores 6-tuples: (ds_idx, s_idx, char_start, char_end, token_start_offset, max_tokens)
+- Added _FakeDataset with .path attribute to test helpers
+- 8 new validation-level unit tests, all passing (13 total)
+
+## Current Completion Status
+2/4 features passing
+
 ## What To Work On Next
-- Feature 2: Rewrite CustomPackDataset.__init__ and _validate_pack
+- Feature 3: Rewrite __getitem__
   - Build path->index mapping from datasets list (using ds.path)
   - Remove 'skip' from short_pack_strategy and long_pack_strategy Literal types
   - Fix _sample_num_tokens: use ds.num_tokens[i] directly (already reindexed by sampled)

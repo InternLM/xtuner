@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from xtuner.v1.datasets.custom_pack import (
+    CustomPackDataset,
     _load_pack_config_jsonl,
     _load_pack_config_parquet,
 )
@@ -15,6 +16,22 @@ from xtuner.v1.datasets.jsonl import save_mixed_dict_to_parquet
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
+
+
+class _FakeDataset:
+    """Minimal fake JsonlDataset with .path and .num_tokens attributes."""
+
+    def __init__(self, samples: list[list[int]], path: str):
+        self.path = path
+        self._samples = samples
+        self.num_tokens = np.array([len(s) for s in samples], dtype=np.int64)
+
+    def __getitem__(self, s_idx: int) -> dict:
+        ids = self._samples[s_idx]
+        return {"input_ids": ids, "labels": list(ids), "num_tokens": len(ids)}
+
+    def __len__(self) -> int:
+        return len(self._samples)
 
 
 def _write_jsonl_pack(path: str, packs: list[list[list]]) -> None:
@@ -62,7 +79,6 @@ class TestLoadPackConfigJsonl:
         assert len(result[0]) == 2
         assert len(result[1]) == 1
 
-        # pack 0, slice 0
         ds_path, s_idx, c_start, c_end, tok_off = result[0][0]
         assert ds_path == "ds0.jsonl"
         assert s_idx == 0
@@ -70,7 +86,6 @@ class TestLoadPackConfigJsonl:
         assert c_end == -1
         assert tok_off == 0
 
-        # pack 1, slice 0 – LongText style
         ds_path, s_idx, c_start, c_end, tok_off = result[1][0]
         assert ds_path == "ds1.jsonl"
         assert s_idx == 5
@@ -105,7 +120,6 @@ class TestLoadPackConfigParquet:
         assert len(result[0]) == 2
         assert len(result[1]) == 1
 
-        # pack 0, slice 0
         ds_path, s_idx, c_start, c_end, tok_off = result[0][0]
         assert ds_path == "ds0.jsonl"
         assert s_idx == 0
@@ -113,7 +127,6 @@ class TestLoadPackConfigParquet:
         assert c_end == -1
         assert tok_off == 0
 
-        # pack 1, slice 0 – LongText style, path_id 1 -> "ds1.jsonl"
         ds_path, s_idx, c_start, c_end, tok_off = result[1][0]
         assert ds_path == "ds1.jsonl"
         assert s_idx == 5
@@ -121,3 +134,93 @@ class TestLoadPackConfigParquet:
         assert c_end == 200
         assert tok_off == 3
 
+# ---------------------------------------------------------------------------
+# Feature 2: validation tests (test CustomPackDataset.__init__ / _validate_pack)
+# ---------------------------------------------------------------------------
+
+
+class TestValidation:
+    def test_valid_pack_exact_length(self, tmp_path):
+        """Pack with total tokens == pack_max_length is accepted."""
+        ds = _FakeDataset([[1] * 128, [2] * 128], path="/ds.jsonl")
+        packs = [["/ds.jsonl", 0, -1, -1, 0], ["/ds.jsonl", 1, -1, -1, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=256)
+        assert len(dataset) == 1
+
+    def test_invalid_dataset_path(self, tmp_path):
+        """Unknown dataset_path raises ValueError."""
+        ds = _FakeDataset([[1] * 256], path="/ds.jsonl")
+        packs = [["/unknown.jsonl", 0, -1, -1, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        with pytest.raises(ValueError, match="dataset_path"):
+            CustomPackDataset([ds], config_path, pack_max_length=256)
+
+    def test_invalid_sample_idx(self, tmp_path):
+        """sample_idx out of range raises ValueError."""
+        ds = _FakeDataset([[1] * 256], path="/ds.jsonl")  # only 1 sample
+        packs = [["/ds.jsonl", 99, -1, -1, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        with pytest.raises(ValueError, match="sample_idx"):
+            CustomPackDataset([ds], config_path, pack_max_length=256)
+
+    @pytest.mark.parametrize("char_start,char_end", [(-5, 100), (100, 50), (-1, 100)])
+    def test_invalid_char_range(self, tmp_path, char_start, char_end):
+        """Invalid char range raises ValueError (unless both are -1)."""
+        ds = _FakeDataset([[1] * 256], path="/ds.jsonl")
+        packs = [["/ds.jsonl", 0, char_start, char_end, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        with pytest.raises(ValueError, match="char range"):
+            CustomPackDataset([ds], config_path, pack_max_length=256)
+
+    def test_short_pack_error(self, tmp_path):
+        """Pack shorter than pack_max_length raises ValueError with strategy='error'."""
+        ds = _FakeDataset([[1] * 100], path="/ds.jsonl")
+        packs = [["/ds.jsonl", 0, -1, -1, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        with pytest.raises(ValueError, match="total tokens"):
+            CustomPackDataset([ds], config_path, pack_max_length=256, short_pack_strategy="error")
+
+    def test_short_pack_padding(self, tmp_path):
+        """Pack shorter than pack_max_length is accepted with strategy='padding'."""
+        ds = _FakeDataset([[1] * 100], path="/ds.jsonl")
+        packs = [["/ds.jsonl", 0, -1, -1, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=256, short_pack_strategy="padding")
+        assert len(dataset) == 1
+        items = dataset[0]
+        assert sum(it["num_tokens"] for it in items) == 256
+
+    def test_long_pack_error(self, tmp_path):
+        """Pack longer than pack_max_length raises ValueError with strategy='error'."""
+        ds = _FakeDataset([[1] * 300], path="/ds.jsonl")
+        packs = [["/ds.jsonl", 0, -1, -1, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        with pytest.raises(ValueError, match="total tokens"):
+            CustomPackDataset([ds], config_path, pack_max_length=256, long_pack_strategy="error")
+
+    def test_long_pack_truncate(self, tmp_path):
+        """Pack longer than pack_max_length is truncated to pack_max_length with strategy='truncate'."""
+        ds = _FakeDataset([[1] * 300], path="/ds.jsonl")
+        packs = [["/ds.jsonl", 0, -1, -1, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=256, long_pack_strategy="truncate")
+        assert len(dataset) == 1
+        items = dataset[0]
+        assert sum(it["num_tokens"] for it in items) == 256

@@ -20,7 +20,7 @@
       "Step 3: Update _FakeDataset in tests to support the new 5-element format and have a .path attribute for path->index mapping",
       "Step 4: Write unit tests for validation: hard errors (invalid dataset_path, sample_idx out of range, invalid char range), short_pack_strategy='error'/'padding', long_pack_strategy='error'/'truncate'; run tests to pass"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "modify",

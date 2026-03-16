@@ -96,6 +96,10 @@ def _load_pack_config(path: str) -> list[list[_PackSlice]]:
     raise ValueError(f"Unsupported pack config format: {path}. Expected .jsonl or .parquet.")
 
 
+# (ds_idx, sample_idx, char_start, char_end, token_start_offset, max_tokens)
+_ValidatedSlice = tuple[int, int, int, int, int, int]
+
+
 class CustomPackDataset(tud.Dataset):
     """Dataset that reads pack groupings from a user-supplied config file.
 
@@ -103,22 +107,16 @@ class CustomPackDataset(tud.Dataset):
     it returns a ``list[DataItem]`` (one item per source sample slice in the
     pack).
 
-    Parameters
-    ----------
-    datasets:
-        List of :class:`JsonlDataset` instances returned by ``build_datasets()``.
-    pack_config_path:
-        Path to the pack configuration file (JSONL or Parquet).
-    pack_max_length:
-        Expected total token count per pack.
-    short_pack_strategy:
-        What to do when a pack has fewer tokens than ``pack_max_length``.
-        ``"error"`` raises; ``"skip"`` drops the pack; ``"padding"`` pads to
-        length (labels for pad positions are ``-100``).
-    long_pack_strategy:
-        What to do when a pack has more tokens than ``pack_max_length``.
-        ``"error"`` raises; ``"skip"`` drops the pack; ``"truncate"``
-        truncates the last slice so the total equals ``pack_max_length``.
+    Parameters:
+        datasets (list[JsonlDataset]): List of source datasets.
+        pack_config_path (str): Path to the pack configuration file (.jsonl or .parquet).
+        pack_max_length (int): Expected total token count per pack.
+        short_pack_strategy (str): What to do when a pack has fewer tokens than
+            ``pack_max_length``. ``"error"`` raises; ``"padding"`` pads to length
+            (labels for pad positions are -100).
+        long_pack_strategy (str): What to do when a pack has more tokens than
+            ``pack_max_length``. ``"error"`` raises; ``"truncate"`` truncates the
+            last slice so the total equals ``pack_max_length``.
     """
 
     def __init__(
@@ -126,8 +124,8 @@ class CustomPackDataset(tud.Dataset):
         datasets: list[JsonlDataset],
         pack_config_path: str,
         pack_max_length: int,
-        short_pack_strategy: Literal["error", "skip", "padding"] = "error",
-        long_pack_strategy: Literal["error", "skip", "truncate"] = "error",
+        short_pack_strategy: Literal["error", "padding"] = "error",
+        long_pack_strategy: Literal["error", "truncate"] = "error",
     ) -> None:
         super().__init__()
         self.datasets = datasets
@@ -135,141 +133,85 @@ class CustomPackDataset(tud.Dataset):
         self.short_pack_strategy = short_pack_strategy
         self.long_pack_strategy = long_pack_strategy
 
-        # ------------------------------------------------------------------
-        # 1. Load pack config file
-        # ------------------------------------------------------------------
+        self._path_to_ds_idx: dict[str, int] = {ds.path: idx for idx, ds in enumerate(datasets)}
+
         raw_packs = _load_pack_config(pack_config_path)
         logger.info(f"CustomPackDataset: loaded {len(raw_packs)} raw packs from {pack_config_path}.")
 
-        # ------------------------------------------------------------------
-        # 2. Pre-compute per-dataset token counts indexed by sampled position
-        # ------------------------------------------------------------------
-        self._sample_num_tokens: list[np.ndarray] = []
-        for ds in datasets:
-            sampled_arr = np.array(ds.sampled, dtype=np.int64)
-            assert ds.num_tokens is not None
-            self._sample_num_tokens.append(ds.num_tokens[sampled_arr])
-
-        # ------------------------------------------------------------------
-        # 3. Validate packs and build self.pack_infos
-        # ------------------------------------------------------------------
-        valid_packs: list[list[tuple[int, int, int, int]]] = []
-        num_skipped = 0
-        used_pairs: set[tuple[int, int]] = set()
-
-        for pack_idx, raw_pack in enumerate(raw_packs):
-            slices, ok = self._validate_pack(pack_idx, raw_pack)
-            if slices is None:
-                if ok == "skip":
-                    num_skipped += 1
-                    continue
-            else:
-                valid_packs.append(slices)
-                for ds_id, s_idx, _, _ in slices:
-                    used_pairs.add((ds_id, s_idx))
-
-        self.pack_infos: list[list[tuple[int, int, int, int]]] = valid_packs
-
-        # ------------------------------------------------------------------
-        # 4. Log summary
-        # ------------------------------------------------------------------
-        total_samples = sum(len(ds) for ds in datasets)
-        used_samples = len(used_pairs)
-        pct = 100.0 * used_samples / total_samples if total_samples > 0 else 0.0
-        logger.info(
-            f"CustomPackDataset: loaded {len(valid_packs)} packs ({num_skipped} skipped).\n"
-            f"Total sample coverage: {used_samples}/{total_samples} samples ({pct:.1f}%) "
-            f"across all datasets."
-        )
-        for ds_id, ds in enumerate(datasets):
-            ds_total = len(ds)
-            ds_used = sum(1 for (d, _) in used_pairs if d == ds_id)
-            ds_pct = 100.0 * ds_used / ds_total if ds_total > 0 else 0.0
-            ds_name = getattr(ds, "name", str(ds_id))
-            logger.info(f"  dataset[{ds_id}] ({ds_name}): {ds_used}/{ds_total} samples ({ds_pct:.1f}%)")
+        self.pack_infos: list[list[_ValidatedSlice]] = [
+            self._validate_pack(pack_idx, raw_pack) for pack_idx, raw_pack in enumerate(raw_packs)
+        ]
+        logger.info(f"CustomPackDataset: {len(self.pack_infos)} valid packs loaded.")
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _validate_pack(
-        self, pack_idx: int, raw_pack: list[_PackSlice]
-    ) -> tuple[list[tuple[int, int, int, int]] | None, str]:
-        """Validate one raw pack.
+    def _validate_pack(self, pack_idx: int, raw_pack: list[_PackSlice]) -> list[_ValidatedSlice]:
+        """Validate one raw pack and return validated slices.
 
-        Returns
-        -------
-        (slices, "ok")    – valid pack; slices may be modified by truncation.
-        (None,  "skip")   – pack should be skipped.
-        Never returns (None, "error") – errors are raised directly.
+        Args:
+            pack_idx (int): Index of the pack (for error messages).
+            raw_pack (list[_PackSlice]): Raw slices from the config file.
+
+        Returns:
+            list[_ValidatedSlice]: Validated slices as
+                (ds_idx, s_idx, char_start, char_end, token_start_offset, max_tokens).
         """
-        # TODO: Feature 2 – rewrite to use new path->index mapping and remove skip
-        slices: list[tuple[int, int, int, int]] = []
+        slices: list[_ValidatedSlice] = []
+        total_tokens = 0
 
-        for entry in raw_pack:
-            # entry = (dataset_path, s_idx, char_start, char_end, token_start_offset)
-            # For now map dataset_path to ds_id by position (legacy compat stub)
-            # This will be replaced entirely in Feature 2.
-            dataset_path, s_idx, t_start, t_end, _tok_off = entry
-            ds_id = next(
-                (i for i, ds in enumerate(self.datasets) if ds.path == dataset_path),
-                -1,
-            )
+        for dataset_path, s_idx, char_start, char_end, token_start_offset in raw_pack:
+            if dataset_path not in self._path_to_ds_idx:
+                raise ValueError(f"Pack {pack_idx}: dataset_path '{dataset_path}' not found in datasets list.")
+            ds_idx = self._path_to_ds_idx[dataset_path]
+            ds = self.datasets[ds_idx]
 
-            if ds_id < 0 or ds_id >= len(self.datasets):
-                raise ValueError(f"Pack {pack_idx}: dataset_id {ds_id} is out of range [0, {len(self.datasets)}).")
-            ds_num_tokens = self._sample_num_tokens[ds_id]
-            n_samples = len(ds_num_tokens)
+            n_samples = len(ds)
             if s_idx < 0 or s_idx >= n_samples:
                 raise ValueError(
-                    f"Pack {pack_idx}: sample_idx {s_idx} is out of range [0, {n_samples}) for dataset {ds_id}."
+                    f"Pack {pack_idx}: sample_idx {s_idx} out of range [0, {n_samples}) for dataset '{dataset_path}'."
                 )
-            tok_len = int(ds_num_tokens[s_idx])
-            resolved_end = tok_len if t_end == 0 else t_end
-            if t_start < 0 or resolved_end > tok_len or t_start >= resolved_end:
-                raise ValueError(
-                    f"Pack {pack_idx}: invalid token range [{t_start}, {t_end}) "
-                    f"for sample ({ds_id}, {s_idx}) with {tok_len} tokens."
-                )
-            slices.append((ds_id, s_idx, t_start, resolved_end))
 
-        total_tokens = sum(end - start for _, _, start, end in slices)
+            if char_start == -1 and char_end == -1:
+                pass  # plain DataItem: no char range validation
+            elif char_start < 0 or char_end <= char_start:
+                raise ValueError(
+                    f"Pack {pack_idx}: invalid char range [{char_start}, {char_end}) "
+                    f"for dataset '{dataset_path}', sample_idx {s_idx}."
+                )
+
+            if token_start_offset < 0:
+                raise ValueError(f"Pack {pack_idx}: token_start_offset {token_start_offset} must be >= 0.")
+
+            assert ds.num_tokens is not None
+            n_tokens = int(ds.num_tokens[s_idx])
+            total_tokens += n_tokens
+            slices.append((ds_idx, s_idx, char_start, char_end, token_start_offset, n_tokens))
 
         if total_tokens < self.pack_max_length:
             if self.short_pack_strategy == "error":
                 raise ValueError(
                     f"Pack {pack_idx}: total tokens {total_tokens} < pack_max_length {self.pack_max_length}."
                 )
-            elif self.short_pack_strategy == "skip":
-                logger.warning(
-                    f"CustomPackDataset: skipping pack {pack_idx} "
-                    f"(total tokens {total_tokens} < pack_max_length {self.pack_max_length})."
-                )
-                return None, "skip"
-
+            # "padding": kept as-is; __getitem__ appends pad tokens.
         elif total_tokens > self.pack_max_length:
             if self.long_pack_strategy == "error":
                 raise ValueError(
                     f"Pack {pack_idx}: total tokens {total_tokens} > pack_max_length {self.pack_max_length}."
                 )
-            elif self.long_pack_strategy == "skip":
-                logger.warning(
-                    f"CustomPackDataset: skipping pack {pack_idx} "
-                    f"(total tokens {total_tokens} > pack_max_length {self.pack_max_length})."
+            # "truncate": reduce the last slice's max_tokens
+            excess = total_tokens - self.pack_max_length
+            ds_idx, s_idx, char_start, char_end, tok_off, max_tok = slices[-1]
+            new_max_tok = max_tok - excess
+            if new_max_tok <= 0:
+                raise ValueError(
+                    f"Pack {pack_idx}: truncation would make the last slice empty. "
+                    "Reduce pack size or adjust pack config."
                 )
-                return None, "skip"
-            else:  # "truncate"
-                excess = total_tokens - self.pack_max_length
-                ds_id, s_idx, t_start, t_end = slices[-1]
-                new_end = t_end - excess
-                if new_end <= t_start:
-                    raise ValueError(
-                        f"Pack {pack_idx}: truncation would make the last slice empty "
-                        f"(slice [{t_start}, {new_end})). Reduce pack size or adjust pack config."
-                    )
-                slices[-1] = (ds_id, s_idx, t_start, new_end)
+            slices[-1] = (ds_idx, s_idx, char_start, char_end, tok_off, new_max_tok)
 
-        return slices, "ok"
+        return slices
 
     # ------------------------------------------------------------------
     # Dataset interface
@@ -282,13 +224,13 @@ class CustomPackDataset(tud.Dataset):
         pack = self.pack_infos[i]
         items: list[DataItem] = []
 
-        for ds_id, s_idx, t_start, t_end in pack:
-            # TODO: Feature 3 – replace token slicing with consistency check
-            raw_item: DataItem = cast(DataItem, self.datasets[ds_id][s_idx])
+        for ds_idx, s_idx, _char_start, _char_end, _tok_off, max_tokens in pack:
+            # TODO: Feature 3 – replace token slicing with DataItem/LongTextDataItem consistency check
+            raw_item: DataItem = cast(DataItem, self.datasets[ds_idx][s_idx])
             sliced: DataItem = {
-                "input_ids": raw_item["input_ids"][t_start:t_end],
-                "labels": raw_item["labels"][t_start:t_end],
-                "num_tokens": t_end - t_start,
+                "input_ids": raw_item["input_ids"][:max_tokens],
+                "labels": raw_item["labels"][:max_tokens],
+                "num_tokens": min(max_tokens, raw_item["num_tokens"]),
             }
             items.append(sliced)
 
