@@ -639,7 +639,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             line_idxs_of_chunks = []
             for line_idx, data in enumerate(tokenized):
                 num_tokens_of_chunks.extend(data["num_tokens"])
-                chunks_of_chunks.extend([(c["char_start"], c["char_end"]) for c in data["chunks"]])
+                chunks_of_chunks.extend(
+                    [(c["char_start"], c["char_end"], c["token_start_offset"]) for c in data["chunks"]]
+                )
                 line_idxs_of_chunks.extend([line_idx] * len(data["num_tokens"]))
             serialized_tokenized = {
                 "num_tokens": np.array(num_tokens_of_chunks),
@@ -703,7 +705,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 assert "chunks" in self._meta, "chunks must be in _meta"
                 cs = int(self._meta["chunks"][item][0])
                 ce = int(self._meta["chunks"][item][1])
-                return self.tokenize_fn(raw_data, char_start=cs, char_end=(None if ce == -1 else ce))
+                token_start_offset = int(self._meta["chunks"][item][2])
+                return self.tokenize_fn(raw_data, char_start=cs, char_end=ce, token_start_offset=token_start_offset)
             return self.tokenize_fn(raw_data)
         else:
             return raw_data

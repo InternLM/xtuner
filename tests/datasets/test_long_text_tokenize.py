@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from transformers import AutoTokenizer
 
+model_path = os.environ["QWEN3_PATH"]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -14,11 +15,7 @@ from transformers import AutoTokenizer
 
 def _make_tokenizer():
     """Load a small, fast tokenizer for testing."""
-    try:
-        tok = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B", trust_remote_code=True)
-    except Exception:
-        # Fallback to gpt2 if Qwen not available
-        tok = AutoTokenizer.from_pretrained("gpt2")
+    tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     return tok
 
 
@@ -48,7 +45,8 @@ def test_shard_char_boundaries_short():
     boundaries = fn.shard_char_boundaries(short_text)
 
     assert len(boundaries) == 1, f"Expected 1 boundary for short text, got {len(boundaries)}"
-    cs, ce = boundaries[0]
+    cs = boundaries[0]["char_start"]
+    ce = boundaries[0]["char_end"]
     assert cs == 0
     assert ce == len(short_text)
 
@@ -69,15 +67,16 @@ def test_shard_char_boundaries_long():
     assert len(boundaries) > 1, "Expected multiple boundaries for long text"
 
     # Boundaries must be contiguous and cover the full text
-    assert boundaries[0][0] == 0
-    assert boundaries[-1][1] == len(long_text)
+    assert boundaries[0]["char_start"] == 0
+    assert boundaries[-1]["char_end"] == len(long_text)
     for i in range(len(boundaries) - 1):
-        assert boundaries[i][1] == boundaries[i + 1][0], (
-            f"Gap between boundary {i} end={boundaries[i][1]} and boundary {i+1} start={boundaries[i+1][0]}"
+        assert boundaries[i]["char_end"] == boundaries[i + 1]["char_start"], (
+            f"Gap between boundary {i} end={boundaries[i]['char_end']} and boundary {i+1} start={boundaries[i+1]['char_start']}"
         )
 
     # Each chunk token count should be roughly <= 2 * chunk_size
-    for cs, ce in boundaries[:-1]:  # last chunk may be shorter
+    for chunk_info in boundaries[:-1]:  # last chunk may be shorter
+        cs, ce = chunk_info["char_start"], chunk_info["char_end"]
         chunk_text = long_text[cs:ce]
         ids = tok.encode(chunk_text, add_special_tokens=False)
         assert len(ids) <= 2 * chunk_size + 5, (
@@ -183,10 +182,7 @@ def test_cache_invalidation():
     from xtuner.v1.datasets.pt_tokenize_fn.long_text import LongTextPretrainTokenizeFunctionConfig
     from transformers import AutoTokenizer
 
-    try:
-        tok = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B", trust_remote_code=True)
-    except Exception:
-        tok = AutoTokenizer.from_pretrained("gpt2")
+    tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
     cfg1 = LongTextPretrainTokenizeFunctionConfig(chunk_size=256)
     cfg2 = LongTextPretrainTokenizeFunctionConfig(chunk_size=512)
@@ -216,14 +212,14 @@ def test_call_runtime_char_range():
     text = "Hello world, this is a test of chunked tokenization. " * 5
     item = {"content": text}
 
-    # Full text
-    full_result = fn(item)
+    # Full text via explicit char range
+    full_result = fn(item, char_start=0, char_end=len(text))
     full_ids = full_result["input_ids"]
 
     # Split at an arbitrary char boundary and check first chunk
     split = len(text) // 2
     r1 = fn(item, char_start=0, char_end=split)
-    r2 = fn(item, char_start=split, char_end=None)
+    r2 = fn(item, char_start=split, char_end=len(text))
 
     combined = r1["input_ids"] + r2["input_ids"]
     # Combined should equal full text tokenization (split is at char boundary, may differ slightly)
