@@ -22,9 +22,6 @@ if TYPE_CHECKING:
 class CachableTokenizeFunction(ABC, Generic[T]):
     def __init__(self, tokenizer, *args, visual_llm_attn_ratio_for_pack: float = 0.0, **kwargs):
         self.tokenizer = tokenizer
-        assert visual_llm_attn_ratio_for_pack >= 0, (
-            f"visual_llm_attn_ratio_for_pack must be greater than 0. but got {visual_llm_attn_ratio_for_pack}"
-        )
         self.visual_llm_attn_ratio_for_pack = visual_llm_attn_ratio_for_pack
         self.state = "runtime"
 

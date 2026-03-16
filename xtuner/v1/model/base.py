@@ -609,9 +609,11 @@ class BaseModel(nn.Module):
             efficient_forward_tokens += (num_tokens.long() ** 2).sum()
             total_forward_tokens += (num_tokens.long().sum()) ** 2
 
-            num_img_tokens = torch.tensor(seq_ctx.num_img_tokens)  # list[int]
-            img_efficient_forward_tokens += (num_img_tokens.long() ** 2).sum()
-            img_total_forward_tokens += (num_img_tokens.long().sum()) ** 2
+            if seq_ctx.num_img_tokens is not None:
+                for num_img_token in seq_ctx.num_img_tokens:  # list[list]
+                    num_img_tokens_ = torch.tensor(num_img_token)  # list[int]
+                    img_efficient_forward_tokens += (num_img_tokens_.long() ** 2).sum()
+                    img_total_forward_tokens += (num_img_tokens_.long().sum()) ** 2
 
         efficient_attn_ratio = efficient_forward_tokens.float() / total_forward_tokens.float()
         img_efficient_attn_ratio = img_efficient_forward_tokens.float() / (img_total_forward_tokens.float() + 1e-8)

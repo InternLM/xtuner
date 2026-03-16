@@ -175,8 +175,9 @@ class BaseComposeModel(BaseModel):
         for data in data_batches:
             seq_ctx = data["seq_ctx"]
             if seq_ctx.num_img_tokens is not None:
-                step_consumed_img_tokens += sum(seq_ctx.num_img_tokens)
-                if seq_ctx.sequence_parallel_mesh:
-                    step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
+                for num_img_token in seq_ctx.num_img_tokens:
+                    step_consumed_img_tokens += sum(num_img_token)
+            if seq_ctx.sequence_parallel_mesh:
+                step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
         data_batch_info["step_consumed_img_tokens"] = step_consumed_img_tokens
         return data_batch_info

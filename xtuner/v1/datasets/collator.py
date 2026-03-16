@@ -191,9 +191,9 @@ def intern_s1_vl_sft_collator(
 
         cu_seq_lens = torch.cumsum(torch.IntTensor(num_tokens), dim=0).int()
 
-        num_img_tokens: list[int] = []
+        num_img_tokens: list[list] = []
         for data in instance:
-            num_img_tokens.extend(data.get("num_img_tokens", [0]))
+            num_img_tokens.append(data.get("num_img_tokens", [0]))
 
         pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
@@ -270,9 +270,9 @@ def qwen3_vl_sft_collator(
             if pack_to_max_length and pack_max_length - position_ids.shape[-1] > 0:
                 position_ids = pad_to_max_length(position_ids, 0, max_length=pack_max_length, dim=-1)
 
-        num_img_tokens: list[int] = []
+        num_img_tokens: list[list[int]] = []
         for data in instance:
-            num_img_tokens.extend(data.get("num_img_tokens", [0]))
+            num_img_tokens.append(data.get("num_img_tokens", [0]))
 
         pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]

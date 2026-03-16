@@ -424,7 +424,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             )
             return {"num_tokens": 0, "num_img_tokens": [0]}
 
-        return {"num_tokens": len(input_ids), "num_img_tokens": sum_media_grid_thw.tolist()}
+        return {"num_tokens": len(input_ids), "num_img_tokens": (sum_media_grid_thw * self.merge_length).tolist()}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
         image_data_list = []
@@ -486,8 +486,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
         )
 
-        num_img_tokens = sum(grid_thw_merged[i].item() + 2 for i in range(len(grid_thw_merged)))
-
         ret = QwenVL3DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -495,7 +493,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             image_grid_thw=grid_thw,  # b,3
             position_ids=position_ids,
             num_tokens=len(input_ids),
-            num_img_tokens=[num_img_tokens],
+            num_img_tokens=grid_thw.prod(dim=1).tolist(),
             num_imgs=[len(self._image_path)],
         )
         return ret
@@ -710,7 +708,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             )
             return {"num_tokens": 0, "num_img_tokens": [0]}
 
-        return {"num_tokens": len(input_ids), "num_img_tokens": list(chain.from_iterable(num_image_token_list))}
+        orig_num_image_tokens = list(chain.from_iterable(num_image_token_list))
+        orig_num_image_tokens = [num * self.merge_length for num in orig_num_image_tokens]
+        return {"num_tokens": len(input_ids), "num_img_tokens": orig_num_image_tokens}
 
     def video_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
         num_image_tokens_list = []
@@ -866,7 +866,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             image_grid_thw=torch.cat(grid_thw_list),  # b, 3
             position_ids=position_ids,
             num_tokens=len(input_ids),
-            num_img_tokens=[total_sum_media_grid_thw],
+            num_img_tokens=torch.cat(grid_thw_list).prod(dim=1).tolist(),
             num_imgs=num_imgs_list,
         )
         return ret
