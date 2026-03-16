@@ -18,6 +18,7 @@ class FakeWorkerActor:
         self.init_dist_port_calls = 0
         self.init_calls = 0
         self.generate_calls = 0
+        self.memory_used = 1024
 
         self.offload = SimpleNamespace(remote=self._offload)
         self.shutdown = SimpleNamespace(remote=self._shutdown)
@@ -32,6 +33,8 @@ class FakeWorkerActor:
 
     def _shutdown(self):
         self.shutdown_calls += 1
+        self.healthy = False
+        self.memory_used = 0
         return True
 
     def _init_dist_port(self):
@@ -40,7 +43,13 @@ class FakeWorkerActor:
 
     def _init(self, dist_init_addr):
         self.init_calls += 1
+        self.healthy = True
+        if self.memory_used == 0:
+            self.memory_used = 1024
         return (0, self.url)
+
+    def get_gpu_memory_used(self):
+        return self.memory_used
 
     async def _check_health(self):
         return self.healthy
@@ -143,27 +152,64 @@ class TestRolloutHealthChecker(unittest.TestCase):
 
 
 class TestRolloutControllerRecover(unittest.IsolatedAsyncioTestCase):
-    async def test_recover_keeps_url_and_worker_can_generate(self):
+    async def test_deactivate_then_restart_worker_with_two_workers(self):
         controller = RolloutController.__new__(RolloutController)
         controller.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None)
         controller.worker_info_lock = threading.RLock()
         controller.config = SimpleNamespace(rollout_timeout=1)
         controller.timeout_multiplier = 1.0
+        controller.health_checker = SimpleNamespace(stop=lambda: None)
 
-        actor = FakeWorkerActor(url="http://same-url")
-        controller.rank2info = {0: WorkerInfo(actor=actor, url="http://same-url", is_active=False)}
+        actor0 = FakeWorkerActor(url="http://w0")
+        actor1 = FakeWorkerActor(url="http://w1")
+        controller.rank2info = {
+            0: WorkerInfo(actor=actor0, url="http://w0", is_active=True),
+            1: WorkerInfo(actor=actor1, url="http://w1", is_active=True),
+        }
         controller.router = SessionRouter(controller.rank2info, worker_infos_lock=controller.worker_info_lock)
+
+        checker_cfg = SimpleNamespace(
+            health_check_interval_seconds=1,
+            health_check_first_wait_seconds=0,
+            health_check_failure_threshold=1,
+        )
+        checker = RolloutHealthChecker(
+            config=checker_cfg,
+            workers_info=controller.rank2info,
+            worker_infos_lock=controller.worker_info_lock,
+        )
+
+        async def _fake_check_worker_health(actor, rank, url, is_active, failure_threshold=1):
+            return rank != 0
+
+        with patch("xtuner.v1.rl.rollout.utils.check_worker_health", _fake_check_worker_health), patch(
+            "xtuner.v1.rl.rollout.utils.ray.get", lambda x, timeout=None: x
+        ):
+            checker.run_once()
+
+        self.assertFalse(controller.rank2info[0].is_active)
+        self.assertEqual(actor0.offload_calls, 1)
+        self.assertEqual(actor0.shutdown_calls, 1)
+        self.assertEqual(actor0.get_gpu_memory_used(), 0)
+
+        worker0_health_before_recover = await actor0.check_health.remote()
+        self.assertFalse(worker0_health_before_recover)
 
         with patch("xtuner.v1.rl.rollout.controller.ray.get", lambda x, timeout=None: x):
             controller.recover()
 
         self.assertTrue(controller.rank2info[0].is_active)
+        self.assertEqual(actor0.url, controller.rank2info[0].url)
+        self.assertEqual(actor0.get_gpu_memory_used(), 1024)
+
+        worker0_health_after_recover = await actor0.check_health.remote()
+        self.assertTrue(worker0_health_after_recover)
 
         rollout_state = SimpleNamespace(session_uid=123, status=None, error_msg="")
         out = await controller.generate(rollout_state)
 
         self.assertEqual(out.status, Status.SUCCESS)
-        self.assertEqual(actor.generate_calls, 1)
+        self.assertEqual(actor0.generate_calls, 1)
 
 
 if __name__ == "__main__":
