@@ -60,7 +60,9 @@ DEVICE = get_device()
 
 class DataBatchInfo(TypedDict):
     step_consumed_tokens: int
+    step_consumed_img_tokens: float
     efficient_attn_ratio: float
+    img_efficient_attn_ratio: float
 
 
 class BatchForwardInfo(TypedDict):
@@ -596,8 +598,11 @@ class BaseModel(nn.Module):
 
     def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
         step_consumed_tokens = torch.tensor(0, device=DEVICE)
+        step_consumed_img_tokens = torch.tensor(0.0, device=DEVICE)
         efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
         total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        img_efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        img_total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
 
         for data in data_batches:
             seq_ctx = data["seq_ctx"]
@@ -606,11 +611,24 @@ class BaseModel(nn.Module):
             efficient_forward_tokens += (num_tokens.long() ** 2).sum()
             total_forward_tokens += (num_tokens.long().sum()) ** 2
 
+            if seq_ctx.num_img_tokens is not None:
+                for num_img_token in seq_ctx.num_img_tokens:  # list[list]
+                    step_consumed_img_tokens += sum(num_img_token)
+                    num_img_tokens_ = torch.tensor(num_img_token)  # list[int]
+                    img_efficient_forward_tokens += (num_img_tokens_.long() ** 2).sum()
+                    img_total_forward_tokens += (num_img_tokens_.long().sum()) ** 2
+
         efficient_attn_ratio = efficient_forward_tokens.float() / total_forward_tokens.float()
+        img_efficient_attn_ratio = img_efficient_forward_tokens.float() / (img_total_forward_tokens.float() + 1e-8)
+
+        if len(data_batches) > 0 and seq_ctx.sequence_parallel_mesh:
+            step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
 
         batch_info: DataBatchInfo = {
             "step_consumed_tokens": cast(int, step_consumed_tokens.item()),
+            "step_consumed_img_tokens": cast(float, step_consumed_img_tokens.item()),
             "efficient_attn_ratio": cast(float, efficient_attn_ratio.item()),
+            "img_efficient_attn_ratio": cast(float, img_efficient_attn_ratio.item()),
         }
         return batch_info
 

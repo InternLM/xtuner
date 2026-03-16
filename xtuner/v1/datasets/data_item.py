@@ -1,9 +1,10 @@
 import torch
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class CacheItem(TypedDict):
     num_tokens: int
+    num_img_tokens: NotRequired[list[int]]
 
 
 class DataItem(CacheItem):
@@ -12,7 +13,6 @@ class DataItem(CacheItem):
 
 
 class BaseMLLMDataItem(DataItem):
-    num_img_tokens: list[int]
     num_imgs: list[int]
 
 

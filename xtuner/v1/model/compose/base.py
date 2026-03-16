@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Callable, Self, Sequence, cast
+from typing import Callable, Self
 
 import torch
 import torch.distributed as dist
@@ -16,7 +16,7 @@ from typing_extensions import override
 
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.model import BaseModel
-from xtuner.v1.model.base import DataBatchInfo, ModelItem, XTunerBaseModelConfig
+from xtuner.v1.model.base import XTunerBaseModelConfig
 from xtuner.v1.utils import get_device, get_logger
 
 from ..utils.misc import update_weight_map_from_safetensors_index
@@ -24,10 +24,6 @@ from ..utils.misc import update_weight_map_from_safetensors_index
 
 DEVICE = get_device()
 logger = get_logger()
-
-
-class ComposeDataBatchInfo(DataBatchInfo):
-    step_consumed_img_tokens: float
 
 
 class BaseComposeConfig(XTunerBaseModelConfig):
@@ -168,15 +164,3 @@ class BaseComposeModel(BaseModel):
 
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()
-
-    def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
-        data_batch_info = cast(ComposeDataBatchInfo, super().pre_micro_batch_forward(data_batches))
-        step_consumed_img_tokens = 0.0
-        for data in data_batches:
-            seq_ctx = data["seq_ctx"]
-            if seq_ctx.num_img_tokens is not None:
-                step_consumed_img_tokens += sum(seq_ctx.num_img_tokens)
-                if seq_ctx.sequence_parallel_mesh:
-                    step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
-        data_batch_info["step_consumed_img_tokens"] = step_consumed_img_tokens
-        return data_batch_info

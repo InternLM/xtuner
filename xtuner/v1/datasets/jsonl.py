@@ -40,7 +40,6 @@ _lock = Lock()
 CACHE_META = ".xpuyu-cache-meta.json"
 XTUNER_FILE_OPEN_CONCURRENCY = int(os.environ.get("XTUNER_FILE_OPEN_CONCURRENCY", "8"))
 
-
 XTUNER_TOKENIZE_CHUNK_SIZE = int(os.environ.get("XTUNER_TOKENIZE_CHUNK_SIZE", "10"))
 
 
@@ -285,6 +284,10 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         self._has_chunk = isinstance(tokenize_fn, LongTextPretrainTokenizeFunction)
 
+        self._proxy_attention_flops_fn = None
+        if tokenize_fn is not None:
+            self._proxy_attention_flops_fn = tokenize_fn.proxy_attention_flops
+
         tok_cache_dir: str | None = None  # set inside cache_dir branch when tokenize_fn is CachableTokenizeFunction
         if cache_tag is not None and (cached := self._get_cached_tag(cache_tag, tokenize_fn)) is not None:
             logger.info(f"[Dataset] Load cached [{self.name}]{self.path} of cache tgs {cache_tag}.")
@@ -503,6 +506,20 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         if self._shared_memory is not None:
             self._release_shared_memory()
 
+        # calc the proxy attention flops
+        _total_proxy_attn_flops = []
+        for i in range(len(self.sampled)):
+            assert self.num_tokens is not None, "num_tokens must be calculated to compute proxy attention flops."
+            _num_tokens = self.num_tokens[i]
+            _num_image_tokens = self._meta["num_img_tokens"][i]
+            if self._proxy_attention_flops_fn is not None:
+                _total_proxy_attn_flops.append(self._proxy_attention_flops_fn(_num_tokens, _num_image_tokens))
+        self._meta["proxy_attn_flops"] = np.array(_total_proxy_attn_flops)
+
+    @property
+    def proxy_attn_flops(self) -> np.ndarray:
+        return self._meta["proxy_attn_flops"]
+
     def _init_shared_memory(self, path: str) -> SharedMemory:
         if dist.is_initialized():
             rank = dist.get_rank()
@@ -567,6 +584,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         res = {"num_tokens": tokenized["num_tokens"]}
         if "chunks" in tokenized:
             res["chunks"] = tokenized["chunks"]
+        if "num_img_tokens" in tokenized:
+            res["num_img_tokens"] = tokenized["num_img_tokens"]
         return res
 
     def count_tokens(self, offsets, cache_dir=None):
@@ -616,16 +635,19 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         # serialize tokenized
         if self._has_chunk:
             num_tokens_of_chunks = []
+            num_img_tokens_of_chunks = []
             chunks_of_chunks = []
             line_idxs_of_chunks = []
             for line_idx, data in enumerate(tokenized):
                 num_tokens_of_chunks.extend(data["num_tokens"])
+                num_img_tokens_of_chunks.extend(data.get("num_img_tokens", [[0]] * len(data["num_tokens"])))
                 chunks_of_chunks.extend(
                     [(c["char_start"], c["char_end"], c["token_start_offset"]) for c in data["chunks"]]
                 )
                 line_idxs_of_chunks.extend([line_idx] * len(data["num_tokens"]))
             serialized_tokenized = {
                 "num_tokens": np.array(num_tokens_of_chunks),
+                "num_img_tokens": num_img_tokens_of_chunks,
                 "chunks": np.array(chunks_of_chunks),
                 "line_idxs": np.array(line_idxs_of_chunks),
             }
@@ -633,6 +655,15 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             serialized_tokenized = {
                 "num_tokens": np.array([data["num_tokens"] for data in tokenized]),
             }
+
+            serialized_tokenized["num_img_tokens"] = []
+            for data in tokenized:
+                num_img_tokens = [0]
+                if "num_img_tokens" in data:
+                    num_img_tokens = data["num_img_tokens"]
+                    if isinstance(num_img_tokens, int):
+                        num_img_tokens = [num_img_tokens]
+                serialized_tokenized["num_img_tokens"].append(num_img_tokens)
 
         if dist.is_initialized():
             # TODO:
