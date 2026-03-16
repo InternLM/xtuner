@@ -20,7 +20,7 @@ import torch.utils.data as tud
 
 from xtuner.v1.utils import get_logger
 
-from .data_item import DataItem
+from .data_item import DataItem, LongTextDataItem
 from .jsonl import JsonlDataset, load_mixed_dict_from_parquet
 
 
@@ -224,15 +224,37 @@ class CustomPackDataset(tud.Dataset):
         pack = self.pack_infos[i]
         items: list[DataItem] = []
 
-        for ds_idx, s_idx, _char_start, _char_end, _tok_off, max_tokens in pack:
-            # TODO: Feature 3 – replace token slicing with DataItem/LongTextDataItem consistency check
-            raw_item: DataItem = cast(DataItem, self.datasets[ds_idx][s_idx])
-            sliced: DataItem = {
-                "input_ids": raw_item["input_ids"][:max_tokens],
-                "labels": raw_item["labels"][:max_tokens],
-                "num_tokens": min(max_tokens, raw_item["num_tokens"]),
-            }
-            items.append(sliced)
+        for ds_idx, s_idx, char_start, char_end, tok_off, max_tokens in pack:
+            item: DataItem = cast(DataItem, self.datasets[ds_idx][s_idx])
+
+            if char_start == -1:
+                if "char_start" in item:
+                    raise ValueError(
+                        f"Pack {i}, sample_idx {s_idx}: pack config expects plain DataItem "
+                        f"(char_start==-1) but dataset returned LongTextDataItem."
+                    )
+            else:
+                long_item = cast(LongTextDataItem, item)
+                if (
+                    "char_start" not in item
+                    or long_item["char_start"] != char_start
+                    or long_item["char_end"] != char_end
+                    or long_item["token_start_offset"] != tok_off
+                ):
+                    raise ValueError(
+                        f"Pack {i}, sample_idx {s_idx}: LongTextDataItem fields mismatch. "
+                        f"Expected char_start={char_start}, char_end={char_end}, token_start_offset={tok_off}. "
+                        f"Got char_start={item.get('char_start')}, char_end={item.get('char_end')}, "
+                        f"token_start_offset={item.get('token_start_offset')}."
+                    )
+
+            if max_tokens < item["num_tokens"]:
+                item = {
+                    "input_ids": item["input_ids"][:max_tokens],
+                    "labels": item["labels"][:max_tokens],
+                    "num_tokens": max_tokens,
+                }
+            items.append(item)
 
         if self.short_pack_strategy == "padding":
             total_tokens = sum(item["num_tokens"] for item in items)

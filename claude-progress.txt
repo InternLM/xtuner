@@ -1,3 +1,29 @@
+# Claude Progress Notes — Session 3
+
+## What Was Done This Session
+
+### Feature 3 — Rewrite __getitem__ (COMPLETED)
+- Replaced old token-slicing approach (`input_ids[:max_tokens]` with TODO comment) with proper DataItem/LongTextDataItem consistency check
+- Added import for `LongTextDataItem` from `data_item.py`
+- For `char_start == -1`: verify `"char_start" not in item` (plain DataItem); raise ValueError otherwise
+- For `char_start != -1`: verify item has matching `char_start`, `char_end`, `token_start_offset` fields; raise ValueError on mismatch
+- Still applies `input_ids[:max_tokens]` truncation for `long_pack_strategy='truncate'` case
+- Updated `_FakeDataset` to accept optional `long_text_meta: dict[int, tuple[int,int,int]]` parameter to return `LongTextDataItem`
+- Added 6 new `TestGetitem` unit tests: DataItem JSONL, DataItem Parquet, LongTextDataItem, mixed, consistency error (DataItem→LongText), consistency error (field mismatch)
+- All 19 tests pass
+
+## Current Completion Status
+3/4 features passing
+
+## What To Work On Next
+- Feature 4: DataloaderConfig forces JsonlDataset settings
+  - Add `disable_filter: bool = False` to `JsonlDataset.__init__`; skip all filter logic when True
+  - Add `disable_filter: bool = False` to `DatasetConfig`; pass to `JsonlDataset.build()`
+  - In `DataloaderConfig.build`, when `pack_level=='custom'`, force `sample_ratio=1.0`, `enable_sequential_sampler=True`, `disable_filter=True`; log warning if overriding non-default values
+  - Add unit tests and run to pass
+
+---
+
 # Claude Progress Notes — Session 2
 
 ## What Was Done This Session

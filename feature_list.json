@@ -31,7 +31,7 @@
       "Step 3: Write unit test for LongTextDataItem case (char_start/char_end/token_start_offset set): verify __getitem__ consistency check passes and returns correct LongTextDataItem; run tests to pass",
       "Step 4: Write unit test for mixed DataItem and LongTextDataItem slices in same pack; write unit test that consistency check raises an error when returned item fields do not match pack config; run all tests to pass"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "add",

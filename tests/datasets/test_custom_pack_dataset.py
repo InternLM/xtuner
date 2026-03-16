@@ -19,15 +19,38 @@ from xtuner.v1.datasets.jsonl import save_mixed_dict_to_parquet
 
 
 class _FakeDataset:
-    """Minimal fake JsonlDataset with .path and .num_tokens attributes."""
+    """Minimal fake JsonlDataset with .path and .num_tokens attributes.
 
-    def __init__(self, samples: list[list[int]], path: str):
+    Args:
+        samples (list[list[int]]): Token id lists, one per sample.
+        path (str): Dataset path used for pack config matching.
+        long_text_meta (dict[int, tuple[int, int, int]] | None): Optional mapping from
+            sample_idx to (char_start, char_end, token_start_offset) for LongTextDataItem samples.
+    """
+
+    def __init__(
+        self,
+        samples: list[list[int]],
+        path: str,
+        long_text_meta: dict[int, tuple[int, int, int]] | None = None,
+    ):
         self.path = path
         self._samples = samples
         self.num_tokens = np.array([len(s) for s in samples], dtype=np.int64)
+        self._long_text_meta = long_text_meta or {}
 
     def __getitem__(self, s_idx: int) -> dict:
         ids = self._samples[s_idx]
+        if s_idx in self._long_text_meta:
+            char_start, char_end, tok_off = self._long_text_meta[s_idx]
+            return {
+                "input_ids": ids,
+                "labels": list(ids),
+                "num_tokens": len(ids),
+                "char_start": char_start,
+                "char_end": char_end,
+                "token_start_offset": tok_off,
+            }
         return {"input_ids": ids, "labels": list(ids), "num_tokens": len(ids)}
 
     def __len__(self) -> int:
@@ -224,3 +247,107 @@ class TestValidation:
         assert len(dataset) == 1
         items = dataset[0]
         assert sum(it["num_tokens"] for it in items) == 256
+
+
+# ---------------------------------------------------------------------------
+# Feature 3: __getitem__ tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetitem:
+    def test_dataitem_jsonl(self, tmp_path):
+        """DataItem case (char_start==-1) via JSONL config: returns correct input_ids/labels/num_tokens."""
+        ids0 = list(range(128))
+        ids1 = list(range(128, 256))
+        ds = _FakeDataset([ids0, ids1], path="/ds.jsonl")
+        packs = [["/ds.jsonl", 0, -1, -1, 0], ["/ds.jsonl", 1, -1, -1, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=256)
+        items = dataset[0]
+
+        assert len(items) == 2
+        assert items[0]["input_ids"] == ids0
+        assert items[0]["labels"] == ids0
+        assert items[0]["num_tokens"] == 128
+        assert items[1]["input_ids"] == ids1
+        assert items[1]["num_tokens"] == 128
+
+    def test_dataitem_parquet(self, tmp_path):
+        """DataItem case (char_start==-1) via Parquet config: returns correct items."""
+        ids0 = [1] * 100
+        ids1 = [2] * 156
+        ds = _FakeDataset([ids0, ids1], path="/ds.jsonl")
+        paths = ["/ds.jsonl"]
+        packs = [[[0, 0, -1, -1, 0], [0, 1, -1, -1, 0]]]
+        config_path = str(tmp_path / "packs.parquet")
+        _write_parquet_pack(config_path, packs, paths)
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=256)
+        items = dataset[0]
+
+        assert len(items) == 2
+        assert items[0]["input_ids"] == ids0
+        assert items[1]["input_ids"] == ids1
+        assert sum(it["num_tokens"] for it in items) == 256
+
+    def test_longtextdataitem(self, tmp_path):
+        """LongTextDataItem case: consistency check passes and item is returned as-is."""
+        ids = list(range(128))
+        ds = _FakeDataset([ids], path="/ds.jsonl", long_text_meta={0: (100, 600, 5)})
+        packs = [["/ds.jsonl", 0, 100, 600, 5]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=128)
+        items = dataset[0]
+
+        assert len(items) == 1
+        assert items[0]["input_ids"] == ids
+        assert items[0]["char_start"] == 100
+        assert items[0]["char_end"] == 600
+        assert items[0]["token_start_offset"] == 5
+
+    def test_mixed_dataitem_and_longtextdataitem(self, tmp_path):
+        """Mixed pack: DataItem and LongTextDataItem slices coexist correctly."""
+        ids0 = [1] * 100  # plain DataItem
+        ids1 = [2] * 128  # LongTextDataItem
+        ds = _FakeDataset([ids0, ids1], path="/ds.jsonl", long_text_meta={1: (0, 512, 0)})
+        packs = [["/ds.jsonl", 0, -1, -1, 0], ["/ds.jsonl", 1, 0, 512, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=228)
+        items = dataset[0]
+
+        assert len(items) == 2
+        assert "char_start" not in items[0]
+        assert items[1]["char_start"] == 0
+        assert sum(it["num_tokens"] for it in items) == 228
+
+    def test_consistency_check_error_dataitem_got_longtext(self, tmp_path):
+        """Consistency check raises ValueError when DataItem expected but LongTextDataItem returned."""
+        ids = [1] * 128
+        ds = _FakeDataset([ids], path="/ds.jsonl", long_text_meta={0: (0, 512, 0)})
+        # pack config says char_start==-1 (DataItem), but dataset returns LongTextDataItem
+        packs = [["/ds.jsonl", 0, -1, -1, 0]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=128)
+        with pytest.raises(ValueError, match="LongTextDataItem"):
+            dataset[0]
+
+    def test_consistency_check_error_longtext_fields_mismatch(self, tmp_path):
+        """Consistency check raises ValueError when LongTextDataItem fields don't match pack config."""
+        ids = [1] * 128
+        # dataset returns char_start=100, but pack config expects char_start=999 (valid range, but mismatches)
+        ds = _FakeDataset([ids], path="/ds.jsonl", long_text_meta={0: (100, 600, 5)})
+        packs = [["/ds.jsonl", 0, 999, 1600, 5]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=128)
+        with pytest.raises(ValueError, match="mismatch"):
+            dataset[0]
