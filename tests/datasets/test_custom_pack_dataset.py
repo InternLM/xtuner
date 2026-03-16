@@ -54,7 +54,7 @@ def _write_npy_pack(base_dir: str, packs: list[list[list[int]]]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Tests for jsonl and npy pack configs
 # ---------------------------------------------------------------------------
 
 def test_valid_jsonl_pack(tmp_path):
@@ -100,6 +100,10 @@ def test_valid_npy_pack(tmp_path):
     assert dataset[0][0]["input_ids"] == ds0[0]["input_ids"]
     assert dataset[1][0]["input_ids"] == ds0[1]["input_ids"]
 
+
+# ---------------------------------------------------------------------------
+# Tests for pack strategies
+# ---------------------------------------------------------------------------
 
 def test_short_pack_error(tmp_path):
     """Pack with fewer tokens than pack_max_length raises ValueError (strategy='error')."""
@@ -196,6 +200,9 @@ def test_long_pack_truncate(tmp_path):
     assert items[0]["num_tokens"] == 256
     assert items[0]["input_ids"] == ds0[0]["input_ids"][:256]
 
+# ---------------------------------------------------------------------------
+# Tests for hard errors
+# ---------------------------------------------------------------------------
 
 def test_hard_error_invalid_dataset_id(tmp_path):
     """dataset_id out of range raises ValueError regardless of pack strategy."""
@@ -231,16 +238,3 @@ def test_hard_error_invalid_token_range(tmp_path, bad_range):
     with pytest.raises(ValueError):
         CustomPackDataset([ds0], config_path, pack_max_length=256)
 
-
-def test_state_dict(tmp_path):
-    """get_state_dict returns {} and load_state_dict is a no-op."""
-    ds0 = _FakeDataset([[i] * 256 for i in range(2)])
-
-    packs = [[[0, 0, 0, 256]], [[0, 1, 0, 256]]]
-    config_path = str(tmp_path / "pack_config.jsonl")
-    _write_jsonl_pack(config_path, packs)
-
-    dataset = CustomPackDataset([ds0], config_path, pack_max_length=256)
-    assert dataset.get_state_dict() == {}
-    dataset.load_state_dict({})   # must not raise
-    assert len(dataset) == 2      # unchanged

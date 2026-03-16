@@ -212,6 +212,7 @@ class CustomPackDataset(tud.Dataset):
                 raise ValueError(f"Pack {pack_idx}: invalid token range [{t_start}, {t_end}).")
             slices.append((ds_id, s_idx, t_start, t_end))
 
+        # TODO: 不应该这里做，这里是 char_start 和 char_end，没有 token 的信息，应该在 __getitem__ 中做。
         total_tokens = sum(end - start for _, _, start, end in slices)
 
         if total_tokens < self.pack_max_length:
