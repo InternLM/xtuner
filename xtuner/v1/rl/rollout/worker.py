@@ -248,6 +248,27 @@ class RolloutConfig(BaseModel):
         ),
     ] = 1
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
+    health_check_interval_seconds: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help="Interval in seconds between rollout worker health checks.",
+        ),
+    ] = 30.0
+    health_check_failure_threshold: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of consecutive health check failures required before marking a worker inactive.",
+        ),
+    ] = 3
+    health_check_first_wait_seconds: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help="Initial wait time in seconds before starting health checks on a new rollout worker.",
+        ),
+    ] = 600.0
     _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
 
     @property

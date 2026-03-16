@@ -1,8 +1,7 @@
 import asyncio
 import os
 from dataclasses import dataclass
-from itertools import cycle
-from typing import Dict, List, Optional, TypedDict
+from typing import Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
 
 import ray
@@ -13,6 +12,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import get_logger
 
+from .utils import RolloutHealthChecker, SessionRouter
 from .worker import RolloutConfig, RolloutWorker
 
 
@@ -79,15 +79,21 @@ class RolloutController:
             else self.config.tensor_parallel_size
         )
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
-        self.engine_rank_mesh_array, self.worker_server_urls_map, self.workers_info = self._init_workers(
-            placement_group
-        )
-        self.num_active_workers = len(self.workers_info)
+        self.engine_rank_mesh_array: List[List[int]] = []
+        self.worker_server_urls_map: dict[str, List[str]] = {}
+        self.rank2info: dict[int, WorkerInfo] = {}
+        self.engine_rank_mesh_array, self.worker_server_urls_map, self.rank2info = self._init_workers(placement_group)
+        self.num_active_workers = len(self.rank2info)
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
-        self.router = cycle(self.workers_info.values())
+        self.router = SessionRouter(self.rank2info)
+        self.health_checker = RolloutHealthChecker(
+            config=self.config,
+            workers_info=self.rank2info,
+        )
+        self.health_checker.start()
 
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
         """Get information about the current rollout setup.
@@ -96,7 +102,7 @@ class RolloutController:
             dict: A dictionary containing the engine mesh list, server URL
                 dictionary, and the rollout configuration.
         """
-        worker_server_urls_status = {info.url: info.is_active for info in self.workers_info.values()}
+        worker_server_urls_status = {info.url: info.is_active for info in self.rank2info.values()}
         rollout_metadata: RolloutWorkerMetadata = {
             "engine_rank_mesh_array": self.engine_rank_mesh_array,
             "server_url_dict": self.worker_server_urls_map,
@@ -128,9 +134,11 @@ class RolloutController:
             return rollout_state
 
     def pause_generation(self):
+        self.health_checker.pause()
         self._broadcast_to_active_workers("pause_generation")
 
     def continue_generation(self):
+        self.health_checker.resume()
         self._broadcast_to_active_workers("continue_generation")
 
     def offload(self):
@@ -152,7 +160,29 @@ class RolloutController:
         Args:
             block (bool): Whether to block until the operation completes.
         """
+        self.health_checker.stop()
         self._broadcast_to_active_workers("shutdown")
+
+    def recover(self):
+        """Recovers from worker failures by restarting failed workers and
+        reinitializing the rollout setup."""
+        failed_workers = [info for info in self.rank2info.values() if not info.is_active]
+        if not failed_workers:
+            self.logger.info("No failed workers detected during recovery.")
+            return
+
+        self.logger.warning(f"Detected {len(failed_workers)} failed workers. Initiating recovery process.")
+        for worker in failed_workers:
+            self._restart_failed_workers(worker.actor)
+            self.rank2info[self._get_rank_by_actor(worker.actor)].is_active = True  #
+
+    def _restart_failed_workers(self, worker: RolloutWorker):
+        try:
+            dist_init_addr = ray.get(worker.init_dist_port.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            _, url = ray.get(worker.init.remote(dist_init_addr), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+        except Exception as e:
+            self.logger.error(f"Failed to restart worker: {e}")
+            return
 
     def _update_dist_init_addr(self, nodes_per_engine, server_urls_per_engine, dist_init_addrs, tp_size):
         """Update the distributed initialization addresses for workers.
@@ -223,7 +253,7 @@ class RolloutController:
             A list of futures if `block` is False, otherwise a list of results.
         """
         futures = []
-        for info in self.workers_info.values():
+        for info in self.rank2info.values():
             if info.is_active:
                 futures.append(getattr(info.actor, method_name).remote())
             else:
@@ -261,7 +291,7 @@ class RolloutController:
         Returns:
             The rank of the worker, or None if not found.
         """
-        for rank, info in self.workers_info.items():
+        for rank, info in self.rank2info.items():
             if info.actor == actor:
                 return rank
         return None
@@ -345,4 +375,4 @@ class RolloutController:
 
 
 RayRolloutController = ray.remote(RolloutController)
-RolloutControllerProxy = ActorProxy[RayRolloutController]
+RolloutControllerProxy: TypeAlias = ActorProxy[RayRolloutController]
