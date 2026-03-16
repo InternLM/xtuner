@@ -4,7 +4,7 @@ You are the FIRST agent in a long-running autonomous development process.
 Your job is to set up the foundation for all future coding agents.
 
 ### FIRST: overview of current code repo
-Read `.claude/CLAUDE.md` to know the basics of current code repo.
+Read `.claude/CLAUDE.bak.md` to know the basics of current code repo.
 
 ### SECOND: Read the design doc and get your GOAL
 

@@ -66,11 +66,11 @@ LongTextTokenizeFn 的核心思路是：对原始字符序列按长度 `tokenize
 以 **JSONL 格式** 为例（每行一个 pack）：
 
 ```jsonl
-{"samples": [["path/to/ds0.jsonl", 42, 0, 512, 0], ["path/to/ds0.jsonl", 43, 0, 256, 2], ["path/to/ds1.jsonl", 7, 128, 384, 0]]}
-{"samples": [["path/to/ds1.jsonl", 100, 384, 512, 0], ["path/to/ds2.jsonl", 5, 0, 1024, 0], ["path/to/ds2.jsonl", 6, 0, 512, 5]]}
+{"samples": [["path/to/ds0.jsonl", 42, 0, 512, 0, 128], ["path/to/ds0.jsonl", 43, 0, 256, 2, 130], ["path/to/ds1.jsonl", 7, 128, 384, 0, 256]]}
+{"samples": [["path/to/ds1.jsonl", 100, 384, 512, 0, 200], ["path/to/ds2.jsonl", 5, 0, 1024, 0, 512], ["path/to/ds2.jsonl", 6, 0, 512, 5, 517]]}
 ```
 
-- `samples[i] = [dataset_path, sample_idx, char_start, char_end, token_start_offset]`
+- `samples[i] = [dataset_path, sample_idx, char_start, char_end, token_start_offset, token_end_offset]`
 - `dataset_path`：对应 Jsonl 文件路径，即 `JsonlDataset.path`（`JsonlDataset.anno_path`）。
 - `sample_idx`：该 dataset 内的逻辑下标，对应 `JsonlDataset` 的第 `sample_idx` 个样本（或 chunk）。
   - **文件与索引一一对应原则**：开启自定义 Pack 时，在 `JsonlDataset` 中强制关闭 filter（`disable_filter=True`），并设置 `sample_ratio=1`、`enable_sequential_sampler=True`，以确保 `sample_idx` 与真实文件行号（或 chunk 索引）一一对应。这样可以使 JSONL 文件中的样本行与 Pack Config 中的 `sample_idx` 明确对应，降低配置出错概率。
@@ -78,8 +78,10 @@ LongTextTokenizeFn 的核心思路是：对原始字符序列按长度 `tokenize
 - `char_start`：从该样本的 `text[char_start:]` 开始取（含起始，inclusive）。用于运行时一致性校验。
 - `char_end`：取到 `text[:char_end]`（不含结尾，exclusive）。用于运行时一致性校验。
 - 对于 `LongTextTokenizeFn`，同一个样本可以在多个不同 pack 中出现（长文被截断后分配到多个 pack），运行时会校验 `char_start` 与 `char_end` 的合法性。
-- `token_start_offset`：表示此次输出 token 的合法结果在该 chunk 的 tokenize 结果中的起始 token 偏移，从该位置开始最多截取 `max_len` 长度的输出（即 `input_ids[token_start_offset:token_start_offset+max_len]`），用于精确描述每个 pack slice 在 token 维度上的位置。
-- 对于普通 TokenizeFn（即非长文本场景），`char_start` 和 `char_end` 均设置为 `-1` 表示「使用样本全部 token」，此时 `token_start_offset` 也固定为 `0`。
+- `token_start_offset`、`token_end_offset`：表示此次输出 token 的合法结果在该 chunk 的 tokenize 结果中的起始和结束 token 偏移（左闭右开），即取 `input_ids[token_start_offset:token_end_offset]`，用于精确描述每个 pack slice 在 token 维度上的位置。
+  - 基于 `LongTextTokenizeFn` 时：运行时 `JsonlDataset.__getitem__` 返回的 `LongTextDataItem` 已经是按 `[token_start_offset, token_end_offset)` 截断后的结果，`__getitem__` 只做语义一致性校验，无需再次截取。
+  - 基于普通 `TokenizeFn` 时：`JsonlDataset.__getitem__` 返回的 `DataItem` 是全量 token，需要在 `CustomPackDataset.__getitem__` 中做 `input_ids[token_start_offset:token_end_offset]` 的截取。
+- 对于普通 TokenizeFn（即非长文本场景），`char_start` 和 `char_end` 均设置为 `-1` 表示「使用样本全部 token」，此时 `token_start_offset` 为 `0`，`token_end_offset` 为该样本实际 token 数（即使用全部 token）。
 
 以 **Parquet 格式** 为例（单个 `.parquet` 文件，适合大规模 pack config 的高效读取）：
 
@@ -87,7 +89,7 @@ LongTextTokenizeFn 的核心思路是：对原始字符序列按长度 `tokenize
 # 写入（离线生成工具使用，复用 jsonl.py 中的 save_mixed_dict_to_parquet）
 save_mixed_dict_to_parquet({
     "boundaries": np.array([0, 1, 3, ...], dtype=np.int64),  # CSR 边界，shape (num_packs+1,)
-    "samples":    [[path_id, s_idx, char_start, char_end, token_start_offset], ...],  # list[list[int]]
+    "samples":    [[path_id, s_idx, char_start, char_end, token_start_offset, token_end_offset], ...],  # list[list[int]]
     "paths":      ["path/to/ds0.jsonl", "path/to/ds1.jsonl", ...],  # list[str]，path_id → dataset_path
 }, "pack_config.parquet")
 
@@ -106,7 +108,7 @@ data = load_mixed_dict_from_parquet("pack_config.parquet")
 - `sample_idx` 越界（超过 `len(dataset)`）→ 抛出错误。
 - 若 `char_start` 和 `char_end` 均为 `-1`（普通 TokenizeFn 情况）→ 允许，跳过 char 范围校验。
 - 否则（LongTextTokenizeFn 情况）：`char_start < 0` 或 `char_end <= char_start` → 抛出错误。
-- `token_start_offset < 0` → 抛出错误。
+- `token_start_offset < 0` 或 `token_end_offset <= token_start_offset` → 抛出错误。
 - 记每个 slice 的 token 数为 `num_tokens_i = dataset.num_tokens[sample_idx]`，若
   - `sum(num_tokens_i) < pack_max_length`：由 `short_pack_strategy` 控制：
     - `"error"`：直接 `raise ValueError`；
@@ -117,12 +119,17 @@ data = load_mixed_dict_from_parquet("pack_config.parquet")
 - 默认策略均为 `"error"`。
 - 不支持 `"skip"` 策略（与「索引与配置一一对应」原则冲突），以确保 PackConfig 中的样本索引可以稳定地与后续 SamplerConfig 中的消费顺序对应。
 
-在实际取样本时（`__getitem__`），再次做一致性检查：对于 `samples[i] = [dataset_path, sample_idx, char_start, char_end, token_start_offset]`：
+在实际取样本时（`__getitem__`），再次做一致性检查：对于 `samples[i] = [dataset_path, sample_idx, char_start, char_end, token_start_offset, token_end_offset]`：
 
 - 调用 `dataset[sample_idx]` 得到 `item`（`DataItem` 或 `LongTextDataItem`）。
-- 若 `char_start == -1`（普通 TokenizeFn 情况）：校验 `item` 中不含 `char_start` 字段（即为普通 `DataItem`），直接使用。
-- 否则（LongTextTokenizeFn 情况）：校验 `item` 为 `LongTextDataItem`，且 `item.char_start == char_start`、`item.char_end == char_end`、`item.token_start_offset == token_start_offset`，确保切片语义一致。
-- `__getitem__` 不再做 `input_ids[t_start:t_end]` 的 token 级手动截取（tokenize 时已完成切片）。
+- 若 `char_start == -1`（普通 TokenizeFn 情况）：
+  - 校验 `item` 中不含 `char_start` 字段（即为普通 `DataItem`）。
+  - 执行 `input_ids[token_start_offset:token_end_offset]` 截取，得到本 slice 实际使用的 token 序列。
+  - 若该 slice 是 pack 中最后一个，且 `short_pack_strategy != "error"` 或 `long_pack_strategy != "error"`，则允许截取后长度与预期不完全一致（由上层 padding/truncate 策略补偿），放松严格长度校验。
+- 否则（LongTextTokenizeFn 情况）：
+  - 校验 `item` 为 `LongTextDataItem`，且 `item.char_start == char_start`、`item.char_end == char_end`、`item.token_start_offset == token_start_offset`，确保切片语义一致。
+  - `LongTextDataItem` 内的 `input_ids` 已在 tokenize 阶段按 `[token_start_offset, token_end_offset)` 截断完毕，此处不再做额外截取。
+  - 若该 slice 是 pack 中最后一个，且 `short_pack_strategy != "error"` 或 `long_pack_strategy != "error"`，则对 `item.char_start`、`item.char_end`、`item.token_start_offset` 的校验予以放松（允许与 pack config 中记录的值存在偏差）。
 
 3. **resume 行为**
 
@@ -132,8 +139,8 @@ data = load_mixed_dict_from_parquet("pack_config.parquet")
 
 上述设计同时支持：
 
-- 基于 `LongTextTokenizeFn` 的 `JsonlDataset`：`char_start`/`char_end` 为实际字符范围，`token_start_offset` 为 token 起始偏移。
-- 基于普通 `TokenizeFn` 的 `JsonlDataset`：`char_start`/`char_end` 均为 `-1`，`token_start_offset` 为 `0`。
+- 基于 `LongTextTokenizeFn` 的 `JsonlDataset`：`char_start`/`char_end` 为实际字符范围，`token_start_offset`/`token_end_offset` 为 token 起止偏移；tokenize 阶段已完成截取，运行时只做校验。
+- 基于普通 `TokenizeFn` 的 `JsonlDataset`：`char_start`/`char_end` 均为 `-1`，`token_start_offset` 为 `0`，`token_end_offset` 为该样本实际 token 数；运行时在 `CustomPackDataset.__getitem__` 中执行截取。
 
 二者可以在同一个 PackConfig 中混合出现，通过 `char_start`/`char_end` 是否为 `-1` 来区分。
 
