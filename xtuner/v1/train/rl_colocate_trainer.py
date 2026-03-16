@@ -568,16 +568,16 @@ class RLColocateTrainer:
             log_time_str = f"\nRollout {rollout_idx} finished and timing listed:\n"
             log_time_str += "\n".join([f" - {k:<25}: {v:.2f}s" for k, v in step_timer_dict.items()])
 
-        if produce_result.timing_n is not None:
-            all_scalars["timing/task_n"] = produce_result.timing_n
-            all_scalars["timing/task_mean_s"] = produce_result.timing_mean_s
-            all_scalars["timing/task_p50_s"] = produce_result.timing_p50_s
-            all_scalars["timing/task_p99_s"] = produce_result.timing_p99_s
-            all_scalars["timing/task_p99_p50_ratio"] = produce_result.timing_p99_p50_ratio
-            all_scalars["timing/pause_s"] = produce_result.timing_pause_time_s
-        all_scalars["async/completed_samples"] = produce_result.completed_samples
-        all_scalars["async/aborted_samples"] = produce_result.aborted_samples
-        all_scalars["async/expired_samples"] = produce_result.expired_samples
+        if produce_result.group_gen_count is not None:
+            all_scalars["timing/task_n"] = produce_result.group_gen_count
+            all_scalars["timing/task_mean_s"] = produce_result.group_gen_mean_s
+            all_scalars["timing/task_p50_s"] = produce_result.group_gen_p50_s
+            all_scalars["timing/task_p99_s"] = produce_result.group_gen_p99_s
+            all_scalars["timing/task_p99_p50_ratio"] = produce_result.group_gen_p99_p50_ratio
+            all_scalars["timing/pause_s"] = produce_result.group_gen_pause_time_s
+        all_scalars["async/completed_samples"] = produce_result.leftover_completed
+        all_scalars["async/aborted_samples"] = produce_result.leftover_aborted
+        all_scalars["async/expired_samples"] = produce_result.leftover_expired
 
         if train_info:
             all_scalars.update({f"response/{k}": v for k, v in train_info.get("data_info", {}).items()})

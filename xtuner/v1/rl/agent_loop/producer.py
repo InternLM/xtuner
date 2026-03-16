@@ -17,7 +17,7 @@ from .sampler import Sampler
 
 
 @dataclass
-class ProduceBatchStats:
+class ProducerTimings:
     generate_times_s: list[float] = field(default_factory=list)
     pause_time_s: float = 0.0
 
@@ -102,7 +102,7 @@ class ProduceStrategy(ABC):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-    ) -> "ProduceBatchStats": ...
+    ) -> "ProducerTimings": ...
 
 
 class SyncProduceStrategy(ProduceStrategy):
@@ -114,7 +114,7 @@ class SyncProduceStrategy(ProduceStrategy):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-    ) -> ProduceBatchStats:
+    ) -> ProducerTimings:
         pending_tasks = set()
         generate_times: list[float] = []
         completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
@@ -151,7 +151,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 task = create_task(_timed_generate_group(agent_loop, rollout_state))
                 pending_tasks.add(task)
 
-        return ProduceBatchStats(generate_times_s=generate_times, pause_time_s=0.0)
+        return ProducerTimings(generate_times_s=generate_times, pause_time_s=0.0)
 
 
 class AsyncProduceStrategy(ProduceStrategy):
@@ -220,7 +220,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-    ) -> ProduceBatchStats:
+    ) -> ProducerTimings:
         # 重启 rollout controller
         rollout_ctl = agent_loop.rollout_ctl
         await continue_generation(rollout_ctl)
@@ -315,4 +315,4 @@ class AsyncProduceStrategy(ProduceStrategy):
         if len(pending_tasks) > 0:
             pause_time_s = await self._cleanup_pending_tasks(pending_tasks, agent_loop, replay_buffer, task_name)
 
-        return ProduceBatchStats(generate_times_s=generate_times, pause_time_s=pause_time_s)
+        return ProducerTimings(generate_times_s=generate_times, pause_time_s=pause_time_s)

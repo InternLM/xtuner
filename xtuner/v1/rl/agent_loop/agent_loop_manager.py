@@ -12,24 +12,24 @@ from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
 
 from .agent_loop import AgentLoop, AgentLoopConfig
-from .producer import ProduceBatchStats, ProduceStrategy, ProduceStrategyConfig, SyncProduceStrategyConfig
+from .producer import ProducerTimings, ProduceStrategy, ProduceStrategyConfig, SyncProduceStrategyConfig
 from .sampler import Sampler, SamplerConfig
 
 
 @dataclass
 class ProduceBatchResult:
     rollout_states: list[list[RolloutState]]
-    # generate timing (all None if no generations occurred)
-    timing_n: int | None = None
-    timing_mean_s: float | None = None
-    timing_p50_s: float | None = None
-    timing_p99_s: float | None = None
-    timing_p99_p50_ratio: float | None = None
-    timing_pause_time_s: float | None = None
-    # replay buffer state after get
-    completed_samples: int = 0
-    aborted_samples: int = 0
-    expired_samples: int = 0
+    # per-group generation timing stats (all None if no generations occurred)
+    group_gen_count: int | None = None
+    group_gen_mean_s: float | None = None
+    group_gen_p50_s: float | None = None
+    group_gen_p99_s: float | None = None
+    group_gen_p99_p50_ratio: float | None = None
+    group_gen_pause_time_s: float | None = None
+    # leftover samples remaining in replay buffer after batch retrieval
+    leftover_completed: int = 0
+    leftover_aborted: int = 0
+    leftover_expired: int = 0
 
 
 class AgentLoopManagerConfig(BaseModel):
@@ -86,7 +86,7 @@ class AgentLoopManager:
     async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
         start = time.perf_counter()
         self.logger.info(f"[AgentLoopManager][{self.task_name}] produce_batch start batch={batch_size}")
-        stats: ProduceBatchStats = await self._scheduler.produce_batch(
+        stats: ProducerTimings = await self._scheduler.produce_batch(
             self._agent_loop, self._data_sampler, self._replay_buffer, batch_size, self.task_name, rollout_step
         )
         self.logger.info(
@@ -100,12 +100,12 @@ class AgentLoopManager:
             p50_s = sorted_times[n // 2]
             p99_s = sorted_times[int(n * 0.99)]
             ratio = p99_s / p50_s if p50_s > 0 else float("inf")
-            result.timing_n = n
-            result.timing_mean_s = mean_s
-            result.timing_p50_s = p50_s
-            result.timing_p99_s = p99_s
-            result.timing_p99_p50_ratio = ratio
-            result.timing_pause_time_s = stats.pause_time_s
+            result.group_gen_count = n
+            result.group_gen_mean_s = mean_s
+            result.group_gen_p50_s = p50_s
+            result.group_gen_p99_s = p99_s
+            result.group_gen_p99_p50_ratio = ratio
+            result.group_gen_pause_time_s = stats.pause_time_s
 
         start = time.perf_counter()
         batch_rollout_states: list[list[RolloutState]] = await self._replay_buffer.get(
@@ -120,9 +120,9 @@ class AgentLoopManager:
             self._replay_buffer.count(task_name=self.task_name, group_status=Status.ABORTED),
             self._replay_buffer.count(task_name=self.task_name, group_status=Status.EXPIRED),
         )
-        result.completed_samples = completed_sample_count
-        result.aborted_samples = aborted_sample_count
-        result.expired_samples = expired_sample_count
+        result.leftover_completed = completed_sample_count
+        result.leftover_aborted = aborted_sample_count
+        result.leftover_expired = expired_sample_count
         return result
 
     # # 非共卡
