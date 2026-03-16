@@ -1,5 +1,5 @@
 from .agent_loop import AgentLoop, AgentLoopConfig
-from .agent_loop_manager import AgentLoopManager, AgentLoopManagerConfig
+from .agent_loop_manager import AgentLoopManager, AgentLoopManagerConfig, ProduceBatchResult
 from .producer import (
     AsyncProduceStrategy,
     AsyncProduceStrategyConfig,
@@ -19,6 +19,7 @@ __all__ = [
     "SingleTurnAgentLoop",
     "AgentLoopManagerConfig",
     "AgentLoopManager",
+    "ProduceBatchResult",
     "ProduceStrategyConfig",
     "SyncProduceStrategyConfig",
     "AsyncProduceStrategyConfig",

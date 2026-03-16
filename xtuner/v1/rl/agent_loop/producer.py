@@ -1,5 +1,7 @@
 import asyncio
+import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
@@ -14,7 +16,28 @@ from .agent_loop import AgentLoop
 from .sampler import Sampler
 
 
+@dataclass
+class ProducerTimings:
+    """记录一轮 batch 生成过程中每个 group 的生成耗时统计信息。
+
+    Args:
+        generate_times_s (list[float]): 每个 group 的生成耗时（秒），长度等于本轮生成 group 的数量。
+        pause_time_s (float): 结束时等待所有 pending 任务收尾的总耗时（秒）。
+    """
+
+    generate_times_s: list[float] = field(default_factory=list)
+    pause_time_s: float = 0.0
+
+
 logger = get_logger()
+
+
+async def _timed_generate_group(
+    agent_loop: AgentLoop, rollout_state: list[RolloutState], **kwargs
+) -> tuple[list[RolloutState], float]:
+    start = time.perf_counter()
+    result = await agent_loop.generate_group(rollout_state, **kwargs)
+    return result, time.perf_counter() - start
 
 
 def default_is_valid_sample_fn(samples: list[RolloutState]) -> bool:
@@ -86,7 +109,7 @@ class ProduceStrategy(ABC):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-    ): ...
+    ) -> "ProducerTimings": ...
 
 
 class SyncProduceStrategy(ProduceStrategy):
@@ -98,21 +121,22 @@ class SyncProduceStrategy(ProduceStrategy):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-    ):
+    ) -> ProducerTimings:
         pending_tasks = set()
+        generate_times: list[float] = []
         completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         assert completed_sample_count == 0, "SyncProduceStrategy assumes no completed samples at the start."
 
         for _ in range(batch_size):
             rollout_state = await sampler.sample(task_name=task_name)
-            task = create_task(agent_loop.generate_group(rollout_state))
+            task = create_task(_timed_generate_group(agent_loop, rollout_state))
             pending_tasks.add(task)
 
         logger.info(f"Started {len(pending_tasks)} initial tasks for SyncProduceStrategy.")
 
         while self.should_continue_fn(completed_sample_count, batch_size):
             if not pending_tasks:
-                print("All tasks are done but not enough samples collected.")
+                logger.warning("All tasks are done but not enough samples collected.")
                 break
             done_tasks, pending_tasks = await asyncio.wait(
                 pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
@@ -120,7 +144,8 @@ class SyncProduceStrategy(ProduceStrategy):
             # 如果要过滤，在这个地方处理，然后加入到 replay buffer
             # 如果被过滤的数据就放到 put_to_filtered pool 中
             for task in done_tasks:
-                items = task.result()
+                items, elapsed = task.result()
+                generate_times.append(elapsed)
                 if self.is_valid_sample_fn(items):
                     completed_sample_count += 1
                     logger.info(f"Collected {completed_sample_count}/{batch_size} valid samples for task {task_name}.")
@@ -130,8 +155,10 @@ class SyncProduceStrategy(ProduceStrategy):
                 completed_sample_count, batch_size
             ):
                 rollout_state = await sampler.sample(task_name=task_name)
-                task = create_task(agent_loop.generate_group(rollout_state))
+                task = create_task(_timed_generate_group(agent_loop, rollout_state))
                 pending_tasks.add(task)
+
+        return ProducerTimings(generate_times_s=generate_times, pause_time_s=0.0)
 
 
 class AsyncProduceStrategy(ProduceStrategy):
@@ -168,7 +195,8 @@ class AsyncProduceStrategy(ProduceStrategy):
 
     async def _cleanup_pending_tasks(
         self, pending_tasks: set, agent_loop: AgentLoop, replay_buffer: ReplayBuffer, task_name: str
-    ):
+    ) -> float:
+        pause_start = time.perf_counter()
         rollout_ctl = agent_loop.rollout_ctl
         await pause_generation(rollout_ctl)
         while len(pending_tasks) > 0:
@@ -177,7 +205,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             )
 
             for task in done_task:
-                paused_items: list[RolloutState] = task.result()
+                paused_items, _ = task.result()
                 paused_items = update_expired_status(
                     paused_items, tail_batch_stale_threshold=self.tail_batch_stale_threshold
                 )
@@ -189,6 +217,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             if len(pending_tasks) > 0:
                 await pause_generation(rollout_ctl)
                 await asyncio.sleep(1)
+        return time.perf_counter() - pause_start
 
     async def produce_batch(
         self,
@@ -198,7 +227,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-    ):
+    ) -> ProducerTimings:
         # 重启 rollout controller
         rollout_ctl = agent_loop.rollout_ctl
         await continue_generation(rollout_ctl)
@@ -220,11 +249,12 @@ class AsyncProduceStrategy(ProduceStrategy):
             data_concurrency = batch_size - previously_completed_count
 
         logger.info(
-            f"[{self.__class__.__name__}] Task {task_name} | Starting produce: data_concurrency: {data_concurrency}, previously_completed: {previously_completed_count}, expired_sample_count: {expired_sample_count}"
+            f"[{self.__class__.__name__}] Task {task_name} | Starting produce: data_concurrency: {data_concurrency}, previously_completed: {previously_completed_count}, expired_sample_count: {expired_sample_count}, rollout_step: {rollout_step}"
         )
 
         # 3. 初始下发任务
         pending_tasks = set()
+        generate_times: list[float] = []
         for _ in range(data_concurrency):
             if sample_from_expired_storage and expired_sample_count > 0:
                 group_status = Status.EXPIRED
@@ -233,8 +263,11 @@ class AsyncProduceStrategy(ProduceStrategy):
                 group_status = Status.ABORTED
             rollout_state = await sampler.sample(task_name=task_name, group_status=group_status)
             task = create_task(
-                agent_loop.generate_group(
-                    rollout_state, enable_partial_rollout=self.enable_partial_rollout, rollout_step=rollout_step
+                _timed_generate_group(
+                    agent_loop,
+                    rollout_state,
+                    enable_partial_rollout=self.enable_partial_rollout,
+                    rollout_step=rollout_step,
                 )
             )
             pending_tasks.add(task)
@@ -250,7 +283,8 @@ class AsyncProduceStrategy(ProduceStrategy):
             )
 
             for task in done_tasks:
-                running_items: list[RolloutState] = task.result()
+                running_items, elapsed = task.result()
+                generate_times.append(elapsed)
                 if self.is_valid_sample_fn(running_items):
                     completed_sample_count += 1
                 running_items = update_expired_status(
@@ -274,20 +308,18 @@ class AsyncProduceStrategy(ProduceStrategy):
                     group_status = Status.ABORTED
                 rollout_state = await sampler.sample(task_name=task_name, group_status=group_status)
                 task = create_task(
-                    agent_loop.generate_group(
-                        rollout_state, enable_partial_rollout=self.enable_partial_rollout, rollout_step=rollout_step
+                    _timed_generate_group(
+                        agent_loop,
+                        rollout_state,
+                        enable_partial_rollout=self.enable_partial_rollout,
+                        rollout_step=rollout_step,
                     )
                 )
                 pending_tasks.add(task)
 
         # 5. 清理正在执行的任务
+        pause_time_s = 0.0
         if len(pending_tasks) > 0:
-            await self._cleanup_pending_tasks(pending_tasks, agent_loop, replay_buffer, task_name)
+            pause_time_s = await self._cleanup_pending_tasks(pending_tasks, agent_loop, replay_buffer, task_name)
 
-        # 6. 统计打印总数
-        completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
-        aborted_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.ABORTED)
-        expired_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
-        logger.info(
-            f"[AsyncProduceStrategy] Task {task_name} | Finished! Final completed count: {completed_sample_count}, aborted count: {aborted_sample_count}, expired count: {expired_sample_count} in replay buffer."
-        )
+        return ProducerTimings(generate_times_s=generate_times, pause_time_s=pause_time_s)

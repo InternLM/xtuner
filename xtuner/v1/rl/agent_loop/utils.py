@@ -6,7 +6,8 @@ logger = get_logger()
 
 
 class PartialRolloutHandler:
-    """Handle preprocessing and postprocessing for partial rollout continuation."""
+    """Handle preprocessing and postprocessing for partial rollout
+    continuation."""
 
     def __init__(self, max_tokens: int) -> None:
         self.max_tokens = max_tokens
@@ -38,7 +39,7 @@ class PartialRolloutHandler:
         rollout_state.sample_params = rollout_state.sample_params.copy(update={"max_tokens": remaining_tokens})
 
         logger.debug(
-            f"[PartialRolloutHandler ] Sample {rollout_state.uid} continue rollout | Remaining tokens allowed: {remaining_tokens} | Status: {rollout_state.status} | Prompt len: {prompt_len} | Response len: {response_len} | Staleness: {rollout_state.seq_staleness} | Total tokens: {len(rollout_state.tokens)}"
+            f"[PartialRolloutHandler] Sample {rollout_state.uid} continue rollout | Remaining tokens allowed: {remaining_tokens} | Status: {rollout_state.status} | Prompt len: {prompt_len} | Response len: {response_len} | Staleness: {rollout_state.seq_staleness} | Total tokens: {len(rollout_state.tokens)}"
         )
         # TODO: handle routed_experts
         rollout_state.extra_fields["history_response_dict"] = {
