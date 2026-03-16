@@ -34,10 +34,10 @@ LongTextTokenizeFn 的核心思路是：对原始字符序列按长度 `tokenize
 
 **两阶段行为（Two-phase behavior）**
 
-| 阶段（`state`） | `__call__` 输出 |
-|-----------------|-----------------|
-| `"cache"` | `{"num_tokens": [int], "chunks": [{"char_start": xx, "char_end": xx}]}` —— 总是返回（即便是短文本只形成 1 个 chunk），用于离线统计与切分规划 |
-| `"runtime"` | `{"input_ids", "labels", "num_tokens"}` —— 只对 `text[char_start:char_end]` 进行真正 tokenize，用于在线训练 |
+| 阶段（`state`） | `__call__` 输入 | `__call__` 输出 |
+|-----------------|-----------------|-----------------|
+| `"cache"` | `{"text": str, "state": "cache"}` | `{"num_tokens": [int], "chunks": [{"char_start": xx, "char_end": xx, "token_start_offset": xx}]}` —— 总是返回（即便是短文本只形成 1 个 chunk），用于离线统计与切分规划；其中 `token_start_offset` 表示该 chunk 在整体 tokenize 结果中的起始 token 偏移，用于后续按 token 维度切片 |
+| `"runtime"` | `{"text": str, "state": "runtime", "char_start": int, "char_end": int, "token_start_offset": int}` | `{"input_ids", "labels", "num_tokens", "char_start", "char_end", "token_start_offset"}` —— 只对 `text[char_start:char_end]` 进行真正 tokenize，并从 `token_start_offset` 开始截取最多 `self.max_length` 长度的输出（如 `input_ids[token_start_offset:token_start_offset+max_length]`），用于在线训练 |
 
 **对其他模块的影响**
 
@@ -58,27 +58,29 @@ LongTextTokenizeFn 的核心思路是：对原始字符序列按长度 `tokenize
 以 **JSONL 格式** 为例（每行一个 pack）：
 
 ```jsonl
-{"samples": [[path0, 42, 0, 512], [path0, 43, 0, 256], [path1, 7, 128, 384]]}
-{"samples": [[path1, 100, 384, 512], [path2, 5, 0, 1024], [path2, 6, 0, 512]]}
+{"samples": [[path0, 42, 0, 512, 0], [path0, 43, 0, 256, 256], [path1, 7, 128, 384, 0]]}
+{"samples": [[path1, 100, 384, 512, 0], [path2, 5, 0, 1024, 0], [path2, 6, 0, 512, 512]]}
 ```
 
-- `samples[i] = [dataset_path, sample_idx, token_start, token_end]`
+- `samples[i] = [dataset_path, sample_idx, char_start, char_end, token_start_offset]`
 - `dataset_path`：对应 Jsonl 文件路径，即 `JsonlDataset.anno_path`。
 - `sample_idx`：该 dataset 内的逻辑下标（对应 post-filter-sampleratio 之后的 `sampled[]` 下标）。
   - **文件与索引一一对应原则**：开启自定义 Pack 时，在 `JsonlDataset` 中强制关闭 filter，并设置 `sampleratio = 1`，以确保 `sample_idx` 与真实文件行号一一对应。这样可以使 JSONL 文件中的样本行与 Pack Config 中的 `sample_idx` 明确对应，降低配置出错概率。
   - 如需 filter、sampleratio 等逻辑，应通过生成 Pack Config 时离线实现，而不是在 `JsonlDataset` 内部动态实现。
-- `token_start`：从该样本的 `input_ids[token_start:]` 开始取（含起始，inclusive）。
-- `token_end`：取到 `input_ids[:token_end]`（不含结尾，exclusive）。
-- 对于 `LongTextTokenizeFn`，同一个样本可以在多个不同 pack 中出现（长文被截断后分配到多个 pack），运行时会检查 `token_start` 与 `token_end` 的合法性。
-- 对于普通 TokenizeFn（即非长文本场景），`token_start` 和 `token_end` 均可设置为 `-1` 表示「不基于 token 范围切片」。
+- `char_start`：从该样本的 `text[char_start:]` 开始取（含起始，inclusive）。用于运行时检查和上一节 cache 内容是否对应。
+- `char_end`：取到 `text[:char_end]`（不含结尾，exclusive）。用于运行时检查。
+- 对于 `LongTextTokenizeFn`，同一个样本可以在多个不同 pack 中出现（长文被截断后分配到多个 pack），运行时会检查 `char_start` 与 `char_end` 的合法性。
+- `token_start_offset`：表示此次输出 token 结果在该样本整体 tokenize 结果中的起始 token 偏移，从该位置开始最多截取 `max_len` 长度的输出（即 `input_ids[token_start_offset:token_start_offset+max_len]`），用于精确描述每个 pack slice 在 token 维度上的位置。
+- 对于普通 TokenizeFn（即非长文本场景），`char_start` 和 `char_end` 均可设置为 `-1` 表示「不基于 token 范围切片」，此时 `token_start_offset` 也可以固定为 `0`。
 
 2. **运行时严格校验逻辑**
 
 在初始化 PackDataset 时，需要对每一个 pack 做强校验：
 - `dataset_path` 不存在 → 抛出错误。
 - `sample_idx` 越界（超过 `len(dataset.sampled)`）→ 抛出错误。
-- `token_start < 0` 或 `token_end > num_tokens` 或 `token_start >= token_end`（非 0 情况）→ 抛出错误（`token_start` 和 `token_end` 均为 -1 的特例除外，对应普通 TokenizeFn 的 JsonlDataset）。
-- 记每个 slice 的长度为 `len_i = token_end - token_start`，若
+- `char_start < 0` 或 `char_end > num_tokens` 或 `char_start >= char_end`（非 0 情况）→ 抛出错误（`char_start` 和 `char_end` 均为 -1 的特例除外，对应普通 TokenizeFn 的 JsonlDataset）。
+- `token_start_offset < 0` 或 `token_start_offset >= num_tokens`（在 LongTextTokenizeFn 场景下）→ 抛出错误，保证 token 级切片位置合法。
+- 记每个 slice 的长度为 `len_i = char_end - char_start`，若
   - `sum(len_i) < pack_max_length`：由 `short_pack_strategy` 控制：
     - `"error"`：直接 `raise ValueError`；
     - `"padding"`：在末尾补齐 pad token，同时在 labels 中对应位置填 -100。
@@ -89,9 +91,9 @@ LongTextTokenizeFn 的核心思路是：对原始字符序列按长度 `tokenize
 - 出于「索引与配置一一对应」的考虑，这里不支持 `"skip"` 策略（与前文 JsonlDataset 不支持 filter/sampleratio 的原因一致），以确保 PackConfig 中的样本索引可以稳定地与后续 SamplerConfig 中的消费顺序对应。
 
 在实际取样本时，再次做一致性检查：  
-对于 `samples[i] = [dataset_path, sample_idx, token_start, token_end]`：
-- 若 `token_start` 和 `token_end` 均为 -1，则检查 tokenize 结果中不含 `token_start` 等字段，表示这是普通 TokenizeFn 情况。
-- 否则，检查 tokenize 结果中记录的 `token_start`、`token_end` 与配置一致，确保 LongTextTokenizeFn 的切片语义在运行时没有被破坏。
+对于 `samples[i] = [dataset_path, sample_idx, char_start, char_end, token_start_offset]`：
+- 若 `char_start` 和 `char_end` 均为 -1，则检查 tokenize 结果中不含 `char_start` 等字段，表示这是普通 TokenizeFn 情况（此时 `token_start_offset` 一般为 `0` 且不参与校验）。
+- 否则，检查 tokenize 结果中记录的 `char_start`、`char_end` 与 `token_start_offset` 与配置一致，确保 LongTextTokenizeFn 的切片语义在运行时没有被破坏。
 
 3. **resume 行为**
 
@@ -102,7 +104,7 @@ LongTextTokenizeFn 的核心思路是：对原始字符序列按长度 `tokenize
 上述设计同时支持：
 - 基于 LongTextTokenizeFn 的 `JsonlDataset`；
 - 基于普通 TokenizeFn 的 `JsonlDataset`。  
-二者可以在同一个 PackConfig 中混合出现，通过 `token_start`/`token_end` 是否为 -1 来区分。
+二者可以在同一个 PackConfig 中混合出现，通过 `char_start`/`char_end` 是否为 -1 来区分。
 
 ### 自定义 Sampler
 
