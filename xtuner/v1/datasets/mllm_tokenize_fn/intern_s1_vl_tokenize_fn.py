@@ -82,7 +82,8 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         oss_loader_cfg: OSSLoaderConfig | None = None,
         tokenizer_hash: str | None = None,
         max_length: int | None = None,
-        visual_llm_attn_ratio_for_pack: float = 0.0,
+        llm_pack_weight: float = 1.0,
+        visual_pack_weight: float = 0.0,
         hash: str | None = None,
         only_prompt: bool = False,
         template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
@@ -169,7 +170,8 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             hash,
             hash_str=_hash_str,
             data_name=self.data_name,
-            visual_llm_attn_ratio_for_pack=visual_llm_attn_ratio_for_pack,
+            llm_pack_weight=llm_pack_weight,
+            visual_pack_weight=visual_pack_weight,
         )
 
     def _get_transform(self):
@@ -496,7 +498,8 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             max_num_frames=self.max_num_frames,
             oss_loader_cfg=self.oss_loader_cfg,
             template_name=self.template_name,
-            visual_llm_attn_ratio_for_pack=self.visual_llm_attn_ratio_for_pack,
+            llm_pack_weight=self.llm_pack_weight,
+            visual_pack_weight=self.visual_pack_weight,
             hash=self.hash,
             debug=self.debug,
             oss_time_log_thr=self.oss_time_log_thr,

@@ -20,9 +20,10 @@ if TYPE_CHECKING:
 
 
 class CachableTokenizeFunction(ABC, Generic[T]):
-    def __init__(self, tokenizer, *args, visual_llm_attn_ratio_for_pack: float = 0.0, **kwargs):
+    def __init__(self, tokenizer, *args, llm_pack_weight: float = 1.0, visual_pack_weight: float = 0.0, **kwargs):
         self.tokenizer = tokenizer
-        self.visual_llm_attn_ratio_for_pack = visual_llm_attn_ratio_for_pack
+        self.llm_pack_weight = llm_pack_weight
+        self.visual_pack_weight = visual_pack_weight
         self.state = "runtime"
 
     @abstractmethod
@@ -41,7 +42,7 @@ class CachableTokenizeFunction(ABC, Generic[T]):
     ) -> float:
         llm_num_patch = (round(num_tokens / flash_attn_block_size)) ** 2
         img_num_patch = sum((n / flash_attn_block_size) ** 2 for n in num_img_tokens)
-        return llm_num_patch + self.visual_llm_attn_ratio_for_pack * img_num_patch
+        return self.llm_pack_weight * llm_num_patch + self.visual_pack_weight * img_num_patch
 
 
 def calculate_file_sha256(path):
