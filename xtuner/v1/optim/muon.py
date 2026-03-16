@@ -696,9 +696,9 @@ def muon_update_batch_async(
     if adjust_lr is None:
         adjusted_lr = lr
     elif adjust_lr == "spectral_norm":
-        adjusted_lr = adjust_lr_spectral_norm(lr, X[0].shape)
+        adjusted_lr = adjust_lr_spectral_norm(lr, X[0].shape, num_experts=num_experts)
     elif adjust_lr == "rms_norm":
-        adjusted_lr = adjust_lr_rms_norm(lr, X[0].shape)
+        adjusted_lr = adjust_lr_rms_norm(lr, X[0].shape, num_experts=num_experts)
     else:
         raise ValueError(f"Unknown adjust_lr value: {adjust_lr}")
 
@@ -802,19 +802,21 @@ def muon_update_newton_schulz(
     return newton_schulz_func(X, epsilon=epsilon, num_experts=num_experts).reshape(original_shape)
 
 
-def adjust_lr_rms_norm(lr, param_shape):
+def adjust_lr_rms_norm(lr, param_shape, num_experts=1):
     # Adjust learning rate for constant element-wise RMS norm
     # https://arxiv.org/abs/2502.16982
-    A, B = param_shape[:2]
+    A = param_shape[-2] // num_experts
+    B = param_shape[-1]
     adjusted_ratio = 0.2 * math.sqrt(max(A, B))
     adjusted_lr = lr * adjusted_ratio
     return adjusted_lr
 
 
-def adjust_lr_spectral_norm(lr, param_shape):
+def adjust_lr_spectral_norm(lr, param_shape, num_experts=1):
     # Adjust from spectral norm 1 to RMS operator norm 1
     # https://arxiv.org/abs/2310.17813
-    fan_out, fan_in = param_shape[:2]
+    fan_out = param_shape[-2] // num_experts
+    fan_in = param_shape[-1]
     adjusted_lr = lr * math.sqrt(fan_out / fan_in)
     return adjusted_lr
 
@@ -861,13 +863,12 @@ def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: i
 
     # Unified handling: reshape to (num_experts, M, N) for both cases
     # For regular case (num_experts=1), this adds a batch dimension of size 1
-    M = X.size(-2) // num_experts
     N = X.size(-1)
-    X = X.view(num_experts, M, N)
+    X = X.view(num_experts, -1, N)
 
     # Transpose if needed (when rows > cols) for numerical stability in NS iteration
     # This ensures X @ X.mT produces a smaller square matrix
-    need_transpose = G.size(-2) > G.size(-1)
+    need_transpose = X.size(-2) > X.size(-1)
     if need_transpose:
         X = X.mT  # (num_experts, N, M) if rows > cols, else (num_experts, M, N)
 

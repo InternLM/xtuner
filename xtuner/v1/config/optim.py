@@ -49,7 +49,7 @@ class AdamWConfig(OptimConfig):
 
         if dist.get_rank() == 0:
             logger.info(
-                f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
+                f"Total trainable parameters: {num_total_requires_grad / 1e6:.2f}M, total parameters: {num_total / 1e6:.2f}M"
             )
             logger.info(f"Untrainable parameters names: {untrainable_names}")
         return torch.optim.AdamW(
@@ -75,7 +75,7 @@ class MuonConfig(OptimConfig):
         num_adamw = 0
 
         # Get MoE config if available
-        num_experts = getattr(model, "n_routed_experts", 1) or 1
+        num_experts = getattr(model.config, "n_routed_experts", 1) or 1
         is_moe_model = num_experts > 1
 
         # Expert parameter patterns for MoE models
@@ -139,13 +139,13 @@ class MuonConfig(OptimConfig):
 
         if dist.get_rank() == 0:
             logger.info(
-                f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
+                f"Total trainable parameters: {num_total_requires_grad / 1e6:.2f}M, total parameters: {num_total / 1e6:.2f}M"
             )
             if is_moe_model:
                 logger.info(
-                    f"Muon params: {(num_muon + num_muon_moe) // 1e6}M "
-                    f"(regular: {num_muon // 1e6}M, MoE expert: {num_muon_moe // 1e6}M), "
-                    f"AdamW params: {num_adamw // 1e6}M (counts by numel)"
+                    f"Muon params: {(num_muon + num_muon_moe) / 1e6:.2f}M "
+                    f"(regular: {num_muon / 1e6:.2f}M, MoE expert: {num_muon_moe / 1e6:.2f}M), "
+                    f"AdamW params: {num_adamw / 1e6:.2f}M (counts by numel)"
                 )
                 logger.info(
                     f"Detected MoE model with {num_experts} routed experts, "
@@ -153,7 +153,7 @@ class MuonConfig(OptimConfig):
                     f"other expert params use num_experts={num_experts}"
                 )
             else:
-                logger.info(f"Muon params: {num_muon // 1e6}M, AdamW params: {num_adamw // 1e6}M (counts by numel)")
+                logger.info(f"Muon params: {num_muon / 1e6:.2f}M, AdamW params: {num_adamw / 1e6:.2f}M (counts by numel)")
             logger.info(f"Untrainable parameters names: {untrainable_names}")
             logger.info(
                 f"using Muon optimizer distributed_mesh_size: {model.fsdp_mesh.size()}, "
