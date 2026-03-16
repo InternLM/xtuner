@@ -21,10 +21,10 @@ class RandomDataset:
     def __init__(self, size: int, **kwargs):
         self.size = size
         self.num_tokens = [random.randint(50, 4096) for _ in range(size)]
+        self._meta = {'num_tokens': self.num_tokens,'proxy_attn_flops': self.num_tokens}
 
     def __len__(self):
         return self.size
-
 
     def __getitem__(self, idx: int):
         num_tokens = self.num_tokens[idx]
