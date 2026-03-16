@@ -24,10 +24,12 @@ class SessionRouter:
     def __init__(
         self,
         worker_infos: dict[int, "WorkerInfo"],  # worker: worker_status
+        worker_infos_lock: Optional[threading.RLock] = None,
         max_sessions: int = 10000,
         max_idle_seconds: Optional[float] = 3600.0,
     ):
         self._worker_infos = worker_infos
+        self._worker_infos_lock = worker_infos_lock
         self._max_sessions = max_sessions
         self._max_idle = max_idle_seconds
 
@@ -63,7 +65,11 @@ class SessionRouter:
         n = len(self._worker_infos)
         for _ in range(n):
             rank = next(self._worker_cycler)
-            info = self._worker_infos[rank]
+            if self._worker_infos_lock is None:
+                info = self._worker_infos[rank]
+            else:
+                with self._worker_infos_lock:
+                    info = self._worker_infos[rank]
             if info and info.is_active:
                 return rank, info.actor
         return -1, None
@@ -74,7 +80,11 @@ class SessionRouter:
 
             if session_id in self._map:
                 worker_rank, _ = self._map.pop(session_id)
-                info = self._worker_infos.get(worker_rank)
+                if self._worker_infos_lock is None:
+                    info = self._worker_infos.get(worker_rank)
+                else:
+                    with self._worker_infos_lock:
+                        info = self._worker_infos.get(worker_rank)
                 if info and info.is_active:
                     self._map[session_id] = (worker_rank, self._now())
                     return info.actor
@@ -92,8 +102,10 @@ class RolloutHealthChecker:
         self,
         config: "RolloutConfig",
         workers_info: dict[int, "WorkerInfo"],
+        worker_infos_lock: Optional[threading.RLock] = None,
     ):
         self._workers_info = workers_info
+        self._worker_infos_lock = worker_infos_lock
         self._check_interval = config.health_check_interval_seconds
         self._check_first_wait = config.health_check_first_wait_seconds
         self._check_failure_threshold = config.health_check_failure_threshold
@@ -140,36 +152,55 @@ class RolloutHealthChecker:
         logger.info("RolloutHealthChecker restarted.")
 
     def run_once(self) -> None:
+        if self._worker_infos_lock is None:
+            workers_snapshot = {
+                rank: (info.actor, info.url, info.is_active) for rank, info in self._workers_info.items()
+            }
+        else:
+            with self._worker_infos_lock:
+                workers_snapshot = {
+                    rank: (info.actor, info.url, info.is_active) for rank, info in self._workers_info.items()
+                }
+
         tasks = [
             check_worker_health(
-                self._workers_info[rank].actor,
+                actor,
                 rank,
-                self._workers_info[rank].url,
-                self._workers_info[rank].is_active,
+                url,
+                is_active,
                 self._check_failure_threshold,
             )
-            for rank in self._workers_info.keys()
+            for rank, (actor, url, is_active) in workers_snapshot.items()
         ]
 
         async def _run_checks() -> list[bool]:
             return await asyncio.gather(*tasks)
 
         check_results = asyncio.run(_run_checks())
-        for rank, is_healthy in zip(self._workers_info.keys(), check_results):
+        inactive_workers = []
+        for rank, is_healthy in zip(workers_snapshot.keys(), check_results):
             if not is_healthy:
                 logger.warning(f"Worker {rank} failed health check. Marking as inactive.")
-                self._workers_info[rank].is_active = False
-                inactive_worker = self._workers_info[rank].actor
+                if self._worker_infos_lock is None:
+                    self._workers_info[rank].is_active = False
+                    inactive_worker = self._workers_info[rank].actor
+                else:
+                    with self._worker_infos_lock:
+                        self._workers_info[rank].is_active = False
+                        inactive_worker = self._workers_info[rank].actor
                 if inactive_worker is None:
                     logger.error(f"Worker {rank} has no actor reference. Skipping shutdown.")
                     continue
-                try:
-                    ray.get(inactive_worker.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-                    ray.get(inactive_worker.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-                except Exception as e:
-                    logger.error(f"Exception while shutting down worker {rank}: {e}")
+                inactive_workers.append((rank, inactive_worker))
             else:
                 logger.debug(f"Worker {rank} passed health check.")
+
+        for rank, inactive_worker in inactive_workers:
+            try:
+                ray.get(inactive_worker.offload.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+                ray.get(inactive_worker.shutdown.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            except Exception as e:
+                logger.error(f"Exception while shutting down worker {rank}: {e}")
 
     def _run_loop(self) -> None:
         assert self._stop_event is not None and self._pause_event is not None

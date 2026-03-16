@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
@@ -84,14 +85,16 @@ class RolloutController:
         self.rank2info: dict[int, WorkerInfo] = {}
         self.engine_rank_mesh_array, self.worker_server_urls_map, self.rank2info = self._init_workers(placement_group)
         self.num_active_workers = len(self.rank2info)
+        self.worker_info_lock = threading.RLock()
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
-        self.router = SessionRouter(self.rank2info)
+        self.router = SessionRouter(self.rank2info, worker_infos_lock=self.worker_info_lock)
         self.health_checker = RolloutHealthChecker(
             config=self.config,
             workers_info=self.rank2info,
+            worker_infos_lock=self.worker_info_lock,
         )
         self.health_checker.start()
 
@@ -102,7 +105,8 @@ class RolloutController:
             dict: A dictionary containing the engine mesh list, server URL
                 dictionary, and the rollout configuration.
         """
-        worker_server_urls_status = {info.url: info.is_active for info in self.rank2info.values()}
+        with self.worker_info_lock:
+            worker_server_urls_status = {info.url: info.is_active for info in self.rank2info.values()}
         rollout_metadata: RolloutWorkerMetadata = {
             "engine_rank_mesh_array": self.engine_rank_mesh_array,
             "server_url_dict": self.worker_server_urls_map,
@@ -166,23 +170,38 @@ class RolloutController:
     def recover(self):
         """Recovers from worker failures by restarting failed workers and
         reinitializing the rollout setup."""
-        failed_workers = [info for info in self.rank2info.values() if not info.is_active]
+        with self.worker_info_lock:
+            failed_workers = [info for info in self.rank2info.values() if not info.is_active]
         if not failed_workers:
             self.logger.info("No failed workers detected during recovery.")
             return
 
         self.logger.warning(f"Detected {len(failed_workers)} failed workers. Initiating recovery process.")
         for worker in failed_workers:
-            self._restart_failed_workers(worker.actor)
-            self.rank2info[self._get_rank_by_actor(worker.actor)].is_active = True  #
+            if self._restart_failed_workers(worker.actor):
+                with self.worker_info_lock:
+                    rank = self._get_rank_by_actor(worker.actor)
+                    if rank is not None:
+                        self.rank2info[rank].is_active = True
 
-    def _restart_failed_workers(self, worker: RolloutWorker):
+    def _restart_failed_workers(self, worker: RolloutWorker) -> bool:
+        rank = self._get_rank_by_actor(worker)
+        old_url = None
+        if rank is not None:
+            with self.worker_info_lock:
+                old_url = self.rank2info[rank].url
+
         try:
             dist_init_addr = ray.get(worker.init_dist_port.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             _, url = ray.get(worker.init.remote(dist_init_addr), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
         except Exception as e:
             self.logger.error(f"Failed to restart worker: {e}")
-            return
+            return False
+
+        if old_url is not None and old_url != url:
+            self.logger.error(f"Restarted worker URL changed unexpectedly: old={old_url}, new={url}")
+            return False
+        return True
 
     def _update_dist_init_addr(self, nodes_per_engine, server_urls_per_engine, dist_init_addrs, tp_size):
         """Update the distributed initialization addresses for workers.
@@ -253,7 +272,9 @@ class RolloutController:
             A list of futures if `block` is False, otherwise a list of results.
         """
         futures = []
-        for info in self.rank2info.values():
+        with self.worker_info_lock:
+            infos = list(self.rank2info.values())
+        for info in infos:
             if info.is_active:
                 futures.append(getattr(info.actor, method_name).remote())
             else:
