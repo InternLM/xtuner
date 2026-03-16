@@ -1,0 +1,47 @@
+[
+  {
+    "category": "modify",
+    "description": "Update pack config file loaders: new 5-element JSONL format [dataset_path(str), sample_idx, char_start, char_end, token_start_offset]; replace NPY loader with Parquet loader using load_mixed_dict_from_parquet from jsonl.py; update dispatch function. Add loader-level unit tests.",
+    "steps": [
+      "Step 1: Update _load_pack_config_jsonl to parse 5-element slices [dataset_path(str), sample_idx, char_start, char_end, token_start_offset]; validate each slice has exactly 5 elements",
+      "Step 2: Delete _load_pack_config_npy; add _load_pack_config_parquet using load_mixed_dict_from_parquet from jsonl.py (reads boundaries np.ndarray, samples list[list[int]], paths list[str] from single .parquet file)",
+      "Step 3: Update _load_pack_config dispatch: .jsonl -> JSONL loader, .parquet -> Parquet loader",
+      "Step 4: Update test helpers in test_custom_pack_dataset.py: update _write_jsonl_pack for 5-element format; delete _write_npy_pack; add _write_parquet_pack using save_mixed_dict_to_parquet",
+      "Step 5: Write unit tests verifying JSONL and Parquet configs are loaded correctly (pack count, slice count, path/idx/char fields preserved) and run tests to pass"
+    ],
+    "passes": false
+  },
+  {
+    "category": "modify",
+    "description": "Rewrite CustomPackDataset __init__ and _validate_pack: build path->index mapping, remove skip strategy, new char-range validation, fix token total computation. Add validation-level unit tests.",
+    "steps": [
+      "Step 1: Update CustomPackDataset.__init__: build path->index mapping from datasets list (using ds.path); remove 'skip' from short_pack_strategy and long_pack_strategy Literal types; fix _sample_num_tokens to use ds.num_tokens[i] directly (not double-indexed via ds.sampled)",
+      "Step 2: Update _validate_pack: new char-range validation (both -1 for DataItem is OK; else require char_start>=0 and char_end>char_start); remove all skip handling code; compute token total via dataset.num_tokens[s_idx]",
+      "Step 3: Update _FakeDataset in tests to support the new 5-element format and have a .path attribute for path->index mapping",
+      "Step 4: Write unit tests for validation: hard errors (invalid dataset_path, sample_idx out of range, invalid char range), short_pack_strategy='error'/'padding', long_pack_strategy='error'/'truncate'; run tests to pass"
+    ],
+    "passes": false
+  },
+  {
+    "category": "modify",
+    "description": "Rewrite CustomPackDataset __getitem__: remove token slicing, add DataItem vs LongTextDataItem consistency check, handle padding. Add getitem-level unit tests covering DataItem, LongTextDataItem and mixed cases.",
+    "steps": [
+      "Step 1: Update __getitem__: remove token slicing (input_ids[t_start:t_end]); add consistency check - for char_start==-1 verify 'char_start' not in item (plain DataItem); for char_start!=-1 verify item is LongTextDataItem with matching char_start/char_end/token_start_offset; apply padding for short_pack_strategy='padding'",
+      "Step 2: Write unit test for DataItem case (char_start==-1) with both JSONL and Parquet configs: verify __getitem__ returns correct DataItem list with matching input_ids/labels/num_tokens; run tests to pass",
+      "Step 3: Write unit test for LongTextDataItem case (char_start/char_end/token_start_offset set): verify __getitem__ consistency check passes and returns correct LongTextDataItem; run tests to pass",
+      "Step 4: Write unit test for mixed DataItem and LongTextDataItem slices in same pack; write unit test that consistency check raises an error when returned item fields do not match pack config; run all tests to pass"
+    ],
+    "passes": false
+  },
+  {
+    "category": "add",
+    "description": "DataloaderConfig.build enforces JsonlDataset settings when pack_level='custom': sample_ratio=1.0, enable_sequential_sampler=True, disable_filter=True. Requires adding disable_filter parameter to JsonlDataset and DatasetConfig. Add unit tests.",
+    "steps": [
+      "Step 1: Add disable_filter: bool = False parameter to JsonlDataset.__init__; when True, skip all filter logic (num_tokens==0 filter and max_length filter) so _sampled is not reduced",
+      "Step 2: Add disable_filter: bool = False field to DatasetConfig; pass it to JsonlDataset in DatasetConfig.build()",
+      "Step 3: In DataloaderConfig.build, when pack_level=='custom', force each DatasetConfig to sample_ratio=1.0, enable_sequential_sampler=True, disable_filter=True before calling build_datasets; log a warning if any value was overridden from a non-default setting",
+      "Step 4: Write unit test verifying disable_filter=True on JsonlDataset skips all filters; write unit test verifying DataloaderConfig with pack_level='custom' forces the three settings regardless of what was configured; run tests to pass"
+    ],
+    "passes": false
+  }
+]

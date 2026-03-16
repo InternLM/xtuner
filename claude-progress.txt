@@ -1,0 +1,91 @@
+# Claude Progress Notes — Session 1 (Initializer)
+
+## What Was Done This Session
+
+This was the INITIALIZER session. No code was written. The session focused on:
+1. Analyzing the existing codebase and design docs
+2. Collecting and clarifying all requirements
+3. Producing the planning artifacts for future coding sessions
+
+## Artifacts Produced
+
+### 1. docs/design/custom_pack_sampler.md (UPDATED)
+Updated the design doc to reflect the finalized requirements:
+- New 5-element pack config slice format: [dataset_path(str), sample_idx, char_start, char_end, token_start_offset]
+- Pack config file formats: JSONL and Parquet (NPY removed)
+- char_start/char_end == -1 for regular DataItem; real values for LongTextDataItem
+- No "skip" strategy (violates index-config correspondence principle)
+- DataloaderConfig.build auto-forces sample_ratio=1, enable_sequential_sampler=True, disable_filter=True when pack_level="custom"
+- JsonlDataset gets new disable_filter parameter
+
+### 2. feature_list.json (CREATED)
+4 features defined — source of truth for all coding work.
+Each feature ends with unit test modifications and a "run tests to pass" step.
+- Feature 1 (modify, 5 steps): Update pack config loaders (JSONL new format + Parquet, drop NPY) + loader tests
+- Feature 2 (modify, 4 steps): Rewrite __init__ + _validate_pack (path mapping, remove skip, char validation) + validation tests
+- Feature 3 (modify, 4 steps): Rewrite __getitem__ (consistency check, no token slicing) + DataItem/LongTextDataItem/mixed tests
+- Feature 4 (add, 4 steps): DataloaderConfig forces JsonlDataset settings + disable_filter param + tests
+
+### 3. claude-progress.txt (this file)
+
+## Files That Need to Be Modified
+
+### Primary (CustomPackDataset goal):
+- xtuner/v1/datasets/custom_pack.py — REWRITE
+- tests/datasets/test_custom_pack_dataset.py — REWRITE
+
+### Supporting (Feature 2):
+- xtuner/v1/datasets/jsonl.py — ADD disable_filter: bool = False parameter
+- xtuner/v1/datasets/config.py — ADD disable_filter to DatasetConfig; force settings in DataloaderConfig.build when pack_level="custom"
+
+## Key Design Decisions (for coding agent to know)
+
+### Pack Config Format Change
+OLD (current code — WRONG, do not use):
+  [dataset_id(int), sample_idx, token_start, token_end]  — 4 elements
+
+NEW (correct):
+  JSONL: [dataset_path(str), sample_idx, char_start, char_end, token_start_offset]  — 5 elements
+  Parquet: [path_id(int), sample_idx, char_start, char_end, token_start_offset] + "paths" list
+
+### __getitem__ Change
+OLD (current code — WRONG):
+  Slices input_ids[t_start:t_end] manually
+
+NEW (correct):
+  Just calls dataset[sample_idx] and does consistency check:
+  - char_start==-1: verify item is plain DataItem (no 'char_start' key)
+  - char_start!=-1: verify item is LongTextDataItem with matching char_start/char_end/token_start_offset
+
+### Parquet Format (uses jsonl.py helpers)
+save_mixed_dict_to_parquet({
+    "boundaries": np.array([0,1,3,...]),  # CSR, shape (num_packs+1,)
+    "samples": [[path_id, s_idx, c_start, c_end, tok_off], ...],  # list[list[int]]
+    "paths": ["ds0.jsonl", "ds1.jsonl"],  # path_id -> dataset_path
+}, "pack_config.parquet")
+
+### No Skip Strategy
+Only: error / padding (for short) and error / truncate (for long)
+"skip" is NOT supported.
+
+### _sample_num_tokens Bug in Old Code
+Old code does: ds.num_tokens[np.array(ds.sampled)]  <- WRONG double indexing
+New code should do: ds.num_tokens[i]  where i is the logical sample index 0..len(ds)-1
+(JsonlDataset already reindexes num_tokens by sampled in its __init__)
+
+## Current State of Tests
+- tests/datasets/test_custom_pack_dataset.py: ALL tests use old format, ALL will fail with new code
+- tests/datasets/test_custom_sampler.py: unchanged, should still pass
+
+## How to Run Tests
+  bash run_test.sh
+(activates conda env py312-pt28-raw, runs pytest on test_custom_pack_dataset.py)
+
+## Next Session Instructions
+1. Read .claude/CLAUDE.md for repo overview
+2. Read docs/design/custom_pack_sampler.md for full spec
+3. Read feature_list.json for all work items
+4. Implement Feature 1 (rewrite custom_pack.py + tests)
+5. Implement Feature 2 (jsonl.py + config.py changes)
+6. Run tests after each feature, mark "passes": true when done
+7. Commit with descriptive message, update this progress file
