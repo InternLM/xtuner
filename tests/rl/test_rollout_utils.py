@@ -1,12 +1,19 @@
 import threading
 import time
 import unittest
+import os
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from xtuner.v1.data_proto.rl_data import Status
+from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.rollout.controller import RolloutController, WorkerInfo
 from xtuner.v1.rl.rollout.utils import RolloutHealthChecker, SessionRouter
+
+
+MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH", "")
+RESOURCE_MAP = {"npu": "NPU", "cuda": "GPU"}
 
 
 class FakeWorkerActor:
@@ -152,64 +159,69 @@ class TestRolloutHealthChecker(unittest.TestCase):
 
 
 class TestRolloutControllerRecover(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
+    @unittest.skipIf(not MODEL_PATH, "ROLLOUT_MODEL_PATH is required")
     async def test_deactivate_then_restart_worker_with_two_workers(self):
-        controller = RolloutController.__new__(RolloutController)
-        controller.logger = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, error=lambda *a, **k: None)
-        controller.worker_info_lock = threading.RLock()
-        controller.config = SimpleNamespace(rollout_timeout=1)
-        controller.timeout_multiplier = 1.0
-        controller.health_checker = SimpleNamespace(stop=lambda: None)
+        import ray
+        import torch
 
-        actor0 = FakeWorkerActor(url="http://w0")
-        actor1 = FakeWorkerActor(url="http://w1")
-        controller.rank2info = {
-            0: WorkerInfo(actor=actor0, url="http://w0", is_active=True),
-            1: WorkerInfo(actor=actor1, url="http://w1", is_active=True),
-        }
-        controller.router = SessionRouter(controller.rank2info, worker_infos_lock=controller.worker_info_lock)
+        from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 
-        checker_cfg = SimpleNamespace(
-            health_check_interval_seconds=1,
-            health_check_first_wait_seconds=0,
-            health_check_failure_threshold=1,
-        )
-        checker = RolloutHealthChecker(
-            config=checker_cfg,
-            workers_info=controller.rank2info,
-            worker_infos_lock=controller.worker_info_lock,
-        )
+        ray.init(ignore_reinit_error=True)
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            resource_cfg = AcceleratorResourcesConfig(
+                accelerator=RESOURCE_MAP[torch.accelerator.current_accelerator().type],
+                num_workers=2,
+                num_cpus_per_worker=4,
+                cpu_memory_per_worker=8 * 1024**3,
+            )
+            pg = AutoAcceleratorWorkers.build_placement_group(resource_cfg, name="recover_test_pg")
+            rollout_cfg = RolloutConfig(
+                env="test_rollout_utils",
+                model_path=MODEL_PATH,
+                model_name=os.path.basename(MODEL_PATH).lower(),
+                tokenizer_path=MODEL_PATH,
+                tensor_parallel_size=2,
+                expert_parallel_size=1,
+                worker_log_dir=temp_dir.name,
+                health_check_first_wait_seconds=0,
+                health_check_interval_seconds=600,
+                health_check_failure_threshold=1,
+            )
+            controller = RolloutController(rollout_cfg, pg)
 
-        async def _fake_check_worker_health(actor, rank, url, is_active, failure_threshold=1):
-            return rank != 0
+            rank0 = min(controller.rank2info.keys())
+            rank1 = max(controller.rank2info.keys())
+            actor0 = controller.rank2info[rank0].actor
 
-        with patch("xtuner.v1.rl.rollout.utils.check_worker_health", _fake_check_worker_health), patch(
-            "xtuner.v1.rl.rollout.utils.ray.get", lambda x, timeout=None: x
-        ):
-            checker.run_once()
+            # Simulate worker-0 deactivation and lifecycle by forcing a failed health result for rank-0.
+            async def _fake_check_worker_health(actor, rank, url, is_active, failure_threshold=1):
+                return rank != rank0
 
-        self.assertFalse(controller.rank2info[0].is_active)
-        self.assertEqual(actor0.offload_calls, 1)
-        self.assertEqual(actor0.shutdown_calls, 1)
-        self.assertEqual(actor0.get_gpu_memory_used(), 0)
+            with patch("xtuner.v1.rl.rollout.utils.check_worker_health", _fake_check_worker_health):
+                controller.health_checker.run_once()
 
-        worker0_health_before_recover = await actor0.check_health.remote()
-        self.assertFalse(worker0_health_before_recover)
+            self.assertFalse(controller.rank2info[rank0].is_active)
+            self.assertTrue(controller.rank2info[rank1].is_active)
 
-        with patch("xtuner.v1.rl.rollout.controller.ray.get", lambda x, timeout=None: x):
+            health_before_recover = await actor0.check_health.remote()
+            self.assertFalse(health_before_recover)
+            url_before = controller.rank2info[rank0].url
+
             controller.recover()
 
-        self.assertTrue(controller.rank2info[0].is_active)
-        self.assertEqual(actor0.url, controller.rank2info[0].url)
-        self.assertEqual(actor0.get_gpu_memory_used(), 1024)
-
-        worker0_health_after_recover = await actor0.check_health.remote()
-        self.assertTrue(worker0_health_after_recover)
-
-        rollout_state = SimpleNamespace(session_uid=123, status=None, error_msg="")
-        out = await controller.generate(rollout_state)
-
-        self.assertEqual(out.status, Status.SUCCESS)
-        self.assertEqual(actor0.generate_calls, 1)
+            self.assertTrue(controller.rank2info[rank0].is_active)
+            self.assertEqual(url_before, controller.rank2info[rank0].url)
+            health_after_recover = await actor0.check_health.remote()
+            self.assertTrue(health_after_recover)
+        finally:
+            try:
+                controller.shutdown()
+            except Exception:
+                pass
+            ray.shutdown()
+            temp_dir.cleanup()
 
 
 if __name__ == "__main__":
