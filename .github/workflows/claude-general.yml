@@ -27,6 +27,8 @@ jobs:
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           show_full_output: true
@@ -160,6 +162,8 @@ jobs:
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           show_full_output: true
@@ -170,7 +174,7 @@ jobs:
               COMMENT_USER: ${{ github.event.comment.user.login }}
               COMMENT_CONTENT: ${{ github.event.comment.body }}
 
-              Please anser the user's question. If you need to get the PR content, use can
+              Please answer the user's question. If you need to get the PR content, you can
               use `gh pr view <PR NUMBER> --comments` and `gh pr diff <PR NUMBER> --patch` to access the PR content.
               You can use multiple subagents to parallelize tasks. Each subagent should be told the PR title and
               description.
@@ -184,6 +188,22 @@ jobs:
               otherwise, push directly to the origin repository.
 
               If you update the branch, you **MUST** provide the URL of the new commit.
+
+              ## Summary Requirement
+
+              After completing all actions, you **MUST** post a summary comment to the issue or PR using `gh`. This
+              lets the user know exactly what was done. Use the appropriate command:
+
+              - For PRs: `gh pr comment <NUMBER> --body "<summary>"`
+              - For issues: `gh issue comment <NUMBER> --body "<summary>"`
+
+              The summary must include:
+              1. What the user requested (one-line recap).
+              2. What actions were taken (e.g., files modified, commits pushed, reviews posted).
+              3. Links to any new commits or relevant references.
+              4. If no action was taken (e.g., only answered a question), summarize the answer briefly.
+
+              Prefix the summary comment with "**Claude:**" so it is clearly identifiable.
 
           claude_args: |
               --max-turns 30
