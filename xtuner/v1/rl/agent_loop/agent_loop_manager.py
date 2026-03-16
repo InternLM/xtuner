@@ -20,7 +20,7 @@ from .sampler import Sampler, SamplerConfig
 class ProduceBatchResult:
     """Result of a single ``produce_batch`` call.
 
-    Attributes:
+    Args:
         rollout_states (list[list[RolloutState]]): Completed rollout groups retrieved from the replay buffer for training.
         group_gen_count (int | None): Number of generate-group calls finished in this batch (None if no generations ran).
         group_gen_mean_s (float | None): Mean wall-clock time per generate-group call, in seconds.
