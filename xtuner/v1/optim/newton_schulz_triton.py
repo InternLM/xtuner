@@ -309,12 +309,11 @@ def newton_schulz_triton(G: Tensor, epsilon: float = 1e-7, num_experts: int = 1)
 
     # Unified reshape: (num_experts * M, N) -> (num_experts, M, N)
     # For num_experts=1, this is (M, N) -> (1, M, N), adding a batch dim
-    M = X.size(-2) // num_experts
     N = X.size(-1)
-    X = X.view(num_experts, M, N)
+    X = X.view(num_experts, -1, N)
 
     # Transpose if rows > cols for numerical stability
-    need_transpose = G.size(-2) > G.size(-1)
+    need_transpose = X.size(-2) > X.size(-1)
     if need_transpose:
         X = X.mT
 
