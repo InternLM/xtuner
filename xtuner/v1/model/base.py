@@ -621,7 +621,7 @@ class BaseModel(nn.Module):
         efficient_attn_ratio = efficient_forward_tokens.float() / total_forward_tokens.float()
         img_efficient_attn_ratio = img_efficient_forward_tokens.float() / (img_total_forward_tokens.float() + 1e-8)
 
-        if seq_ctx.sequence_parallel_mesh:
+        if len(data_batches) > 0 and seq_ctx.sequence_parallel_mesh:
             step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
 
         batch_info: DataBatchInfo = {

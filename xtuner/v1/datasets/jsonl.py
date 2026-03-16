@@ -517,7 +517,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         self._meta["proxy_attn_flops"] = np.array(_total_proxy_attn_flops)
 
     @property
-    def proxy_attn_flops(self):
+    def proxy_attn_flops(self) -> np.ndarray:
         return self._meta["proxy_attn_flops"]
 
     def _init_shared_memory(self, path: str) -> SharedMemory:
