@@ -635,16 +635,19 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         # serialize tokenized
         if self._has_chunk:
             num_tokens_of_chunks = []
+            num_img_tokens_of_chunks = []
             chunks_of_chunks = []
             line_idxs_of_chunks = []
             for line_idx, data in enumerate(tokenized):
                 num_tokens_of_chunks.extend(data["num_tokens"])
+                num_img_tokens_of_chunks.extend(data.get("num_img_tokens", [[0]] * len(data["num_tokens"])))
                 chunks_of_chunks.extend(
                     [(c["char_start"], c["char_end"], c["token_start_offset"]) for c in data["chunks"]]
                 )
                 line_idxs_of_chunks.extend([line_idx] * len(data["num_tokens"]))
             serialized_tokenized = {
                 "num_tokens": np.array(num_tokens_of_chunks),
+                "num_img_tokens": num_img_tokens_of_chunks,
                 "chunks": np.array(chunks_of_chunks),
                 "line_idxs": np.array(line_idxs_of_chunks),
             }

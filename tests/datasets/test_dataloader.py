@@ -22,6 +22,10 @@ class RandomDataset:
         self.size = size
         self.num_tokens = [random.randint(50, 4096) for _ in range(size)]
         self._meta = {'num_tokens': self.num_tokens,'proxy_attn_flops': self.num_tokens}
+    
+    @property
+    def proxy_attn_flops(self):
+        return self._meta['proxy_attn_flops']
 
     def __len__(self):
         return self.size
