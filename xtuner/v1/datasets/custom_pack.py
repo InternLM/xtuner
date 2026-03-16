@@ -3,17 +3,16 @@
 Pack config file formats
 ------------------------
 JSONL (one pack per line):
-    {"samples": [[dataset_id, sample_idx, token_start, token_end], ...]}
+    {"samples": [[dataset_path, sample_idx, char_start, char_end, token_start_offset], ...]}
+    For plain DataItem: char_start == char_end == -1, token_start_offset == 0
 
-NPY (CSR-style, two files in same directory):
-    pack_boundaries.npy  – shape (num_packs+1,)   int64 CSR boundaries
-    pack_samples.npy     – shape (total_slices, 4) int64 flat slice list
-
-token_end == 0  means "take to the end of the sample".
+Parquet (single .parquet file, efficient for large configs):
+    boundaries: np.ndarray  shape (num_packs+1,)  -- CSR boundaries
+    samples:    list[list[int]]  -- [[path_id, sample_idx, char_start, char_end, token_start_offset], ...]
+    paths:      list[str]        -- path_id -> dataset_path mapping
 """
 
 import json
-import os
 from typing import Literal, cast
 
 import numpy as np
@@ -22,18 +21,23 @@ import torch.utils.data as tud
 from xtuner.v1.utils import get_logger
 
 from .data_item import DataItem
-from .jsonl import JsonlDataset
+from .jsonl import JsonlDataset, load_mixed_dict_from_parquet
 
 
 logger = get_logger()
 
+# (dataset_path, sample_idx, char_start, char_end, token_start_offset)
+_PackSlice = tuple[str, int, int, int, int]
 
-def _load_pack_config_jsonl(path: str) -> list[list[list[int]]]:
+
+def _load_pack_config_jsonl(path: str) -> list[list[_PackSlice]]:
     """Load pack config from a JSONL file.
 
-    Returns a list of packs, each pack is a list of slices [dataset_id, sample_idx, token_start, token_end].
+    Returns:
+        list[list[_PackSlice]]: A list of packs, each pack is a list of slices
+            (dataset_path, sample_idx, char_start, char_end, token_start_offset).
     """
-    packs: list[list[list[int]]] = []
+    packs: list[list[_PackSlice]] = []
     with open(path, encoding="utf-8") as f:
         for lineno, line in enumerate(f, 1):
             line = line.strip()
@@ -48,55 +52,48 @@ def _load_pack_config_jsonl(path: str) -> list[list[list[int]]]:
             samples = obj["samples"]
             if not isinstance(samples, list) or len(samples) == 0:
                 raise ValueError(f"'samples' must be a non-empty list on line {lineno} of {path}.")
+            pack: list[_PackSlice] = []
             for s in samples:
-                if not (isinstance(s, (list, tuple)) and len(s) == 4):
+                if not (isinstance(s, (list, tuple)) and len(s) == 5):
                     raise ValueError(
-                        f"Each slice must be [dataset_id, sample_idx, token_start, token_end] "
+                        f"Each slice must be [dataset_path, sample_idx, char_start, char_end, token_start_offset] "
                         f"on line {lineno} of {path}. Got: {s}"
                     )
-            packs.append([list(s) for s in samples])
+                pack.append((str(s[0]), int(s[1]), int(s[2]), int(s[3]), int(s[4])))
+            packs.append(pack)
     return packs
 
 
-def _load_pack_config_npy(path: str) -> list[list[list[int]]]:
-    """Load pack config from NPY files (CSR format).
+def _load_pack_config_parquet(path: str) -> list[list[_PackSlice]]:
+    """Load pack config from a Parquet file.
 
-    Looks for ``pack_boundaries.npy`` and ``pack_samples.npy``
-    alongside ``path`` (or in the same directory if path is a directory).
+    Returns:
+        list[list[_PackSlice]]: A list of packs, each pack is a list of slices
+            (dataset_path, sample_idx, char_start, char_end, token_start_offset).
     """
-    base_dir = path if os.path.isdir(path) else os.path.dirname(path)
-    boundaries_path = os.path.join(base_dir, "pack_boundaries.npy")
-    samples_path = os.path.join(base_dir, "pack_samples.npy")
+    data = load_mixed_dict_from_parquet(path)
+    boundaries = np.asarray(data["boundaries"], dtype=np.int64)
+    samples: list[list[int]] = cast(list[list[int]], data["samples"])
+    paths: list[str] = cast(list[str], data["paths"])
 
-    if not os.path.exists(boundaries_path):
-        raise FileNotFoundError(f"pack_boundaries.npy not found in {base_dir}")
-    if not os.path.exists(samples_path):
-        raise FileNotFoundError(f"pack_samples.npy not found in {base_dir}")
-
-    boundaries = np.load(boundaries_path)
-    flat_samples = np.load(samples_path)
-
-    if flat_samples.ndim != 2 or flat_samples.shape[1] != 4:
-        raise ValueError(f"pack_samples.npy must have shape (N, 4), got {flat_samples.shape}")
-    if boundaries.ndim != 1 or len(boundaries) < 2:
-        raise ValueError(
-            f"pack_boundaries.npy must be a 1-D array with at least 2 elements, got shape {boundaries.shape}"
-        )
-
-    packs: list[list[list[int]]] = []
+    packs: list[list[_PackSlice]] = []
     for i in range(len(boundaries) - 1):
         start, end = int(boundaries[i]), int(boundaries[i + 1])
-        packs.append(flat_samples[start:end].tolist())
+        pack: list[_PackSlice] = []
+        for s in samples[start:end]:
+            path_id, s_idx, c_start, c_end, tok_off = int(s[0]), int(s[1]), int(s[2]), int(s[3]), int(s[4])
+            pack.append((paths[path_id], s_idx, c_start, c_end, tok_off))
+        packs.append(pack)
     return packs
 
 
-def _load_pack_config(path: str) -> list[list[list[int]]]:
-    """Dispatch to the correct loader based on file extension / existence."""
+def _load_pack_config(path: str) -> list[list[_PackSlice]]:
+    """Dispatch to the correct loader based on file extension."""
     if path.endswith(".jsonl"):
         return _load_pack_config_jsonl(path)
-    else:
-        # Try NPY CSR format
-        return _load_pack_config_npy(path)
+    elif path.endswith(".parquet"):
+        return _load_pack_config_parquet(path)
+    raise ValueError(f"Unsupported pack config format: {path}. Expected .jsonl or .parquet.")
 
 
 class CustomPackDataset(tud.Dataset):
@@ -111,7 +108,7 @@ class CustomPackDataset(tud.Dataset):
     datasets:
         List of :class:`JsonlDataset` instances returned by ``build_datasets()``.
     pack_config_path:
-        Path to the pack configuration file (JSONL or NPY-CSR).
+        Path to the pack configuration file (JSONL or Parquet).
     pack_max_length:
         Expected total token count per pack.
     short_pack_strategy:
@@ -145,11 +142,19 @@ class CustomPackDataset(tud.Dataset):
         logger.info(f"CustomPackDataset: loaded {len(raw_packs)} raw packs from {pack_config_path}.")
 
         # ------------------------------------------------------------------
+        # 2. Pre-compute per-dataset token counts indexed by sampled position
+        # ------------------------------------------------------------------
+        self._sample_num_tokens: list[np.ndarray] = []
+        for ds in datasets:
+            sampled_arr = np.array(ds.sampled, dtype=np.int64)
+            assert ds.num_tokens is not None
+            self._sample_num_tokens.append(ds.num_tokens[sampled_arr])
+
+        # ------------------------------------------------------------------
         # 3. Validate packs and build self.pack_infos
         # ------------------------------------------------------------------
         valid_packs: list[list[tuple[int, int, int, int]]] = []
         num_skipped = 0
-        # Track used (dataset_id, sample_idx) pairs for coverage reporting.
         used_pairs: set[tuple[int, int]] = set()
 
         for pack_idx, raw_pack in enumerate(raw_packs):
@@ -158,7 +163,6 @@ class CustomPackDataset(tud.Dataset):
                 if ok == "skip":
                     num_skipped += 1
                     continue
-                # ok == "error" – exception already raised in _validate_pack
             else:
                 valid_packs.append(slices)
                 for ds_id, s_idx, _, _ in slices:
@@ -189,7 +193,7 @@ class CustomPackDataset(tud.Dataset):
     # ------------------------------------------------------------------
 
     def _validate_pack(
-        self, pack_idx: int, raw_pack: list[list[int]]
+        self, pack_idx: int, raw_pack: list[_PackSlice]
     ) -> tuple[list[tuple[int, int, int, int]] | None, str]:
         """Validate one raw pack.
 
@@ -199,20 +203,36 @@ class CustomPackDataset(tud.Dataset):
         (None,  "skip")   – pack should be skipped.
         Never returns (None, "error") – errors are raised directly.
         """
-        # TODO: 去掉skip逻辑
+        # TODO: Feature 2 – rewrite to use new path->index mapping and remove skip
         slices: list[tuple[int, int, int, int]] = []
 
         for entry in raw_pack:
-            ds_id, s_idx, t_start, t_end = int(entry[0]), int(entry[1]), int(entry[2]), int(entry[3])
+            # entry = (dataset_path, s_idx, char_start, char_end, token_start_offset)
+            # For now map dataset_path to ds_id by position (legacy compat stub)
+            # This will be replaced entirely in Feature 2.
+            dataset_path, s_idx, t_start, t_end, _tok_off = entry
+            ds_id = next(
+                (i for i, ds in enumerate(self.datasets) if ds.path == dataset_path),
+                -1,
+            )
 
-            # Hard errors – always raise, not skippable.
             if ds_id < 0 or ds_id >= len(self.datasets):
                 raise ValueError(f"Pack {pack_idx}: dataset_id {ds_id} is out of range [0, {len(self.datasets)}).")
-            if t_start < 0 or t_end < 0 or t_start > t_end:
-                raise ValueError(f"Pack {pack_idx}: invalid token range [{t_start}, {t_end}).")
-            slices.append((ds_id, s_idx, t_start, t_end))
+            ds_num_tokens = self._sample_num_tokens[ds_id]
+            n_samples = len(ds_num_tokens)
+            if s_idx < 0 or s_idx >= n_samples:
+                raise ValueError(
+                    f"Pack {pack_idx}: sample_idx {s_idx} is out of range [0, {n_samples}) for dataset {ds_id}."
+                )
+            tok_len = int(ds_num_tokens[s_idx])
+            resolved_end = tok_len if t_end == 0 else t_end
+            if t_start < 0 or resolved_end > tok_len or t_start >= resolved_end:
+                raise ValueError(
+                    f"Pack {pack_idx}: invalid token range [{t_start}, {t_end}) "
+                    f"for sample ({ds_id}, {s_idx}) with {tok_len} tokens."
+                )
+            slices.append((ds_id, s_idx, t_start, resolved_end))
 
-        # TODO: 不应该这里做，这里是 char_start 和 char_end，没有 token 的信息，应该在 __getitem__ 中做。
         total_tokens = sum(end - start for _, _, start, end in slices)
 
         if total_tokens < self.pack_max_length:
@@ -226,7 +246,6 @@ class CustomPackDataset(tud.Dataset):
                     f"(total tokens {total_tokens} < pack_max_length {self.pack_max_length})."
                 )
                 return None, "skip"
-            # "padding": slices kept as-is; __getitem__ appends pad tokens.
 
         elif total_tokens > self.pack_max_length:
             if self.long_pack_strategy == "error":
@@ -241,7 +260,6 @@ class CustomPackDataset(tud.Dataset):
                 return None, "skip"
             else:  # "truncate"
                 excess = total_tokens - self.pack_max_length
-                # Truncate the last slice
                 ds_id, s_idx, t_start, t_end = slices[-1]
                 new_end = t_end - excess
                 if new_end <= t_start:
@@ -265,7 +283,7 @@ class CustomPackDataset(tud.Dataset):
         items: list[DataItem] = []
 
         for ds_id, s_idx, t_start, t_end in pack:
-            # TODO: 不是做截断，而是做 start, end 检查
+            # TODO: Feature 3 – replace token slicing with consistency check
             raw_item: DataItem = cast(DataItem, self.datasets[ds_id][s_idx])
             sliced: DataItem = {
                 "input_ids": raw_item["input_ids"][t_start:t_end],
@@ -274,7 +292,6 @@ class CustomPackDataset(tud.Dataset):
             }
             items.append(sliced)
 
-        # Handle padding strategy: append a pad DataItem if needed.
         if self.short_pack_strategy == "padding":
             total_tokens = sum(item["num_tokens"] for item in items)
             pad_len = self.pack_max_length - total_tokens

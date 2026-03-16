@@ -9,7 +9,7 @@
       "Step 4: Update test helpers in test_custom_pack_dataset.py: update _write_jsonl_pack for 5-element format; delete _write_npy_pack; add _write_parquet_pack using save_mixed_dict_to_parquet",
       "Step 5: Write unit tests verifying JSONL and Parquet configs are loaded correctly (pack count, slice count, path/idx/char fields preserved) and run tests to pass"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "modify",

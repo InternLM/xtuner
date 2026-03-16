@@ -1,3 +1,28 @@
+# Claude Progress Notes — Session 2
+
+## What Was Done This Session
+
+### Feature 1 — Update pack config loaders (COMPLETED, commit: 931dcb7d)
+- _load_pack_config_jsonl: new 5-element format [dataset_path(str), sample_idx, char_start, char_end, token_start_offset]
+- Replaced _load_pack_config_npy with _load_pack_config_parquet (uses load_mixed_dict_from_parquet)
+- Updated _load_pack_config dispatch: .jsonl -> JSONL loader, .parquet -> Parquet loader
+- Rewrote test helpers (_write_jsonl_pack, _write_parquet_pack)
+- 5 loader-level unit tests, all passing
+
+## Current Completion Status
+1/4 features passing
+
+## What To Work On Next
+- Feature 2: Rewrite CustomPackDataset.__init__ and _validate_pack
+  - Build path->index mapping from datasets list (using ds.path)
+  - Remove 'skip' from short_pack_strategy and long_pack_strategy Literal types
+  - Fix _sample_num_tokens: use ds.num_tokens[i] directly (already reindexed by sampled)
+  - New char-range validation: both -1 OK (DataItem); else require char_start>=0 and char_end>char_start
+  - Update _FakeDataset in tests to have .path attribute and support new 5-element format
+  - Add validation-level unit tests
+
+---
+
 # Claude Progress Notes — Session 1 (Initializer)
 
 ## What Was Done This Session
