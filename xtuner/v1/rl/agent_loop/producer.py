@@ -18,6 +18,13 @@ from .sampler import Sampler
 
 @dataclass
 class ProducerTimings:
+    """记录一轮 batch 生成过程中每个 group 的生成耗时统计信息。
+
+    Attributes:
+        generate_times_s (list[float]): 每个 group 的生成耗时（秒），长度等于本轮生成 group 的数量。
+        pause_time_s (float): 结束时等待所有 pending 任务收尾的总耗时（秒）。
+    """
+
     generate_times_s: list[float] = field(default_factory=list)
     pause_time_s: float = 0.0
 

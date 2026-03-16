@@ -18,6 +18,21 @@ from .sampler import Sampler, SamplerConfig
 
 @dataclass
 class ProduceBatchResult:
+    """Result of a single ``produce_batch`` call.
+
+    Attributes:
+        rollout_states (list[list[RolloutState]]): Completed rollout groups retrieved from the replay buffer for training.
+        group_gen_count (int | None): Number of generate-group calls finished in this batch (None if no generations ran).
+        group_gen_mean_s (float | None): Mean wall-clock time per generate-group call, in seconds.
+        group_gen_p50_s (float | None): Median (p50) generate-group time, in seconds.
+        group_gen_p99_s (float | None): 99th percentile generate-group time, in seconds.
+        group_gen_p99_p50_ratio (float | None): Ratio of p99 to p50, indicating tail-latency skew.
+        group_gen_pause_time_s (float | None): Time spent in pause/cleanup phase (async strategy only), in seconds.
+        leftover_completed (int): Number of completed groups remaining in the replay buffer after this batch.
+        leftover_aborted (int): Number of aborted groups remaining in the replay buffer.
+        leftover_expired (int): Number of expired groups remaining in the replay buffer.
+    """
+
     rollout_states: list[list[RolloutState]]
     # per-group generation timing stats (all None if no generations occurred)
     group_gen_count: int | None = None
