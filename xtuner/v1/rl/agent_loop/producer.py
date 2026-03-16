@@ -315,11 +315,4 @@ class AsyncProduceStrategy(ProduceStrategy):
         if len(pending_tasks) > 0:
             pause_time_s = await self._cleanup_pending_tasks(pending_tasks, agent_loop, replay_buffer, task_name)
 
-        # 6. 统计打印总数
-        completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
-        aborted_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.ABORTED)
-        expired_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
-        logger.info(
-            f"[AsyncProduceStrategy] Task {task_name} | Finished! Final completed count: {completed_sample_count}, aborted count: {aborted_sample_count}, expired count: {expired_sample_count} in replay buffer."
-        )
         return ProduceBatchStats(generate_times_s=generate_times, pause_time_s=pause_time_s)

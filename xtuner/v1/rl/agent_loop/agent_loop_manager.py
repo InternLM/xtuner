@@ -1,3 +1,4 @@
+import asyncio
 import time
 from dataclasses import dataclass
 
@@ -114,12 +115,11 @@ class AgentLoopManager:
             f"[AgentLoopManager][{self.task_name}] replay_buffer.get done completed_groups={len(batch_rollout_states)} elapsed={time.perf_counter() - start:.3f}"
         )
         result.rollout_states = batch_rollout_states
-        completed_sample_count = await self._replay_buffer.count(
-            task_name=self.task_name, group_status=Status.COMPLETED
+        completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
+            self._replay_buffer.count(task_name=self.task_name, group_status=Status.COMPLETED),
+            self._replay_buffer.count(task_name=self.task_name, group_status=Status.ABORTED),
+            self._replay_buffer.count(task_name=self.task_name, group_status=Status.EXPIRED),
         )
-        aborted_sample_count = await self._replay_buffer.count(task_name=self.task_name, group_status=Status.ABORTED)
-        expired_sample_count = await self._replay_buffer.count(task_name=self.task_name, group_status=Status.EXPIRED)
-
         result.completed_samples = completed_sample_count
         result.aborted_samples = aborted_sample_count
         result.expired_samples = expired_sample_count

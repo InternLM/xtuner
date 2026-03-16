@@ -345,7 +345,6 @@ class RLColocateTrainer:
                 train_trajectory_path = train_trajectory_dir / f"train_rollout_{rollout_idx}.jsonl"
                 self._save_trajectories(train_batch, train_trajectory_path)
                 self.logger.info(f"Rollout {rollout_idx} train trajectories saved to {train_trajectory_path}")
-                # TODO: save train trajectory
                 if not self._debug_rollout:
                     ray.get(self.rollout_controller.offload.remote())
 
