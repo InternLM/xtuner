@@ -1,16 +1,19 @@
 """Unit tests for CustomPackDataset."""
 
 import json
+import os
 
 import numpy as np
 import pytest
 
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.custom_pack import (
     CustomPackDataset,
     _load_pack_config_jsonl,
     _load_pack_config_parquet,
 )
-from xtuner.v1.datasets.jsonl import save_mixed_dict_to_parquet
+from xtuner.v1.datasets.jsonl import JsonlDataset, save_mixed_dict_to_parquet
+from xtuner.v1.datasets.utils import CachableTokenizeFunction
 
 
 # ---------------------------------------------------------------------------
@@ -351,3 +354,103 @@ class TestGetitem:
         dataset = CustomPackDataset([ds], config_path, pack_max_length=128)
         with pytest.raises(ValueError, match="mismatch"):
             dataset[0]
+
+
+# ---------------------------------------------------------------------------
+# Helpers for Feature 4 tests
+# ---------------------------------------------------------------------------
+
+
+class _CountingTokenizeFn(CachableTokenizeFunction):
+    """Tokenize function that returns preset num_tokens per line (by call order)."""
+
+    def __init__(self, num_tokens_per_line: list[int]):
+        super().__init__(tokenizer=None)
+        self._num_tokens = num_tokens_per_line
+        self._idx = 0
+
+    def __call__(self, item, **kwargs):
+        n = self._num_tokens[self._idx % len(self._num_tokens)]
+        self._idx += 1
+        return {"num_tokens": n}
+
+    def hash(self) -> str:
+        return "counting_test_hash"
+
+
+def _write_jsonl(path: str, lines: list[dict]) -> None:
+    with open(path, "w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: disable_filter tests
+# ---------------------------------------------------------------------------
+
+
+class TestDisableFilter:
+    def test_zero_token_filter_applied_by_default(self, tmp_path, monkeypatch):
+        """Without disable_filter, samples with num_tokens==0 are excluded."""
+        monkeypatch.setenv("XTUNER_TOKENIZE_WORKERS", "1")
+        jsonl_path = str(tmp_path / "data.jsonl")
+        # 3 lines; tokenize fn returns [0, 5, 5] tokens
+        _write_jsonl(jsonl_path, [{"text": "a"}, {"text": "b"}, {"text": "c"}])
+        tokenize_fn = _CountingTokenizeFn([0, 5, 5])
+
+        ds = JsonlDataset(jsonl_path, tokenize_fn=tokenize_fn)
+        # Sample with 0 tokens should be filtered out
+        assert len(ds) == 2
+
+    def test_disable_filter_skips_zero_token_filter(self, tmp_path, monkeypatch):
+        """disable_filter=True keeps samples with num_tokens==0."""
+        monkeypatch.setenv("XTUNER_TOKENIZE_WORKERS", "1")
+        jsonl_path = str(tmp_path / "data.jsonl")
+        _write_jsonl(jsonl_path, [{"text": "a"}, {"text": "b"}, {"text": "c"}])
+        tokenize_fn = _CountingTokenizeFn([0, 5, 5])
+
+        ds = JsonlDataset(jsonl_path, tokenize_fn=tokenize_fn, disable_filter=True)
+        assert len(ds) == 3
+
+    def test_disable_filter_skips_max_length_filter(self, tmp_path, monkeypatch):
+        """disable_filter=True keeps samples that exceed max_length."""
+        monkeypatch.setenv("XTUNER_TOKENIZE_WORKERS", "1")
+        jsonl_path = str(tmp_path / "data.jsonl")
+        _write_jsonl(jsonl_path, [{"text": "a"}, {"text": "b"}])
+        # line 0: 100 tokens (within limit), line 1: 200 tokens (over limit)
+        tokenize_fn = _CountingTokenizeFn([100, 200])
+
+        ds_filtered = JsonlDataset(jsonl_path, tokenize_fn=tokenize_fn, max_length=150)
+        ds_unfiltered = JsonlDataset(
+            jsonl_path,
+            tokenize_fn=_CountingTokenizeFn([100, 200]),
+            max_length=150,
+            disable_filter=True,
+        )
+        assert len(ds_filtered) == 1
+        assert len(ds_unfiltered) == 2
+
+
+# ---------------------------------------------------------------------------
+# Feature 4: DataloaderConfig forces settings for pack_level='custom'
+# ---------------------------------------------------------------------------
+
+
+class TestDataloaderConfigCustomMode:
+    def test_forces_dataset_settings(self):
+        """_force_custom_pack_settings forces sample_ratio=1.0, enable_sequential_sampler=True,
+        disable_filter=True regardless of original config values."""
+        dc = DatasetConfig(
+            anno_path="/fake/ds.jsonl",
+            sample_ratio=0.5,
+            enable_sequential_sampler=False,
+            disable_filter=False,
+        )
+        config_list = [{"dataset": dc, "tokenize_fn": None}]  # type: ignore[list-item]
+        forced = DataloaderConfig._force_custom_pack_settings(config_list)
+
+        assert len(forced) == 1
+        result_dc = forced[0]["dataset"]
+        assert result_dc.sample_ratio == 1.0
+        assert result_dc.enable_sequential_sampler is True
+        assert result_dc.disable_filter is True

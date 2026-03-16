@@ -42,6 +42,6 @@
       "Step 3: In DataloaderConfig.build, when pack_level=='custom', force each DatasetConfig to sample_ratio=1.0, enable_sequential_sampler=True, disable_filter=True before calling build_datasets; log a warning if any value was overridden from a non-default setting",
       "Step 4: Write unit test verifying disable_filter=True on JsonlDataset skips all filters; write unit test verifying DataloaderConfig with pack_level='custom' forces the three settings regardless of what was configured; run tests to pass"
     ],
-    "passes": false
+    "passes": true
   }
 ]

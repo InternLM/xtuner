@@ -1,3 +1,23 @@
+# Claude Progress Notes — Session 4
+
+## What Was Done This Session
+
+### Feature 4 — DataloaderConfig forces JsonlDataset settings (COMPLETED)
+- Added `disable_filter: bool = False` to `JsonlDataset.__init__`; gates both filter blocks:
+  - `num_tokens==0` filter (damaged samples)
+  - `max_length` filter
+- Added `disable_filter: bool = False` to `DatasetConfig`; passed to `JsonlDataset.build()`
+- Added `DataloaderConfig._force_custom_pack_settings` static method: deep-copies each config, forces `sample_ratio=1.0`, `enable_sequential_sampler=True`, `disable_filter=True`, logs warning for each override
+- Called `_force_custom_pack_settings` in `DataloaderConfig.build` before `build_datasets` when `pack_level='custom'`
+- Added `_CountingTokenizeFn` test helper and `_write_jsonl` helper
+- Added `TestDisableFilter` (3 tests) and `TestDataloaderConfigCustomMode` (3 tests)
+- All 25 tests pass
+
+## Current Completion Status
+4/4 features passing — ALL DONE!
+
+---
+
 # Claude Progress Notes — Session 3
 
 ## What Was Done This Session

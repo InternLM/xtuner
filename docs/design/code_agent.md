@@ -150,7 +150,9 @@ Before context fills up:
 
 **Your Goal:** Production-quality application with all 200+ tests passing
 
-**This Session's Goal:** Complete at least one feature perfectly
+**This Session's Goal:** Complete at least one feature perfectly. But make sure that:
+One Feature One Commit (Step 3 - Step 8). Then you can start another feature (Step 3 - Step 8).
+And commit all changes before context fills up.
 
 **Priority:** Fix broken tests before implementing new features
 

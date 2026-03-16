@@ -50,6 +50,7 @@ class DatasetConfig(BaseModel):
     enable_sequential_sampler: Annotated[bool, Parameter(group="dataset")] = False
     enable_mmap_shared: Annotated[bool, Parameter(group="dataset")] = False
     media_root: Annotated[str | None, Parameter(group="dataset")] = ""
+    disable_filter: Annotated[bool, Parameter(group="dataset")] = False
 
     def build(
         self,
@@ -65,6 +66,7 @@ class DatasetConfig(BaseModel):
                 name=self.name,
                 cache_dir=self.cache_dir,
                 cache_tag=self.cache_tag,
+                disable_filter=self.disable_filter,
             )
         elif self.class_name == "VLMJsonlDataset":
             return VLMJsonlDataset(
@@ -303,6 +305,40 @@ class DataloaderConfig(BaseDataloaderConfig):
         Parameter(help="path to custom sampler order file (JSONL or NPY); required when pack_level='custom'"),
     ] = None
 
+    @staticmethod
+    def _force_custom_pack_settings(dataset_config_list: "DatasetConfigList") -> "DatasetConfigList":
+        """Return a copy of dataset_config_list with settings required by
+        pack_level='custom' forced.
+
+        Forces sample_ratio=1.0, enable_sequential_sampler=True, and disable_filter=True on every
+        DatasetConfig, logging a warning for each field that is overridden from a non-default value.
+
+        Args:
+            dataset_config_list (DatasetConfigList): Original dataset config list.
+
+        Returns:
+            DatasetConfigList: New list with forced settings applied.
+        """
+        result: DatasetConfigList = []
+        for config in dataset_config_list:
+            dc = copy.deepcopy(config["dataset"])
+            if dc.sample_ratio != 1.0:
+                logger.warning(
+                    f"pack_level='custom': overriding sample_ratio {dc.sample_ratio} -> 1.0 "
+                    f"for dataset '{dc.anno_path}'."
+                )
+                dc.sample_ratio = 1.0
+            if not dc.enable_sequential_sampler:
+                logger.warning(
+                    f"pack_level='custom': forcing enable_sequential_sampler=True for dataset '{dc.anno_path}'."
+                )
+                dc.enable_sequential_sampler = True
+            if not dc.disable_filter:
+                logger.warning(f"pack_level='custom': forcing disable_filter=True for dataset '{dc.anno_path}'.")
+                dc.disable_filter = True
+            result.append({"dataset": dc, "tokenize_fn": config["tokenize_fn"]})
+        return result
+
     def build_collator(self):
         if self.collator == "sft_llm_collator":
             return sft_llm_collator
@@ -348,7 +384,12 @@ class DataloaderConfig(BaseDataloaderConfig):
             raise ValueError("dataset_config_list is required.")
 
         with profile_time("[Build Datasets]"):
-            datasets = build_datasets(self.dataset_config_list, tokenizer, tokenizer_hash=self.tokenizer_hash)
+            effective_config_list = (
+                self._force_custom_pack_settings(self.dataset_config_list)
+                if self.pack_level == "custom"
+                else self.dataset_config_list
+            )
+            datasets = build_datasets(effective_config_list, tokenizer, tokenizer_hash=self.tokenizer_hash)
 
         assert isinstance(datasets, list), "datasets must be a list of datasets."
 

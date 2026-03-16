@@ -293,9 +293,11 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         cache_tag: str | None = None,
         enable_sequential_sampler: bool = False,
         enable_mmap_shared: bool = False,
+        disable_filter: bool = False,
     ):
         super().__init__()
 
+        self.disable_filter = disable_filter
         self.tokenize_fn = tokenize_fn
         self.path = str(anno_path)
         self.name = name
@@ -541,7 +543,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             base_len = len(offsets) - 1
         dtype = np.int32 if base_len < np.iinfo(np.int32).max else np.int64
         _sampled = np.arange(base_len, dtype=dtype)
-        _sampled = _filter_sampled_indices(_sampled, num_tokens, max_length)
+        if not self.disable_filter:
+            _sampled = _filter_sampled_indices(_sampled, num_tokens, max_length)
         sampled = _apply_sample_ratio(
             _sampled,
             sample_ratio=sample_ratio,
