@@ -30,3 +30,9 @@ class OmniDataItem(BaseMLLMDataItem, total=False):
     pixel_values: torch.Tensor
     image_grid_thw: torch.Tensor
     position_ids: torch.Tensor
+
+
+class LongTextDataItem(DataItem):
+    char_start: int
+    char_end: int
+    token_start_offset: int
