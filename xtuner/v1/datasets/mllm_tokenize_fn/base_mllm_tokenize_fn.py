@@ -157,6 +157,8 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._image_wh_list: list[list] = []
         self._video_wh_list: list[list] = []
         self._video_extra_info_list: list[dict] = []
+
+        self._hash_str += f"llm_pack_weight:{llm_pack_weight}_visual_pack_weight:{visual_pack_weight}"
         super().__init__(tokenizer, llm_pack_weight=llm_pack_weight, visual_pack_weight=visual_pack_weight)
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:

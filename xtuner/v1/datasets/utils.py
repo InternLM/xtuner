@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 def with_proxy_attention_flops(call_fn=None, *, flash_attn_block_size: int = 128):
-    """装饰器：自动为 CacheItem 计算并填充 proxy_attn_flops 字段."""
+    """Decorator: automatically compute and fill the proxy_attn_flops field for CacheItem."""
 
     def decorator(call_fn):
         @functools.wraps(call_fn)
@@ -32,9 +32,16 @@ def with_proxy_attention_flops(call_fn=None, *, flash_attn_block_size: int = 128
                     num_img_tokens = [0]
                 else:
                     num_img_tokens = ret["num_img_tokens"]
-                ret["proxy_attn_flops"] = self.proxy_attention_flops(
-                    ret["num_tokens"], num_img_tokens, flash_attn_block_size
-                )
+                num_tokens = ret["num_tokens"]
+                if isinstance(num_tokens, list):
+                    # Chunked mode (LongTextPretrainTokenizeFunction): compute per-chunk flops
+                    ret["proxy_attn_flops"] = [
+                        self.proxy_attention_flops(nt, num_img_tokens, flash_attn_block_size) for nt in num_tokens
+                    ]
+                else:
+                    ret["proxy_attn_flops"] = self.proxy_attention_flops(
+                        num_tokens, num_img_tokens, flash_attn_block_size
+                    )
             return ret
 
         return wrapper
