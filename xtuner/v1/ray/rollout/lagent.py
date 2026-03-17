@@ -99,7 +99,6 @@ class ControllerWrapper:
         placement_group: Optional[Any] = None,
         rollout_cfg: Optional[RolloutConfig] = None,
         rollout_controller: Optional[ActorClass] = None,
-        convert_to_str: bool = False,
         sample_params: Optional[SampleParams] = None,
     ):
         assert rollout_controller is not None or (
@@ -115,7 +114,6 @@ class ControllerWrapper:
         from transformers import AutoTokenizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.rollout_cfg.tokenizer_path, trust_remote_code=True)
-        self.convert_to_str = convert_to_str
         self.sample_params = sample_params or SampleParams()
         # default parsers
         self.reasoning_parser = TokenReasonParser(self.rollout_cfg.tokenizer_path)
@@ -124,29 +122,24 @@ class ControllerWrapper:
     async def chat(self, messages, session_id=None, tools: Optional[List[Dict]] = None, **kwargs):
         sample_params = self.sample_params.model_copy(update=kwargs)
         inputs = tokenize(self.tokenizer, messages, tools)
-        extra_info = {'action_id': session_id}
-        if inputs['routed_experts'] is not None:
-            extra_info['routed_experts'] = inputs['routed_experts']
-        try:
+        if len(inputs['input_ids']) >= self.rollout_cfg.context_length:
+            response = RLRolloutResponseItem(finish_reason='length')
+        else:
+            extra_info = {'action_id': session_id}
+            if inputs['routed_experts'] is not None:
+                extra_info['routed_experts'] = inputs['routed_experts']
             response: RLRolloutResponseItem = await self.rollout_controller.rollout.remote(
                 input_ids=inputs['input_ids'],
                 sample_params=sample_params,
                 session_id=session_id,
                 extra_info=extra_info,
             )
-        except RuntimeError as err:
-            if str(err).startswith('AssertionError: routed_experts is None, but finish_reason is error'):
-                response = RLRolloutResponseItem(finish_reason='length')
-            else:
-                raise err
-        if (
-            response.finish_reason != 'abort'
-            and self.rollout_cfg.enable_return_routed_experts
-            and 'routed_experts' not in response.extra_info
-        ):
-            raise ValueError("Routed experts expected in response extra_info but not found.")
-        if self.convert_to_str:
-            return response.response
+            if (
+                response.finish_reason != 'abort'
+                and self.rollout_cfg.enable_return_routed_experts
+                and 'routed_experts' not in response.extra_info
+            ):
+                raise ValueError("Routed experts expected in response extra_info but not found.")
 
         response = AgentMessage.from_model_response(response, '')
         response = self.reasoning_parser.parse_response(response)
