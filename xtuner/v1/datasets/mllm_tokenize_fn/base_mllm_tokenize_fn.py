@@ -12,7 +12,7 @@ from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.utils import get_logger
 
 from ..data_item import BaseMLLMDataItem, CacheItem
-from ..utils import CachableTokenizeFunction, tokenizer_xxhash
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
 
 
 logger = get_logger()
@@ -192,6 +192,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 labels = labels[: self.max_length]
         return input_ids, labels
 
+    @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
         try:
             self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
@@ -201,7 +202,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         except RuntimeError as e:
             if self.state == "cache":
                 print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")
-                ret = CacheItem(num_tokens=0)
+                ret = CacheItem(num_tokens=0, num_img_tokens=[0])
                 return ret
             else:
                 raise RuntimeError(f"!!!! RuntimeError: {e} of {self.data_name}")
