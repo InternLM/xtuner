@@ -5,7 +5,7 @@ from typing import Callable, Self, Sequence, cast
 import torch
 import torch.distributed as dist
 from pydantic import ConfigDict
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     FSDPModule,
@@ -15,8 +15,9 @@ from torch.distributed.fsdp import (
 from typing_extensions import override
 
 from xtuner.v1.config import FSDPConfig
+from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model import BaseModel
-from xtuner.v1.model.base import DataBatchInfo, ModelItem, XTunerBaseModelConfig
+from xtuner.v1.model.base import BatchForwardInfo, DataBatchInfo, ModelItem, ModelOutputs, XTunerBaseModelConfig
 from xtuner.v1.utils import get_device, get_logger
 
 from ..utils.misc import update_weight_map_from_safetensors_index
@@ -169,6 +170,15 @@ class BaseComposeModel(BaseModel):
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()
 
+    @override
+    def build_loss_ctx_batch(  # type: ignore[override]
+        self,
+        data_batch: list[dict],
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list[dict[str, BaseLossContext]]:
+        """Delegate loss_ctx building to the language model."""
+        return self.language_model.build_loss_ctx_batch(data_batch, sp_mesh=sp_mesh)
+
     def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
         data_batch_info = cast(ComposeDataBatchInfo, super().pre_micro_batch_forward(data_batches))
         step_consumed_img_tokens = 0.0
@@ -180,3 +190,6 @@ class BaseComposeModel(BaseModel):
                     step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
         data_batch_info["step_consumed_img_tokens"] = step_consumed_img_tokens
         return data_batch_info
+
+    def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
+        return self.language_model.post_micro_batch_forward(batch_outputs)
