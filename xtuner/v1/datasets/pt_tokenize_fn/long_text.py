@@ -11,7 +11,7 @@ from pydantic import ConfigDict
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.datasets.data_item import CacheItem, DataItem, LongTextDataItem
 
-from ..utils import CachableTokenizeFunction, tokenizer_xxhash
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
 from .text import PretrainTokenizeFunction, PretrainTokenizeFunctionConfig
 
 
@@ -197,6 +197,7 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
             running_chars += max(len(decoded), 1)
         return offsets
 
+    @with_proxy_attention_flops
     def __call__(self, item: Any, **kwargs: Any) -> DataItem | CacheItem:  # type: ignore[override]
         char_start: int | None = kwargs.get("char_start")
         char_end: int | None = kwargs.get("char_end")

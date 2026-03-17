@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import functools
 import hashlib
 import os
 import tempfile
@@ -17,6 +18,37 @@ T = TypeVar("T")
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
+
+
+def with_proxy_attention_flops(call_fn=None, *, flash_attn_block_size: int = 128):
+    """Decorator: automatically compute and fill the `proxy_attn_flops` field for CacheItem."""
+
+    def decorator(call_fn):
+        @functools.wraps(call_fn)
+        def wrapper(self, *args, **kwargs) -> CacheItem | T:
+            ret = call_fn(self, *args, **kwargs)
+            if self.state == "cache":
+                if "num_img_tokens" not in ret:
+                    num_img_tokens = [0]
+                else:
+                    num_img_tokens = ret["num_img_tokens"]
+                num_tokens = ret["num_tokens"]
+                if isinstance(num_tokens, list):
+                    # Chunked mode (LongTextPretrainTokenizeFunction): compute per-chunk flops
+                    ret["proxy_attn_flops"] = [
+                        self.proxy_attention_flops(nt, num_img_tokens, flash_attn_block_size) for nt in num_tokens
+                    ]
+                else:
+                    ret["proxy_attn_flops"] = self.proxy_attention_flops(
+                        num_tokens, num_img_tokens, flash_attn_block_size
+                    )
+            return ret
+
+        return wrapper
+
+    if call_fn is not None:
+        return decorator(call_fn)
+    return decorator
 
 
 class CachableTokenizeFunction(ABC, Generic[T]):
