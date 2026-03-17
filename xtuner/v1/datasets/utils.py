@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 def with_proxy_attention_flops(call_fn=None, *, flash_attn_block_size: int = 128):
-    """Decorator: automatically compute and fill the proxy_attn_flops field for CacheItem."""
+    """Decorator: automatically compute and fill the `proxy_attn_flops` field for CacheItem."""
 
     def decorator(call_fn):
         @functools.wraps(call_fn)
