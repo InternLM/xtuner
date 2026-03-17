@@ -167,6 +167,9 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
         safetensor: torch.Tensor,
         hf_param_name: str,
     ):
+        if "mtp" in hf_param_name:
+            return super().param_to_safetensor(safetensor, hf_param_name)
+
         assert isinstance(hf_param_name, str)
         if "gate_up_proj" in hf_param_name:
             # xtuner: num_experts * 2 * expert_dim, hidden_size

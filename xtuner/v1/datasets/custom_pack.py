@@ -154,6 +154,7 @@ class CustomPackDataset(tud.Dataset):
             # ds.num_tokens is indexed by raw line index.
             # ds.sampled maps logical index → raw line index.
             sampled_arr = np.array(ds.sampled, dtype=np.int64)
+            assert ds.num_tokens is not None
             self._sample_num_tokens.append(ds.num_tokens[sampled_arr])
 
         # ------------------------------------------------------------------
@@ -211,6 +212,7 @@ class CustomPackDataset(tud.Dataset):
         (None,  "skip")   – pack should be skipped.
         Never returns (None, "error") – errors are raised directly.
         """
+        # TODO: 去掉skip逻辑
         slices: list[tuple[int, int, int, int]] = []
 
         for entry in raw_pack:
@@ -287,6 +289,7 @@ class CustomPackDataset(tud.Dataset):
         items: list[DataItem] = []
 
         for ds_id, s_idx, t_start, t_end in pack:
+            # TODO: 不是做截断，而是做 start, end 检查
             raw_item: DataItem = cast(DataItem, self.datasets[ds_id][s_idx])
             sliced: DataItem = {
                 "input_ids": raw_item["input_ids"][t_start:t_end],
