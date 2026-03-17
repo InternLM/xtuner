@@ -216,8 +216,7 @@ class TestOrealLoss(DistributedTestBase):
                 seq_ctx = seq_ctx.split(sp_mesh)
             seq_ctx_list.append(seq_ctx)
             loss_ctx = loss_cfg.build(
-                shifted_labels=shifted_labels_list_rank[iter_idx], 
-                advantages=advantages_list_rank[iter_idx], 
+                data={"shifted_labels": shifted_labels_list_rank[iter_idx], "advantages": advantages_list_rank[iter_idx]},
                 sp_mesh=sp_mesh,
             )
             loss_ctx_list.append(loss_ctx)
