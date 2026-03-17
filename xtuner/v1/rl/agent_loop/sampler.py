@@ -1,5 +1,5 @@
-from pathlib import Path
 import copy
+from pathlib import Path
 from typing import Iterator, Optional, cast
 from uuid import uuid4
 
