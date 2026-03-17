@@ -61,7 +61,10 @@ rollout_config = RolloutConfig(
 )
 
 # 3. judger
-os_token_id = get_eos_token(model_path)
+from xtuner.v1.rl.utils import get_eos_token
+from transformers import AutoTokenizer
+eos_token_id = get_eos_token(model_path)
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
 dapomath_judger_config = DapoMathJudgerConfig(
     judger_name="dapo_math", 
