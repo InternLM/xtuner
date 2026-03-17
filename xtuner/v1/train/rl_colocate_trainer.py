@@ -543,6 +543,7 @@ class RLColocateTrainer:
             # self._maybe_save_hf()
             # self._maybe_save_checkpoint()
 
+        ray.get(self.rollout_controller.recover_failed_workers.remote())
         with timer("sync_weight", step_timer_dict):
             bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
             ray.get(self.rollout_controller.onload_weights.remote())

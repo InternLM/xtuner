@@ -13,11 +13,8 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import get_logger
 
-from .utils import RolloutHealthChecker, SessionRouter
+from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
 from .worker import RolloutConfig, RolloutWorker
-
-
-ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
 
 @dataclass
@@ -167,7 +164,7 @@ class RolloutController:
         self.health_checker.stop()
         self._broadcast_to_active_workers("shutdown")
 
-    def recover(self):
+    def recover_failed_workers(self):
         """Recovers from worker failures by restarting failed workers and
         reinitializing the rollout setup."""
         with self.worker_info_lock:
@@ -185,23 +182,19 @@ class RolloutController:
                         self.rank2info[rank].is_active = True
 
     def _restart_failed_workers(self, worker: RolloutWorker) -> bool:
-        rank = self._get_rank_by_actor(worker)
-        old_url = None
-        if rank is not None:
-            with self.worker_info_lock:
-                old_url = self.rank2info[rank].url
-
         try:
             dist_init_addr = ray.get(worker.init_dist_port.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
             _, url = ray.get(worker.init.remote(dist_init_addr), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            is_healthy = ray.get(worker.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
+            if is_healthy:
+                self.logger.info(f"Successfully restarted worker {worker} with URL {url}.")
+                return True
+            else:
+                self.logger.error(f"Worker {worker} is still unhealthy after restart.")
+                return False
         except Exception as e:
             self.logger.error(f"Failed to restart worker: {e}")
             return False
-
-        if old_url is not None and old_url != url:
-            self.logger.error(f"Restarted worker URL changed unexpectedly: old={old_url}, new={url}")
-            return False
-        return True
 
     def _update_dist_init_addr(self, nodes_per_engine, server_urls_per_engine, dist_init_addrs, tp_size):
         """Update the distributed initialization addresses for workers.

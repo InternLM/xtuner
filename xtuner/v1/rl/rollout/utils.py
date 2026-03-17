@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 import ray
 
+from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
 
@@ -107,12 +108,10 @@ class RolloutHealthChecker:
         self._workers_info = workers_info
         self._worker_infos_lock = worker_infos_lock
         self._check_interval = config.health_check_interval_seconds
-        self._check_first_wait = config.health_check_first_wait_seconds
         self._check_failure_threshold = config.health_check_failure_threshold
         self._stop_event: Optional[threading.Event] = None
         self._pause_event: Optional[threading.Event] = None
         self._thread: Optional[threading.Thread] = None
-        self._need_first_wait = True
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -123,7 +122,6 @@ class RolloutHealthChecker:
         self._pause_event.set()  # 启动时设置为暂停状态，开始generation后再调用restart方法恢复
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        self._need_first_wait = True
         logger.info("RolloutHealthChecker started.")
 
     def stop(self) -> None:
@@ -152,6 +150,7 @@ class RolloutHealthChecker:
         logger.info("RolloutHealthChecker restarted.")
 
     def run_once(self) -> None:
+        logger.info("RolloutHealthChecker running health checks for all workers.")
         if self._worker_infos_lock is None:
             workers_snapshot = {
                 rank: (info.actor, info.url, info.is_active) for rank, info in self._workers_info.items()
@@ -176,7 +175,7 @@ class RolloutHealthChecker:
         async def _run_checks() -> list[bool]:
             return await asyncio.gather(*tasks)
 
-        check_results = asyncio.run(_run_checks())
+        check_results = asyncio_run(_run_checks())
         inactive_workers = []
         for rank, is_healthy in zip(workers_snapshot.keys(), check_results):
             if not is_healthy:
@@ -189,11 +188,11 @@ class RolloutHealthChecker:
                         self._workers_info[rank].is_active = False
                         inactive_worker = self._workers_info[rank].actor
                 if inactive_worker is None:
-                    logger.error(f"Worker {rank} has no actor reference. Skipping shutdown.")
+                    logger.error(f"[RolloutHealthChecker] Worker {rank} has no actor reference. Skipping shutdown.")
                     continue
                 inactive_workers.append((rank, inactive_worker))
             else:
-                logger.debug(f"Worker {rank} passed health check.")
+                logger.info(f"[RolloutHealthChecker] Worker {rank} passed health check.")
 
         for rank, inactive_worker in inactive_workers:
             try:
@@ -204,20 +203,14 @@ class RolloutHealthChecker:
 
     def _run_loop(self) -> None:
         assert self._stop_event is not None and self._pause_event is not None
+        logger.info("RolloutHealthChecker loop started.")
 
         while not self._stop_event.is_set():
             while self._pause_event.is_set() and not self._stop_event.is_set():
-                self._stop_event.wait(timeout=1)
+                self._stop_event.wait(timeout=0.5)
 
             if self._stop_event.is_set():
                 break
-
-            if self._need_first_wait:
-                if self._stop_event.wait(self._check_first_wait):
-                    break
-                if self._pause_event.is_set():
-                    continue
-                self._need_first_wait = False
 
             if not self._pause_event.is_set() and not self._stop_event.is_set():
                 self.run_once()
@@ -239,6 +232,7 @@ async def send_abort_request(client: httpx.AsyncClient, url: str, timeout: float
 
 
 async def pause_generation(rollout_ctl: "RolloutControllerProxy", pause_time_out: float = 60.0) -> None:
+    await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
     rollout_ctl_metadata = await rollout_ctl.get_rollout_metadata.remote()  # type: ignore[attr-defined]
     infer_server_url = list(rollout_ctl_metadata["server_url_dict"].values())
     async with httpx.AsyncClient() as client:

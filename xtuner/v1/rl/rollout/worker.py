@@ -262,13 +262,6 @@ class RolloutConfig(BaseModel):
             help="Number of consecutive health check failures required before marking a worker inactive.",
         ),
     ] = 3
-    health_check_first_wait_seconds: Annotated[
-        float,
-        Parameter(
-            group=infer_group,
-            help="Initial wait time in seconds before starting health checks on a new rollout worker.",
-        ),
-    ] = 600.0
     _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
 
     @property
@@ -489,7 +482,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     def shutdown(self):
         """Shut down the worker, its server task, and any child processes."""
         if self.server_task is not None:
-            ray.cancel(self.server_task)
+            ray.cancel(self.server_task, force=True)
             return
 
         if self.server_process is not None:
