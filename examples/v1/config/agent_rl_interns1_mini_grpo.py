@@ -95,7 +95,7 @@ total_epochs = 10
 sp_size = 2
 # evaluation settings
 enable_evaluate = True
-enable_initial_evaluate = True
+enable_initial_evaluate = False
 evaluate_step = 5
 
 # 1. resources
@@ -267,7 +267,7 @@ eval_dataset_cfg = (
             "dataset": DatasetConfig(
                 name="gaia",
                 anno_path="/mnt/shared-storage-user/llmit/user/wangziyi/projs/crg_rl_projects/data/gaia_text_103.jsonl",
-                sample_ratio=4,
+                sample_ratio=1.0,
                 media_root=None,
                 class_name='VLMJsonlDataset',
             ),
@@ -299,7 +299,7 @@ eval_dataset_cfg = (
             "dataset": DatasetConfig(
                 name="hle",
                 anno_path="/mnt/shared-storage-user/llmit/user/wangziyi/projs/crg_rl_projects/data/hle.jsonl",
-                sample_ratio=1.0,
+                sample_ratio=0.0,
                 media_root=None,
                 class_name='VLMJsonlDataset',
             ),
