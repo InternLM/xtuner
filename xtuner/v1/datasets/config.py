@@ -26,7 +26,7 @@ from .collator import (
     sft_llm_collator,
 )
 from .custom_pack import CustomPackDataset
-from .custom_sampler import CustomSampler, _load_sampler_config
+from .custom_sampler import CustomSampler
 from .dataloader import BaseDataloader, Dataloader
 from .jsonl import JsonlDataset
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
@@ -149,7 +149,7 @@ def build_dataloader(
     assert isinstance(datasets, list), "datasets must be a list of datasets."
 
     if dataloader_config.pack_level != "none" and get_rank == 0:
-        num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
+        num_tokens = sum(dset.num_tokens.sum() for dset in datasets if dset.num_tokens is not None)
         logger.debug(f"[Dataset] {num_tokens} tokens.")
 
     dataset: (
@@ -351,7 +351,7 @@ class DataloaderConfig(BaseDataloaderConfig):
         assert isinstance(datasets, list), "datasets must be a list of datasets."
 
         if self.pack_level != "none" and get_rank == 0:
-            num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
+            num_tokens = sum(dset.num_tokens.sum() for dset in datasets if dset.num_tokens is not None)
             logger.debug(f"[Dataset] {num_tokens} tokens.")
 
         with profile_time("[Pack Datasets]"):
@@ -428,10 +428,10 @@ class DataloaderConfig(BaseDataloaderConfig):
         if self.pack_level == "custom":
             assert isinstance(dataset, CustomPackDataset)
             assert self.custom_sampler_config_path is not None
-            global_order = _load_sampler_config(self.custom_sampler_config_path)
+            # global_order = _load_sampler_config(self.custom_sampler_config_path)
             sampler = CustomSampler(
                 dataset=dataset,
-                global_order=global_order,
+                global_order=self.custom_sampler_config_path,
                 global_batch_size=global_batch_size,
                 dp_mesh=dp_mesh,
                 seed=seed,
