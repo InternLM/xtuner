@@ -14,11 +14,9 @@ from io import BytesIO
 from multiprocessing import Process, Queue
 from pathlib import Path
 from threading import Lock
-from typing import Callable, Dict, List, TypeVar, Union, cast
+from typing import Callable, Dict, TypeVar, cast
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import torch
 from mmengine import mkdir_or_exist
 from mmengine.dist import barrier, get_rank
@@ -49,75 +47,24 @@ def _concat_values(values):
     return list(itertools.chain.from_iterable(values))
 
 
-def save_mixed_dict_to_parquet(
-    data: Dict[str, Union[np.ndarray, List[List[int] | List[float]]]], file_path: str
-) -> None:
-    """通用保存函数：将 dict[str, np.array | list[list[int|float]]] 保存为 Parquet 文件.
-
-    每个 value 整体存为单行单 cell，避免不同 key 长度不一致导致 Arrow 报错。 通过 schema metadata 记录原始类型（np / list），确保 load 时正确还原。
-
-    :param data: 混合类型字典（键为字符串，值为 np.array 或 list[list[int|float]]）
-    :param file_path: 保存路径（如 "data.parquet"）
-    """
+def save_dict_to_npz(data: Dict[str, np.ndarray], file_path: str) -> None:
+    """通用保存函数：将 Dict[str, np.ndarray] 保存为 NPZ 文件."""
     if not isinstance(data, dict):
         raise ValueError("输入必须是字典类型")
+    for k, v in data.items():
+        if not isinstance(k, str):
+            raise TypeError(f"key 必须是 str，当前: {type(k)}")
+        if not isinstance(v, np.ndarray):
+            raise TypeError(f"value 必须是 np.ndarray，key={k}, 当前: {type(v)}")
 
-    type_map: Dict[str, str] = {}
-    fields = []
-    arrays = []
-    for key, value in data.items():
-        if isinstance(value, np.ndarray):
-            py_val = value.tolist()
-            type_map[key] = "np"
-        elif isinstance(value, list):
-            py_val = value
-            type_map[key] = "list"
-        else:
-            raise TypeError(f"不支持的数据类型: {type(value)}，仅支持 np.ndarray 或 list[list[int|float]]")
-
-        pa_arr = pa.array([py_val])
-        fields.append(pa.field(key, pa_arr.type))
-        arrays.append(pa_arr)
-
-    schema = pa.schema(fields, metadata={b"__type_map__": json.dumps(type_map).encode()})
-    table = pa.Table.from_arrays(arrays, schema=schema)
-    pq.write_table(table, file_path)
-    print(f"数据已成功保存到: {file_path}")
+    # NOTE: 若存在 object dtype（如 ragged 的 list-of-list），load 时需要 allow_pickle=True
+    np.savez_compressed(file_path, **data)
 
 
-def load_mixed_dict_from_parquet(file_path: str) -> Dict[str, Union[np.ndarray, List[List[int] | List[float]]]]:
-    """通用恢复函数：从 Parquet 文件恢复 dict[str, np.array | list[list[int|float]]].
-
-    :param file_path: Parquet 文件路径
-    :return: 与保存时一致的混合类型字典
-    """
-    table = pq.read_table(file_path)
-
-    metadata = table.schema.metadata or {}
-    type_map_raw = metadata.get(b"__type_map__")
-    type_map: Dict[str, str] = json.loads(type_map_raw) if type_map_raw else {}
-
-    result: Dict[str, Union[np.ndarray, List[List[int] | List[float]]]] = {}
-    for col_name in table.column_names:
-        col = table.column(col_name)
-        pylist = col.to_pylist()
-
-        # 新格式：每列只有 1 行，cell 内是完整的值
-        if len(table) == 1:
-            val = pylist[0]
-        else:
-            val = pylist
-
-        orig_type = type_map.get(col_name)
-        if orig_type == "list":
-            result[col_name] = val
-        else:
-            try:
-                result[col_name] = np.array(val)
-            except (ValueError, TypeError):
-                result[col_name] = val
-
-    return result
+def load_dict_from_npz(file_path: str) -> Dict[str, np.ndarray]:
+    """通用恢复函数：从 NPZ 文件恢复 Dict[str, np.ndarray]."""
+    with np.load(file_path, allow_pickle=True) as z:
+        return {k: z[k] for k in z.files}
 
 
 def _streaming_parallel_open_inplace(path: str, buf, executor: ThreadPoolExecutor):
@@ -291,7 +238,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             meta_path = cached.get("jsonl_meta")
             offsets = np.load(offset_path)
             if meta_path:
-                _meta = load_mixed_dict_from_parquet(meta_path)
+                _meta = load_dict_from_npz(meta_path)
                 num_tokens = _meta["num_tokens"]
         elif cache_dir:
             self._shared_memory = self._init_shared_memory(anno_path)
@@ -339,7 +286,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 #         "<tag name>": {
                 #             "<file path>": {
                 #                 "<tokenize hash>": {
-                #                     "jsonl_meta": "<tokenize cache path>/jsonl_meta.parquet",
+                #                     "jsonl_meta": "<tokenize cache path>/jsonl_meta.npz",
                 #                     "offsets": "<file cache path>",
                 #                     "datetime": "2025-06-30 09:40:24"
                 #                 }
@@ -371,10 +318,10 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                         mkdir_or_exist(tok_cache_dir)
                 barrier()
 
-                _meta_file = os.path.join(tok_cache_dir, "jsonl_meta.parquet")
+                _meta_file = os.path.join(tok_cache_dir, "jsonl_meta.npz")
                 if os.path.exists(_meta_file):
                     logger.info(f"Loading tokenize meta from cache: {_meta_file}")
-                    _meta = load_mixed_dict_from_parquet(_meta_file)
+                    _meta = load_dict_from_npz(_meta_file)
                     num_tokens = _meta["num_tokens"]
                 else:
                     serialized_tokenized_global = self.count_tokens(offsets, tok_cache_dir)
@@ -406,7 +353,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
                             if tok_hash not in tag_data[self.path]:
                                 tag_data[self.path][tok_hash] = {
-                                    "jsonl_meta": os.path.join(tok_cache_dir, "jsonl_meta.parquet"),
+                                    "jsonl_meta": os.path.join(tok_cache_dir, "jsonl_meta.npz"),
                                     "offsets": os.path.join(file_cache_dir, "offsets.npy"),
                                     "datetime": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 }
@@ -656,7 +603,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             serialized_tokenized_global = serialized_tokenized
 
         if rank == 0 and cache_dir:
-            save_mixed_dict_to_parquet(serialized_tokenized_global, os.path.join(cache_dir, "jsonl_meta.parquet"))
+            save_dict_to_npz(serialized_tokenized_global, os.path.join(cache_dir, "jsonl_meta.npz"))
 
         self.tokenize_fn.set_state("runtime")
         return serialized_tokenized_global
