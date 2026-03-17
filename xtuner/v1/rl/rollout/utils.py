@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from .controller import RolloutControllerProxy, WorkerInfo
     from .worker import RolloutConfig, RolloutWorker
 
-ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
+ROLLOUT_RAY_GET_TIMEOUT = int(os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", str(5 * 3600)))  # default 5 hours
 logger = get_logger()
 
 
@@ -68,11 +68,13 @@ class SessionRouter:
             rank = next(self._worker_cycler)
             if self._worker_infos_lock is None:
                 info = self._worker_infos[rank]
+                if info and info.is_active:
+                    return rank, info.actor
             else:
                 with self._worker_infos_lock:
                     info = self._worker_infos[rank]
-            if info and info.is_active:
-                return rank, info.actor
+                    if info and info.is_active:
+                        return rank, info.actor
         return -1, None
 
     async def get_worker(self, session_id: int) -> Optional[Any]:

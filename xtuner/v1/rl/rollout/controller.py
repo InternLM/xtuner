@@ -136,7 +136,6 @@ class RolloutController:
 
     def pause_generation(self):
         self.health_checker.pause()
-        self._broadcast_to_active_workers("pause_generation")
 
     def continue_generation(self):
         self.health_checker.resume()
@@ -167,6 +166,7 @@ class RolloutController:
     def recover_failed_workers(self):
         """Recovers from worker failures by restarting failed workers and
         reinitializing the rollout setup."""
+        self.health_checker.pause()
         with self.worker_info_lock:
             failed_workers = [info for info in self.rank2info.values() if not info.is_active]
         if not failed_workers:
@@ -180,6 +180,7 @@ class RolloutController:
                     rank = self._get_rank_by_actor(worker.actor)
                     if rank is not None:
                         self.rank2info[rank].is_active = True
+        self.helth_checker.resume()
 
     def _restart_failed_workers(self, worker: RolloutWorker) -> bool:
         try:
@@ -266,13 +267,8 @@ class RolloutController:
         """
         futures = []
         with self.worker_info_lock:
-            infos = list(self.rank2info.values())
-        for info in infos:
-            if info.is_active:
-                futures.append(getattr(info.actor, method_name).remote())
-            else:
-                self.logger.warning(f"Skipping {method_name} for inactive worker {info.actor}.")
-
+            active_actors = [info.actor for info in self.rank2info.values() if info.is_active]
+        futures = [getattr(actor, method_name).remote() for actor in active_actors]
         results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
         return results
 

@@ -18,28 +18,6 @@ MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH", "")
 RESOURCE_MAP = {"npu": "NPU", "cuda": "GPU"}
 TEST_TEXT_MESSAGES=[{"role": "user", "content": "Hello!"}]
 
-def _kill_lmdeploy_server_wrapper(self):
-    """Force kill lmdeploy wrapper process to simulate hard engine crash."""
-    result = subprocess.run(
-        ["ps", "-ef"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    target_pids = []
-    for line in result.stdout.splitlines():
-        if "run_lmdeploy_server_wrapper" not in line:
-            continue
-        if "grep" in line:
-            continue
-        cols = line.split()
-        if len(cols) > 1 and cols[1].isdigit():
-            target_pids.append(int(cols[1]))
-
-    for pid in target_pids:
-        subprocess.run(["kill", "-9", str(pid)], check=False)
-
-
 class TestRolloutControllerRecover(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

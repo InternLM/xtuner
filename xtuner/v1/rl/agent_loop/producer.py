@@ -162,9 +162,10 @@ class SyncProduceStrategy(ProduceStrategy):
                 task = create_task(_timed_generate_group(agent_loop, rollout_state))
                 pending_tasks.add(task)
 
-        return ProducerTimings(generate_times_s=generate_times, pause_time_s=0.0)
         # 暂停 rollout controller
         await pause_generation(rollout_ctl)
+
+        return ProducerTimings(generate_times_s=generate_times, pause_time_s=0.0)
 
 
 class AsyncProduceStrategy(ProduceStrategy):
