@@ -78,8 +78,8 @@ def roll_sequence_context(
     """Roll the sequence context to get future tokens for MTP prediction.
 
     This function respects sequence boundaries in packed sequences, shifting each
-    sequence independently without crossing boundaries. Both input_ids and position_ids
-    are rolled.
+    sequence independently without crossing boundaries. Returns a new
+    ``SequenceContext`` — the original is never modified.
 
     Args:
         seq_ctx (SequenceContext): Input sequence context with packed sequences.
@@ -87,34 +87,33 @@ def roll_sequence_context(
             Only -1 is currently supported.
 
     Returns:
-        SequenceContext: A new sequence context with shifted input_ids and position_ids.
-            Positions at sequence boundaries are zeroed to prevent information leakage.
+        SequenceContext: A new sequence context with shifted input_ids (and/or
+            inputs_embeds). Positions at sequence boundaries are zeroed to prevent
+            information leakage.
 
     Example:
         For packed sequences [1,2,3] and [4,5,6] with shifts=-1:
         Original input_ids:  [1, 2, 3, 4, 5, 6]
         Rolled input_ids:    [2, 3, 0, 5, 6, 0]
-        Original position_ids: [0, 1, 2, 0, 1, 2]
-        Rolled position_ids:   [1, 2, 0, 1, 2, 0]
     """
     assert seq_ctx.sequence_parallel_mesh is None, "Sequence parallel is not yet supported"
 
+    overrides: dict = {}
+
     if seq_ctx.input_ids is not None:
-        rolled_input_ids = roll_packed_tensor(
+        overrides["input_ids"] = roll_packed_tensor(
             tensor=seq_ctx.input_ids,
             cu_seq_lens=seq_ctx.cu_seq_lens_q,
             shifts=shifts,
             dim=-1,
         )
-        seq_ctx.input_ids = rolled_input_ids  # type: ignore[assignment]
 
     if seq_ctx.inputs_embeds is not None:
-        rolled_inputs_embeds = roll_packed_tensor(
+        overrides["inputs_embeds"] = roll_packed_tensor(
             tensor=seq_ctx.inputs_embeds,
             cu_seq_lens=seq_ctx.cu_seq_lens_q,
             shifts=shifts,
             dim=-2,  # Embedding dimension is typically the second to last
         )
-        seq_ctx.inputs_embeds = rolled_inputs_embeds  # type: ignore[assignment]
 
-    return seq_ctx
+    return seq_ctx.copy(**overrides)

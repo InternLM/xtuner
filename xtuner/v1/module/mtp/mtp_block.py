@@ -72,7 +72,7 @@ class MTPBlock(nn.Module):
         embed_tokens_fn: Callable[[torch.Tensor], torch.Tensor],
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         seq_ctx: SequenceContext,
-    ) -> list[torch.Tensor]:
+    ) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """Forward pass through all MTP layers.
 
         Args:
@@ -87,11 +87,11 @@ class MTPBlock(nn.Module):
                 attention mask, etc.
 
         Returns:
-            list[torch.Tensor]: List of output hidden states for each MTP depth.
-                Length equals num_layers. Each tensor has shape [batch, seq_len, hidden_size].
-                - outputs[0]: Hidden states for predicting token at position (i+1)
-                - outputs[1]: Hidden states for predicting token at position (i+2)
-                - outputs[k]: Hidden states for predicting token at position (i+k+1)
+            list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]: List of 3-tuples
+                (hidden_states, router_weights, router_results) for each MTP depth.
+                Length equals num_layers.
+                - outputs[0]: Outputs for predicting token at position (i+1)
+                - outputs[k]: Outputs for predicting token at position (i+k+1)
         """
         mtp_outputs = []
         current_hidden_states = hidden_states
