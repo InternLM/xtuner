@@ -112,6 +112,7 @@ class TestTrainerSaveHF(DistributedTestBase):
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
+    @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
     @prepare
     def test_save_hf_interval(self):
         """Test save_hf is called at correct intervals during training."""
@@ -184,6 +185,7 @@ class TestTrainerSaveHF(DistributedTestBase):
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
+    @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
     @prepare
     def test_save_checkpoint_interval(self):
         self.create_pg(DEVICE)
@@ -258,6 +260,7 @@ class TestTrainerSaveHF(DistributedTestBase):
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
+    @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
     @prepare
     def test_resume(self):
         self.create_pg(DEVICE)
@@ -738,6 +741,7 @@ class TestHooksConfig(DeterministicDDPTestCase):
         assert len(loaded.get_hooks(HookStage.AFTER_SAVE_DCP)) == 1
 
 
+@patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
 @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
 def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
     # 0. prepare environment

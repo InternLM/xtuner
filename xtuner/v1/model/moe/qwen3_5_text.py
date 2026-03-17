@@ -42,6 +42,57 @@ MOE_EP_COMPILE_CFG.pop("xtuner.v1.module.decoder_layer.moe_decoder_layer.MoEDeco
 
 class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
     def to_hf_key_list(self, key: str) -> list[str]:
+        # Handle MTP parameters
+        if key.startswith("mtp_block."):
+            # Remove "mtp_block." prefix
+            key = key.replace("mtp_block.", "", 1)
+
+            # Handle MTP layer-specific parameters
+            # xtuner: mtp_block.layers.{idx}.decoder_layer.{param}
+            # HF: mtp.layers.{idx}.{param}
+            key = re.sub(r"layers\.(\d+)\.decoder_layer\.", r"layers.\1.", key)
+
+            # Handle MTP normalization layers
+            # xtuner: mtp_block.layers.{idx}.enorm -> HF: mtp.pre_fc_norm_embedding
+            # xtuner: mtp_block.layers.{idx}.hnorm -> HF: mtp.pre_fc_norm_hidden
+            # xtuner: mtp_block.layers.{idx}.final_layernorm -> HF: mtp.norm
+            # Note: Currently assuming single MTP layer (idx=0), may need adjustment for multiple layers
+            if ".enorm." in key:
+                key = re.sub(r"layers\.\d+\.enorm\.", "pre_fc_norm_embedding.", key)
+            elif ".hnorm." in key:
+                key = re.sub(r"layers\.\d+\.hnorm\.", "pre_fc_norm_hidden.", key)
+            elif ".final_layernorm." in key:
+                key = re.sub(r"layers\.\d+\.final_layernorm\.", "norm.", key)
+
+            # Handle MTP projection layer
+            # xtuner: mtp_block.layers.{idx}.eh_proj -> HF: mtp.fc
+            if ".eh_proj." in key:
+                key = re.sub(r"layers\.\d+\.eh_proj\.", "fc.", key)
+
+            # Handle MoE-specific transformations within MTP layers
+            key = re.sub(r"layers\.(\d+)\.(experts|gate|shared_experts|shared_expert_gate)", r"layers.\1.mlp.\2", key)
+            key = key.replace("shared_experts", "shared_expert")
+
+            # Handle fused weights
+            n_routed_experts = self.config.n_routed_experts
+            if "fused_w1w3.weight" in key:
+                w1w3_keys: list[str] = []
+
+                for i in range(n_routed_experts):
+                    w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.gate_proj.weight"))
+                    w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.up_proj.weight"))
+
+                return [f"mtp.{key}" for key in w1w3_keys]
+
+            elif "fused_w2.weight" in key:
+                w2_keys: list[str] = []
+                for i in range(n_routed_experts):
+                    w2_keys.append(key.replace("fused_w2.weight", f"{i}.down_proj.weight"))
+                return [f"mtp.{key}" for key in w2_keys]
+            else:
+                return ["mtp." + key]
+
+        # Handle main model parameters
         if "layers" in key or "embed_tokens" in key:
             key = "model.language_model." + key
 
@@ -85,13 +136,13 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
         else:
             loaded_tensor = safetensors[0]
 
-        if "fused_w1w3.weight" in param_name:
+        if "fused_w1w3.weight" in param_name and "mtp" not in param_name:
             # hf: num_experts, 2 * expert_dim, hidden_size
             # xtuner: num_experts * 2 * expert_dim, hidden_size
             # num_experts * 2 * expert_dim, hidden_size
             loaded_tensor = loaded_tensor.flatten(0, 1)
 
-        elif "fused_w2.weight" in param_name:
+        elif "fused_w2.weight" in param_name and "mtp" not in param_name:
             # hf: num_experts, hidden_size, expert_dim
             # xtuner: num_experts * hidden_size, expert_dim
             loaded_tensor = loaded_tensor.flatten(0, 1)
@@ -116,6 +167,9 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
         safetensor: torch.Tensor,
         hf_param_name: str,
     ):
+        if "mtp" in hf_param_name:
+            return super().param_to_safetensor(safetensor, hf_param_name)
+
         assert isinstance(hf_param_name, str)
         if "gate_up_proj" in hf_param_name:
             # xtuner: num_experts * 2 * expert_dim, hidden_size
