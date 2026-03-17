@@ -1512,6 +1512,9 @@ class BaseModel(nn.Module):
                 continue
             _loaded_tensor.append(weight.to(local_tensor.device))
 
+        if not _loaded_tensor:
+            return missing_keys
+
         if not hf_keys:
             # fp8 pad
             assert self.config.float8_cfg is not None

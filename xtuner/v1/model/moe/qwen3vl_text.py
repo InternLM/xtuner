@@ -4,10 +4,9 @@ import re
 import torch
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.loss import CELossContext
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
 
-from .moe import MoEModelOutputs
+from .moe import MoELossContextDict, MoEModelOutputs
 from .qwen3 import Qwen3MoE, Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
 
 
@@ -112,9 +111,12 @@ class Qwen3VLTextMoE(Qwen3MoE):
     def _forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: CELossContext | None,
+        loss_ctx: MoELossContextDict | None,
         return_router_logits: bool = False,
     ) -> MoEModelOutputs:
+        if seq_ctx.deepstack_visual_embeds is None:
+            return super()._forward(seq_ctx, loss_ctx, return_router_logits)
+
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
 
@@ -183,7 +185,9 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)  # type: ignore
+        # Get LM loss context from dict
+        lm_loss_ctx = loss_ctx["lm"] if loss_ctx is not None else None
+        loss, (logits, extra_info) = self.lm_head(hidden_states, lm_loss_ctx)  # type: ignore
         output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info
@@ -193,17 +197,23 @@ class Qwen3VLTextMoE(Qwen3MoE):
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
         router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
 
-        if self.balancing_loss:
-            balancing_loss = self.balancing_loss(
-                router_weights=router_weights,
-                n_routed_experts=self.config.n_routed_experts,
-                num_experts_per_tok=self.config.num_experts_per_tok,
-            )
-            output["balancing_loss"] = balancing_loss
+        # Calculate balancing loss using loss context
+        if loss_ctx is not None:
+            balancing_ctx = loss_ctx.get("balancing")
+            if balancing_ctx is not None:
+                balancing_loss = balancing_ctx(
+                    router_weights,
+                    self.config.n_routed_experts,
+                    self.config.num_experts_per_tok,
+                )
+                output["balancing_loss"] = balancing_loss
 
-        if self.z_loss:
-            z_loss = self.z_loss(router_logits=router_logits)
-            output["z_loss"] = z_loss
+        # Calculate z-loss using loss context
+        if loss_ctx is not None:
+            z_loss_ctx = loss_ctx.get("z_loss")
+            if z_loss_ctx is not None:
+                z_loss = z_loss_ctx(router_logits)
+                output["z_loss"] = z_loss
 
         tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
         output["tokens_per_expert_global"] = tokens_per_expert_global
