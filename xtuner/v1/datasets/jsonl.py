@@ -514,6 +514,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             _num_image_tokens = self._meta["num_img_tokens"][i]
             if self._proxy_attention_flops_fn is not None:
                 _total_proxy_attn_flops.append(self._proxy_attention_flops_fn(_num_tokens, _num_image_tokens))
+        del self._meta["num_img_tokens"]
+        del self._meta["num_tokens"]
         self._meta["proxy_attn_flops"] = np.array(_total_proxy_attn_flops)
 
     @property

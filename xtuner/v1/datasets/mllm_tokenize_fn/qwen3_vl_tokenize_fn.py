@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
+import copy
 import io
 import math
 import os
@@ -34,6 +35,11 @@ from .base_mllm_tokenize_fn import (
 from .qwen3_vl_utils import Qwen3VLOSSLoader, read_qwen3_vl_video
 from .qwenvl_rope2d import get_rope_index_3
 
+
+# Cache to avoid repeated AutoProcessor.from_pretrained() calls
+# when multiple datasets share the same processor.
+# Keyed by processor_path to support different model paths.
+_PROCESSOR_CACHE: dict[str, tuple] = {}
 
 logger = get_logger()
 
@@ -244,9 +250,13 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if version.parse(version_str) < version.parse("4.57.0"):
             raise ValueError(f"请升级 transformers 到 4.57.0 及其以上版本，当前版本为 {version_str}")
 
-        _processor = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
-        self.image_processor = _processor.image_processor
-        self.video_processor = _processor.video_processor
+        if processor_path not in _PROCESSOR_CACHE:
+            _processor = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
+            _PROCESSOR_CACHE[processor_path] = (_processor.image_processor, _processor.video_processor)
+
+        self.image_processor = copy.deepcopy(_PROCESSOR_CACHE[processor_path][0])
+        self.video_processor = copy.deepcopy(_PROCESSOR_CACHE[processor_path][1])
+
         # default min_pixels 4096=4x32x32=4x16x16x2x2 pix 一张图片 patch size=16x16，然后 merge size=2x2, 最终输出给 llm 占 4 个 token
         # default max_pixels 16777216=16384x32x32 pix 一张图片输出给 llm 会占 16384 个 token
         if min_pixels is not None:
