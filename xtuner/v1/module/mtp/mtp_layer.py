@@ -98,7 +98,9 @@ class MTPLayer(nn.Module):
             seq_ctx (SequenceContext): Sequence context containing attention mask, etc.
 
         Returns:
-            torch.Tensor: Output hidden states, shape [batch, seq_len, hidden_size].
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A 3-tuple of
+                (hidden_states, router_weights, router_results) where each tensor
+                has shape [batch, seq_len, ...].
         """
         # Step 1: Normalize embeddings and hidden states separately
         # This ensures both inputs are in the same numerical range
@@ -113,7 +115,7 @@ class MTPLayer(nn.Module):
         # Step 3: Pass through the standard decoder layer
         # This includes attention, MLP, and their respective normalizations
         # TODO: TMP hardcode here.
-        hidden_states, router_weights, router_results = self.decoder_layer(
+        hidden_states, router_results, router_weights = self.decoder_layer(
             projected,
             position_embeddings=position_embeddings,
             seq_ctx=seq_ctx,
@@ -121,4 +123,4 @@ class MTPLayer(nn.Module):
 
         # Step 4: Final normalization before output
         hidden_states = self.final_layernorm(hidden_states)
-        return hidden_states, router_weights, router_results
+        return hidden_states, router_results, router_weights
