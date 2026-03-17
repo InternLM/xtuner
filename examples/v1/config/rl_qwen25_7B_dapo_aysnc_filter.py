@@ -70,7 +70,7 @@ dapomath_judger_config = DapoMathJudgerConfig(
     judger_name="dapo_math", 
     eos_token=eos_token_str,
     enable_overlong_buffer = True, 
-    max_response_len=max_response_length, 
+    max_response_len =max_response_length, 
     overlong_buffer_len=4096, 
     overlong_penalty_factor=1.0, 
     tokenizer=tokenizer)
@@ -138,11 +138,23 @@ agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
 )
+def group_samples_filter_func(rollout_states):
+    valid_responses = []
+    for state in rollout_states:
+        if state.response_ids is not None:
+            valid_responses.append(state)
+        
+    rewards = [res.reward["score"] for res in valid_responses]
+    if len(set(rewards)) == 1:
+        return False
+    else:
+        return True
 produce_strategy_config = AsyncProduceStrategyConfig(
     over_sample_threshold=0.2,
     enable_partial_rollout=True,
     tail_batch_stale_threshold=1,
     tail_batch_trigger_size=256,
+    is_valid_sample_fn=group_samples_filter_func
 )
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     task_name="train_task",
