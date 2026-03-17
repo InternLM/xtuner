@@ -17,7 +17,7 @@ from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model import BaseModel
-from xtuner.v1.model.base import DataBatchInfo, ModelItem, XTunerBaseModelConfig
+from xtuner.v1.model.base import BatchForwardInfo, DataBatchInfo, ModelItem, ModelOutputs, XTunerBaseModelConfig
 from xtuner.v1.utils import get_device, get_logger
 
 from ..utils.misc import update_weight_map_from_safetensors_index
@@ -190,3 +190,6 @@ class BaseComposeModel(BaseModel):
                     step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
         data_batch_info["step_consumed_img_tokens"] = step_consumed_img_tokens
         return data_batch_info
+
+    def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
+        return self.language_model.post_micro_batch_forward(batch_outputs)

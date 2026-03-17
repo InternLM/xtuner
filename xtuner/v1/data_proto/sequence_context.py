@@ -285,7 +285,17 @@ class SequenceContext:
             mask = cast(torch.BoolTensor, torch.ones_like(self.input_ids, dtype=torch.bool))
         else:
             assert self.inputs_embeds is not None, "input_ids or inputs_embeds must be provided"
-            mask = cast(torch.BoolTensor, torch.ones_like(self.inputs_embeds[..., 0], dtype=torch.bool))
+            # NOTE:
+            # In some distributed / optimization settings, inputs_embeds can be a tensor
+            # whose .storage() has size 0 (fake / sharded view), which breaks operations
+            # like torch.ones_like that rely on the underlying storage layout.
+            # Here we only care about the (batch, seq_len) shape, so construct the mask
+            # directly from the logical shape instead of using ones_like on the tensor.
+            seq_shape = self.inputs_embeds.shape[:-1]
+            mask = cast(
+                torch.BoolTensor,
+                torch.ones(seq_shape, dtype=torch.bool, device=self.inputs_embeds.device),
+            )
         if self.num_padding > 0:
             mask[..., -self.num_padding :] = False
         return mask

@@ -579,11 +579,12 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
+        self._resolve_model_loss_cfg(model_cfg, loss_cfg)
+
         if loss_cfg is None:
             loss_cfg = CELossConfig()
 
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg, fsdp_cfg)
-        self._resolve_model_loss_cfg(model_cfg, loss_cfg)
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
             logger.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
@@ -1721,7 +1722,7 @@ class Trainer:
             return True
         return auto_resume
 
-    def _resolve_model_loss_cfg(self, model_cfg: XTunerBaseModelConfig, loss_cfg: CELossConfig):
+    def _resolve_model_loss_cfg(self, model_cfg: XTunerBaseModelConfig, loss_cfg: CELossConfig | None):
         """Backward compatibility: set Trainer's loss_cfg to model's lm_loss_cfg if not already set.
 
         Args:
