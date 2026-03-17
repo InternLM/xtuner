@@ -6,8 +6,10 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from cyclopts import Parameter
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.nn.functional import all_reduce
 
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
+from xtuner.v1.loss.chunk_loss import ChunkLoss
 from xtuner.v1.utils.device import get_device
 
 # from xtuner.v1.profiler.prober import ProberList
@@ -37,7 +39,11 @@ class CELossConfig(BaseLossConfig):
     def loss_ctx_cls(self) -> type["CELossContext"]:
         return CELossContext
 
-    def model_post_init(self, __context: Any) -> None:
+    @property
+    def _loss_kwargs_cls(self) -> type["CELossKwargs"]:
+        return CELossKwargs
+
+    def model_post_init(self, _context: Any) -> None:
         if self.mode == "liger":
             assert self.loss_reduction == "token", "Currently, cannot use liger kernel with sample or square reduction"
 
@@ -80,8 +86,16 @@ class CELossKwargs(BaseLossKwargs):
     shifted_labels: torch.Tensor
     loss_weight: torch.Tensor | None = None
 
+    def sp_split(self, sp_mesh: DeviceMesh) -> "CELossKwargs":
+        self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
+        return self
 
-class CELossContext(BaseLossContext):
+    def to(self, device: torch.device | str) -> "CELossKwargs":
+        self.shifted_labels = self.shifted_labels.to(device)
+        return self
+
+
+class LMHeadLossContext(BaseLossContext):
     """Cross-entropy loss context for language models.
 
     Args:
@@ -163,6 +177,7 @@ class CELossContext(BaseLossContext):
 
         for loss_ctx in loss_ctx_list:
             loss_ctx._batch_size = len(loss_ctx_list)
+            assert loss_ctx.loss_kwargs.loss_weight is not None
             loss_ctx.loss_kwargs.loss_weight /= global_denominator + 1e-12
         return loss_ctx_list
 
@@ -195,15 +210,30 @@ class CELossContext(BaseLossContext):
 
         return loss, (logits, {})
 
+    def eager_mode(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: CELossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        return self.loss_fn(hidden_states, head_weight, head_bias, loss_kwargs)
+
     def chunk_mode(
         self,
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
         loss_kwargs: CELossKwargs,
-    ):
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         if self.loss_cfg.mode == "chunk":
-            return super().chunk_mode(hidden_states, head_weight, head_bias, loss_kwargs)
+            assert self.loss_cfg.chunk_size is not None, "chunk_size must be set in chunk mode"
+
+            chunks = loss_kwargs.chunk(self.loss_cfg.chunk_size)
+            loss, extra_info = ChunkLoss.apply(
+                hidden_states, head_weight, head_bias, self.loss_fn, chunks, self.loss_cfg.chunk_size
+            )
+            return loss, (None, extra_info)
         else:
             assert self.liger_loss_fct is not None, "liger_loss_fct must be initialized in liger mode"
             shifted_labels = loss_kwargs.shifted_labels  # (bs, seq_len)
@@ -225,3 +255,36 @@ class CELossContext(BaseLossContext):
     @property
     def batch_size(self) -> int:
         return self._batch_size
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
+
+        assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
+        if head_bias is not None:
+            raise NotImplementedError("Loss does not support head_bias yet.")
+
+        if self.loss_cfg.mode == "eager":
+            loss, (logits, extra_info) = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+        else:
+            loss, (logits, extra_info) = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+
+        # TODO: yanhuida, should be removed
+        if not isinstance(extra_info, ModelForwardExtraLogInfo):
+            extra_info = ModelForwardExtraLogInfo(extra_info)
+
+        extra_info["local_base_loss"] = loss.detach().clone()
+
+        # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
+        if dist.is_initialized():
+            loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
+
+        return loss, (logits, extra_info)
+
+
+# Deprecated: Use LMHeadLossContext instead. Will be removed in version 1.1.0
+CELossContext = LMHeadLossContext

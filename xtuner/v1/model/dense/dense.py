@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from pathlib import Path
-from typing import Self, cast, Literal
+from typing import Self, cast
 
 import torch
 import torch.distributed as dist
@@ -19,7 +19,7 @@ from typing_extensions import overload, override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import CELossContext, BaseLossContext
+from xtuner.v1.loss import BaseLossContext, CELossContext
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -78,7 +78,7 @@ class Dense(BaseModel):
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: dict[Literal["lm"], BaseLossContext] | None = None,
+        loss_ctx: dict[str, BaseLossContext | list[BaseLossContext]] | None = None,
     ) -> ModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -116,7 +116,7 @@ class Dense(BaseModel):
             output["logits"] = logits
         else:
             # Training mode
-            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx["lm"])
+            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx["lm"])  # type: ignore[call-overload]
             output["loss"] = loss
             output["logits"] = logits
             output["extra_info"] = extra_info
