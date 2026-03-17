@@ -78,7 +78,7 @@ class TestGptOss(DeterministicDDPTestCase):
         loss_cfg = CELossConfig()
         seq_ctx_list = [seq_ctx]
         LossContext = loss_cfg.loss_ctx_cls
-        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
         loss_ctx_list = [loss_ctx]
         loss_ctx_list = LossContext.build_batches(loss_ctx_list)
         loss_ctx = loss_ctx_list[0]
@@ -87,7 +87,7 @@ class TestGptOss(DeterministicDDPTestCase):
         with torch.no_grad():
             output = gpt_oss_model(
                 seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+                loss_ctx={"lm": loss_ctx},
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -141,7 +141,7 @@ class TestGptOss(DeterministicDDPTestCase):
         loss_cfg = CELossConfig()
         seq_ctx_list = [seq_ctx]
         LossContext = loss_cfg.loss_ctx_cls
-        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
         loss_ctx_list = [loss_ctx]
         loss_ctx_list = LossContext.build_batches(loss_ctx_list)
         loss_ctx = loss_ctx_list[0]
@@ -152,7 +152,7 @@ class TestGptOss(DeterministicDDPTestCase):
         with torch.no_grad():
             output = gpt_oss_model(
                 seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+                loss_ctx={"lm": loss_ctx},
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=1e-2, rtol=1e-2))
