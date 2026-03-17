@@ -1,6 +1,7 @@
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
@@ -139,6 +140,14 @@ class AgentLoopManager:
         result.leftover_aborted = aborted_sample_count
         result.leftover_expired = expired_sample_count
         return result
+
+    def save(self, checkpoint_path: Path | str) -> None:
+        """Save the sampler's dataloader state to checkpoint."""
+        self._data_sampler.save(checkpoint_path)
+
+    def resume(self, checkpoint_path: Path | str) -> None:
+        """Resume the sampler's dataloader state from checkpoint."""
+        self._data_sampler.resume(checkpoint_path)
 
     # # 非共卡
     # async def disaggregate_produce_batch(self, batch_size: int):
