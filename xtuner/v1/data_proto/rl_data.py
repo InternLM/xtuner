@@ -106,6 +106,7 @@ class RLDatasetItem(BaseModel):
     messages: list[dict[str, Any]] | None = None
     input_ids: list[int] | None = None
     num_tokens: int | None = None
+    proxy_attn_flops: float | None = None
     ability: str | None = None
     reward_model: dict[str, Any] | None = None
     data_source: dict[str, Any] | None = None

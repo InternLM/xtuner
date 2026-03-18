@@ -135,6 +135,7 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             "messages": messages,
             "input_ids": prompt_token_ids,
             "num_tokens": num_tokens,
+            "proxy_attn_flops": float(num_tokens),  # ununsed
             "reward_model": item["reward_model"],
             "ability": item.get("ability", None),
             "data_source": {item.get("data_source"): 1.0},
