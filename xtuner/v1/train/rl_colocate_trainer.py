@@ -420,7 +420,6 @@ class RLColocateTrainer:
             return
 
         if self._enable_initial_evaluate and not self._debug_rollout:
-            # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
             eval_produce_result = asyncio_run(
                 self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size, rollout_step=0)
             )
@@ -438,7 +437,6 @@ class RLColocateTrainer:
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
-                # TODO: ray.get(self.rollout_controller.check_health.remote())
                 self.logger.info("start to generate rollout experience for training")
                 produce_result: ProduceBatchResult = asyncio_run(
                     self.agent_loop_manager.produce_batch(self.global_batch_size, rollout_step=rollout_idx)
@@ -647,6 +645,7 @@ class RLColocateTrainer:
             self._maybe_save_checkpoint(rollout_idx)
             # TODO: self._maybe_save_hf()
 
+        ray.get(self.rollout_controller.recover_failed_workers.remote())
         with timer("sync_weight", step_timer_dict):
             bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
             ray.get(self.rollout_controller.onload_weights.remote())
