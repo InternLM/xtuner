@@ -386,8 +386,11 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 num_tokens = serialized_tokenized_global["num_tokens"]
                 _meta = serialized_tokenized_global
 
+        # _meta['num_tokens'] is already set to `num_tokens`, so we can remove it from _meta
+        _meta.pop("num_tokens", None)
+
         if self._has_chunk:
-            line_idxs = _meta["line_idxs"]
+            line_idxs = _meta.pop("line_idxs")
             offsets = offsets[line_idxs]
             # After line_idxs indexing, offsets has exactly num_chunks elements
             # (no trailing sentinel), so use len(offsets) directly.
@@ -417,17 +420,17 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             _sampled = _filtered
 
         _target_num_samples = int(len(_sampled) * sample_ratio)
-        self.sampled = _sampled * int(sample_ratio)
+        sampled = _sampled * int(sample_ratio)
         if enable_sequential_sampler:
-            self.sampled.extend(_sampled[: _target_num_samples - len(self.sampled)])
+            sampled.extend(_sampled[: _target_num_samples - len(sampled)])
         else:
-            self.sampled.extend(random.sample(_sampled, _target_num_samples - len(self.sampled)))
+            sampled.extend(random.sample(_sampled, _target_num_samples - len(sampled)))
 
         if num_tokens is not None:
             assert isinstance(num_tokens, np.ndarray)
-            num_tokens = num_tokens[self.sampled]
+            num_tokens = num_tokens[sampled]
         self.num_tokens: np.ndarray | None = num_tokens
-        self.offsets = offsets[self.sampled]
+        self.offsets = offsets[sampled]
 
         # check all values in _meta are same length
         v_len = None
@@ -440,9 +443,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         self._meta = {}
         for k, v in _meta.items():
             if isinstance(v, np.ndarray):
-                self._meta[k] = v[self.sampled]
+                self._meta[k] = v[sampled]
             elif isinstance(v, list):
-                self._meta[k] = [v[i] for i in self.sampled]
+                self._meta[k] = [v[i] for i in sampled]
             else:
                 raise ValueError(f"Unsupported type: {type(v)}")
 
