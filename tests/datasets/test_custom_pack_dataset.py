@@ -380,6 +380,39 @@ class TestGetitem:
         with pytest.raises(ValueError, match="mismatch"):
             dataset[0]
 
+    def test_plain_tokenizefn_token_start_offset_applied(self, tmp_path):
+        """Plain DataItem: input_ids[token_start_offset:token_end_offset] slicing is applied."""
+        ids = list(range(200))
+        ds = _FakeDataset([ids], path="/ds.jsonl")
+        # Take tokens [50:150] — 100 tokens out of the 200-token sample
+        packs = [["/ds.jsonl", 0, -1, -1, 50, 150]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=100)
+        items = dataset[0]
+
+        assert len(items) == 1
+        assert items[0]["input_ids"] == ids[50:150]
+        assert items[0]["labels"] == ids[50:150]
+        assert items[0]["num_tokens"] == 100
+
+    def test_longtextdataitem_no_extra_truncation(self, tmp_path):
+        """LongTextDataItem is pre-truncated at tokenize time; __getitem__ does not apply extra slicing."""
+        ids = list(range(128))  # already pre-truncated 128 tokens
+        # token_start_offset=10, token_end_offset=138: tok_end - tok_off = 128 = len(ids)
+        ds = _FakeDataset([ids], path="/ds.jsonl", long_text_meta={0: (0, 1000, 10)})
+        packs = [["/ds.jsonl", 0, 0, 1000, 10, 138]]
+        config_path = str(tmp_path / "packs.jsonl")
+        _write_jsonl_pack(config_path, [packs])
+
+        dataset = CustomPackDataset([ds], config_path, pack_max_length=128)
+        items = dataset[0]
+
+        assert len(items) == 1
+        assert items[0]["input_ids"] == ids  # returned as-is, not re-sliced
+        assert items[0]["num_tokens"] == 128
+
 
 # ---------------------------------------------------------------------------
 # Helpers for Feature 4 tests

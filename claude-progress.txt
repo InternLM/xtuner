@@ -1,3 +1,28 @@
+# Claude Progress Notes — Session 6
+
+## What Was Done This Session
+
+### Feature 6 — Rewrite __getitem__ to distinguish two TokenizeFn cases (COMPLETED)
+- For `char_start == -1` (plain TokenizeFn): apply `input_ids[tok_off:tok_end]` / `labels[tok_off:tok_end]` slicing; `num_tokens = tok_end - tok_off`
+- For `char_start != -1` (LongTextTokenizeFn): keep existing field-match validation; return item as-is (pre-truncated at tokenize time)
+- Removed old unified `if max_tokens < item["num_tokens"]: item[:max_tokens]` branch
+- Added `test_plain_tokenizefn_token_start_offset_applied`: verifies non-zero `token_start_offset` is correctly applied for plain DataItem
+- Added `test_longtextdataitem_no_extra_truncation`: verifies LongTextDataItem is returned as-is without re-slicing
+- All 27 tests pass
+
+## Current Completion Status
+6/8 features passing
+
+## What To Work On Next
+- Feature 7: Switch pack_config_path to NPY directory format
+  - Add `load_config(path, mmap=True)` loading `boundaries.npy`, `samples.npy`, `paths.npy`
+  - Rewrite `__init__` to use `load_config`; store mmap'd arrays; remove old JSONL/Parquet machinery
+  - Replace `_validate_pack` Python loop with vectorized numpy validation
+  - Update `__getitem__` to do segment reads on mmap'd arrays
+  - Update test helpers to write NPY directory format
+
+---
+
 # Claude Progress Notes — Session 5
 
 ## What Was Done This Session

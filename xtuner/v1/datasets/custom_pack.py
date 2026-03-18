@@ -238,7 +238,6 @@ class CustomPackDataset(tud.Dataset):
 
         for ds_idx, s_idx, char_start, char_end, tok_off, tok_end in pack:
             item: DataItem = cast(DataItem, self.datasets[ds_idx][s_idx])
-            max_tokens = tok_end - tok_off
 
             if char_start == -1:
                 if "char_start" in item:
@@ -246,6 +245,12 @@ class CustomPackDataset(tud.Dataset):
                         f"Pack {i}, sample_idx {s_idx}: pack config expects plain DataItem "
                         f"(char_start==-1) but dataset returned LongTextDataItem."
                     )
+                # Apply token_start_offset:token_end_offset slicing for plain TokenizeFn.
+                item = {
+                    "input_ids": item["input_ids"][tok_off:tok_end],
+                    "labels": item["labels"][tok_off:tok_end],
+                    "num_tokens": tok_end - tok_off,
+                }
             else:
                 long_item = cast(LongTextDataItem, item)
                 if (
@@ -260,13 +265,7 @@ class CustomPackDataset(tud.Dataset):
                         f"Got char_start={item.get('char_start')}, char_end={item.get('char_end')}, "
                         f"token_start_offset={item.get('token_start_offset')}."
                     )
-
-            if max_tokens < item["num_tokens"]:
-                item = {
-                    "input_ids": item["input_ids"][:max_tokens],
-                    "labels": item["labels"][:max_tokens],
-                    "num_tokens": max_tokens,
-                }
+                # LongTextDataItem is pre-truncated at tokenize time; no additional slicing needed.
             items.append(item)
 
         if self.short_pack_strategy == "padding":

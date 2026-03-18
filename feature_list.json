@@ -65,7 +65,7 @@
       "Step 3: Write unit test for plain TokenizeFn case verifying truncation via token_start_offset:token_end_offset is applied; run tests to pass",
       "Step 4: Write unit test for LongTextTokenizeFn case verifying no extra truncation occurs; run all tests to pass"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "modify",
