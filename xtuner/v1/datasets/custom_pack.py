@@ -3,12 +3,12 @@
 Pack config file formats
 ------------------------
 JSONL (one pack per line):
-    {"samples": [[dataset_path, sample_idx, char_start, char_end, token_start_offset], ...]}
+    {"samples": [[dataset_path, sample_idx, char_start, char_end, token_start_offset, token_end_offset], ...]}
     For plain DataItem: char_start == char_end == -1, token_start_offset == 0
 
 Parquet (single .parquet file, efficient for large configs):
     boundaries: np.ndarray  shape (num_packs+1,)  -- CSR boundaries
-    samples:    list[list[int]]  -- [[path_id, sample_idx, char_start, char_end, token_start_offset], ...]
+    samples:    list[list[int]]  -- [[path_id, sample_idx, char_start, char_end, token_start_offset, token_end_offset], ...]
     paths:      list[str]        -- path_id -> dataset_path mapping
 """
 
@@ -26,8 +26,8 @@ from .jsonl import JsonlDataset, load_mixed_dict_from_parquet
 
 logger = get_logger()
 
-# (dataset_path, sample_idx, char_start, char_end, token_start_offset)
-_PackSlice = tuple[str, int, int, int, int]
+# (dataset_path, sample_idx, char_start, char_end, token_start_offset, token_end_offset)
+_PackSlice = tuple[str, int, int, int, int, int]
 
 
 def _load_pack_config_jsonl(path: str) -> list[list[_PackSlice]]:
@@ -35,7 +35,7 @@ def _load_pack_config_jsonl(path: str) -> list[list[_PackSlice]]:
 
     Returns:
         list[list[_PackSlice]]: A list of packs, each pack is a list of slices
-            (dataset_path, sample_idx, char_start, char_end, token_start_offset).
+            (dataset_path, sample_idx, char_start, char_end, token_start_offset, token_end_offset).
     """
     packs: list[list[_PackSlice]] = []
     with open(path, encoding="utf-8") as f:
@@ -54,12 +54,13 @@ def _load_pack_config_jsonl(path: str) -> list[list[_PackSlice]]:
                 raise ValueError(f"'samples' must be a non-empty list on line {lineno} of {path}.")
             pack: list[_PackSlice] = []
             for s in samples:
-                if not (isinstance(s, (list, tuple)) and len(s) == 5):
+                if not (isinstance(s, (list, tuple)) and len(s) == 6):
                     raise ValueError(
-                        f"Each slice must be [dataset_path, sample_idx, char_start, char_end, token_start_offset] "
+                        f"Each slice must be [dataset_path, sample_idx, char_start, char_end, "
+                        f"token_start_offset, token_end_offset] "
                         f"on line {lineno} of {path}. Got: {s}"
                     )
-                pack.append((str(s[0]), int(s[1]), int(s[2]), int(s[3]), int(s[4])))
+                pack.append((str(s[0]), int(s[1]), int(s[2]), int(s[3]), int(s[4]), int(s[5])))
             packs.append(pack)
     return packs
 
@@ -69,7 +70,7 @@ def _load_pack_config_parquet(path: str) -> list[list[_PackSlice]]:
 
     Returns:
         list[list[_PackSlice]]: A list of packs, each pack is a list of slices
-            (dataset_path, sample_idx, char_start, char_end, token_start_offset).
+            (dataset_path, sample_idx, char_start, char_end, token_start_offset, token_end_offset).
     """
     data = load_mixed_dict_from_parquet(path)
     boundaries = np.asarray(data["boundaries"], dtype=np.int64)
@@ -81,8 +82,15 @@ def _load_pack_config_parquet(path: str) -> list[list[_PackSlice]]:
         start, end = int(boundaries[i]), int(boundaries[i + 1])
         pack: list[_PackSlice] = []
         for s in samples[start:end]:
-            path_id, s_idx, c_start, c_end, tok_off = int(s[0]), int(s[1]), int(s[2]), int(s[3]), int(s[4])
-            pack.append((paths[path_id], s_idx, c_start, c_end, tok_off))
+            path_id, s_idx, c_start, c_end, tok_off, tok_end = (
+                int(s[0]),
+                int(s[1]),
+                int(s[2]),
+                int(s[3]),
+                int(s[4]),
+                int(s[5]),
+            )
+            pack.append((paths[path_id], s_idx, c_start, c_end, tok_off, tok_end))
         packs.append(pack)
     return packs
 
@@ -96,7 +104,7 @@ def _load_pack_config(path: str) -> list[list[_PackSlice]]:
     raise ValueError(f"Unsupported pack config format: {path}. Expected .jsonl or .parquet.")
 
 
-# (ds_idx, sample_idx, char_start, char_end, token_start_offset, max_tokens)
+# (ds_idx, sample_idx, char_start, char_end, token_start_offset, token_end_offset)
 _ValidatedSlice = tuple[int, int, int, int, int, int]
 
 
@@ -156,12 +164,12 @@ class CustomPackDataset(tud.Dataset):
 
         Returns:
             list[_ValidatedSlice]: Validated slices as
-                (ds_idx, s_idx, char_start, char_end, token_start_offset, max_tokens).
+                (ds_idx, s_idx, char_start, char_end, token_start_offset, token_end_offset).
         """
         slices: list[_ValidatedSlice] = []
         total_tokens = 0
 
-        for dataset_path, s_idx, char_start, char_end, token_start_offset in raw_pack:
+        for dataset_path, s_idx, char_start, char_end, token_start_offset, token_end_offset in raw_pack:
             if dataset_path not in self._path_to_ds_idx:
                 raise ValueError(f"Pack {pack_idx}: dataset_path '{dataset_path}' not found in datasets list.")
             ds_idx = self._path_to_ds_idx[dataset_path]
@@ -183,11 +191,15 @@ class CustomPackDataset(tud.Dataset):
 
             if token_start_offset < 0:
                 raise ValueError(f"Pack {pack_idx}: token_start_offset {token_start_offset} must be >= 0.")
+            if token_end_offset <= token_start_offset:
+                raise ValueError(
+                    f"Pack {pack_idx}: token_end_offset {token_end_offset} must be > "
+                    f"token_start_offset {token_start_offset}."
+                )
 
-            assert ds.num_tokens is not None
-            n_tokens = int(ds.num_tokens[s_idx])
+            n_tokens = token_end_offset - token_start_offset
             total_tokens += n_tokens
-            slices.append((ds_idx, s_idx, char_start, char_end, token_start_offset, n_tokens))
+            slices.append((ds_idx, s_idx, char_start, char_end, token_start_offset, token_end_offset))
 
         if total_tokens < self.pack_max_length:
             if self.short_pack_strategy == "error":
@@ -200,16 +212,16 @@ class CustomPackDataset(tud.Dataset):
                 raise ValueError(
                     f"Pack {pack_idx}: total tokens {total_tokens} > pack_max_length {self.pack_max_length}."
                 )
-            # "truncate": reduce the last slice's max_tokens
+            # "truncate": reduce the last slice's token_end_offset
             excess = total_tokens - self.pack_max_length
-            ds_idx, s_idx, char_start, char_end, tok_off, max_tok = slices[-1]
-            new_max_tok = max_tok - excess
-            if new_max_tok <= 0:
+            ds_idx, s_idx, char_start, char_end, tok_start, tok_end = slices[-1]
+            new_tok_end = tok_end - excess
+            if new_tok_end <= tok_start:
                 raise ValueError(
                     f"Pack {pack_idx}: truncation would make the last slice empty. "
                     "Reduce pack size or adjust pack config."
                 )
-            slices[-1] = (ds_idx, s_idx, char_start, char_end, tok_off, new_max_tok)
+            slices[-1] = (ds_idx, s_idx, char_start, char_end, tok_start, new_tok_end)
 
         return slices
 
@@ -224,8 +236,9 @@ class CustomPackDataset(tud.Dataset):
         pack = self.pack_infos[i]
         items: list[DataItem] = []
 
-        for ds_idx, s_idx, char_start, char_end, tok_off, max_tokens in pack:
+        for ds_idx, s_idx, char_start, char_end, tok_off, tok_end in pack:
             item: DataItem = cast(DataItem, self.datasets[ds_idx][s_idx])
+            max_tokens = tok_end - tok_off
 
             if char_start == -1:
                 if "char_start" in item:

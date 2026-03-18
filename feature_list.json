@@ -54,7 +54,7 @@
       "Step 4: Update test helpers _write_jsonl_pack and _write_parquet_pack to emit 6-element slices; update all existing test fixtures",
       "Step 5: Write/update unit tests verifying loaders parse token_end_offset correctly and validation rejects token_end_offset <= token_start_offset; run tests to pass"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "modify",

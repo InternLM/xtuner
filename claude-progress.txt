@@ -1,3 +1,37 @@
+# Claude Progress Notes — Session 5
+
+## What Was Done This Session
+
+### Feature 5 — Upgrade pack config slice from 5-tuple to 6-tuple (COMPLETED)
+- Updated `_PackSlice` to 6-element tuple: `(dataset_path, sample_idx, char_start, char_end, token_start_offset, token_end_offset)`
+- Updated `_load_pack_config_jsonl`: now requires exactly 6 elements per slice (was 5); parses `token_end_offset`
+- Updated `_load_pack_config_parquet`: unpacks 6th element `token_end_offset`
+- Updated `_ValidatedSlice` comment to reflect `token_end_offset` (replaces `max_tokens` semantically)
+- Updated `_validate_pack`:
+  - Validates `token_end_offset > token_start_offset` (raises ValueError with match "token_end_offset")
+  - Computes `n_tokens = token_end_offset - token_start_offset` (no longer reads from `ds.num_tokens`)
+  - Truncate case: adjusts `token_end_offset` of last slice instead of `max_tokens`
+- Updated `__getitem__`: computes `max_tokens = tok_end - tok_off` from validated slice
+- Updated all test helpers and fixtures:
+  - `_write_jsonl_pack` and `_write_parquet_pack` docstrings updated
+  - All test fixtures updated to 6-element format
+  - `TestLoadPackConfigJsonl::test_basic_load`: now checks `tok_end` field
+  - `TestLoadPackConfigJsonl::test_invalid_slice_length`: now tests 5-element (was 4-element)
+  - `TestLoadPackConfigParquet::test_basic_load`: now checks `tok_end` field
+- Added 2 new validation tests: `test_invalid_token_end_offset` and `test_invalid_token_end_offset_equal`
+- All 25 tests pass
+
+## Current Completion Status
+5/8 features passing
+
+## What To Work On Next
+- Feature 6: Rewrite CustomPackDataset.__getitem__ to distinguish two TokenizeFn cases
+  - For plain TokenizeFn (char_start==-1): apply `input_ids[token_start_offset:token_end_offset]` truncation
+  - For LongTextTokenizeFn: keep existing field-match validation; skip manual truncation since item is pre-truncated
+  - Add unit tests for both cases
+
+---
+
 # Claude Progress Notes — Session 4
 
 ## What Was Done This Session
