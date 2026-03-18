@@ -378,7 +378,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             # 当拼接后的response_ids长度已经达到了max_tokens时，则不需要发送数据，直接返回
             if extra_info.get("partial_rollout_input_ids", None) is not None:
                 if sample_params["max_tokens"] == 0:
-                    self.logger.info(
+                    self.logger.debug(
                         f"Request {uid} reached max context length {self.config.context_length}, no need to rollout more."
                     )
                     return RLRolloutResponseItem(
@@ -390,7 +390,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                         state=RolloutState.COMPLETED,
                     )
                 if extra_info["partial_rollout_input_ids"][-1] in self.eos_token:
-                    self.logger.info(
+                    self.logger.debug(
                         f"Request {uid} already ends with eos token {extra_info['partial_rollout_input_ids'][-1]}, no need to rollout more"
                     )
                     return RLRolloutResponseItem(

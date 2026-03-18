@@ -792,7 +792,6 @@ class ReplayBufferStorage:
             )
 
 
-@ray.remote
 class ReplayBuffer:
     """A Ray actor that manages experience replay for reinforcement
     learning."""
