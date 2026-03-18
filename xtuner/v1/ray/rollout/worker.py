@@ -565,7 +565,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     exist_history_routed_experts = (
                         "routed_experts" in input_extra_info and input_extra_info["routed_experts"] is not None
                     )
-                    routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
+                    routed_experts = response["meta_info"].pop("routed_experts")  # token[layer[expert]]
                     if routed_experts is not None and not exist_history_routed_experts:
                         # 不存在历史专家，先把当前专家存起来
                         if isinstance(routed_experts, str):
@@ -585,13 +585,13 @@ class RolloutWorker(SingleAcceleratorWorker):
                             data = base64.b64decode(routed_experts)
                             routed_experts = ray.cloudpickle.loads(data)
                             cur_routed_experts = await routed_experts  # n,layer,expert
-                            ray._private.internal_api.free(routed_experts)
+                            ray.internal.free(routed_experts, local_only=False)
                         else:
                             routed_experts = torch.tensor(routed_experts)  # n,layer,expert
                             cur_routed_experts = routed_experts
 
                         history_routed_experts = await input_extra_info["routed_experts"]  # n, layer, expert
-                        ray._private.internal_api.free(input_extra_info["routed_experts"])
+                        ray.internal.free(input_extra_info["routed_experts"], local_only=False)
                         del input_extra_info["routed_experts"]
 
                         assert (history_routed_experts.shape[0] - 1) > 0 and history_routed_experts.shape[
