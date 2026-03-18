@@ -149,6 +149,7 @@ def group_samples_filter_func(rollout_states):
         return False
     else:
         return True
+    
 produce_strategy_config = AsyncProduceStrategyConfig(
     over_sample_threshold=0.2,
     enable_partial_rollout=True,
@@ -196,7 +197,7 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
 )
 
 def dapo_compute_metric(samples):
-    return {"accuracy": sum(s.env.judger.reward["acc"] > 0 for s in samples) / len(samples)}
+    return {"accuracy": sum(s.reward["acc"] > 0 for s in samples) / len(samples)}
 
 evaluator_config = EvaluatorConfig(compute_metric_func=dapo_compute_metric)
 

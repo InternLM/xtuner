@@ -66,7 +66,7 @@ from transformers import AutoTokenizer
 eos_token_id = get_eos_token(model_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
-dapomath_judger_config = DapoMathJudgerConfig(
+judger_config = DapoMathJudgerConfig(
     judger_name="dapo_math", 
     eos_token=eos_token_str,
     enable_overlong_buffer = True, 
@@ -74,8 +74,6 @@ dapomath_judger_config = DapoMathJudgerConfig(
     overlong_buffer_len=4096, 
     overlong_penalty_factor=1.0, 
     tokenizer=tokenizer)
-judger_config = DapoMathJudgerConfig(judger_name="dapo_math", judger_type="router")
-
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
@@ -184,7 +182,7 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
 )
 
 def dapo_compute_metric(samples):
-    return {"accuracy": sum(s.env.judger.reward["acc"] > 0 for s in samples) / len(samples)}
+    return {"accuracy": sum(s.reward["acc"] > 0 for s in samples) / len(samples)}
 
 evaluator_config = EvaluatorConfig(compute_metric_func=dapo_compute_metric)
 
@@ -202,6 +200,7 @@ trainer = RLColocateTrainerConfig(
     global_batch_size=global_batch_size,
     enable_evaluate=True,
     enable_initial_evaluate=False,
+    rollout_steps=500,
     evaluate_step=evaluate_step,
     work_dir=work_dir,
     seed=123,
