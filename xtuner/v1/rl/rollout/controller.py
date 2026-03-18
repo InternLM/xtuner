@@ -180,7 +180,7 @@ class RolloutController:
                     rank = self._get_rank_by_actor(worker.actor)
                     if rank is not None:
                         self.rank2info[rank].is_active = True
-        self.helth_checker.resume()
+        self.health_checker.resume()
 
     def _restart_failed_workers(self, worker: RolloutWorker) -> bool:
         try:
