@@ -198,7 +198,11 @@ class RawEvaluator:
             RLDataFlowItem or None: The sample with retry information if it
                 failed, or None if it succeeded or failed without a sample.
         """
-        group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
+        # Force disable return_routed_experts for evaluator to reduce overhead
+        extra_params = {"disable_routed_experts": True}
+        group_sample = await self.env_controller.run.remote(
+            [sample], sample_params=self.sample_params, extra_params=extra_params
+        )  # type: ignore[attr-defined]
         self.return_list.append(group_sample[0])
 
     async def concurrent_eval_task_runner(self):
