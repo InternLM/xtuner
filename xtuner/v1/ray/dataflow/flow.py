@@ -141,10 +141,10 @@ class RawDataFlow:
         self.config = dataflow_cfg
         replay_buffer_cfg.worker_log_dir = self.config.worker_log_dir
         self.replay_buffer = ReplayBuffer(replay_buffer_cfg)
-        self.replay_buffer.setup_storage_config(  # type: ignore[attr-defined]
+        self.replay_buffer.setup_storage_config(
             enable_partial_rollout=self.config.enable_partial_rollout,
             tail_batch_candidate_steps=self.config.tail_batch_candidate_steps,
-            tail_batch_trigger_size=self.config.tail_batch_trigger_size,
+            tail_batch_trigger_size=self.config.tail_batch_trigger_size,  # type: ignore
         )
         self.staleness_threshold = self.config.staleness_threshold
         self.env_controller = environment
