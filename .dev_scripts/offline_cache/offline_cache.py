@@ -244,6 +244,7 @@ def cache_worker(
     tokenizer_path: str,
     task_id: int,
     tracker: Any,
+    tokenizer_hash: str | None = None,
 ):
     """Ray remote worker function to process and cache datasets.
 
@@ -257,6 +258,7 @@ def cache_worker(
         tokenizer_path (str): Path to the pretrained tokenizer to load
         task_id (int): Task identifier (used for logging)
         tracker (Any): Ray Actor handle to the ProgressTracker for reporting progress
+        tokenizer_hash (str | None): Pre-computed tokenizer hash. If None, will be computed.
     """
     import socket
     import os
@@ -272,12 +274,14 @@ def cache_worker(
     monkey_patch_hf_modules_cache()
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
-    tok_hash = tokenizer_xxhash(tokenizer)[:16]
+    # Use provided hash or compute if not provided
+    tok_hash = tokenizer_hash if tokenizer_hash is not None else tokenizer_xxhash(tokenizer)[:16]
 
+    # Prepare modified configs with worker-specific cache_dir
+    modified_configs = []
     for config in dataset_config_list:
-        # Deep copy to avoid modifying original config
-        _dataset_config = copy.deepcopy(config["dataset"])
-        _tokenize_fn_config = config["tokenize_fn"]
+        _config = copy.deepcopy(config)
+        _dataset_config = _config["dataset"]
 
         # Dynamically set cache_dir based on physical worker identity
         if hasattr(_dataset_config, "cache_dir") and _dataset_config.cache_dir is not None:
@@ -285,10 +289,13 @@ def cache_worker(
             worker_cache_dir = original_cache_dir / f"worker-{worker_unique_id}"
             _dataset_config.cache_dir = str(worker_cache_dir)
 
-        _tokenize_fn = _tokenize_fn_config.build(tokenizer, tokenizer_hash=tok_hash)
+        modified_configs.append(_config)
 
-        _dataset_config.build(_tokenize_fn)
-        tracker.increment.remote(1)
+    # Use build_datasets to handle directory expansion and dataset creation
+    build_datasets(modified_configs, tokenizer, tok_hash)
+
+    # Report progress for each config (not expanded files)
+    tracker.increment.remote(len(dataset_config_list))
 
     logger.info(f"[Task {task_id}] Finished on {hostname}, PID={pid}")
 
@@ -302,6 +309,7 @@ def main(
     tasks_per_node: Annotated[int, Parameter(help="num cache workers per node")] = 1,
     image: Annotated[str, Parameter(help="image containing XTuner dependencies and ray")] = "registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_latest",
     ray_log_to_driver: Annotated[bool, Parameter(help="whether or not worker logs are to be logged to driver node")] = False,
+    tokenizer_hash: Annotated[str | None, Parameter(help="pre-computed tokenizer hash (if None, will be computed)")] = None,
 ):
     head_job = start_ray(nnodes=1, cpus_per_task=cpus_per_task, memory_per_task=memory_per_task, image=image)  # type: ignore[arg-type]
     worker_job = None
@@ -347,6 +355,18 @@ def main(
         tokenizer_path = config.trainer.tokenizer_path
         base_cache_dir = Path(dataset_config[0]["dataset"].cache_dir)
 
+        # Use provided tokenizer_hash or compute it
+        if tokenizer_hash is not None:
+            tok_hash = tokenizer_hash
+            logger.info(f"Using provided tokenizer hash: {tok_hash}")
+        else:
+            # Compute tokenizer hash once in main (avoid redundant computation in workers)
+            from xtuner.v1.datasets.utils import tokenizer_xxhash
+            monkey_patch_hf_modules_cache()
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+            tok_hash = tokenizer_xxhash(tokenizer)[:16]
+            logger.info(f"Computed tokenizer hash: {tok_hash}")
+
         total_files = len(dataset_config)
         logger.info(f"Total files to process: {total_files}")
 
@@ -372,7 +392,7 @@ def main(
 
         for i, config in tqdm(enumerate(dataset_config), total=total_files, desc="Submitting tasks", unit="task"):
             # Submit task with single config (worker will handle cache_dir internally)
-            res.append(worker.remote([config], tokenizer_path, i, tracker))
+            res.append(worker.remote([config], tokenizer_path, i, tracker, tok_hash))
 
         pbar = tqdm(total=total_files, desc="Processing files", unit="file")
         stop_event = threading.Event()
