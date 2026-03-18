@@ -276,6 +276,20 @@ class RolloutConfig(BaseModel):
         ),
     ] = False
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
+    health_check_interval_seconds: Annotated[
+        float,
+        Parameter(
+            group=infer_group,
+            help="Interval in seconds between rollout worker health checks.",
+        ),
+    ] = 30.0
+    health_check_failure_threshold: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of consecutive health check failures required before marking a worker inactive.",
+        ),
+    ] = 3
     _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
 
     @property
@@ -496,7 +510,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     def shutdown(self):
         """Shut down the worker, its server task, and any child processes."""
         if self.server_task is not None:
-            ray.cancel(self.server_task)
+            ray.cancel(self.server_task, force=True)
             return
 
         if self.server_process is not None:
