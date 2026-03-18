@@ -58,25 +58,36 @@
   },
   {
     "category": "modify",
-    "description": "Rewrite CustomPackDataset.__getitem__ to distinguish two TokenizeFn cases: for plain TokenizeFn (char_start==-1) apply input_ids[token_start_offset:token_end_offset] truncation; for LongTextTokenizeFn the item is pre-truncated so only validate. Also relax consistency check for the last slice when short/long_pack_strategy != 'error'.",
+    "description": "Rewrite CustomPackDataset.__getitem__ to distinguish two TokenizeFn cases: for plain TokenizeFn (char_start==-1) apply input_ids[token_start_offset:token_end_offset] truncation; for LongTextTokenizeFn the item is pre-truncated so only validate.",
     "steps": [
       "Step 1: For char_start==-1 (plain TokenizeFn): after verifying item is plain DataItem, truncate via input_ids[token_start_offset:token_end_offset] instead of relying on max_tokens from _ValidatedSlice",
       "Step 2: For char_start!=-1 (LongTextTokenizeFn): keep existing field-match validation; skip manual truncation since item is pre-truncated at tokenize time",
-      "Step 3: Detect last-slice position in the pack; when short_pack_strategy != 'error' or long_pack_strategy != 'error', skip strict length/field validation for that slice",
-      "Step 4: Write unit test for plain TokenizeFn case verifying truncation via token_start_offset:token_end_offset is applied; run tests to pass",
-      "Step 5: Write unit test for LongTextTokenizeFn case verifying no extra truncation occurs; write unit test verifying relaxed validation on last slice when non-error strategy is set; run all tests to pass"
+      "Step 3: Write unit test for plain TokenizeFn case verifying truncation via token_start_offset:token_end_offset is applied; run tests to pass",
+      "Step 4: Write unit test for LongTextTokenizeFn case verifying no extra truncation occurs; run all tests to pass"
     ],
     "passes": false
   },
   {
     "category": "modify",
-    "description": "Replace self.pack_infos list[list[_ValidatedSlice]] with a compact np.ndarray representation (CSR-style: a flat slices array + boundaries array), and stream-validate the config file on-the-fly to eliminate the intermediate raw_packs list and reduce peak memory usage.",
+    "description": "Switch pack_config_path to NPY directory format (boundaries.npy, samples.npy, paths.npy). Add load_config(path, mmap=True) function. Replace Python-loop _validate_pack with vectorized numpy validation. Move long_pack_strategy='truncate' handling from __init__ to __getitem__. Update __getitem__ to do segment reads on mmap'd arrays.",
     "steps": [
-      "Step 1: Design np.ndarray layout: _slices_arr shape (total_slices, 6) dtype int64 storing [ds_idx, s_idx, char_start, char_end, token_start_offset, token_end_offset]; _boundaries_arr shape (num_packs+1,) dtype int64 as CSR row pointers",
-      "Step 2: Refactor __init__: remove _load_pack_config call and raw_packs variable; instead open the config file (JSONL or Parquet) and call a new _iter_raw_packs generator that yields one raw pack at a time; accumulate validated slice rows into a Python list then convert to np.ndarray at end (or pre-allocate if total count is known from Parquet boundaries)",
-      "Step 3: Rewrite _validate_pack to accept/return flat int-list rows instead of Python tuples; append validated rows to the accumulation buffer; build _boundaries_arr incrementally",
-      "Step 4: Update __len__ to return len(_boundaries_arr)-1; update __getitem__ to slice _slices_arr[_boundaries_arr[i]:_boundaries_arr[i+1]] and iterate rows as int tuples",
-      "Step 5: Write unit tests verifying the np.ndarray-based path produces identical __getitem__ results compared to the old list-based path for both JSONL and Parquet configs; run tests to pass"
+      "Step 1: Add load_config(path: str, mmap: bool = True) -> dict[str, np.ndarray] that loads boundaries.npy (int64), samples.npy (int64, shape Nx6), paths.npy (object) from the given directory; use np.load(mmap_mode='r') for int64 arrays when mmap=True; always load paths.npy in full",
+      "Step 2: Rewrite CustomPackDataset.__init__: call load_config; store _boundaries and _samples as mmap'd arrays and _paths as a loaded array; build _path_to_ds_idx from _paths; remove the old _load_pack_config / raw_packs / pack_infos list machinery",
+      "Step 3: Replace _validate_pack Python loop with vectorized numpy validation: structural checks (boundaries[-1]==len(samples), shape[1]==6); field checks (path_id range, token_start_offset>=0, token_end_offset>token_start_offset, char constraints); for short_pack_strategy='error' and long_pack_strategy='error' use np.add.reduceat on token lengths to compute per-pack sums and raise if any pack total != pack_max_length",
+      "Step 4: Update __getitem__(i): read row slice _samples[_boundaries[i]:_boundaries[i+1]] (segment read); for long_pack_strategy='truncate' compute running token sum and stop at pack_max_length instead of using pre-computed max_tokens; update __len__ to len(_boundaries)-1",
+      "Step 5: Update test helpers to write NPY directory format (write_npy_pack_dir); update all existing test fixtures to use the new format; run all existing tests to pass"
+    ],
+    "passes": false
+  },
+  {
+    "category": "add",
+    "description": "Stress test CustomPackDataset at 2-billion-slice scale with an 8-process distributed test. Mock datasets to isolate CustomPackDataset performance. Measure init time, __getitem__ time, and memory usage (tracemalloc for Python objects + psutil RSS for total process memory).",
+    "steps": [
+      "Step 1: Write a helper generate_stress_pack_config(num_slices, pack_max_length, out_dir) that generates boundaries.npy, samples.npy, paths.npy in NPY directory format; token length per slice drawn uniformly from [200, 16000]; each pack filled greedily until pack_max_length is reached; total slices ~2 billion (adjust num_packs so total_slices ≈ 2e9)",
+      "Step 2: Write a MockDataset that satisfies the JsonlDataset interface (has .path, .num_tokens, __len__, __getitem__) without real file I/O; __getitem__ returns a synthetic DataItem (input_ids list of zeros with length matching num_tokens[i])",
+      "Step 3: Implement the 8-process distributed test class inheriting DistributedTestBase; each rank independently constructs CustomPackDataset with mmap=True; record init wall-clock time and peak RSS (psutil) + tracemalloc peak before/after __init__",
+      "Step 4: In the distributed test, each rank calls __getitem__ on its shard of pack indices (rank-strided); record total __getitem__ wall-clock time and average per-item latency; assert no crashes and results are non-empty",
+      "Step 5: Add an assertion or logged comparison between mmap=True and mmap=False memory usage to validate the mmap memory saving; run the stress test and ensure it completes within a reasonable time bound"
     ],
     "passes": false
   }

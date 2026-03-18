@@ -59,77 +59,88 @@ LongTextTokenizeFn 的核心思路是：对原始字符序列按长度 `tokenize
 
 ### 自定义 Pack
 
-1. **Pack Config 文件（JSONL 或 Parquet）**
+1. **Pack Config 文件（NPY 目录格式）**
 
-每个 pack 由若干 **sample slice** 组成，每个 slice 描述「取某个样本的哪一段（或全部）token」：
+每个 pack 由若干 **sample slice** 组成，每个 slice 描述「取某个样本的哪一段（或全部）token」。Pack Config 存储为一个目录，目录下包含若干 `.npy` 文件：
 
-以 **JSONL 格式** 为例（每行一个 pack）：
+| 文件名 | dtype | shape | 含义 |
+| --- | --- | --- | --- |
+| `boundaries.npy` | `int64` | `(num_packs + 1,)` | CSR 边界数组，`boundaries[i]:boundaries[i+1]` 是第 i 个 pack 的 slice 行范围 |
+| `samples.npy` | `int64` | `(total_slices, 6)` | 所有 slice 的数值字段，列顺序见下表 |
+| `paths.npy` | `object`（Python str） | `(num_paths,)` | `path_id → dataset_path` 映射 |
 
-```jsonl
-{"samples": [["path/to/ds0.jsonl", 42, 0, 512, 0, 128], ["path/to/ds0.jsonl", 43, 0, 256, 2, 130], ["path/to/ds1.jsonl", 7, 128, 384, 0, 256]]}
-{"samples": [["path/to/ds1.jsonl", 100, 384, 512, 0, 200], ["path/to/ds2.jsonl", 5, 0, 1024, 0, 512], ["path/to/ds2.jsonl", 6, 0, 512, 5, 517]]}
-```
+`samples.npy` 的列定义（列索引 0–5）：
 
-- `samples[i] = [dataset_path, sample_idx, char_start, char_end, token_start_offset, token_end_offset]`
-- `dataset_path`：对应 Jsonl 文件路径，即 `JsonlDataset.path`（`JsonlDataset.anno_path`）。
-- `sample_idx`：该 dataset 内的逻辑下标，对应 `JsonlDataset` 的第 `sample_idx` 个样本（或 chunk）。
-  - **文件与索引一一对应原则**：开启自定义 Pack 时，在 `JsonlDataset` 中强制关闭 filter（`disable_filter=True`），并设置 `sample_ratio=1`、`enable_sequential_sampler=True`，以确保 `sample_idx` 与真实文件行号（或 chunk 索引）一一对应。这样可以使 JSONL 文件中的样本行与 Pack Config 中的 `sample_idx` 明确对应，降低配置出错概率。
-  - 如需 filter、sampleratio 等逻辑，应通过生成 Pack Config 时离线实现，而不是在 `JsonlDataset` 内部动态实现。
-- `char_start`：从该样本的 `text[char_start:]` 开始取（含起始，inclusive）。用于运行时一致性校验。
-- `char_end`：取到 `text[:char_end]`（不含结尾，exclusive）。用于运行时一致性校验。
-- 对于 `LongTextTokenizeFn`，同一个样本可以在多个不同 pack 中出现（长文被截断后分配到多个 pack），运行时会校验 `char_start` 与 `char_end` 的合法性。
-- `token_start_offset`、`token_end_offset`：表示此次输出 token 的合法结果在该 chunk 的 tokenize 结果中的起始和结束 token 偏移（左闭右开），即取 `input_ids[token_start_offset:token_end_offset]`，用于精确描述每个 pack slice 在 token 维度上的位置。
-  - 基于 `LongTextTokenizeFn` 时：运行时 `JsonlDataset.__getitem__` 返回的 `LongTextDataItem` 已经是按 `[token_start_offset, token_end_offset)` 截断后的结果，`__getitem__` 只做语义一致性校验，无需再次截取。
-  - 基于普通 `TokenizeFn` 时：`JsonlDataset.__getitem__` 返回的 `DataItem` 是全量 token，需要在 `CustomPackDataset.__getitem__` 中做 `input_ids[token_start_offset:token_end_offset]` 的截取。
-- 对于普通 TokenizeFn（即非长文本场景），`char_start` 和 `char_end` 均设置为 `-1` 表示「使用样本全部 token」，此时 `token_start_offset` 为 `0`，`token_end_offset` 为该样本实际 token 数（即使用全部 token）。
+| 列索引 | 字段名 | 含义 |
+| --- | --- | --- |
+| 0 | `path_id` | `paths.npy` 中的整数下标，对应实际的 `dataset_path` |
+| 1 | `sample_idx` | 该 dataset 内的逻辑下标 |
+| 2 | `char_start` | 字符级起始（inclusive）；普通 TokenizeFn 时固定为 `-1` |
+| 3 | `char_end` | 字符级结束（exclusive）；普通 TokenizeFn 时固定为 `-1` |
+| 4 | `token_start_offset` | token 起始偏移（inclusive） |
+| 5 | `token_end_offset` | token 结束偏移（exclusive） |
 
-以 **Parquet 格式** 为例（单个 `.parquet` 文件，适合大规模 pack config 的高效读取）：
+字段语义补充说明：
+
+- **文件与索引一一对应原则**：开启自定义 Pack 时，在 `JsonlDataset` 中强制关闭 filter（`disable_filter=True`），并设置 `sample_ratio=1`、`enable_sequential_sampler=True`，以确保 `sample_idx` 与真实文件行号（或 chunk 索引）一一对应。如需 filter、sample_ratio 等逻辑，应通过生成 Pack Config 时离线实现。
+- `char_start`/`char_end`：均为 `-1` 时表示普通 TokenizeFn（全量样本），否则为 `LongTextTokenizeFn` 的字符切片范围，运行时用于一致性校验。
+- `token_start_offset`/`token_end_offset`（左闭右开）：取 `input_ids[token_start_offset:token_end_offset]`。
+  - 基于 `LongTextTokenizeFn` 时：`JsonlDataset.__getitem__` 返回的 `LongTextDataItem` 已按此范围截断，`CustomPackDataset.__getitem__` 只做校验。
+  - 基于普通 `TokenizeFn` 时：`DataItem` 为全量 token，`CustomPackDataset.__getitem__` 负责执行截取。
+- 普通 TokenizeFn 场景：`char_start = char_end = -1`，`token_start_offset = 0`，`token_end_offset` = 该样本实际 token 数。
+
+**`load_config` 加载函数：**
 
 ```python
-# 写入（离线生成工具使用，复用 jsonl.py 中的 save_mixed_dict_to_parquet）
-save_mixed_dict_to_parquet({
-    "boundaries": np.array([0, 1, 3, ...], dtype=np.int64),  # CSR 边界，shape (num_packs+1,)
-    "samples":    [[path_id, s_idx, char_start, char_end, token_start_offset, token_end_offset], ...],  # list[list[int]]
-    "paths":      ["path/to/ds0.jsonl", "path/to/ds1.jsonl", ...],  # list[str]，path_id → dataset_path
-}, "pack_config.parquet")
+def load_config(path: str, mmap: bool = True) -> dict[str, np.ndarray]:
+    """从 NPY 目录加载 pack config。
 
-# 读取（复用 jsonl.py 中的 load_mixed_dict_from_parquet）
-data = load_mixed_dict_from_parquet("pack_config.parquet")
-# data["boundaries"]: np.ndarray, shape (num_packs+1,)
-# data["samples"]:    list[list[int]]
-# data["paths"]:      list[str]
+    Args:
+        path:  存放 .npy 文件的目录路径。
+        mmap:  若为 True，使用 mmap_mode='r' 以只读内存映射方式加载 int64 数组，
+               避免将大数组完整读入 RAM；paths.npy 始终完整加载（数据量小）。
+
+    Returns:
+        dict，key 为不含扩展名的文件名，value 为对应 np.ndarray：
+            'boundaries': shape (num_packs+1,), dtype int64
+            'samples':    shape (total_slices, 6), dtype int64
+            'paths':      shape (num_paths,),      dtype object (Python str)
+    """
+```
+
+写入示例（离线生成工具使用）：
+
+```python
+np.save(os.path.join(pack_dir, "boundaries.npy"),
+        np.array([0, 1, 3, ...], dtype=np.int64))
+np.save(os.path.join(pack_dir, "samples.npy"),
+        np.array([[path_id, s_idx, c_start, c_end, tok_start, tok_end], ...], dtype=np.int64))
+np.save(os.path.join(pack_dir, "paths.npy"),
+        np.array(["path/to/ds0.jsonl", "path/to/ds1.jsonl", ...], dtype=object))
 ```
 
 2. **运行时严格校验逻辑**
 
-在初始化 `CustomPackDataset` 时，需要对每一个 pack 做强校验：
+在初始化 `CustomPackDataset` 时，通过 `load_config` 加载 mmap 只读数组后，使用 **numpy 向量化操作**对全量数组做结构性校验，避免 Python 逐行循环（对于亿级 slice 而言逐行校验开销过高）：
 
-- `dataset_path` 不在 datasets 列表中（通过 `JsonlDataset.path` 匹配）→ 抛出错误。
-- `sample_idx` 越界（超过 `len(dataset)`）→ 抛出错误。
-- 若 `char_start` 和 `char_end` 均为 `-1`（普通 TokenizeFn 情况）→ 允许，跳过 char 范围校验。
-- 否则（LongTextTokenizeFn 情况）：`char_start < 0` 或 `char_end <= char_start` → 抛出错误。
-- `token_start_offset < 0` 或 `token_end_offset <= token_start_offset` → 抛出错误。
-- 记每个 slice 的 token 数为 `num_tokens_i = dataset.num_tokens[sample_idx]`，若
-  - `sum(num_tokens_i) < pack_max_length`：由 `short_pack_strategy` 控制：
-    - `"error"`：直接 `raise ValueError`；
-    - `"padding"`：在末尾补齐 pad token，同时在 labels 中对应位置填 -100。
-  - `sum(num_tokens_i) > pack_max_length`：由 `long_pack_strategy` 控制：
-    - `"error"`：直接 `raise ValueError`；
-    - `"truncate"`：截断最后一个 slice，使总长度恰好等于 `pack_max_length`。
-- 默认策略均为 `"error"`。
-- 不支持 `"skip"` 策略（与「索引与配置一一对应」原则冲突），以确保 PackConfig 中的样本索引可以稳定地与后续 SamplerConfig 中的消费顺序对应。
+- **结构校验**：`boundaries[-1] == len(samples)`，`samples.shape[1] == 6`。
+- **字段取值校验**（向量化，无需全量加载进 RAM，numpy 会按页读取 mmap）：
+  - `samples[:, 0]`（`path_id`）均在 `[0, len(paths))` 范围内。
+  - `samples[:, 4]`（`token_start_offset`）均 `>= 0`。
+  - `samples[:, 5]`（`token_end_offset`）均 `> samples[:, 4]`。
+  - 对 `char_start != -1` 的行：`char_start >= 0` 且 `char_end > char_start`（用 mask 筛出后校验）。
+- **per-pack token 总量校验**（`short_pack_strategy == "error"` 或 `long_pack_strategy == "error"` 时）：利用 `np.add.reduceat` 按 `boundaries[:-1]` 对 `token_end_offset - token_start_offset` 做分段求和，一次向量化操作得到每个 pack 的 token 总量，与 `pack_max_length` 比较。
+- **`long_pack_strategy == "truncate"` 情况**：不在 `__init__` 中修改 samples 数据（mmap 为只读），截断逻辑推迟到 `__getitem__` 中按需执行。
+- 不支持 `"skip"` 策略（与「索引与配置一一对应」原则冲突）。
 
-在实际取样本时（`__getitem__`），再次做一致性检查：对于 `samples[i] = [dataset_path, sample_idx, char_start, char_end, token_start_offset, token_end_offset]`：
+在实际取样本时（`__getitem__(i)`），通过 **段式读取** `_samples[_boundaries[i]:_boundaries[i+1]]` 获取该 pack 的 slice 行，再逐行处理：
 
-- 调用 `dataset[sample_idx]` 得到 `item`（`DataItem` 或 `LongTextDataItem`）。
-- 若 `char_start == -1`（普通 TokenizeFn 情况）：
-  - 校验 `item` 中不含 `char_start` 字段（即为普通 `DataItem`）。
-  - 执行 `input_ids[token_start_offset:token_end_offset]` 截取，得到本 slice 实际使用的 token 序列。
-  - 若该 slice 是 pack 中最后一个，且 `short_pack_strategy != "error"` 或 `long_pack_strategy != "error"`，则允许截取后长度与预期不完全一致（由上层 padding/truncate 策略补偿），放松严格长度校验。
-- 否则（LongTextTokenizeFn 情况）：
-  - 校验 `item` 为 `LongTextDataItem`，且 `item.char_start == char_start`、`item.char_end == char_end`、`item.token_start_offset == token_start_offset`，确保切片语义一致。
-  - `LongTextDataItem` 内的 `input_ids` 已在 tokenize 阶段按 `[token_start_offset, token_end_offset)` 截断完毕，此处不再做额外截取。
-  - 若该 slice 是 pack 中最后一个，且 `short_pack_strategy != "error"` 或 `long_pack_strategy != "error"`，则对 `item.char_start`、`item.char_end`、`item.token_start_offset` 的校验予以放松（允许与 pack config 中记录的值存在偏差）。
+- 对每一行 `[path_id, s_idx, char_start, char_end, tok_start, tok_end]`：
+  - 调用 `datasets[path_to_ds_idx[paths[path_id]]][s_idx]` 得到 `item`。
+  - 若 `char_start == -1`（普通 TokenizeFn）：校验 `item` 不含 `char_start` 字段；执行 `input_ids[tok_start:tok_end]` 截取。
+  - 否则（LongTextTokenizeFn）：校验 `item` 为 `LongTextDataItem`，且 `item.char_start == char_start`、`item.char_end == char_end`、`item.token_start_offset == tok_start`；不再做额外截取。
+  - 若 `long_pack_strategy == "truncate"` 且当前累计 token 数加上本 slice 会超出 `pack_max_length`，则对本 slice 截取 `input_ids[:remaining]` 后停止（不再处理后续 slice）。
+- `short_pack_strategy == "padding"` 时，在所有 slice 处理完毕后在末尾追加 pad DataItem。
 
 3. **resume 行为**
 
@@ -143,6 +154,10 @@ data = load_mixed_dict_from_parquet("pack_config.parquet")
 - 基于普通 `TokenizeFn` 的 `JsonlDataset`：`char_start`/`char_end` 均为 `-1`，`token_start_offset` 为 `0`，`token_end_offset` 为该样本实际 token 数；运行时在 `CustomPackDataset.__getitem__` 中执行截取。
 
 二者可以在同一个 PackConfig 中混合出现，通过 `char_start`/`char_end` 是否为 `-1` 来区分。
+
+**内存占用分析：**
+
+使用 `mmap=True` 时，`boundaries.npy` 和 `samples.npy` 通过 OS mmap 以只读方式映射，操作系统按需将文件页加载进物理内存，未访问的页不占用 RAM。以 20 亿条 slice（`samples.npy` 约 96 GB）为例，若每次训练 step 仅访问其中极小一部分，常驻 RAM 可控制在操作系统的 page cache 范围内，远低于完整加载。`paths.npy` 数据量极小，始终完整加载。
 
 5. **DataloaderConfig 集成**
 
