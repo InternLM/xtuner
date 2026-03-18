@@ -149,11 +149,13 @@ def tokenize_worker(
     out_queue: Queue,
     cpu_ids: list[int],
 ):
-    # For offline caching script to work, cpu affinity has to be turned off.
-    # try:
-    #     os.sched_setaffinity(os.getpid(), cpu_ids)
-    # except OSError as e:
-    #     logger.debug(f"Failed to set CPU affinity: {e}")
+    if os.environ.get("XTUNER_TOKENIZE_WORKER_SKIP_AFFINITY", "0") != "1":
+        try:
+            os.sched_setaffinity(os.getpid(), cpu_ids)
+        except OSError as e:
+            import warnings
+
+            warnings.warn(f"Failed to set CPU affinity: {e}")
 
     shared_memory = SharedMemory(name=shm_name, create=False)
     while True:

@@ -1,25 +1,22 @@
-import copy
-import json
-import random
-import shutil
-import threading
-import time
-from math import ceil
-from pathlib import Path
-from typing import Annotated
-
-import ray
+from brainpp.rjob import Job
 from clusterx import CLUSTER, CLUSTER_MAPPING
 from clusterx.launcher.base import JobSchema, JobStatus
+from xtuner.v1.datasets import build_datasets, DatasetConfigList
+from typing import Annotated, Any
 from cyclopts import App, Parameter
-from loguru import logger
-from more_itertools import batched
-from tqdm import tqdm
-
-from transformers import AutoTokenizer
-from xtuner.v1.datasets import DatasetConfigList
+import ray
+from pathlib import Path
 from xtuner.v1.utils import Config
 from xtuner.v1.utils.misc import monkey_patch_hf_modules_cache
+from transformers import AutoTokenizer
+import copy
+from loguru import logger
+import json
+import os
+import shutil
+from tqdm import tqdm
+import threading
+import time
 
 
 CACHE_META = ".xpuyu-cache-meta.json"
@@ -41,7 +38,6 @@ class ProgressTracker:
         """Get current progress (completed, total)."""
         return self.completed, self.total
 
-
 app = App()
 
 
@@ -54,14 +50,7 @@ assert Cluster is not None, "Please install clusterx correctly"
 cluster = Cluster()
 
 
-def start_ray(
-    nnodes: int,
-    cpus_per_task: int,
-    memory_per_task: int,
-    image: str,
-    max_wait_minutes: int = 30,
-    head_ip: str | None = None,
-) -> JobSchema:
+def start_ray(nnodes: int, cpus_per_task: int, memory_per_task: int, image: str, max_wait_minutes: int = 30, head_ip: str | None = None) -> JobSchema:
     """Start Ray cluster nodes and wait for them to be ready.
 
     This function supports two modes:
@@ -112,7 +101,8 @@ def start_ray(
         elapsed = time.time() - start_time
         if elapsed > timeout_seconds:
             raise TimeoutError(
-                f"Job {job.job_id} did not start within {max_wait_minutes} minutes. Current status: {job.status}"
+                f"Job {job.job_id} did not start within {max_wait_minutes} minutes. "
+                f"Current status: {job.status}"
             )
 
         time.sleep(10)  # Poll every 10 seconds
@@ -127,39 +117,45 @@ def start_ray(
     return job
 
 
-def merge_worker_caches(base_cache_dir: Path, num_workers: int) -> None:
+def merge_worker_caches(base_cache_dir: Path) -> None:
     """Merge all worker cache directories into the base directory.
 
     Handles merging when same file_hash exists across workers by:
     - Merging subdirectories (tokenize_hash) as union
-    - Deep-merging metadata (offsets lists, num_tokens dicts)
+    - Deep-merging metadata (offsets lists, jsonl_meta dicts)
 
     Args:
-        base_cache_dir (Path): Base directory containing worker-{i} subdirectories
-        num_workers (int): Number of worker directories to merge
+        base_cache_dir (Path): Base directory containing worker-* subdirectories
     """
     merged_meta: dict = {}
     merged_tags: dict = {}
 
     logger.info(f"Starting cache merge into {base_cache_dir}")
 
-    for worker_id in range(num_workers):
-        worker_dir = base_cache_dir / f"worker-{worker_id}"
-        if not worker_dir.exists():
-            logger.warning(f"Worker directory {worker_dir} does not exist, skipping")
+    # Auto-discover all worker-* directories
+    worker_dirs = sorted(base_cache_dir.glob("worker-*"))
+    logger.info(f"Found {len(worker_dirs)} worker directories to merge")
+
+    for worker_dir in worker_dirs:
+        worker_id = worker_dir.name  # e.g., "worker-node01_12345"
+
+        if not worker_dir.is_dir():
             continue
 
         meta_file = worker_dir / CACHE_META
         if not meta_file.exists():
-            logger.warning(f"Meta file {meta_file} does not exist, skipping worker-{worker_id}")
+            logger.warning(f"Meta file {meta_file} does not exist, skipping {worker_id}")
             continue
 
+        # Load worker's meta.json
         with open(meta_file) as f:
             worker_meta = json.load(f)
 
-        logger.info(f"Processing worker-{worker_id}: {len(worker_meta)} hash entries")
+        logger.info(f"Processing {worker_id}: {len(worker_meta)} hash entries")
 
+        # Copy each hash directory and merge metadata
         for file_hash, hash_meta in worker_meta.items():
+            # Skip "tags" key as it will be handled separately
             if file_hash == "tags":
                 continue
 
@@ -170,37 +166,40 @@ def merge_worker_caches(base_cache_dir: Path, num_workers: int) -> None:
                 logger.warning(f"Hash directory {src_hash_dir} does not exist, skipping")
                 continue
 
+            # Merge subdirectories (tokenize_hash level)
             if dst_hash_dir.exists():
                 logger.info(f"Hash directory {dst_hash_dir} already exists, merging subdirectories")
-
+                # Move tokenize_hash subdirs from src to dst
                 for tok_hash_dir in src_hash_dir.iterdir():
                     if tok_hash_dir.is_dir():
                         dst_tok_dir = dst_hash_dir / tok_hash_dir.name
-
                         if not dst_tok_dir.exists():
                             shutil.move(tok_hash_dir, dst_tok_dir)
                             logger.debug(f"Moved tokenize subdir {tok_hash_dir.name} to {dst_tok_dir}")
                         else:
                             logger.warning(f"Tokenize subdir {dst_tok_dir} already exists, skipping")
             else:
+                # First worker with this file_hash
                 shutil.move(src_hash_dir, dst_hash_dir)
                 logger.debug(f"Moved {src_hash_dir} -> {dst_hash_dir}")
 
+            # Merge metadata
             if file_hash in merged_meta:
+                # Merge offsets (union)
                 existing_offsets = set(merged_meta[file_hash].get("offsets", []))
                 new_offsets = set(hash_meta.get("offsets", []))
-
                 merged_meta[file_hash]["offsets"] = list(existing_offsets | new_offsets)
 
-                if "num_tokens" not in merged_meta[file_hash]:
-                    merged_meta[file_hash]["num_tokens"] = {}
-
-                merged_meta[file_hash]["num_tokens"].update(hash_meta.get("num_tokens", {}))
+                # Merge jsonl_meta (deep merge)
+                if "jsonl_meta" not in merged_meta[file_hash]:
+                    merged_meta[file_hash]["jsonl_meta"] = {}
+                merged_meta[file_hash]["jsonl_meta"].update(hash_meta.get("jsonl_meta", {}))
 
                 logger.debug(f"Merged metadata for file_hash {file_hash}")
             else:
                 merged_meta[file_hash] = hash_meta
 
+        # Merge cache_tags
         if "tags" in worker_meta:
             for tag_name, tag_data in worker_meta["tags"].items():
                 if tag_name not in merged_tags:
@@ -211,24 +210,28 @@ def merge_worker_caches(base_cache_dir: Path, num_workers: int) -> None:
                         merged_tags[tag_name][file_path] = {}
 
                     for tok_hash, cache_info in tok_data.items():
+                        # Remove worker-* prefix from paths
                         updated_cache_info = {}
                         for key, value in cache_info.items():
-                            if isinstance(value, str) and f"/worker-{worker_id}/" in value:
-                                updated_cache_info[key] = value.replace(f"/worker-{worker_id}/", "/")
+                            if isinstance(value, str) and f"/{worker_id}/" in value:
+                                updated_cache_info[key] = value.replace(f"/{worker_id}/", "/")
                             else:
                                 updated_cache_info[key] = value
 
                         merged_tags[tag_name][file_path][tok_hash] = updated_cache_info
 
+        # Clean up worker directory
         try:
             shutil.rmtree(worker_dir)
             logger.info(f"Removed worker directory {worker_dir}")
         except Exception as e:
             logger.error(f"Failed to remove worker directory {worker_dir}: {e}")
 
+    # Add merged tags to merged_meta
     if merged_tags:
         merged_meta["tags"] = merged_tags
 
+    # Write merged metadata
     merged_meta_file = base_cache_dir / CACHE_META
     with open(merged_meta_file, "w") as f:
         json.dump(merged_meta, f, indent=4, ensure_ascii=False)
@@ -239,7 +242,7 @@ def merge_worker_caches(base_cache_dir: Path, num_workers: int) -> None:
 def cache_worker(
     dataset_config_list: DatasetConfigList,
     tokenizer_path: str,
-    worker_id: int,
+    task_id: int,
     tracker: Any,
 ):
     """Ray remote worker function to process and cache datasets.
@@ -252,20 +255,19 @@ def cache_worker(
         dataset_config_list (DatasetConfigList): List of dataset configurations to process.
             Each item contains a dataset config and tokenize function config.
         tokenizer_path (str): Path to the pretrained tokenizer to load
-        worker_id (int): Unique identifier for this worker (used for logging)
+        task_id (int): Task identifier (used for logging)
         tracker (Any): Ray Actor handle to the ProgressTracker for reporting progress
     """
-    import os
     import socket
-
+    import os
     from loguru import logger
-
     from xtuner.v1.datasets.utils import tokenizer_xxhash
 
     hostname = socket.gethostname()
     pid = os.getpid()
+    worker_unique_id = f"{hostname}_{pid}"
 
-    logger.info(f"[Worker {worker_id}] Starting on {hostname}, PID={pid}")
+    logger.info(f"[Task {task_id}] Starting on {hostname}, PID={pid}, worker_id={worker_unique_id}")
 
     monkey_patch_hf_modules_cache()
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -273,15 +275,22 @@ def cache_worker(
     tok_hash = tokenizer_xxhash(tokenizer)[:16]
 
     for config in dataset_config_list:
-        _dataset_config = config["dataset"]
+        # Deep copy to avoid modifying original config
+        _dataset_config = copy.deepcopy(config["dataset"])
         _tokenize_fn_config = config["tokenize_fn"]
+
+        # Dynamically set cache_dir based on physical worker identity
+        if hasattr(_dataset_config, "cache_dir") and _dataset_config.cache_dir is not None:
+            original_cache_dir = Path(_dataset_config.cache_dir)
+            worker_cache_dir = original_cache_dir / f"worker-{worker_unique_id}"
+            _dataset_config.cache_dir = str(worker_cache_dir)
 
         _tokenize_fn = _tokenize_fn_config.build(tokenizer, tokenizer_hash=tok_hash)
 
         _dataset_config.build(_tokenize_fn)
         tracker.increment.remote(1)
 
-    logger.info(f"[Worker {worker_id}] Finished on {hostname}, PID={pid}")
+    logger.info(f"[Task {task_id}] Finished on {hostname}, PID={pid}")
 
 
 @app.default
@@ -291,12 +300,8 @@ def main(
     cpus_per_task: Annotated[int, Parameter(help="cpus per node (clusterx params)")],
     memory_per_task: Annotated[int, Parameter(help="memory per node (clusterx params)")],
     tasks_per_node: Annotated[int, Parameter(help="num cache workers per node")] = 1,
-    image: Annotated[
-        str, Parameter(help="image containing XTuner dependencies and ray")
-    ] = "registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_latest",
-    ray_log_to_driver: Annotated[
-        bool, Parameter(help="whether or not worker logs are to be logged to driver node")
-    ] = False,
+    image: Annotated[str, Parameter(help="image containing XTuner dependencies and ray")] = "registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_latest",
+    ray_log_to_driver: Annotated[bool, Parameter(help="whether or not worker logs are to be logged to driver node")] = False,
 ):
     head_job = start_ray(nnodes=1, cpus_per_task=cpus_per_task, memory_per_task=memory_per_task, image=image)  # type: ignore[arg-type]
     worker_job = None
@@ -328,13 +333,7 @@ def main(
 
         if nnodes > 1:
             try:
-                worker_job = start_ray(
-                    nnodes=nnodes - 1,
-                    cpus_per_task=cpus_per_task,
-                    memory_per_task=memory_per_task,
-                    image=image,
-                    head_ip=head_job.nodes_ip[0],
-                )  # type: ignore[arg-type]
+                worker_job = start_ray(nnodes=nnodes-1, cpus_per_task=cpus_per_task, memory_per_task=memory_per_task, image=image, head_ip=head_job.nodes_ip[0])  # type: ignore[arg-type]
             except Exception as e:
                 logger.error(f"Failed to start worker nodes: {e}")
                 raise
@@ -351,38 +350,29 @@ def main(
         total_files = len(dataset_config)
         logger.info(f"Total files to process: {total_files}")
 
-        tracker = ProgressTracker.remote(total_files)
+        # Create progress tracker actor
+        tracker: Any = ProgressTracker.remote(total_files)
 
-        global cache_worker
-        worker = ray.remote(
+        # Create ray remote worker
+        worker: Any = ray.remote(
             num_cpus=cpus_per_task // tasks_per_node,
+            scheduling_strategy="SPREAD",
             runtime_env={
                 "env_vars": {
                     "XTUNER_TOKENIZE_WORKERS": str(cpus_per_task // tasks_per_node),
-                    "PYTHONPATH": str((Path(__file__).parent.parent.parent).absolute()),
+                    "XTUNER_TOKENIZE_WORKER_SKIP_AFFINITY": "1",
+                    "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
                 }
             },
         )(cache_worker)
-        batch_size = ceil(len(dataset_config) / (nnodes * tasks_per_node))
-        batch_config_list = list(batched(dataset_config, batch_size))
-        random.seed(0)
-        random.shuffle(batch_config_list)
 
+        # Submit one task per file for fine-grained load balancing
         res = []
-        logger.info(f"Total tasks: {len(batch_config_list)} (nnodes={nnodes}, tasks_per_node={tasks_per_node})")
-        logger.info(f"Batch size: {batch_size}, Total datasets: {len(dataset_config)}")
-        for i, batch in enumerate(batch_config_list):
-            batch_copy = copy.deepcopy(list(batch))
+        logger.info(f"Submitting {total_files} tasks (one file per task) to {nnodes} nodes with {tasks_per_node} tasks per node")
 
-            for dataset_cfg in batch_copy:
-                if hasattr(dataset_cfg["dataset"], "cache_dir") and dataset_cfg["dataset"].cache_dir is not None:
-                    original_cache_dir = Path(dataset_cfg["dataset"].cache_dir)
-                    worker_cache_dir = original_cache_dir / f"worker-{i}"
-                    dataset_cfg["dataset"].cache_dir = str(worker_cache_dir)
-
-            res.append(worker.remote(batch_copy, tokenizer_path, i, tracker))
-
-            logger.info(f"Submitted task {i + 1}/{len(batch_config_list)}")
+        for i, config in tqdm(enumerate(dataset_config), total=total_files, desc="Submitting tasks", unit="task"):
+            # Submit task with single config (worker will handle cache_dir internally)
+            res.append(worker.remote([config], tokenizer_path, i, tracker))
 
         pbar = tqdm(total=total_files, desc="Processing files", unit="file")
         stop_event = threading.Event()
@@ -415,7 +405,7 @@ def main(
         pbar.close()
 
         logger.info("All tasks completed, starting cache merge...")
-        merge_worker_caches(base_cache_dir, num_workers=len(batch_config_list))
+        merge_worker_caches(base_cache_dir)
 
     finally:
         if ray.is_initialized():
