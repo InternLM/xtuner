@@ -67,6 +67,57 @@ def load_dict_from_npz(file_path: str) -> Dict[str, np.ndarray]:
         return {k: z[k] for k in z.files}
 
 
+def _filter_sampled_indices(
+    sampled: np.ndarray,
+    num_tokens: np.ndarray | None,
+    max_length: int | None,
+) -> np.ndarray:
+    # Filter out samples with num_tokens=0, 0 means the sample is damaged
+    if num_tokens is not None:
+        assert isinstance(num_tokens, np.ndarray)
+        orig_sample_num = len(num_tokens)
+        sampled = sampled[num_tokens[sampled] != 0]
+        if len(sampled) < orig_sample_num:
+            missed = orig_sample_num - len(sampled)
+            logger.warning(f"filtered {missed} damaged samples (num_tokens==0).")
+
+    if num_tokens is not None and max_length is not None:
+        assert isinstance(max_length, int)
+        before = len(sampled)
+        sampled = sampled[num_tokens[sampled] <= max_length]
+        if len(sampled) < before:
+            logger.warning(f"filtered {before - len(sampled)} samples with length>{max_length}.")
+
+    return sampled
+
+
+def _apply_sample_ratio(
+    sampled: np.ndarray,
+    *,
+    sample_ratio: float,
+    enable_sequential_sampler: bool,
+) -> np.ndarray:
+    target = int(len(sampled) * sample_ratio)
+    if target <= 0:
+        return sampled[:0]
+
+    base_repeats = int(sample_ratio)
+    repeated = np.tile(sampled, base_repeats) if base_repeats > 0 else sampled[:0]
+    remaining = target - len(repeated)
+    if remaining <= 0:
+        return repeated[:target]
+
+    if enable_sequential_sampler:
+        extra = sampled[:remaining]
+    else:
+        # Keep the same no-replacement behavior as `random.sample`,
+        # but avoid converting the whole numpy array to Python list.
+        choice_idxs = random.sample(range(len(sampled)), remaining)
+        extra = sampled[np.asarray(choice_idxs, dtype=np.int64)]
+
+    return np.concatenate([repeated, extra], axis=0)
+
+
 def _streaming_parallel_open_inplace(path: str, buf, executor: ThreadPoolExecutor):
     file_size = os.path.getsize(path)
     max_workers = min(executor._max_workers, file_size)
@@ -394,37 +445,23 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             offsets = offsets[line_idxs]
             # After line_idxs indexing, offsets has exactly num_chunks elements
             # (no trailing sentinel), so use len(offsets) directly.
-            _sampled = list(range(len(offsets)))
+            base_len = len(offsets)
         else:
-            # offset starts from 0 and ends with `file_size`
-            # The size of offsets is `num_samples + 1`
-            _sampled = list(range(len(offsets) - 1))
-        # Filter out samples with num_tokens=0, 0 means the sample is damaged
-        if num_tokens is not None:
-            orig_sample_num = len(num_tokens)
-            _sampled = [i for i in _sampled if num_tokens[i] != 0]
-            if len(_sampled) < orig_sample_num:
-                logger.warning(f"{self.path} has {orig_sample_num - len(_sampled)} damaged samples, discard.")
+            # offsets has trailing sentinel (file_size), so samples are num_offsets - 1
+            base_len = len(offsets) - 1
 
-        # Skip max_length filter when chunks exist: long docs are already split into chunks,
-        # so filtering by total doc length would incorrectly discard valid long-text samples.
-        if num_tokens is not None and max_length is not None and not self._has_chunk:
-            assert isinstance(max_length, int)
-            assert isinstance(num_tokens, np.ndarray)
-            _filtered = [i for i in _sampled if num_tokens[i] <= max_length]
-
-            if len(_filtered) < len(_sampled):
-                missed_num = len(_sampled) - len(_filtered)
-                logger.warning(f"{self.path} has {missed_num} prompt length>{max_length}, discard.")
-
-            _sampled = _filtered
-
-        _target_num_samples = int(len(_sampled) * sample_ratio)
-        sampled = _sampled * int(sample_ratio)
-        if enable_sequential_sampler:
-            sampled.extend(_sampled[: _target_num_samples - len(sampled)])
-        else:
-            sampled.extend(random.sample(_sampled, _target_num_samples - len(sampled)))
+        dtype = np.int32 if base_len < np.iinfo(np.int32).max else np.int64
+        _sampled = np.arange(base_len, dtype=dtype)
+        _sampled = _filter_sampled_indices(
+            _sampled,
+            num_tokens,
+            max_length,
+        )
+        sampled = _apply_sample_ratio(
+            _sampled,
+            sample_ratio=sample_ratio,
+            enable_sequential_sampler=enable_sequential_sampler,
+        )
 
         if num_tokens is not None:
             assert isinstance(num_tokens, np.ndarray)

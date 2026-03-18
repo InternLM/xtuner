@@ -3,6 +3,7 @@ import gc
 import psutil
 import time
 import random
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.testing._internal.common_distributed import DistributedTestBase
@@ -12,6 +13,7 @@ from transformers import AutoTokenizer
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.config import DatasetConfig
 from xtuner.v1.utils.device import get_device
+from xtuner.v1.datasets.jsonl import _apply_sample_ratio, _filter_sampled_indices
 
 
 DEVICE = get_device()
@@ -54,6 +56,7 @@ class TestJsonlDatasetSmokeTest(DistributedTestBase):
         # Get memory used during dataset build
         gc.collect()
         dist.barrier()
+
         start_time = time.time()
         rss_before, pss_before = _get_rss_mb(), _get_pss_mb()
         if rank == 0:
@@ -91,3 +94,18 @@ class TestJsonlDatasetSmokeTest(DistributedTestBase):
         time_cost = time.time() - start_time
         print(f"[Rank {rank}] Random read 10000 samples Time cost: {time_cost:.2f} s")
         dist.barrier()
+
+
+def test_build_sampled_indices_uses_numpy_array_and_matches_sampling_semantics():
+    num_offsets = 5  # non-chunk: base indices 0..3
+    num_tokens = np.asarray([1, 0, 2, 3], dtype=np.int64)
+    base_len = num_offsets - 1
+    dtype = np.int32 if base_len < np.iinfo(np.int32).max else np.int64
+    sampled = np.arange(base_len, dtype=dtype)
+    sampled = _filter_sampled_indices(sampled, num_tokens, max_length=2)
+    sampled = _apply_sample_ratio(sampled, sample_ratio=1.5, enable_sequential_sampler=True)
+    assert isinstance(sampled, np.ndarray)
+    assert sampled.dtype.kind in ("i", "u")
+    # After filtering: indices [0,2] (idx1 damaged, idx3 > max_length)
+    # sample_ratio=1.5 => target=3, base_repeats=1 => [0,2] + one extra sampled from [0,2]
+    assert sampled.tolist() == [0, 2, 0]
