@@ -122,6 +122,10 @@ class SyncProduceStrategy(ProduceStrategy):
         task_name: str,
         rollout_step: int = 0,
     ) -> ProducerTimings:
+        # 重启 rollout controller
+        rollout_ctl = agent_loop.rollout_ctl
+        await continue_generation(rollout_ctl)
+
         pending_tasks = set()
         generate_times: list[float] = []
         completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
@@ -157,6 +161,9 @@ class SyncProduceStrategy(ProduceStrategy):
                 rollout_state = await sampler.sample(task_name=task_name)
                 task = create_task(_timed_generate_group(agent_loop, rollout_state))
                 pending_tasks.add(task)
+
+        # 暂停 rollout controller
+        await pause_generation(rollout_ctl)
 
         return ProducerTimings(generate_times_s=generate_times, pause_time_s=0.0)
 
