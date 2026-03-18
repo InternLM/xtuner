@@ -11,6 +11,7 @@ from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
+from xtuner.v1.rl.utils import asyncio_run
 
 from .agent_loop import AgentLoop, AgentLoopConfig
 from .producer import ProducerTimings, ProduceStrategy, ProduceStrategyConfig, SyncProduceStrategyConfig
@@ -144,10 +145,12 @@ class AgentLoopManager:
     def save(self, checkpoint_path: Path | str) -> None:
         """Save the sampler's dataloader state to checkpoint."""
         self._data_sampler.save(checkpoint_path)
+        asyncio_run(self._replay_buffer.save(checkpoint_path))
 
     def resume(self, checkpoint_path: Path | str) -> None:
         """Resume the sampler's dataloader state from checkpoint."""
         self._data_sampler.resume(checkpoint_path)
+        asyncio_run(self._replay_buffer.resume(checkpoint_path))
 
     # # 非共卡
     # async def disaggregate_produce_batch(self, batch_size: int):
