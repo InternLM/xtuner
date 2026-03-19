@@ -27,8 +27,13 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
     config: Qwen3VLBaseConfig
 
     def __init__(self, config: Qwen3VLBaseConfig):
-        super().__init__(config)  # type: ignore[arg-type]
         self.only_llm_forward = config.only_llm_forward
+        if self.only_llm_forward:
+            config.freeze_vision = True
+            config.freeze_projector = True
+            logger.warning("only_llm_forward is True, vision and projector will be frozen " \
+                            "regardless of their individual freeze settings.")
+        super().__init__(config)  # type: ignore[arg-type]
 
         # if type(self.language_model) is Qwen3MoE:
         #     # TODO(YHC): This is a hack to make the language model compatible with HF
