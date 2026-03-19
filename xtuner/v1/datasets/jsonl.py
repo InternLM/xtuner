@@ -68,8 +68,11 @@ def load_dict_from_npy_dir(dir_path: str, mmap: bool = True) -> Dict[str, np.nda
             continue
         key = fname[:-4]
         fpath = os.path.join(dir_path, fname)
+        # 先尝试用内存映射方式打开文件，这样对于大数组可以避免把整个文件读进内存，节省内存占用。
+        # 如果加载后发现 arr.dtype == object（即数组元素是 Python 对象，比如字符串数组），说明 mmap_mode 对它可能无效
         arr = np.load(fpath, mmap_mode="r" if mmap else None, allow_pickle=True)
-        if arr.dtype == object:
+        if mmap and arr.dtype == object:
+            # 第二次加载（不带 mmap_mode）：改为完整加载，确保 object 数组能被正确读取。
             arr = np.load(fpath, allow_pickle=True)
         result[key] = arr
     return result
@@ -221,7 +224,6 @@ def _is_local_rank0() -> bool:
     """Return True if this process is local rank 0."""
     if not dist.is_initialized():
         return True
-    # return dist.local_rank() == 0
     return dist.get_rank() % _get_local_concurrency() == 0
 
 
@@ -462,9 +464,12 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         _meta.pop("num_tokens", None)
 
         tok_hash_str = tokenize_fn.hash() if isinstance(tokenize_fn, CachableTokenizeFunction) else ""
+        job_discriminator = os.environ.get("MASTER_PORT", "")
         tmp_dir = os.path.join(
             "/tmp",
-            hashlib.md5(f"jsonl_mmap_{self.path}_{sample_ratio}_{max_length}_{tok_hash_str}".encode()).hexdigest(),
+            hashlib.md5(
+                f"jsonl_mmap_{self.path}_{sample_ratio}_{max_length}_{tok_hash_str}_{job_discriminator}".encode()
+            ).hexdigest(),
         )
 
         if enable_mmap_shared and dist.is_initialized() and _get_local_concurrency() > 1:
