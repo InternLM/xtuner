@@ -15,6 +15,7 @@ from .misc import (
     get_function_type,
     get_padding_length,
     is_hf_model_path,
+    is_local_rank0,
     record_git_info,
 )
 from .pad import pad_to_max_length, pad_to_multiple_of
@@ -50,6 +51,7 @@ __all__ = [
     "Config",
     "record_git_info",
     "is_hf_model_path",
+    "is_local_rank0",
     "copy_signature",
     "copy_method_signature",
     "init_params",
