@@ -68,12 +68,7 @@ def load_dict_from_npy_dir(dir_path: str, mmap: bool = True) -> Dict[str, np.nda
             continue
         key = fname[:-4]
         fpath = os.path.join(dir_path, fname)
-        # 先尝试用内存映射方式打开文件，这样对于大数组可以避免把整个文件读进内存，节省内存占用。
-        # 如果加载后发现 arr.dtype == object（即数组元素是 Python 对象，比如字符串数组），说明 mmap_mode 对它可能无效
-        arr = np.load(fpath, mmap_mode="r" if mmap else None, allow_pickle=True)
-        if mmap and arr.dtype == object:
-            # 第二次加载（不带 mmap_mode）：改为完整加载，确保 object 数组能被正确读取。
-            arr = np.load(fpath, allow_pickle=True)
+        arr = np.load(fpath, mmap_mode="r" if mmap else None)
         result[key] = arr
     return result
 
