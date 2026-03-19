@@ -31,7 +31,8 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
         if self.only_llm_forward:
             config.freeze_vision = True
             config.freeze_projector = True
-            logger.warning("only_llm_forward is True, vision and projector will be frozen regardless of their individual freeze settings.")
+            logger.warning("only_llm_forward is True, vision and projector will be frozen " \
+                            "regardless of their individual freeze settings.")
         super().__init__(config)  # type: ignore[arg-type]
 
         # if type(self.language_model) is Qwen3MoE:
