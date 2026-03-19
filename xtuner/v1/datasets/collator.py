@@ -8,7 +8,7 @@ from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
 from .data_item import DataItem, InternS1DataItem, QwenVL3DataItem
-
+from ..data_proto.rl_data import RolloutState
 
 logger = get_logger()
 
@@ -18,7 +18,13 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
 
 
-def fake_collator(instances: list[DataItem], **kwargs):
+def fake_collator(instances: list[RolloutState], **kwargs):
+    import ray
+    for rollout_state in instances:
+        if 'mm_info' in rollout_state and rollout_state['mm_info'] is not None:
+            pixel_values = rollout_state['mm_info'].get('pixel_values', None)
+            if pixel_values is not None:
+                rollout_state['mm_info']['pixel_values'] = ray.put(pixel_values)
     return instances
 
 

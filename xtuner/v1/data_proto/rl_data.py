@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 import torch
 from pydantic import BaseModel, ConfigDict, field_serializer
 from typing_extensions import NotRequired, TypedDict
-
+import numpy as np
 # ====================================
 # ====== DataFlow 数据流 ==============
 # ====================================
@@ -59,9 +59,8 @@ class Status(Enum):
 
 class MultimodalInfo(TypedDict):
     # 使用TypedDict给出pixel_values的类型提示
-    pixel_values: NotRequired[torch.Tensor | RayObjectRef | None]
+    pixel_values: NotRequired[np.ndarray | RayObjectRef | None]
     image_grid_thw: NotRequired[torch.Tensor]
-    position_ids: NotRequired[torch.Tensor]
 
 
 class RolloutState(CacheObj, BaseModel):
@@ -101,6 +100,7 @@ class RolloutState(CacheObj, BaseModel):
     seq_staleness: int = 0
     response_mask: list[int] | None = None  # response_ids的长度
     response_rollout_steps: list[int] | None = None  # 记录 response_ids 中每个 token 是在哪个 rollout_step 生成的
+    position_ids: torch.Tensor | None = None 
     extra_fields: dict[str, Any] = {}
 
     @field_serializer("routed_experts")

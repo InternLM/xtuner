@@ -21,6 +21,7 @@ from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 from typing_extensions import NotRequired
+import numpy as np
 
 from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig
@@ -538,11 +539,12 @@ class TrainingWorker(SingleAcceleratorWorker):
             seq_ctx = data["seq_ctx"]
             pixel_values = seq_ctx.pixel_values
             if pixel_values is not None:
-                if not isinstance(pixel_values, torch.Tensor):
+                if not isinstance(pixel_values, np.ndarray):
                     assert isinstance(pixel_values, list), (
                         f"pixel_values should be list of tensor, got {type(pixel_values)}"
                     )
                     pixel_values = [ray.get(pixel_obf) for pixel_obf in pixel_values]
+                    pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
                     pixel_values = torch.cat(pixel_values, dim=0)
                     seq_ctx.pixel_values = pixel_values
 
