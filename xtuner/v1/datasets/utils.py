@@ -8,13 +8,73 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 import numpy as np
+import torch.distributed as dist
 import xxhash
 from PIL import Image
+
+from xtuner.v1.utils import is_local_rank0
 
 from .data_item import CacheItem
 
 
 T = TypeVar("T")
+
+# Shared directory for mmap temp files; all ranks on the same node will use
+# the same directory so content-addressed files are reused across processes.
+_MMAP_DIR: Path | None = None
+
+
+def _get_mmap_dir() -> Path:
+    global _MMAP_DIR
+    if _MMAP_DIR is None:
+        # Prefer /dev/shm (tmpfs, RAM-backed) for lowest-latency mmap;
+        # fall back to the system tmp dir.
+        for candidate in ("/dev/shm",):
+            p = Path(candidate)
+            if p.is_dir() and os.access(p, os.W_OK):
+                _MMAP_DIR = p / f"xtuner_mmap_{os.getuid()}"
+                _MMAP_DIR.mkdir(exist_ok=True)
+                return _MMAP_DIR
+        _MMAP_DIR = Path(tempfile.mkdtemp(prefix="xtuner_mmap_"))
+    return _MMAP_DIR
+
+
+def ndarray_to_mmap(arr: np.ndarray, group: "dist.ProcessGroup | None" = None) -> np.ndarray:
+    """Save *arr* to a shared ``.npy`` file and return a read-only mmap view.
+
+    Only rank 0 writes the file; all other ranks wait at a ``dist.barrier``
+    and then open the same file as mmap.  After the caller drops the
+    reference to *arr*, the OS reclaims its physical pages and all ranks
+    share the single on-disk copy through the page cache.
+
+    Args:
+        arr (np.ndarray): The array to convert.
+        group (dist.ProcessGroup | None): Process group to use for the barrier.
+            Pass a group with a generous timeout when the write may be slow
+            (e.g. large arrays on shared storage) to avoid triggering the
+            default NCCL watchdog.
+
+    Returns:
+        np.ndarray: A read-only memory-mapped view of the same data.
+    """
+    arr = np.ascontiguousarray(arr)
+    content_hash = xxhash.xxh128(arr.data).hexdigest()
+    mmap_dir = _get_mmap_dir()
+    npy_path = mmap_dir / f"{content_hash}_{arr.dtype}_{arr.shape}.npy"
+
+    if is_local_rank0() and not npy_path.exists():
+        # Write to a temp file then atomically rename so other ranks never
+        # observe a partially-written file.
+        fd, tmp_path = tempfile.mkstemp(suffix=".npy", dir=mmap_dir)
+        os.close(fd)
+        np.save(tmp_path, arr)
+        os.rename(tmp_path, str(npy_path))
+
+    if dist.is_initialized():
+        dist.barrier(group=group)
+
+    return np.load(npy_path, mmap_mode="r")
+
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
