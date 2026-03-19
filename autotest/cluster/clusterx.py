@@ -50,6 +50,7 @@ class ClusterTaskExecutor:
                 num_nodes=resource.get("num_nodes", 1),
                 image=resource.get("image", None),
                 no_env=resource.get("no_env", True),
+                image_pull_policy="Always",
             )
 
             job_schema = self.cluster.run(params)
