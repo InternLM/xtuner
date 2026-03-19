@@ -313,6 +313,7 @@ class SingleAcceleratorWorker:
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["LOCAL_RANK"] = str(self.get_logical_local_rank())
+
         # backend 参数是指定通信后端，不是从环境变量获取
         # - 'nccl': NVIDIA GPU 间通信（推荐用于 GPU）
         # - 'gloo': CPU 通信或跨平台
