@@ -547,6 +547,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                     pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
                     pixel_values = torch.cat(pixel_values, dim=0)
                     seq_ctx.pixel_values = pixel_values
+                else:
+                    raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts
             if rollout_routed_experts is not None:

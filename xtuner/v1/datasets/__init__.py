@@ -1,5 +1,5 @@
 from .build import build_dataloader, build_datasets
-from .collator import fake_collator, intern_s1_vl_sft_collator, qwen3_vl_sft_collator, sft_llm_collator
+from .collator import intern_s1_vl_sft_collator, qwen3_vl_sft_collator, sft_llm_collator
 from .config import (
     BaseTokenizeFnConfig,
     DataloaderConfig,
@@ -55,7 +55,6 @@ __all__ = [
     "VLMJsonlDataset",
     "FTDPTokenizeFnConfig",
     "InternS1VLTokenizeFnConfig",
-    "fake_collator",
     "RLTokenizeFnConfig",
     "get_dataloader_state",
     "load_dataloader_state",

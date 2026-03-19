@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 import ray
 
 from xtuner.v1.utils.logger import get_logger
-
+from xtuner.v1.data_proto.rl_data import RolloutState
 from .misc import _is_port_available
 
 
@@ -183,3 +183,12 @@ def bind_train_rollout(
     info_dict = ray.get(rollout_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
     ray.get([worker.update_rollout_info.remote(**info_dict) for worker in train_workers])  # type: ignore[attr-defined]
     return
+
+
+def fake_collator(instances: list[RolloutState], **kwargs):
+    for rollout_state in instances:
+        if hasattr(rollout_state, 'mm_info') and rollout_state.mm_info is not None:
+            pixel_values = rollout_state.mm_info.get('pixel_values', None)
+            if pixel_values is not None:
+                rollout_state.mm_info['pixel_values'] = ray.put(pixel_values)
+    return instances

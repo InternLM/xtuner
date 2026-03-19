@@ -3,7 +3,7 @@ from xtuner.v1.data_proto import RolloutState
 from ..utils import replace_image_context_and_collect_media_data
 from ...data_proto.rl_data import MultimodalInfo
 
-def remove_consecutive_twos(tokens, img_context_id):
+def remove_consecutive_img_context_tokens(tokens, img_context_id):
     if not tokens:
         return tokens
 
@@ -31,7 +31,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
         extra_info = item.get("extra_info", {})
         message = item["prompt"]
 
-        data = super().__call__({"messages": message})
+        data = super().__call__({"messages": message}, media_root=media_root)
 
         if self.state == "cache":
             return RolloutState(message=message, num_tokens=data["num_tokens"])
@@ -44,7 +44,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
             # 为了确保一致，必须要通过 tokenizer_fn 得到 prompt_token_ids
             # raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             # prompt_token_ids = self.tokenizer(raw_prompt, add_special_tokens=False)["input_ids"]
-            prompt_token_ids = remove_consecutive_twos(data["input_ids"], self.img_context_token_id)
+            prompt_token_ids = remove_consecutive_img_context_tokens(data["input_ids"], self.img_context_token_id)
             raw_prompt = self.tokenizer.decode(prompt_token_ids)  # Just for logging
             extra_info["raw_prompt"] = raw_prompt
             # 训练时的 prompt token ids，包含连续的 img_context_token_id
@@ -54,9 +54,9 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
             if not self.ignore_multimodal_info:
                 mm_info = MultimodalInfo()
                 if "pixel_values" in data:
-                    mm_info.pixel_values = data["pixel_values"].numpy()  # for ray put into shared memory
+                    mm_info['pixel_values'] = data["pixel_values"].numpy()  # for ray put into shared memory
                 if "image_grid_thw" in data:
-                    mm_info.image_grid_thw = data["image_grid_thw"]
+                    mm_info['image_grid_thw'] = data["image_grid_thw"]
              
             return RolloutState(
                 message=message,
