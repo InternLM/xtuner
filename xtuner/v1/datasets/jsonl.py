@@ -1,11 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import atexit
 import datetime
+import hashlib
 import itertools
 import json
 import math
 import multiprocessing
 import os
 import random
+import shutil
 import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -26,6 +29,7 @@ from tqdm import tqdm
 from xtuner.v1.datasets.data_item import CacheItem
 from xtuner.v1.datasets.pt_tokenize_fn.long_text import LongTextPretrainTokenizeFunction
 from xtuner.v1.utils import SharedMemory, get_logger
+from xtuner.v1.utils.device import get_torch_device_module
 
 from .utils import CachableTokenizeFunction, calculate_xxhash
 
@@ -33,7 +37,7 @@ from .utils import CachableTokenizeFunction, calculate_xxhash
 T = TypeVar("T")
 logger = get_logger()
 _lock = Lock()
-
+DEVICE_MODULE = get_torch_device_module()
 
 CACHE_META = ".xpuyu-cache-meta.json"
 XTUNER_FILE_OPEN_CONCURRENCY = int(os.environ.get("XTUNER_FILE_OPEN_CONCURRENCY", "8"))
@@ -199,10 +203,22 @@ def chunk_data_to_queue(
 def _get_local_concurrency():
     """Get the local concurrency level based on the environment variable."""
     if dist.is_initialized():
-        local_rank_concurrency = os.getenv("LOCAL_WORLD_SIZE", "1")
+        local_rank_concurrency = os.getenv("LOCAL_WORLD_SIZE")
+        if local_rank_concurrency is None:
+            local_rank_concurrency = os.getenv("PROC_PER_NODE")
+        if local_rank_concurrency is None:
+            local_rank_concurrency = DEVICE_MODULE.device_count()
     else:
         local_rank_concurrency = 1
     return int(local_rank_concurrency)
+
+
+def _is_local_rank0() -> bool:
+    """Return True if this process is local rank 0."""
+    if not dist.is_initialized():
+        return True
+    # return dist.local_rank() == 0
+    return dist.get_rank() % _get_local_concurrency() == 0
 
 
 # NOTE: The `map` or `submit` function of `concurrent.futures.ProcessPoolExecutor` will cause frequent serialization
@@ -256,6 +272,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
     _thread_executor: ThreadPoolExecutor | None = None
     # TODO: Using shared memory should be optional since the size of `/dev/shm` could be not enough for some devices
     _shared_memory: SharedMemory | None = None
+    offsets: np.ndarray
+    num_tokens: np.ndarray | None
+    _meta: dict[str, np.ndarray]
 
     def __init__(
         self,
@@ -267,6 +286,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         max_length: int | None = None,  # TODO: Remove max_length in dataset
         cache_tag: str | None = None,
         enable_sequential_sampler: bool = False,
+        enable_mmap_shared: bool = False,
     ):
         super().__init__()
 
@@ -375,9 +395,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                     _meta = load_dict_from_npz(_meta_file)
                     num_tokens = _meta["num_tokens"]
                 else:
-                    serialized_tokenized_global = self.count_tokens(offsets, tok_cache_dir)
-                    num_tokens = serialized_tokenized_global["num_tokens"]
-                    _meta = serialized_tokenized_global
+                    _meta = self.count_tokens(offsets, tok_cache_dir)
+                    num_tokens = _meta["num_tokens"]
 
                 if get_rank() == 0:
                     with open(self.meta_path, "r+") as f:
@@ -420,9 +439,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                     "`CachableTokenizeFunction`, data will always "
                     "be re-tokenized during training!"
                 )
-                serialized_tokenized_global = self.count_tokens(offsets)
-                num_tokens = serialized_tokenized_global["num_tokens"]
-                _meta = serialized_tokenized_global
+                _meta = self.count_tokens(offsets)
+                num_tokens = _meta["num_tokens"]
             else:
                 offsets = offsets
                 num_tokens = None
@@ -433,13 +451,72 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             num_tokens = None
             _meta = {}
             if tokenize_fn is not None:
-                serialized_tokenized_global = self.count_tokens(offsets)
-                num_tokens = serialized_tokenized_global["num_tokens"]
-                _meta = serialized_tokenized_global
+                _meta = self.count_tokens(offsets)
+                num_tokens = _meta["num_tokens"]
 
-        # _meta['num_tokens'] is already set to `num_tokens`, so we can remove it from _meta
+        tok_hash_str = tokenize_fn.hash() if isinstance(tokenize_fn, CachableTokenizeFunction) else ""
+        tmp_dir = os.path.join(
+            "/tmp",
+            hashlib.md5(f"jsonl_mmap_{self.path}_{sample_ratio}_{max_length}_{tok_hash_str}".encode()).hexdigest(),
+        )
+
+        if enable_mmap_shared and dist.is_initialized() and _get_local_concurrency() > 1:
+            # Only local rank0 computes sampling and saves to tmp; others mmap-load to share physical pages.
+            if _is_local_rank0():
+                self._set_meta_attrs(
+                    offsets,
+                    num_tokens,
+                    _meta,
+                    sample_ratio=sample_ratio,
+                    max_length=max_length,
+                    enable_sequential_sampler=enable_sequential_sampler,
+                )
+                os.makedirs(tmp_dir, exist_ok=True)
+                np.save(os.path.join(tmp_dir, "offsets.npy"), self.offsets)
+                if self.num_tokens is not None:
+                    np.save(os.path.join(tmp_dir, "num_tokens.npy"), self.num_tokens)
+                for k, v in self._meta.items():
+                    np.save(os.path.join(tmp_dir, f"meta_{k}.npy"), v)
+                atexit.register(shutil.rmtree, tmp_dir, True)
+            else:
+                del _meta, offsets
+                if num_tokens is not None:
+                    del num_tokens
+            dist.barrier()
+            self.offsets = np.load(os.path.join(tmp_dir, "offsets.npy"), mmap_mode="r")
+            nt_path = os.path.join(tmp_dir, "num_tokens.npy")
+            self.num_tokens = np.load(nt_path, mmap_mode="r") if os.path.exists(nt_path) else None
+            self._meta = {
+                fname[5:-4]: np.load(os.path.join(tmp_dir, fname), mmap_mode="r")
+                for fname in os.listdir(tmp_dir)
+                if fname.startswith("meta_") and fname.endswith(".npy")
+            }
+        else:
+            self._set_meta_attrs(
+                offsets,
+                num_tokens,
+                _meta,
+                sample_ratio=sample_ratio,
+                max_length=max_length,
+                enable_sequential_sampler=enable_sequential_sampler,
+            )
+
+        if self._shared_memory is not None:
+            self._release_shared_memory()
+
+    def _set_meta_attrs(
+        self,
+        offsets: np.ndarray,
+        num_tokens: np.ndarray | None,
+        _meta: dict,
+        *,
+        sample_ratio: float,
+        max_length: int | None,
+        enable_sequential_sampler: bool,
+    ) -> None:
+        """Compute sampling and set self.offsets, self.num_tokens,
+        self._meta."""
         _meta.pop("num_tokens", None)
-
         if self._has_chunk:
             line_idxs = _meta.pop("line_idxs")
             offsets = offsets[line_idxs]
@@ -449,45 +526,25 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         else:
             # offsets has trailing sentinel (file_size), so samples are num_offsets - 1
             base_len = len(offsets) - 1
-
         dtype = np.int32 if base_len < np.iinfo(np.int32).max else np.int64
         _sampled = np.arange(base_len, dtype=dtype)
-        _sampled = _filter_sampled_indices(
-            _sampled,
-            num_tokens,
-            max_length,
-        )
+        _sampled = _filter_sampled_indices(_sampled, num_tokens, max_length)
         sampled = _apply_sample_ratio(
             _sampled,
             sample_ratio=sample_ratio,
             enable_sequential_sampler=enable_sequential_sampler,
         )
-
         if num_tokens is not None:
             assert isinstance(num_tokens, np.ndarray)
             num_tokens = num_tokens[sampled]
-        self.num_tokens: np.ndarray | None = num_tokens
+        self.num_tokens = num_tokens
         self.offsets = offsets[sampled]
-
-        # check all values in _meta are same length
-        v_len = None
         for _, v in _meta.items():
-            if v_len is None:
-                v_len = len(v)
-            else:
-                assert len(v) == v_len
-
+            assert base_len == len(v)
         self._meta = {}
         for k, v in _meta.items():
-            if isinstance(v, np.ndarray):
-                self._meta[k] = v[sampled]
-            elif isinstance(v, list):
-                self._meta[k] = [v[i] for i in sampled]
-            else:
-                raise ValueError(f"Unsupported type: {type(v)}")
-
-        if self._shared_memory is not None:
-            self._release_shared_memory()
+            assert isinstance(v, np.ndarray)
+            self._meta[k] = v[sampled]
 
     @property
     def proxy_attn_flops(self) -> np.ndarray:
