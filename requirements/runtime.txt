@@ -11,7 +11,7 @@ SentencePiece
 tiktoken
 torch>=2.6.0
 torchvision
-transformers==4.56.0
+# transformers==4.56.0
 cyclopts
 transformers_stream_generator
 opencv-python-headless
