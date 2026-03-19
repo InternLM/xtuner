@@ -1,3 +1,41 @@
+# Claude Progress Notes — Session 7
+
+## What Was Done This Session
+
+### Feature 7 — Switch pack_config_path to NPY directory format (COMPLETED)
+- Added `load_config(path: str, mmap: bool = True) -> dict[str, np.ndarray]` that loads
+  `boundaries.npy` (int64), `samples.npy` (int64, shape Nx6), `paths.npy` (object) from
+  a directory; uses `mmap_mode='r'` for int64 arrays when `mmap=True`; always full-loads `paths.npy`
+- Rewrote `CustomPackDataset.__init__`: calls `load_config`; stores `_boundaries`, `_samples`
+  (mmap'd arrays), `_paths`; builds `_path_to_ds_idx`; removed old `_load_pack_config` /
+  `raw_packs` / `pack_infos` list machinery; added `mmap: bool = True` parameter
+- Replaced `_validate_pack` Python loop with `_validate_arrays` vectorized numpy validation:
+  structural checks (`boundaries[-1]==len(samples)`, `shape[1]==6`); field checks
+  (`path_id` range, `tok_off>=0`, `tok_end>tok_off`, char range via `mixed_mask`);
+  per-dataset sample_idx range; per-pack token total via `np.add.reduceat` (only when
+  error strategy is active)
+- Updated `__getitem__`: segment reads `_samples[_boundaries[i]:_boundaries[i+1]]`;
+  `long_pack_strategy='truncate'` handled at runtime (computes remaining tokens and clips);
+  `__len__` returns `len(_boundaries) - 1`
+- Updated test helpers: replaced `_write_jsonl_pack` and `_write_parquet_pack` with
+  `_write_npy_pack_dir`; replaced `TestLoadPackConfigJsonl` / `TestLoadPackConfigParquet`
+  with `TestLoadConfig`; updated all test fixtures in `TestValidation` and `TestGetitem`
+  to NPY directory format
+- All 26 tests pass
+
+## Current Completion Status
+7/8 features passing
+
+## What To Work On Next
+- Feature 8: Stress test CustomPackDataset at 2-billion-slice scale with 8-process distributed test
+  - generate_stress_pack_config helper (NPY dir format, ~2B slices)
+  - MockDataset satisfying JsonlDataset interface
+  - 8-process distributed test class measuring init time, RSS, tracemalloc
+  - __getitem__ benchmark on rank-strided indices
+  - Compare mmap=True vs mmap=False memory usage
+
+---
+
 # Claude Progress Notes — Session 6
 
 ## What Was Done This Session

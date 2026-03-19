@@ -77,7 +77,7 @@
       "Step 4: Update __getitem__(i): read row slice _samples[_boundaries[i]:_boundaries[i+1]] (segment read); for long_pack_strategy='truncate' compute running token sum and stop at pack_max_length instead of using pre-computed max_tokens; update __len__ to len(_boundaries)-1",
       "Step 5: Update test helpers to write NPY directory format (write_npy_pack_dir); update all existing test fixtures to use the new format; run all existing tests to pass"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "add",
