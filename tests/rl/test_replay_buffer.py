@@ -19,9 +19,9 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
     def _get_sorted_input_ids(data_groups):
         return sorted(tuple(state.input_ids) for group in data_groups for state in group)
         
-    async def _run_roundtrip_input_ids_case(self, replay_buffer_cfg, put_groups, task_name, sample_size, save_name):
+    async def _run_roundtrip_input_ids_case(self, replay_buffer_cfg, put_groups, task_name, sample_size):
         with TemporaryDirectory() as tmp_dir:
-            save_path = Path(tmp_dir) / save_name
+            save_path = Path(tmp_dir)
             original = replay_buffer_cfg.build()
             for group in put_groups:
                 await original.put(group, task_name)
@@ -59,7 +59,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
     async def test_save_resume_keeps_query_behavior_fifo(self):
         replay_buffer_cfg = SyncReplayBufferConfig()
         with TemporaryDirectory() as tmp_dir:
-            save_path = Path(tmp_dir) / "fifo_query.pkl"
+            save_path = Path(tmp_dir)
             buffer = replay_buffer_cfg.build()
             await buffer.put([MockState("a1", status=Status.COMPLETED, input_ids=[11, 12])], "task_a")
             await buffer.put([MockState("a2", status=Status.FAILED, input_ids=[21])], "task_a")
@@ -86,7 +86,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
     async def test_save_resume_keeps_query_behavior_staleness(self):
         replay_buffer_cfg = AsyncReplayBufferConfig()
         with TemporaryDirectory() as tmp_dir:
-            save_path = Path(tmp_dir) / "staleness_query.pkl"
+            save_path = Path(tmp_dir)
             buffer = replay_buffer_cfg.build()
             await buffer.put([MockState("done_low", staleness=1, status=Status.COMPLETED, input_ids=[101])], "task")
             await buffer.put([MockState("failed_high", staleness=10, status=Status.FAILED, input_ids=[201])], "task")
@@ -114,7 +114,6 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             ],
             task_name="task",
             sample_size=2,
-            save_name="fifo_input_ids.pkl",
         )
 
     async def test_save_resume_sample_keeps_input_ids_staleness(self):
@@ -127,5 +126,4 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             ],
             task_name="task",
             sample_size=3,
-            save_name="staleness_input_ids.pkl",
         )

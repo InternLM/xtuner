@@ -301,7 +301,7 @@ class PandasStorage(StorageBackend):
         self._timestamp_id_gen = count(state["next_timestamp_id"])
 
 
-class FIFOBackend(ReplayPolicy):
+class FIFOReplayPolicy(ReplayPolicy):
     async def put(self, item: StorageItem, storage_backend: StorageBackend) -> None:
         if not item.item:
             return
@@ -318,7 +318,7 @@ class FIFOBackend(ReplayPolicy):
         return [record.item for record in selected]
 
 
-class StalenessBackend(ReplayPolicy):
+class StalenessReplayPolicy(ReplayPolicy):
     async def put(self, item: StorageItem, storage_backend: StorageBackend) -> None:
         if not item.item:
             return
@@ -411,10 +411,10 @@ class ReplayBuffer:
 
 class SyncReplayBufferConfig(BaseModel):
     def build(self):
-        return ReplayBuffer(policy=FIFOBackend(), storage_backend=NaiveStorage())
+        return ReplayBuffer(policy=FIFOReplayPolicy(), storage_backend=NaiveStorage())
 
 
 class AsyncReplayBufferConfig(BaseModel):
     def build(self):
-        policy = StalenessBackend()
+        policy = StalenessReplayPolicy()
         return ReplayBuffer(policy=policy, storage_backend=NaiveStorage())
