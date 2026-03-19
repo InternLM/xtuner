@@ -70,8 +70,10 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
             extra_fields=extra_info,
         )
         return rollout_state
+
     def hash(self) -> str:
         raise ValueError("不应该触发这个方法, 因为 RLTokenizeFn 不需要缓存。")
+
 
 class RLTextTokenizeFnConfig(BaseModel):
     model_config = ConfigDict(title="Text RL dataset config for xtuner", extra="forbid")

@@ -1,7 +1,11 @@
-from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFunction, Qwen3VLTokenizeFnConfig
+from typing import cast
+
 from xtuner.v1.data_proto import RolloutState
-from ..utils import replace_image_context_and_collect_media_data
+
 from ...data_proto.rl_data import MultimodalInfo
+from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwen3VLTokenizeFunction, QwenVL3DataItem
+from ..utils import replace_image_context_and_collect_media_data
+
 
 def remove_consecutive_img_context_tokens(tokens, img_context_id):
     if not tokens:
@@ -17,12 +21,7 @@ def remove_consecutive_img_context_tokens(tokens, img_context_id):
 
 
 class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
-    def __init__(
-            self,
-            *args,
-            ignore_multimodal_info: bool = False,
-            **kwargs   
-    ):
+    def __init__(self, *args, ignore_multimodal_info: bool = False, **kwargs):
         self.ignore_multimodal_info = ignore_multimodal_info
         super().__init__(*args, **kwargs)
 
@@ -36,6 +35,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
         if self.state == "cache":
             return RolloutState(message=message, num_tokens=data["num_tokens"])
         else:
+            data = cast(QwenVL3DataItem, data)
             image_data, _ = replace_image_context_and_collect_media_data(message, media_root, True)
             if image_data:
                 extra_info["image_data"] = image_data
@@ -48,16 +48,16 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
             raw_prompt = self.tokenizer.decode(prompt_token_ids)  # Just for logging
             extra_info["raw_prompt"] = raw_prompt
             # 训练时的 prompt token ids，包含连续的 img_context_token_id
-            extra_info['train_prompt_ids'] = data["input_ids"]
-            
+            extra_info["train_prompt_ids"] = data["input_ids"]
+
             mm_info = None
             if not self.ignore_multimodal_info:
                 mm_info = MultimodalInfo()
                 if "pixel_values" in data:
-                    mm_info['pixel_values'] = data["pixel_values"].numpy()  # for ray put into shared memory
+                    mm_info["pixel_values"] = data["pixel_values"].numpy()  # for ray put into shared memory
                 if "image_grid_thw" in data:
-                    mm_info['image_grid_thw'] = data["image_grid_thw"]
-             
+                    mm_info["image_grid_thw"] = data["image_grid_thw"]
+
             return RolloutState(
                 message=message,
                 num_tokens=data["num_tokens"],
@@ -69,8 +69,10 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                 extra_fields=extra_info,
             )
 
+
 class RLQwen3VLTokenizeFnConfig(Qwen3VLTokenizeFnConfig):
     ignore_multimodal_info: bool = False  # eval is True
+
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> RLQwen3VLTokenizeFunction:

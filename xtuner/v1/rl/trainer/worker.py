@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, TypeAlias, Typ
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+import numpy as np
 import ray
 import requests
 import torch
@@ -21,7 +22,6 @@ from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 from typing_extensions import NotRequired
-import numpy as np
 
 from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig

@@ -299,6 +299,7 @@ class DataloaderConfig(BaseDataloaderConfig):
             return qwen3_vl_sft_collator
         elif self.collator == "fake_collator":
             from xtuner.v1.rl.utils.ray_utils import fake_collator
+
             return fake_collator
         else:
             collator = pydoc.locate(self.collator)

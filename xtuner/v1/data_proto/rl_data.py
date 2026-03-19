@@ -3,10 +3,11 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeAlias
 
+import numpy as np
 import torch
 from pydantic import BaseModel, ConfigDict, field_serializer
 from typing_extensions import NotRequired, TypedDict
-import numpy as np
+
 # ====================================
 # ====== DataFlow 数据流 ==============
 # ====================================
@@ -100,9 +101,9 @@ class RolloutState(CacheObj, BaseModel):
     seq_staleness: int = 0
     response_mask: list[int] | None = None  # response_ids的长度
     response_rollout_steps: list[int] | None = None  # 记录 response_ids 中每个 token 是在哪个 rollout_step 生成的
-    position_ids: torch.Tensor | None = None 
+    position_ids: torch.Tensor | None = None
     extra_fields: dict[str, Any] = {}
-    
+
     @field_serializer("routed_experts")
     def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | None:
         """Dump 时跳过 ray.ObjectRef，序列化为 None，避免 PydanticSerializationError。"""
@@ -118,10 +119,11 @@ class RolloutState(CacheObj, BaseModel):
         if type(value).__name__ == "ObjectRef" and "ray" in getattr(type(value), "__module__", ""):
             return None
         return value  # list[int]
-    
+
     @field_serializer("mm_info")
     def _serialize_mm_info(self, value: MultimodalInfo | None) -> MultimodalInfo | None:
         return None
+
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
     """Updates the internal status based on the inference engine's finish

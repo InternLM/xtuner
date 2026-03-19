@@ -64,7 +64,10 @@ class TrainInfo(TypedDict, total=False):
 
 
 def get_train_seq_ctx(
-    input_ids: torch.LongTensor, position_ids: torch.LongTensor, multimodal_train_info: dict | None = None, len_response_ids: int = 0
+    input_ids: torch.LongTensor,
+    position_ids: torch.Tensor,
+    multimodal_train_info: dict | None = None,
+    len_response_ids: int = 0,
 ):
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     if position_ids is not None and len(position_ids.shape) == 3:
@@ -76,7 +79,7 @@ def get_train_seq_ctx(
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         seq_ctx.position_ids = position_ids  # type: ignore[assignment]
         assert position_ids.size(-1) == input_ids.size(-1)
-        
+
     if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
@@ -522,11 +525,11 @@ class RLColocateTrainer:
             if not is_valid_for_training(group, self.logger):
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
-            
+
             is_vlm_model = "train_prompt_ids" in group[0].extra_fields
             if is_vlm_model:
                 # TODO(hha): VLM, 不好的设计，后续要去掉
-                prompt_ids = group[0].extra_fields['train_prompt_ids']
+                prompt_ids = group[0].extra_fields["train_prompt_ids"]
             else:
                 prompt_ids = group[0].prompt_ids
             assert prompt_ids is not None and len(prompt_ids) > 0, (
@@ -607,12 +610,12 @@ class RLColocateTrainer:
                     )
                 else:
                     rollout_logprobs = None
-                
+
                 position_ids = group[i].position_ids
                 multimodal_train_info = group[i].mm_info
                 multi_info_cast = cast(dict | None, multimodal_train_info)
                 seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
-                 
+
                 data_dict = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels_t,
