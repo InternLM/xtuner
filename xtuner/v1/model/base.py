@@ -1262,9 +1262,6 @@ class BaseModel(nn.Module):
         # 3. Calculating the `offset` and `size` of FSDP param base on the ep sharded params, and fill
         #    the FSDP param with the loaded tensor.
 
-        # import debugpy
-        # debugpy.connect(('10.103.23.59', 5680))
-
         hf_keys = load_spec.hf_keys
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
 
