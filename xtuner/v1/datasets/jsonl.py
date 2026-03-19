@@ -51,24 +51,28 @@ def _concat_values(values):
     return list(itertools.chain.from_iterable(values))
 
 
-def save_dict_to_npz(data: Dict[str, np.ndarray], file_path: str) -> None:
-    """通用保存函数：将 Dict[str, np.ndarray] 保存为 NPZ 文件."""
-    if not isinstance(data, dict):
-        raise ValueError("输入必须是字典类型")
+def save_dict_to_npy_dir(data: Dict[str, np.ndarray], dir_path: str) -> None:
+    """将 dict 以每 key 一个 .npy 文件的形式保存到目录."""
+    os.makedirs(dir_path, exist_ok=True)
     for k, v in data.items():
-        if not isinstance(k, str):
-            raise TypeError(f"key 必须是 str，当前: {type(k)}")
-        if not isinstance(v, np.ndarray):
-            raise TypeError(f"value 必须是 np.ndarray，key={k}, 当前: {type(v)}")
-
-    # NOTE: 若存在 object dtype（如 ragged 的 list-of-list），load 时需要 allow_pickle=True
-    np.savez_compressed(file_path, **data)
+        np.save(os.path.join(dir_path, f"{k}.npy"), v)
 
 
-def load_dict_from_npz(file_path: str) -> Dict[str, np.ndarray]:
-    """通用恢复函数：从 NPZ 文件恢复 Dict[str, np.ndarray]."""
-    with np.load(file_path, allow_pickle=True) as z:
-        return {k: z[k] for k in z.files}
+def load_dict_from_npy_dir(dir_path: str, mmap: bool = True) -> Dict[str, np.ndarray]:
+    """从 npy 目录按 key 加载 _meta；object 数组完整加载，其余 mmap_mode='r'."""
+    if not os.path.exists(dir_path):
+        return {}
+    result = {}
+    for fname in os.listdir(dir_path):
+        if not fname.endswith(".npy"):
+            continue
+        key = fname[:-4]
+        fpath = os.path.join(dir_path, fname)
+        arr = np.load(fpath, mmap_mode="r" if mmap else None, allow_pickle=True)
+        if arr.dtype == object:
+            arr = np.load(fpath, allow_pickle=True)
+        result[key] = arr
+    return result
 
 
 def _filter_sampled_indices(
@@ -309,7 +313,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             meta_path = cached.get("jsonl_meta")
             offsets = np.load(offset_path)
             if meta_path:
-                _meta = load_dict_from_npz(meta_path)
+                _meta = load_dict_from_npy_dir(meta_path)
                 num_tokens = _meta["num_tokens"]
         elif cache_dir:
             self._shared_memory = self._init_shared_memory(anno_path)
@@ -357,7 +361,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 #         "<tag name>": {
                 #             "<file path>": {
                 #                 "<tokenize hash>": {
-                #                     "jsonl_meta": "<tokenize cache path>/jsonl_meta.npz",
+                #                     "jsonl_meta": "<tokenize cache path>/jsonl_meta/",
                 #                     "offsets": "<file cache path>",
                 #                     "datetime": "2025-06-30 09:40:24"
                 #                 }
@@ -389,10 +393,10 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                         mkdir_or_exist(tok_cache_dir)
                 barrier()
 
-                _meta_file = os.path.join(tok_cache_dir, "jsonl_meta.npz")
+                _meta_file = os.path.join(tok_cache_dir, "jsonl_meta")
                 if os.path.exists(_meta_file):
                     logger.info(f"Loading tokenize meta from cache: {_meta_file}")
-                    _meta = load_dict_from_npz(_meta_file)
+                    _meta = load_dict_from_npy_dir(_meta_file)
                     num_tokens = _meta["num_tokens"]
                 else:
                     _meta = self.count_tokens(offsets, tok_cache_dir)
@@ -423,7 +427,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
                             if tok_hash not in tag_data[self.path]:
                                 tag_data[self.path][tok_hash] = {
-                                    "jsonl_meta": os.path.join(tok_cache_dir, "jsonl_meta.npz"),
+                                    "jsonl_meta": os.path.join(tok_cache_dir, "jsonl_meta"),
                                     "offsets": os.path.join(file_cache_dir, "offsets.npy"),
                                     "datetime": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 }
@@ -454,6 +458,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 _meta = self.count_tokens(offsets)
                 num_tokens = _meta["num_tokens"]
 
+        # remove num_tokens from _meta, because variable `num_tokens` is already set
+        _meta.pop("num_tokens", None)
+
         tok_hash_str = tokenize_fn.hash() if isinstance(tokenize_fn, CachableTokenizeFunction) else ""
         tmp_dir = os.path.join(
             "/tmp",
@@ -475,8 +482,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 np.save(os.path.join(tmp_dir, "offsets.npy"), self.offsets)
                 if self.num_tokens is not None:
                     np.save(os.path.join(tmp_dir, "num_tokens.npy"), self.num_tokens)
-                for k, v in self._meta.items():
-                    np.save(os.path.join(tmp_dir, f"meta_{k}.npy"), v)
+                save_dict_to_npy_dir(self._meta, os.path.join(tmp_dir, "meta"))
                 atexit.register(shutil.rmtree, tmp_dir, True)
             else:
                 del _meta, offsets
@@ -486,11 +492,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             self.offsets = np.load(os.path.join(tmp_dir, "offsets.npy"), mmap_mode="r")
             nt_path = os.path.join(tmp_dir, "num_tokens.npy")
             self.num_tokens = np.load(nt_path, mmap_mode="r") if os.path.exists(nt_path) else None
-            self._meta = {
-                fname[5:-4]: np.load(os.path.join(tmp_dir, fname), mmap_mode="r")
-                for fname in os.listdir(tmp_dir)
-                if fname.startswith("meta_") and fname.endswith(".npy")
-            }
+            self._meta = load_dict_from_npy_dir(os.path.join(tmp_dir, "meta"), mmap=True)
         else:
             self._set_meta_attrs(
                 offsets,
@@ -516,7 +518,6 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
     ) -> None:
         """Compute sampling and set self.offsets, self.num_tokens,
         self._meta."""
-        _meta.pop("num_tokens", None)
         if self._has_chunk:
             line_idxs = _meta.pop("line_idxs")
             offsets = offsets[line_idxs]
@@ -700,7 +701,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             serialized_tokenized_global = serialized_tokenized
 
         if rank == 0 and cache_dir:
-            save_dict_to_npz(serialized_tokenized_global, os.path.join(cache_dir, "jsonl_meta.npz"))
+            save_dict_to_npy_dir(serialized_tokenized_global, os.path.join(cache_dir, "jsonl_meta"))
 
         self.tokenize_fn.set_state("runtime")
         return serialized_tokenized_global
