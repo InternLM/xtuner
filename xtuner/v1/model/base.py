@@ -1261,6 +1261,10 @@ class BaseModel(nn.Module):
         #    by FSDP will only have 128/8/16 = 1 `hf-keys`
         # 3. Calculating the `offset` and `size` of FSDP param base on the ep sharded params, and fill
         #    the FSDP param with the loaded tensor.
+
+        # import debugpy
+        # debugpy.connect(('10.103.23.59', 5680))
+
         hf_keys = load_spec.hf_keys
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
 
@@ -1323,6 +1327,9 @@ class BaseModel(nn.Module):
             #     "Only support fp8 pad for MoE with ep_size == 1"
             # )
             local_tensor.zero_()  # type: ignore  # padded part must be set to 0
+            return missing_keys
+
+        if missing_keys:
             return missing_keys
 
         self.safetensors_to_params(
