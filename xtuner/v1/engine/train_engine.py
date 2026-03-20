@@ -317,11 +317,19 @@ class TrainEngine:
 
         with profile_time_and_memory(f"[DCP Checkpoint to {optimizer_dir}]"):
             if optimizer_dir is not None:
-                shard_optimizer_state_dict = get_optimizer_state_dict(self.model, self.optimizer, options=_options)
-                dcp.save(
-                    shard_optimizer_state_dict,
-                    checkpoint_id=optimizer_dir,
-                )
+                prepare_for_checkpoint_save = getattr(self.optimizer, "prepare_for_checkpoint_save", None)
+                finalize_after_checkpoint_save = getattr(self.optimizer, "finalize_after_checkpoint_save", None)
+                if callable(prepare_for_checkpoint_save):
+                    prepare_for_checkpoint_save()
+                try:
+                    shard_optimizer_state_dict = get_optimizer_state_dict(self.model, self.optimizer, options=_options)
+                    dcp.save(
+                        shard_optimizer_state_dict,
+                        checkpoint_id=optimizer_dir,
+                    )
+                finally:
+                    if callable(finalize_after_checkpoint_save):
+                        finalize_after_checkpoint_save()
 
     def load_dcp(
         self,
@@ -353,39 +361,47 @@ class TrainEngine:
 
         if optimizer_dir is not None:
             with profile_time_and_memory(f"[Load DCP Optimizer] from {optimizer_dir}"):
-                shard_optimizer_state_dict = get_optimizer_state_dict(
-                    self.model, self.optimizer, options=_load_options
-                )
-                dcp.load(
-                    state_dict=shard_optimizer_state_dict,
-                    checkpoint_id=optimizer_dir,
-                )
-                if not load_states:
-                    logger.info("Not loading optimizer states")
-                    shard_optimizer_state_dict["state"] = {}
-                if not load_args:
-                    logger.info("Not loading arg defaults")
-                    param_groups = self.optimizer.state_dict()["param_groups"]
-                    # Now we only support one param_group. If we want to support different lr for different parameters,
-                    # we may use multiple param_groups like:
-                    # [{'params': ['net1.weight', 'net2.weight'], 'lr': 0.001}, {'params': ['net3.weight'], 'lr': 0.002}]
-                    # Then we need change the code here
-                    assert len(param_groups) == 1, "Only one param_group is supported now"
-                    init_defaults = param_groups[0]
-                    init_defaults.pop("params")
-                    for param_group in cast(List[Dict[str, Any]], shard_optimizer_state_dict["param_groups"]):
-                        # param_group is like: {'params': ['net1.weight', 'net2.weight'], 'lr': 0.001, 'betas': (0.9, 0.999), 'eps': 1e-08, 'weight_decay': 0.01}
-                        default_keys = list(filter(lambda x: x != "params", param_group.keys()))
-                        for key in default_keys:
-                            param_group.pop(key)
-                        param_group.update(init_defaults)  # lr, betas, eps, etc.
+                prepare_for_checkpoint_load = getattr(self.optimizer, "prepare_for_checkpoint_load", None)
+                finalize_after_checkpoint_load = getattr(self.optimizer, "finalize_after_checkpoint_load", None)
+                if callable(prepare_for_checkpoint_load):
+                    prepare_for_checkpoint_load()
+                try:
+                    shard_optimizer_state_dict = get_optimizer_state_dict(
+                        self.model, self.optimizer, options=_load_options
+                    )
+                    dcp.load(
+                        state_dict=shard_optimizer_state_dict,
+                        checkpoint_id=optimizer_dir,
+                    )
+                    if not load_states:
+                        logger.info("Not loading optimizer states")
+                        shard_optimizer_state_dict["state"] = {}
+                    if not load_args:
+                        logger.info("Not loading arg defaults")
+                        param_groups = self.optimizer.state_dict()["param_groups"]
+                        # Now we only support one param_group. If we want to support different lr for different parameters,
+                        # we may use multiple param_groups like:
+                        # [{'params': ['net1.weight', 'net2.weight'], 'lr': 0.001}, {'params': ['net3.weight'], 'lr': 0.002}]
+                        # Then we need change the code here
+                        assert len(param_groups) == 1, "Only one param_group is supported now"
+                        init_defaults = param_groups[0]
+                        init_defaults.pop("params")
+                        for param_group in cast(List[Dict[str, Any]], shard_optimizer_state_dict["param_groups"]):
+                            # param_group is like: {'params': ['net1.weight', 'net2.weight'], 'lr': 0.001, 'betas': (0.9, 0.999), 'eps': 1e-08, 'weight_decay': 0.01}
+                            default_keys = list(filter(lambda x: x != "params", param_group.keys()))
+                            for key in default_keys:
+                                param_group.pop(key)
+                            param_group.update(init_defaults)  # lr, betas, eps, etc.
 
-                set_optimizer_state_dict(
-                    self.model,
-                    self.optimizer,
-                    optim_state_dict=shard_optimizer_state_dict,
-                    options=_set_options,
-                )
+                    set_optimizer_state_dict(
+                        self.model,
+                        self.optimizer,
+                        optim_state_dict=shard_optimizer_state_dict,
+                        options=_set_options,
+                    )
+                finally:
+                    if callable(finalize_after_checkpoint_load):
+                        finalize_after_checkpoint_load()
 
     def put_model_to_device(self, device: torch.device | str):
         """Put the model to the given device."""
@@ -394,7 +410,7 @@ class TrainEngine:
 
     def put_optimizer_to_device(self, device: torch.device | str):
         """Put the optimizer to the given device."""
-        if self.fsdp_cfg.cpu_offload:
+        if self.fsdp_cfg.cpu_offload or self.optim_cfg.swap_optimizer:
             return
         if not self.optimizer.state:
             return
