@@ -2,6 +2,7 @@ import json
 import os
 import random
 from pathlib import Path
+from shutil import rmtree
 from typing import Any, List, Union, cast
 
 import ray
@@ -10,7 +11,7 @@ from mmengine.dist import get_rank
 from pydantic import BaseModel, ConfigDict
 from typing_extensions import Literal, TypedDict
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -25,7 +26,7 @@ from xtuner.v1.rl.trainer.controller import TrainingControllerProxy
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
-from xtuner.v1.utils import get_logger, timer
+from xtuner.v1.utils import get_logger, is_hf_model_path, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
@@ -152,6 +153,8 @@ class RLColocateTrainerConfig(BaseModel):
     load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
+    hf_interval: int | None = -1
+    hf_max_keep: int | None = -1
     checkpoint_no_save_optimizer: bool = False
     log_dir: Union[Path, str, None] = None
     seed: int = 66
@@ -179,6 +182,8 @@ class RLColocateTrainerConfig(BaseModel):
             checkpoint_interval=self.checkpoint_interval,
             checkpoint_maxkeep=self.checkpoint_maxkeep,
             checkpoint_no_save_optimizer=self.checkpoint_no_save_optimizer,
+            hf_interval=self.hf_interval,
+            hf_max_keep=self.hf_max_keep,
             load_from=self.load_from,
             log_dir=self.log_dir,
             seed=self.seed,
@@ -194,6 +199,7 @@ class RLColocateTrainer:
     _META_PATH = ".xtuner_rl_colocate_trainer"
     _EXP_TRACKING_PATH = "exp_tracking"
     _CHECKPOINT_DIR = "checkpoints"
+    _HF_DIR = "hf"
     _SAVE_TRAIN_STATE_PATH = "train_state.json"
 
     # 弱化Trainer：Trainer中代码尽量少，尽量用componet来组织代码。
@@ -227,6 +233,8 @@ class RLColocateTrainer:
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
         checkpoint_no_save_optimizer: bool = False,
+        hf_interval: int | None = None,
+        hf_max_keep: int | None = None,
         # others
         load_from: str | Path,
         log_dir: Path | str | None = None,
@@ -246,6 +254,16 @@ class RLColocateTrainer:
         if get_rank() == 0:
             work_dir.mkdir(parents=True, exist_ok=True)
         self._meta = XTunerMeta.build(work_dir, self._META_PATH, auto_resume)
+
+        # hf checkpoint config
+        self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
+        is_hf_path, error_info = is_hf_model_path(load_from) if load_from is not None else (False, "")
+        self._load_from_hf = is_hf_path
+
+        if not self._load_from_hf:
+            raise NotImplementedError(error_info)
+        self._hf_max_keep = hf_max_keep
+        self._hf_interval = hf_interval
 
         # checkpoint config
         self._checkpoint_interval = checkpoint_interval
@@ -364,7 +382,7 @@ class RLColocateTrainer:
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
     ) -> LoadCheckpointConfig:
         """Resolve checkpoint path for auto-resume."""
-        latest_checkpoint = self._meta.latest_checkpoint
+        latest_checkpoint = self._meta.latest_exp.latest_checkpoint
         if latest_checkpoint is not None and auto_resume:
             load_checkpoint_cfg.checkpoint_path = Path(latest_checkpoint)
         return load_checkpoint_cfg
@@ -401,8 +419,6 @@ class RLColocateTrainer:
         ckp_maxkeep = self._checkpoint_maxkeep
         ckp_list = current_exp.checkpoint_list
         if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
-            from shutil import rmtree
-
             for deleted in ckp_list[:-ckp_maxkeep]:
                 if Path(deleted).exists():
                     rmtree(deleted, ignore_errors=True)
@@ -412,6 +428,40 @@ class RLColocateTrainer:
         meta_path = self.exp_dir.parent / self._META_PATH
         with meta_path.open("w") as f:
             f.write(self._meta.model_dump_json(indent=2))
+
+    def _maybe_save_hf(self, cur_step: int):
+        if self._hf_interval is None or self._hf_interval == -1:
+            return
+
+        if not self._load_from_hf:
+            raise RuntimeError(
+                "Only support saving to Huggingface format when loading from Huggingface! "
+                "You meet this error means `load_from` of trainer is not a Huggingface model path."
+            )
+
+        if cur_step % self._hf_interval != 0 and cur_step != self._rollout_steps:
+            return
+
+        save_hf_path = self.exp_dir / self._HF_DIR / f"hf-step-{cur_step}"
+        save_hf_path.mkdir(parents=True, exist_ok=True)
+
+        # update meta
+        current_exp = self._meta.latest_exp
+        current_exp.hf_checkpoint_list.append(str(save_hf_path))
+
+        # save hf
+        self.logger.info(f"Saving Huggingface checkpoint to {save_hf_path}")
+        hf_list = self._meta.latest_exp.hf_checkpoint_list
+        if self._hf_max_keep is not None and self._hf_max_keep > 0 and len(hf_list) > self._hf_max_keep:
+            for deleted in hf_list[: -self._hf_max_keep]:
+                if Path(deleted).exists():
+                    rmtree(deleted, ignore_errors=True)
+            current_exp.hf_checkpoint_list = hf_list[-self._hf_max_keep :]
+        ray.get(self.train_controller.save_hf.remote(str(save_hf_path)), timeout=TRAINER_RAY_GET_TIMEOUT)
+
+        # save tokenizer
+        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+            self.tokenizer.save_pretrained(str(save_hf_path))
 
     def fit(self):
         self.logger.info("Start RL training")
@@ -643,7 +693,7 @@ class RLColocateTrainer:
         with timer("save_ckpt", step_timer_dict):
             ray.get(self.train_controller.offload.remote(target="optimizer"))
             self._maybe_save_checkpoint(rollout_idx)
-            # TODO: self._maybe_save_hf()
+            self._maybe_save_hf(rollout_idx)
 
         ray.get(self.rollout_controller.recover_failed_workers.remote())
         with timer("sync_weight", step_timer_dict):
