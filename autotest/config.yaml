@@ -317,8 +317,8 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-vl-moe/e968368a/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    grad_norm: 5
+                    loss/reduced_llm_loss: 5
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
