@@ -156,7 +156,8 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             replay_buffer=replay_buffer,
         )
         # 4. 执行 produce_batch
-        batch_rollout_states = await agent_loop_manager.produce_batch(batch_size=4)
+        result = await agent_loop_manager.produce_batch(batch_size=4)
+        batch_rollout_states = result.rollout_states
         # 5. 验证结果
         self.assertEqual(len(batch_rollout_states), 4)
         for group_state in batch_rollout_states:
