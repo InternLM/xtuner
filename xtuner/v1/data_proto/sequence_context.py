@@ -36,7 +36,6 @@ class SequenceContext:
     block_table: torch.Tensor | None
     device: str | torch.device  # TODO: 这个地方有点乱，到处是 device
     position_ids: torch.LongTensor | None
-    seq_idx: torch.IntTensor | None
 
     # Qwen3VL
     image_grid_thw: torch.Tensor | None
@@ -45,7 +44,7 @@ class SequenceContext:
     # mllm model
     pixel_values: torch.FloatTensor | None
     inputs_embeds: torch.FloatTensor | None
-    num_img_tokens: list[list[int]] | None
+    num_img_tokens: list[int] | None
 
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
@@ -69,7 +68,7 @@ class SequenceContext:
         # mllm model
         pixel_values: torch.FloatTensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
-        num_img_tokens: list[list[int]] | None = None,
+        num_img_tokens: list[int] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
@@ -99,7 +98,6 @@ class SequenceContext:
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
-        self.seq_idx = None
 
         seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
         seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
@@ -177,16 +175,6 @@ class SequenceContext:
                     split_for_sequence_parallel(pad_position_ids, dim=-1, sp_mesh=sequence_parallel_mesh),
                 )
                 self.position_ids = position_ids
-
-            if self.rollout_routed_experts is not None:
-                assert isinstance(self.rollout_routed_experts, torch.Tensor), (
-                    f"rollout_routed_experts must be a tensor, but got {type(self.rollout_routed_experts)}"
-                )
-                pad_rollout_routed_experts = pad_to_multiple_of(self.rollout_routed_experts, 0, multiple_of, 0)
-                rollout_routed_experts = split_for_sequence_parallel(
-                    pad_rollout_routed_experts, dim=0, sp_mesh=sequence_parallel_mesh
-                )
-                self.rollout_routed_experts = rollout_routed_experts
 
             sp_seq_ctx = self.__class__(
                 input_ids=sp_input_ids,
@@ -285,17 +273,7 @@ class SequenceContext:
             mask = cast(torch.BoolTensor, torch.ones_like(self.input_ids, dtype=torch.bool))
         else:
             assert self.inputs_embeds is not None, "input_ids or inputs_embeds must be provided"
-            # NOTE:
-            # In some distributed / optimization settings, inputs_embeds can be a tensor
-            # whose .storage() has size 0 (fake / sharded view), which breaks operations
-            # like torch.ones_like that rely on the underlying storage layout.
-            # Here we only care about the (batch, seq_len) shape, so construct the mask
-            # directly from the logical shape instead of using ones_like on the tensor.
-            seq_shape = self.inputs_embeds.shape[:-1]
-            mask = cast(
-                torch.BoolTensor,
-                torch.ones(seq_shape, dtype=torch.bool, device=self.inputs_embeds.device),
-            )
+            mask = cast(torch.BoolTensor, torch.ones_like(self.inputs_embeds[..., 0], dtype=torch.bool))
         if self.num_padding > 0:
             mask[..., -self.num_padding :] = False
         return mask
@@ -346,36 +324,6 @@ class SequenceContext:
         self.sequence_parallel_mesh = sp_mesh
         return self
 
-    def copy(self, **overrides) -> Self:
-        """Create a shallow copy of the SequenceContext with optional attribute
-        overrides.
-
-        Args:
-            **overrides: Keyword arguments to override specific attributes in the copy.
-
-        Returns:
-            Self: A new SequenceContext instance with copied attributes.
-        """
-        return self.__class__(
-            input_ids=overrides.get("input_ids", self.input_ids),
-            cu_seq_lens_q=overrides.get("cu_seq_lens_q", self.cu_seq_lens_q),
-            cu_seq_lens_k=overrides.get("cu_seq_lens_k", self.cu_seq_lens_k),
-            max_length_q=overrides.get("max_length_q", self.max_length_q),
-            max_length_k=overrides.get("max_length_k", self.max_length_k),
-            num_padding=overrides.get("num_padding", self.num_padding),
-            sequence_parallel_mesh=overrides.get("sequence_parallel_mesh", self.sequence_parallel_mesh),
-            block_table=overrides.get("block_table", self.block_table),
-            device=overrides.get("device", self.device),
-            position_ids=overrides.get("position_ids", self.position_ids),
-            image_grid_thw=overrides.get("image_grid_thw", self.image_grid_thw),
-            deepstack_visual_embeds=overrides.get("deepstack_visual_embeds", self.deepstack_visual_embeds),
-            visual_pos_masks=overrides.get("visual_pos_masks", self.visual_pos_masks),
-            pixel_values=overrides.get("pixel_values", self.pixel_values),
-            inputs_embeds=overrides.get("inputs_embeds", self.inputs_embeds),
-            num_img_tokens=overrides.get("num_img_tokens", self.num_img_tokens),
-            rollout_routed_experts=overrides.get("rollout_routed_experts", self.rollout_routed_experts),
-        )
-
     def to(self, device: torch.device | str):
         """Move all tensors in the context to the specified device.
 
@@ -414,30 +362,3 @@ class SequenceContext:
         self.device = device
 
         return self
-
-    @property
-    def data(self) -> dict:
-        """Export all attributes as a dictionary.
-
-        Returns:
-            dict: A dictionary containing all attributes of the SequenceContext.
-        """
-        return {
-            "input_ids": self.input_ids,
-            "cu_seq_lens_q": self.cu_seq_lens_q,
-            "cu_seq_lens_k": self.cu_seq_lens_k,
-            "max_length_q": self.max_length_q,
-            "max_length_k": self.max_length_k,
-            "num_padding": self.num_padding,
-            "sequence_parallel_mesh": self.sequence_parallel_mesh,
-            "block_table": self.block_table,
-            "device": self.device,
-            "position_ids": self.position_ids,
-            "image_grid_thw": self.image_grid_thw,
-            "deepstack_visual_embeds": self.deepstack_visual_embeds,
-            "visual_pos_masks": self.visual_pos_masks,
-            "pixel_values": self.pixel_values,
-            "inputs_embeds": self.inputs_embeds,
-            "num_img_tokens": self.num_img_tokens,
-            "rollout_routed_experts": self.rollout_routed_experts,
-        }

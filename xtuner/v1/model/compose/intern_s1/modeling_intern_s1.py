@@ -1,5 +1,5 @@
 import types
-from typing import cast, Self
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -9,7 +9,7 @@ from xtuner.v1.model.moe.moe import MoEModelOutputs
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.utils import get_logger, get_padding_length, get_device
 from xtuner.v1.model import TorchCompileOption, DEFAULT_FLOAT8_CFG
-from xtuner.v1.loss.utils import sp_split
+from xtuner.v1.rl.utils import sp_split
 
 from .modeling_vision import init_world_mesh
 from typing_extensions import override
@@ -56,6 +56,14 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
         self.select_layer = config.vision_feature_layer
         self.downsample_ratio = config.downsample_ratio
 
+        # TODO(YHC): This is a hack to make the language model compatible with HF
+        _hf_prefix = "model.language_model."
+        self.language_model.to_hf_key_list = types.MethodType(to_hf_key_list_wrapper(  # type: ignore
+            fn=self.language_model.to_hf_key_list,
+            convertor=lambda x: x.replace('model.', _hf_prefix)),
+            self.language_model)
+        self.language_model._init_load_spec()
+
         self.img_context_token_id = config.image_token_id
         self.image_size = config.vision_config.image_size[0]
 
@@ -63,11 +71,9 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-    ) -> Self:
+        float8_handler: Float8Handler | None = None,
+    ):
         self.fsdp_config = fsdp_config
-        self.language_model.fully_shard(self.fsdp_config)
-        self.vision_tower.fully_shard(self.fsdp_config)
-        self.multi_modal_projector.fully_shard(self.fsdp_config)
         # TODO: 判断其余模块是否已经被 fsdp 切分了
 
         # NOTE: 暂时只能在这个地方进行 checkpoint_wrapper

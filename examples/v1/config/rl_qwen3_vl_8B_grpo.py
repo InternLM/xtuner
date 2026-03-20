@@ -21,12 +21,14 @@ from xtuner.v1.datasets import RLTokenizeFnConfig, DatasetConfig, Qwen3VLTokeniz
 from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
 
 
-work_dir = os.environ["WORK_DIR"]
-model_path = os.environ["MODEL_PATH"]
-data_path = os.environ["DATA_PATH"]
-eval_data_path = os.environ["EVAL_DATA_PATH"]
+work_dir = '/mnt/shared-storage-user/yanziang/test_xtuner/105xtuner/xtuner/examples/v1/config/rl_qwen3_vl_8B_grpo.py'
+model_path = "/mnt/shared-storage-user/yanziang/xtuner/Qwen3-VL-8B-Instruct"
+data_path = "/mnt/shared-storage-user/yanziang/internvideo3_metas/annotations_rl.jsonl"
+eval_data_path = ""
 enable_evaluate = True if eval_data_path != "" else False
-media_root = os.environ["MEDIA_ROOT"]
+media_root = '/workspace/intern-multi-modal-h-delivery/internvl_delivery/internvl3_5/P~Reasoning~en~visual_perception_2~1.1.0~0.0/multimodal_elements/'
+
+
 
 # basic settings
 experimental_name = "grpo_geo3k"
@@ -60,7 +62,7 @@ evaluate_step = 10
 # 1. resources
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=8,
+    num_workers=4,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )

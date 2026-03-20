@@ -1,10 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
-import copy
 import io
 import math
 import os
-from itertools import chain
 from types import SimpleNamespace
 from typing import Optional, Union
 
@@ -35,11 +33,6 @@ from .base_mllm_tokenize_fn import (
 from .qwen3_vl_utils import Qwen3VLOSSLoader, read_qwen3_vl_video
 from .qwenvl_rope2d import get_rope_index_3
 
-
-# Cache to avoid repeated AutoProcessor.from_pretrained() calls
-# when multiple datasets share the same processor.
-# Keyed by processor_path to support different model paths.
-_PROCESSOR_CACHE: dict[str, tuple] = {}
 
 logger = get_logger()
 
@@ -216,7 +209,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # Max frames per video for random sampling when origin_video_length is None
         # 当用户没有提供 origin_video_length 和 origin_fps 时候，不能采用 video_max_frames 值
         # 因为默认的 video_max_frames 太大了，会导致采样的视频帧太多，导致显存不足
-        rand_video_max_frames: int = 24,
+        rand_video_max_frames: int = 512,
         fps: int | None = None,  # Sampling time interval (seconds) between frames
         video_max_total_pixels: int | None = None,  # Max pixels within a frame
         video_min_total_pixels: int | None = None,  # Min pixels within a frame
@@ -224,8 +217,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         enable_3d_rope: bool = True,
         add_vision_id: bool = True,
         max_length: int | None = None,
-        llm_pack_weight: float = 1.0,
-        visual_pack_weight: float = 0.0,
         oss_loader_cfg: OSSLoaderConfig | None = None,
         debug: bool = False,
         oss_time_log_thr: int = 10,  # 10s
@@ -250,13 +241,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if version.parse(version_str) < version.parse("4.57.0"):
             raise ValueError(f"请升级 transformers 到 4.57.0 及其以上版本，当前版本为 {version_str}")
 
-        if processor_path not in _PROCESSOR_CACHE:
-            _processor = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
-            _PROCESSOR_CACHE[processor_path] = (_processor.image_processor, _processor.video_processor)
-
-        self.image_processor = copy.deepcopy(_PROCESSOR_CACHE[processor_path][0])
-        self.video_processor = copy.deepcopy(_PROCESSOR_CACHE[processor_path][1])
-
+        _processor = AutoProcessor.from_pretrained(processor_path, trust_remote_code=True)
+        self.image_processor = _processor.image_processor
+        self.video_processor = _processor.video_processor
         # default min_pixels 4096=4x32x32=4x16x16x2x2 pix 一张图片 patch size=16x16，然后 merge size=2x2, 最终输出给 llm 占 4 个 token
         # default max_pixels 16777216=16384x32x32 pix 一张图片输出给 llm 会占 16384 个 token
         if min_pixels is not None:
@@ -333,8 +320,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             hash,
             hash_str=_hash_str,
             data_name=self.data_name,
-            llm_pack_weight=llm_pack_weight,
-            visual_pack_weight=visual_pack_weight,
         )
 
     def _truncated_data_item(
@@ -357,7 +342,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         return input_ids, labels, position_ids
 
     def pure_text_get_item(self, data_item: dict) -> QwenVL3DataItem:
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+        messages = ChatMessages(messages=data_item["messages"])
 
         is_pretrain = False
         if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
@@ -394,10 +379,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             for size in self._image_wh_list:
                 if size[0] == 0 or size[1] == 0:
                     # Image is corrupted, flag=0, and this data will be removed later
-                    return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
+                    return {"num_tokens": 0}  # type: ignore
         except Exception as e:
             print(f"ERROR of image_wh: {e}, data_name: {self.data_name}")
-            return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
+            return {"num_tokens": 0}  # type: ignore
 
         # 图片宽高比可能不符合 qwen3vl 要求
         try:
@@ -408,9 +393,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             sum_media_grid_thw = media_grid_thw.prod(dim=1) // self.merge_length  # type: ignore
         except ValueError as e:
             print(f"ERROR of {self._image_wh_list}: {e}, data_name: {self.data_name}")
-            return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
+            return {"num_tokens": 0}  # type: ignore
 
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+        messages = ChatMessages(messages=data_item["messages"])
         replace_image_token(messages, self.chat_template, sum_media_grid_thw, add_vision_id=self.add_vision_id)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
@@ -434,9 +419,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 f"num_image_tokens of input_ids {num_image_tokens_1} != num_image_tokens of media_grid_thw {num_image_tokens_2}, "
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
-            return {"num_tokens": 0, "num_img_tokens": [0]}
+            return {"num_tokens": 0}
 
-        return {"num_tokens": len(input_ids), "num_img_tokens": (sum_media_grid_thw * self.merge_length).tolist()}
+        return {"num_tokens": len(input_ids)}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
         image_data_list = []
@@ -453,10 +438,11 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             image_data_list.append(image)
 
         visual_processed = self.image_processor.preprocess(image_data_list, return_tensors="pt")
+        del image_data_list
         image_tensor = visual_processed["pixel_values"]
         grid_thw = visual_processed["image_grid_thw"]  # b,3
         grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw]  # type: ignore
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+        messages = ChatMessages(messages=data_item["messages"])
         replace_image_token(messages, self.chat_template, grid_thw_merged, add_vision_id=self.add_vision_id)  # type: ignore
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
@@ -498,6 +484,8 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
         )
 
+        num_img_tokens = sum(grid_thw_merged[i].item() + 2 for i in range(len(grid_thw_merged)))
+
         ret = QwenVL3DataItem(
             input_ids=input_ids,
             labels=labels,
@@ -505,7 +493,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             image_grid_thw=grid_thw,  # b,3
             position_ids=position_ids,
             num_tokens=len(input_ids),
-            num_img_tokens=grid_thw.prod(dim=1).tolist(),
+            num_img_tokens=[num_img_tokens],
             num_imgs=[len(self._image_path)],
         )
         return ret
@@ -674,7 +662,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 )
             except ValueError as e:
                 print(f"ERROR of {self._video_wh_list}: {e}, data_name: {self.data_name}")
-                return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
+                return {"num_tokens": 0}  # type: ignore
 
             assert num_frames % self.video_processor.merge_size == 0, "num_frames must be divisible by merge_size"
 
@@ -688,7 +676,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             num_image_token_list.append([frame_seqlen] * grid_t)
             total_sum_media_grid_thw += sum_media_grid_thw
 
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+        messages = ChatMessages(messages=data_item["messages"])
         replace_video_token(
             messages,
             self.chat_template,
@@ -718,11 +706,9 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 f"num_video_tokens of input_ids {num_image_tokens_1} != num_video_tokens of media_grid_thw {num_image_tokens_2}, "
                 f"data_name: {self.data_name}, data_id: {data_item.get('id', '')}. Discard this data."
             )
-            return {"num_tokens": 0, "num_img_tokens": [0]}
+            return {"num_tokens": 0}
 
-        orig_num_image_tokens = list(chain.from_iterable(num_image_token_list))
-        orig_num_image_tokens = [num * self.merge_length for num in orig_num_image_tokens]
-        return {"num_tokens": len(input_ids), "num_img_tokens": orig_num_image_tokens}
+        return {"num_tokens": len(input_ids)}
 
     def video_get_item(self, data_item: dict, media_root: str = "") -> QwenVL3DataItem:
         num_image_tokens_list = []
@@ -821,7 +807,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             num_imgs_list.append(num_frames)
             total_sum_media_grid_thw += sum_media_grid_thw
 
-        messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
+        messages = ChatMessages(messages=data_item["messages"])
         replace_video_token(
             messages,
             self.chat_template,
@@ -878,7 +864,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             image_grid_thw=torch.cat(grid_thw_list),  # b, 3
             position_ids=position_ids,
             num_tokens=len(input_ids),
-            num_img_tokens=torch.cat(grid_thw_list).prod(dim=1).tolist(),
+            num_img_tokens=[total_sum_media_grid_thw],
             num_imgs=num_imgs_list,
         )
         return ret
@@ -924,8 +910,6 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             add_vision_id=self.add_vision_id,
             max_length=self.max_length,
             system_message=self.system_message,
-            llm_pack_weight=self.llm_pack_weight,
-            visual_pack_weight=self.visual_pack_weight,
             tokenizer_hash=tokenizer_hash,
             hash=self.hash,
             debug=self.debug,

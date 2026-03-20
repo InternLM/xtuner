@@ -49,11 +49,3 @@ class Float8Config(BaseModel):
     def is_tensorwise(self) -> bool:
         """Whether the scaling granularity is TENSORWISE."""
         return self.scaling_granularity_gemm == ScalingGranularity.TENSORWISE
-
-    def build(self):
-        from .float8_handler import Float8Handler
-
-        return Float8Handler(
-            scaling_granularity_gemm=self.scaling_granularity_gemm,
-            scaling_granularity_grouped_gemm=self.scaling_granularity_grouped_gemm,
-        )

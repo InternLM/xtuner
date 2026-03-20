@@ -192,11 +192,3 @@ def get_function_full_qualname(function: FunctionType) -> str:
 
     full_qualname = f"{module_name}.{qualname}"
     return full_qualname
-
-
-def clean_param_name(name: str) -> str:
-    if "_checkpoint_wrapped_module." in name:
-        name = name.replace("_checkpoint_wrapped_module.", "")
-    if "_orig_mod." in name:
-        name = name.replace("_orig_mod.", "")
-    return name

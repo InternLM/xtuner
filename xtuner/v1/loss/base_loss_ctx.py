@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABC, abstractmethod
-from typing import Annotated, Any, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -9,9 +9,6 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.nn.functional import all_reduce
-from typing_extensions import Self
-
-from xtuner.v1.loss.utils import sp_split
 
 from .chunk_loss import ChunkLoss
 
@@ -51,22 +48,11 @@ class BaseLossKwargs(BaseModel):
     model_config = ConfigDict(title="loss keyword arguments", extra="forbid", arbitrary_types_allowed=True)
     shifted_labels: torch.Tensor
 
-    def sp_split(self, sp_mesh: DeviceMesh) -> Self:
-        self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
-        return self
-
-    def to(self, device: torch.device | str) -> Self:
-        self.shifted_labels = self.shifted_labels.to(device)
-        return self
-
     def chunk(self, chunk_size) -> list["BaseLossKwargs"]:
         tensor_fields: dict[str, tuple[torch.Tensor, ...]] = {}
-        non_tensor_fields: dict[str, Any] = {}
         for field_name, field_value in self.__dict__.items():
-            if isinstance(field_value, torch.Tensor) and field_value.dim() > 0:
+            if isinstance(field_value, torch.Tensor):
                 tensor_fields[field_name] = torch.split(field_value, chunk_size, dim=1)
-            else:  # scalar or 0-dim tensor such as global_grad_tokens
-                non_tensor_fields[field_name] = field_value
 
         assert len(tensor_fields) > 0, "At least one field should be a tensor to chunk."
 
@@ -76,8 +62,6 @@ class BaseLossKwargs(BaseModel):
             chunk_dict = {}
             for field_name, splits in tensor_fields.items():
                 chunk_dict[field_name] = splits[i]
-            for field_name, field_value in non_tensor_fields.items():
-                chunk_dict[field_name] = field_value
             chunks.append(type(self)(**chunk_dict))
         return chunks
 
@@ -88,12 +72,9 @@ class BaseLossKwargs(BaseModel):
         # Collect all tensor field names (based on chunk[0]'s fields; pydantic extra=forbid also requires fields to be consistent)
         first = chunks[0]
         tensor_field_names: list[str] = []
-        non_tensor_fields: dict[str, Any] = {}
         for field_name, field_value in first.__dict__.items():
-            if isinstance(field_value, torch.Tensor) and field_value.dim() > 0:
+            if isinstance(field_value, torch.Tensor):
                 tensor_field_names.append(field_name)
-            else:
-                non_tensor_fields[field_name] = field_value
 
         assert len(tensor_field_names) > 0, "At least one field should be a tensor to cat."
 
@@ -101,8 +82,6 @@ class BaseLossKwargs(BaseModel):
         for field_name in tensor_field_names:
             tensors = [getattr(c, field_name) for c in chunks]
             cat_dict[field_name] = torch.cat(tensors, dim=1)
-
-        cat_dict.update(non_tensor_fields)
 
         return cls(**cat_dict)
 
@@ -117,34 +96,31 @@ class BaseLossConfig(BaseModel):
     def loss_ctx_cls(self) -> type["BaseLossContext"]:
         raise NotImplementedError
 
-    @property
-    def _loss_kwargs_cls(self) -> type["BaseLossKwargs"]:
-        raise NotImplementedError
 
-    def build(self, *args, **kwargs) -> "BaseLossContext":
-        raise NotImplementedError
-
+LossContextInputItem = TypeVar("LossContextInputItem")
 
 # NOTE: Self type for BaseLossContext subclasses (F-bounded polymorphism)
-_BaseLossContextT = TypeVar("_BaseLossContextT", bound="BaseLossContext")
+_BaseLossContextT = TypeVar("_BaseLossContextT", bound="BaseLossContext[Any]")
 
 
-class BaseLossContext(nn.Module, ABC):
+class BaseLossContext(nn.Module, ABC, Generic[LossContextInputItem]):
     def __init__(self, loss_cfg: BaseLossConfig, loss_kwargs: BaseLossKwargs):
-        # LossContext需要负责几个功能：
-        # 1. sequence parallel, 借助LossKwargs.sp_split 实现
-        # 2. batch内的loss全局校准, 借助 LossContext.build_batches 实现
-        # 3. chunk loss计算，借助 LossKwargs.chunk 实现
-        # 其中，因为LossContext负责batch内的loss 全局校准，提供 build_batches接口，
-        # 在build_batches中统计batch内的loss 全局校准参数（例如global_grad_tokens）
         super().__init__()
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
-        self._batch_size = 1
 
-    @staticmethod
+    @classmethod
     @abstractmethod
-    def build_batches(loss_ctx_list: list[_BaseLossContextT], *args, **kwargs) -> list[_BaseLossContextT]: ...
+    def build_batches_loss_kwargs(
+        cls,
+        data_batches: list[LossContextInputItem],
+        loss_cfg: BaseLossConfig,
+        # The following two parameters need to be passed in only when sp is enabled
+        # and calculating loss_kwargs requires the complete shifted_labels.
+        # (For example, the sample-wise loss)
+        cu_seq_lens_list: list[torch.Tensor] | None = None,
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list[BaseLossKwargs]: ...
 
     @abstractmethod
     def loss_fn(
@@ -187,8 +163,6 @@ class BaseLossContext(nn.Module, ABC):
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
-        from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
-
         assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
         if head_bias is not None:
             raise NotImplementedError("Loss does not support head_bias yet.")
@@ -197,10 +171,6 @@ class BaseLossContext(nn.Module, ABC):
             loss, (logits, extra_info) = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
         else:
             loss, (logits, extra_info) = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
-
-        # TODO: yanhuida, should be removed
-        if not isinstance(extra_info, ModelForwardExtraLogInfo):
-            extra_info = ModelForwardExtraLogInfo(extra_info)
 
         extra_info["local_base_loss"] = loss.detach().clone()
 
@@ -220,7 +190,3 @@ class BaseLossContext(nn.Module, ABC):
         loss_kwargs = type(first.loss_kwargs).cat(loss_kwargs_chunks)
 
         return cls(loss_cfg, loss_kwargs)
-
-    @property
-    def batch_size(self) -> int:
-        return self._batch_size

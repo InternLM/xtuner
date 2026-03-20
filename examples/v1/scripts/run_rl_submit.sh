@@ -4,10 +4,12 @@ ray stop --force
 # qwen3_8B_grpo_gsm8k training: bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen3_8B_grpo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 # qwen2.5_7B_dapo_math training: bash examples/v1/scripts/run_rl.sh  examples/v1/config/rl_qwen25_7B_dapo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 
-CONFIG_PATH=$1
-INFER_BACKEND=$2
-MODEL_PATH=$3
-DATA_PATH=$4
+CONFIG_PATH="/mnt/shared-storage-user/yanziang/xtuner/examples/v1/config/rl_qwen3_vl_8B_grpo.py"
+INFER_BACKEND="lmdeploy"
+MODEL_PATH="/mnt/shared-storage-user/yanziang/xtuner/Qwen3-VL-8B-Instruct"
+DATA_PATH="/mnt/shared-storage-user/yanziang/internvideo3_metas/annotations_rl.jsonl"
+EVAL_DATA_PATH=""
+
 EVAL_DATA_PATH=${5:-""}
 ACCELERATOR=${6:-"gpu"} # "gpu" or "npu"
 ACCELERATOR=$(echo "$ACCELERATOR" | tr '[:lower:]' '[:upper:]')
@@ -18,7 +20,7 @@ fi
 if [ "$ACCELERATOR" = "NPU" ]; then
   ACCELERATOR_PER_NODE=${7:-16}
 else
-  ACCELERATOR_PER_NODE=${7:-8}
+  ACCELERATOR_PER_NODE=${7:-4}
 fi
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
@@ -65,7 +67,7 @@ current_time=$(date "+%m%d%H")
 model_dir_name=$(basename "$MODEL_PATH")
 data_dir_name=$(basename "$(dirname "$DATA_PATH")")
 DIR=$(pwd)
-export WORK_DIR="${DIR}/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
+export WORK_DIR="/mnt/shared-storage-user/yanziang/test_xtuner/xtuner/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
 if [ ! -d "$WORK_DIR" ]; then
   mkdir -p "$WORK_DIR"
 fi
@@ -152,9 +154,10 @@ if [ "$RAY_RANK" -eq 0 ]; then
 
   ray job submit --address="http://127.0.0.1:$RAY_DASHBOARD_PORT" \
        --runtime-env-json="$RUNTIME_ENV_JSON" \
-       -- python xtuner/v1/train/cli/rl.py \
+       -- python /mnt/shared-storage-user/yanziang/test_xtuner/105xtuner/xtuner/xtuner/v1/train/cli/rl.py \
        --config $CONFIG_PATH \
        2>&1 | tee -a "$LOG_FILE"
 
   echo "训练任务提交完成。日志文件: $LOG_FILE"
 fi
+

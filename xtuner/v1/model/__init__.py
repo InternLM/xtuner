@@ -11,12 +11,15 @@ from .compose.internvl import (
     InternVL3P5MoE30BA3Config,
     InternVLBaseConfig,
 )
-from .compose.qwen3_5 import Qwen3_5_VLMoE35BA3Config
 from .compose.qwen3_vl import (
     Qwen3VLDense4BConfig,
     Qwen3VLDense8BConfig,
     Qwen3VLMoE30BA3Config,
     Qwen3VLMoE235BA22Config,
+)
+
+from .compose.qwen3_vl_mla import (
+    Qwen3VLDense8BMLAConfig,
 )
 from .dense.dense import Dense
 from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
@@ -96,8 +99,5 @@ __all__ = [
     "Qwen3VLDense4BConfig",
     "Qwen3VLDense8BConfig",
     "Qwen3VLMoE235BA22Config",
-    "TorchCompileOption",
-    "DEFAULT_FLOAT8_CFG",
-    "XTunerBaseModelConfig",
-    "Qwen3_5_VLMoE35BA3Config",
+    "Qwen3VLDense8BMLAConfig",
 ]

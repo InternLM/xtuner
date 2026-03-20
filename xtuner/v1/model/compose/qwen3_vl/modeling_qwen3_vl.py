@@ -27,22 +27,16 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
     config: Qwen3VLBaseConfig
 
     def __init__(self, config: Qwen3VLBaseConfig):
-        self.only_llm_forward = config.only_llm_forward
-        if self.only_llm_forward:
-            config.freeze_vision = True
-            config.freeze_projector = True
-            logger.warning("only_llm_forward is True, vision and projector will be frozen " \
-                            "regardless of their individual freeze settings.")
         super().__init__(config)  # type: ignore[arg-type]
 
-        # if type(self.language_model) is Qwen3MoE:
-        #     # TODO(YHC): This is a hack to make the language model compatible with HF
-        #     _hf_prefix = "model.language_model."
-        #     self.language_model.to_hf_key_list = types.MethodType(to_hf_key_list_wrapper(  # type: ignore
-        #         fn=self.language_model.to_hf_key_list,
-        #         convertor=lambda x: x.replace('model.', _hf_prefix)),
-        #         self.language_model)
-        #     self.language_model._init_load_spec()
+        if type(self.language_model) is Qwen3MoE:
+            # TODO(YHC): This is a hack to make the language model compatible with HF
+            _hf_prefix = "model.language_model."
+            self.language_model.to_hf_key_list = types.MethodType(to_hf_key_list_wrapper(  # type: ignore
+                fn=self.language_model.to_hf_key_list,
+                convertor=lambda x: x.replace('model.', _hf_prefix)),
+                self.language_model)
+            self.language_model._init_load_spec()
 
     @property
     @override
@@ -149,9 +143,8 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
         sequence_parallel_mesh = seq_ctx.sequence_parallel_mesh
 
         inputs_embeds = self.language_model.embed_tokens(input_ids)  # type: ignore
-        
+
         if pixel_values is not None:
-            assert self.only_llm_forward is False, "only_llm_forward is True, but pixel_values is not None. Please check your config setting."
             assert image_grid_thw is not None
             assert input_ids is not None
             visual_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values,
@@ -174,36 +167,40 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
                 inputs_embeds = inputs_embeds + visual_embeds.sum() * 0.0
                 for deepstack_visual_embed in deepstack_visual_embeds:
                     inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
+                inputs_embeds = inputs_embeds + visual_embeds.sum() * 0.0
                 deepstack_visual_embeds = None
                 visual_pos_masks = None
         else:
-            if not self.only_llm_forward:
-                pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
-                image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
-                viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values_dump, image_grid_thw)
-                inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
-                for deepstack_visual_embed in deepstack_visual_embeds:
-                    inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
+            pixel_values_dump = torch.randn(4, 1536, device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+            image_grid_thw = torch.tensor([[1, 2, 2]], device=inputs_embeds.device)
+            viusal_embeds, deepstack_visual_embeds = self.get_visual_features(pixel_values_dump, image_grid_thw)
+            inputs_embeds = inputs_embeds + viusal_embeds.sum() * 0.0
+            for deepstack_visual_embed in deepstack_visual_embeds:
+                inputs_embeds = inputs_embeds + deepstack_visual_embed.sum() * 0.0
 
             deepstack_visual_embeds = None
             visual_pos_masks = None
 
         if deepstack_visual_embeds is not None and len(deepstack_visual_embeds) == 0:
             assert seq_ctx.position_ids is not None
-            assert seq_ctx.position_ids.ndim in (2, 3), (
-                f"position_ids must be 2-dim or 3-dim when deepstack_visual_embeds is None,"
-                f" but got {seq_ctx.position_ids.ndim}"
-            )
+            assert seq_ctx.position_ids.ndim == 2, f"position_ids must be 2-dim when deepstack_visual_embeds is None," \
+                                                   f" but got {seq_ctx.position_ids.ndim}"
             deepstack_visual_embeds = None
             visual_pos_masks = None
 
         # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
-        lang_seq_ctx = seq_ctx.copy(
-            input_ids=None,
-            inputs_embeds=inputs_embeds,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-            visual_pos_masks=visual_pos_masks,
-        )
+        lang_seq_ctx = SequenceContext(input_ids=None,
+                                       cu_seq_lens_q=seq_ctx.cu_seq_lens_q,
+                                       cu_seq_lens_k=seq_ctx.cu_seq_lens_k,
+                                       max_length_q=seq_ctx.max_length_q,
+                                       max_length_k=seq_ctx.max_length_k,
+                                       position_ids=seq_ctx.position_ids,
+                                       num_padding=seq_ctx.num_padding,
+                                       sequence_parallel_mesh=seq_ctx.sequence_parallel_mesh,
+                                       inputs_embeds=inputs_embeds,
+                                       rollout_routed_experts=seq_ctx.rollout_routed_experts,
+                                       deepstack_visual_embeds=deepstack_visual_embeds,
+                                       visual_pos_masks=visual_pos_masks)
         outputs = self.language_model(
             lang_seq_ctx,
             loss_ctx

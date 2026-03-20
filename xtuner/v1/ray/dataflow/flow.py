@@ -1,8 +1,6 @@
 import asyncio
-import math
-import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional
 
 import httpx
 import ray
@@ -12,19 +10,13 @@ from ray.actor import ActorProxy
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
-from xtuner.v1.data_proto.rl_data import MultimodalTrainInfo, RLDataFlowItem, RolloutState
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RolloutState
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
 from xtuner.v1.utils import get_logger, ray_method
 
 from .replay_buffer import ReplayBuffer, ReplayBufferConfig, determine_group_state
-
-
-class DataFlowResult(TypedDict):
-    data_groups: List[List[RLDataFlowItem]]
-    mm_train_infos: List[MultimodalTrainInfo]
-    metrics: Dict[str, Any]
 
 
 class DataFlowConfig(BaseModel):
@@ -77,37 +69,15 @@ class DataFlowConfig(BaseModel):
         int,
         Parameter(help="Target number of samples to collect before stopping."),
     ] = 8
+    enable_partial_rollout: Annotated[
+        int, Parameter(help="Whether to enable async rollout_controller. 1 for enabled, 0 for disabled")
+    ] = 0
     sample_params: Annotated[SampleParams, Parameter(help="Parameters for sampling from the model.")] = SampleParams()
     extra_params: Annotated[Dict, Parameter(help="Extra parameters for rollout.")] = {}
-    # async params
-    staleness_threshold: Annotated[
-        float,
-        Parameter(
-            help="The maximum allowed threshold of stale (expired) samples in a training batch. Must be between 0.0 and 1.0."
-        ),
-    ] = 0.0
-    enable_partial_rollout: Annotated[
-        bool,
-        Parameter(help="Whether to enable partial rollout for asynchronous data generation."),
-    ] = False
-    tail_batch_candidate_steps: Annotated[
-        int,
-        Parameter(
-            help="Number of rollout steps after which a sample becomes a candidate for the tail batch. Set to 0 to disable."
-        ),
-    ] = 0
-    tail_batch_trigger_size: Annotated[
-        Optional[int],
-        Parameter(
-            help="Number of candidate samples needed in the queue to trigger a tail batch operation. Set to 0 to disable."
-        ),
-    ] = None
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
 
     def model_post_init(self, __context: Any) -> None:
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
-        if self.tail_batch_trigger_size is None:
-            self.tail_batch_trigger_size = self.global_batch_size
 
 
 class RawDataFlow:
@@ -136,24 +106,17 @@ class RawDataFlow:
             postprocessor (Optional[Callable]): An optional function to
                 post-process the generated samples.
         """
-        self.logger = get_logger(log_dir=dataflow_cfg.worker_log_dir, tag="DataFlow")
         self.env = env
         self.config = dataflow_cfg
         replay_buffer_cfg.worker_log_dir = self.config.worker_log_dir
-        self.replay_buffer = ReplayBuffer(replay_buffer_cfg)
-        self.replay_buffer.setup_storage_config(
-            enable_partial_rollout=self.config.enable_partial_rollout,
-            tail_batch_candidate_steps=self.config.tail_batch_candidate_steps,
-            tail_batch_trigger_size=self.config.tail_batch_trigger_size,  # type: ignore
-        )
-        self.staleness_threshold = self.config.staleness_threshold
+        self.replay_buffer = ReplayBuffer.remote(replay_buffer_cfg)  # type: ignore[attr-defined]
         self.env_controller = environment
         self.finished_samples_count = 0
         self.skipped_sample_count = 0
         self.failed_sample_count = 0
-        self.filtered_samples_count = 0
-        self.tb_metrics: Dict[str, Any] = {}
+        self.logger = get_logger(log_dir=self.config.worker_log_dir, tag="DataFlow")
         self.target_batch_size = self.config.global_batch_size
+        self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
         rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
         self.worker_url_list = list(rollout_info["server_url_dict"].values())
         self.logger.info(f"DataFlow connected to active rollout workers url: {self.worker_url_list}")
@@ -176,46 +139,41 @@ class RawDataFlow:
             self.logger.warning(
                 f"Dataflow max_concurrent is set to {self.config.max_concurrent}, we proposed to set max_concurrent to {max_concurrent} based on rollout_max_batch_size_per_instance."
             )
-        self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
-        self.cleanup_task_time = 5 * 60  # 5 minutes
+        self.enable_partial_rollout = self.config.enable_partial_rollout
 
     def _reset_internal_states(
         self,
         global_batch_size: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
-        staleness_threshold: Optional[float] = None,
+        enable_partial_rollout: Optional[bool] = None,
     ):
         """Resets all internal state variables of DataFlow."""
+        self.finished_samples_count = 0
         self.skipped_sample_count = 0
         self.failed_sample_count = 0
-        self.filtered_samples_count = 0
-        self.tb_metrics = {}
         if global_batch_size and global_batch_size > 0:
             self.target_batch_size = global_batch_size
         else:
             self.target_batch_size = self.config.global_batch_size
 
-        if staleness_threshold is not None:
-            self.staleness_threshold = staleness_threshold
+        if enable_partial_rollout is not None:
+            self.enable_partial_rollout = enable_partial_rollout
         else:
-            self.staleness_threshold = self.config.staleness_threshold
-
-        self.sample_from_expired_storage, self.finished_samples_count = self.replay_buffer.get_prerun_state()
-        ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
+            self.enable_partial_rollout = self.config.enable_partial_rollout
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
         logger_msg = (
-            f"DataFlow states for new generations: target_batch_size={self.target_batch_size}, "
+            f"DataFlow internal states reset for new run: target_batch_size={self.target_batch_size}, "
             f"sample_params: {self.sample_params}, extra_params: {self.extra_params}, "
-            f"sample_from_expired_storage={self.sample_from_expired_storage}, finished_samples_count={self.finished_samples_count}, "
+            f"enable_partial_rollout={self.enable_partial_rollout}."
         )
         self.logger.info(logger_msg)
 
     @ray_method
     def get_train_dataset_length(self):
         """Gets the length of the training dataset from the replay buffer."""
-        return self.replay_buffer.get_train_dataset_length()
+        return ray.get(self.replay_buffer.get_train_dataset_length.remote())
 
     @ray_method
     async def worker_task(self, group_samples_for_retry: Optional[List[RLDataFlowItem]] = None):
@@ -236,33 +194,29 @@ class RawDataFlow:
             Optional[List[RLDataFlowItem]]: The group of samples if the task
             fails and needs to be retried, otherwise None.
         """
-        task_start_time = time.perf_counter()
         # step 1: sample
         # TODO(@duanyanhui): More fine-grained control over group data generation:
         # Pass n to the inference engine to ensure that the same data is processed by the same server, improving efficiency.
-        group_data_items = self.replay_buffer.sample(self.env, self.config.prompt_repeat_k)
+        group_data_items = await self.replay_buffer.sample.remote(  # type: ignore[attr-defined]
+            self.env, self.enable_partial_rollout, self.config.prompt_repeat_k
+        )
         assert len(group_data_items) > 0, "Sampled empty group data items from replay buffer."
         action_id = group_data_items[0].uid.action_id
         # step 2: env generate
         group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
-            group_data_items,
-            sample_params=self.sample_params,
-            extra_params=self.extra_params,
+            group_data_items, sample_params=self.sample_params, extra_params=self.extra_params
         )
 
         # Step 3: Determine the sample's state and act accordingly.
         group_state = determine_group_state(group_data_items)
         self.logger.debug(f"Determined replay state for {action_id}: {group_state}")
         if group_state == RolloutState.COMPLETED:
-            if not self.sample_from_expired_storage:
-                group_data_items = self.replay_buffer.post_processor(group_data_items)  # type: ignore[attr-defined]
+            group_data_items = await self.replay_buffer.post_processor.remote(group_data_items)  # type: ignore[attr-defined]
             if len(group_data_items) > 0:
-                self.replay_buffer.add(group_data_items)  # type: ignore[attr-defined]
-            else:
-                self.filtered_samples_count += 1
+                await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
             self.logger.debug(f"Worker task completed successfully for {action_id}.")
         elif group_state == RolloutState.ABORTED:
-            self.replay_buffer.add(group_data_items)  # type: ignore[attr-defined]
+            await self.replay_buffer.add.remote(group_data_items)  # type: ignore[attr-defined]
             self.logger.debug(f"Adding aborted sample {action_id} to aborted storage")
         elif group_state == RolloutState.SKIPPED:
             self.skipped_sample_count += 1
@@ -273,92 +227,63 @@ class RawDataFlow:
         else:
             self.logger.error(f"Unexpected group state '{group_state}' for action_id {action_id}.")
 
-        return time.perf_counter() - task_start_time
-
     async def concurrent_task_runner(self):
-        """Orchestrates the concurrent execution of worker tasks.
+        """Orchestrates the concurrent execution of worker tasks to generate a
+        batch of training data.
 
         This method manages a pool of asynchronous worker tasks to collect a
-        target number of samples (`self.target_batch_size`). It dynamically
-        adjusts the number of concurrent tasks based on progress and a
-        staleness threshold, ensuring efficient data generation.
+        specified number of samples (`self.global_batch_size`). It handles
+        task scheduling, retries for failed tasks, and progress tracking.
 
         The process is as follows:
-        1.  Initializes a set of worker tasks, potentially over-provisioning
-            based on `self.config.staleness_threshold` to account for
-            variability in task completion times.
-        2.  Enters a main loop that continues until `target_batch_size`
-            samples are collected.
-        3.  Inside the loop, it periodically checks the number of pending
-            tasks and launches new ones if the current number is insufficient
-            to meet the target, maintaining a steady flow of data generation.
-        4.  Uses `asyncio.wait` with a short timeout to efficiently monitor
-            for completed tasks without blocking execution.
-        5.  A progress bar (`tqdm`) is updated as samples are collected.
-        6.  Once `target_batch_size` is reached, it sends a pause/abort
-            signal to all rollout workers to prevent them from starting new
-            computations.
-        7.  It then waits for any remaining in-flight tasks to complete, with
-            a configurable timeout to prevent indefinite hanging. Tasks that
-            do not finish within the timeout are forcefully cancelled.
+        1.  Continuously spawns new `worker_task` instances until the
+            number of in-flight tasks reaches `self.config.max_concurrent`.
+        2.  Uses `asyncio.wait` to efficiently handle completed tasks.
+        3.  If a task fails but is retryable, it is rescheduled with the same
+            data, up to `self.config.max_retry_times`.
+        4.  If a task fails permanently, it is logged and counted.
+        5.  A progress bar (`tqdm`) is updated as samples are successfully
+            processed.
+        6.  Once `global_batch_size` is reached, the environment controller is
+            paused, and the method waits for any remaining tasks to finish
+            before completing.
         """
         waiting_tasks = set()
-        dataflow_start_time = time.perf_counter()
-        task_completion_times = []
-        with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples", miniters=10) as pbar:
-            last_pbar_n = self.finished_samples_count
-            init_finished_samples_count = self.finished_samples_count
-
-            if self.sample_from_expired_storage:
-                # 如果是从过期的存储中采样数据，需要禁用staleness_threshold
-                data_concurrency = self.target_batch_size - self.finished_samples_count
-                self.logger.info(
-                    f"Sampling from expired storage, starting {data_concurrency} worker tasks from expired samples."
-                )
-            else:
-                data_concurrency = math.ceil(
-                    (1 + self.staleness_threshold) * (self.target_batch_size - self.finished_samples_count)
-                )
-                self.logger.info(
-                    f"Starting dataflow concurrent task runner with data_concurrency: {data_concurrency}, target_batch_size: {self.target_batch_size}, finished_samples_count: {self.finished_samples_count}, staleness_threshold: {self.staleness_threshold}"
-                )
-
-            for _ in range(data_concurrency):
-                task = create_task(self.worker_task())
-                waiting_tasks.add(task)
-
+        with tqdm(total=self.target_batch_size, desc="rollout_controller for training samples") as pbar:
+            update_step = max(1, int(self.target_batch_size * 0.01))
+            next_update_threshold = update_step
             while (
                 self.finished_samples_count < self.target_batch_size
-                and self.failed_sample_count < self.target_batch_size
                 and self.skipped_sample_count < self.target_batch_size
+                and self.failed_sample_count < self.target_batch_size
             ):
-                done_tasks, pending_tasks = await asyncio.wait(
-                    waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
-                )
-
-                for done_task in done_tasks:
-                    task_time = done_task.result()
-                    task_completion_times.append(task_time)
-
-                self.finished_samples_count = self.replay_buffer.get_completed_samples_count()
-                pbar.update(self.finished_samples_count - last_pbar_n)
-                last_pbar_n = self.finished_samples_count
-
-                waiting_tasks = pending_tasks
-
-                while (
-                    len(waiting_tasks) + self.finished_samples_count < data_concurrency + init_finished_samples_count
-                ):
-                    # 当存在被filter掉的样本时，需要补数据
+                if self.finished_samples_count >= next_update_threshold:
+                    pbar.n = self.finished_samples_count
+                    pbar.refresh()
+                    next_update_threshold += update_step
+                    self.logger.info(
+                        f"waiting_tasks: {len(waiting_tasks)}, finished_samples_count: {self.finished_samples_count}"
+                    )
+                while len(waiting_tasks) < self.config.max_concurrent:
+                    # In async mode, we keep spawning. In sync mode, we stop if we have enough tasks in flight.
+                    if (
+                        not self.enable_partial_rollout
+                        and self.finished_samples_count + len(waiting_tasks) >= self.target_batch_size
+                    ):
+                        break
                     task = create_task(self.worker_task())
                     waiting_tasks.add(task)
+
+                _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+                self.finished_samples_count = await self.replay_buffer.get_finished_samples.remote()
+                waiting_tasks = pending_tasks
 
             pbar.n = self.finished_samples_count
             pbar.refresh()
 
         if self.finished_samples_count >= self.target_batch_size:
             self.logger.info(
-                f"Target batch size {self.target_batch_size} reached with finished_samples_count: {self.finished_samples_count}."
+                f"Target batch size {self.target_batch_size} reached with {self.finished_samples_count} finished samples."
             )
         elif self.skipped_sample_count >= self.target_batch_size:
             self.logger.info(
@@ -368,48 +293,26 @@ class RawDataFlow:
             self.logger.info(
                 f"Stopping data generation as failed samples {self.failed_sample_count} reached target batch size {self.target_batch_size}."
             )
-        generation_time = time.perf_counter() - dataflow_start_time
-        pause_start_time = time.perf_counter()
 
-        if len(waiting_tasks) > 0:
-            self.logger.info(f"Start pausing env controller for remaining worker tasks {len(waiting_tasks)}.")
+        if self.enable_partial_rollout:
+            self.logger.info("Start pausing env controller.")
             await self.pause()
-            cleanup_start_time = time.perf_counter()
             while len(waiting_tasks) > 0:
-                elapsed_time = time.perf_counter() - cleanup_start_time
-                if elapsed_time > self.cleanup_task_time:
-                    self.logger.warning(
-                        f"Cleanup timeout of {self.cleanup_task_time}s reached. "
-                        f"Forcefully cancelling {len(waiting_tasks)} remaining tasks."
-                    )
-                    for task in waiting_tasks:
-                        task.cancel()
-                    # Wait for cancellations to complete
-                    await asyncio.gather(*waiting_tasks, return_exceptions=True)
-                    break  # Exit the cleanup loop
                 # NOTE: Keep sending pause requests because the inference engine only marks currently running requests as aborted.
                 # When a waiting request starts running, it still needs another pause request to be marked as aborted.
-                _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
+                done_tasks, pending_tasks = await asyncio.wait(
+                    waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED
+                )
                 if len(pending_tasks) > 0:
                     await self.pause()
-                    await asyncio.sleep(1)
-                    self.logger.debug(
-                        f"Waiting for {len(pending_tasks)} remaining worker tasks to complete after pausing env controller."
-                    )
                 waiting_tasks = pending_tasks
             self.logger.info("All worker tasks have completed after pausing env controller.")
 
-        pause_time = time.perf_counter() - pause_start_time
-        dataflow_time = time.perf_counter() - dataflow_start_time
+        replay_buffer_stats = await self.replay_buffer.print.remote()  # type: ignore[attr-defined]
+        rollout_stats = await self.env_controller.get_rollout_stats.remote()  # type: ignore[attr-defined]
         self.logger.info(
-            f"dataflow task finished, generation_time: {generation_time:.2f}s, pause_time: {pause_time:.2f}s, total_time: {dataflow_time:.2f}s"
+            f"Data generation completed. Replay Buffer Stats: {replay_buffer_stats}, Rollout Stats: {rollout_stats}"
         )
-        self.tb_metrics["time/generation_time"] = generation_time
-        self.tb_metrics["time/pause_time"] = pause_time
-
-        task_completion_dict = self._log_task_completion_stats(task_completion_times, "Task Completion Time Stats:\n")
-        for k, v in task_completion_dict.items():
-            self.tb_metrics[f"task_time/{k}"] = v
 
     @ray_method
     async def pause(self, timeout: float = 60.0):
@@ -431,7 +334,7 @@ class RawDataFlow:
                 f"Failed: {len(failed_workers)}. Failed workers: {failed_workers}"
             )
         else:
-            self.logger.info(f"All {succeeded_count} abort requests sent successfully.")
+            self.logger.debug(f"All {succeeded_count} abort requests sent successfully.")
 
     @ray_method
     async def run(
@@ -439,8 +342,8 @@ class RawDataFlow:
         num: Optional[int] = None,
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
-        staleness_threshold: Optional[float] = None,
-    ) -> DataFlowResult:
+        enable_partial_rollout: Optional[bool] = None,
+    ):
         """Starts the data generation process.
 
         This method resets the internal state and runs the concurrent task
@@ -463,37 +366,16 @@ class RawDataFlow:
             global_batch_size=num,
             sample_params=sample_params,
             extra_params=extra_params,
-            staleness_threshold=staleness_threshold,
+            enable_partial_rollout=enable_partial_rollout,
         )
-        self.logging_replaybuffer_state("DataFlow run started. ")
         await self.concurrent_task_runner()
-        self.logging_replaybuffer_state("DataFlow run completed. ")
-
-        get_start_time = time.perf_counter()
-        return_samples = self.replay_buffer.get_samples(self.target_batch_size)  # type: ignore[attr-defined]
-        self.logger.info(
-            f"Getting {self.target_batch_size} samples from replay buffer took {time.perf_counter() - get_start_time:.2f}s"
-        )
-        self.tb_metrics["time/get_samples_time"] = time.perf_counter() - get_start_time
-        dataflow_result = DataFlowResult(
-            data_groups=return_samples[0],
-            mm_train_infos=return_samples[1],
-            metrics=self.tb_metrics,
-        )
-        return dataflow_result
-
-    def logging_replaybuffer_state(self, logging_msg: Optional[str] = None):
-        status = self.get_replaybuffer_status()
-        logging_msg = logging_msg if logging_msg else ""
-        logging_msg += f"ReplayBuffer Status: {status}"
-        logging_msg += f", finished_samples_count: {self.finished_samples_count}, "
-        logging_msg += f"skipped_samples_count: {self.skipped_sample_count}, "
-        logging_msg += f"failed_samples_count: {self.failed_sample_count}, "
-        logging_msg += f"filtered_samples_count: {self.filtered_samples_count}, "
-        self.logger.info(logging_msg)
+        return await self.replay_buffer.get_samples.remote(self.target_batch_size)  # type: ignore[attr-defined]
 
     def get_replaybuffer_status(self):
-        return self.replay_buffer.status()
+        return ray.get(self.replay_buffer.status.remote())
+
+    def clear_replaybuffer(self):
+        return ray.get(self.replay_buffer.clear.remote())
 
     async def _send_abort_request(self, client, url, timeout):
         worker_url = f"{url}/abort_request"
@@ -506,41 +388,13 @@ class RawDataFlow:
             self.logger.error(f"Failed to send abort request to {url}: {e}")
             return url, False
 
-    def _log_task_completion_stats(self, task_times: List[float], logger_msg: Optional[str] = None):
-        if not task_times:
-            self.logger.info("No task completion times to report.")
-            return {}
-
-        import numpy as np
-
-        stats_dict = {
-            "p50": np.percentile(task_times, 50),
-            "p90": np.percentile(task_times, 90),
-            "p95": np.percentile(task_times, 95),
-            "p99": np.percentile(task_times, 99),
-            "max": np.max(task_times),
-            "avg": np.mean(task_times),
-            "std": np.std(task_times),
-        }
-        stats_dict["p99_p50_ratio"] = stats_dict["p99"] / stats_dict["p50"] if stats_dict["p50"] > 0 else float("inf")
-
-        task_completions_report = (
-            f"  - Avg Time: {stats_dict['avg']:.2f}s, Std: {stats_dict['std']:.2f}s\n"
-            f"  - P50 (Median): {stats_dict['p50']:.2f}s, P90: {stats_dict['p90']:.2f}s, P95: {stats_dict['p95']:.2f}s, P99: {stats_dict['p99']:.2f}s\n"
-            f"  - Max Time: {stats_dict['max']:.2f}s, Ratio (P99 / P50): {stats_dict['p99_p50_ratio']:.2f}\n"
-        )
-        logger_msg = logger_msg if logger_msg else ""
-        logger_msg += task_completions_report
-        self.logger.info(logger_msg)
-        return stats_dict
-
     def save(self, save_path: Path | str):
         """Saves the replay buffer to the specified path.
 
         Args:
             save_path (str): The path to the checkpoint file to save to.
         """
-        self.replay_buffer.save(save_path)
+        ray.get(self.replay_buffer.save.remote(save_path))
 
     def resume(self, resume_path: Path | str):
         """Resumes the replay buffer from the specified path.
@@ -548,7 +402,7 @@ class RawDataFlow:
         Args:
             resume_path (str): The path to the checkpoint file to resume from.
         """
-        self.replay_buffer.resume(resume_path)
+        ray.get(self.replay_buffer.resume.remote(resume_path))
 
 
 DataFlow = ray.remote(RawDataFlow)

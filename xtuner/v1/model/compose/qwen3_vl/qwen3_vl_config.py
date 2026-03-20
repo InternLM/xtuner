@@ -38,10 +38,9 @@ class Qwen3VLVisionConfig(XTunerBaseModelConfig):
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
-        if self.attn_impl == "flash_attention" and get_device() == "cuda":
-            if not (is_installed("flash-attn") or is_installed("flash-attn-3")):
-                logger.warning("flash-attn is not installed, using `flex_attention` instead.")
-                self.attn_impl = "flex_attention"
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
+            logger.warning("flash-attn is not installed, using `flex_attention` instead.")
+            self.attn_impl = "flex_attention"
         return self
 
     def build(self):
@@ -87,8 +86,7 @@ class Qwen3VLBaseConfig(BaseComposeConfig):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
-    # If true, skip the forward of vit+projector. Only enable when the whole training process is pure text task.
-    only_llm_forward: bool = False
+    dcp_ignore_frozen_params: bool = True
 
     def build(self):
         from .modeling_qwen3_vl import Qwen3VLForConditionalGeneration

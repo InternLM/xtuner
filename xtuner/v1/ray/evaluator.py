@@ -1,7 +1,6 @@
 import asyncio
 from pathlib import Path
 from typing import Callable, List, Optional, Sized, TypeVar, Union
-from uuid import uuid4
 
 import ray
 from cyclopts import Parameter
@@ -11,7 +10,7 @@ from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, RLUIDItem, SampleParams
+from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLDatasetItem, SampleParams
 from xtuner.v1.datasets import build_dataloader, build_datasets
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfigList
 from xtuner.v1.ray.environment import BaseEnvironment
@@ -198,11 +197,7 @@ class RawEvaluator:
             RLDataFlowItem or None: The sample with retry information if it
                 failed, or None if it succeeded or failed without a sample.
         """
-        # Force disable return_routed_experts for evaluator to reduce overhead
-        extra_params = {"disable_routed_experts": True}
-        group_sample = await self.env_controller.run.remote(
-            [sample], sample_params=self.sample_params, extra_params=extra_params
-        )  # type: ignore[attr-defined]
+        group_sample = await self.env_controller.run.remote([sample], sample_params=self.sample_params)  # type: ignore[attr-defined]
         self.return_list.append(group_sample[0])
 
     async def concurrent_eval_task_runner(self):
@@ -234,8 +229,7 @@ class RawEvaluator:
                         data_iter = iter(self.dataloader)
                         data = next(data_iter)
                         self.logger.warning("Restarting the evaluation dataset.")
-                    uid = RLUIDItem(action_id=uuid4().int, observation_id=uuid4().int)
-                    data_item = RLDataFlowItem(data=RLDatasetItem(**data[0]), uid=uid)
+                    data_item = RLDataFlowItem(data=RLDatasetItem(**data[0]))
                     task = create_task(self.eval_worker_task(data_item))
                     waiting_tasks.add(task)
 

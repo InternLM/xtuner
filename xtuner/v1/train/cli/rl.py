@@ -40,6 +40,10 @@ def main(
     *,
     config: Annotated[Path, Parameter(group=Group("config-path", sort_key=0))],
 ):
+    #打印lmdeploy版本
+    import lmdeploy
+    print(f"lmdeploy version: {lmdeploy.__version__}")
+    # breakpoint()
     if not ray.is_initialized():
         if os.getenv("RAY_MASTER_ADDR"):
             master_addr = os.getenv("RAY_MASTER_ADDR", "127.0.0.1")

@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.datasets.data_item import DataItem
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 
-from .utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
+from .utils import CachableTokenizeFunction, tokenizer_xxhash
 
 
 if TYPE_CHECKING:
@@ -724,7 +724,6 @@ class FtdpTokenizeFunction(CachableTokenizeFunction):
         self._tokenizer_hash = tokenizer_hash
         self.max_length = max_length
 
-    @with_proxy_attention_flops
     def __call__(self, item: dict | list, **kwargs) -> DataItem:
         return ftdp_tokenize(self.tokenizer, item, self.template_config, max_length=self.max_length)  # type: ignore[return-value]
 

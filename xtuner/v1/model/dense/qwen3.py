@@ -6,9 +6,185 @@ from typing_extensions import Self
 
 from transformers.models.qwen3 import Qwen3Config as HFQwen3DenseConfig
 from xtuner.v1.model.base import TransformerConfig
-from xtuner.v1.module.attention import MHAConfig
+from xtuner.v1.module.attention import MHAConfig, MLAConfig
 
 from .dense import Dense
+
+from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_rope_utils import rope_config_validation
+
+
+
+
+class HFQwen3DenseMLAConfig(PretrainedConfig):
+    r"""
+    This is the configuration class to store the configuration of a [`Qwen3VLTextModel`]. It is used to instantiate a
+    Qwen3-VL model according to the specified arguments, defining the model architecture. Instantiating a configuration
+    with the defaults will yield a similar configuration to that of
+    Qwen3-VL-4B-Instruct [Qwen/Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct).
+
+    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
+    documentation from [`PretrainedConfig`] for more information.
+
+    Args:
+        vocab_size (`int`, *optional*, defaults to 151936):
+            Vocabulary size of the Qwen3VL model. Defines the number of different tokens that can be represented by the
+            `inputs_ids` passed when calling [`Qwen3VLModel`]
+        hidden_size (`int`, *optional*, defaults to 4096):
+            Dimension of the hidden representations.
+        intermediate_size (`int`, *optional*, defaults to 22016):
+            Dimension of the MLP representations.
+        num_hidden_layers (`int`, *optional*, defaults to 32):
+            Number of hidden layers in the Transformer encoder.
+        num_attention_heads (`int`, *optional*, defaults to 32):
+            Number of attention heads for each attention layer in the Transformer encoder.
+        num_key_value_heads (`int`, *optional*, defaults to 32):
+            This is the number of key_value heads that should be used to implement Grouped Query Attention. If
+            `num_key_value_heads=num_attention_heads`, the model will use Multi Head Attention (MHA), if
+            `num_key_value_heads=1` the model will use Multi Query Attention (MQA) otherwise GQA is used. When
+            converting a multi-head checkpoint to a GQA checkpoint, each group key and value head should be constructed
+            by meanpooling all the original heads within that group. For more details, check out [this
+            paper](https://huggingface.co/papers/2305.13245). If it is not specified, will default to `32`.
+        head_dim (`int`, *optional*, defaults to 128):
+            The dimension of the head. If not specified, will default to `hidden_size // num_attention_heads`.
+        hidden_act (`str` or `function`, *optional*, defaults to `"silu"`):
+            The non-linear activation function (function or string) in the decoder.
+        max_position_embeddings (`int`, *optional*, defaults to 128000):
+            The maximum sequence length that this model might ever be used with.
+        initializer_range (`float`, *optional*, defaults to 0.02):
+            The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
+        rms_norm_eps (`float`, *optional*, defaults to 1e-06):
+            The epsilon used by the rms normalization layers.
+        use_cache (`bool`, *optional*, defaults to `True`):
+            Whether or not the model should return the last key/values attentions (not used by all models). Only
+            relevant if `config.is_decoder=True`.
+        tie_word_embeddings (`bool`, *optional*, defaults to `False`):
+            Whether the model's input and output word embeddings should be tied.
+        rope_theta (`float`, *optional*, defaults to 5000000.0):
+            The base period of the RoPE embeddings.
+        rope_scaling (`Dict`, *optional*):
+            Dictionary containing the scaling configuration for the RoPE embeddings. NOTE: if you apply new rope type
+            and you expect the model to work on longer `max_position_embeddings`, we recommend you to update this value
+            accordingly.
+            Expected contents:
+                `rope_type` (`str`):
+                    The sub-variant of RoPE to use. Can be one of ['default', 'linear', 'dynamic', 'yarn', 'longrope',
+                    'llama3'], with 'default' being the original RoPE implementation.
+                `factor` (`float`, *optional*):
+                    Used with all rope types except 'default'. The scaling factor to apply to the RoPE embeddings. In
+                    most scaling types, a `factor` of x will enable the model to handle sequences of length x *
+                    original maximum pre-trained length.
+                `original_max_position_embeddings` (`int`, *optional*):
+                    Used with 'dynamic', 'longrope' and 'llama3'. The original max position embeddings used during
+                    pretraining.
+                `attention_factor` (`float`, *optional*):
+                    Used with 'yarn' and 'longrope'. The scaling factor to be applied on the attention
+                    computation. If unspecified, it defaults to value recommended by the implementation, using the
+                    `factor` field to infer the suggested value.
+                `beta_fast` (`float`, *optional*):
+                    Only used with 'yarn'. Parameter to set the boundary for extrapolation (only) in the linear
+                    ramp function. If unspecified, it defaults to 32.
+                `beta_slow` (`float`, *optional*):
+                    Only used with 'yarn'. Parameter to set the boundary for interpolation (only) in the linear
+                    ramp function. If unspecified, it defaults to 1.
+                `short_factor` (`list[float]`, *optional*):
+                    Only used with 'longrope'. The scaling factor to be applied to short contexts (<
+                    `original_max_position_embeddings`). Must be a list of numbers with the same length as the hidden
+                    size divided by the number of attention heads divided by 2
+                `long_factor` (`list[float]`, *optional*):
+                    Only used with 'longrope'. The scaling factor to be applied to long contexts (<
+                    `original_max_position_embeddings`). Must be a list of numbers with the same length as the hidden
+                    size divided by the number of attention heads divided by 2
+                `low_freq_factor` (`float`, *optional*):
+                    Only used with 'llama3'. Scaling factor applied to low frequency components of the RoPE
+                `high_freq_factor` (`float`, *optional*):
+                    Only used with 'llama3'. Scaling factor applied to high frequency components of the RoPE
+        attention_bias (`bool`, defaults to `False`, *optional*, defaults to `False`):
+            Whether to use a bias in the query, key, value and output projection layers during self-attention.
+        attention_dropout (`float`, *optional*, defaults to 0.0):
+            The dropout ratio for the attention probabilities.
+
+    ```python
+    >>> from transformers import Qwen3VLTextModel, Qwen3VLTextConfig
+
+    >>> # Initializing a Qwen3VL style configuration
+    >>> configuration = Qwen3VLTextConfig()
+
+    >>> # Initializing a model from the Qwen3-VL-7B style configuration
+    >>> model = Qwen3VLTextModel(configuration)
+
+    >>> # Accessing the model configuration
+    >>> configuration = model.config
+    ```"""
+
+    model_type = "qwen3_vl_text"
+    base_config_key = "text_config"
+
+    def __init__(
+        self,
+        vocab_size=151936,
+        hidden_size=4096,
+        intermediate_size=22016,
+        num_hidden_layers=32,
+        num_attention_heads=32,
+        num_key_value_heads=32,
+        head_dim=128,
+        hidden_act="silu",
+        max_position_embeddings=128000,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        use_cache=True,
+        tie_word_embeddings=False,
+        rope_theta=5000000.0,
+        rope_scaling=None,
+        attention_bias=False,
+        attention_dropout=0.0,
+        kv_lora_rank=512,
+        kv_lora_rank_list=None,
+        q_lora_rank=None,
+        qk_rope_head_dim=64,
+        qk_nope_head_dim=128,
+        v_head_dim=128,
+        qk_latent_layernorm=True,
+        rope_interleave=True,
+        **kwargs,
+    ):
+        self.vocab_size = vocab_size
+        self.max_position_embeddings = max_position_embeddings
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+
+        # for backward compatibility
+        if num_key_value_heads is None:
+            num_key_value_heads = num_attention_heads
+
+        self.num_key_value_heads = num_key_value_heads
+        self.head_dim = head_dim
+        self.hidden_act = hidden_act
+        self.initializer_range = initializer_range
+        self.rms_norm_eps = rms_norm_eps
+        self.use_cache = use_cache
+        self.rope_theta = rope_theta
+        self.rope_scaling = rope_scaling
+        self.attention_bias = attention_bias
+        self.attention_dropout = attention_dropout
+
+        rope_config_validation(self, ignore_keys={"mrope_section", "mrope_interleaved"})
+
+        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
+
+        self.kv_lora_rank = kv_lora_rank
+        self.kv_lora_rank_list = kv_lora_rank_list
+        self.q_lora_rank = q_lora_rank
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_head_dim = qk_rope_head_dim + qk_nope_head_dim
+        self.v_head_dim = v_head_dim
+        self.qk_latent_layernorm = qk_latent_layernorm
+        self.rope_interleave = rope_interleave
+
 
 
 class Qwen3Dense(Dense):
@@ -97,6 +273,86 @@ class Qwen3DenseConfig(TransformerConfig):
             dtype=torch.bfloat16,
         )
 
+class Qwen3DenseMLAConfig(TransformerConfig):
+    use_sliding_window: bool = False
+    pad_token_id: int | None = None
+    bos_token_id: int
+
+    def build(self) -> Qwen3Dense:
+        return Qwen3Dense(self)
+
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        from transformers import AutoConfig
+        # from transformers.models.qwen3 import Qwen3Config as HFConfig
+
+        hf_config = AutoConfig.from_pretrained(hf_path, trust_remote_code=True)
+
+        # assert isinstance(hf_config, HFConfig)
+
+        config = cls(
+            vocab_size=hf_config.vocab_size,
+            max_position_embeddings=hf_config.max_position_embeddings,
+            pad_token_id=getattr(hf_config, "pad_token_id"),
+            bos_token_id=hf_config.bos_token_id,
+            eos_token_id=hf_config.eos_token_id,
+            num_hidden_layers=hf_config.num_hidden_layers,
+            max_window_layers=hf_config.max_window_layers,
+            hidden_size=hf_config.hidden_size,
+            intermediate_size=hf_config.intermediate_size,
+            rms_norm_eps=hf_config.rms_norm_eps,
+            rope_theta=hf_config.rope_theta,
+            hidden_act=hf_config.hidden_act,
+            attention=MLAConfig(
+                kv_lora_rank=hf_config.kv_lora_rank,
+                num_attention_heads=hf_config.num_attention_heads,
+                head_dim=hf_config.head_dim,
+                dropout=hf_config.attention_dropout,
+                qkv_bias=True,
+                o_bias=False,
+                q_lora_rank=hf_config.q_lora_rank,
+                qk_rope_head_dim=hf_config.qk_rope_head_dim,
+                qk_nope_head_dim=hf_config.qk_nope_head_dim,
+                v_head_dim=hf_config.v_head_dim,
+            ),
+            tie_word_embeddings=hf_config.tie_word_embeddings,
+        )
+
+        return config
+
+    @property
+    def hf_config(self) -> HFQwen3DenseMLAConfig:
+        """Check if the configuration can be saved in HuggingFace format."""
+        return HFQwen3DenseMLAConfig(
+            architectures=["Qwen3ForCausalLM"],
+            vocab_size=self.vocab_size,
+            max_position_embeddings=self.max_position_embeddings,
+            max_window_layers=self.max_window_layers,
+            bos_token_id=self.bos_token_id,
+            eos_token_id=self.eos_token_id,
+            pad_token_id=self.pad_token_id,
+            num_hidden_layers=self.num_hidden_layers,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+            rms_norm_eps=self.rms_norm_eps,
+            rope_theta=self.rope_theta,
+            hidden_act=self.hidden_act,
+            num_key_value_heads=self.num_key_value_heads,
+            kv_lora_rank=self.kv_lora_rank,
+            num_attention_heads=self.num_attention_heads,
+            head_dim=self.head_dim,
+            attention_dropout=self.dropout,
+            qkv_bias=self.qkv_bias,
+            o_bias=self.o_bias,
+            q_lora_rank=self.q_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            v_head_dim=self.v_head_dim,
+            tie_word_embeddings=self.tie_word_embeddings,
+            dtype=torch.bfloat16,
+        )
+    
+
 
 # TODO: Unify the config name style
 class Qwen3Dense8BConfig(Qwen3DenseConfig):
@@ -117,6 +373,41 @@ class Qwen3Dense8BConfig(Qwen3DenseConfig):
     )
     tie_word_embeddings: bool = False
 
+
+class Qwen3Dense8BMLAConfig(Qwen3DenseMLAConfig):
+    vocab_size: int = 151936
+    max_position_embeddings: int = 40960
+    eos_token_id: int = 151645
+    bos_token_id: int = 151643
+    num_hidden_layers: int = 36
+    max_window_layers: int = 36
+    hidden_size: int = 4096
+    intermediate_size: int = 12288
+    rms_norm_eps: float = 1e-6
+    rope_theta: float = 1000000.0
+    hidden_act: str = "silu"
+    kv_lora_rank: int = 896,
+    dropout: float = 0.0,
+    qkv_bias: bool = True,
+    o_bias: bool = False,
+    q_lora_rank: int = None,
+    qk_rope_head_dim: int = 128,
+    qk_nope_head_dim: int = 128,
+    v_head_dim: int = 128,
+    attention: MLAConfig = MLAConfig(
+        kv_lora_rank=512,#896,
+        num_attention_heads=32,
+        head_dim=128,
+        dropout=0.0,
+        qkv_bias=True,
+        o_bias=False,
+        num_key_value_heads=None,
+        q_lora_rank=None,
+        qk_rope_head_dim=128,
+        qk_nope_head_dim=128,
+        v_head_dim=128,
+    )
+    tie_word_embeddings: bool = False
 
 class Qwen3Dense4BConfig(Qwen3DenseConfig):
     vocab_size: int = 151936

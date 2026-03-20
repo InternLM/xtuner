@@ -49,10 +49,9 @@ class InternVLVisionConfig(XTunerBaseModelConfig):
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
-        if self.attn_impl == "flash_attention" and get_device() == "cuda":
-            if not (is_installed("flash-attn") or is_installed("flash-attn-3")):
-                logger.warning("flash-attn is not installed, using `flex_attention` instead.")
-                self.attn_impl = "flex_attention"
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
+            logger.warning("flash-attn is not installed, using `flex_attention` instead.")
+            self.attn_impl = "flex_attention"
         return self
 
     def build(self):
@@ -101,6 +100,7 @@ class InternVLBaseConfig(BaseComposeConfig):
     freeze_vision: bool = False
     freeze_projector: bool = False
     freeze_language: bool = False
+    dcp_ignore_frozen_params: bool = True
 
     def build(self) -> "InternVLForConditionalGeneration":
         from .modeling_internvl import InternVLForConditionalGeneration
@@ -122,22 +122,16 @@ class InternVLBaseConfig(BaseComposeConfig):
 class InternVL3P5Dense8BConfig(InternVLBaseConfig):
     vision_config: InternVLVisionConfig = InternVLVisionConfig()
     projector_config: InternVLProjectorConfig = InternVLProjectorConfig()
-    text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig(
-        hf_key_mapping={r"^model.": "model.language_model."},
-    )
+    text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig()
 
 
 class InternVL3P5MoE30BA3Config(InternVLBaseConfig):
     vision_config: InternVLVisionConfig = InternVLVisionConfig()
     projector_config: InternVLProjectorConfig = InternVLProjectorConfig(text_hidden_size=2049)
-    text_config: Qwen3MoE30BA3Config = Qwen3MoE30BA3Config(
-        hf_key_mapping={r"^model.": "model.language_model."},
-    )
+    text_config: Qwen3MoE30BA3Config = Qwen3MoE30BA3Config()
 
 
 class InternVL3P5Dense1BConfig(InternVLBaseConfig):
     vision_config: InternVLVisionConfig = InternVLVisionConfig()
     projector_config: InternVLProjectorConfig = InternVLProjectorConfig(text_hidden_size=1024)
-    text_config: Qwen3Dense0P6BConfig = Qwen3Dense0P6BConfig(
-        hf_key_mapping={r"^model.": "model.language_model."},
-    )
+    text_config: Qwen3Dense0P6BConfig = Qwen3Dense0P6BConfig()
