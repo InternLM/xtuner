@@ -387,7 +387,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
             completed_groups = await manager.produce_batch(
                 batch_size=self.BATCH_SIZE, rollout_step=rollout_step
             )
-            for group in completed_groups:
+            for group in completed_groups.rollout_states:
                 for sample in group:
                     if sample.uid == injected_uid:
                         target_sample = sample
@@ -447,6 +447,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         completed_groups = await manager.produce_batch(
             batch_size=self.BATCH_SIZE, rollout_step=1
         )
+        completed_groups = completed_groups.rollout_states
 
         self.assertEqual(len(completed_groups), self.BATCH_SIZE)
         final = completed_groups[0][0]
@@ -493,6 +494,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         completed_groups = await manager.produce_batch(
             batch_size=self.BATCH_SIZE, rollout_step=1
         )
+        completed_groups = completed_groups.rollout_states
 
         self.assertEqual(len(completed_groups), self.BATCH_SIZE)
         final = completed_groups[0][0]
@@ -540,7 +542,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
             completed_groups = await manager.produce_batch(
                 batch_size=self.BATCH_SIZE, rollout_step=rollout_step
             )
-            for group in completed_groups:
+            for group in completed_groups.rollout_states    :
                 for sample in group:
                     if sample.uid == injected_uid:
                         self.assertLessEqual(
@@ -669,6 +671,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             enable_partial_rollout=True,
             tail_batch_stale_threshold=STALE_THRESHOLD,
             tail_batch_trigger_size=TRIGGER_SIZE,
+            max_tokens=8192,
         )
         replay_buffer = manager._replay_buffer
 
@@ -683,6 +686,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             completed_groups = await manager.produce_batch(
                 batch_size=self.BATCH_SIZE, rollout_step=rollout_step
             )
+            completed_groups = completed_groups.rollout_states
 
             # 进入本轮前 expired >= trigger_size → 本轮就是 tail-batch 轮
             if expired_before >= TRIGGER_SIZE:
