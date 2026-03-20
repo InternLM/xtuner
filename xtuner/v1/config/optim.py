@@ -62,6 +62,9 @@ class MuonConfig(OptimConfig):
     momentum: Annotated[float, Parameter(help="Momentum coefficients for Muon optimizer")] = 0.95
     betas: Annotated[Tuple[float, float], Parameter(help="Beta coefficients for AdamW optimizer")] = (0.9, 0.95)
     eps: Annotated[float, Parameter(help="Epsilon value for numerical stability in Muon optimizer")] = 1e-8
+    adjust_lr: Annotated[
+        Literal["rms_norm", "spectral_norm", "none"], Parameter(help="Method for adjusting lr in Muon")
+    ] = "rms_norm"
 
     def build(self, model):
         trainable_parameters_names = model.trainable_parameters()
@@ -73,29 +76,29 @@ class MuonConfig(OptimConfig):
         num_muon = 0
         num_adamw = 0
 
+        muon_params = []
+        adamw_params = []
+
         for name, p in model.named_parameters():
             n = p.numel()
             num_total += n
             if name in trainable_names:
                 num_total_requires_grad += n
-                is_muon_tensor = p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
+                # we want to avoid using Muon for 1D-tensors, as well as embed_tokens and lm_head.
+                # effectively-1D tensors where one dimension accounts for all elements (e.g. shape [1, D]) should
+                # also be excluded.
+                is_muon_tensor = (
+                    p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name and p.numel() not in p.shape
+                )
                 if is_muon_tensor:
+                    muon_params.append(p)
                     num_muon += n
                 else:
+                    adamw_params.append(p)
                     num_adamw += n
             else:
                 untrainable_names.append(name)
 
-        muon_params = [
-            p
-            for name, p in model.named_parameters()
-            if name in trainable_names and p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
-        ]
-        adamw_params = [
-            p
-            for name, p in model.named_parameters()
-            if name in trainable_names and not (p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name)
-        ]
         param_groups = [
             dict(params=muon_params),
             dict(params=adamw_params, algorithm="adamw"),
@@ -103,9 +106,10 @@ class MuonConfig(OptimConfig):
 
         if dist.get_rank() == 0:
             logger.info(
-                f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
+                f"Total trainable parameters: {num_total_requires_grad / 1e6:.2f}M, "
+                f"total parameters: {num_total / 1e6:.2f}M"
             )
-            logger.info(f"Muon params: {num_muon // 1e6}M, AdamW params: {num_adamw // 1e6}M (counts by numel)")
+            logger.info(f"Muon params: {num_muon / 1e6:.2f}M, AdamW params: {num_adamw / 1e6:.2f}M (counts by numel)")
             logger.info(f"Untrainable parameters names: {untrainable_names}")
             logger.info(
                 f"using Muon optimizer distributed_mesh_size: {model.fsdp_mesh.size()}, "
@@ -120,7 +124,8 @@ class MuonConfig(OptimConfig):
             betas=self.betas,
             weight_decay=self.weight_decay,
             nesterov=True,
-            adjust_lr="rms_norm",
+            adjust_lr=self.adjust_lr,
+            flatten=True,  # TODO:@nil0x9 would be nice if we have fine-grained control here.
             use_triton=False,
             epsilon=self.eps,
         )

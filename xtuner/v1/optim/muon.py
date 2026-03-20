@@ -284,10 +284,10 @@ class Muon(Optimizer):
         weight_decay: Weight decay factor.
         epsilon: Small value to avoid division by zero.
         nesterov: Whether to use Nesterov momentum.
-        adjust_lr: How to adjust the learning rate for Muon updates ("spectral_norm" or "rms_norm" or None).
+        adjust_lr: How to adjust the learning rate for Muon updates ("spectral_norm" or "rms_norm" or "none").
             "spectral_norm": Adjust based on spectral norm, for learning rate transfer across model scale.
             "rms_norm": Adjust based on RMS norm, for learning rate compatibility with Adam/AdamW.
-            None: Do not adjust the learning rate.
+            "none": Do not adjust the learning rate.
         flatten: Whether to flatten 3D+ tensors to 2D for Muon updates.
             True: Tensors with 3+ dimensions are flattened to 2D. Use this for convolutional layers.
             False: Tensors are not flattened. 3D+ tensors are treated as batches of 2D matrices.
@@ -309,7 +309,7 @@ class Muon(Optimizer):
         weight_decay: float = 0.01,
         epsilon: float = 1e-8,
         nesterov: bool = False,
-        adjust_lr: Optional[str] = "spectral_norm",
+        adjust_lr: str = "rms_norm",
         flatten: bool = False,
         use_triton: bool = False,
         newton_schulz_func: Optional[Callable] = None,
@@ -321,8 +321,8 @@ class Muon(Optimizer):
             raise ValueError(f"Invalid momentum factor (mu): {mu}")
         if len(betas) != 2 or betas[0] < 0.0 or betas[1] < 0.0:
             raise ValueError(f"Invalid betas: {betas}")
-        if adjust_lr not in ("spectral_norm", "rms_norm", None):
-            raise ValueError(f"Invalid adjust_lr value: {adjust_lr}. Must be 'spectral_norm', 'rms_norm', or None.")
+        if adjust_lr not in ("spectral_norm", "rms_norm", "none"):
+            raise ValueError(f"Invalid adjust_lr value: {adjust_lr}. Must be 'spectral_norm', 'rms_norm', or 'none'.")
 
         # Default arguments for each param group
         defaults = dict(
@@ -552,7 +552,7 @@ def muon_update_batch_async(
     epsilon: Tensor,  # Epsilon (scalar tensor)
     nesterov: bool,  # Whether to use Nesterov momentum
     flatten: bool,  # Whether to flatten 3D+ tensors to 2D
-    adjust_lr: Optional[str],  # How to adjust learning rate
+    adjust_lr: str,  # How to adjust learning rate
     device_rank: int,  # Rank of the current device
     world_size: int,  # Total number of devices to parallelize over
     shard_dim: Optional[int] = None,  # Shard dimension for DTensor (if applicable)
@@ -685,7 +685,7 @@ def muon_update_batch_async(
 
     # Compute scaled learning rate
     # Do this before to_local(X) because we use the full tensor shape, not the shard shape
-    if adjust_lr is None:
+    if adjust_lr == "none":
         adjusted_lr = lr
     elif adjust_lr == "spectral_norm":
         adjusted_lr = adjust_lr_spectral_norm(lr, X[0].shape)
