@@ -1,3 +1,31 @@
+# Claude Progress Notes — Session 8
+
+## What Was Done This Session
+
+### Feature 8 — Stress test CustomPackDataset with 8-process distributed test (COMPLETED)
+- Added `generate_stress_pack_config(num_slices, pack_max_length, out_dir)`: greedy packing of
+  slices with token lengths uniform in [200, 16000]; produces NPY directory; returns num_packs
+- Added `_MockDataset`: satisfies JsonlDataset interface without file I/O; `__getitem__` always
+  returns 16001-zero synthetic DataItem; `__len__` returns n_samples; has `.path` and `.num_tokens`
+- Added `_stress_worker_fn` and `_measure_load_rss` as module-level functions for multiprocessing
+- Added `TestStress` class with 3 tests:
+  - `test_generate_stress_pack_config`: verifies output shape/boundaries with 10K slices
+  - `test_multiprocess_getitem`: 8 fork'd processes each build CustomPackDataset (mmap=True),
+    call __getitem__ on rank-strided 200 indices, assert non-empty + log timing/RSS
+  - `test_mmap_memory_saving`: two separate subprocesses (fork) measure RSS delta after
+    `load_config(mmap=True)` (0.2MB) vs `load_config(mmap=False)` (24.1MB); asserts nommap > mmap
+- Scale: 500K slices, pack_max_length=32768 → 147K packs, ~24MB samples.npy
+- Results: init 13ms/rank, getitem 200-items in 20ms/rank, mmap saves ~120x memory at load time
+- All 29 tests pass in 7.3s
+
+## Current Completion Status
+8/8 features passing — ALL DONE!
+
+## What To Work On Next
+All features complete. Consider cleanup or new feature work.
+
+---
+
 # Claude Progress Notes — Session 7
 
 ## What Was Done This Session

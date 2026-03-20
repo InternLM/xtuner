@@ -89,6 +89,6 @@
       "Step 4: In the distributed test, each rank calls __getitem__ on its shard of pack indices (rank-strided); record total __getitem__ wall-clock time and average per-item latency; assert no crashes and results are non-empty",
       "Step 5: Add an assertion or logged comparison between mmap=True and mmap=False memory usage to validate the mmap memory saving; run the stress test and ensure it completes within a reasonable time bound"
     ],
-    "passes": false
+    "passes": true
   }
 ]

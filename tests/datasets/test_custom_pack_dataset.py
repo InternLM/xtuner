@@ -1,9 +1,12 @@
 """Unit tests for CustomPackDataset."""
 
 import json
+import multiprocessing
 import os
+import time
 
 import numpy as np
+import psutil
 import pytest
 
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -447,3 +450,258 @@ class TestDataloaderConfigCustomMode:
         assert result_dc.sample_ratio == 1.0
         assert result_dc.enable_sequential_sampler is True
         assert result_dc.disable_filter is True
+
+
+# ---------------------------------------------------------------------------
+# Feature 8: stress test helpers (module-level for multiprocessing compatibility)
+# ---------------------------------------------------------------------------
+
+# Use a smaller scale for CI; the helpers support any num_slices for real stress runs.
+_STRESS_NUM_SLICES = int(os.environ.get("STRESS_NUM_SLICES", 500_000))
+_STRESS_PACK_MAX_LENGTH = int(os.environ.get("STRESS_PACK_MAX_LENGTH", 32768))
+
+
+def generate_stress_pack_config(num_slices: int, pack_max_length: int, out_dir: str) -> int:
+    """Generate boundaries.npy, samples.npy, paths.npy for stress testing.
+
+    Token length per slice is drawn uniformly from [200, 16000]. Packs are
+    filled greedily: a new pack starts whenever adding the next slice would
+    exceed pack_max_length.
+
+    Args:
+        num_slices (int): Total number of slices to generate.
+        pack_max_length (int): Maximum token count per pack.
+        out_dir (str): Output NPY directory path.
+
+    Returns:
+        int: Number of packs generated.
+    """
+    rng = np.random.default_rng(42)
+    token_lengths = rng.integers(200, 16001, size=num_slices, dtype=np.int64)
+
+    boundaries: list[int] = [0]
+    running = 0
+    for i in range(num_slices):
+        tl = int(token_lengths[i])
+        if running > 0 and running + tl > pack_max_length:
+            boundaries.append(i)
+            running = 0
+        running += tl
+    boundaries.append(num_slices)
+
+    samples = np.stack(
+        [
+            np.zeros(num_slices, dtype=np.int64),  # path_id
+            np.arange(num_slices, dtype=np.int64),  # sample_idx
+            np.full(num_slices, -1, dtype=np.int64),  # char_start
+            np.full(num_slices, -1, dtype=np.int64),  # char_end
+            np.zeros(num_slices, dtype=np.int64),  # tok_start
+            token_lengths,  # tok_end
+        ],
+        axis=1,
+    )
+
+    os.makedirs(out_dir, exist_ok=True)
+    np.save(os.path.join(out_dir, "boundaries.npy"), np.array(boundaries, dtype=np.int64))
+    np.save(os.path.join(out_dir, "samples.npy"), samples)
+    np.save(os.path.join(out_dir, "paths.npy"), np.array(["mock://stress"], dtype=object))
+    return len(boundaries) - 1
+
+
+class _MockDataset:
+    """Minimal dataset satisfying the JsonlDataset interface without file I/O.
+
+    __getitem__ always returns a synthetic DataItem with 16001 zero-valued tokens,
+    which covers any tok_end up to 16000 as produced by generate_stress_pack_config.
+
+    Args:
+        path (str): Dataset path for pack config matching.
+        n_samples (int): Number of logical samples (used for len()).
+    """
+
+    _MOCK_IDS: list[int] = [0] * 16001
+
+    def __init__(self, path: str, n_samples: int):
+        self.path = path
+        self.num_tokens = np.zeros(n_samples, dtype=np.int64)
+
+    def __len__(self) -> int:
+        return len(self.num_tokens)
+
+    def __getitem__(self, i: int) -> dict:
+        return {"input_ids": self._MOCK_IDS, "labels": self._MOCK_IDS, "num_tokens": len(self._MOCK_IDS)}
+
+
+def _stress_worker_fn(
+    rank: int,
+    num_ranks: int,
+    config_dir: str,
+    pack_max_length: int,
+    num_slices: int,
+    result_queue: multiprocessing.Queue,
+) -> None:
+    """Worker: build CustomPackDataset (mmap=True), benchmark __getitem__ on random indices."""
+    mock_ds = _MockDataset("mock://stress", num_slices)
+    proc = psutil.Process()
+
+    mem_before = proc.memory_full_info()
+    t0 = time.perf_counter()
+    ds = CustomPackDataset(
+        [mock_ds],
+        config_dir,
+        pack_max_length,
+        short_pack_strategy="padding",
+        long_pack_strategy="truncate",
+        mmap=True,
+    )
+    init_time = time.perf_counter() - t0
+    mem_after = proc.memory_full_info()
+
+    n_packs = len(ds)
+    rng = np.random.default_rng(rank)
+    indices = rng.choice(n_packs, size=min(200, n_packs), replace=False).tolist()
+
+    t0 = time.perf_counter()
+    for i in indices:
+        items = ds[i]
+        assert len(items) > 0
+    getitem_time = time.perf_counter() - t0
+
+    result_queue.put(
+        {
+            "rank": rank,
+            "n_packs": n_packs,
+            "init_time_s": round(init_time, 4),
+            "rss_delta_mb": round((mem_after.rss - mem_before.rss) / 1024**2, 1),
+            "pss_delta_mb": round((mem_after.pss - mem_before.pss) / 1024**2, 1),
+            "getitem_time_s": round(getitem_time, 4),
+            "n_items": len(indices),
+        }
+    )
+
+
+def _measure_load_rss(use_mmap: bool, config_dir: str, result_queue: multiprocessing.Queue) -> None:
+    """Subprocess: call load_config and report RSS and PSS deltas before any data access."""
+    from xtuner.v1.datasets.custom_pack import load_config as _load_config
+
+    proc = psutil.Process()
+    mem_before = proc.memory_full_info()
+    t0 = time.perf_counter()
+    config = _load_config(config_dir, mmap=use_mmap)
+    elapsed = time.perf_counter() - t0
+    mem_after = proc.memory_full_info()
+    result_queue.put(
+        {
+            "rss_delta": mem_after.rss - mem_before.rss,
+            "pss_delta": mem_after.pss - mem_before.pss,
+            "elapsed_s": round(elapsed, 4),
+        }
+    )
+    _ = config  # keep alive until measured
+
+
+# ---------------------------------------------------------------------------
+# Feature 8: stress tests
+# ---------------------------------------------------------------------------
+
+
+class TestStress:
+    def test_generate_stress_pack_config(self, tmp_path):
+        """generate_stress_pack_config produces a valid NPY directory."""
+        config_dir = str(tmp_path / "stress")
+        n_packs = generate_stress_pack_config(10_000, 32768, config_dir)
+
+        config = load_config(config_dir, mmap=False)
+        assert len(config["boundaries"]) == n_packs + 1
+        assert config["samples"].shape == (10_000, 6)
+        assert list(config["paths"]) == ["mock://stress"]
+        assert int(config["boundaries"][-1]) == 10_000
+
+    def test_multiprocess_getitem(self, tmp_path):
+        """8 processes independently build CustomPackDataset (mmap=True) and call __getitem__.
+
+        Run with 2 Billion slices (set STRESS_NUM_SLICES=2000000000), the output is like:
+        ```
+        [Rank 0] n_packs=589147374 init=82.361s rss_delta=91554.0MB pss_delta=11182.2MB getitem=0.024s n_items=200
+        [Rank 1] n_packs=589147374 init=82.352s rss_delta=91554.0MB pss_delta=11327.0MB getitem=0.024s n_items=200
+        [Rank 2] n_packs=589147374 init=82.374s rss_delta=91554.0MB pss_delta=11372.4MB getitem=0.024s n_items=200
+        [Rank 3] n_packs=589147374 init=82.308s rss_delta=91554.0MB pss_delta=11399.8MB getitem=0.024s n_items=200
+        [Rank 4] n_packs=589147374 init=82.317s rss_delta=91554.0MB pss_delta=11419.3MB getitem=0.024s n_items=200
+        [Rank 5] n_packs=589147374 init=82.325s rss_delta=91554.0MB pss_delta=11433.9MB getitem=0.024s n_items=200
+        [Rank 6] n_packs=589147374 init=83.762s rss_delta=91554.0MB pss_delta=20910.8MB getitem=0.026s n_items=200
+        [Rank 7] n_packs=589147374 init=82.317s rss_delta=91554.0MB pss_delta=11445.3MB getitem=0.024s n_items=200
+        ```
+        """
+        config_dir = str(tmp_path / "stress")
+        generate_stress_pack_config(_STRESS_NUM_SLICES, _STRESS_PACK_MAX_LENGTH, config_dir)
+
+        ctx = multiprocessing.get_context("fork")
+        result_queue: multiprocessing.Queue = ctx.Queue()
+        procs = [
+            ctx.Process(
+                target=_stress_worker_fn,
+                args=(rank, 8, config_dir, _STRESS_PACK_MAX_LENGTH, _STRESS_NUM_SLICES, result_queue),
+            )
+            for rank in range(8)
+        ]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=120)
+            assert p.exitcode == 0, f"Worker rank process exited with code {p.exitcode}"
+
+        results = [result_queue.get() for _ in range(8)]
+        assert all(r["n_items"] > 0 for r in results)
+        for r in sorted(results, key=lambda x: x["rank"]):
+            print(
+                f"[Rank {r['rank']}] n_packs={r['n_packs']} init={r['init_time_s']:.3f}s "
+                f"rss_delta={r['rss_delta_mb']:.1f}MB pss_delta={r['pss_delta_mb']:.1f}MB "
+                f"getitem={r['getitem_time_s']:.3f}s n_items={r['n_items']}"
+            )
+
+    def test_mmap_memory_saving(self, tmp_path):
+        """mmap=True uses less RSS than mmap=False before any data access.
+
+        Run with 2 Billion slices (set STRESS_NUM_SLICES=2000000000), the output is like:
+        ```
+        mmap=True  RSS delta: 0.2MB  PSS delta: 0.4MB
+        mmap=False RSS delta: 96047.9MB  PSS delta: 96047.9MB
+        ```
+        """
+        config_dir = str(tmp_path / "stress")
+        generate_stress_pack_config(_STRESS_NUM_SLICES, _STRESS_PACK_MAX_LENGTH, config_dir)
+
+        ctx = multiprocessing.get_context("fork")
+        q: multiprocessing.Queue = ctx.Queue()
+
+        p_mmap = ctx.Process(target=_measure_load_rss, args=(True, config_dir, q))
+        p_mmap.start()
+        p_mmap.join(timeout=30)
+        assert p_mmap.exitcode == 0
+        result_mmap = q.get()
+
+        p_nommap = ctx.Process(target=_measure_load_rss, args=(False, config_dir, q))
+        p_nommap.start()
+        p_nommap.join(timeout=1800)
+        assert p_nommap.exitcode == 0
+        result_nommap = q.get()
+
+        rss_mmap = result_mmap["rss_delta"]
+        pss_mmap = result_mmap["pss_delta"]
+        elapsed_mmap = result_mmap["elapsed_s"]
+        rss_nommap = result_nommap["rss_delta"]
+        pss_nommap = result_nommap["pss_delta"]
+        elapsed_nommap = result_nommap["elapsed_s"]
+
+        print(
+            f"\nmmap=True  RSS delta: {rss_mmap / 1024**2:.1f}MB  PSS delta: {pss_mmap / 1024**2:.1f}MB  elapsed: {elapsed_mmap:.4f}s"
+            f"\nmmap=False RSS delta: {rss_nommap / 1024**2:.1f}MB  PSS delta: {pss_nommap / 1024**2:.1f}MB  elapsed: {elapsed_nommap:.4f}s"
+        )
+        assert rss_nommap > rss_mmap, (
+            f"mmap=False should use more RSS than mmap=True: "
+            f"nommap={rss_nommap / 1024**2:.1f}MB vs mmap={rss_mmap / 1024**2:.1f}MB"
+        )
+        assert pss_nommap > pss_mmap, (
+            f"mmap=False should use more PSS than mmap=True: "
+            f"nommap={pss_nommap / 1024**2:.1f}MB vs mmap={pss_mmap / 1024**2:.1f}MB"
+        )
