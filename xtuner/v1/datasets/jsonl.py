@@ -28,6 +28,7 @@ from tqdm import tqdm
 
 from xtuner.v1.datasets.data_item import CacheItem
 from xtuner.v1.datasets.pt_tokenize_fn.long_text import LongTextPretrainTokenizeFunction
+from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFn
 from xtuner.v1.utils import SharedMemory, get_logger
 from xtuner.v1.utils.device import get_torch_device_module
 
@@ -462,7 +463,14 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         # remove num_tokens from _meta, because variable `num_tokens` is already set
         _meta.pop("num_tokens", None)
 
-        tok_hash_str = tokenize_fn.hash() if isinstance(tokenize_fn, CachableTokenizeFunction) else ""
+        tok_hash_str = ""
+        if isinstance(
+            tokenize_fn, RLTokenizeFn
+        ):  # RLTokenizeFn is CachableTokenizeFunction, but it does not have a hash method
+            tok_hash_str = "RLTokenizeFn"
+        elif isinstance(tokenize_fn, CachableTokenizeFunction):
+            tok_hash_str = tokenize_fn.hash()
+
         job_discriminator = os.environ.get("MASTER_PORT", "")
         tmp_dir = os.path.join(
             "/tmp",
