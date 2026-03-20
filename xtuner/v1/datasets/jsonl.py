@@ -55,6 +55,10 @@ def save_dict_to_npy_dir(data: Dict[str, np.ndarray], dir_path: str) -> None:
     """将 dict 以每 key 一个 .npy 文件的形式保存到目录."""
     os.makedirs(dir_path, exist_ok=True)
     for k, v in data.items():
+        if not isinstance(k, str):
+            raise TypeError(f"key must be str, got {type(k)}")
+        if not isinstance(v, np.ndarray):
+            raise TypeError(f"value for key '{k}' must be np.ndarray, got {type(v)}")
         np.save(os.path.join(dir_path, f"{k}.npy"), v)
 
 
