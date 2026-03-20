@@ -462,9 +462,10 @@ class ReplayBufferStorage:
         # Resolve rollout.extra_info.router_experts
         if "routed_experts" in data_item.env.rollout.extra_info:
             if isinstance(data_item.env.rollout.extra_info["routed_experts"], ObjectRef):
-                data_item.env.rollout.extra_info["routed_experts"] = ray.get(
-                    data_item.env.rollout.extra_info["routed_experts"]
-                )
+                routed_experts = ray.get(data_item.env.rollout.extra_info["routed_experts"])
+                ray.internal.free(data_item.env.rollout.extra_info["routed_experts"], local_only=False)
+                del data_item.env.rollout.extra_info["routed_experts"]
+                data_item.env.rollout.extra_info["routed_experts"] = routed_experts
                 self.logger.info("Resolved routed_experts ObjectRef in rollout.extra_info")
 
     def convert_to_ray_objref(self, data_item: RLDataFlowItem):
@@ -609,7 +610,7 @@ class ReplayBufferStorage:
         for sample in group_samples:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
             if "routed_experts" in sample.env.rollout.extra_info:
-                ray._private.internal_api.free(sample.env.rollout.extra_info["routed_experts"])
+                ray.internal.free(sample.env.rollout.extra_info["routed_experts"], local_only=False)
                 del sample.env.rollout.extra_info["routed_experts"]
             del sample.env
             sample.env = RLEnvDataItem()  # 重置env数据
@@ -647,7 +648,7 @@ class ReplayBufferStorage:
             if not self.enable_partial_rollout:
                 # 清除上次的response_ids等env数据
                 if "routed_experts" in sample.env.rollout.extra_info:
-                    ray._private.internal_api.free(sample.env.rollout.extra_info["routed_experts"])
+                    ray.internal.free(sample.env.rollout.extra_info["routed_experts"], local_only=False)
                     del sample.env.rollout.extra_info["routed_experts"]
                 del sample.env
                 sample.env = RLEnvDataItem()
@@ -792,7 +793,6 @@ class ReplayBufferStorage:
             )
 
 
-@ray.remote
 class ReplayBuffer:
     """A Ray actor that manages experience replay for reinforcement
     learning."""
