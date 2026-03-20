@@ -1,4 +1,4 @@
-"""Unit tests for CustomPackDataset."""
+"""Unit tests for PresetPackDataset."""
 
 import json
 import multiprocessing
@@ -10,7 +10,7 @@ import psutil
 import pytest
 
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.custom_pack import CustomPackDataset, load_config
+from xtuner.v1.datasets.preset_pack import PresetPackDataset, load_config
 from xtuner.v1.datasets.jsonl import JsonlDataset
 from xtuner.v1.datasets.utils import CachableTokenizeFunction
 
@@ -72,7 +72,8 @@ def _write_npy_pack_dir(directory: str, packs: list[list[list[int]]], paths: lis
     samples_arr = np.array(flat, dtype=np.int64).reshape(-1, 6) if flat else np.empty((0, 6), dtype=np.int64)
     np.save(os.path.join(directory, "boundaries.npy"), np.array(boundaries, dtype=np.int64))
     np.save(os.path.join(directory, "samples.npy"), samples_arr)
-    np.save(os.path.join(directory, "paths.npy"), np.array(paths, dtype=object))
+    with open(os.path.join(directory, "paths.json"), "w", encoding="utf-8") as f:
+        json.dump(paths, f)
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +108,7 @@ class TestLoadConfig:
 
 
 # ---------------------------------------------------------------------------
-# Feature 2: validation tests (test CustomPackDataset.__init__ / _validate_arrays)
+# Feature 2: validation tests (test PresetPackDataset.__init__ / _validate_arrays)
 # ---------------------------------------------------------------------------
 
 
@@ -119,7 +120,7 @@ class TestValidation:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=256)
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=256)
         assert len(dataset) == 1
 
     def test_invalid_dataset_path(self, tmp_path):
@@ -130,7 +131,7 @@ class TestValidation:
         _write_npy_pack_dir(config_dir, packs, ["/unknown.jsonl"])
 
         with pytest.raises(ValueError, match="dataset_path"):
-            CustomPackDataset([ds], config_dir, pack_max_length=256)
+            PresetPackDataset([ds], config_dir, pack_max_length=256)
 
     def test_invalid_sample_idx(self, tmp_path):
         """sample_idx out of range raises ValueError."""
@@ -140,7 +141,7 @@ class TestValidation:
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
         with pytest.raises(ValueError, match="sample_idx"):
-            CustomPackDataset([ds], config_dir, pack_max_length=256)
+            PresetPackDataset([ds], config_dir, pack_max_length=256)
 
     @pytest.mark.parametrize("char_start,char_end", [(-5, 100), (100, 50), (-1, 100)])
     def test_invalid_char_range(self, tmp_path, char_start, char_end):
@@ -151,7 +152,7 @@ class TestValidation:
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
         with pytest.raises(ValueError, match="char range"):
-            CustomPackDataset([ds], config_dir, pack_max_length=256)
+            PresetPackDataset([ds], config_dir, pack_max_length=256)
 
     def test_short_pack_error(self, tmp_path):
         """Pack shorter than pack_max_length raises ValueError with strategy='error'."""
@@ -161,7 +162,7 @@ class TestValidation:
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
         with pytest.raises(ValueError, match="total tokens"):
-            CustomPackDataset([ds], config_dir, pack_max_length=256, short_pack_strategy="error")
+            PresetPackDataset([ds], config_dir, pack_max_length=256, short_pack_strategy="error")
 
     def test_short_pack_padding(self, tmp_path):
         """Pack shorter than pack_max_length is accepted with strategy='padding'."""
@@ -170,7 +171,7 @@ class TestValidation:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=256, short_pack_strategy="padding")
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=256, short_pack_strategy="padding")
         assert len(dataset) == 1
         items = dataset[0]
         assert sum(it["num_tokens"] for it in items) == 256
@@ -183,7 +184,7 @@ class TestValidation:
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
         with pytest.raises(ValueError, match="total tokens"):
-            CustomPackDataset([ds], config_dir, pack_max_length=256, long_pack_strategy="error")
+            PresetPackDataset([ds], config_dir, pack_max_length=256, long_pack_strategy="error")
 
     def test_long_pack_truncate(self, tmp_path):
         """Pack longer than pack_max_length is truncated to pack_max_length with strategy='truncate'."""
@@ -192,7 +193,7 @@ class TestValidation:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=256, long_pack_strategy="truncate")
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=256, long_pack_strategy="truncate")
         assert len(dataset) == 1
         items = dataset[0]
         assert sum(it["num_tokens"] for it in items) == 256
@@ -205,7 +206,7 @@ class TestValidation:
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
         with pytest.raises(ValueError, match="token_end_offset"):
-            CustomPackDataset([ds], config_dir, pack_max_length=256)
+            PresetPackDataset([ds], config_dir, pack_max_length=256)
 
     def test_invalid_token_end_offset_equal(self, tmp_path):
         """token_end_offset == token_start_offset raises ValueError."""
@@ -215,7 +216,7 @@ class TestValidation:
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
         with pytest.raises(ValueError, match="token_end_offset"):
-            CustomPackDataset([ds], config_dir, pack_max_length=256)
+            PresetPackDataset([ds], config_dir, pack_max_length=256)
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +234,7 @@ class TestGetitem:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=256)
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=256)
         items = dataset[0]
 
         assert len(items) == 2
@@ -252,7 +253,7 @@ class TestGetitem:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=128)
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=128)
         assert len(dataset) == 2
         assert dataset[0][0]["input_ids"] == ids0
         assert dataset[1][0]["input_ids"] == ids1
@@ -266,7 +267,7 @@ class TestGetitem:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=128)
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=128)
         items = dataset[0]
 
         assert len(items) == 1
@@ -284,7 +285,7 @@ class TestGetitem:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=228)
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=228)
         items = dataset[0]
 
         assert len(items) == 2
@@ -301,7 +302,7 @@ class TestGetitem:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=128)
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=128)
         with pytest.raises(ValueError, match="LongTextDataItem"):
             dataset[0]
 
@@ -314,7 +315,7 @@ class TestGetitem:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=128)
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=128)
         with pytest.raises(ValueError, match="mismatch"):
             dataset[0]
 
@@ -327,7 +328,7 @@ class TestGetitem:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=100)
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=100)
         items = dataset[0]
 
         assert len(items) == 1
@@ -344,7 +345,7 @@ class TestGetitem:
         config_dir = str(tmp_path / "packs")
         _write_npy_pack_dir(config_dir, packs, ["/ds.jsonl"])
 
-        dataset = CustomPackDataset([ds], config_dir, pack_max_length=128)
+        dataset = PresetPackDataset([ds], config_dir, pack_max_length=128)
         items = dataset[0]
 
         assert len(items) == 1
@@ -462,7 +463,7 @@ _STRESS_PACK_MAX_LENGTH = int(os.environ.get("STRESS_PACK_MAX_LENGTH", 32768))
 
 
 def generate_stress_pack_config(num_slices: int, pack_max_length: int, out_dir: str) -> int:
-    """Generate boundaries.npy, samples.npy, paths.npy for stress testing.
+    """Generate boundaries.npy, samples.npy, paths.json for stress testing.
 
     Token length per slice is drawn uniformly from [200, 16000]. Packs are
     filled greedily: a new pack starts whenever adding the next slice would
@@ -504,7 +505,8 @@ def generate_stress_pack_config(num_slices: int, pack_max_length: int, out_dir: 
     os.makedirs(out_dir, exist_ok=True)
     np.save(os.path.join(out_dir, "boundaries.npy"), np.array(boundaries, dtype=np.int64))
     np.save(os.path.join(out_dir, "samples.npy"), samples)
-    np.save(os.path.join(out_dir, "paths.npy"), np.array(["mock://stress"], dtype=object))
+    with open(os.path.join(out_dir, "paths.json"), "w", encoding="utf-8") as f:
+        json.dump(["mock://stress"], f)
     return len(boundaries) - 1
 
 
@@ -540,13 +542,13 @@ def _stress_worker_fn(
     num_slices: int,
     result_queue: multiprocessing.Queue,
 ) -> None:
-    """Worker: build CustomPackDataset (mmap=True), benchmark __getitem__ on random indices."""
+    """Worker: build PresetPackDataset (mmap=True), benchmark __getitem__ on random indices."""
     mock_ds = _MockDataset("mock://stress", num_slices)
     proc = psutil.Process()
 
     mem_before = proc.memory_full_info()
     t0 = time.perf_counter()
-    ds = CustomPackDataset(
+    ds = PresetPackDataset(
         [mock_ds],
         config_dir,
         pack_max_length,
@@ -582,7 +584,7 @@ def _stress_worker_fn(
 
 def _measure_load_rss(use_mmap: bool, config_dir: str, result_queue: multiprocessing.Queue) -> None:
     """Subprocess: call load_config and report RSS and PSS deltas before any data access."""
-    from xtuner.v1.datasets.custom_pack import load_config as _load_config
+    from xtuner.v1.datasets.preset_pack import load_config as _load_config
 
     proc = psutil.Process()
     mem_before = proc.memory_full_info()
@@ -618,7 +620,7 @@ class TestStress:
         assert int(config["boundaries"][-1]) == 10_000
 
     def test_multiprocess_getitem(self, tmp_path):
-        """8 processes independently build CustomPackDataset (mmap=True) and call __getitem__.
+        """8 processes independently build PresetPackDataset (mmap=True) and call __getitem__.
 
         Run with 2 Billion slices (set STRESS_NUM_SLICES=2000000000), the output is like:
         ```

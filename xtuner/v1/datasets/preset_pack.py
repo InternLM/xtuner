@@ -1,15 +1,16 @@
-"""CustomPackDataset: loads user-provided pack configurations.
+"""PresetPackDataset: loads user-provided pack configurations.
 
 Pack config directory format (NPY directory):
     boundaries.npy: int64 array, shape (num_packs+1,) — CSR boundaries
     samples.npy:    int64 array, shape (total_slices, 6)
         columns: [path_id, sample_idx, char_start, char_end, token_start_offset, token_end_offset]
         For plain DataItem: char_start == char_end == -1
-    paths.npy:      object array — path_id -> dataset_path mapping
+    paths.json:     JSON array of strings — path_id -> dataset_path mapping
 """
 
+import json
 import os
-from typing import Literal, cast
+from typing import Literal, TypedDict, cast
 
 import numpy as np
 import torch.utils.data as tud
@@ -23,28 +24,36 @@ from .jsonl import JsonlDataset
 logger = get_logger()
 
 
-def load_config(path: str, mmap: bool = True) -> dict[str, np.ndarray]:
+class PackConfig(TypedDict):
+    boundaries: np.ndarray  # int64, shape (num_packs+1,)
+    samples: np.ndarray  # int64, shape (total_slices, 6)
+    paths: list[str]  # path_id -> dataset_path
+
+
+def load_config(path: str, mmap: bool = True) -> PackConfig:
     """Load pack config from an NPY directory.
 
     Args:
-        path (str): Directory containing boundaries.npy, samples.npy, paths.npy.
+        path (str): Directory containing boundaries.npy, samples.npy, paths.json.
         mmap (bool): If True, load int64 arrays with mmap_mode='r' to avoid loading
-            large arrays into RAM. paths.npy is always fully loaded.
+            large arrays into RAM. paths.json is always fully loaded.
 
     Returns:
-        dict with 'boundaries' (int64 ndarray, shape (num_packs+1,)),
+        PackConfig with 'boundaries' (int64 ndarray, shape (num_packs+1,)),
         'samples' (int64 ndarray, shape (total_slices, 6)),
-        'paths' (object ndarray of str).
+        'paths' (list[str]).
     """
     mmap_mode = "r" if mmap else None
+    with open(os.path.join(path, "paths.json"), encoding="utf-8") as f:
+        paths: list[str] = json.load(f)
     return {
         "boundaries": np.load(os.path.join(path, "boundaries.npy"), mmap_mode=mmap_mode),
         "samples": np.load(os.path.join(path, "samples.npy"), mmap_mode=mmap_mode),
-        "paths": np.load(os.path.join(path, "paths.npy"), allow_pickle=True),
+        "paths": paths,
     }
 
 
-class CustomPackDataset(tud.Dataset):
+class PresetPackDataset(tud.Dataset):
     """Dataset that reads pack groupings from a user-supplied NPY directory.
 
     The interface of ``__getitem__`` is identical to ``HardPackDataset``:
@@ -54,7 +63,7 @@ class CustomPackDataset(tud.Dataset):
     Parameters:
         datasets (list[JsonlDataset]): List of source datasets.
         pack_config_path (str): Path to the NPY directory containing
-            boundaries.npy, samples.npy, and paths.npy.
+            boundaries.npy, samples.npy, and paths.json.
         pack_max_length (int): Expected total token count per pack.
         short_pack_strategy (str): What to do when a pack has fewer tokens than
             ``pack_max_length``. ``"error"`` raises; ``"padding"`` appends pad tokens.
@@ -82,11 +91,11 @@ class CustomPackDataset(tud.Dataset):
         config = load_config(pack_config_path, mmap=mmap)
         self._boundaries: np.ndarray = config["boundaries"]
         self._samples: np.ndarray = config["samples"]
-        self._paths: np.ndarray = config["paths"]
+        self._paths: list[str] = config["paths"]
         self._path_to_ds_idx: dict[str, int] = {ds.path: idx for idx, ds in enumerate(datasets)}
 
         self._validate_arrays()
-        logger.info(f"CustomPackDataset: {len(self)} valid packs loaded.")
+        logger.info(f"PresetPackDataset: {len(self)} valid packs loaded.")
 
     # ------------------------------------------------------------------
     # Internal helpers

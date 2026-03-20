@@ -25,11 +25,11 @@ from .collator import (
     qwen3_vl_sft_collator,
     sft_llm_collator,
 )
-from .custom_pack import CustomPackDataset
 from .custom_sampler import CustomSampler
 from .dataloader import BaseDataloader, Dataloader
 from .jsonl import JsonlDataset
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
+from .preset_pack import PresetPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
 from .vlm_jsonl import VLMJsonlDataset
@@ -404,7 +404,7 @@ class DataloaderConfig(BaseDataloaderConfig):
                 | ConcatDataset
                 | HardPackDataset
                 | MLLMPretrainHybridPackDataset
-                | CustomPackDataset
+                | PresetPackDataset
             )
             if self.pack_level == "soft":
                 logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
@@ -452,8 +452,8 @@ class DataloaderConfig(BaseDataloaderConfig):
                         "pack_level='custom' requires both 'custom_pack_config_path' and "
                         "'custom_sampler_config_path' to be set."
                     )
-                logger.info("[Dataset] Start loading CustomPackDataset.")
-                dataset = CustomPackDataset(
+                logger.info("[Dataset] Start loading PresetPackDataset.")
+                dataset = PresetPackDataset(
                     datasets,
                     pack_config_path=self.custom_pack_config_path,
                     pack_max_length=self.pack_max_length,
@@ -469,7 +469,7 @@ class DataloaderConfig(BaseDataloaderConfig):
 
         sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler | CustomSampler
         if self.pack_level == "custom":
-            assert isinstance(dataset, CustomPackDataset)
+            assert isinstance(dataset, PresetPackDataset)
             assert self.custom_sampler_config_path is not None
             # global_order = _load_sampler_config(self.custom_sampler_config_path)
             sampler = CustomSampler(
