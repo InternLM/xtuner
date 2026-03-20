@@ -1077,23 +1077,16 @@ class MoE(BaseModel):
                 continue
 
             if isinstance(param, DTensor):
-                replicate_dim_names = tuple(
-                    param.device_mesh.mesh_dim_names[i]
-                    for i, p in enumerate(param.placements)
-                    if isinstance(p, Replicate)
-                )
-                if replicate_dim_names:
-                    # `DeviceMesh.get_group()` only supports a single mesh dimension,
-                    # so calling it directly on a multi-dim sub-mesh raises RuntimeError.
-                    # `_flatten()` collapses all Replicate dims into a 1D mesh whose
-                    # process group covers every rank across those dimensions, allowing
-                    # a single all_reduce regardless of how many Replicate dims exist.
-                    flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
+                replicate_placements = [p for p in param.placements if isinstance(p, Replicate)]
+                if replicate_placements:
+                    replicate_index = param.placements.index(replicate_placements[0])
+                    device_mesh = param.device_mesh[param.device_mesh.mesh_dim_names[replicate_index]]
+
                     grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
                     dist.all_reduce(
-                        grad.div_(flat_mesh.size()),  # type: ignore
+                        grad.div_(device_mesh.size()),  # type: ignore
                         ReduceOp.SUM,
-                        group=flat_mesh.get_group(),  # type: ignore
+                        group=device_mesh.get_group(mesh_dim=0),  # type: ignore
                     )
 
     def _init_device_mesh(self, fsdp_config: FSDPConfig):

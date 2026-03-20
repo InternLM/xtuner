@@ -202,8 +202,9 @@ class Qwen3_5_VLTextMoEConfig(MoEConfig):
     rms_norm_type: Literal["default", "zero_centered"] = "zero_centered"
     hf_save_cfg: HFSaveCfg = HFSaveCfg(
         fp32_keys_pattern=[
-            r"model\.language_model\.layers\.\d+\.linear_attn\.norm\.weight",
-            r"model\.language_model\.layers\.\d+\.linear_attn\.A_log",
+            r"model.language_model.layers.\d+.linear_attn.norm.weight",
+            r"model.language_model.layers.\d+.linear_attn.A_log",
+            r"model.language_model.layers.\d+.mlp.shared_expert_gate.weight"
         ],
     )
 

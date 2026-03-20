@@ -162,7 +162,7 @@ class AsyncRuntime:
             previous_tasks = running_tasks
 
 
-@torch.compile(fullgraph=True)
+# @torch.compile(fullgraph=True)
 def adamw_update(
     X: Tensor,  # Model weights (modified in place)
     G: Tensor,  # Gradient
@@ -209,7 +209,7 @@ def adamw_update(
     X.addcdiv_(M, denom, value=-adj_lr)
 
 
-@torch.compile(fullgraph=True)
+# @torch.compile(fullgraph=True)
 def adamw_update_foreach(  # type: ignore
     X: List[Tensor],  # Model weights (modified in place)
     G: List[Tensor],  # Gradient
@@ -721,7 +721,7 @@ def adamw_update_foreach_async(
     yield
 
 
-@torch.compile(fullgraph=True)
+# @torch.compile(fullgraph=True)
 def muon_update_pre_orthogonalize(
     G: List[Tensor],
     M: List[Tensor],
@@ -810,7 +810,7 @@ def adjust_lr_spectral_norm(lr, param_shape):
     return adjusted_lr
 
 
-@torch.compile(fullgraph=True)
+# @torch.compile(fullgraph=True)
 def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7):
     """Newton-Schulz iteration to approximate the orthogonalization of X."""
     # Newton-Schulz constants

@@ -649,9 +649,9 @@ class MoEDecoderLayer(nn.Module):
             assert self.shared_expert_gate is not None, (
                 "Shared expert gate should be initialized when with_shared_expert_gate is True"
             )
-            shared_experts_out = torch.sigmoid(self.shared_expert_gate(hidden_states)) * shared_experts_out
+            shared_experts_out = torch.sigmoid(self.shared_expert_gate(hidden_states.float())) * shared_experts_out
 
-        return shared_experts_out
+        return shared_experts_out.to(torch.bfloat16)
 
     def _post_moe_forward(
         self,
