@@ -49,7 +49,7 @@ class AdamWConfig(OptimConfig):
 
         if dist.get_rank() == 0:
             logger.info(
-                f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
+                f"Total trainable parameters: {num_total_requires_grad / 1e6:.2f}M, total parameters: {num_total / 1e6:.2f}M"
             )
             logger.info(f"Untrainable parameters names: {untrainable_names}")
         return torch.optim.AdamW(
@@ -71,7 +71,18 @@ class MuonConfig(OptimConfig):
         num_total = 0
         num_total_requires_grad = 0
         num_muon = 0
+        num_muon_moe = 0
         num_adamw = 0
+
+        # Get MoE config if available
+        num_experts = getattr(model.config, "n_routed_experts", 1) or 1
+        is_moe_model = num_experts > 1
+
+        # Expert parameter patterns for MoE models
+        # Note: fused_w1w3 contains both w1 and w3 weights, so num_experts = 2 * n_routed_experts
+        fused_w1w3_patterns = ("fused_w1w3",)
+        other_expert_patterns = ("fused_w2", "fused_w1", "fused_w3")
+        all_expert_patterns = fused_w1w3_patterns + other_expert_patterns
 
         for name, p in model.named_parameters():
             n = p.numel()
@@ -80,32 +91,69 @@ class MuonConfig(OptimConfig):
                 num_total_requires_grad += n
                 is_muon_tensor = p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
                 if is_muon_tensor:
-                    num_muon += n
+                    # Check if this is an MoE expert parameter
+                    if is_moe_model and any(pattern in name for pattern in all_expert_patterns):
+                        num_muon_moe += n
+                    else:
+                        num_muon += n
                 else:
                     num_adamw += n
             else:
                 untrainable_names.append(name)
 
-        muon_params = [
-            p
-            for name, p in model.named_parameters()
-            if name in trainable_names and p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
-        ]
+        # Separate Muon params into regular and MoE expert params
+        # fused_w1w3 has 2 * num_experts (w1 and w3 each have num_experts)
+        # other expert params have num_experts
+        muon_params_regular = []
+        muon_params_moe_fused_w1w3 = []  # num_experts = 2 * n_routed_experts
+        muon_params_moe_other = []  # num_experts = n_routed_experts
+
+        for name, p in model.named_parameters():
+            if name in trainable_names:
+                is_muon_tensor = p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
+                if is_muon_tensor:
+                    if is_moe_model and any(pattern in name for pattern in fused_w1w3_patterns):
+                        muon_params_moe_fused_w1w3.append(p)
+                    elif is_moe_model and any(pattern in name for pattern in other_expert_patterns):
+                        muon_params_moe_other.append(p)
+                    else:
+                        muon_params_regular.append(p)
+
         adamw_params = [
             p
             for name, p in model.named_parameters()
             if name in trainable_names and not (p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name)
         ]
-        param_groups = [
-            dict(params=muon_params),
-            dict(params=adamw_params, algorithm="adamw"),
-        ]
+
+        # Build parameter groups
+        param_groups = []
+        if muon_params_regular:
+            param_groups.append(dict(params=muon_params_regular))
+        # fused_w1w3: w1 and w3 are fused, so num_experts = 2 * n_routed_experts
+        if muon_params_moe_fused_w1w3:
+            param_groups.append(dict(params=muon_params_moe_fused_w1w3, num_experts=2 * num_experts))
+        # Other expert params: num_experts = n_routed_experts
+        if muon_params_moe_other:
+            param_groups.append(dict(params=muon_params_moe_other, num_experts=num_experts))
+        param_groups.append(dict(params=adamw_params, algorithm="adamw"))
 
         if dist.get_rank() == 0:
             logger.info(
-                f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
+                f"Total trainable parameters: {num_total_requires_grad / 1e6:.2f}M, total parameters: {num_total / 1e6:.2f}M"
             )
-            logger.info(f"Muon params: {num_muon // 1e6}M, AdamW params: {num_adamw // 1e6}M (counts by numel)")
+            if is_moe_model:
+                logger.info(
+                    f"Muon params: {(num_muon + num_muon_moe) / 1e6:.2f}M "
+                    f"(regular: {num_muon / 1e6:.2f}M, MoE expert: {num_muon_moe / 1e6:.2f}M), "
+                    f"AdamW params: {num_adamw / 1e6:.2f}M (counts by numel)"
+                )
+                logger.info(
+                    f"Detected MoE model with {num_experts} routed experts, "
+                    f"fused_w1w3 uses num_experts={2 * num_experts} (w1+w3), "
+                    f"other expert params use num_experts={num_experts}"
+                )
+            else:
+                logger.info(f"Muon params: {num_muon / 1e6:.2f}M, AdamW params: {num_adamw / 1e6:.2f}M (counts by numel)")
             logger.info(f"Untrainable parameters names: {untrainable_names}")
             logger.info(
                 f"using Muon optimizer distributed_mesh_size: {model.fsdp_mesh.size()}, "
