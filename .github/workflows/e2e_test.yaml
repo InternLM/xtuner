@@ -43,6 +43,7 @@ jobs:
           conda activate clusterx 
           conda env list
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
+          CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
           if [ "$CASE_NAME" = "all" ]; then
             pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
           else
