@@ -2,6 +2,7 @@ from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from .ce_loss import CELossConfig, CELossContext
 from .chunk_loss import ChunkLoss
 from .moe_loss import BalancingLoss, ZLoss
+from .rl_loss import LogProbConfig, LogProbContext
 
 
 __all__ = [
@@ -13,6 +14,8 @@ __all__ = [
     "BaseLossConfig",
     "BaseLossContext",
     "BaseLossKwargs",
+    "LogProbConfig",
+    "LogProbContext",
 ]
 
 import torch
