@@ -1,20 +1,28 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import datetime
 import multiprocessing
+import os
 import random
+import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from multiprocessing import shared_memory
+from pathlib import Path
 from typing import Sized
 
 import numpy as np
 import torch
+import xxhash
 from datasets import Dataset, concatenate_datasets
+from torch import distributed as dist
 from torch.utils.data import ConcatDataset
 from tqdm import tqdm
 
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, is_local_rank0
+from xtuner.v1.utils.executor import SharedPoolExecutor
 
 from .jsonl import JsonlDataset
+from .utils import _get_mmap_dir, ndarray_to_mmap
 from .vlm_jsonl import VLMJsonlDataset
 
 
@@ -354,37 +362,61 @@ def _hard_pack_chunk_core(
     pack_max_length: int,
     cu: np.ndarray,
     inds_arr: np.ndarray,
-) -> list[dict]:
-    lengths = cu[1:] - cu[:-1]
-    out: list[dict] = []
-    for i in i_chunk:
-        begin = i * pack_max_length
-        end = (i + 1) * pack_max_length
+    lengths: np.ndarray,
+) -> dict[str, np.ndarray]:
+    n = len(i_chunk)
+    out_dataset_id = np.full(n, dataset_id, dtype=np.int64)
+    out_longest = np.empty(n, dtype=np.int64)
+    indices_parts: list[np.ndarray] = []
 
-        s_idx = int(np.searchsorted(cu, begin, side="right") - 1)
-        e_idx = int(np.searchsorted(cu, end - 1, side="right") - 1)
+    i_arr = np.asarray(i_chunk, dtype=np.int64)
+    begins = i_arr * pack_max_length
+    ends = begins + pack_max_length
+    s_idxs = np.searchsorted(cu, begins, side="right").astype(np.int64) - 1
+    e_idxs = np.searchsorted(cu, ends - 1, side="right").astype(np.int64) - 1
+    out_start_offset = (begins - cu[s_idxs]).astype(np.int64)
+    out_end_offset = (ends - cu[e_idxs]).astype(np.int64)
 
-        s_off = int(begin - cu[s_idx])
-        e_off = int(end - cu[e_idx])
+    for j in range(n):
+        s_idx, e_idx = int(s_idxs[j]), int(e_idxs[j])
+        s_off, e_off = int(out_start_offset[j]), int(out_end_offset[j])
 
         if s_idx == e_idx:
-            longest = int(e_off - s_off)
+            out_longest[j] = e_off - s_off
         else:
             len_first = int(lengths[s_idx] - s_off)
-            len_last = int(e_off)
+            len_last = e_off
             mid_max = int(lengths[s_idx + 1 : e_idx].max()) if e_idx - s_idx > 1 else 0
-            longest = max(len_first, len_last, mid_max)
+            out_longest[j] = max(len_first, len_last, mid_max)
 
-        out.append(
-            {
-                "dataset_id": dataset_id,
-                "indices": inds_arr[s_idx : e_idx + 1].tolist(),
-                "start_offset": s_off,
-                "end_offset": e_off,
-                "longest": longest,
-            }
-        )
-    return out
+        indices_parts.append(inds_arr[s_idx : e_idx + 1])
+
+    indices_flat = np.concatenate(indices_parts) if indices_parts else np.empty(0, dtype=np.int64)
+    indices_lens = e_idxs - s_idxs + 1
+    return {
+        "dataset_id": out_dataset_id,
+        "indices": indices_flat,
+        "indices_cu_len": np.cumsum(indices_lens, dtype=np.int64),
+        "start_offset": out_start_offset,
+        "end_offset": out_end_offset,
+        "longest": out_longest,
+    }
+
+
+def _merge_pack_infos(infos: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
+    cu_parts: list[np.ndarray] = []
+    offset = np.int64(0)
+    for r in infos:
+        cu_parts.append(r["indices_cu_len"] + offset)
+        offset += r["indices_cu_len"][-1]
+    return {
+        "dataset_id": np.concatenate([r["dataset_id"] for r in infos]),
+        "indices": np.concatenate([r["indices"] for r in infos]),
+        "indices_cu_len": np.concatenate(cu_parts),
+        "start_offset": np.concatenate([r["start_offset"] for r in infos]),
+        "end_offset": np.concatenate([r["end_offset"] for r in infos]),
+        "longest": np.concatenate([r["longest"] for r in infos]),
+    }
 
 
 def get_pack_infos_by_hard_split(
@@ -408,73 +440,180 @@ def get_pack_infos_by_hard_split(
     i_all = list(range(num_packed_samples))
     chunks = [i_all[i : i + chunk_size] for i in range(0, len(i_all), chunk_size)]
 
-    pack_infos_list = []
+    lengths_arr = (cu_arr[1:] - cu_arr[:-1]).astype(np.int64)
+    all_results: list[dict[str, np.ndarray]] = []
 
     if pack_workers > 1:
-        # Use fork to inherit read-only arrays; no extra shared memory copy needed
-        mp_context = multiprocessing.get_context("fork")
-        fn = partial(
-            _hard_pack_chunk_core,
-            dataset_id=dataset_id,
-            pack_max_length=pack_max_length,
-            cu=cu_arr,
-            inds_arr=inds_arr,
-        )
-        with ProcessPoolExecutor(max_workers=pack_workers, mp_context=mp_context) as ex:
-            for res in tqdm(ex.map(fn, chunks), total=len(chunks)):
-                pack_infos_list.extend(res)
+        # cu_arr, inds_arr, and lengths_arr are passed as partial_kwargs so
+        # SharedPoolExecutor places them in POSIX shared memory.  All worker
+        # processes attach to the same physical pages — no per-worker copy is
+        # made.  For large datasets these arrays can be hundreds of MB, so
+        # without shared memory the total footprint would scale linearly with
+        # the number of workers.
+        with SharedPoolExecutor(
+            fn=_hard_pack_chunk_core,
+            partial_kwargs={
+                "dataset_id": dataset_id,
+                "pack_max_length": pack_max_length,
+                "cu": cu_arr,
+                "inds_arr": inds_arr,
+                "lengths": lengths_arr,
+            },
+            max_workers=pack_workers,
+            mp_context="fork",
+        ) as pool:
+            all_results = list(tqdm(pool.map(chunks), total=len(chunks)))
     else:
-        # single-process path, reuse the same core
-        for i_chunk in tqdm(chunks, total=len(chunks)):
-            pack_infos_list.extend(
-                _hard_pack_chunk_core(
-                    i_chunk,
-                    dataset_id=dataset_id,
-                    pack_max_length=pack_max_length,
-                    cu=cu_arr,
-                    inds_arr=inds_arr,
-                )
+        all_results = [
+            _hard_pack_chunk_core(
+                i_chunk,
+                dataset_id=dataset_id,
+                pack_max_length=pack_max_length,
+                cu=cu_arr,
+                inds_arr=inds_arr,
+                lengths=lengths_arr,
             )
-    return pack_infos_list
+            for i_chunk in tqdm(chunks, total=len(chunks))
+        ]
+    return _merge_pack_infos(all_results)
 
 
 class HardPackDataset(_LegacySoftPackDataset):
+    # TODO: The shared-memory / mmap optimisation below applies only to
+    # HardPackDataset.  SoftPackDataset stores pack_infos as a HuggingFace
+    # Dataset whose "indices" column is a Python list shuffled every epoch,
+    # so the result is not deterministic and cannot be content-addressed.
+    # Extending this to SoftPack would require fixing the shuffle order into
+    # the cache key and switching the indices storage to a flat ndarray.
+    _PACK_INFO_FIELDS = ("dataset_id", "indices", "start_offset", "end_offset", "longest", "indices_cu_len")
+
     def __init__(
         self, datasets, pack_max_length=2048, global_pack=False, seed: int | None = None, pack_workers: int = 1
     ):
         self.pack_workers = pack_workers
-        super().__init__(
-            datasets=datasets,
-            pack_max_length=pack_max_length,
-            global_pack=global_pack,
-            seed=seed,
-        )
+        self.random = random.Random()
+        if seed is not None:
+            self.random = random.Random(seed)
 
-    def get_pack_infos(
-        self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray, proxy_attn_flops: np.ndarray | None = None
-    ):
-        # shuffled indices
+        # Create a single dedicated process group with a generous timeout for
+        # all collective operations during dataset initialisation (ndarray_to_mmap
+        # and _build_pack_infos).  This avoids triggering the default NCCL
+        # watchdog when pack computation or large-array writes are slow.
+        pack_pg = dist.new_group(timeout=datetime.timedelta(seconds=7200)) if dist.is_initialized() else None
+
+        if global_pack:
+            # Concatenate all datasets into a single virtual dataset so that
+            # the packer can form packs that span sample boundaries across
+            # datasets.  ndarray_to_mmap converts the concatenated array to a
+            # file-backed mmap so that all ranks on the same node share a
+            # single copy of the (potentially very large) num_tokens array
+            # rather than each rank holding its own in-process copy.
+            num_tokens = [ndarray_to_mmap(np.concatenate([dset.num_tokens for dset in datasets]), group=pack_pg)]
+            proxy_attn_flops = [
+                ndarray_to_mmap(np.concatenate([dset.proxy_attn_flops for dset in datasets]), group=pack_pg)
+            ]
+            assert len(num_tokens[0]) == len(proxy_attn_flops[0]), (
+                f"num_tokens and proxy_attn_flops should have the same length"
+                f" after concatenation. but got {len(num_tokens[0])} and"
+                f" {len(proxy_attn_flops[0])}"
+            )
+            datasets = [ConcatDataset(datasets)]
+        else:
+            # Per-dataset packing: keep each dataset's num_tokens array as-is.
+            # No mmap conversion needed here since the arrays are already owned
+            # by the individual JsonlDataset instances.
+            num_tokens = [dset.num_tokens for dset in datasets]
+            proxy_attn_flops = [dset.proxy_attn_flops for dset in datasets]
+
+        self.datasets = datasets
+        self.seed = seed
+        self.global_pack = global_pack
+        self.pack_max_length = pack_max_length
+
+        self.pack_infos = self._build_pack_infos(num_tokens, pack_pg=pack_pg)
+
+    def _build_pack_infos(
+        self, num_tokens: list[np.ndarray], pack_pg: "dist.ProcessGroup | None" = None
+    ) -> dict[str, np.ndarray]:
+        # Derive a content-addressed cache key from all inputs that determine
+        # the final pack_infos (seed, pack_max_length, global_pack, and the
+        # content of every num_tokens array).
+        h = xxhash.xxh128()
+        h.update(f"{self.seed}_{self.pack_max_length}_{self.global_pack}".encode())
+        for nt in num_tokens:
+            h.update(np.ascontiguousarray(nt).data.tobytes())
+        pack_dir = _get_mmap_dir() / "pack_infos" / h.hexdigest()
+
+        if is_local_rank0() and not pack_dir.exists():
+            # Only rank 0 (per node) runs the full pack computation.  The
+            # results are written to a content-addressed directory on shared
+            # storage so that every other rank can load them without
+            # recomputing.  Writing once and memory-mapping from disk lets all
+            # ranks on a node share the same physical pages (see
+            # _load_pack_infos_from_mmap), keeping per-node memory overhead
+            # proportional to the data size rather than the rank count.
+            all_infos = [
+                self._compute_pack_infos(dataset, i, num_tokens[i]) for i, dataset in enumerate(self.datasets)
+            ]
+            self._save_pack_infos(_merge_pack_infos(all_infos), pack_dir)
+
+        if dist.is_initialized():
+            dist.barrier(group=pack_pg)
+            if pack_pg is not None:
+                dist.destroy_process_group(pack_pg)
+
+        return self._load_pack_infos_from_mmap(pack_dir)
+
+    def _save_pack_infos(self, pack_infos: dict[str, np.ndarray], pack_dir: Path) -> None:
+        # Write to a temp directory then atomically rename so that other ranks
+        # never observe a partially-written pack_dir if this rank is killed mid-write.
+        pack_dir.parent.mkdir(parents=True, exist_ok=True)
+        tmp_dir = Path(tempfile.mkdtemp(dir=pack_dir.parent))
+        try:
+            for field in self._PACK_INFO_FIELDS:
+                arr = pack_infos.get(field)
+                if arr is not None:
+                    np.save(str(tmp_dir / f"{field}.npy"), arr)
+            os.rename(str(tmp_dir), str(pack_dir))
+        except Exception:
+            import shutil
+
+            shutil.rmtree(str(tmp_dir), ignore_errors=True)
+            raise
+
+    def _load_pack_infos_from_mmap(self, pack_dir: Path) -> dict[str, np.ndarray]:
+        # Load with mmap_mode="r" so that every rank on the same node maps the
+        # same on-disk file into its virtual address space read-only.  The OS
+        # automatically backs all of those mappings with a single set of
+        # physical pages, meaning a node running N ranks holds only one copy of
+        # the pack_infos arrays in RAM regardless of N.  This is critical at
+        # large sample counts where the arrays can be hundreds of MB per dataset.
+        return {
+            field: np.load(str(pack_dir / f"{field}.npy"), mmap_mode="r")
+            for field in self._PACK_INFO_FIELDS
+            if (pack_dir / f"{field}.npy").exists()
+        }
+
+    def _compute_pack_infos(self, dataset: Sized, dataset_id: int, num_tokens: np.ndarray) -> dict[str, np.ndarray]:
         inds = list(range(len(dataset)))
         self.random.shuffle(inds)
-
-        pack_infos_list = get_pack_infos_by_hard_split(
+        return get_pack_infos_by_hard_split(
             inds, dataset_id, num_tokens, pack_max_length=self.pack_max_length, pack_workers=self.pack_workers
         )
 
-        pack_infos = Dataset.from_list(pack_infos_list)
-        return pack_infos
-
-    def __len__(self):
-        return len(self.pack_infos)
-
     def __getitem__(self, item: int):
-        info = self.pack_infos[item]
-        dataset_id = info["dataset_id"]
+        assert self.pack_infos is not None
+        dataset_id = int(self.pack_infos["dataset_id"][item])
         ds = self.datasets[dataset_id]
 
-        indices = info["indices"]
-        s_off = info["start_offset"]
-        e_off = info["end_offset"]
+        if item == 0:
+            indices_start = 0
+        else:
+            indices_start = int(self.pack_infos["indices_cu_len"][item - 1])
+        indices_end = int(self.pack_infos["indices_cu_len"][item])
+        indices = self.pack_infos["indices"][indices_start:indices_end].tolist()
+        s_off = int(self.pack_infos["start_offset"][item])
+        e_off = int(self.pack_infos["end_offset"][item])
 
         packed_list: list[dict] = []
 
@@ -498,6 +637,15 @@ class HardPackDataset(_LegacySoftPackDataset):
             f"Internal Error! Found size: {total_num_tokens} mismatch after hard packing."
         )
         return packed_list
+
+    def __len__(self):
+        assert self.pack_infos is not None
+        return self.pack_infos["dataset_id"].shape[0]
+
+    @property
+    def longest(self):
+        assert self.pack_infos is not None
+        return self.pack_infos["longest"].tolist()
 
     def get_state_dict(self):
         return {}
@@ -539,7 +687,7 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
         if global_pack:
             hard_pack_datasets: list[Sized] = []
             if len(hard_pack_groups) > 0:
-                num_tokens = [np.concatenate([dset.num_tokens for dset in hard_pack_groups])]
+                num_tokens = [ndarray_to_mmap(np.concatenate([dset.num_tokens for dset in hard_pack_groups]))]
                 hard_pack_datasets = [ConcatDataset(hard_pack_groups)]
 
             pack_infos_list = []
@@ -550,8 +698,10 @@ class MLLMPretrainHybridPackDataset(_LegacySoftPackDataset):
 
             soft_pack_datasets: list[Sized] = []
             if len(soft_pack_groups) > 0:
-                num_tokens = [np.concatenate([dset.num_tokens for dset in soft_pack_groups])]
-                proxy_attn_flops = [np.concatenate([dset.proxy_attn_flops for dset in soft_pack_groups])]
+                num_tokens = [ndarray_to_mmap(np.concatenate([dset.num_tokens for dset in soft_pack_groups]))]
+                proxy_attn_flops = [
+                    ndarray_to_mmap(np.concatenate([dset.proxy_attn_flops for dset in soft_pack_groups]))
+                ]
 
                 soft_pack_datasets = [ConcatDataset(soft_pack_groups)]
                 for i, dataset in enumerate(soft_pack_datasets):
