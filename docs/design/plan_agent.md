@@ -57,7 +57,7 @@ needs to be built.
 - Both "modify" and "add" categories
 - Try to ensure the task is completed within 2-6 steps, not too small or too big
 - Order features by priority: fundamental features first
-- ALL tests start with "passes": false
+- ALL cases start with "passes": false
 - Cover every feature in the GOAL exhaustively
 
 **CRITICAL INSTRUCTION:**

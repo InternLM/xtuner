@@ -90,5 +90,17 @@
       "Step 5: Add an assertion or logged comparison between mmap=True and mmap=False memory usage to validate the mmap memory saving; run the stress test and ensure it completes within a reasonable time bound"
     ],
     "passes": true
+  },
+  {
+    "category": "modify",
+    "description": "Security and naming cleanup: (1) replace paths.npy (requires allow_pickle=True) with paths.json for safe deserialization; (2) rename CustomPackDataset -> PresetPackDataset and custom_pack.py -> preset_pack.py; update all references across config.py, custom_sampler.py, __init__.py, and tests.",
+    "steps": [
+      "Step 1: In load_config(), replace np.load('paths.npy', allow_pickle=True) with json.load(open('paths.json')); update the corresponding writer (if any) to save paths.json instead of paths.npy",
+      "Step 2: Rename custom_pack.py to preset_pack.py; rename class CustomPackDataset to PresetPackDataset inside the file; update module docstring accordingly",
+      "Step 3: Update all import sites: xtuner/v1/datasets/config.py (from .custom_pack import CustomPackDataset -> from .preset_pack import PresetPackDataset); xtuner/v1/datasets/custom_sampler.py; xtuner/v1/datasets/__init__.py",
+      "Step 4: Rename tests/datasets/test_custom_pack_dataset.py to tests/datasets/test_preset_pack_dataset.py; update all internal references from CustomPackDataset to PresetPackDataset; update run_test.sh if it hardcodes the test file path",
+      "Step 5: Run tests to pass"
+    ],
+    "passes": false
   }
 ]

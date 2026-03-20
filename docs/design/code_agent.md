@@ -124,7 +124,8 @@ Update `claude-progress.txt` with:
 
 ### STEP 8: COMMIT YOUR PROGRESS
 
-Make a descriptive git commit:
+First, ask me to commit or not.
+If so, Make a descriptive git commit:
 ```bash
 git add .
 git commit -m "Implement [feature name] - verified end-to-end
