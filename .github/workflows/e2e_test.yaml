@@ -47,6 +47,7 @@ jobs:
             pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
           else
             pytest autotest/test_all.py::test_all[$CASE_NAME] -m all -n 1 -vv --run_id ${{ github.run_id }}
+          fi
 
       - name: Upload Artifacts
         if: ${{ !cancelled() }}
