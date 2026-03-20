@@ -313,9 +313,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             logger.info(f"[Dataset] Load cached [{self.name}]{self.path} of cache tgs {cache_tag}.")
             offset_path = cached["offsets"]
             meta_path = cached.get("jsonl_meta")
-            offsets = np.load(offset_path)
+            offsets = np.load(offset_path, mmap_mode="r" if enable_mmap_shared else None)
             if meta_path:
-                _meta = load_dict_from_npy_dir(meta_path)
+                _meta = load_dict_from_npy_dir(meta_path, mmap=enable_mmap_shared)
                 num_tokens = _meta["num_tokens"]
         elif cache_dir:
             self._shared_memory = self._init_shared_memory(anno_path)
@@ -385,7 +385,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
             barrier()
 
-            offsets = np.load(_cached_file)
+            offsets = np.load(_cached_file, mmap_mode="r" if enable_mmap_shared else None)
 
             if tokenize_fn and isinstance(tokenize_fn, CachableTokenizeFunction):
                 tok_hash = tokenize_fn.hash()
@@ -398,7 +398,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 _meta_file = os.path.join(tok_cache_dir, "jsonl_meta")
                 if os.path.exists(_meta_file):
                     logger.info(f"Loading tokenize meta from cache: {_meta_file}")
-                    _meta = load_dict_from_npy_dir(_meta_file)
+                    _meta = load_dict_from_npy_dir(_meta_file, mmap=enable_mmap_shared)
                     num_tokens = _meta["num_tokens"]
                 else:
                     _meta = self.count_tokens(offsets, tok_cache_dir)

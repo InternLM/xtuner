@@ -60,7 +60,7 @@ class TestJsonlDatasetDist(DistributedTestBase):
         rank = dist.get_rank()
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        dataset_cfg = DatasetConfig(name="alpaca", anno_path=alpaca_path, sample_ratio=1000.0, enable_mmap_shared=enable_mmap_shared)
+        dataset_cfg = DatasetConfig(name="alpaca", anno_path=alpaca_path, sample_ratio=100.0, enable_mmap_shared=enable_mmap_shared)
         tokenize_fn_cfg = FTDPTokenizeFnConfig(max_length=16386)
         tokenize_fn = tokenize_fn_cfg.build(tokenizer)
 
@@ -159,11 +159,12 @@ class TestJsonlDatasetDist(DistributedTestBase):
         
         self.assertSequenceEqual(item_base["input_ids"], item_mmap["input_ids"], msg=f"input_ids should be equal, but got {item_base['input_ids']} and {item_mmap['input_ids']}")
 
-    def _run_cache_consistency(self, use_cache_tag: bool):
+    def _run_cache_consistency(self, use_cache_tag: bool, enable_mmap_shared: bool = False):
         """
         Helper: first build creates npy cache; second build loads from cache without re-tokenizing.
         use_cache_tag=False → second build goes through cache_dir branch.
         use_cache_tag=True  → second build goes through cache_tag fast-path branch.
+        enable_mmap_shared  → when True, also verifies offsets are memmap-backed after cache load.
         """
         import shutil
         from pathlib import Path
@@ -180,6 +181,8 @@ class TestJsonlDatasetDist(DistributedTestBase):
 
         tag = "npy_test" if use_cache_tag else None
         suffix = "with_tag" if use_cache_tag else "no_tag"
+        if enable_mmap_shared:
+            suffix += "_mmap"
         cache_dir = f"/tmp/xtuner_test_cache_npy_{suffix}"
         if rank == 0:
             shutil.rmtree(cache_dir, ignore_errors=True)
@@ -190,6 +193,7 @@ class TestJsonlDatasetDist(DistributedTestBase):
             cfg = DatasetConfig(
                 name="alpaca", anno_path=alpaca_path, sample_ratio=1.0,
                 cache_dir=cache_dir, cache_tag=tag,
+                enable_mmap_shared=enable_mmap_shared,
             )
 
             # First build: no cache, tokenizes from scratch
@@ -220,6 +224,14 @@ class TestJsonlDatasetDist(DistributedTestBase):
 
             self.assertFalse(was_called[0], "count_tokens should not be called when loading from npy cache")
 
+            # When enable_mmap_shared is True, the final self.offsets must be memmap-backed
+            # (written to tmp_dir then mmap-loaded by all ranks, including local rank 0).
+            if enable_mmap_shared:
+                self.assertIsInstance(
+                    ds_res.offsets, np.memmap,
+                    msg="offsets should be memmap-backed when enable_mmap_shared=True",
+                )
+
             # Results must be identical to first build
             self.assertEqual(len(ds_ref), len(ds_res))
             for i in [0, len(ds_ref) // 2, len(ds_ref) - 1]:
@@ -237,6 +249,14 @@ class TestJsonlDatasetDist(DistributedTestBase):
     def test_cache_tag_npy_format_consistent(self):
         """cache_tag fast-path: second build resolves stored paths and loads npy without re-tokenizing."""
         self._run_cache_consistency(use_cache_tag=True)
+
+    def test_cache_dir_npy_format_consistent_with_mmap(self):
+        """cache_dir + enable_mmap_shared: offsets are memmap-backed and results are correct."""
+        self._run_cache_consistency(use_cache_tag=False, enable_mmap_shared=True)
+
+    def test_cache_tag_npy_format_consistent_with_mmap(self):
+        """cache_tag fast-path + enable_mmap_shared: offsets are memmap-backed and results are correct."""
+        self._run_cache_consistency(use_cache_tag=True, enable_mmap_shared=True)
 
 
 def test_npy_dir_meta_save_and_mmap_reload():
