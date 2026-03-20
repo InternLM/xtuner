@@ -1,7 +1,6 @@
 from typing import Any, Callable
 
 import torch
-from torch.autograd import grad
 
 
 class ChunkLoss(torch.autograd.Function):
@@ -33,22 +32,9 @@ class ChunkLoss(torch.autograd.Function):
             hidden_states_chunk = hidden_states_chunks[i]
             grad_inputs_chunk = grad_inputs_chunks[i]
 
-            # (chunk_grad_input, chunk_grad_weight), (chunk_loss, (_, extra_info)) = torch.func.grad_and_value(
-            #     loss_forward, argnums=(0, 1), has_aux=True
-            # )(hidden_states_chunk, head_weight, None, loss_kwargs_chunks[i])
-
-            with torch.enable_grad():
-                hidden_states_chunk.requires_grad_()
-                chunk_loss, (_, extra_info) = loss_forward(
-                    hidden_states_chunk, head_weight, None, loss_kwargs_chunks[i]
-                )
-                if head_weight.requires_grad:
-                    chunk_grad_input, chunk_grad_weight = grad(
-                        chunk_loss, (hidden_states_chunk, head_weight), allow_unused=True
-                    )
-                else:
-                    chunk_grad_input = grad(chunk_loss, (hidden_states_chunk,), allow_unused=True)[0]
-                    chunk_grad_weight = torch.zeros_like(head_weight)
+            (chunk_grad_input, chunk_grad_weight), (chunk_loss, (_, extra_info)) = torch.func.grad_and_value(
+                loss_forward, argnums=(0, 1), has_aux=True
+            )(hidden_states_chunk, head_weight, None, loss_kwargs_chunks[i])
 
             accumulated_loss.add_(chunk_loss)
             grad_inputs_chunk.copy_(chunk_grad_input)

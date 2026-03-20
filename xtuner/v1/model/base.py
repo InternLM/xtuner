@@ -1,14 +1,13 @@
 import json
 import math
 import pydoc
-import re
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import reduce
 from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Iterable, Literal, Mapping, Sequence, cast
+from typing import Annotated, Generator, Iterable, Literal, Mapping, cast
 
 import torch
 import torch.distributed as dist
@@ -19,16 +18,10 @@ from more_itertools import consume
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, computed_field
 from safetensors.torch import save_file
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.fsdp import (
-    CPUOffloadPolicy,
-    FSDPModule,
-    MixedPrecisionPolicy,
-    fully_shard,
-)
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Placement, Shard
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-from typing_extensions import NotRequired, Self, TypedDict, overload
+from typing_extensions import NotRequired, Self, TypedDict
 
 from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig, GenerateConfig
@@ -40,7 +33,7 @@ from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
 from xtuner.v1.loss import BaseLossContext
-from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
+from xtuner.v1.module.attention import MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
@@ -56,18 +49,6 @@ logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
-
-
-class DataBatchInfo(TypedDict):
-    step_consumed_tokens: int
-    step_consumed_img_tokens: float
-    efficient_attn_ratio: float
-    img_efficient_attn_ratio: float
-
-
-class BatchForwardInfo(TypedDict):
-    logs_info: dict[str, float]
-    extra_info: ModelForwardExtraLogInfo
 
 
 class TorchCompileOption(TypedDict):
@@ -98,42 +79,9 @@ class XTunerBaseModelConfig(PydanticBaseModel):
             "`dict[str, TorchCompileOption]`: Customize the compile option",
         ),
     ] = None
-    hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
-    dcp_ignore_frozen_params: bool = True
 
     @property
     def hf_config(self) -> PretrainedConfig | None:
-        return None
-
-    def save_hf(self, hf_path: str | Path):
-        if self.hf_config is None:
-            raise NotImplementedError("The `hf_config` property must be implemented to save in HuggingFace format.")
-
-        self.hf_config.save_pretrained(hf_path)
-
-    @classmethod
-    def from_hf(cls, hf_path: str | Path) -> Self:
-        """Build a `TransformerConfig` from a pre-trained HuggingFace model.
-
-        This method creates a configuration object based on a `PretrainedConfig` loaded from the specified HuggingFace model path.
-        If you want to use this method, you must implement it in a subclass to correctly extract and map configuration parameters.
-
-        Note:
-            The `hf_config` field needs to be set to the `PretrainedConfig` object loaded from `hf_path`,
-            otherwise it cannot be saved in HuggingFace format.
-
-        Args:
-            hf_path (str | Path): Path to the HuggingFace model.
-
-        Returns:
-            TransformerConfig: A configuration object populated with values from the pre-trained model.
-
-        Raises:
-            NotImplementedError: This method must be implemented by subclasses.
-        """
-        raise NotImplementedError
-
-    def build(self):
         raise NotImplementedError
 
 
@@ -160,11 +108,9 @@ class TransformerConfig(XTunerBaseModelConfig):
     hidden_size: Annotated[int, Parameter(group="model")]
     intermediate_size: Annotated[int, Parameter(group="model")]
     rms_norm_eps: Annotated[float, Parameter(group="model")]
-    rms_norm_type: Annotated[Literal["default", "zero_centered"], Parameter(group="model")] = "default"
     rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: MLAConfig | MHAConfig
-    linear_attention: Annotated[GatedDeltaNetConfig | None, Parameter(group="model")] = None
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
     model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
@@ -173,16 +119,10 @@ class TransformerConfig(XTunerBaseModelConfig):
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
+    dcp_ignore_frozen_params: Annotated[bool, Parameter(group="model")] = False
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
     )
-
-    @computed_field  # type: ignore[misc]
-    @property
-    def rope_scaling(self) -> dict | None:
-        if self.rope_scaling_cfg is not None:
-            return self.rope_scaling_cfg.model_dump()
-        return None
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -197,7 +137,7 @@ class TransformerConfig(XTunerBaseModelConfig):
         return self.attention.head_dim
 
     @computed_field
-    def layers_type(self) -> list[Literal["full_attention", "sliding_attention", "linear_attention"]]:
+    def layers_type(self) -> list[Literal["full_attention", "sliding_attention"]]:
         if not self.use_sliding_window:
             return ["full_attention"] * self.num_hidden_layers
         else:
@@ -208,33 +148,54 @@ class TransformerConfig(XTunerBaseModelConfig):
                 for i in range(self.num_hidden_layers)
             ]
 
+    def build(self) -> "BaseModel":
+        raise NotImplementedError
 
-class ModelOutputs(PydanticBaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
-    hidden_states: list[torch.Tensor] | None = None
-    logits: torch.Tensor | None = None
-    loss: torch.Tensor | None = None  # TODO: `forward_only` mode for RL
-    extra_info: ModelForwardExtraLogInfo | dict | None = None  # TODO: `forward_only` mode for RL
+    @classmethod
+    def from_hf(cls, hf_path: str | Path) -> Self:
+        """Build a `TransformerConfig` from a pre-trained HuggingFace model.
 
-    def free_nongrad_feature(self):
-        """Release large intermediate tensors not needed for backward or
-        logging.
+        This method creates a configuration object based on a `PretrainedConfig` loaded from the specified HuggingFace model path.
+        If you want to use this method, you must implement it in a subclass to correctly extract and map configuration parameters.
 
-        This method is called immediately after forward() in the micro-batch loop.
-        It releases large tensors (logits, hidden_states) while keeping:
-        - loss: needed for backward pass
-        - extra_info: lightweight logging info needed by post_micro_batch_forward()
+        Note:
+            The `hf_config` field needs to be set to the `PretrainedConfig` object loaded from `hf_path`,
+            otherwise it cannot be saved in HuggingFace format.
+
+        Args:
+            hf_path (str | Path): Path to the HuggingFace model.
+
+        Returns:
+            TransformerConfig: A configuration object populated with values from the pre-trained model.
+
+        Raises:
+            NotImplementedError: This method must be implemented by subclasses.
         """
-        self.hidden_states = None
-        self.logits = None
+        raise NotImplementedError
 
-    # TODO: Only for avoid BC. Should be removed later.
-    def __getitem__(self, key):
-        return getattr(self, key)
+    @property
+    def hf_config(self) -> PretrainedConfig | None:
+        """HuggingFace configuration."""
+        return None
 
-    # TODO: Only for avoid BC. Should be removed later.
-    def __contains__(self, key):
-        return key in self.model_fields_set
+    def save_hf(self, hf_path: str | Path):
+        """Save the configuration to a HuggingFace-compatible format.
+
+        Args:
+            hf_path (str | Path): Path where the configuration should be saved.
+        """
+
+        if self.hf_config is None:
+            raise NotImplementedError("The `hf_config` property must be implemented to save in HuggingFace format.")
+
+        self.hf_config.save_pretrained(hf_path)
+
+
+class ModelOutputs(TypedDict):
+    hidden_states: NotRequired[list[torch.Tensor]]
+    logits: NotRequired[torch.Tensor]
+    loss: torch.Tensor
+    extra_info: ModelForwardExtraLogInfo
 
 
 def _is_float8_available():
@@ -277,16 +238,11 @@ class BaseModel(nn.Module):
         self._hf_path: Path | None = None  # type: ignore
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
-        self._float8_handler: Float8Handler | None = None
 
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
 
-    def from_hf(
-        self, hf_path: str | Path, strict: bool = True
-    ) -> tuple[
-        Annotated[set[str], "loaded keys"], Annotated[set[str], "unloaded keys"], Annotated[set[str], "missing keys"]
-    ]:
+    def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         self._hf_path = Path(hf_path)
 
         if isinstance(hf_path, Path):
@@ -309,42 +265,10 @@ class BaseModel(nn.Module):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-    ) -> Self:
+        float8_handler: Float8Handler | None = None,
+    ) -> "BaseModel":
         """Fully shard the model parameters."""
-        self.fsdp_config = fsdp_config
-        self.fsdp_mesh = self._init_world_mesh()
-
-        if self.fsdp_config.requires_grad:
-            for name, module in self.named_modules():
-                # if "ts_model" in name:
-                #     torch.distributed.breakpoint()
-                for p_name, param in module.named_parameters(recurse=False):
-                    if param.requires_grad:
-                        param_fp32 = torch.nn.Parameter(param.to(dtype=torch.float32))
-                        setattr(module, p_name, param_fp32)
-        else:
-            for param in self.parameters():
-                param.requires_grad = False
-
-        mp_policy = MixedPrecisionPolicy(param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype)
-
-        for module in self.modules():
-            if module is self:
-                continue
-            if isinstance(module, BaseModel):
-                module.fully_shard(fsdp_config)
-
-        mp_policy = MixedPrecisionPolicy(
-            param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
-        )
-        fully_shard(
-            self,
-            mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
-        )
-        return self
+        raise NotImplementedError
 
     def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
         with profile_time_and_memory(f"[Saving HF to [{safetensors_prefix}]{hf_dir} cost]"):
@@ -410,19 +334,6 @@ class BaseModel(nn.Module):
 
         return _compile_cfg
 
-    @property
-    def float8_handler(self):
-        if (
-            self.config.float8_cfg is not None
-            and self.config.float8_cfg.enable_float8
-            and self._float8_handler is None
-        ):
-            self._float8_handler = self.config.float8_cfg.build()
-
-            if self.fsdp_mesh is not None:
-                self._float8_handler.build_reduce_mesh(self, self.fsdp_mesh)
-        return self._float8_handler
-
     @torch.no_grad()
     def init_weights(self):
         # TODO: HardCode here. The initialization method should be module specific. All module in model
@@ -430,7 +341,8 @@ class BaseModel(nn.Module):
         from xtuner.v1.utils import default_init_weights
 
         initialized_params = default_init_weights(self)
-        if missing := {self._clean_param_name(name) for name, _ in self.named_parameters()} - initialized_params:
+
+        if missing := {name for name, _ in self.named_parameters()} - initialized_params:
             raise RuntimeError(f"{missing} is not initialized")
 
     def _init_load_spec(self) -> None:
@@ -463,34 +375,10 @@ class BaseModel(nn.Module):
             return
 
         load_spec_mapping: dict[str, LoadSpec] = {}
-        hf_key_mapping_missing: set[str] = set()
 
         for name, param in self.state_dict().items():
             name = self._clean_param_name(name)
-            _hf_keys = self.to_hf_key_list(name)
-
-            if not self.config.hf_key_mapping:
-                hf_keys = _hf_keys
-            else:
-                hf_keys = []
-                for key in _hf_keys:
-                    max_matched_pattern = None
-                    max_match_len = -1
-                    for pattern in self.config.hf_key_mapping:
-                        if (matched := re.search(pattern, key)) is not None:
-                            matched_len = matched.end() - matched.start()
-
-                            if matched_len > max_match_len:
-                                max_match_len = matched_len
-                                max_matched_pattern = pattern
-
-                    if max_matched_pattern is None:
-                        hf_key_mapping_missing.add(key)
-                        hf_keys.append(key)
-                    else:
-                        repl = self.config.hf_key_mapping[max_matched_pattern]
-                        hf_keys.append(re.sub(max_matched_pattern, repl, key))
-
+            hf_keys = self.to_hf_key_list(name)
             if isinstance(param, DTensor) and (placement := get_shard_placement(param.placements)) is not None:
                 dim = placement.dim
                 _, _offset = compute_local_shape_and_global_offset(param.shape, param.device_mesh, param.placements)
@@ -569,10 +457,6 @@ class BaseModel(nn.Module):
                     )
             load_spec_mapping[name] = load_spec
 
-        if hf_key_mapping_missing:
-            logger.info("These hf keys will not be influenced by `hf_key_mapping`:")
-            logger.info(json.dumps(list(hf_key_mapping_missing), indent=2))
-
         self.load_spec_mapping = load_spec_mapping
 
     def _to_float8(
@@ -595,80 +479,6 @@ class BaseModel(nn.Module):
             gathered_tensor_list_new.extend([gathered_tensor_fp8, scale])
             name_list_new.extend([name, f"{name}_scale_inv"])
         return gathered_tensor_list_new, name_list_new
-
-    def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
-        step_consumed_tokens = torch.tensor(0, device=DEVICE)
-        step_consumed_img_tokens = torch.tensor(0.0, device=DEVICE)
-        efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
-        total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
-        img_efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
-        img_total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
-
-        for data in data_batches:
-            seq_ctx = data["seq_ctx"]
-            step_consumed_tokens += seq_ctx.mask.sum()
-            num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
-            efficient_forward_tokens += (num_tokens.long() ** 2).sum()
-            total_forward_tokens += (num_tokens.long().sum()) ** 2
-
-            if seq_ctx.num_img_tokens is not None:
-                for num_img_token in seq_ctx.num_img_tokens:  # list[list]
-                    step_consumed_img_tokens += sum(num_img_token)
-                    num_img_tokens_ = torch.tensor(num_img_token)  # list[int]
-                    img_efficient_forward_tokens += (num_img_tokens_.long() ** 2).sum()
-                    img_total_forward_tokens += (num_img_tokens_.long().sum()) ** 2
-
-        efficient_attn_ratio = efficient_forward_tokens.float() / total_forward_tokens.float()
-        img_efficient_attn_ratio = img_efficient_forward_tokens.float() / (img_total_forward_tokens.float() + 1e-8)
-
-        if len(data_batches) > 0 and seq_ctx.sequence_parallel_mesh:
-            step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
-
-        batch_info: DataBatchInfo = {
-            "step_consumed_tokens": cast(int, step_consumed_tokens.item()),
-            "step_consumed_img_tokens": cast(float, step_consumed_img_tokens.item()),
-            "efficient_attn_ratio": cast(float, efficient_attn_ratio.item()),
-            "img_efficient_attn_ratio": cast(float, img_efficient_attn_ratio.item()),
-        }
-        return batch_info
-
-    def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
-        train_engine_extra_info = ModelForwardExtraLogInfo()
-
-        local_total_loss = torch.tensor(0.0, device=DEVICE)
-        reduced_other_losses: dict[str, float] = {}
-
-        for output in batch_outputs:
-            output_copy = output.model_copy()
-            for name in output_copy.model_fields:
-                obj = getattr(output_copy, name)
-                if "loss" in name and isinstance(obj, torch.Tensor):
-                    loss_item = obj.item()
-                    local_total_loss += loss_item
-                    reduced_name = f"reduced_{name}"
-
-                    if reduced_name not in reduced_other_losses:
-                        reduced_other_losses[reduced_name] = loss_item
-                    else:
-                        reduced_other_losses[reduced_name] += loss_item
-
-            if "extra_info" in output_copy:
-                extra_info = output["extra_info"]
-                train_engine_extra_info.append(extra_info)
-
-        for name, loss in reduced_other_losses.items():
-            tensor_loss = torch.tensor(loss, device=DEVICE)
-            dist.all_reduce(tensor_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
-            reduced_other_losses[name] = tensor_loss.item()
-
-        if "reduced_loss" in reduced_other_losses:
-            reduced_other_losses["reduced_llm_loss"] = reduced_other_losses.pop("reduced_loss")
-
-        ret = BatchForwardInfo(
-            logs_info=reduced_other_losses,
-            extra_info=train_engine_extra_info,
-        )
-        return ret
 
     def _get_shard_hf_param(
         self,
@@ -953,12 +763,11 @@ class BaseModel(nn.Module):
         if buffer_tensor_list:
             yield buffer_name_list, buffer_tensor_list
 
-    # TODO: Using `xtuenr.v1.utils.misc.clean_param_name`
     def _clean_param_name(self, name: str) -> str:
-        if "_checkpoint_wrapped_module." in name:
-            name = name.replace("_checkpoint_wrapped_module.", "")
-        if "_orig_mod." in name:
-            name = name.replace("_orig_mod.", "")
+        if "._checkpoint_wrapped_module." in name:
+            name = name.replace("._checkpoint_wrapped_module.", ".")
+        if "._orig_mod." in name:
+            name = name.replace("._orig_mod.", ".")
         return name
 
     def _group_param_by_load_spec(self, load_enum: LoadEnum):
@@ -1164,6 +973,7 @@ class BaseModel(nn.Module):
                     raise RuntimeError(f"Internal Error. Parameter {name} not found in load_spec_mapping.")
 
                 if load_spec.load_enum == LoadEnum.SAME:
+                    print(f"Loading same hf param: {name}, shape: {param.shape}")
                     _missing_keys = self._load_same_hf_param(param, load_spec, checkpoint_loader)
                 elif load_spec.load_enum == LoadEnum.FUSED:
                     _missing_keys = self._load_fused_hf_param(param, load_spec, checkpoint_loader)
@@ -1261,7 +1071,6 @@ class BaseModel(nn.Module):
         #    by FSDP will only have 128/8/16 = 1 `hf-keys`
         # 3. Calculating the `offset` and `size` of FSDP param base on the ep sharded params, and fill
         #    the FSDP param with the loaded tensor.
-
         hf_keys = load_spec.hf_keys
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
 
@@ -1324,9 +1133,6 @@ class BaseModel(nn.Module):
             #     "Only support fp8 pad for MoE with ep_size == 1"
             # )
             local_tensor.zero_()  # type: ignore  # padded part must be set to 0
-            return missing_keys
-
-        if missing_keys:
             return missing_keys
 
         self.safetensors_to_params(
@@ -1628,47 +1434,3 @@ class BaseModel(nn.Module):
 
         for target, option in compile_cfg.items():
             self._compile_overwrite(target, option)
-
-    def _mark_dynamic(self, seq_ctx: SequenceContext, dim=0):
-        """`cu_seq_lens_q` and `cu_seq_lens_k` are dynamic shapes in each
-        fwd/bwd pass.
-
-        Mark them as dynamic explicitly to avoid recompilation.
-        """
-        torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_q, dim)
-        torch._dynamo.mark_dynamic(seq_ctx.cu_seq_lens_k, dim)
-
-    def _init_world_mesh(self):
-        device = DEVICE
-        world_size = dist.get_world_size()
-
-        # TODO: Support hsdp_sharding_size
-        fsdp_mesh = init_device_mesh(device, (world_size,))
-        return fsdp_mesh
-
-    def _collect_full_state_dict(self, module: nn.Module):
-        assert isinstance(module, (nn.Module, FSDPModule))
-
-        ret = {}
-        for name, param in module.state_dict().items():  # type: ignore[attr-defined]
-            if isinstance(param, DTensor):
-                param = param.full_tensor()
-            ret[name] = param
-        return ret
-
-    # NOTE: Add this overload for inferring the return type for easier type checking and using
-    @overload  # type: ignore
-    def __call__(  # type: ignore
-        self,
-        seq_ctx: SequenceContext,
-        loss_ctx: BaseLossContext | None,
-    ) -> ModelOutputs: ...
-
-    @overload  # type: ignore
-    def __call__(  # type: ignore
-        self,
-        seq_ctx: list[SequenceContext],
-        loss_ctx: list[BaseLossContext],
-    ) -> ModelOutputs: ...
-
-    __call__ = nn.Module.__call__

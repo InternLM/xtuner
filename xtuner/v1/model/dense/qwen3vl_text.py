@@ -6,7 +6,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.loss import CELossContext
 from xtuner.v1.model.base import ModelOutputs
 
-from .qwen3 import Qwen3Dense, Qwen3Dense4BConfig, Qwen3Dense8BConfig
+from .qwen3 import Qwen3Dense, Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3Dense8BMLAConfig
 
 
 class Qwen3VLTextDense(Qwen3Dense):
@@ -49,13 +49,12 @@ class Qwen3VLTextDense(Qwen3Dense):
 
         # create position embeddings to be shared across the decoder layers
         assert position_ids is not None
+        # breakpoint()
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         output: dict = {}
         if self.config.return_hidden_states:
             output["hidden_states"] = []
-
-        self._mark_dynamic(seq_ctx)
 
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds
@@ -91,5 +90,10 @@ class Qwen3VLTextDense4BConfig(Qwen3Dense4BConfig):
 
 
 class Qwen3VLTextDense8BConfig(Qwen3Dense8BConfig):
+    def build(self) -> Qwen3VLTextDense:
+        return Qwen3VLTextDense(self)
+
+
+class Qwen3VLTextDense8BMLAConfig(Qwen3Dense8BMLAConfig):
     def build(self) -> Qwen3VLTextDense:
         return Qwen3VLTextDense(self)

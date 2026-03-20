@@ -5,12 +5,23 @@ ray stop --force
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_qwen3_8B_grpo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 # qwen2.5_7B_dapo_math training: 
 # bash examples/v1/scripts/run_rl.sh  examples/v1/config/rl_qwen25_7B_dapo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
+pip install lmdeploy==0.11.1
+export AWS_ACCESS_KEY_ID=0giydv1f6acxmwwsvm54
+export AWS_SECRET_ACCESS_KEY=gi3l1nedpaurw6606p2g4pykhfom1zhkeumhldzc
+sudo apt update 
+sudo apt install -y fuse libfuse2
+sudo apt install -y fuse3
+mkdir -p /workspace/intern-multi-modal-h-delivery
+oss_mount_src=intern-multi-modal-h-delivery
+oss_mount_dst=/workspace/intern-multi-modal-h-delivery
+# /mnt/shared-storage-user/heyinan/tools/s3mount ${oss_mount_src} ${oss_mount_dst}  --endpoint-url http://ssd1.h.pjlab.org.cn:8060 --force-path-style
 
-CONFIG_PATH=$1
-INFER_BACKEND=$2
-MODEL_PATH=$3
-DATA_PATH=$4
-EVAL_DATA_PATH=${5:-""}
+CONFIG_PATH="/mnt/shared-storage-user/yanziang/xtuner/examples/v1/config/rl_qwen3_vl_8B_grpo.py"
+INFER_BACKEND="lmdeploy"
+MODEL_PATH="/mnt/shared-storage-user/yanziang/xtuner/Qwen3-VL-8B-Instruct"
+DATA_PATH="/mnt/shared-storage-user/yanziang/internvideo3_metas/annotations_rl.jsonl"
+EVAL_DATA_PATH=""
+
 ACCELERATOR=${6:-"gpu"} # "gpu" or "npu"
 ACCELERATOR=$(echo "$ACCELERATOR" | tr '[:lower:]' '[:upper:]')
 if [ $ACCELERATOR != "GPU" ] && [ $ACCELERATOR != "NPU" ]; then
@@ -20,15 +31,15 @@ fi
 if [ "$ACCELERATOR" = "NPU" ]; then
   ACCELERATOR_PER_NODE=${7:-16}
 else
-  ACCELERATOR_PER_NODE=${7:-8}
+  ACCELERATOR_PER_NODE=${7:-4}
 fi
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
 # ray 环境变量
 export MASTER_PORT=6000
-export WORLD_SIZE=${NODE_COUNT:-"1"}
-export RANK=${NODE_RANK:-"0"}
+export WORLD_SIZE=$NODE_COUNT
+export RANK=$NODE_RANK
 export RAY_MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 export RAY_RANK=${RANK:-0} # 0 代表主节点, >0 代表工作节点
 export RAY_HEAD_PORT=${RAY_HEAD_PORT:-"6379"}
@@ -66,18 +77,10 @@ current_time=$(date "+%m%d%H")
 # 取模型路径的最后一级作为model_name，取数据路径的倒数第二级作为data_name
 model_dir_name=$(basename "$MODEL_PATH")
 data_dir_name=$(basename "$(dirname "$DATA_PATH")")
-
-if [ "x$WORK_DIR" = "x" ]; then
-  DIR=$(pwd)
-  export WORK_DIR="${DIR}/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
-else
-  export WORK_DIR=$WORK_DIR
-fi
-echo "WORK_DIR: $WORK_DIR"
+export WORK_DIR="/mnt/shared-storage-user/yanziang/test_xtuner/xtuner/work_dirs/${model_dir_name}_${data_dir_name}_${infer_backend_lower}"
 if [ ! -d "$WORK_DIR" ]; then
   mkdir -p "$WORK_DIR"
 fi
-
 export LMDEPLOY_LOG_FILE="${WORK_DIR}/lmdeploy_log_${current_time}.txt"
 if [ "$ACCELERATOR" = "GPU" ]; then
     # TODO: support NPU RL Memory Monitor
@@ -93,7 +96,6 @@ elif [ "$ACCELERATOR" = "NPU" ]; then
   total_cpus=$((node_count * 256))
 fi
 
-WORK_DIR=$(realpath "$WORK_DIR")
 if [ "$RAY_RANK" -eq 0 ]; then
   rm -rf /tmp/ray_log
   export RAY_LOG_DIR="${WORK_DIR}/ray_${current_time}/"
@@ -132,11 +134,11 @@ while true; do
   fi
 done
 
-SCRIPT_NAME=$(basename "$0")
-cp "$0" "${WORK_DIR}/${SCRIPT_NAME}"
-cp "$CONFIG_PATH" "${WORK_DIR}/config.py"
-LOG_FILE="${WORK_DIR}/training_log_${current_time}.txt"
+# SCRIPT_NAME=$(basename "$0")
+# cp "$0" "${}/${SCRIPT_NAME}"
+# cp "$CONFIG_PATH" "${WORK_DWORK_DIRIR}/config.py"
+LOG_FILE="/mnt/shared-storage-user/yanziang/test_xtuner/xtuner/training_log_${current_time}.txt"
 
-python xtuner/v1/train/cli/rl.py \
+python /mnt/shared-storage-user/yanziang/test_xtuner/105xtuner/xtuner/xtuner/v1/train/cli/rl.py \
     --config $CONFIG_PATH \
-    2>&1 | tee -a "${WORK_DIR}/training_log_${current_time}.txt"
+    2>&1 | tee -a "/mnt/shared-storage-user/yanziang/test_xtuner/xtuner/training_log_${current_time}.txt"

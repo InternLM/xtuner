@@ -368,13 +368,11 @@ class RolloutController:
         """
         session_id = session_id if session_id else uuid4().int
         worker = await self.router.get_worker(session_id)
-        # update sample params and extra params (use copy to avoid modifying global state)
-        current_sample_params = {**self.sample_params, **(sample_params.dict() if sample_params else {})}
-        current_extra_params = {**self.extra_params, **(extra_params if extra_params else {})}
+        # update sample params and extra params
+        self.sample_params.update(sample_params.dict() if sample_params else {})
+        self.extra_params.update(extra_params if extra_params else {})
         if self.print_params_flag:
-            self.logger.info(
-                f"Rollout with sample params: {current_sample_params}, extra params: {current_extra_params}"
-            )
+            self.logger.info(f"Rollout with sample params: {self.sample_params}, extra params: {self.extra_params}")
             self.print_params_flag = False
         assert prompt is not None or input_ids is not None, "Either prompt or input_ids must be provided."
         active_worker_to_url_map = self._get_active_worker_to_url_map()
@@ -385,8 +383,8 @@ class RolloutController:
             input_ids=input_ids,
             tools=tools,
             tool_choice=tool_choice,
-            sample_params=current_sample_params,
-            extra_params=current_extra_params,
+            sample_params=self.sample_params,
+            extra_params=self.extra_params,
             format=format,
             extra_info=extra_info,
         )

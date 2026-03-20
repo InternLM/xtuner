@@ -1,18 +1,10 @@
-import os
 from typing import Optional, Tuple
 
 import torch
 
 
 try:
-    # flash_attn_interface renamed its v3 entrypoint in newer releases:
-    # - old: flash_attn_3_cuda
-    # - new: flash_attn_3_gpu
-    # Keep the rest of this file stable by aliasing whichever exists to `flash_attn_3_cuda`.
-    try:
-        from flash_attn_interface import flash_attn_3_gpu as flash_attn_3_cuda
-    except ImportError:
-        from flash_attn_interface import flash_attn_3_cuda as flash_attn_3_cuda
+    from flash_attn_interface import flash_attn_3_cuda
     from flash_attn_interface import maybe_contiguous as maybe_contiguous_v3
 
     @torch.library.custom_op("flash_attn::_flash_attn_varlen_forward_v3", mutates_args=(), device_types="cuda")
@@ -64,7 +56,7 @@ try:
             None,  # scheduler_metadata
             1,  # num_splits
             None,  # pack_gqa
-            int(os.environ.get("XTUNER_SM_MARGIN", 0)),  # sm_margin
+            0,  # sm_margin
         )
         return out, softmax_lse
 
@@ -135,7 +127,7 @@ try:
             window_size_right,
             softcap,
             deterministic,
-            int(os.environ.get("XTUNER_SM_MARGIN", 0)),  # sm_margin
+            0,  # sm_margin
         )
 
     @torch.library.register_fake("flash_attn::_flash_attn_varlen_backward_v3")

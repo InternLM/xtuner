@@ -125,20 +125,12 @@ class LMDeployWorker(RolloutWorker):
         else:
             payload["messages"] = prompt
 
-        if "partial_rollout_input_ids" in extra_info:
-            assert "return_token_ids" in extra_params and extra_params["return_token_ids"], (
-                "concat response_ids and input_ids is only compatible with return_token_ids=True."
-            )
-            payload["input_ids"] = extra_info["partial_rollout_input_ids"]
-            assert len(payload["input_ids"]) <= self.config.context_length, (
-                f"Total input length {len(payload['input_ids'])} exceeds context length {self.config.context_length}."
-            )
-
-        if self.enable_return_routed_experts and not extra_params.get("disable_routed_experts", False):
+        if self.enable_return_routed_experts:
             extra_params["return_routed_experts"] = True
 
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)
         payload.update(lmdeploy_sample_params)
+
         return await self._safe_post_request(url, headers, payload)
 
     def get_logprobs(self, input_ids, sampling_params):
@@ -242,17 +234,9 @@ class LMDeployWorker(RolloutWorker):
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
 
-        extra_engine_config: Dict[str, Any] = {}
+        extra_engine_config = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
-        if backend == "pytorch" and self.config.router_n_groups:
-            hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
-            hf_overrides.update(router_n_groups=self.config.router_n_groups)
-        if backend == "pytorch" and self.config.fp32_lm_head:
-            hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
-            hf_overrides.update(fp32_lm_head=self.config.fp32_lm_head)
-        if backend == "pytorch" and self.config.max_prefill_token_num:
-            extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
 
         dp_rank = 0
         if backend == "pytorch":

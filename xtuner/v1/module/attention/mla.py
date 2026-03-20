@@ -15,6 +15,7 @@ from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops import flash_attn_varlen_func
+from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from ..linear import build_linear
@@ -51,8 +52,9 @@ class MLAConfig(BaseModel):
     head_dim: Annotated[int, Parameter(group="attention")]
     dropout: Annotated[float, Parameter(group="attention")] = 0.0
     # casual: bool = True
-    qkv_bias: Annotated[bool, Parameter(group="attention")] = False
+    qkv_bias: Annotated[bool, Parameter(group="attention")] = True
     o_bias: Annotated[bool, Parameter(group="attention")] = False
+    num_key_value_heads: int | None = None
     kv_lora_rank: int
     q_lora_rank: int | None
     qk_rope_head_dim: int
@@ -187,7 +189,8 @@ class MultiLatentAttention(nn.Module):
         q_lora_rank: int | None = None,
         dropout: float = 0.0,
         # casual: bool = True,
-        qkv_bias: bool = False,
+        num_key_value_heads: int | None = None,
+        qkv_bias: bool = True,
         qk_norm: bool = False,
         o_bias: bool = False,
         rope_scaling_cfg: RopeScalingConfig | None = None,
@@ -222,7 +225,7 @@ class MultiLatentAttention(nn.Module):
             self.q_proj = build_linear(
                 self.hidden_size,
                 self.num_attention_heads * self.q_head_dim,
-                bias=False,
+                bias=True,
                 float8_cfg=self.float8_cfg,
             )
         else:
@@ -246,10 +249,10 @@ class MultiLatentAttention(nn.Module):
             bias=self.qkv_bias,
             float8_cfg=self.float8_cfg,
         )
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank)
+        # self.kv_a_layernorm = RMSNorm(self.kv_lora_rank)
         self.kv_b_proj = build_linear(
             self.kv_lora_rank,
-            self.num_attention_heads * (self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim),
+            self.num_attention_heads * (self.qk_rope_head_dim + self.v_head_dim),
             bias=False,
             float8_cfg=self.float8_cfg,
         )
@@ -296,7 +299,7 @@ class MultiLatentAttention(nn.Module):
         compressed_kv, k_pe = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
         kv = (
-            self.kv_b_proj(self.kv_a_layernorm(compressed_kv))
+            self.kv_b_proj(self.compressed_kv)
             .view(bsz, q_len, self.num_attention_heads, self.qk_nope_head_dim + self.v_head_dim)
             .transpose(1, 2)
         )
@@ -368,7 +371,7 @@ class MultiLatentAttention(nn.Module):
         )
         compressed_kv, k_pe = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
-        compressed_kv = self.kv_a_layernorm(compressed_kv)
+        # compressed_kv = self.kv_a_layernorm(compressed_kv)
         k_pe = k_pe.view(bsz, q_len, -1, self.qk_rope_head_dim)
 
         # k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
@@ -481,7 +484,7 @@ class MultiLatentAttention(nn.Module):
         k_pe = compressed_kv[..., self.kv_lora_rank :]
         compressed_kv = _compressed_kv
 
-        compressed_kv = self.kv_a_layernorm(compressed_kv).view(bsz, q_len, -1, self.kv_lora_rank)
+        compressed_kv = compressed_kv.view(bsz, q_len, -1, self.kv_lora_rank)
         k_pe = k_pe.view(bsz, q_len, -1, self.qk_rope_head_dim)
 
         # k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
@@ -576,7 +579,7 @@ class MultiLatentAttention(nn.Module):
         compressed_kv, k_pe = torch.split(compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         k_pe = k_pe.view(bsz, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
         kv = (
-            self.kv_b_proj(self.kv_a_layernorm(compressed_kv))
+            self.kv_b_proj(compressed_kv)
             .view(bsz, q_len, self.num_attention_heads, self.qk_nope_head_dim + self.v_head_dim)
             .transpose(1, 2)
         )
@@ -599,6 +602,40 @@ class MultiLatentAttention(nn.Module):
         if self.q_head_dim != self.v_head_dim:
             value_states = F.pad(value_states, [0, self.q_head_dim - self.v_head_dim])
 
+        query_states = query_states.transpose(1, 2)  # [b, n_head, seq , head_dim]
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+
+
+        if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
+            sp_size = seq_ctx.sequence_parallel_mesh.size()
+            num_kv_heads = key_states.size(1)
+            if sp_size > num_kv_heads:
+                assert sp_size % num_kv_heads == 0
+                key_states = repeat_kv(key_states, sp_size // num_kv_heads)
+                value_states = repeat_kv(value_states, sp_size // num_kv_heads)
+            
+            # print(query_states.shape, sp_size, num_kv_heads)
+            #query_states.shape:torch.Size([1, 32, 31834, 128])
+            query_states = ulysses_all_to_all(
+                query_states,
+                scatter_dim=2,
+                gather_dim=1,
+                mesh=seq_ctx.sequence_parallel_mesh,
+            )
+            key_states = ulysses_all_to_all(
+                key_states,
+                scatter_dim=2,
+                gather_dim=1,
+                mesh=seq_ctx.sequence_parallel_mesh,
+            )
+            value_states = ulysses_all_to_all(
+                value_states,
+                scatter_dim=2,
+                gather_dim=1,
+                mesh=seq_ctx.sequence_parallel_mesh,
+            )
+
         assert query_states.size(0) == 1
         assert key_states.size(0) == 1
         assert value_states.size(0) == 1
@@ -607,9 +644,9 @@ class MultiLatentAttention(nn.Module):
         softmax_lse: torch.Tensor | None = None
 
         fla_outputs = flash_attn_varlen_func(
-            query_states.transpose(1, 2).squeeze(0),
-            key_states.transpose(1, 2).squeeze(0),
-            value_states.transpose(1, 2).squeeze(0),
+            query_states.squeeze(0),
+            key_states.squeeze(0),
+            value_states.squeeze(0),
             cu_seqlens_q=seq_ctx.cu_seq_lens_q,
             cu_seqlens_k=seq_ctx.cu_seq_lens_k,
             max_seqlen_q=seq_ctx.max_length_q,
@@ -618,15 +655,24 @@ class MultiLatentAttention(nn.Module):
             softmax_scale=self.softmax_scale,
             causal=True,
             deterministic=XTUNER_DETERMINISTIC,
-            return_attn_probs=True,
         )
-
         if isinstance(fla_outputs, tuple):
             raw_output = fla_outputs[0]
             softmax_lse = fla_outputs[1].detach()
         else:  # npu fused attn doesn't support softmax_lse
             raw_output = fla_outputs
+        # print(raw_output.shape)
+        # print(raw_output.is_contiguous())
+        if seq_ctx.sequence_parallel_mesh and seq_ctx.sequence_parallel_mesh.size() > 1:
+            raw_output = ulysses_all_to_all(
+                raw_output,
+                scatter_dim=0,
+                gather_dim=1,
+                mesh=seq_ctx.sequence_parallel_mesh,
+            )
 
+
+        # print(raw_output.shape) # 15942*32*512 # torch.Size([63768, 32, 256]
         if self.q_head_dim != self.v_head_dim:
             raw_output = raw_output[:, :, : self.v_head_dim]
 

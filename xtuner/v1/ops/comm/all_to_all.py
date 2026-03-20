@@ -37,7 +37,7 @@ def ulysses_all_to_all(
     # a bug "ValueError: Tensors must be contiguous" in torch compile mode.
     # (a bug of torch compile)
     input = input.movedim(scatter_dim, 0)
-
+    input = input.contiguous()
     output = _all_to_all_single_autograd(
         input,
         group=mesh.get_group(),

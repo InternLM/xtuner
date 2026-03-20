@@ -51,10 +51,9 @@ class InternS1VisionConfig(XTunerBaseModelConfig):
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
-        if self.attn_impl == "flash_attention" and get_device() == "cuda":
-            if not (is_installed("flash-attn") or is_installed("flash-attn-3")):
-                logger.warning("flash-attn is not installed, using `flex_attention` instead.")
-                self.attn_impl = "flex_attention"
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
+            logger.warning("flash-attn is not installed, using `flex_attention` instead.")
+            self.attn_impl = "flex_attention"
         return self
 
     def build(self):
@@ -139,14 +138,10 @@ class InternS1Config(InternS1BaseConfig):
         norm_type="rms_norm",
     )
     projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig(vision_hidden_size=3200, text_hidden_size=4096)
-    text_config: MoEConfig = Qwen3MoE235BA22Config(
-        vocab_size=153216, hf_key_mapping={r"^model.": "model.language_model."}
-    )
+    text_config: MoEConfig = Qwen3MoE235BA22Config(vocab_size=153216)
 
 
 class InternS1MiniConfig(InternS1BaseConfig):
     vision_config: InternS1VisionConfig = InternS1VisionConfig()
     projector_config: InternS1ProjectorConfig = InternS1ProjectorConfig()
-    text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig(
-        vocab_size=153216, hf_key_mapping={r"^model.": "model.language_model."}
-    )
+    text_config: Qwen3Dense8BConfig = Qwen3Dense8BConfig(vocab_size=153216)

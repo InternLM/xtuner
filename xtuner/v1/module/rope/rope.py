@@ -1,4 +1,4 @@
-from typing import Callable, Literal, Optional, Protocol, cast
+from typing import Literal, Protocol, cast
 
 import torch
 import torch.nn as nn
@@ -20,13 +20,13 @@ class RopeScalingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["default", "linear", "dynamic", "yarn", "longrope", "llama3", "qwen3_vl"] = "default"
 
-    max_position_embeddings: int | None = None
-    original_max_position_embeddings: int | None = None
+    max_position_embeddings: int | None = None  # TODO: 无用参数考虑删除
+    original_max_position_embeddings: int | None = None  # TODO: 无用参数考虑删除
 
     # For Qwen3VL
     mrope_section: list[int] | None = None  # e.g. [24, 20, 20]
-    partial_rotary_factor: float = 1.0
 
+    # For inference
     factor: float | None = None
     beta_fast: float | None = None
     beta_slow: float | None = None
@@ -36,7 +36,6 @@ class RopeScalingConfig(BaseModel):
     high_freq_factor: float | None = None
     mscale: float | None = None
     mscale_all_dim: float | None = None
-    truncate: bool = False
 
     # For FoPE
     fope_init_factor: float | None = None
@@ -61,26 +60,6 @@ class RotaryEmbeddingProtocol(Protocol):
     def to(self, device: torch.device) -> Self: ...
 
 
-def compute_default_rope_parameters(
-    config,
-    device: Optional["torch.device"] = None,
-) -> tuple["torch.Tensor", float]:
-    base = config.rope_theta
-    if config.rope_scaling_cfg is not None:
-        rope_scaling_cfg: RopeScalingConfig = config.rope_scaling_cfg
-        partial_rotary_factor = getattr(rope_scaling_cfg, "partial_rotary_factor", 1.0)
-    else:
-        partial_rotary_factor = 1.0
-    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
-    dim = int(head_dim * partial_rotary_factor)
-
-    attention_factor = 1.0  # Unused in this type of RoPE
-
-    # Compute the inverse frequencies
-    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim))
-    return inv_freq, attention_factor
-
-
 class RotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor
 
@@ -94,19 +73,7 @@ class RotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
         self.rope_type = "default"
         self.config = config
-
-        rope_scaling_cfg = config.rope_scaling_cfg
-        if rope_scaling_cfg is not None:
-            self.rope_type = rope_scaling_cfg.type
-        assert self.rope_type in ["default", "linear", "yarn", "llama3"], (
-            f"Unsupported rope_type: {self.rope_type}. Supported types are: 'default', 'linear', 'yarn', 'llama3'."
-        )
-
-        # The implementation of RoPE has been refactored in Transformers V5, and
-        # the following approach is used for compatibility.
-        self.rope_init_fn: Callable = compute_default_rope_parameters
-        if self.rope_type != "default":
-            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
         inv_freq: torch.Tensor
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
@@ -308,12 +275,7 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
         self.rope_type = "default"
         self.config = config
-
-        # The implementation of RoPE has been refactored in Transformers V5, and
-        # the following approach is used for compatibility.
-        self.rope_init_fn: Callable = compute_default_rope_parameters
-        if self.rope_type != "default":
-            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
         inv_freq: torch.Tensor
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)

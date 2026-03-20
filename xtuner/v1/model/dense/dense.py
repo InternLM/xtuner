@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from pathlib import Path
-from typing import Self, cast
+from typing import cast
 
 import torch
 import torch.distributed as dist
@@ -29,15 +29,7 @@ from xtuner.v1.model.base import (
     TransformerConfig,
 )
 from xtuner.v1.model.utils import checkpoint_wrapper
-from xtuner.v1.module import (
-    GatedDeltaNetConfig,
-    LMHead,
-    MHAConfig,
-    MLAConfig,
-    RMSNorm,
-    RotaryEmbeddingProtocol,
-    get_rope_embedding,
-)
+from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbeddingProtocol, get_rope_embedding
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
     get_device,
@@ -61,7 +53,7 @@ class Dense(BaseModel):
     def __init__(self, config: TransformerConfig):
         super().__init__(config)
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
         self.layers = self.build_layers(config)
         self.rotary_emb = self.build_rotary_embedding(config)
@@ -97,8 +89,6 @@ class Dense(BaseModel):
         if self.config.return_hidden_states:
             output["hidden_states"] = []
 
-        self._mark_dynamic(seq_ctx)
-
         for idx, decoder_layer in self.layers.items():
             hidden_states = decoder_layer(
                 hidden_states,
@@ -115,7 +105,7 @@ class Dense(BaseModel):
         output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info
-        return ModelOutputs(**output)
+        return ModelOutputs(**output)  # type: ignore[typeddict-item]
 
     def build_embeddings(self, config: TransformerConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
@@ -124,27 +114,14 @@ class Dense(BaseModel):
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，
         # 这样可以保证部分 layer 被切掉后，idx 保持不变
         layers = nn.ModuleDict()
-        attention_config: GatedDeltaNetConfig | MLAConfig | MHAConfig | None = None
         for layer_idx in range(config.num_hidden_layers):
-            if config.layers_type[layer_idx] in ["full_attention", "sliding_attention"]:
-                attention_config = config.attention
-            elif config.layers_type[layer_idx] == "linear_attention":
-                attention_config = config.linear_attention
-                assert attention_config is not None, (
-                    "linear_attention config must be provided for linear_attention layer"
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported layer type {config.layers_type[layer_idx]} at layer {layer_idx}. Only 'full_attention', 'sliding_attention' and 'linear_attention' are supported."
-                )
-
             layers[str(layer_idx)] = DenseDecoderLayer(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 mlp_bias=config.mlp_bias,
                 hidden_act=config.hidden_act,
                 rms_norm_eps=config.rms_norm_eps,
-                attention_config=attention_config,
+                attention_config=config.attention,
                 generate_config=config.generate_config,
                 rope_scaling_cfg=config.rope_scaling_cfg,
                 float8_cfg=config.float8_cfg,
@@ -172,6 +149,11 @@ class Dense(BaseModel):
 
     __call__ = nn.Module.__call__
 
+    def _apply(self, fn, recurse: bool = True):
+        super()._apply(fn)
+        self.rotary_emb.to(torch.float32)  # type: ignore
+        return self
+
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
@@ -185,14 +167,17 @@ class Dense(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-    ) -> Self:
+        float8_handler: Float8Handler | None = None,
+    ) -> "Dense":
         self.fsdp_config = fsdp_config
         self._init_device_mesh(fsdp_config)
 
-        if self.config.float8_cfg is not None:
+        if float8_handler is not None:
             # As we modify the shape of the model's parameters,
             # we need to reinitialize the load spec mapping.
-            Float8Handler.pad_for_fsdp(self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec)
+            float8_handler.pad_for_fsdp(
+                self, cast(DeviceMesh, self.fsdp_mesh), callback_after_pad=self._init_load_spec
+            )
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         if not checkpoint_preserve_rng_state and self.config.attention.dropout > 0.0:
@@ -219,10 +204,6 @@ class Dense(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        if self.fsdp_config.fp32_lm_head:
-            lm_head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
-        else:
-            lm_head_mp_policy = mp_policy
         num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
 
         generator = torch.Generator()
@@ -259,7 +240,7 @@ class Dense(BaseModel):
         fully_shard(
             self.embed_tokens,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=lm_head_mp_policy if self.config.tie_word_embeddings else mp_policy,
+            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
@@ -275,7 +256,7 @@ class Dense(BaseModel):
         fully_shard(
             self.lm_head,
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=lm_head_mp_policy,
+            mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )

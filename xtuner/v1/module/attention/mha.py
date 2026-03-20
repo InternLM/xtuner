@@ -38,18 +38,15 @@ class MHAConfig(BaseModel):
     qkv_bias: Annotated[bool, Parameter(group="attention")] = False
     qk_norm: bool = False
     rms_norm_eps: float = 1e-06
-    rms_norm_type: Literal["default", "zero_centered"] = "default"
     o_bias: Annotated[bool, Parameter(group="attention")] = False
     sliding_window: Annotated[int | None, Parameter(group="attention")] = -1
     with_sink: Annotated[bool, Parameter(group="attention")] = False
-    with_gate: Annotated[bool, Parameter(group="attention")] = False
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
 
     def model_post_init(self, _):
-        if self.attn_impl == "flash_attention" and get_device() == "cuda":
-            if not (is_installed("flash-attn") or is_installed("flash-attn-3")):
-                logger.warning("flash-attn is not installed, using `flex_attention` instead.")
-                self.attn_impl = "flex_attention"
+        if not is_installed("flash-attn") and self.attn_impl == "flash_attention" and get_device() == "cuda":
+            logger.warning("flash-attn is not installed, using `flex_attention` instead.")
+            self.attn_impl = "flex_attention"
         return self
 
     def build(
@@ -124,10 +121,8 @@ class MultiHeadAttention(nn.Module):
         qkv_bias: bool = False,
         qk_norm: bool = False,
         rms_norm_eps: float = 1e-6,
-        rms_norm_type: Literal["default", "zero_centered"] = "default",
         o_bias: bool = False,
         with_sink: bool = False,
-        with_gate: bool = False,
         attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention",
         rope_scaling_cfg: RopeScalingConfig | None = None,
         float8_cfg: Float8Config | None = None,
@@ -149,18 +144,14 @@ class MultiHeadAttention(nn.Module):
         self.qkv_bias = qkv_bias
         self.qk_norm = qk_norm
         self.rms_norm_eps = rms_norm_eps
-        self.rms_norm_type = rms_norm_type
         self.o_bias = o_bias
         self.generate_config = generate_config
         self.float8_cfg = float8_cfg
         self.layer_idx = layer_idx
-        self.with_gate = with_gate
 
         self.q_proj = build_linear(
             self.hidden_size,
-            self.num_attention_heads * self.head_dim
-            if not with_gate
-            else self.num_attention_heads * self.head_dim * 2,
+            self.num_attention_heads * self.head_dim,
             bias=self.qkv_bias,
             float8_cfg=self.float8_cfg,
         )
@@ -184,8 +175,8 @@ class MultiHeadAttention(nn.Module):
         )
 
         if self.qk_norm:
-            self.q_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps, type=self.rms_norm_type)
-            self.k_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps, type=self.rms_norm_type)
+            self.q_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
+            self.k_norm = RMSNorm(self.head_dim, eps=self.rms_norm_eps)
 
         self.with_sink = with_sink
         if self.with_sink:
@@ -196,10 +187,7 @@ class MultiHeadAttention(nn.Module):
             self.window_size = (sliding_window, sliding_window)
 
         fope_sep_head = rope_scaling_cfg.fope_sep_head if rope_scaling_cfg is not None else None
-        enable_partial_rotary = (
-            rope_scaling_cfg.partial_rotary_factor != 1.0 if rope_scaling_cfg is not None else False
-        )
-        self.apply_rotary_emb = get_apply_rotary_emb(fope_sep_head, enable_partial_rotary=enable_partial_rotary)  # type: ignore
+        self.apply_rotary_emb = get_apply_rotary_emb(fope_sep_head)  # type: ignore
 
         self.attn_impl_func: Callable[..., AttnOpOutputs] = attn_impl_mapping[attn_impl]  # type: ignore[assignment]
 
@@ -339,14 +327,7 @@ class MultiHeadAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        if self.with_gate:
-            query_states, gate = torch.chunk(
-                self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1
-            )
-            gate = gate.reshape(*input_shape, -1)
-        else:
-            gate = None
-            query_states = self.q_proj(hidden_states).view(hidden_shape)  # [b, seq,  n_head, head_dim]
+        query_states = self.q_proj(hidden_states).view(hidden_shape)  # [b, seq,  n_head, head_dim]
         key_states = self.k_proj(hidden_states).view(hidden_shape)
         value_states = self.v_proj(hidden_states).view(hidden_shape)
 
@@ -427,10 +408,6 @@ class MultiHeadAttention(nn.Module):
             )
 
         raw_output = raw_output.reshape(*input_shape, -1).contiguous()
-        if self.with_gate:
-            assert gate is not None
-            raw_output = raw_output * torch.sigmoid(gate)
-
         projected_output = self.o_proj(raw_output)
         attn_outputs: AttnOutputs = {
             "projected_output": projected_output,

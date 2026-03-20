@@ -1,4 +1,4 @@
-from typing_extensions import override, Self
+from typing_extensions import override
 from torch import nn
 import torch
 
@@ -52,8 +52,10 @@ class InternS1MultiModalProjector(BaseModel):
     def fully_shard(
         self,
         fsdp_config: FSDPConfig,
-    ) -> Self:
+        float8_handler: Float8Handler | None = None,
+    ):  
         self.fsdp_config = fsdp_config
+        assert float8_handler is None
         mp_policy = MixedPrecisionPolicy(
             param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
@@ -78,3 +80,12 @@ class InternS1MultiModalProjector(BaseModel):
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
         return self
+
+    @torch.no_grad()
+    def init_weights(self):
+        init_params(self.layer_norm.weight, nn.init.ones_)
+        init_params(self.layer_norm.bias, nn.init.zeros_)
+        init_params(self.linear_1.bias, nn.init.zeros_)
+        init_params(self.linear_1.weight, partial(nn.init.normal_, mean=0.0, std=0.02))
+        init_params(self.linear_2.bias, nn.init.zeros_)
+        init_params(self.linear_2.weight, partial(nn.init.normal_, mean=0.0, std=0.02))

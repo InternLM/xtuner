@@ -50,7 +50,7 @@ class SGLangWorker(RolloutWorker):
         payload = {"model": self.model_name}
         sglang_sample_params = self._transform_sample_params(sample_params)
         sglang_extra_params = self._transform_extra_params(extra_params)
-        if self.enable_return_routed_experts and not extra_params.get("disable_routed_experts", False):
+        if self.enable_return_routed_experts:
             sglang_extra_params["return_routed_experts"] = True
 
         payload.update(sglang_extra_params)
