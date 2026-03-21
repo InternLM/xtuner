@@ -11,6 +11,7 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
+    OffloadPolicy,
     fully_shard,
 )
 from torch.distributed.tensor import DTensor
@@ -247,7 +248,7 @@ class Dense(BaseModel):
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
                 reshard_after_forward=self.fsdp_config.reshard_after_forward,
-                offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+                offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
             )
 
         for layer_cur, layer_next in zip(
@@ -261,7 +262,7 @@ class Dense(BaseModel):
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=lm_head_mp_policy if self.config.tie_word_embeddings else mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
         )
 
         fully_shard(
@@ -269,7 +270,7 @@ class Dense(BaseModel):
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
         )
 
         fully_shard(
@@ -277,7 +278,7 @@ class Dense(BaseModel):
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=lm_head_mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
         )
 
         fully_shard(
@@ -285,7 +286,7 @@ class Dense(BaseModel):
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else OffloadPolicy(),
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
 
