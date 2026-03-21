@@ -18,10 +18,6 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
 
 
-def fake_collator(instances: list[DataItem], **kwargs):
-    return instances
-
-
 def build_text_ctx_labels(
     instance: Sequence[DataItem] | DataItem,
     pack_max_length: int,
