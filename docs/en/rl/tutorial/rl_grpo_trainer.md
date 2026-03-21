@@ -200,7 +200,7 @@ evaluator_cfg = EvaluatorConfig(
 In addition to the above generation and training configurations, we need to configure system required resources (such as GPU, CPU, memory), etc. Here we use the default resource configuration, example as follows.
 
 ```{code-block} python
-from xtuner.v1.ray.accelerator import AcceleratorResourcesConfig
+from xtuner.v1.ray.base import AcceleratorResourcesConfig
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
     num_accelerators_per_worker=1,
