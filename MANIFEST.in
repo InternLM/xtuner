@@ -1,2 +1,0 @@
-recursive-include xtuner/configs *.py *.yml *.json
-recursive-include xtuner/tools *.sh *.py

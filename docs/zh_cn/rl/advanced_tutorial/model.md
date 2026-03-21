@@ -1,3 +1,0 @@
-# 模型
-
-Coming soon...

@@ -1,2 +1,0 @@
-deepspeed==0.16.2
-mpi4py-mpich

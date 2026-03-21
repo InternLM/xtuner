@@ -1,3 +1,0 @@
-# Performance Analysis
-
-Coming soon...
