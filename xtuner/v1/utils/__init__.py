@@ -17,6 +17,7 @@ from .misc import (
     get_padding_length,
     is_hf_model_path,
     record_git_info,
+    set_deterministic,
 )
 from .pad import pad_to_max_length, pad_to_multiple_of
 from .profile import profile_time, profile_time_and_memory, timer, timer_logger
@@ -62,4 +63,5 @@ __all__ = [
     "clean_param_name",
     "CacheDict",
     "CacheObj",
+    "set_deterministic",
 ]
