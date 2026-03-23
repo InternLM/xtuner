@@ -3,7 +3,7 @@ import json
 import re
 from typing import cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto import RolloutState, SampleParams
 from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
@@ -28,6 +28,8 @@ class GSM8KToolAgentLoopConfig(AgentLoopConfig):
 
 
 class FunctionCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     arguments: dict
 
