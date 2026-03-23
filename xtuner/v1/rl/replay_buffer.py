@@ -7,7 +7,7 @@ from typing import Any, List, TypeAlias, Union
 
 import pandas as pd
 import torch
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status
 from xtuner.v1.rl.utils import (
@@ -410,11 +410,15 @@ class ReplayBuffer:
 
 
 class SyncReplayBufferConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     def build(self):
         return ReplayBuffer(policy=FIFOReplayPolicy(), storage_backend=NaiveStorage())
 
 
 class AsyncReplayBufferConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     def build(self):
         policy = StalenessReplayPolicy()
         return ReplayBuffer(policy=policy, storage_backend=NaiveStorage())
