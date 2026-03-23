@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import base64
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 import torch
-from pydantic import BaseModel, ConfigDict, field_serializer
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 from typing_extensions import NotRequired, TypedDict
 
 # ====================================
@@ -76,7 +77,7 @@ class RolloutState(CacheObj, BaseModel):
     reward_model: dict[str, Any] | None = None
     num_tokens: int | None = None  # 用于 cache 管理
 
-    # --- InferEngine 输入 ---
+    # --- InferEngine 输入 ---å
     session_uid: int | None = None
     tokens: list[int] | None = None  # 每一次推理引擎的实际输入
     tools: list | None = None
@@ -104,20 +105,44 @@ class RolloutState(CacheObj, BaseModel):
     extra_fields: dict[str, Any] = {}
 
     @field_serializer("routed_experts")
-    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | None:
-        """Dump 时跳过 ray.ObjectRef，序列化为 None，避免 PydanticSerializationError。"""
+    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | str | None:
+        """序列化 routed_experts 字段：
+
+        - None -> None
+        - list[int] -> list[int]（原样保留）
+        - RayObjectRef -> base64 编码的字符串（通过 ray.cloudpickle 序列化）
+        """
+        import ray
+
         if value is None:
             return None
-        try:
-            import ray
+        if isinstance(value, ray.ObjectRef):
+            data = ray.cloudpickle.dumps(value)
+            return base64.b64encode(data).decode("utf-8")
+        return value
 
-            if isinstance(value, ray.ObjectRef):
-                return None
-        except ImportError:
-            pass
-        if type(value).__name__ == "ObjectRef" and "ray" in getattr(type(value), "__module__", ""):
+    @field_validator("routed_experts", mode="before")
+    @classmethod
+    def _deserialize_routed_experts(cls, value: Any) -> list[int] | RayObjectRef | None:
+        """反序列化 routed_experts 字段：
+
+        - None -> None
+        - list[int] -> list[int]（原样保留）
+        - str（base64 编码）-> RayObjectRef（通过 ray.cloudpickle 反序列化）
+        - RayObjectRef -> RayObjectRef（原样保留）
+        """
+        import ray
+
+        if value is None:
             return None
-        return value  # list[int]
+        if isinstance(value, ray.ObjectRef):
+            return value
+        if isinstance(value, str):
+            data = base64.b64decode(value)
+            return ray.cloudpickle.loads(data)
+        if isinstance(value, list):
+            return value
+        return value
 
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:

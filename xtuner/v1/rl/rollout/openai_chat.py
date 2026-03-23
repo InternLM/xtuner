@@ -1,29 +1,21 @@
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
-from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.utils import get_logger
+
+from .utils import ensure_rollout_request_id
 
 
+logger = get_logger(__name__)
 GenerateHandler = Callable[[RolloutState], Awaitable[RolloutState]]
 
 
-def ensure_rollout_request_id(rollout_state: RolloutState) -> str:
-    request_id = str(rollout_state.extra_fields.get("request_id", ""))
-    if request_id:
-        return request_id
-
-    request_id = uuid4().hex
-    rollout_state.extra_fields["request_id"] = request_id
-    return request_id
-
-
 class ChatCompletionRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     messages: list[dict[str, Any]]
     model: str | None = None
     tools: list[dict[str, Any]] | None = None
@@ -39,31 +31,23 @@ class ChatCompletionRequest(BaseModel):
 
 
 class ChatCompletionMessage(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     role: str = "assistant"
     content: str | None = None
 
 
 class ChatCompletionChoice(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     index: int
     message: ChatCompletionMessage
     finish_reason: str | None = None
 
 
 class ChatCompletionUsage(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
 
 
 class ChatCompletionResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     id: str
     object: str = "chat.completion"
     created: int
@@ -73,7 +57,13 @@ class ChatCompletionResponse(BaseModel):
 
 
 class OpenAIChatAdapterError(RuntimeError):
-    def __init__(self, message: str, error_type: str, code: str, request_id: str | None = None):
+    def __init__(
+        self,
+        message: str,
+        error_type: str,
+        code: str,
+        request_id: str | None = None,
+    ):
         super().__init__(message)
         self.message = message
         self.error_type = error_type
@@ -85,12 +75,15 @@ class OpenAIChatAdapter:
     def __init__(
         self,
         generate_handler: GenerateHandler,
+        tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str,
         default_model_name: str | None = None,
-        tokenizer: Any | None = None,
     ):
         self._generate_handler = generate_handler
         self._default_model_name = default_model_name
-        self._tokenizer = tokenizer
+        if isinstance(tokenizer, str):
+            self._tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+        else:
+            self._tokenizer = tokenizer
 
     async def chat(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         if request.stream:
@@ -99,13 +92,10 @@ class OpenAIChatAdapter:
                 "invalid_request_error",
                 "stream_not_supported",
             )
-
         rollout_state = self._build_rollout_state(request)
-        request_id = self._ensure_request_id(rollout_state)
+        request_id = ensure_rollout_request_id(rollout_state)
         response = await self._generate_handler(rollout_state)
-
-        if not response.extra_fields.get("request_id"):
-            response.extra_fields["request_id"] = request_id
+        response.extra_fields.setdefault("request_id", request_id)
 
         if response.status == Status.FAILED:
             raise OpenAIChatAdapterError(
@@ -130,7 +120,6 @@ class OpenAIChatAdapter:
             tool_choice=request.tool_choice,
             sample_params=self._build_sample_params(request),
         )
-        self._ensure_request_id(rollout_state)
         return rollout_state
 
     def _build_sample_params(self, request: ChatCompletionRequest) -> SampleParams:
@@ -167,7 +156,7 @@ class OpenAIChatAdapter:
         rollout_state: RolloutState,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
-        request_id = self._ensure_request_id(rollout_state)
+        request_id = ensure_rollout_request_id(rollout_state)
         response_id = f"chatcmpl-{request_id}"
         model_name = request.model or self._default_model_name or "rollout-controller"
         prompt_tokens = self._count_prompt_tokens(rollout_state)
@@ -189,14 +178,6 @@ class OpenAIChatAdapter:
             choices=[choice],
             usage=usage,
         )
-
-    @staticmethod
-    def ensure_request_id(rollout_state: RolloutState) -> str:
-        return ensure_rollout_request_id(rollout_state)
-
-    @staticmethod
-    def _ensure_request_id(rollout_state: RolloutState) -> str:
-        return ensure_rollout_request_id(rollout_state)
 
     def _count_prompt_tokens(self, rollout_state: RolloutState) -> int:
         if rollout_state.tokens is not None:
@@ -222,13 +203,13 @@ class OpenAIChatAdapter:
 
 def bind_openai_chat_interface(
     rollout_controller: Any,
+    tokenizer: str | PreTrainedTokenizer | PreTrainedTokenizerFast,
     default_model_name: str | None = None,
 ) -> Any:
-    if getattr(rollout_controller, "openai_chat_adapter", None) is None:
-        rollout_controller.openai_chat_adapter = OpenAIChatAdapter(
-            rollout_controller.generate,
-            default_model_name=default_model_name,
-            tokenizer=getattr(rollout_controller, "tokenizer", None),
-        )
+    rollout_controller.openai_chat_adapter = OpenAIChatAdapter(
+        rollout_controller.generate,
+        tokenizer=tokenizer,
+        default_model_name=default_model_name,
+    )
     rollout_controller.chat = rollout_controller.openai_chat_adapter.chat
     return rollout_controller

@@ -1,8 +1,9 @@
 import asyncio
 import os
+import socket
 import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TypeAlias, TypedDict
+from typing import Any, Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
 
 import ray
@@ -14,11 +15,10 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import get_logger
 
-
-from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
+from .anthropic_chat import bind_anthropic_chat_interface
 from .api_server import create_rollout_api_app
-from .claude_chat import bind_claude_chat_interface
 from .openai_chat import bind_openai_chat_interface
+from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
 from .worker import RolloutConfig, RolloutWorker
 
 
@@ -57,6 +57,8 @@ class RolloutWorkerMetadata(TypedDict):
     # 键：服务器 URL 字符串
     # 值：布尔值，True 表示该 worker 处于活跃状态，False 表示已失效或停用
     worker_server_urls_status: Dict[str, bool]
+
+    # Rollout Controller API 服务器的 URL 地址，
     api_server_url: str
 
 
@@ -90,8 +92,14 @@ class RolloutController:
         self.engine_rank_mesh_array, self.worker_server_urls_map, self.rank2info = self._init_workers(placement_group)
         self.num_active_workers = len(self.rank2info)
         self.worker_info_lock = threading.RLock()
-        bind_openai_chat_interface(self, default_model_name=self.config.model_name)
-        bind_claude_chat_interface(self, default_model_name=self.config.model_name)
+        bind_openai_chat_interface(
+            self, default_model_name=self.config.model_name, tokenizer=self.config.tokenizer_path
+        )
+        bind_anthropic_chat_interface(
+            self,
+            default_model_name=self.config.model_name,
+            tokenizer=self.config.tokenizer_path,
+        )
         self._start_api_server()
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
@@ -124,9 +132,9 @@ class RolloutController:
         return rollout_metadata
 
     def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
-        self.check_health()
-        active_workers = sum(1 for info in self.workers_info.values() if info.is_active)
-        total_workers = len(self.workers_info)
+        with self.worker_info_lock:
+            active_workers = sum(1 for info in self.rank2info.values() if info.is_active)
+            total_workers = len(self.rank2info)
         return active_workers > 0, {
             "active_workers": active_workers,
             "total_workers": total_workers,
@@ -342,6 +350,12 @@ class RolloutController:
             active_worker_server_urls = list(worker_server_urls_map.values())[::active_worker_interval]
             return active_rollout_workers[::active_worker_interval], dict(zip(active_rank, active_worker_server_urls))
 
+    @staticmethod
+    def _is_port_in_use(host: str, port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            return sock.connect_ex((host, port)) == 0
+
     def _start_api_server(self, host: str | None = None, port: int | None = None):
         """Starts the API server to expose the rollout functionality."""
         host = host or self.config.api_host
@@ -355,7 +369,7 @@ class RolloutController:
         if original_port != port:
             self.logger.info(f"API server will use port {port} instead of the originally configured {original_port}.")
 
-        app = create_rollout_api_app(self, self.logger, self.config.api_key)
+        app = create_rollout_api_app(self, self.logger)
 
         config = uvicorn.Config(app, host=host, port=port)
         server = uvicorn.Server(config)

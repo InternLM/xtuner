@@ -3,37 +3,40 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
+from xtuner.v1.utils import get_logger
 
-from .openai_chat import ensure_rollout_request_id
+from .utils import ensure_rollout_request_id
 
 
+logger = get_logger(__name__)
 GenerateHandler = Callable[[RolloutState], Awaitable[RolloutState]]
 
 
-class ClaudeTextContent(BaseModel):
+class AnthropicTextContent(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     type: str = "text"
     text: str
 
 
-ClaudeContentBlock = ClaudeTextContent
+AnthropicContentBlock = AnthropicTextContent
 
 
-class ClaudeMessage(BaseModel):
+class AnthropicMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     role: Literal["user", "assistant"]
-    content: str | list[ClaudeContentBlock]
+    content: str | list[AnthropicContentBlock]
 
 
-class ClaudeMessagesRequest(BaseModel):
+class AnthropicMessagesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     model: str | None = None
-    system: str | list[ClaudeTextContent] | None = None
-    messages: list[ClaudeMessage]
+    system: str | list[AnthropicTextContent] | None = None
+    messages: list[AnthropicMessage]
     max_tokens: int
     stream: bool = False
     temperature: float | None = None
@@ -41,27 +44,27 @@ class ClaudeMessagesRequest(BaseModel):
     stop_sequences: list[str] | None = None
 
 
-class ClaudeUsage(BaseModel):
+class AnthropicUsage(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     input_tokens: int
     output_tokens: int
 
 
-class ClaudeMessagesResponse(BaseModel):
+class AnthropicMessagesResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
-    content: list[ClaudeTextContent]
+    content: list[AnthropicTextContent]
     model: str
     stop_reason: str | None = None
     stop_sequence: str | None = None
-    usage: ClaudeUsage
+    usage: AnthropicUsage
 
 
-class ClaudeChatAdapterError(RuntimeError):
+class AnthropicChatAdapterError(RuntimeError):
     def __init__(self, message: str, error_type: str, request_id: str | None = None):
         super().__init__(message)
         self.message = message
@@ -69,33 +72,36 @@ class ClaudeChatAdapterError(RuntimeError):
         self.request_id = request_id
 
 
-class ClaudeChatAdapter:
+class AnthropicChatAdapter:
     def __init__(
         self,
         generate_handler: GenerateHandler,
+        tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str,
         default_model_name: str | None = None,
-        tokenizer: Any | None = None,
     ):
         self._generate_handler = generate_handler
         self._default_model_name = default_model_name
-        self._tokenizer = tokenizer
+        if isinstance(tokenizer, str):
+            self._tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+        else:
+            self._tokenizer = tokenizer
 
-    async def messages(self, request: ClaudeMessagesRequest) -> ClaudeMessagesResponse:
+    async def messages(self, request: AnthropicMessagesRequest) -> AnthropicMessagesResponse:
         if request.stream:
-            raise ClaudeChatAdapterError(
+            raise AnthropicChatAdapterError(
                 "stream=true is not supported yet",
                 "invalid_request_error",
             )
 
         rollout_state = self._build_rollout_state(request)
-        request_id = self._ensure_request_id(rollout_state)
+        request_id = ensure_rollout_request_id(rollout_state)
         response = await self._generate_handler(rollout_state)
 
         if not response.extra_fields.get("request_id"):
             response.extra_fields["request_id"] = request_id
 
         if response.status == Status.FAILED:
-            raise ClaudeChatAdapterError(
+            raise AnthropicChatAdapterError(
                 response.error_msg or "Rollout generation failed",
                 "api_error",
                 request_id,
@@ -103,16 +109,17 @@ class ClaudeChatAdapter:
 
         return self._build_messages_response(response, request)
 
-    def _build_rollout_state(self, request: ClaudeMessagesRequest) -> RolloutState:
+    def _build_rollout_state(self, request: AnthropicMessagesRequest) -> RolloutState:
         messages = self._build_internal_messages(request)
         rollout_state = RolloutState(
             message=messages,
             sample_params=self._build_sample_params(request),
         )
-        self._ensure_request_id(rollout_state)
+        logger.info(f"rollout_state built for request: {rollout_state}")
+        ensure_rollout_request_id(rollout_state)
         return rollout_state
 
-    def _build_internal_messages(self, request: ClaudeMessagesRequest) -> list[dict[str, str]]:
+    def _build_internal_messages(self, request: AnthropicMessagesRequest) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
 
         if request.system:
@@ -131,17 +138,17 @@ class ClaudeChatAdapter:
 
         return messages
 
-    def _join_text_blocks(self, blocks: list[ClaudeContentBlock], context: str) -> str:
+    def _join_text_blocks(self, blocks: list[AnthropicContentBlock], context: str) -> str:
         unsupported_types = [block.type for block in blocks if block.type != "text"]
         if unsupported_types:
             unsupported_str = ", ".join(sorted(set(unsupported_types)))
-            raise ClaudeChatAdapterError(
-                f"Unsupported Claude content block type(s) in {context}: {unsupported_str}",
+            raise AnthropicChatAdapterError(
+                f"Unsupported Anthropic content block type(s) in {context}: {unsupported_str}",
                 "invalid_request_error",
             )
         return "\n".join(block.text for block in blocks)
 
-    def _build_sample_params(self, request: ClaudeMessagesRequest) -> SampleParams:
+    def _build_sample_params(self, request: AnthropicMessagesRequest) -> SampleParams:
         kwargs = {
             "return_token_ids": False,
             "return_logprob": False,
@@ -158,27 +165,23 @@ class ClaudeChatAdapter:
     def _build_messages_response(
         self,
         rollout_state: RolloutState,
-        request: ClaudeMessagesRequest,
-    ) -> ClaudeMessagesResponse:
-        request_id = self._ensure_request_id(rollout_state)
+        request: AnthropicMessagesRequest,
+    ) -> AnthropicMessagesResponse:
+        request_id = ensure_rollout_request_id(rollout_state)
         model_name = request.model or self._default_model_name or "rollout-controller"
         prompt_tokens = self._count_prompt_tokens(rollout_state)
         completion_tokens = self._count_completion_tokens(rollout_state)
 
-        return ClaudeMessagesResponse(
+        return AnthropicMessagesResponse(
             id=f"msg_{request_id}",
-            content=[ClaudeTextContent(text=rollout_state.response or "")],
+            content=[AnthropicTextContent(text=rollout_state.response or "")],
             model=model_name,
             stop_reason=rollout_state.finish_reason,
-            usage=ClaudeUsage(
+            usage=AnthropicUsage(
                 input_tokens=prompt_tokens,
                 output_tokens=completion_tokens,
             ),
         )
-
-    @staticmethod
-    def _ensure_request_id(rollout_state: RolloutState) -> str:
-        return ensure_rollout_request_id(rollout_state)
 
     def _count_prompt_tokens(self, rollout_state: RolloutState) -> int:
         if rollout_state.tokens is not None:
@@ -202,15 +205,16 @@ class ClaudeChatAdapter:
         return 0
 
 
-def bind_claude_chat_interface(
+def bind_anthropic_chat_interface(
     rollout_controller: Any,
     default_model_name: str | None = None,
+    tokenizer: Any | None = None,
 ) -> Any:
-    if getattr(rollout_controller, "claude_chat_adapter", None) is None:
-        rollout_controller.claude_chat_adapter = ClaudeChatAdapter(
+    if getattr(rollout_controller, "anthropic_chat_adapter", None) is None:
+        rollout_controller.anthropic_chat_adapter = AnthropicChatAdapter(
             rollout_controller.generate,
             default_model_name=default_model_name,
-            tokenizer=getattr(rollout_controller, "tokenizer", None),
+            tokenizer=tokenizer,
         )
-    rollout_controller.claude_messages = rollout_controller.claude_chat_adapter.messages
+    rollout_controller.anthropic_messages = rollout_controller.anthropic_chat_adapter.messages
     return rollout_controller

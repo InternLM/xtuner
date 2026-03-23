@@ -109,7 +109,7 @@ class LMDeployWorker(RolloutWorker):
                 payload["input_ids"] = prompt_token_ids
             sample_params.return_routed_experts = True if self.enable_return_routed_experts else False
             lmdeploy_sample_params = self._transform_sample_params(sample_params)
-            payload.update(sample_params)
+            payload.update(lmdeploy_sample_params)
         else:
             payload = {
                 "model": self.model_name,
