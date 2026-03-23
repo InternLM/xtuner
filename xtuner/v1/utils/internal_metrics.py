@@ -13,6 +13,7 @@ from xtuner.v1.model import MoE
 from xtuner.v1.model.base import BaseModel as XTunerBaseModel
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.module import LMHead, MHAConfig, MLAConfig, MultiHeadAttention, MultiLatentAttention
+from xtuner.v1.module.attention.gated_deltanet import FusedRMSNormGated
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEDecoderLayer
 from xtuner.v1.utils.device import get_device
@@ -37,6 +38,8 @@ ATTENTION_CLS = (MultiHeadAttention, MultiLatentAttention)
 
 class InternalMetrics(TypedDict, total=False):
     weight_rms: dict[str, float]
+    weight_min: dict[str, float]
+    weight_max: dict[str, float]
     maxvio: dict[str, float]
     drop_ratio: dict[str, float]
     router_logits_max: dict[str, float]
@@ -52,6 +55,7 @@ class InternalMetricsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     internal_metrics_interval: int | None = None
     monitor_weights_rms_norm: bool = True
+    monitor_gdn_stats: bool = True
     monitor_attn_logits_stats: bool = True
     monitor_moe_router_logits_stats: bool | None = None  # only applies to MoE models
     monitor_moe_load_balance_stats: bool | None = None
@@ -60,6 +64,7 @@ class InternalMetricsConfig(BaseModel):
     def post_init(self):
         monitoring_fields = [
             self.monitor_weights_rms_norm,
+            self.monitor_gdn_stats,
             self.monitor_attn_logits_stats,
             self.monitor_moe_router_logits_stats,
             self.monitor_moe_load_balance_stats,
@@ -74,7 +79,7 @@ class InternalMetricsConfig(BaseModel):
 class InternalMetricsRecorder:
     def __init__(self, internal_metrics_cfg: InternalMetricsConfig, model: XTunerBaseModel):
         self.internal_metrics_cfg = internal_metrics_cfg
-        self.model = model
+        self.model = model.language_model if hasattr(model, "language_model") else model
 
         self.hooks: list[RemovableHandle] = []
 
@@ -90,6 +95,10 @@ class InternalMetricsRecorder:
 
         if self.internal_metrics_cfg.monitor_weights_rms_norm:
             metrics["weight_rms"] = {}
+
+        if self.internal_metrics_cfg.monitor_gdn_stats:
+            metrics["weight_min"] = {}
+            metrics["weight_max"] = {}
 
         if self.internal_metrics_cfg.monitor_attn_logits_stats:
             attn_cfg: MHAConfig | MLAConfig = self.model.config.attention  # type: ignore[attr-defined]
@@ -153,6 +162,44 @@ class InternalMetricsRecorder:
 
         self.metrics["weight_rms"][layer_name] = param_rms.item()
 
+    @torch.no_grad()
+    def calculate_module_weight_min_max(self, module: nn.Module | nn.Parameter | torch.Tensor, layer_name: str):
+        """Calculate the min and max of the module's parameters."""
+        self._check_closed()
+
+        if "weight_min" not in self.metrics or "weight_max" not in self.metrics:
+            return
+
+        if isinstance(module, nn.Module):
+            all_params = [param.data for param in module.parameters() if param.requires_grad]
+        else:
+            all_params = [module.data]
+
+        if not all_params:
+            return
+
+        # Handle DTensor - convert to local tensors
+        from torch.distributed.tensor import DTensor
+
+        local_params = []
+        for param in all_params:
+            if isinstance(param, DTensor):
+                local_params.append(param.to_local())
+            else:
+                local_params.append(param)
+
+        # Calculate local min/max
+        local_min = torch.min(torch.stack([p.min() for p in local_params]))
+        local_max = torch.max(torch.stack([p.max() for p in local_params]))
+
+        # All-reduce across ranks
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(local_min, op=dist.ReduceOp.MIN)
+            dist.all_reduce(local_max, op=dist.ReduceOp.MAX)
+
+        self.metrics["weight_min"][layer_name] = local_min.item()
+        self.metrics["weight_max"][layer_name] = local_max.item()
+
     def register_attn_output_hook(self, module: nn.Module):
         """Register attention output hook as a forward hook."""
         self._check_closed()
@@ -178,6 +225,12 @@ class InternalMetricsRecorder:
 
             if self.internal_metrics_cfg.monitor_weights_rms_norm and isinstance(module, RMS_NORM_MONITOR_MODULES):
                 self.calculate_module_weight_rms(module, self._clean_module_name(name), dtype=torch.float32)
+
+            if self.internal_metrics_cfg.monitor_gdn_stats and isinstance(module, FusedRMSNormGated):
+                self.calculate_module_weight_min_max(module, self._clean_module_name(name))
+
+            if self.internal_metrics_cfg.monitor_gdn_stats and hasattr(module, "A_log"):
+                self.calculate_module_weight_min_max(module.A_log, f"{self._clean_module_name(name)}.A_log")
 
         additional_kwargs = {}
         if self.internal_metrics_cfg.monitor_moe_router_logits_stats and isinstance(self.model, MoE):
