@@ -1,8 +1,6 @@
 import time
 
-import numpy as np
 import ray
-import torch
 
 from xtuner.v1.data_proto import RolloutState, Status, update_seq_staleness
 from xtuner.v1.utils import get_logger
@@ -11,14 +9,14 @@ from xtuner.v1.utils import get_logger
 logger = get_logger()
 
 
-def _resolve_routed_experts(routed_experts: torch.Tensor | ray.ObjectRef | None) -> torch.Tensor | None:
+def _resolve_routed_experts(routed_experts: list[int] | ray.ObjectRef | None) -> list[int] | None:
     if routed_experts is None:
         return None
     if isinstance(routed_experts, ray.ObjectRef):
         routed_experts = ray.get(routed_experts)
-    if isinstance(routed_experts, np.ndarray):
-        return torch.from_numpy(routed_experts)
-    assert isinstance(routed_experts, torch.Tensor), f"Unexpected routed_experts type: {type(routed_experts)}"
+    if hasattr(routed_experts, "tolist"):
+        routed_experts = routed_experts.tolist()
+    assert isinstance(routed_experts, list), f"Unexpected routed_experts type: {type(routed_experts)}"
     return routed_experts
 
 
@@ -81,38 +79,40 @@ class PartialRolloutHandler:
         rollout_state.response = history_dict.get("response", "") + (rollout_state.response or "")
         rollout_state.logprobs = history_dict.get("logprobs", []) + (rollout_state.logprobs or [])
         rollout_state.response_mask = history_dict.get("response_mask", []) + (rollout_state.response_mask or [])
-        history_routed_experts = _resolve_routed_experts(history_dict.get("routed_experts"))
-        cur_routed_experts = _resolve_routed_experts(rollout_state.routed_experts)
-        if history_routed_experts is not None and cur_routed_experts is not None:
+        history_routed_experts_ref = history_dict.get("routed_experts")
+        cur_routed_experts_ref = rollout_state.routed_experts
+        if history_routed_experts_ref is not None and cur_routed_experts_ref is not None:
             start_time = time.time()
-            cur_routed_experts_shape = cur_routed_experts.shape
-            history_routed_experts_len = history_routed_experts.shape[0]
-            assert history_routed_experts_len - 1 <= cur_routed_experts_shape[0], (
-                f"Existing routed_experts shape: {history_routed_experts.shape}, current routed_experts shape: {cur_routed_experts_shape}"
+            history_routed_experts = _resolve_routed_experts(history_dict.get("routed_experts"))
+            cur_routed_experts = _resolve_routed_experts(rollout_state.routed_experts)
+            cur_routed_experts_len = len(cur_routed_experts)
+            history_routed_experts_len = len(history_routed_experts)
+            assert history_routed_experts_len - 1 <= cur_routed_experts_len, (
+                f"Existing routed_experts len: {history_routed_experts_len}, current routed_experts len: {cur_routed_experts_len}"
             )
-            cur_routed_experts = cur_routed_experts[history_routed_experts_len:, :, :]
-            concat_routed_experts = torch.cat([history_routed_experts, cur_routed_experts], dim=0)
+            cur_routed_experts = cur_routed_experts[history_routed_experts_len:]
+            concat_routed_experts = history_routed_experts + cur_routed_experts
 
             prompt_ids = rollout_state.prompt_ids or []
             response_ids = rollout_state.response_ids or []
             expect_tokens_num = len(prompt_ids) + len(response_ids) - 1
-            assert concat_routed_experts.shape[0] == expect_tokens_num, (
-                f"After concatenation, routed_experts shape: {concat_routed_experts.shape}, expected tokens num: {expect_tokens_num}"
+            assert len(concat_routed_experts) == expect_tokens_num, (
+                f"After concatenation, routed_experts len: {len(concat_routed_experts)}, expected tokens num: {expect_tokens_num}"
             )
             logger.info(
                 f"[PartialRolloutHandler] Postprocess rollout {rollout_state.uid}: "
-                f"concat routed_experts {concat_routed_experts.shape} "
-                f"(history={history_routed_experts.shape[0]}, new={cur_routed_experts_shape[0]}), "
+                f"concat routed_experts len={len(concat_routed_experts)} "
+                f"(history={history_routed_experts_len}, new={cur_routed_experts_len}), "
                 f"prompt={len(prompt_ids)}, response={len(response_ids)}"
             )
-            rollout_state.routed_experts = concat_routed_experts
+            rollout_state.routed_experts = ray.put(concat_routed_experts)
             end_time = time.time()
             logger.info(
                 f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"
             )
-        elif history_routed_experts is None and cur_routed_experts is not None:
-            rollout_state.routed_experts = cur_routed_experts
-        elif history_routed_experts is not None and cur_routed_experts is None:
-            rollout_state.routed_experts = history_routed_experts
+        elif history_routed_experts_ref is None and cur_routed_experts_ref is not None:
+            rollout_state.routed_experts = cur_routed_experts_ref
+        elif history_routed_experts_ref is not None and cur_routed_experts_ref is None:
+            rollout_state.routed_experts = history_routed_experts_ref
 
         return rollout_state

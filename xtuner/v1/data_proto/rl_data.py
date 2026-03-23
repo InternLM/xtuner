@@ -88,7 +88,7 @@ class RolloutState(CacheObj, BaseModel):
     response: str | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
-    routed_experts: torch.Tensor | RayObjectRef | None = None
+    routed_experts: list[int] | RayObjectRef | None = None
     finish_reason: str | None = None
     # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
     response_mask: list[int] | None = None
