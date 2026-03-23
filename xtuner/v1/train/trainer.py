@@ -6,6 +6,7 @@ import os
 import pickle
 import sys
 import time
+from concurrent.futures import wait
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -337,6 +338,7 @@ class TrainerConfig(BaseModel):
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
+    async_checkpoint: bool = False
     snapshot_interval: int | None = None
     check_health_interval: int | None = None
     hf_interval: int | None = None
@@ -459,6 +461,7 @@ class Trainer:
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
+        async_checkpoint: bool = False,
         snapshot_interval: int | None = None,
         check_health_interval: int | None = None,
         hf_interval: int | None = None,
@@ -516,6 +519,8 @@ class Trainer:
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
+        self._async_checkpoint = async_checkpoint
+        self._pending_dcp_futures: list | None = None
         self._snapshot_interval = snapshot_interval
         self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
@@ -675,6 +680,7 @@ class Trainer:
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
+            async_checkpoint=config.async_checkpoint,
             snapshot_interval=config.snapshot_interval,
             check_health_interval=config.check_health_interval,
             hf_interval=config.hf_interval,
@@ -778,6 +784,7 @@ class Trainer:
                 gc.collect()
 
         # TODO: Should use flush rather than close
+        self._wait_for_pending_checkpoint()
         self._exp_tracker.close()
         if self._metrics_recorder:
             self._metrics_recorder.close()
@@ -1079,6 +1086,11 @@ class Trainer:
                 raise RuntimeError("Health check failed, exit training")
             logger.info(f"Health check passed at step {self.cur_step}")
 
+    def _wait_for_pending_checkpoint(self) -> None:
+        if self._pending_dcp_futures is not None:
+            wait(self._pending_dcp_futures)
+            self._pending_dcp_futures = None
+
     def _maybe_save(self, is_snapshot: bool = False) -> bool:
         ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
         if ckp_interval is None:
@@ -1096,6 +1108,8 @@ class Trainer:
         checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step, is_snapshot=is_snapshot)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
+        self._wait_for_pending_checkpoint()
+
         meta_path = self.work_dir / self._META_PATH
 
         optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR
@@ -1105,10 +1119,16 @@ class Trainer:
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
 
         # Save model and optimizer
-        self._engine.save_dcp(
-            model_dir=model_path,
-            optimizer_dir=optimizer_path,
-        )
+        if self._async_checkpoint and not is_snapshot:
+            self._pending_dcp_futures = self._engine.async_save_dcp(
+                model_dir=model_path,
+                optimizer_dir=optimizer_path,
+            )
+        else:
+            self._engine.save_dcp(
+                model_dir=model_path,
+                optimizer_dir=optimizer_path,
+            )
 
         # Save dataloader
         self._save_dataloader(dataloader_path)
