@@ -49,6 +49,7 @@ class InternS1VisionConfig(XTunerBaseModelConfig):
     use_mask_token: bool = False
     use_mean_pooling: bool = True
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
+    text_hidden_layers: int = 0
 
     def model_post_init(self, _):
         if self.attn_impl == "flash_attention" and get_device() == "cuda":
@@ -142,6 +143,11 @@ class InternS1Config(InternS1BaseConfig):
     text_config: MoEConfig = Qwen3MoE235BA22Config(
         vocab_size=153216, hf_key_mapping={r"^model.": "model.language_model."}
     )
+
+    # FOR ACTIVATION_OFFLOAD PURPOSE, vision and text model need to exchange num_hidden_layers with each other.
+    def model_post_init(self, __context) -> None:
+        self.vision_config.text_hidden_layers = self.text_config.num_hidden_layers
+        self.text_config.vision_hidden_layers = self.vision_config.num_hidden_layers
 
 
 class InternS1MiniConfig(InternS1BaseConfig):

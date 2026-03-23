@@ -155,6 +155,7 @@ class MoEConfig(TransformerConfig):
     moe_bias: bool = False
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
     freeze_routers: bool = False
+    vision_hidden_layers: int = 0
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -431,8 +432,8 @@ class MoE(BaseModel):
                     with async_save_on_cpu(
                         h2d_stream=self.offload_stream,
                         d2h_stream=self.offload_stream,
-                        block_idx=layer_idx - self.config.first_k_dense_replace,
-                        depth=len(self.layers) - self.config.first_k_dense_replace,
+                        block_idx=layer_idx - self.config.first_k_dense_replace + self.config.vision_hidden_layers,
+                        depth=len(self.layers) - self.config.first_k_dense_replace + self.config.vision_hidden_layers,
                         custom_check_fn=lambda x: x.data_ptr()
                         in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
                         prefetch=True,
@@ -578,8 +579,8 @@ class MoE(BaseModel):
                     with async_save_on_cpu(
                         h2d_stream=self.offload_stream,
                         d2h_stream=self.offload_stream,
-                        block_idx=int(idx),
-                        depth=len(self.layers),
+                        block_idx=int(idx) + self.config.vision_hidden_layers,
+                        depth=len(self.layers) + self.config.vision_hidden_layers,
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
                     ):
                         layer_results = decoder_layer(
