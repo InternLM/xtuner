@@ -278,8 +278,6 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
     _thread_executor: ThreadPoolExecutor | None = None
     # TODO: Using shared memory should be optional since the size of `/dev/shm` could be not enough for some devices
     _shared_memory: SharedMemory | None = None
-    offsets: np.ndarray
-    num_tokens: np.ndarray | None
     _meta: dict[str, np.ndarray]
 
     def __init__(
@@ -318,7 +316,6 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             offsets = np.load(offset_path, mmap_mode="r" if enable_mmap_shared else None)
             if meta_path:
                 _meta = load_dict_from_npy_dir(meta_path, mmap=enable_mmap_shared)
-                num_tokens = _meta["num_tokens"]
         elif cache_dir:
             self._shared_memory = self._init_shared_memory(anno_path)
             assert self.meta_path is not None
@@ -401,10 +398,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 if os.path.exists(_meta_file):
                     logger.info(f"Loading tokenize meta from cache: {_meta_file}")
                     _meta = load_dict_from_npy_dir(_meta_file, mmap=enable_mmap_shared)
-                    num_tokens = _meta["num_tokens"]
                 else:
                     _meta = self.count_tokens(offsets, tok_cache_dir)
-                    num_tokens = _meta["num_tokens"]
 
                 if get_rank() == 0:
                     with open(self.meta_path, "r+") as f:
@@ -448,22 +443,20 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                     "be re-tokenized during training!"
                 )
                 _meta = self.count_tokens(offsets)
-                num_tokens = _meta["num_tokens"]
             else:
                 offsets = offsets
-                num_tokens = None
                 _meta = {}
         else:
             self._shared_memory = self._init_shared_memory(anno_path)
             offsets = self.count_offsets()
-            num_tokens = None
             _meta = {}
             if tokenize_fn is not None:
                 _meta = self.count_tokens(offsets)
-                num_tokens = _meta["num_tokens"]
 
-        # remove num_tokens from _meta, because variable `num_tokens` is already set
-        _meta.pop("num_tokens", None)
+        _meta["offsets"] = offsets
+        del offsets
+        if _meta["num_tokens"] is None:
+            _meta.pop("num_tokens")
 
         ################################## Post-processing of offsets, num_tokens and _meta #######################################
 
@@ -487,32 +480,19 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             # Only local rank0 computes sampling and saves to tmp; others mmap-load to share physical pages.
             if _is_local_rank0():
                 self._set_meta_attrs(
-                    offsets,
-                    num_tokens,
                     _meta,
                     sample_ratio=sample_ratio,
                     max_length=max_length,
                     enable_sequential_sampler=enable_sequential_sampler,
                 )
-                os.makedirs(tmp_dir, exist_ok=True)
-                np.save(os.path.join(tmp_dir, "offsets.npy"), self.offsets)
-                if self.num_tokens is not None:
-                    np.save(os.path.join(tmp_dir, "num_tokens.npy"), self.num_tokens)
-                save_dict_to_npy_dir(self._meta, os.path.join(tmp_dir, "meta"))
+                save_dict_to_npy_dir(self._meta, tmp_dir)
                 atexit.register(shutil.rmtree, tmp_dir, True)
             else:
-                del _meta, offsets
-                if num_tokens is not None:
-                    del num_tokens
+                del _meta
             dist.barrier()
-            self.offsets = np.load(os.path.join(tmp_dir, "offsets.npy"), mmap_mode="r")
-            nt_path = os.path.join(tmp_dir, "num_tokens.npy")
-            self.num_tokens = np.load(nt_path, mmap_mode="r") if os.path.exists(nt_path) else None
-            self._meta = load_dict_from_npy_dir(os.path.join(tmp_dir, "meta"), mmap=True)
+            self._meta = load_dict_from_npy_dir(tmp_dir, mmap=True)
         else:
             self._set_meta_attrs(
-                offsets,
-                num_tokens,
                 _meta,
                 sample_ratio=sample_ratio,
                 max_length=max_length,
@@ -524,9 +504,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
     def _set_meta_attrs(
         self,
-        offsets: np.ndarray,
-        num_tokens: np.ndarray | None,
-        _meta: dict,
+        _meta: dict[str, np.ndarray],
         *,
         sample_ratio: float,
         max_length: int | None,
@@ -536,17 +514,16 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         self._meta."""
         if self._has_chunk:
             line_idxs = _meta.pop("line_idxs")
-            offsets = offsets[line_idxs]
+            _meta["offsets"] = _meta["offsets"][line_idxs]
             # After line_idxs indexing, offsets has exactly num_chunks elements
             # (no trailing sentinel), so use len(offsets) directly.
-            base_len = len(offsets)
+            base_len = len(_meta["offsets"])
         else:
             # offsets has trailing sentinel (file_size), so samples are num_offsets - 1
-            base_len = len(offsets) - 1
+            _meta["offsets"] = _meta["offsets"][:-1]
+            base_len = len(_meta["offsets"])
 
         if self.disable_filter and sample_ratio == 1.0:
-            self.offsets = offsets
-            self.num_tokens = num_tokens
             self._meta = _meta
             return
 
@@ -554,7 +531,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         _sampled = np.arange(base_len, dtype=dtype)
 
         if not self.disable_filter:
-            _sampled = _filter_sampled_indices(_sampled, num_tokens, max_length)
+            _sampled = _filter_sampled_indices(_sampled, _meta.get("num_tokens"), max_length)
 
         if sample_ratio != 1.0:
             _sampled = _apply_sample_ratio(
@@ -563,17 +540,20 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 enable_sequential_sampler=enable_sequential_sampler,
             )
 
-        if num_tokens is not None:
-            assert isinstance(num_tokens, np.ndarray)
-            num_tokens = num_tokens[_sampled]
-        self.num_tokens = num_tokens
-        self.offsets = offsets[_sampled]
         for _, v in _meta.items():
             assert base_len == len(v)
         self._meta = {}
         for k, v in _meta.items():
             assert isinstance(v, np.ndarray)
             self._meta[k] = v[_sampled]
+
+    @property
+    def offsets(self) -> np.ndarray:
+        return self._meta["offsets"]
+
+    @property
+    def num_tokens(self) -> np.ndarray | None:
+        return self._meta.get("num_tokens")
 
     @property
     def proxy_attn_flops(self) -> np.ndarray:

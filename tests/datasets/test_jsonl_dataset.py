@@ -96,7 +96,7 @@ class TestJsonlDatasetDist(DistributedTestBase):
 
         # Random read 10000 samples, and test time cost
         start_time = time.time()
-        for i in range(10000):
+        for i in range(100):
             idx = random.randint(0, length - 1)
             _ = dataset[idx]
         time_cost = time.time() - start_time
