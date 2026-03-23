@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
 
 import ray
+import uvicorn
 from ray.actor import ActorProxy
 from ray.util.placement_group import PlacementGroup
 
@@ -13,7 +14,11 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import get_logger
 
+
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
+from .api_server import create_rollout_api_app
+from .claude_chat import bind_claude_chat_interface
+from .openai_chat import bind_openai_chat_interface
 from .worker import RolloutConfig, RolloutWorker
 
 
@@ -52,6 +57,7 @@ class RolloutWorkerMetadata(TypedDict):
     # 键：服务器 URL 字符串
     # 值：布尔值，True 表示该 worker 处于活跃状态，False 表示已失效或停用
     worker_server_urls_status: Dict[str, bool]
+    api_server_url: str
 
 
 class RolloutController:
@@ -77,12 +83,16 @@ class RolloutController:
             else self.config.tensor_parallel_size
         )
         self.logger = get_logger(log_dir=infer_config.worker_log_dir, tag="RolloutController")
+        self.api_server_url = ""
         self.engine_rank_mesh_array: List[List[int]] = []
         self.worker_server_urls_map: dict[str, List[str]] = {}
         self.rank2info: dict[int, WorkerInfo] = {}
         self.engine_rank_mesh_array, self.worker_server_urls_map, self.rank2info = self._init_workers(placement_group)
         self.num_active_workers = len(self.rank2info)
         self.worker_info_lock = threading.RLock()
+        bind_openai_chat_interface(self, default_model_name=self.config.model_name)
+        bind_claude_chat_interface(self, default_model_name=self.config.model_name)
+        self._start_api_server()
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
@@ -109,8 +119,18 @@ class RolloutController:
             "server_url_dict": self.worker_server_urls_map,
             "rollout_config": self.config,
             "worker_server_urls_status": worker_server_urls_status,
+            "api_server_url": self.api_server_url,
         }
         return rollout_metadata
+
+    def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
+        self.check_health()
+        active_workers = sum(1 for info in self.workers_info.values() if info.is_active)
+        total_workers = len(self.workers_info)
+        return active_workers > 0, {
+            "active_workers": active_workers,
+            "total_workers": total_workers,
+        }
 
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         session_id = rollout_state.session_uid if rollout_state.session_uid else uuid4().int
@@ -321,6 +341,29 @@ class RolloutController:
             active_rank = list(worker_server_urls_map.keys())[::active_worker_interval]
             active_worker_server_urls = list(worker_server_urls_map.values())[::active_worker_interval]
             return active_rollout_workers[::active_worker_interval], dict(zip(active_rank, active_worker_server_urls))
+
+    def _start_api_server(self, host: str | None = None, port: int | None = None):
+        """Starts the API server to expose the rollout functionality."""
+        host = host or self.config.api_host
+        port = self.config.api_port if self.config.api_port else (port or 8000)
+
+        original_port = port
+        while self._is_port_in_use(host, port):
+            self.logger.warning(f"Port {port} is in use, trying port {port + 1}")
+            port += 1
+
+        if original_port != port:
+            self.logger.info(f"API server will use port {port} instead of the originally configured {original_port}.")
+
+        app = create_rollout_api_app(self, self.logger, self.config.api_key)
+
+        config = uvicorn.Config(app, host=host, port=port)
+        server = uvicorn.Server(config)
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
+        self.config.api_port = port
+        self.api_server_url = f"http://{host}:{port}"
+        self.logger.info(f"Rollout API server started at {self.api_server_url}")
 
     def _init_workers(self, placement_group: PlacementGroup):
         """Initializes and configures the pool of RolloutWorker actors.
