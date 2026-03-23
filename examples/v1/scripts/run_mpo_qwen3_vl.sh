@@ -21,4 +21,4 @@ torchrun \
   --master_addr=$MASTER_ADDR \
   --master_port=$MASTER_PORT \
   --nproc_per_node=$PROC_PER_NODE \
-  /mnt/shared-storage-user/lisongze/xtuner/xtuner/v1/train/cli/dpo.py --config ${config_file}
+  xtuner/xtuner/v1/train/cli/dpo.py --config ${config_file}
