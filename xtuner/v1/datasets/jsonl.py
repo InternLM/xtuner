@@ -465,6 +465,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         # remove num_tokens from _meta, because variable `num_tokens` is already set
         _meta.pop("num_tokens", None)
 
+        ################################## Post-processing of offsets, num_tokens and _meta #######################################
+
         tok_hash_str = ""
         if isinstance(
             tokenize_fn, RLTokenizeFn
@@ -541,26 +543,37 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         else:
             # offsets has trailing sentinel (file_size), so samples are num_offsets - 1
             base_len = len(offsets) - 1
+
+        if self.disable_filter and sample_ratio == 1.0:
+            self.offsets = offsets
+            self.num_tokens = num_tokens
+            self._meta = _meta
+            return
+
         dtype = np.int32 if base_len < np.iinfo(np.int32).max else np.int64
         _sampled = np.arange(base_len, dtype=dtype)
+
         if not self.disable_filter:
             _sampled = _filter_sampled_indices(_sampled, num_tokens, max_length)
-        sampled = _apply_sample_ratio(
-            _sampled,
-            sample_ratio=sample_ratio,
-            enable_sequential_sampler=enable_sequential_sampler,
-        )
+
+        if sample_ratio != 1.0:
+            _sampled = _apply_sample_ratio(
+                _sampled,
+                sample_ratio=sample_ratio,
+                enable_sequential_sampler=enable_sequential_sampler,
+            )
+
         if num_tokens is not None:
             assert isinstance(num_tokens, np.ndarray)
-            num_tokens = num_tokens[sampled]
+            num_tokens = num_tokens[_sampled]
         self.num_tokens = num_tokens
-        self.offsets = offsets[sampled]
+        self.offsets = offsets[_sampled]
         for _, v in _meta.items():
             assert base_len == len(v)
         self._meta = {}
         for k, v in _meta.items():
             assert isinstance(v, np.ndarray)
-            self._meta[k] = v[sampled]
+            self._meta[k] = v[_sampled]
 
     @property
     def proxy_attn_flops(self) -> np.ndarray:
