@@ -49,6 +49,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop = MagicMock()
         mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
         mock_agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
+        mock_agent_loop.rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
 
         async def mock_gen(rs):
             await asyncio.sleep(0.01 * rs[0].id) 

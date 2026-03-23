@@ -8,6 +8,7 @@ from typing import Any, List, Union, cast
 import ray
 import torch
 from mmengine.dist import get_rank
+from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict
 from typing_extensions import Literal, TypedDict
 
@@ -26,7 +27,7 @@ from xtuner.v1.rl.trainer.controller import TrainingControllerProxy
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
-from xtuner.v1.utils import get_logger, is_hf_model_path, timer
+from xtuner.v1.utils import get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
@@ -283,6 +284,9 @@ class RLColocateTrainer:
         # self._total_epochs = total_epochs  # TODO
         self._cur_step = 0
         self._global_train_step = 0
+        self._seed = seed
+        set_deterministic()
+        set_random_seed(seed)
         self.global_batch_size = global_batch_size
 
         # main components
