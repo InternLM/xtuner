@@ -9,7 +9,7 @@ export HF_HOME="$(pwd)/"
 export TORCHDYNAMO_VERBOSE=1
 
 MASTER_PORT=20500
-config_file="/mnt/shared-storage-user/lisongze/xtuner/examples/v1/config/mpo_qwen3_vl_8B.py"
+config_file="xtuner/examples/v1/config/mpo_qwen3_vl_8B.py"
 # NODE_COUNT=1
 # NODE_RANK=0
 # MASTER_ADDR=127.0.0.1
