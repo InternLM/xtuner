@@ -231,6 +231,10 @@ class TestJsonlDatasetDist(DistributedTestBase):
                     ds_res.offsets, np.memmap,
                     msg="offsets should be memmap-backed when enable_mmap_shared=True",
                 )
+                # verify _meta dict values are memmap-backed
+                for k, v in ds_res._meta.items():
+                    self.assertIsInstance(v, np.memmap,
+                                          msg=f"{k} should be memmap-backed when enable_mmap_shared=True")
 
             # Results must be identical to first build
             self.assertEqual(len(ds_ref), len(ds_res))

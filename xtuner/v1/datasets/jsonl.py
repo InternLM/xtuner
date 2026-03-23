@@ -477,20 +477,33 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         )
 
         if enable_mmap_shared and dist.is_initialized() and _get_local_concurrency() > 1:
-            # Only local rank0 computes sampling and saves to tmp; others mmap-load to share physical pages.
-            if _is_local_rank0():
-                self._set_meta_attrs(
+            # 有3种情况:
+            # 1. disable_filter and sample_ratio == 1.0 and not self._has_chunk:
+            #      所有rank直接设置self._meta，因为_meta已经是mmap模式。这是高速通路，保持了meta数据懒加载
+            # 2. disable_filter and sample_ratio == 1.0 and self._has_chunk:
+            #     所有rank直接设置self._meta，除了_meta["offsets"]。因为 offsets 在 LongTextPretrainTokenizeFunction 时会做扩增。
+            #     Local rank0将offsets保存到tmp，然后所有rank将通过mmap共享物理页加载。
+            # 3. 其他情况:
+            #    只有local rank0过滤和采样样本，然后保存到tmp；所有rank将通过mmap共享物理页加载。
+            #    这时 offsets.npy 和 jsonl_meta 虽然是懒加载，但是在过滤和采样时都会被加载到内存。是慢速通路。
+            _meta_cache_if_mmap = {}
+            if _is_local_rank0() or (disable_filter and sample_ratio == 1.0):
+                _meta_cache_if_mmap = self._set_meta_attrs(
                     _meta,
                     sample_ratio=sample_ratio,
                     max_length=max_length,
                     enable_sequential_sampler=enable_sequential_sampler,
                 )
-                save_dict_to_npy_dir(self._meta, tmp_dir)
-                atexit.register(shutil.rmtree, tmp_dir, True)
             else:
-                del _meta
+                self._meta = {}
+
+            if _is_local_rank0():
+                save_dict_to_npy_dir(_meta_cache_if_mmap, tmp_dir)
+                atexit.register(shutil.rmtree, tmp_dir, True)
+
             dist.barrier()
-            self._meta = load_dict_from_npy_dir(tmp_dir, mmap=True)
+            _meta_cache_if_mmap = load_dict_from_npy_dir(tmp_dir, mmap=True)
+            self._meta.update(_meta_cache_if_mmap)
         else:
             self._set_meta_attrs(
                 _meta,
@@ -509,23 +522,36 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         sample_ratio: float,
         max_length: int | None,
         enable_sequential_sampler: bool,
-    ) -> None:
-        """Compute sampling and set self.offsets, self.num_tokens,
-        self._meta."""
+    ) -> dict[str, np.ndarray]:
+        """对 ``_meta`` 做 chunk
+        对齐(LongTextPretrainTokenizeFunction时才需要)、过滤、采样，结果写入 ``self._meta``。
+
+        Returns:
+            供 mmap 路径参考的元数据：
+            无过滤且 ``sample_ratio==1`` 时，
+              1) 无 chunk 为 ``{}``，
+              2) 有 chunk 为 ``{"offsets": ...}``，
+            3) 否则为与 ``self._meta`` 相同的完整字典。
+        """
+        _meta_cache_if_mmap = {}
         if self._has_chunk:
             line_idxs = _meta.pop("line_idxs")
             _meta["offsets"] = _meta["offsets"][line_idxs]
             # After line_idxs indexing, offsets has exactly num_chunks elements
             # (no trailing sentinel), so use len(offsets) directly.
             base_len = len(_meta["offsets"])
+            _meta_cache_if_mmap["offsets"] = _meta["offsets"]
         else:
             # offsets has trailing sentinel (file_size), so samples are num_offsets - 1
             _meta["offsets"] = _meta["offsets"][:-1]
+            # [:-1] 是 基本切片（basic slicing），得到的是 视图（view），与原来的 _meta["offsets"] 共享同一段底层缓冲区。
+            # 若原数组是 np.load(..., mmap_mode="r") 得到的 memmap，这段缓冲区就是文件 mmap 出来的；
+            # 切片后的数组只是换了 shape/偏移，仍然通过视图链指向同一块 mmap 内存。
             base_len = len(_meta["offsets"])
 
         if self.disable_filter and sample_ratio == 1.0:
             self._meta = _meta
-            return
+            return _meta_cache_if_mmap
 
         dtype = np.int32 if base_len < np.iinfo(np.int32).max else np.int64
         _sampled = np.arange(base_len, dtype=dtype)
@@ -546,6 +572,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         for k, v in _meta.items():
             assert isinstance(v, np.ndarray)
             self._meta[k] = v[_sampled]
+
+        _meta_cache_if_mmap = self._meta
+        return _meta_cache_if_mmap
 
     @property
     def offsets(self) -> np.ndarray:
