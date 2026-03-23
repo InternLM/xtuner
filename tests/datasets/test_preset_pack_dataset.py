@@ -369,7 +369,8 @@ class _CountingTokenizeFn(CachableTokenizeFunction):
     def __call__(self, item, **kwargs):
         n = self._num_tokens[self._idx % len(self._num_tokens)]
         self._idx += 1
-        return {"num_tokens": n}
+        fake_value = 1.0
+        return {"num_tokens": n, "proxy_attn_flops": fake_value}
 
     def hash(self) -> str:
         return "counting_test_hash"
