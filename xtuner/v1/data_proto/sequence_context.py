@@ -45,7 +45,7 @@ class SequenceContext:
     # mllm model
     pixel_values: torch.FloatTensor | None
     inputs_embeds: torch.FloatTensor | None
-    num_img_tokens: list[int] | None
+    num_img_tokens: list[list[int]] | None
 
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
@@ -69,7 +69,7 @@ class SequenceContext:
         # mllm model
         pixel_values: torch.FloatTensor | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
-        num_img_tokens: list[int] | None = None,
+        num_img_tokens: list[list[int]] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,

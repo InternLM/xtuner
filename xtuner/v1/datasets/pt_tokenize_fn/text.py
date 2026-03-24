@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.datasets.data_item import CacheItem, DataItem
 
-from ..utils import CachableTokenizeFunction, tokenizer_xxhash
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
 
 
 class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
@@ -27,6 +27,7 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
         self._hash = hash
         super().__init__(tokenizer)
 
+    @with_proxy_attention_flops
     def __call__(self, item: dict, **kwargs) -> DataItem | CacheItem:
         if "messages" in item:
             messages = item["messages"]
@@ -51,7 +52,11 @@ class PretrainTokenizeFunction(CachableTokenizeFunction[DataItem]):
             labels = copy.deepcopy(input_ids)
             labels[0] = -100
 
-        return {"input_ids": input_ids, "labels": labels, "num_tokens": num_tokens}
+        return DataItem(
+            input_ids=input_ids,
+            labels=labels,
+            num_tokens=num_tokens,
+        )
 
     def hash(self) -> str:
         if self._hash is None:

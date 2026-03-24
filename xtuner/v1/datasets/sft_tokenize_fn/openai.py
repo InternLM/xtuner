@@ -12,7 +12,7 @@ from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
 from xtuner.v1.datasets.data_item import CacheItem, DataItem
 from xtuner.v1.utils import get_logger
 
-from ..utils import CachableTokenizeFunction, tokenizer_xxhash
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
 
 
 logger = get_logger()
@@ -36,6 +36,7 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         self.max_length = max_length
         super().__init__(tokenizer)
 
+    @with_proxy_attention_flops
     def __call__(self, item: dict | list, **kwargs) -> DataItem | CacheItem:
         tools = None
         if isinstance(item, dict) and "tools" in item:

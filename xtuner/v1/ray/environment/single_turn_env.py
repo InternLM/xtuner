@@ -81,12 +81,16 @@ class RawSingleTurnEnvironment(BaseEnvironment):
                 A list of RLTextDataItem objects containing the prompts/messages for generation.
             sample_params: Sampling parameters for the generation process. The type should match
                 the rollout controller's expected sampling parameter type (e.g., SampleParams or dict).
+            extra_params: Extra parameters for generation. If contains "disable_routed_experts=True",
+                will force disable return_routed_experts regardless of config.
 
         Returns:
             List[RLTextDataItem]:
                 The same list of RLTextDataItem, with each item enriched with the generated response
                 and state from the rollout controller.
         """
+        if extra_params is None:
+            extra_params = {}
         if self.rollout_controller:
             response_future = []
             for sample in group_data_items:

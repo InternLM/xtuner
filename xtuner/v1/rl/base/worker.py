@@ -422,7 +422,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     rollout_routed_expert = ray.get(rollout_routed_expert_refs)
                     # free obj store explicitly
                     if self.sp_mesh is None or self.sp_mesh.size() == 1:
-                        ray._private.internal_api.free(rollout_routed_expert_refs)
+                        ray.internal.free(rollout_routed_expert_refs, local_only=False)
                     else:
                         if self.sp_mesh.get_local_rank() == 0:
                             # only free once of sp mesh
@@ -451,7 +451,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.sp_mesh is not None and self.sp_mesh.size() > 1:
             dist.barrier()
             for free_routed_expert_refs in to_free_routed_expert_refs:
-                ray._private.internal_api.free(free_routed_expert_refs)
+                ray.internal.free(free_routed_expert_refs, local_only=False)
             del to_free_routed_expert_refs
 
     @ray_method

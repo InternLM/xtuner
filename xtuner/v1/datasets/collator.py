@@ -18,6 +18,14 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
 
 
+def split_to_chunks(n: int, chunk_size: int) -> list[int]:
+    full, remainder = divmod(n, chunk_size)
+    result = [chunk_size] * full
+    if remainder > 0:
+        result.append(remainder)
+    return result
+
+
 def fake_collator(instances: list[DataItem], **kwargs):
     return instances
 
@@ -27,6 +35,7 @@ def build_text_ctx_labels(
     pack_max_length: int,
     padding_token_idx: int,
     pack_to_max_length: bool,
+    pad_chunk_size: int,
 ) -> tuple[SequenceContext, torch.Tensor, Sequence[DataItem]]:
     if isinstance(instance, dict):
         instance = [instance]
@@ -72,7 +81,8 @@ def build_text_ctx_labels(
     if pad_len > 0:
         input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
         shifted_labels = pad_to_max_length(shifted_labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
-        num_tokens = [0] + num_tokens + [pad_len]
+        pad_chunk_tokens = split_to_chunks(pad_len, pad_chunk_size)
+        num_tokens = [0] + num_tokens + pad_chunk_tokens
 
     elif pad_len < 0:
         raise ValueError(
@@ -96,7 +106,11 @@ def build_text_ctx_labels(
 
 
 def sft_llm_collator(
-    instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int, pack_to_max_length: bool = True
+    instances: list[list[DataItem]],
+    pack_max_length: int,
+    padding_token_idx: int,
+    pack_to_max_length: bool = True,
+    pad_chunk_size: int = 256,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -106,6 +120,7 @@ def sft_llm_collator(
             pack_max_length,
             padding_token_idx,
             pack_to_max_length,
+            pad_chunk_size,
         )
         ret.append(
             {
@@ -122,6 +137,7 @@ def intern_s1_vl_sft_collator(
     pack_max_length: int,
     padding_token_idx: int,
     pack_to_max_length: bool = True,
+    pad_chunk_size: int = 256,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -162,7 +178,8 @@ def intern_s1_vl_sft_collator(
         if pad_len > 0:
             input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
             shifted_labels = pad_to_max_length(shifted_labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
-            num_tokens = [0] + num_tokens + [pad_len]
+            pad_chunk_tokens = split_to_chunks(pad_len, pad_chunk_size)
+            num_tokens = [0] + num_tokens + pad_chunk_tokens
 
         elif pad_len < 0:
             raise ValueError(
@@ -174,9 +191,9 @@ def intern_s1_vl_sft_collator(
 
         cu_seq_lens = torch.cumsum(torch.IntTensor(num_tokens), dim=0).int()
 
-        num_img_tokens: list[int] = []
+        num_img_tokens: list[list] = []
         for data in instance:
-            num_img_tokens.extend(data.get("num_img_tokens", [0]))
+            num_img_tokens.append(data.get("num_img_tokens", [0]))
 
         pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
@@ -210,6 +227,7 @@ def qwen3_vl_sft_collator(
     pack_max_length: int,
     padding_token_idx: int,
     pack_to_max_length: bool = True,
+    pad_chunk_size: int = 256,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -219,6 +237,7 @@ def qwen3_vl_sft_collator(
             pack_max_length,
             padding_token_idx,
             pack_to_max_length,
+            pad_chunk_size,
         )
 
         all_position_ids_none = all(
@@ -251,9 +270,9 @@ def qwen3_vl_sft_collator(
             if pack_to_max_length and pack_max_length - position_ids.shape[-1] > 0:
                 position_ids = pad_to_max_length(position_ids, 0, max_length=pack_max_length, dim=-1)
 
-        num_img_tokens: list[int] = []
+        num_img_tokens: list[list[int]] = []
         for data in instance:
-            num_img_tokens.extend(data.get("num_img_tokens", [0]))
+            num_img_tokens.append(data.get("num_img_tokens", [0]))
 
         pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
