@@ -9,7 +9,7 @@ from transformers import AutoTokenizer
 import torch.distributed as dist
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
 from xtuner.v1.loss.ce_loss import CELossConfig
-from xtuner.v1.model.moe.moe import SequenceContext
+from xtuner.v1.model.moe.moe import SequenceContext, MTPConfig
 from xtuner.v1.utils.test_utils import init_data_mesh
 from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
 from xtuner.v1.config import FSDPConfig
@@ -233,6 +233,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             model_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
+            model_cfg.text_config.mtp_config = MTPConfig(num_layers=1)
             qwen3vl_model = model_cfg.build().to(torch.bfloat16)
 
         fsdp_config = FSDPConfig(cpu_offload=False)
@@ -262,8 +263,6 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
 
                 # Verify all original HF weights are preserved correctly
                 for key in origin_index["weight_map"].keys():
-                    if "mtp" in key:
-                        continue  # TODO: remove this after MTP is implemented
                     origin_safetensor_name = origin_index["weight_map"][key]
                     saved_safetensor_name = saved_index["weight_map"][key]
 
