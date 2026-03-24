@@ -83,8 +83,7 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
         # Note: 非常关键，不能删除这个 assert
         assert self.fsdp_mesh is not None
 
-        fully_shard(
-            self,
+        self._fully_shard(
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
@@ -122,7 +121,7 @@ class InternS1ForConditionalGeneration(BaseComposeModel):
     def forward(
             self,
             seq_ctx: SequenceContext,
-            loss_ctx: CELossContext
+            loss_ctx: dict[str, CELossContext] | None = None
     ) -> MoEModelOutputs:
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
