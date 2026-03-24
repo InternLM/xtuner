@@ -57,7 +57,6 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                     mm_info["pixel_values"] = data["pixel_values"].numpy()  # for ray put into shared memory
                 if "image_grid_thw" in data:
                     mm_info["image_grid_thw"] = data["image_grid_thw"]
-
             return RolloutState(
                 message=message,
                 num_tokens=data["num_tokens"],

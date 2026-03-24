@@ -74,7 +74,6 @@ class RolloutState(CacheObj, BaseModel):
     data_source: dict[str, Any] | str | None = None
     mm_info: MultimodalInfo | None = None
     reward_model: dict[str, Any] | None = None
-    num_tokens: int | None = None  # 用于 cache 管理
 
     # --- InferEngine 输入 ---
     session_uid: int | None = None

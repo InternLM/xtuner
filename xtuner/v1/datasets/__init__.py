@@ -1,5 +1,5 @@
 from .build import build_dataloader, build_datasets
-from .collator import intern_s1_vl_sft_collator, qwen3_vl_sft_collator, sft_llm_collator
+from .collator import fake_collator, intern_s1_vl_sft_collator, qwen3_vl_sft_collator, sft_llm_collator
 from .config import (
     BaseTokenizeFnConfig,
     DataloaderConfig,
@@ -46,6 +46,7 @@ __all__ = [
     "build_datasets",
     "build_dataloader",
     "sft_llm_collator",
+    "fake_collator",
     "intern_s1_vl_sft_collator",
     "qwen3_vl_sft_collator",
     "FtdpTokenizeFunction",

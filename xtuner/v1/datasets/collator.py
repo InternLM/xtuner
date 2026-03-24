@@ -4,6 +4,7 @@ import torch
 from typing_extensions import TypedDict
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
@@ -16,6 +17,10 @@ logger = get_logger()
 class ColateItem(TypedDict):
     seq_ctx: SequenceContext
     shifted_labels: torch.Tensor
+
+
+def fake_collator(instances: list[RolloutState], **kwargs):
+    return instances
 
 
 def build_text_ctx_labels(

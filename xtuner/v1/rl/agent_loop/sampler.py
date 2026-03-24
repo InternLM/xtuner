@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Iterator, Optional, cast
 from uuid import uuid4
 
+import ray
 import torch
 from pydantic import BaseModel, ConfigDict
 
@@ -34,6 +35,16 @@ class SamplerConfig(BaseModel):
         )
         return Sampler(dataloader=dataloader, prompt_repeat_k=self.prompt_repeat_k, replay_buffer=replay_buffer)
 
+# TODO: The best solution is to put it in the fake_collator, 
+# but it will cause a deadlock problem, so it is temporarily placed here. 
+# The best solution should be to start the dataloader using spawn.
+def put_to_ray(data: RolloutState) -> RolloutState:
+    if hasattr(data, "mm_info") and data.mm_info is not None:
+        pixel_values = data.mm_info.get("pixel_values", None)
+        if pixel_values is not None:
+            data.mm_info["pixel_values"] = ray.put(pixel_values)
+    return data
+
 
 class _DatasetSampler:
     def __init__(self, dataloader: Dataloader, prompt_repeat_k: int):
@@ -52,11 +63,14 @@ class _DatasetSampler:
         assert self.dataloader_iter is not None
         try:
             data = next(self.dataloader_iter)[0]
+            data = put_to_ray(data)
+
         except StopIteration:
             self.cur_epoch += 1
             self.dataloader.set_epoch(self.cur_epoch)
             self.dataloader_iter = iter(self.dataloader)
             data = next(self.dataloader_iter)[0]
+            data = put_to_ray(data)
 
         group_data = []
         for _ in range(self.prompt_repeat_k):

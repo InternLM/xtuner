@@ -20,6 +20,7 @@ from xtuner.v1.utils import get_logger, profile_time
 
 from ..datasets.collator import ColateItem
 from .collator import (
+    fake_collator,
     intern_s1_vl_sft_collator,
     qwen3_vl_sft_collator,
     sft_llm_collator,
@@ -298,8 +299,6 @@ class DataloaderConfig(BaseDataloaderConfig):
         elif self.collator == "qwen3_vl_sft_collator":
             return qwen3_vl_sft_collator
         elif self.collator == "fake_collator":
-            from xtuner.v1.rl.utils.ray_utils import fake_collator
-
             return fake_collator
         else:
             collator = pydoc.locate(self.collator)
