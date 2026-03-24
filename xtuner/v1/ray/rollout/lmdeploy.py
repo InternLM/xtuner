@@ -349,6 +349,11 @@ class LMDeployWorker(RolloutWorker):
                     {
                         "LMDEPLOY_DP_MASTER_ADDR": dist_addr,
                         "LMDEPLOY_DP_MASTER_PORT": dist_port,
+                        # DEEPEP_MAX_TOKENS_PER_RANK is required by DLBlas's DeepEP
+                        # token dispatcher used in lmdeploy EP mode. Without it,
+                        # lmdeploy will fail during warmup.
+                        # Ref: https://github.com/DeepLink-org/DLBlas/blob/aae23445/dlblas/layers/moe/token_dispatcher.py#L81
+                        # Ref: https://github.com/InternLM/lmdeploy/blob/81627e3d/lmdeploy/utils.py#L375
                         "DEEPEP_MAX_TOKENS_PER_RANK": str(max_batch_size),
                     }
                 )
