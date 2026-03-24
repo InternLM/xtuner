@@ -21,7 +21,7 @@ dataset_config = [
             name="sft",
             anno_path=DATA_PATH,
             class_name="VLMJsonlDataset",
-            media_root=media_root,
+            media_root=MEDIA_ROOT,
             sample_ratio=1.0,
         ),
         "tokenize_fn": Qwen3VLTokenizeFnConfig(
