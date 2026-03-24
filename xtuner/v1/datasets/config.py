@@ -48,6 +48,7 @@ class DatasetConfig(BaseModel):
     class_name: Annotated[str, Parameter(group="dataset")] = "JsonlDataset"
     sample_ratio: Annotated[float, Parameter(group="dataset")] = 1.0
     enable_sequential_sampler: Annotated[bool, Parameter(group="dataset")] = False
+    enable_mmap_shared: Annotated[bool, Parameter(group="dataset")] = False
     media_root: Annotated[str | None, Parameter(group="dataset")] = ""
 
     def build(
@@ -60,6 +61,7 @@ class DatasetConfig(BaseModel):
                 anno_path=self.anno_path,
                 sample_ratio=self.sample_ratio,
                 enable_sequential_sampler=self.enable_sequential_sampler,
+                enable_mmap_shared=self.enable_mmap_shared,
                 name=self.name,
                 cache_dir=self.cache_dir,
                 cache_tag=self.cache_tag,

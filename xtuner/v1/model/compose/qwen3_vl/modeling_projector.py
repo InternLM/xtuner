@@ -102,8 +102,7 @@ class Qwen3VLProjector(BaseModel):
             for param in self.parameters():
                 param.requires_grad = False
 
-        fully_shard(
-            self,
+        self._fully_shard(
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=True,
