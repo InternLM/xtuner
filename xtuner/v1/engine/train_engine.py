@@ -172,7 +172,7 @@ class TrainEngine:
 
     @torch.no_grad()
     def forward_only(self, seq_ctx: SequenceContext, loss_ctx: LogProbContext):
-        output = self.model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+        output = self.model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)  # type: ignore[call-overload]
         return output
 
     def grad_accumulation_steps(self, data_batches_len: int):
