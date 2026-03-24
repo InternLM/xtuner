@@ -180,6 +180,7 @@ class TransformerConfig(XTunerBaseModelConfig):
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
     rope_scaling_cfg: RopeScalingConfig | None = None
+    rope_parameters: dict | None = None  # For transformers 5.2.0+ compatibility
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
     )
@@ -190,6 +191,45 @@ class TransformerConfig(XTunerBaseModelConfig):
         if self.rope_scaling_cfg is not None:
             return self.rope_scaling_cfg.model_dump()
         return None
+
+    def standardize_rope_params(self):
+        """Helper to standardize the config's rope params field for
+        compatibility with transformers 5.2.0+.
+
+        This method creates a `rope_parameters` dict that is compatible with transformers' rope initialization
+        functions like `_compute_yarn_parameters`. For old model configs, the fn will duplicate a single rope
+        param in each layer type (backward compatibility).
+        """
+        # Initialize rope_parameters if not exists
+        if not hasattr(self, "rope_parameters") or self.rope_parameters is None:
+            self.rope_parameters = {}
+
+        # Get rope scaling config values
+        rope_scaling = self.rope_scaling
+        rope_theta = getattr(self, "rope_theta", None)
+
+        # Case 0: no RoPE params defined
+        if not (rope_scaling or rope_theta):
+            return
+
+        # Get rope type from config
+        rope_type = rope_scaling.get("type", "default") if rope_scaling else "default"
+
+        # Set basic rope parameters
+        self.rope_parameters["rope_type"] = rope_type
+        if rope_theta is not None:
+            self.rope_parameters["rope_theta"] = rope_theta
+
+        # Add scaling-specific parameters for yarn/llama3/longrope types
+        if rope_type in ["yarn", "llama3", "longrope"] and rope_scaling:
+            self.rope_parameters["factor"] = rope_scaling.get("factor", 1.0)
+            self.rope_parameters["beta_fast"] = rope_scaling.get("beta_fast", 32.0)
+            self.rope_parameters["beta_slow"] = rope_scaling.get("beta_slow", 1.0)
+            self.rope_parameters["original_max_position_embeddings"] = rope_scaling.get(
+                "original_max_position_embeddings", self.max_position_embeddings
+            )
+            if "truncate" in rope_scaling:
+                self.rope_parameters["truncate"] = rope_scaling.get("truncate", False)
 
     @computed_field
     def num_attention_heads(self) -> int:
