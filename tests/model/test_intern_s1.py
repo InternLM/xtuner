@@ -78,7 +78,7 @@ class TestInternS1(DeterministicDDPTestCase):
         
         seq_ctx_list = [seq_ctx]
         LossContext = loss_cfg.loss_ctx_cls
-        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
         loss_ctx_list = [loss_ctx]
         loss_ctx_list = LossContext.build_batches(loss_ctx_list)
         loss_ctx = loss_ctx_list[0]
@@ -87,7 +87,7 @@ class TestInternS1(DeterministicDDPTestCase):
         with torch.no_grad():
             output = interns1_model(
                 seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+                loss_ctx={"lm": loss_ctx},
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -186,7 +186,7 @@ class TestInternS1(DeterministicDDPTestCase):
 
         seq_ctx_list = [seq_ctx]
         LossContext = loss_cfg.loss_ctx_cls
-        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=sp_mesh)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=sp_mesh)
         loss_ctx_list = [loss_ctx]
         loss_ctx_list = LossContext.build_batches(loss_ctx_list)
         loss_ctx = loss_ctx_list[0]
@@ -195,7 +195,7 @@ class TestInternS1(DeterministicDDPTestCase):
         with torch.no_grad():
             output = interns1_model(
                 seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+                loss_ctx={"lm": loss_ctx},
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -256,7 +256,7 @@ class TestInternS1(DeterministicDDPTestCase):
         seq_ctx_list = [seq_ctx]
         loss_cfg = CELossConfig()
         LossContext = loss_cfg.loss_ctx_cls
-        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
         loss_ctx_list = [loss_ctx]
         loss_ctx_list = LossContext.build_batches(loss_ctx_list)
         loss_ctx = loss_ctx_list[0]
@@ -265,7 +265,7 @@ class TestInternS1(DeterministicDDPTestCase):
         with torch.no_grad():
             output = interns1_model(
                 seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+                loss_ctx={"lm": loss_ctx},
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
@@ -370,7 +370,7 @@ class TestInternS1(DeterministicDDPTestCase):
         seq_ctx_list = [seq_ctx]
         loss_cfg = CELossConfig()
         LossContext = loss_cfg.loss_ctx_cls
-        loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=sp_mesh)
+        loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=sp_mesh)
         loss_ctx_list = [loss_ctx]
         loss_ctx_list = LossContext.build_batches(loss_ctx_list)
         loss_ctx = loss_ctx_list[0]
@@ -379,7 +379,7 @@ class TestInternS1(DeterministicDDPTestCase):
         with torch.no_grad():
             output = interns1_model(
                 seq_ctx=seq_ctx,
-                loss_ctx=loss_ctx,
+                loss_ctx={"lm": loss_ctx},
             )
         loss = output["loss"]
         self.assertTrue(torch.allclose(loss, expected_loss.to(loss.dtype), atol=tol, rtol=tol))
