@@ -305,7 +305,7 @@ case:
         -
             type: sft
             parameters:
-                config: autotest/config/qwen3_vl_dense.py
+                config: autotest/config/qwen3_vl_8B_dense.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 envs:
