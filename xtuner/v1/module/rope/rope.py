@@ -206,7 +206,7 @@ class FourierEmbedding(RotaryEmbedding):
 
         # zero out under-trained frequencies
         inv_freq = _compute_fope_parameters(self.num_inv_freq, self.inv_freq, config.max_position_embeddings)
-        self.register_buffer("inv_freq", inv_freq, persistent=True)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         if self.num_inv_freq is not None:
             assert (self.inv_freq > (2.0 * torch.pi / config.max_position_embeddings)).all() or (
