@@ -48,6 +48,23 @@ def check_fa3():
         raise RuntimeError(f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0.")
 
 
+def force_set_tokenize_workers(logger):
+    # To avoid segmentation faults when setting num_workers for the dataloader
+    # The root cause is the incompatibility between fork start method and ray's grpc.
+    # The most fundamental solution is that all processes started in ray should
+    # use spawn start method.
+    tokenize_workers = os.environ.get("XTUNER_TOKENIZE_WORKERS", None)
+    os.environ["XTUNER_TOKENIZE_WORKERS"] = "1"
+    if tokenize_workers is not None and int(tokenize_workers) > 1:
+        logger.warning(
+            f"XTUNER_TOKENIZE_WORKERS is set to {tokenize_workers}, which may cause segmentation faults. Force set XTUNER_TOKENIZE_WORKERS to 1 to avoid this."
+        )
+    else:
+        logger.info(
+            f"Set XTUNER_TOKENIZE_WORKERS to {os.environ['XTUNER_TOKENIZE_WORKERS']} for safe tokenization in dataloader workers."
+        )
+
+
 def bind_train_rollout(
     train_controller: TrainingControllerProxy,
     rollout_controller: RolloutControllerProxy,
@@ -259,6 +276,8 @@ class RLColocateTrainer:
         # log
         log_dir = self.exp_dir / "logs"
         self.logger = get_logger(log_dir=log_dir, tag="RLTrainer")
+
+        force_set_tokenize_workers(self.logger)
 
         if skip_checkpoint_validation:
             patch_default_save_plan()

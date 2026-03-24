@@ -23,9 +23,6 @@ from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
 from xtuner.v1.rl.agent_loop.gsm8k_with_tool import GSM8KToolAgentLoopConfig
 
-# To avoid segmentation faults when setting num_workers for the dataloader
-os.environ["XTUNER_TOKENIZE_WORKERS"] = '1'
-
 # env
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
