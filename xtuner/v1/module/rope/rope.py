@@ -77,7 +77,8 @@ def compute_default_rope_parameters(
     attention_factor = 1.0  # Unused in this type of RoPE
 
     # Compute the inverse frequencies
-    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim))
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
+    inv_freq = inv_freq.to(device=device)
     return inv_freq, attention_factor
 
 
@@ -205,7 +206,7 @@ class FourierEmbedding(RotaryEmbedding):
 
         # zero out under-trained frequencies
         inv_freq = _compute_fope_parameters(self.num_inv_freq, self.inv_freq, config.max_position_embeddings)
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.register_buffer("inv_freq", inv_freq, persistent=True)
 
         if self.num_inv_freq is not None:
             assert (self.inv_freq > (2.0 * torch.pi / config.max_position_embeddings)).all() or (
