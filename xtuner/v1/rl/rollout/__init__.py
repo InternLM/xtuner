@@ -1,6 +1,8 @@
 import os
 
+from .anthropic_chat import AnthropicChatAdapter
 from .controller import RolloutController
+from .openai_chat import OpenAIChatAdapter
 from .worker import RolloutWorker
 
 

@@ -5,10 +5,12 @@ import time
 from collections import OrderedDict
 from itertools import cycle
 from typing import TYPE_CHECKING, Any, Optional
+from uuid import uuid4
 
 import httpx
 import ray
 
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
@@ -277,3 +279,13 @@ async def check_worker_health(
                 f"Exception during health check for worker {rank} at {url}: {e}. Failure count: {failing_count}"
             )
     return False
+
+
+def ensure_rollout_request_id(rollout_state: RolloutState) -> str:
+    request_id = str(rollout_state.extra_fields.get("request_id", ""))
+    if request_id:
+        return request_id
+
+    request_id = uuid4().hex
+    rollout_state.extra_fields["request_id"] = request_id
+    return request_id
