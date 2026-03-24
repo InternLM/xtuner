@@ -695,7 +695,7 @@ class MoE(BaseModel):
             for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
                 shifted_tensor = mtp_ctx.loss_kwargs.shifted_labels
                 mtp_ctx.loss_kwargs.shifted_labels = roll_packed_tensor(
-                    shifted_tensor, seq_ctx.cu_seq_lens_k, -idx - 1, dim=-1
+                    shifted_tensor, seq_ctx.cu_seq_lens_k, -idx - 1, dim=-1, fill_value=-100
                 )
 
                 mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
