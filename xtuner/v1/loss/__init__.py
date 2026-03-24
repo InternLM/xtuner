@@ -1,5 +1,5 @@
 from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs
-from .ce_loss import CELossConfig, CELossContext
+from .ce_loss import CELossConfig, CELossContext, LMHeadLossContext
 from .chunk_loss import ChunkLoss
 from .moe_loss import (
     BalancingLoss,
@@ -28,6 +28,7 @@ __all__ = [
     "BaseLossConfig",
     "BaseLossContext",
     "BaseLossKwargs",
+    "LMHeadLossContext",
 ]
 
 import torch

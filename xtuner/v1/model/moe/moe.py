@@ -8,7 +8,6 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from cyclopts import Parameter
-from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
@@ -33,8 +32,6 @@ from xtuner.v1.loss import (
     LMHeadLossContext,
     ZLossConfig,
     ZLossContext,
-    ZLossKwargs,
-    BaseLossContext,
 )
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
@@ -289,11 +286,11 @@ class MoE(BaseModel):
 
             e_score_correction_bias.add_(updates)
 
-    def build_loss_ctx_batch(
+    def build_loss_ctx_batch(  # type: ignore[override]
         self,
         data_batch: list["ColateItem"],
         sp_mesh: DeviceMesh | None = None,
-    ) -> list[MoELossContextDict]:
+    ) -> list[MoELossContextDict]:  # type: ignore[override]
         """Build and calibrate loss contexts for MoE model.
 
         Args:
