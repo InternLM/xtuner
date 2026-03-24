@@ -1,7 +1,7 @@
 import json
 import os
 import threading
-from concurrent.futures import Future, wait
+from concurrent.futures import wait
 from pathlib import Path
 from typing import Any, Dict, List, cast
 
@@ -16,13 +16,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-
-
-try:
-    from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
-except ImportError:
-    AsyncSaveResponse = None
-
 from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
@@ -328,63 +321,6 @@ class TrainEngine:
                     shard_optimizer_state_dict,
                     checkpoint_id=optimizer_dir,
                 )
-
-    def async_save_dcp(
-        self,
-        model_dir: Path,
-        optimizer_dir: Path | None = None,
-    ) -> list[Future]:
-        """Asynchronously save model and optimizer via DCP.
-
-        Stages state_dict to CPU synchronously, then writes to disk in a background thread.
-
-        Args:
-            model_dir (Path): Directory to save the model checkpoint.
-            optimizer_dir (Path | None): Directory to save the optimizer checkpoint.
-
-        Returns:
-            list[Future]: Futures that complete when the background writes finish.
-        """
-        if not hasattr(dcp, "async_save"):
-            raise RuntimeError(
-                "dcp.async_save is not available in this PyTorch version. "
-                "Please upgrade PyTorch or set async_checkpoint=False."
-            )
-
-        rank = dist.get_rank()
-
-        if rank == 0:
-            model_dir.mkdir(parents=True, exist_ok=True)
-            if optimizer_dir is not None:
-                optimizer_dir.mkdir(parents=True, exist_ok=True)
-
-        futures: list[Future] = []
-        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params)
-
-        with profile_time_and_memory(f"[DCP Async Stage to {model_dir}]"):
-            model_state = get_model_state_dict(self.model, options=_options)
-            result = dcp.async_save(
-                model_state,
-                checkpoint_id=model_dir,
-            )
-            if AsyncSaveResponse is not None and isinstance(result, AsyncSaveResponse):
-                futures.append(result.upload_completion)
-            else:
-                futures.append(result)
-
-        with profile_time_and_memory(f"[DCP Async Stage to {optimizer_dir}]"):
-            if optimizer_dir is not None:
-                shard_optimizer_state_dict = get_optimizer_state_dict(self.model, self.optimizer, options=_options)
-                result = dcp.async_save(
-                    shard_optimizer_state_dict,
-                    checkpoint_id=optimizer_dir,
-                )
-                if AsyncSaveResponse is not None and isinstance(result, AsyncSaveResponse):
-                    futures.append(result.upload_completion)
-                else:
-                    futures.append(result)
-
-        return futures
 
     def load_dcp(
         self,
