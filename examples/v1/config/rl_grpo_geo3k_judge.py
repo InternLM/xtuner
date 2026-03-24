@@ -22,6 +22,9 @@ from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
 
 # To avoid segmentation faults when setting num_workers for the dataloader
+# The root cause is the incompatibility between fork start method and ray's grpc. 
+# The most fundamental solution is that all processes started in ray should 
+# use spawn start method.
 os.environ["XTUNER_TOKENIZE_WORKERS"] = '1'
 
 # env
@@ -37,8 +40,8 @@ media_root = os.environ["MEDIA_ROOT"]
 experimental_name = "grpo_geo3k"
 rollout_steps = 45  # TODO: total_epoch
 evaluate_step = 45
-train_optimizer_steps = 1 # 4
-global_batch_size = 64 # 1024
+train_optimizer_steps = 4
+global_batch_size = 1024
 prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 1
