@@ -1,9 +1,11 @@
 import torch
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class CacheItem(TypedDict):
     num_tokens: int
+    num_img_tokens: NotRequired[list[int]]
+    proxy_attn_flops: NotRequired[float]
 
 
 class DataItem(CacheItem):
@@ -12,7 +14,6 @@ class DataItem(CacheItem):
 
 
 class BaseMLLMDataItem(DataItem):
-    num_img_tokens: list[int]
     num_imgs: list[int]
 
 
@@ -30,3 +31,9 @@ class OmniDataItem(BaseMLLMDataItem, total=False):
     pixel_values: torch.Tensor
     image_grid_thw: torch.Tensor
     position_ids: torch.Tensor
+
+
+class LongTextDataItem(DataItem):
+    char_start: int
+    char_end: int
+    token_start_offset: int

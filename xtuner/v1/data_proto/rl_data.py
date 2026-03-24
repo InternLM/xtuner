@@ -96,6 +96,7 @@ class RLDatasetItem(BaseModel):
         messages (Optional[List[Dict[str, Any]]]): The message list for the prompt.
         input_ids (Optional[List[int]]): The tokenized input IDs.
         num_tokens (Optional[int]): The number of tokens in the input.
+        proxy_attn_flops (Optional[float]): The estimated proxy attention FLOPs for the sample. unused for RL
         ability (Optional[str]): The ability or category of the data.
         reward_model (Optional[Dict[str, Any]]): Data required by the reward model, like ground truth.
         data_source (Optional[Dict[str, Any]]): The source of the data, used for weighting rewards.
@@ -106,6 +107,7 @@ class RLDatasetItem(BaseModel):
     messages: list[dict[str, Any]] | None = None
     input_ids: list[int] | None = None
     num_tokens: int | None = None
+    proxy_attn_flops: float | None = None
     ability: str | None = None
     reward_model: dict[str, Any] | None = None
     data_source: dict[str, Any] | None = None
