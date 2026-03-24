@@ -35,8 +35,9 @@ class SamplerConfig(BaseModel):
         )
         return Sampler(dataloader=dataloader, prompt_repeat_k=self.prompt_repeat_k, replay_buffer=replay_buffer)
 
-# TODO: The best solution is to put it in the fake_collator, 
-# but it will cause a deadlock problem, so it is temporarily placed here. 
+
+# TODO: The best solution is to put it in the fake_collator,
+# but it will cause a deadlock problem, so it is temporarily placed here.
 # The best solution should be to start the dataloader using spawn.
 def put_to_ray(data: RolloutState) -> RolloutState:
     if hasattr(data, "mm_info") and data.mm_info is not None:
