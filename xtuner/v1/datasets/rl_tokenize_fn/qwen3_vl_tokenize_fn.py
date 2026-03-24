@@ -7,7 +7,7 @@ from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwe
 from ..utils import replace_image_context_and_collect_media_data
 
 
-def remove_consecutive_img_context_tokens(tokens, img_context_id):
+def remove_consecutive_img_context_tokens(tokens: list[int], img_context_id: int) -> list[int]:
     if not tokens:
         return tokens
 

@@ -65,7 +65,7 @@ class TrainInfo(TypedDict, total=False):
 
 def get_train_seq_ctx(
     input_ids: torch.LongTensor,
-    position_ids: torch.Tensor,
+    position_ids: torch.Tensor | None = None,
     multimodal_train_info: dict | None = None,
     len_response_ids: int = 0,
 ):

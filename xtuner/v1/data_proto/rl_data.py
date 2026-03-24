@@ -121,6 +121,7 @@ class RolloutState(CacheObj, BaseModel):
 
     @field_serializer("mm_info")
     def _serialize_mm_info(self, value: MultimodalInfo | None) -> MultimodalInfo | None:
+        # TODO: Not currently needed
         return None
 
 
