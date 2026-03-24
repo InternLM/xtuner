@@ -107,6 +107,25 @@ def apply_rotary_pos_emb_sep_cuda(
     return q_embed, k_embed
 
 
+# Note: Replace manual trigonometric operations with torch_npu.npu_rotary_mul operator.
+def apply_rotary_pos_emb_sep_npu(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    position_ids: torch.Tensor | None = None,
+    unsqueeze_dim: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    import torch_npu
+
+    num_groups = int(q.shape[unsqueeze_dim] // cos.shape[unsqueeze_dim])
+    cos_rep = repeat_kv(cos, num_groups)
+    sin_rep = repeat_kv(sin, num_groups)
+    q_embed = torch_npu.npu_rotary_mul(q, cos_rep, sin_rep)
+    k_embed = torch_npu.npu_rotary_mul(k, cos, sin)
+    return q_embed, k_embed
+
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     """This is the equivalent of torch.repeat_interleave(x, dim=1,
     repeats=n_rep).
@@ -155,9 +174,11 @@ def get_apply_rotary_emb(
 
     device = get_device()
     if device == "npu":
-        assert fope_sep_head is None or not fope_sep_head, "FoPE with sep head is not supported on NPU yet."
         assert not enable_partial_rotary, "Partial rotary is not supported on NPU yet."
-        return apply_rotary_pos_emb_npu
+        if fope_sep_head:
+            return apply_rotary_pos_emb_sep_npu
+        else:
+            return apply_rotary_pos_emb_npu
     else:
         if fope_sep_head:
             logger.debug("Using FoPE with fope_sep_head")
