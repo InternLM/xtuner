@@ -11,7 +11,6 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
-    fully_shard,
 )
 from torch.distributed.tensor import DTensor
 from tqdm import tqdm
@@ -20,7 +19,7 @@ from typing_extensions import overload, override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.loss import BaseLossContext, CELossContext
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -79,7 +78,7 @@ class Dense(BaseModel):
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: CELossContext,
+        loss_ctx: dict[str, BaseLossContext | list[BaseLossContext]] | None = None,
     ) -> ModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -111,10 +110,17 @@ class Dense(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
+        if loss_ctx is None:
+            # Inference mode
+            logits = F.linear(hidden_states, self.lm_head.weight, self.lm_head.bias)
+            output["logits"] = logits
+        else:
+            # Training mode
+            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx["lm"])  # type: ignore[call-overload]
+            output["loss"] = loss
+            output["logits"] = logits
+            output["extra_info"] = extra_info
+
         return ModelOutputs(**output)
 
     def build_embeddings(self, config: TransformerConfig):
@@ -167,7 +173,7 @@ class Dense(BaseModel):
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        loss_ctx: CELossContext,
+        loss_ctx: dict[str, CELossContext] | None = None,
     ) -> ModelOutputs: ...
 
     __call__ = nn.Module.__call__
@@ -242,12 +248,12 @@ class Dense(BaseModel):
                     layer.forward = torch.compile(layer.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
-            fully_shard(
-                layer,
+            self._fully_shard(
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
                 reshard_after_forward=self.fsdp_config.reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+                module=layer,
             )
 
         for layer_cur, layer_next in zip(
@@ -256,32 +262,31 @@ class Dense(BaseModel):
         ):
             layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
 
-        fully_shard(
-            self.embed_tokens,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=lm_head_mp_policy if self.config.tie_word_embeddings else mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            module=self.embed_tokens,
         )
 
-        fully_shard(
-            self.norm,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            module=self.norm,
         )
 
-        fully_shard(
-            self.lm_head,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=lm_head_mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            module=self.lm_head,
         )
 
-        fully_shard(
-            self,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
