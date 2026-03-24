@@ -454,7 +454,6 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 _meta = self.count_tokens(offsets)
 
         _meta["offsets"] = offsets
-        del offsets
         if _meta["num_tokens"] is None:
             _meta.pop("num_tokens")
 
@@ -477,45 +476,34 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         )
 
         if enable_mmap_shared and dist.is_initialized() and _get_local_concurrency() > 1:
-            # 有3种情况:
-            # 1. disable_filter and sample_ratio == 1.0 and not self._has_chunk:
-            #      所有rank直接设置self._meta，因为_meta已经是mmap模式。这是高速通路，保持了meta数据懒加载
-            # 2. disable_filter and sample_ratio == 1.0 and self._has_chunk:
-            #     所有rank直接设置self._meta，除了_meta["offsets"]。因为 offsets 在 LongTextPretrainTokenizeFunction 时会做扩增。
-            #     Local rank0将offsets保存到tmp，然后所有rank将通过mmap共享物理页加载。
-            # 3. 其他情况:
-            #    只有local rank0过滤和采样样本，然后保存到tmp；所有rank将通过mmap共享物理页加载。
-            #    这时 offsets.npy 和 jsonl_meta 虽然是懒加载，但是在过滤和采样时都会被加载到内存。是慢速通路。
-            _meta_cache_if_mmap = {}
-            if _is_local_rank0() or (disable_filter and sample_ratio == 1.0):
-                _meta_cache_if_mmap = self._set_meta_attrs(
+            _meta_need_update = {}
+            if _is_local_rank0():
+                _meta_need_update = self._get_meta_need_update(
                     _meta,
                     sample_ratio=sample_ratio,
                     max_length=max_length,
                     enable_sequential_sampler=enable_sequential_sampler,
                 )
-            else:
-                self._meta = {}
-
-            if _is_local_rank0():
-                save_dict_to_npy_dir(_meta_cache_if_mmap, tmp_dir)
+                save_dict_to_npy_dir(_meta_need_update, tmp_dir)
                 atexit.register(shutil.rmtree, tmp_dir, True)
 
             dist.barrier()
-            _meta_cache_if_mmap = load_dict_from_npy_dir(tmp_dir, mmap=True)
-            self._meta.update(_meta_cache_if_mmap)
+            _meta_need_update = load_dict_from_npy_dir(tmp_dir, mmap=True)
         else:
-            self._set_meta_attrs(
+            _meta_need_update = self._get_meta_need_update(
                 _meta,
                 sample_ratio=sample_ratio,
                 max_length=max_length,
                 enable_sequential_sampler=enable_sequential_sampler,
             )
 
+        _meta.update(_meta_need_update)
+        self._meta = _meta
+
         if self._shared_memory is not None:
             self._release_shared_memory()
 
-    def _set_meta_attrs(
+    def _get_meta_need_update(
         self,
         _meta: dict[str, np.ndarray],
         *,
@@ -523,24 +511,37 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         max_length: int | None,
         enable_sequential_sampler: bool,
     ) -> dict[str, np.ndarray]:
-        """对 ``_meta`` 做 chunk
-        对齐(LongTextPretrainTokenizeFunction时才需要)、过滤、采样，结果写入 ``self._meta``。
+        """对 _meta 做过滤、采样，返回 _meta 中需要更新的 key-value (即 _meta_need_update)。
+
+        如果使用 LongTextPretrainTokenizeFunction (即 self._has_chunk=True)，还需要将offsets更新为 chunk 对齐后的 offsets。
+
+        需要更新的 _meta_need_update, 在不使用 mmap (enable_mmap_shared=False) 时，后续在各rank会更新_meta。
+        而在使用 mmap 时，local rank0会将 _meta_need_update 保存到 tmp 目录，然后所有rank将通过mmap共享物理页加载。
+
+        在使用 mmap 时，具体有3种情况:
+        1. disable_filter and sample_ratio == 1.0 and not self._has_chunk:
+             所有rank直接使用_meta，因为_meta已经是mmap模式。这是高速通路，保持了meta数据懒加载
+        2. disable_filter and sample_ratio == 1.0 and self._has_chunk:
+            所有rank直接使用_meta，除了_meta["offsets"]。因为 offsets 在 LongTextPretrainTokenizeFunction 时会做扩增。
+            Local rank0将offsets保存到tmp，然后所有rank将通过mmap共享物理页加载。
+        3. 其他情况:
+           只有local rank0过滤和采样样本，然后保存到tmp；所有rank将通过mmap共享物理页加载。
+           这时 offsets.npy 和 jsonl_meta 虽然是懒加载，但是在过滤和采样时都会被加载到内存。是慢速通路。
 
         Returns:
-            供 mmap 路径参考的元数据：
-            无过滤且 ``sample_ratio==1`` 时，
-              1) 无 chunk 为 ``{}``，
-              2) 有 chunk 为 ``{"offsets": ...}``，
-            3) 否则为与 ``self._meta`` 相同的完整字典。
+            无过滤且 `sample_ratio==1` 时，
+              1) _has_chunk=False 为 `{}`，
+              2) _has_chunk=True 为 `{"offsets": ...}`，
+            3) 否则为与 `_meta` 相同的完整字典。
         """
-        _meta_cache_if_mmap = {}
+        _meta_need_update = {}
         if self._has_chunk:
             line_idxs = _meta.pop("line_idxs")
             _meta["offsets"] = _meta["offsets"][line_idxs]
             # After line_idxs indexing, offsets has exactly num_chunks elements
             # (no trailing sentinel), so use len(offsets) directly.
             base_len = len(_meta["offsets"])
-            _meta_cache_if_mmap["offsets"] = _meta["offsets"]
+            _meta_need_update["offsets"] = _meta["offsets"]
         else:
             # offsets has trailing sentinel (file_size), so samples are num_offsets - 1
             _meta["offsets"] = _meta["offsets"][:-1]
@@ -550,8 +551,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             base_len = len(_meta["offsets"])
 
         if self.disable_filter and sample_ratio == 1.0:
-            self._meta = _meta
-            return _meta_cache_if_mmap
+            # self._meta = _meta
+            return _meta_need_update
 
         dtype = np.int32 if base_len < np.iinfo(np.int32).max else np.int64
         _sampled = np.arange(base_len, dtype=dtype)
@@ -568,13 +569,12 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
 
         for _, v in _meta.items():
             assert base_len == len(v)
-        self._meta = {}
+        _meta_need_update = {}
         for k, v in _meta.items():
             assert isinstance(v, np.ndarray)
-            self._meta[k] = v[_sampled]
+            _meta_need_update[k] = v[_sampled]
 
-        _meta_cache_if_mmap = self._meta
-        return _meta_cache_if_mmap
+        return _meta_need_update
 
     @property
     def offsets(self) -> np.ndarray:
