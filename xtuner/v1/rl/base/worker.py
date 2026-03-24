@@ -377,7 +377,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
         old_logprobs_list: list[torch.Tensor] = []
         for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
-            loss_ctx = self.logprob_cfg.build(shifted_labels=shifted_labels)
+            loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
+            assert loss_ctx is not None
             output = self._engine.forward_only(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
             old_logprobs_list.append(output["loss"])
         return old_logprobs_list
