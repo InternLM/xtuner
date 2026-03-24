@@ -251,6 +251,12 @@ RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
         pip install nvidia-nccl-cu12==2.25.1 --no-cache-dir; \
     fi
 
+# cudnn update for torch 2.9.1
+RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
+    if [ "x${TORCH_VERSION}" = "x2.9.1" ]; then \
+        pip install nvidia-cudnn-cu12==9.15.1.9 --no-cache-dir; \
+    fi
+
 # setup sysctl
 RUN echo "fs.file-max=100000" >> /etc/sysctl.conf
 RUN sysctl -p
