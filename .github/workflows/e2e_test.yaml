@@ -17,6 +17,11 @@ on:
         description: 'Set branch or tag or commit id. Default is "main"'
         type: string
         default: 'main'
+      run_case:
+        required: false
+        description: 'Run a specific test case, e.g., "qwen3-rl-lmdeploy", as defined in autotest/config.yaml.'
+        type: string
+        default: 'all'
   schedule:
     - cron:  '00 22 * * 0-4'
 
@@ -38,7 +43,12 @@ jobs:
           conda activate clusterx 
           conda env list
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
-          pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+          CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
+          if [ "$CASE_NAME" = "all" ]; then
+            pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+          else
+            pytest autotest/test_all.py::test_all[$CASE_NAME] -m all -n 1 -vv --run_id ${{ github.run_id }}
+          fi
 
       - name: Upload Artifacts
         if: ${{ !cancelled() }}
