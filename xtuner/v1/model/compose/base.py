@@ -10,7 +10,6 @@ from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     FSDPModule,
     MixedPrecisionPolicy,
-    fully_shard,
 )
 from typing_extensions import override
 
@@ -108,8 +107,7 @@ class BaseComposeModel(BaseModel):
         # Note: 非常关键，不能删除这个 assert
         assert self.fsdp_mesh is not None
 
-        fully_shard(
-            self,
+        self._fully_shard(
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
