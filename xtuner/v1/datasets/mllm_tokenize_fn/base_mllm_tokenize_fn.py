@@ -12,7 +12,7 @@ from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
 from xtuner.v1.utils import get_logger
 
 from ..data_item import BaseMLLMDataItem, CacheItem
-from ..utils import CachableTokenizeFunction, tokenizer_xxhash
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
 
 
 logger = get_logger()
@@ -142,6 +142,8 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         hash: str | None = None,
         hash_str: str = "",
         data_name: str | None = None,
+        llm_pack_weight: float = 1.0,
+        visual_pack_weight: float = 0.0,
     ):
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
@@ -155,7 +157,9 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._image_wh_list: list[list] = []
         self._video_wh_list: list[list] = []
         self._video_extra_info_list: list[dict] = []
-        super().__init__(tokenizer)
+
+        self._hash_str += f"llm_pack_weight:{llm_pack_weight}_visual_pack_weight:{visual_pack_weight}"
+        super().__init__(tokenizer, llm_pack_weight=llm_pack_weight, visual_pack_weight=visual_pack_weight)
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         raise NotImplementedError
@@ -175,7 +179,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
-        return {"num_tokens": len(input_ids)}
+        return {"num_tokens": len(input_ids), "num_img_tokens": [0]}
 
     def pure_text_get_item(self, data_item: Any) -> BaseMLLMDataItem:
         raise NotImplementedError
@@ -190,6 +194,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 labels = labels[: self.max_length]
         return input_ids, labels
 
+    @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
         try:
             self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
@@ -199,7 +204,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         except RuntimeError as e:
             if self.state == "cache":
                 print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")
-                ret = CacheItem(num_tokens=0)
+                ret = CacheItem(num_tokens=0, num_img_tokens=[0])
                 return ret
             else:
                 raise RuntimeError(f"!!!! RuntimeError: {e} of {self.data_name}")
@@ -250,6 +255,8 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
     oss_time_log_thr: int = 10  # 10s
     add_eos_token: bool = True  # for mllm pretrain
     add_bos_token: bool = False  # for mllm pretrain
+    llm_pack_weight: float = 1.0
+    visual_pack_weight: float = 0.0
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs

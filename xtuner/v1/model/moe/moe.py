@@ -18,7 +18,6 @@ from torch.distributed.distributed_c10d import ReduceOp
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
-    fully_shard,
 )
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from tqdm import tqdm
@@ -827,12 +826,13 @@ class MoE(BaseModel):
                 reshard_after_forward = False
             else:
                 reshard_after_forward = self.fsdp_config.reshard_after_forward
-            fully_shard(
-                layer,
+
+            self._fully_shard(
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
                 reshard_after_forward=reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+                module=layer,
             )
 
         for layer_cur, layer_next in zip(
@@ -841,32 +841,31 @@ class MoE(BaseModel):
         ):
             layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
 
-        fully_shard(
-            self.embed_tokens,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            module=self.embed_tokens,
         )
 
-        fully_shard(
-            self.norm,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            module=self.norm,
         )
 
-        fully_shard(
-            self.lm_head,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=lm_head_mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            module=self.lm_head,
         )
 
-        fully_shard(
-            self,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
@@ -906,14 +905,25 @@ class MoE(BaseModel):
                 param.grad.div_(self.ep_mesh.size())  # type: ignore
                 continue
 
-            # Reduce gradients for other parameters
-            if ep_enabled:
-                grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
-                dist.all_reduce(
-                    grad.div_(self.ep_mesh.size()),  # type: ignore
-                    ReduceOp.SUM,
-                    group=self.ep_mesh.get_group(mesh_dim=0),  # type: ignore
+            if isinstance(param, DTensor):
+                replicate_dim_names = tuple(
+                    param.device_mesh.mesh_dim_names[i]
+                    for i, p in enumerate(param.placements)
+                    if isinstance(p, Replicate)
                 )
+                if replicate_dim_names:
+                    # `DeviceMesh.get_group()` only supports a single mesh dimension,
+                    # so calling it directly on a multi-dim sub-mesh raises RuntimeError.
+                    # `_flatten()` collapses all Replicate dims into a 1D mesh whose
+                    # process group covers every rank across those dimensions, allowing
+                    # a single all_reduce regardless of how many Replicate dims exist.
+                    flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
+                    grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+                    dist.all_reduce(
+                        grad.div_(flat_mesh.size()),  # type: ignore
+                        ReduceOp.SUM,
+                        group=flat_mesh.get_group(),  # type: ignore
+                    )
 
     def _init_device_mesh(self, fsdp_config: FSDPConfig):
         self.fsdp_config = fsdp_config
@@ -928,6 +938,7 @@ class MoE(BaseModel):
                 (experts_fsdp_size, self.fsdp_config.ep_size),
                 mesh_dim_names=(f"{self.config.mesh_prefix}.fsdp", f"{self.config.mesh_prefix}.ep"),
             )
+            self._world_mesh = model_mesh
             if self.ep_mesh is not None:
                 # WARN: This assertion is **VERY** important.
                 # FSDP requires that `device_mesh` shares the same root mesh across all mesh dimensions.
@@ -992,7 +1003,9 @@ class MoE(BaseModel):
             if isinstance(module, MoEBlock):
                 return
             for name, param in module.named_parameters(recurse=False):
-                dist_param = nn.Parameter(distribute_tensor(param, self.ep_mesh, [Replicate()]))
+                dist_param = nn.Parameter(
+                    distribute_tensor(param, self.ep_mesh, [Replicate()]), requires_grad=param.requires_grad
+                )
                 module.register_parameter(name, dist_param)
             for child in module.children():
                 traverse(child)

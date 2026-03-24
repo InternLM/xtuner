@@ -3,16 +3,22 @@ import hashlib
 import inspect
 import warnings
 from difflib import SequenceMatcher
-from typing import Annotated, Any, Union, cast
+from typing import Annotated, Any, TypedDict, Union, cast
 
 from cyclopts import Parameter
 from pydantic import ConfigDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.datasets.data_item import CacheItem, DataItem
+from xtuner.v1.datasets.data_item import CacheItem, DataItem, LongTextDataItem
 
-from ..utils import CachableTokenizeFunction, tokenizer_xxhash
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
 from .text import PretrainTokenizeFunction, PretrainTokenizeFunctionConfig
+
+
+class ChunkInfo(TypedDict):
+    char_start: int
+    char_end: int
+    token_start_offset: int
 
 
 class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
@@ -26,6 +32,7 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
         tokenizer_chunk_chars: int = 4096,
         overlap_chars: int = 512,
         min_chunk_tokens: int = 0,
+        max_length: int | None = None,
         add_eos_token: bool = True,
         add_bos_token: bool = False,
         tokenizer_hash: str | None = None,
@@ -35,6 +42,7 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
         self.tokenizer_chunk_chars = tokenizer_chunk_chars
         self.overlap_chars = overlap_chars
         self.min_chunk_tokens = min_chunk_tokens
+        self.max_length = max_length
         # Call grandparent __init__ via CachableTokenizeFunction to avoid
         # re-running PretrainTokenizeFunction.__init__ attribute assignments
         self.add_eos_token = add_eos_token
@@ -66,7 +74,7 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
             chunk = chunk + self.tokenizer.eos_token
         return chunk
 
-    def shard_char_boundaries(self, text: str) -> list[tuple[int, int]]:
+    def shard_char_boundaries(self, text: str) -> list[ChunkInfo]:
         """Return list of (char_start, char_end) covering the full text, where
         each segment corresponds to approximately chunk_size tokens.
 
@@ -157,10 +165,18 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
         # Final boundary is end of text
         chunk_boundaries.append(len(text))
 
+        fake_token_start_offset = 0
+
         # Convert boundaries to (start, end) pairs
-        result = []
+        result: list[ChunkInfo] = []
         for i in range(len(chunk_boundaries) - 1):
-            result.append((chunk_boundaries[i], chunk_boundaries[i + 1]))
+            result.append(
+                {
+                    "char_start": chunk_boundaries[i],
+                    "char_end": chunk_boundaries[i + 1],
+                    "token_start_offset": fake_token_start_offset,
+                }
+            )
 
         return result
 
@@ -181,38 +197,54 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
             running_chars += max(len(decoded), 1)
         return offsets
 
+    @with_proxy_attention_flops
     def __call__(self, item: Any, **kwargs: Any) -> DataItem | CacheItem:  # type: ignore[override]
         char_start: int | None = kwargs.get("char_start")
         char_end: int | None = kwargs.get("char_end")
+        token_start_offset: int = kwargs.get("token_start_offset", 0)
         text = self._get_text(item)
 
         if self.state == "cache":
-            boundaries = self.shard_char_boundaries(text)
-            chunks = []
+            chunk_infos = self.shard_char_boundaries(text)
             num_tokens_list = []
-            for cs, ce in boundaries:
-                chunk_text = self._make_chunk_text(text, cs, ce)
+            chunks = []
+            for chunk_info in chunk_infos:
+                chunk_text = self._make_chunk_text(text, chunk_info["char_start"], chunk_info["char_end"])
                 nt = len(self.tokenizer.encode(chunk_text, add_special_tokens=False))
-                if nt < self.min_chunk_tokens and (cs, ce) == boundaries[-1]:
+                if nt < self.min_chunk_tokens and chunk_info["char_end"] == len(text):
                     continue  # drop trailing short chunk
                 num_tokens_list.append(nt)
-                chunks.append({"char_start": cs, "char_end": ce})
+                chunks.append(chunk_info)
             return cast(CacheItem, {"num_tokens": num_tokens_list, "chunks": chunks})
 
         # Runtime: tokenize specified char range
-        if char_start is not None:
-            chunk_text = self._make_chunk_text(text, char_start, char_end)
-            input_ids = self.tokenizer.encode(chunk_text, add_special_tokens=False)
-            num_tokens = len(input_ids)
-            if num_tokens == 0:
-                labels = []
-            else:
-                labels = copy.deepcopy(input_ids)
-                labels[0] = -100
-            return {"input_ids": input_ids, "labels": labels, "num_tokens": num_tokens}
+        assert char_start is not None and char_end is not None, "char_start and char_end must be provided"
+        if char_start == -1:
+            # full-text fallback
+            char_start, char_end = 0, len(text)
 
-        # Full-text fallback (no char range specified)
-        return super().__call__(item)
+        chunk_text = self._make_chunk_text(text, char_start, char_end)
+        input_ids = self.tokenizer.encode(chunk_text, add_special_tokens=False)
+
+        if self.max_length is not None:
+            input_ids = input_ids[token_start_offset : token_start_offset + self.max_length]
+        else:
+            input_ids = input_ids[token_start_offset:]
+
+        num_tokens = len(input_ids)
+        if num_tokens == 0:
+            labels = []
+        else:
+            labels = copy.deepcopy(input_ids)
+            labels[0] = -100
+        return LongTextDataItem(
+            input_ids=input_ids,
+            labels=labels,
+            num_tokens=num_tokens,
+            char_start=char_start,
+            char_end=char_end,
+            token_start_offset=token_start_offset,
+        )
 
     def hash(self) -> str:
         if self._hash is None:
@@ -230,7 +262,7 @@ class LongTextPretrainTokenizeFunction(PretrainTokenizeFunction):
                 f"{_tokenizer_hash}_{_source_hash}"
                 f"_{self.add_bos_token}_{self.add_eos_token}"
                 f"_{self.chunk_size}_{self.tokenizer_chunk_chars}"
-                f"_{self.overlap_chars}_{self.min_chunk_tokens}"
+                f"_{self.overlap_chars}_{self.min_chunk_tokens}_{self.max_length}"
             )
         return self._hash
 
@@ -241,6 +273,7 @@ class LongTextPretrainTokenizeFunctionConfig(PretrainTokenizeFunctionConfig):
     tokenizer_chunk_chars: Annotated[int, Parameter(group="tokenize_fn")] = 4096
     overlap_chars: Annotated[int, Parameter(group="tokenize_fn")] = 512
     min_chunk_tokens: Annotated[int, Parameter(group="tokenize_fn")] = 0
+    max_length: Annotated[int | None, Parameter(group="tokenize_fn")] = None
 
     def build(
         self,
@@ -255,6 +288,7 @@ class LongTextPretrainTokenizeFunctionConfig(PretrainTokenizeFunctionConfig):
             tokenizer_chunk_chars=self.tokenizer_chunk_chars,
             overlap_chars=self.overlap_chars,
             min_chunk_tokens=self.min_chunk_tokens,
+            max_length=self.max_length,
             add_eos_token=self.add_eos_token,
             add_bos_token=self.add_bos_token,
             tokenizer_hash=tokenizer_hash,
