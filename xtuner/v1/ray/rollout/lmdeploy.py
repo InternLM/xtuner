@@ -134,7 +134,7 @@ class LMDeployWorker(RolloutWorker):
                 f"Total input length {len(payload['input_ids'])} exceeds context length {self.config.context_length}."
             )
 
-        if self.enable_return_routed_experts:
+        if self.enable_return_routed_experts and not extra_params.get("disable_routed_experts", False):
             extra_params["return_routed_experts"] = True
 
         lmdeploy_sample_params = self._transform_sample_params(sample_params, extra_params)

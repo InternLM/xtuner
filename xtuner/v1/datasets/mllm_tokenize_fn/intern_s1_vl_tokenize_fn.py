@@ -2,6 +2,7 @@
 
 import os
 import time
+from itertools import chain
 from typing import Literal
 
 import numpy as np
@@ -81,6 +82,8 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         oss_loader_cfg: OSSLoaderConfig | None = None,
         tokenizer_hash: str | None = None,
         max_length: int | None = None,
+        llm_pack_weight: float = 1.0,
+        visual_pack_weight: float = 0.0,
         hash: str | None = None,
         only_prompt: bool = False,
         template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
@@ -167,6 +170,8 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             hash,
             hash_str=_hash_str,
             data_name=self.data_name,
+            llm_pack_weight=llm_pack_weight,
+            visual_pack_weight=visual_pack_weight,
         )
 
     def _get_transform(self):
@@ -202,10 +207,10 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             for size in self._image_wh_list:
                 if size[0] == 0 or size[1] == 0:
                     # Image is corrupted, flag=0, and this data will be removed later
-                    return {"num_tokens": 0}  # type: ignore
+                    return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
         except Exception as e:
             print(f"ERROR of image_wh: {e}, data_name: {self.data_name}")
-            return {"num_tokens": 0}  # type: ignore
+            return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
 
         num_tiles = []
         if self.dynamic_image_size:  # If dynamic image size is enabled, preprocess the image dynamically
@@ -243,13 +248,13 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             assert (torch.tensor(input_ids) == self.img_context_token_id).sum() == sum(num_image_tokens), (
                 "ERROR: image tokens are truncated"
             )
-            return {"num_tokens": len(input_ids)}
+            return {"num_tokens": len(input_ids), "num_img_tokens": num_image_tokens}
         except Exception as e:
             print(
                 f"ERROR of Preprocess function: {e}, data_name: {self.data_name}, "
                 # f"conversations: {data_item['conversations']}"
             )
-            return {"num_tokens": 0}
+            return {"num_tokens": 0, "num_img_tokens": [0]}
 
     def multi_modal_get_item(self, data_item: dict, media_root: str = "") -> InternS1DataItem:
         num_tiles = []
@@ -366,13 +371,13 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             assert (torch.tensor(input_ids) == self.video_context_token_id).sum() == total_image_tokens, (
                 "ERROR: video tokens are truncated"
             )
-            return {"num_tokens": len(input_ids)}
+            return {"num_tokens": len(input_ids), "num_img_tokens": list(chain.from_iterable(num_image_tokens_list))}
         except Exception as e:
             print(
                 f"ERROR of Preprocess function: {e}, data_name: {self.data_name}, "
                 # f"conversations: {data_item['conversations']}"
             )
-            return {"num_tokens": 0}
+            return {"num_tokens": 0, "num_img_tokens": [0]}
 
     def video_get_item(self, data_item: dict, media_root: str = "") -> InternS1DataItem:
         num_image_tokens_list = []
@@ -454,7 +459,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             labels=labels,
             pixel_values=pixel_values,  # type: ignore
             num_tokens=len(input_ids),
-            num_img_tokens=[total_image_tokens],
+            num_img_tokens=list(chain.from_iterable(num_image_tokens_list)),
             num_imgs=num_imgs_list,
         )
         return ret
@@ -493,6 +498,8 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             max_num_frames=self.max_num_frames,
             oss_loader_cfg=self.oss_loader_cfg,
             template_name=self.template_name,
+            llm_pack_weight=self.llm_pack_weight,
+            visual_pack_weight=self.visual_pack_weight,
             hash=self.hash,
             debug=self.debug,
             oss_time_log_thr=self.oss_time_log_thr,
