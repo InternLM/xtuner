@@ -12,6 +12,7 @@ from .moe_loss import (
     ZLossKwargs,
 )
 from .mtp_loss import MTPLossContext
+from .rl_loss import LogProbConfig, LogProbContext
 
 
 __all__ = [
@@ -31,6 +32,8 @@ __all__ = [
     "BaseLossKwargs",
     "LMHeadLossContext",
     "MTPLossContext",
+    "LogProbConfig",
+    "LogProbContext",
 ]
 
 import torch

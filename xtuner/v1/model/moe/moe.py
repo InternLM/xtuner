@@ -113,6 +113,7 @@ class MoEModelOutputs(ModelOutputs):
         """
         super().free_nongrad_feature()
         self.router_logits = None
+        self.router_weights = None
 
 
 class MoEBatchForwardInfo(BatchForwardInfo):

@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import torch
 from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossKwargs, LMHeadLossContext
@@ -70,6 +71,21 @@ class MTPLossConfig(CELossConfig):
 
         shifted_labels = data["shifted_labels"]
         cu_seq_lens = data["seq_ctx"].cu_seq_lens_k
+
+        # cu_seq_lens[-1] may be larger than shifted_labels.shape[-1] when seq_ctx
+        # was split for sequence parallelism (padding is added to make the sequence
+        # length a multiple of sp_size). Pad with -100 so roll_packed_tensor does
+        # not go out of bounds.
+        padded_len = int(cu_seq_lens[-1].item())
+        seq_len = shifted_labels.shape[-1]
+        if padded_len > seq_len:
+            pad = torch.full(
+                (*shifted_labels.shape[:-1], padded_len - seq_len),
+                fill_value=-100,
+                dtype=shifted_labels.dtype,
+                device=shifted_labels.device,
+            )
+            shifted_labels = torch.cat([shifted_labels, pad], dim=-1)
 
         rolled = roll_packed_tensor(shifted_labels, cu_seq_lens, shifts=-self.mtp_depth, dim=-1, fill_value=-100)
 
