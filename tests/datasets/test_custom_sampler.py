@@ -1,7 +1,5 @@
 """Unit tests for CustomSampler."""
 
-import json
-
 import numpy as np
 import pytest
 
@@ -22,6 +20,10 @@ class _FakePackDataset:
         return self._num_packs
 
 
+def _i64(*values: int) -> np.ndarray:
+    return np.array(values, dtype=np.int64)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -29,21 +31,22 @@ class _FakePackDataset:
 def test_basic_single_rank():
     """Single-rank sampler yields all indices in the supplied order."""
     dataset = _FakePackDataset(5)
-    global_order = [2, 0, 4, 1, 3]
+    global_order = _i64(2, 0, 4, 1, 3)
 
     sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
-    assert list(sampler) == global_order
+    assert list(sampler) == [2, 0, 4, 1, 3]
 
 
-def test_round_up():
-    """global_order is padded so its length is a multiple of global_batch_size."""
+def test_round_down():
+    """global_order is truncated so its length is a multiple of global_batch_size."""
     dataset = _FakePackDataset(10)
-    global_order = list(range(7))   # 7 items, batch_size=4 → pad to 8
+    global_order = np.arange(7, dtype=np.int64)  # 7 items, batch_size=4 → use first 4
 
     sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=4)
     yielded = list(sampler)
 
-    assert len(yielded) % 4 == 0
+    assert len(yielded) == 4
+    assert yielded == [0, 1, 2, 3]
     assert all(0 <= idx < 10 for idx in yielded)
 
 
@@ -52,24 +55,11 @@ def test_invalid_order_out_of_range():
     dataset = _FakePackDataset(5)
 
     with pytest.raises(ValueError, match="out of range"):
-        CustomSampler(dataset, global_order=[0, 1, 99], global_batch_size=1)
+        CustomSampler(dataset, global_order=_i64(0, 1, 99), global_batch_size=1)
 
 
-def test_load_from_jsonl_file(tmp_path):
-    """CustomSampler accepts a file path (JSONL) for global_order."""
-    dataset = _FakePackDataset(5)
-    order = [2, 0, 1, 3, 4]
-
-    order_path = str(tmp_path / "order.jsonl")
-    with open(order_path, "w") as f:
-        f.write(json.dumps(order))
-
-    sampler = CustomSampler(dataset, global_order=order_path, global_batch_size=1)
-    assert list(sampler) == order
-
-
-def test_load_from_npy_file(tmp_path):
-    """CustomSampler accepts a .npy file path for global_order."""
+def test_load_from_npy_file_mmap(tmp_path):
+    """CustomSampler accepts a .npy file path and keeps mmap-backed order."""
     dataset = _FakePackDataset(5)
     order = [2, 0, 1, 3, 4]
 
@@ -78,12 +68,14 @@ def test_load_from_npy_file(tmp_path):
 
     sampler = CustomSampler(dataset, global_order=npy_path, global_batch_size=1)
     assert list(sampler) == order
+    assert isinstance(sampler.global_order, np.ndarray)
+    assert isinstance(sampler.global_order, np.memmap)
 
 
 def test_state_dict_resume():
     """Restoring a state dict causes __iter__ to resume from the saved offset."""
     dataset = _FakePackDataset(6)
-    global_order = [0, 1, 2, 3, 4, 5]
+    global_order = _i64(0, 1, 2, 3, 4, 5)
 
     sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
 
@@ -100,31 +92,40 @@ def test_state_dict_resume():
 def test_state_dict_world_size_mismatch():
     """Mismatched world_size in state dict logs a warning but does not raise."""
     dataset = _FakePackDataset(4)
-    global_order = [0, 1, 2, 3]
+    global_order = _i64(0, 1, 2, 3)
 
     sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
     state = sampler.get_state_dict(step=0)
-    state["world_size"] = 99   # force mismatch
+    state["world_size"] = 99  # force mismatch
 
-    sampler.load_state_dict(state)   # must not raise
+    sampler.load_state_dict(state)  # must not raise
 
 
 def test_repeated_packs():
     """global_order may reference the same pack more than once (over-sampling)."""
     dataset = _FakePackDataset(3)
-    global_order = [0, 0, 1, 1, 2, 2]
+    global_order = _i64(0, 0, 1, 1, 2, 2)
 
     sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
     yielded = list(sampler)
 
-    assert len(yielded) == len(global_order)
-    assert len(set(yielded)) < len(yielded)   # duplicates present
+    assert len(yielded) == global_order.size
+    assert len(set(yielded)) < len(yielded)  # duplicates present
 
 
 def test_len():
     """__len__ returns the per-rank number of samples."""
     dataset = _FakePackDataset(6)
-    global_order = [0, 1, 2, 3, 4, 5]
+    global_order = _i64(0, 1, 2, 3, 4, 5)
 
     sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
     assert len(sampler) == 6
+
+
+def test_round_down_too_short_raises():
+    """If global_order is shorter than global_batch_size*world_size, round-down yields 0."""
+    dataset = _FakePackDataset(10)
+    global_order = _i64(0, 1, 2)  # len 3, batch 4 * world 1 → 0
+
+    with pytest.raises(ValueError, match="round down"):
+        CustomSampler(dataset, global_order=global_order, global_batch_size=4)

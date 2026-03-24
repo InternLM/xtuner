@@ -177,8 +177,9 @@ with open(os.path.join(pack_dir, "paths.json"), "w") as f:
 
 SamplerConfig 描述了一个有序的「pack 全局消费序列」（1D 整数数组）：
 
-- JSONL：单行 JSON 数组，如 `[3, 1, 7, 2, 0, 5, 4, 6]`；
-- NPY：如 `sampler_order.npy`，shape 为 `(num_steps,)`。
+- 仅支持 **NPY**：如 `sampler_order.npy`，shape 为 `(num_steps,)`，运行时以 `numpy.load(..., mmap_mode="r")` 只读映射，便于单机多进程共享映射、降低内存峰值。
+- 长度按 `global_batch_size * world_size` **向下取整**（截断尾部），不再用重复尾部做向上补齐。
+- 内容如 `[3, 1, 7, 2, 0, 5, 4, 6]`
 
 2. **运行时检查**
 
