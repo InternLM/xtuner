@@ -8,7 +8,7 @@ default_config:
             gpus_per_task: 16
             cpus_per_task: 256
             memory_per_task: 1920
-            image: registry2.d.pjlab.org.cn/ccr-yehaochen/910c:xtuner_rc2-20251011-2
+            image: registry2.d.pjlab.org.cn/ccr-hw/910c:cann83rc3_pta271_fixzero
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
