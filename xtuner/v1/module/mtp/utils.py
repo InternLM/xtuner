@@ -100,24 +100,31 @@ def roll_sequence_context(
         Original input_ids:  [1, 2, 3, 4, 5, 6]
         Rolled input_ids:    [2, 3, 0, 5, 6, 0]
     """
-    assert seq_ctx.sequence_parallel_mesh is None, "Sequence parallel is not yet supported"
+    sp_mesh = seq_ctx.sequence_parallel_mesh
+    is_sp = sp_mesh is not None and sp_mesh.size() > 1
 
     overrides: dict = {}
 
-    if seq_ctx.input_ids is not None:
-        overrides["input_ids"] = roll_packed_tensor(
-            tensor=seq_ctx.input_ids,
-            cu_seq_lens=seq_ctx.cu_seq_lens_q,
-            shifts=shifts,
-            dim=-1,
-        )
+    raw_input_ids = seq_ctx.raw_input_ids
+    if raw_input_ids is not None:
+        rolled = roll_packed_tensor(tensor=raw_input_ids, cu_seq_lens=seq_ctx.cu_seq_lens_q, shifts=shifts, dim=-1)
+        overrides["raw_input_ids"] = rolled
+        if is_sp:
+            s = seq_ctx._shard_start
+            overrides["input_ids"] = rolled[:, s : s + seq_ctx._shard_size]
+        else:
+            overrides["input_ids"] = rolled
 
-    if seq_ctx.inputs_embeds is not None:
-        overrides["inputs_embeds"] = roll_packed_tensor(
-            tensor=seq_ctx.inputs_embeds,
-            cu_seq_lens=seq_ctx.cu_seq_lens_q,
-            shifts=shifts,
-            dim=-2,  # Embedding dimension is typically the second to last
+    raw_inputs_embeds = seq_ctx.raw_inputs_embeds
+    if raw_inputs_embeds is not None:
+        rolled_e = roll_packed_tensor(
+            tensor=raw_inputs_embeds, cu_seq_lens=seq_ctx.cu_seq_lens_q, shifts=shifts, dim=-2
         )
+        overrides["raw_inputs_embeds"] = rolled_e
+        if is_sp:
+            s = seq_ctx._shard_start
+            overrides["inputs_embeds"] = rolled_e[:, s : s + seq_ctx._shard_size]
+        else:
+            overrides["inputs_embeds"] = rolled_e
 
     return seq_ctx.copy(**overrides)

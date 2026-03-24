@@ -2,7 +2,6 @@
 from torch.distributed.device_mesh import DeviceMesh
 
 from xtuner.v1.loss.ce_loss import CELossConfig, CELossKwargs, LMHeadLossContext
-from xtuner.v1.module.mtp.utils import roll_packed_tensor
 from xtuner.v1.utils.device import get_device
 
 
@@ -63,6 +62,9 @@ class MTPLossConfig(CELossConfig):
             MTPLossContext | None: Built loss context, or ``None`` if
                 ``shifted_labels`` is not present in ``data``.
         """
+        # TODO: Should move the common utils function to public package to avoid from circular import.
+        from xtuner.v1.module.mtp.utils import roll_packed_tensor
+
         if "shifted_labels" not in data:
             return None
 
