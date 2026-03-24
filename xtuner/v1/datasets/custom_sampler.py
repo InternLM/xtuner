@@ -1,21 +1,22 @@
 """CustomSampler: consumes packs in a user-supplied global order.
 
-Sampler config file formats
-----------------------------
-JSONL (single line):
-    [3, 1, 7, 2, 0, 5, 4, 6]
+Sampler config file format
+--------------------------
+Only ``.npy`` is supported: a 1-D integer array of pack indices, loaded with
+``numpy.load(..., mmap_mode='r')`` so multiple processes on one machine can
+share the same virtual memory mapping and avoid duplicating the full order in
+RAM.
 
-NPY:
-    sampler_order.npy  – 1-D int64 array of pack indices.
+In-memory callers must pass a 1-D integer :class:`numpy.ndarray` (not a Python
+``list``); a ``.npy`` path is loaded via mmap as above.
 
 The global order may be longer than the number of packs (over-sampling) or
-shorter (only consume a subset).  The sampler round-ups the total length to
-the nearest multiple of ``global_batch_size * world_size`` by repeating tail
-elements, then slices indices for the local rank.
+shorter (only consume a subset).  The sampler **rounds down** the total length
+to the largest multiple of ``global_batch_size * world_size`` using a basic
+slice ``global_order[:rounded_len]``, which keeps a memory-mapped array as a
+view (no copy).  Then each rank takes ``effective[rank::world_size]``.
 """
 
-import json
-import math
 from typing import Iterator
 
 import numpy as np
@@ -30,27 +31,43 @@ from .preset_pack import PresetPackDataset
 logger = get_logger()
 
 
-def _load_sampler_config(path: str) -> list[int]:
-    """Load the global pack consumption order from a file.
+def _load_sampler_config(path: str) -> np.memmap | np.ndarray:
+    """Load the global pack consumption order from a ``.npy`` file via mmap.
 
-    Supports JSONL (single line JSON array) and NPY (1-D integer array).
+    Uses read-only mmap so multiple training processes can share the same mapping and reduce peak resident memory.
     """
-    if path.endswith(".npy"):
-        arr = np.load(path)
-        if arr.ndim != 1:
-            raise ValueError(f"sampler config NPY must be 1-D, got shape {arr.shape}")
-        return arr.tolist()
-    else:
-        # JSONL: single line containing a JSON array.
-        with open(path, encoding="utf-8") as f:
-            content = f.read().strip()
-        try:
-            order = json.loads(content)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Cannot parse sampler config as JSON array from {path}: {e}") from e
-        if not isinstance(order, list):
-            raise ValueError(f"Sampler config must be a JSON array, got {type(order)} in {path}.")
-        return [int(x) for x in order]
+    if not path.endswith(".npy"):
+        raise ValueError(f"CustomSampler: only .npy sampler order files are supported (mmap read). Got path {path!r}.")
+    arr = np.load(path, mmap_mode="r")
+    if arr.ndim != 1:
+        raise ValueError(f"sampler config NPY must be 1-D, got shape {arr.shape}")
+    if not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError(f"sampler config NPY must have an integer dtype, got {arr.dtype}")
+    return arr
+
+
+def _validate_pack_indices(order: np.ndarray, num_packs: int) -> None:
+    """Ensure all indices are in ``[0, num_packs)`` without materializing huge
+    lists."""
+    bad = np.where((order < 0) | (order >= num_packs))[0]
+    if bad.size:
+        first = bad[:5]
+        vals = order[first]
+        raise ValueError(
+            f"CustomSampler: {bad.size} pack index(es) out of range [0, {num_packs}). "
+            f"First positions/values (idx -> value): {list(zip(first.tolist(), vals.tolist()))}"
+        )
+
+
+def _log_coverage_summary(order: np.ndarray, num_packs: int) -> None:
+    uniq, counts = np.unique(order, return_counts=True)
+    used_packs = int(uniq.size)
+    repeated = int(np.sum(counts > 1))
+    pct = 100.0 * used_packs / num_packs if num_packs > 0 else 0.0
+    logger.info(
+        f"CustomSampler: global_order covers {used_packs}/{num_packs} packs ({pct:.1f}%). "
+        f"({repeated} packs referenced more than once)"
+    )
 
 
 class CustomSampler(Sampler):
@@ -61,11 +78,13 @@ class CustomSampler(Sampler):
     dataset:
         The :class:`PresetPackDataset` whose packs are being sampled.
     global_order:
-        A pre-loaded list of pack indices specifying the global consumption
-        order.  Can also be passed as a path string; in that case the file is
-        loaded automatically.
+        A 1-D integer :class:`numpy.ndarray` of pack indices, or a path to a
+        ``.npy`` file (mmap read).  Python ``list`` is not accepted.
+        When loaded from file, ``self.global_order`` is a view into the mmap
+        after length round-down (still backed by the file mapping).
     global_batch_size:
-        Total batch size across all ranks.  Used for round-up behaviour.
+        Total batch size across all ranks.  Used together with ``world_size``
+        for round-down alignment.
     dp_mesh:
         Optional DeviceMesh for distributed training.  If ``None``, assumes
         single-rank training.
@@ -73,10 +92,12 @@ class CustomSampler(Sampler):
         Unused in this sampler (order is deterministic), kept for API parity.
     """
 
+    global_order: np.ndarray
+
     def __init__(
         self,
         dataset: PresetPackDataset,
-        global_order: list[int] | str,
+        global_order: np.ndarray | str,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
         seed: int | None = None,
@@ -95,40 +116,56 @@ class CustomSampler(Sampler):
         self.seed = seed  # kept for API compat, not used
 
         # ------------------------------------------------------------------
-        # Load order from file if a path was given
+        # Load order from file if a path was given (mmap only)
         # ------------------------------------------------------------------
         if isinstance(global_order, str):
-            logger.info(f"CustomSampler: loading sampler order from {global_order}.")
+            logger.info(f"CustomSampler: loading sampler order (mmap) from {global_order}.")
             global_order = _load_sampler_config(global_order)
+
+        if not isinstance(global_order, np.ndarray):
+            raise TypeError(
+                "CustomSampler: global_order must be a numpy.ndarray (1-D integer), "
+                f"got {type(global_order).__name__}. Use np.asarray(..., dtype=np.int64) "
+                "or pass a path to a .npy file."
+            )
+        if global_order.ndim != 1:
+            raise ValueError(f"CustomSampler: global_order must be 1-D, got shape {global_order.shape}")
+        if not np.issubdtype(global_order.dtype, np.integer):
+            raise ValueError(f"CustomSampler: global_order must have an integer dtype, got {global_order.dtype}")
 
         num_packs = len(dataset)
 
         # ------------------------------------------------------------------
         # Validate
         # ------------------------------------------------------------------
-        invalid = [idx for idx in global_order if idx < 0 or idx >= num_packs]
-        if invalid:
-            raise ValueError(
-                f"CustomSampler: {len(invalid)} pack index(es) out of range [0, {num_packs}). "
-                f"First few invalid: {invalid[:5]}"
-            )
+        _validate_pack_indices(global_order, num_packs)
 
         # ------------------------------------------------------------------
-        # Round-up to multiple of global_batch_size * world_size
+        # Round-down to multiple of global_batch_size * world_size (basic slice)
         # ------------------------------------------------------------------
         step_size = global_batch_size * self.world_size
         raw_len = len(global_order)
-        rounded_len = math.ceil(raw_len / step_size) * step_size
-        if rounded_len > raw_len:
-            # Repeat tail elements
-            extra = rounded_len - raw_len
-            tail = global_order[-(extra % raw_len or raw_len) :]
-            padded: list[int] = list(global_order) + (tail * (extra // raw_len + 1))[:extra]
-        else:
-            padded = list(global_order)
+        if raw_len == 0:
+            raise ValueError("CustomSampler: global_order is empty.")
+        rounded_len = (raw_len // step_size) * step_size
+        if rounded_len == 0:
+            raise ValueError(
+                f"CustomSampler: global_order length {raw_len} is smaller than "
+                f"global_batch_size*world_size={step_size}; "
+                "cannot round down to a positive multiple. "
+                "Increase the order length or decrease batch size / world size."
+            )
+        if rounded_len < raw_len:
+            logger.info(
+                f"CustomSampler: truncating global order from {raw_len} to {rounded_len} "
+                f"(multiple of {step_size}, round-down)."
+            )
 
-        # Local indices for this rank: interleaved slicing
-        self._local_indices: list[int] = padded[self.rank :: self.world_size]
+        effective = global_order[:rounded_len]
+        self.global_order = effective
+
+        # Local indices for this rank: interleaved slicing (view if ndarray)
+        self._local_indices = effective[self.rank :: self.world_size]
         self.total_size = rounded_len  # global total (all ranks)
         self.num_samples = len(self._local_indices)  # per-rank
 
@@ -138,13 +175,7 @@ class CustomSampler(Sampler):
         # ------------------------------------------------------------------
         # Log coverage summary
         # ------------------------------------------------------------------
-        used_packs = len(set(global_order))
-        repeated = sum(1 for idx in set(global_order) if global_order.count(idx) > 1)
-        pct = 100.0 * used_packs / num_packs if num_packs > 0 else 0.0
-        logger.info(
-            f"CustomSampler: global_order covers {used_packs}/{num_packs} packs ({pct:.1f}%). "
-            f"({repeated} packs referenced more than once)"
-        )
+        _log_coverage_summary(effective, num_packs)
 
     # ------------------------------------------------------------------
     # Sampler interface
