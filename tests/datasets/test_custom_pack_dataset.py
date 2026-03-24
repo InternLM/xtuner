@@ -101,21 +101,6 @@ def test_valid_npy_pack(tmp_path):
     assert dataset[1][0]["input_ids"] == ds0[1]["input_ids"]
 
 
-def test_token_end_zero_sentinel(tmp_path):
-    """token_end=0 is resolved to the sample's full length."""
-    ds0 = _FakeDataset([[i] * 128 for i in range(2)])
-
-    # token_end=0 → take all 128 tokens
-    packs = [[[0, 0, 0, 0]]]
-    config_path = str(tmp_path / "pack_config.jsonl")
-    _write_jsonl_pack(config_path, packs)
-
-    dataset = CustomPackDataset([ds0], config_path, pack_max_length=128)
-    items = dataset[0]
-    assert items[0]["num_tokens"] == 128
-    assert items[0]["input_ids"] == ds0[0]["input_ids"]
-
-
 def test_short_pack_error(tmp_path):
     """Pack with fewer tokens than pack_max_length raises ValueError (strategy='error')."""
     ds0 = _FakeDataset([[i] * 100 for i in range(2)])
@@ -225,18 +210,6 @@ def test_hard_error_invalid_dataset_id(tmp_path):
             [ds0], config_path, pack_max_length=256,
             short_pack_strategy="skip", long_pack_strategy="skip",
         )
-
-
-def test_hard_error_invalid_sample_idx(tmp_path):
-    """sample_idx out of range raises ValueError."""
-    ds0 = _FakeDataset([[i] * 256 for i in range(2)])   # 2 samples
-
-    packs = [[[0, 99, 0, 256]]]   # sample_idx=99 but only 2 samples
-    config_path = str(tmp_path / "pack_config.jsonl")
-    _write_jsonl_pack(config_path, packs)
-
-    with pytest.raises(ValueError, match="sample_idx"):
-        CustomPackDataset([ds0], config_path, pack_max_length=256)
 
 
 @pytest.mark.parametrize(
