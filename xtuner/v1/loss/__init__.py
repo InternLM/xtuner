@@ -11,6 +11,7 @@ from .moe_loss import (
     ZLossContext,
     ZLossKwargs,
 )
+from .mtp_loss import MTPLossContext
 
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "BaseLossContext",
     "BaseLossKwargs",
     "LMHeadLossContext",
+    "MTPLossContext",
 ]
 
 import torch

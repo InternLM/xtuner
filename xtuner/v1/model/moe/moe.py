@@ -30,9 +30,11 @@ from xtuner.v1.loss import (
     BalancingLossContext,
     BaseLossContext,
     LMHeadLossContext,
+    MTPLossContext,
     ZLossConfig,
     ZLossContext,
 )
+from xtuner.v1.loss.mtp_loss import MTPLossConfig
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -56,7 +58,7 @@ from xtuner.v1.module import (
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
-from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer, roll_packed_tensor
+from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
@@ -323,15 +325,17 @@ class MoE(BaseModel):
 
         # Add MTP loss contexts if MTP is enabled
         if self.config.mtp_config is not None:
-            # Build MTP loss contexts using the same approach as LM loss
-            # Each MTP depth needs its own loss context
             for mtp_idx in range(self.config.mtp_config.num_layers):
-                # MTP needs to shift labels multiple times. Since rebuild the `shifted_labels` in data_batch
-                mtp_loss_ctx_list = self._build_loss_ctx(self.config.lm_loss_cfg, _data_batch, sp_mesh)
+                mtp_loss_cfg = MTPLossConfig(
+                    **self.config.lm_loss_cfg.model_dump(),
+                    mtp_depth=mtp_idx + 1,
+                )
+                mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, _data_batch, sp_mesh)
                 if mtp_loss_ctx_list is not None:
-                    loss_ctx_cls = mtp_loss_ctx_list[0].__class__
-                    mtp_loss_ctx_list = loss_ctx_cls.build_batches(
-                        mtp_loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=sp_mesh
+                    mtp_loss_ctx_list = MTPLossContext.build_batches(  # type: ignore[assignment]
+                        cast(list[MTPLossContext], mtp_loss_ctx_list),  # type: ignore[arg-type]
+                        cu_seq_lens_list=cu_seq_lens_list,
+                        sp_mesh=sp_mesh,
                     )
                     for i, mtp_loss_ctx in enumerate(mtp_loss_ctx_list):
                         if "mtp" not in res[i]:
@@ -693,13 +697,8 @@ class MoE(BaseModel):
             # Compute MTP losses for each depth
             mtp_losses = torch.tensor(0.0, device=DEVICE)
             for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-                shifted_tensor = mtp_ctx.loss_kwargs.shifted_labels
-                mtp_ctx.loss_kwargs.shifted_labels = roll_packed_tensor(
-                    shifted_tensor, seq_ctx.cu_seq_lens_k, -idx - 1, dim=-1, fill_value=-100
-                )
-
                 mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
-                mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(LMHeadLossContext, mtp_ctx))
+                mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
                 mtp_losses += mtp_loss
 
                 output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
