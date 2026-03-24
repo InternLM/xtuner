@@ -61,13 +61,12 @@ class AgentEnvironment(BaseEnvironment):
         sample_params = sample_params.model_dump() if sample_params else {}
 
         async def _inner_agent_call(item):
-            agent_memory = item.env.rollout.extra_info.get('resume_agent_memory')
-            agent_inputs = item.env.rollout.extra_info.get('resume_agent_inputs')
-            if agent_memory is not None and agent_inputs is not None:
-                self.agent.load_state_dict(agent_memory, session_id=item.uid.observation_id)
-            else:
-                self.agent.reset(session_id=item.uid.observation_id, recursive=True)
-                agent_inputs = self.preprocess_func(self, deepcopy(item))
+            self.agent.reset(session_id=item.uid.observation_id, recursive=True)
+            if 'agent_state_dict' in item.env.rollout.extra_info:
+                self.agent.load_state_dict(
+                    item.env.rollout.extra_info.pop('agent_state_dict'), session_id=item.uid.observation_id
+                )
+            agent_inputs = self.preprocess_func(self, deepcopy(item))
             try:
                 return await self.agent(*agent_inputs, session_id=item.uid.observation_id, **sample_params)
             except BaseException as exc:
@@ -83,7 +82,7 @@ class AgentEnvironment(BaseEnvironment):
                 continue
             if message.finish_reason == 'abort':
                 sample.env.rollout.state = RolloutState.ABORTED
-                sample.env.rollout.extra_info.update(message.extra_info)
+                sample.env.rollout.extra_info['agent_state_dict'] = self.agent.state_dict(sample.uid.observation_id)
                 aborted_data_items.append(sample)
             else:
                 completed_data_items.append(sample)
