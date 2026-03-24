@@ -17,6 +17,11 @@ on:
         description: 'Set branch or tag or commit id. Default is "main"'
         type: string
         default: 'main'
+      run_case:
+        required: false
+        description: 'Run a specific test case, e.g., "npu-qwen3-sft", as defined in autotest/config-npu.yaml.'
+        type: string
+        default: 'all'
   schedule:
     - cron:  '00 21 * * 0-4'
 
@@ -36,7 +41,12 @@ jobs:
         run: |
           source activate npuci
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
-          export DEVICE=npu && pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+          CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
+          if [ "$CASE_NAME" = "all" ]; then
+            export DEVICE=npu && pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+          else
+            export DEVICE=npu && pytest autotest/test_all.py::test_all[$CASE_NAME] -m all -n 1 -vv --run_id ${{ github.run_id }}
+          fi
 
       - name: Upload Artifacts
         if: ${{ !cancelled() }}
