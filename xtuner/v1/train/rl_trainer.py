@@ -789,7 +789,7 @@ class RLTrainer:
                 }
 
                 if "routed_experts" in group[i].env.rollout.extra_info:
-                    routed_experts = group[i].env.rollout.extra_info["routed_experts"]  # n,layer*expert
+                    routed_experts = group[i].env.rollout.extra_info.pop("routed_experts")  # n,layer*expert
                     seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
 
                 data_batches.append(data_dict)
@@ -893,7 +893,7 @@ class RLTrainer:
                         # "versioned_response_ids": str(data.env.rollout.versioned_response_ids),
                         "response_len": rollout_response_len_list[_count],
                         "versioned_response_len": data.env.rollout.versioned_num_return_tokens,
-                        "label": data.data.reward_model["ground_truth"],
+                        "label": data.data.reward_model.get("ground_truth", ""),
                         "reward": data.env.judger.reward["score"],
                         "version": data.uid.version,
                         "finish_reason": data.env.rollout.finish_reason,

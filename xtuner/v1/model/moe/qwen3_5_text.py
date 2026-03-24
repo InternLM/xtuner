@@ -7,6 +7,7 @@ from typing_extensions import override
 
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
+    HFSaveCfg,
     TorchCompileOption,
 )
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
@@ -168,7 +169,7 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
         hf_param_name: str,
     ):
         if "mtp" in hf_param_name:
-            return super().param_to_safetensor(safetensor, hf_param_name)
+            return safetensor
 
         assert isinstance(hf_param_name, str)
         if "gate_up_proj" in hf_param_name:
@@ -199,6 +200,12 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
 class Qwen3_5_VLTextMoEConfig(MoEConfig):
     with_shared_expert_gate: bool = True
     rms_norm_type: Literal["default", "zero_centered"] = "zero_centered"
+    hf_save_cfg: HFSaveCfg = HFSaveCfg(
+        fp32_keys_pattern=[
+            r"model\.language_model\.layers\.\d+\.linear_attn\.norm\.weight",
+            r"model\.language_model\.layers\.\d+\.linear_attn\.A_log",
+        ],
+    )
 
     @computed_field
     def layers_type(self) -> list[Literal["full_attention", "linear_attention"]]:
