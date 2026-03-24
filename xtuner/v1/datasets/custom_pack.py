@@ -145,19 +145,6 @@ class CustomPackDataset(tud.Dataset):
         logger.info(f"CustomPackDataset: loaded {len(raw_packs)} raw packs from {pack_config_path}.")
 
         # ------------------------------------------------------------------
-        # 2. Pre-compute per-dataset token counts indexed by sampled position
-        # ------------------------------------------------------------------
-        # sample_num_tokens[ds_id][s_idx] = num_tokens for the s_idx-th
-        # post-filter sample in dataset ds_id.
-        self._sample_num_tokens: list[np.ndarray] = []
-        for ds in datasets:
-            # ds.num_tokens is indexed by raw line index.
-            # ds.sampled maps logical index → raw line index.
-            sampled_arr = np.array(ds.sampled, dtype=np.int64)
-            assert ds.num_tokens is not None
-            self._sample_num_tokens.append(ds.num_tokens[sampled_arr])
-
-        # ------------------------------------------------------------------
         # 3. Validate packs and build self.pack_infos
         # ------------------------------------------------------------------
         valid_packs: list[list[tuple[int, int, int, int]]] = []
@@ -182,7 +169,7 @@ class CustomPackDataset(tud.Dataset):
         # ------------------------------------------------------------------
         # 4. Log summary
         # ------------------------------------------------------------------
-        total_samples = sum(len(ds.sampled) for ds in datasets)
+        total_samples = sum(len(ds) for ds in datasets)
         used_samples = len(used_pairs)
         pct = 100.0 * used_samples / total_samples if total_samples > 0 else 0.0
         logger.info(
@@ -191,7 +178,7 @@ class CustomPackDataset(tud.Dataset):
             f"across all datasets."
         )
         for ds_id, ds in enumerate(datasets):
-            ds_total = len(ds.sampled)
+            ds_total = len(ds)
             ds_used = sum(1 for (d, _) in used_pairs if d == ds_id)
             ds_pct = 100.0 * ds_used / ds_total if ds_total > 0 else 0.0
             ds_name = getattr(ds, "name", str(ds_id))
@@ -221,21 +208,9 @@ class CustomPackDataset(tud.Dataset):
             # Hard errors – always raise, not skippable.
             if ds_id < 0 or ds_id >= len(self.datasets):
                 raise ValueError(f"Pack {pack_idx}: dataset_id {ds_id} is out of range [0, {len(self.datasets)}).")
-            ds_num_tokens = self._sample_num_tokens[ds_id]
-            n_samples = len(ds_num_tokens)
-            if s_idx < 0 or s_idx >= n_samples:
-                raise ValueError(
-                    f"Pack {pack_idx}: sample_idx {s_idx} is out of range [0, {n_samples}) for dataset {ds_id}."
-                )
-            tok_len = int(ds_num_tokens[s_idx])
-            # Resolve token_end == 0
-            resolved_end = tok_len if t_end == 0 else t_end
-            if t_start < 0 or resolved_end > tok_len or t_start >= resolved_end:
-                raise ValueError(
-                    f"Pack {pack_idx}: invalid token range [{t_start}, {t_end}) "
-                    f"for sample ({ds_id}, {s_idx}) with {tok_len} tokens."
-                )
-            slices.append((ds_id, s_idx, t_start, resolved_end))
+            if t_start < 0 or t_end < 0 or t_start > t_end:
+                raise ValueError(f"Pack {pack_idx}: invalid token range [{t_start}, {t_end}).")
+            slices.append((ds_id, s_idx, t_start, t_end))
 
         total_tokens = sum(end - start for _, _, start, end in slices)
 

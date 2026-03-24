@@ -546,7 +546,7 @@ class RLTrainer:
 
         rollout_info: RolloutInfo = {
             "data_groups": dataflow_result["data_groups"],
-            "multimodal_train_infos": dataflow_result.get("multimodal_train_infos", None),
+            "multimodal_train_infos": dataflow_result.get("mm_train_infos", None),
             "task_time": dataflow_result.get("metrics", {}),
             "replay_buffer_info": ray.get(self._rollout_dataflow.get_replaybuffer_status.remote()),
         }
