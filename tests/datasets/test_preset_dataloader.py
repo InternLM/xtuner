@@ -11,6 +11,7 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.datasets import PretrainTokenizeFunctionConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
+from xtuner.v1.datasets.packing import get_pack_infos_by_hard_split
 
 
 def get_pack_config_by_simple_hard_split(
@@ -45,6 +46,46 @@ def get_pack_config_by_simple_hard_split(
             close()
     samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
     return {"boundaries": np.asarray(boundaries, dtype=np.int64), "samples": samples}
+
+
+def get_pack_config_from_pack_infos_by_hard_split(
+    pack_infos: dict[str, np.ndarray], path_id: int, num_tokens: np.ndarray
+) -> dict[str, np.ndarray]:
+    """Same keys as ``get_pack_config_by_simple_hard_split``; built from ``get_pack_infos_by_hard_split`` output."""
+    npack = int(pack_infos["dataset_id"].shape[0])
+    rows: list[list[int]] = []
+    boundaries: list[int] = [0]
+    cu, ix = pack_infos["indices_cu_len"], pack_infos["indices"]
+    starts, ends = pack_infos["start_offset"], pack_infos["end_offset"]
+    for item in range(npack):
+        i0 = 0 if item == 0 else int(cu[item - 1])
+        i1 = int(cu[item])
+        indices = ix[i0:i1]
+        s_off, e_off = int(starts[item]), int(ends[item])
+        for i, idx in enumerate(indices):
+            idx_i = int(idx)
+            L = int(num_tokens[idx_i])
+            st = 0 if i else s_off
+            ed = L if i < len(indices) - 1 else e_off
+            rows.append([path_id, idx_i, -1, -1, st, ed])
+        boundaries.append(len(rows))
+    samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
+    return {"boundaries": np.asarray(boundaries, dtype=np.int64), "samples": samples}
+
+
+def test_hard_split_pack_config_matches_packing_implementation():
+    rng = np.random.RandomState(42)
+    num_tokens = rng.randint(8, 25, size=24).astype(np.int64)
+    inds = rng.permutation(24).astype(np.int64)
+    pack_max_length = 32
+    assert int(num_tokens.sum()) >= 2 * pack_max_length
+
+    simple = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1)
+    infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=1)
+    ref = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
+
+    np.testing.assert_array_equal(simple["boundaries"], ref["boundaries"])
+    np.testing.assert_array_equal(simple["samples"], ref["samples"])
 
 
 def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
