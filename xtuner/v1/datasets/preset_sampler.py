@@ -2,18 +2,15 @@
 
 Sampler config file format
 --------------------------
-Only ``.npy`` is supported: a 1-D integer array of pack indices, loaded with
+Only ``.npy`` paths are supported: a 1-D integer array of pack indices, loaded with
 ``numpy.load(..., mmap_mode='r')`` so multiple processes on one machine can
 share the same virtual memory mapping and avoid duplicating the full order in
 RAM.
 
-In-memory callers must pass a 1-D integer :class:`numpy.ndarray` (not a Python
-``list``); a ``.npy`` path is loaded via mmap as above.
-
-The global order may be longer than the number of packs (over-sampling) or
+The file order may be longer than the number of packs (over-sampling) or
 shorter (only consume a subset).  The sampler **rounds down** the total length
 to the largest multiple of ``global_batch_size * world_size`` using a basic
-slice ``global_order[:rounded_len]``, which keeps a memory-mapped array as a
+slice ``order[:rounded_len]``, which keeps a memory-mapped array as a
 view (no copy).  Then each rank takes ``effective[rank::world_size]``.
 """
 
@@ -65,7 +62,7 @@ def _log_coverage_summary(order: np.ndarray, num_packs: int) -> None:
     repeated = int(np.sum(counts > 1))
     pct = 100.0 * used_packs / num_packs if num_packs > 0 else 0.0
     logger.info(
-        f"PresetSampler: global_order covers {used_packs}/{num_packs} packs ({pct:.1f}%). "
+        f"PresetSampler: sampler order covers {used_packs}/{num_packs} packs ({pct:.1f}%). "
         f"({repeated} packs referenced more than once)"
     )
 
@@ -77,11 +74,10 @@ class PresetSampler(Sampler):
     ----------
     dataset:
         The :class:`PresetPackDataset` whose packs are being sampled.
-    global_order:
-        A 1-D integer :class:`numpy.ndarray` of pack indices, or a path to a
-        ``.npy`` file (mmap read).  Python ``list`` is not accepted.
-        When loaded from file, ``self.global_order`` is a view into the mmap
-        after length round-down (still backed by the file mapping).
+    sampler_config_path:
+        Path to a ``.npy`` file (mmap read): 1-D integer pack indices.
+        After length round-down, ``self.global_order`` holds a view backed by
+        that mapping.
     global_batch_size:
         Total batch size across all ranks.  Used together with ``world_size``
         for round-down alignment.
@@ -97,12 +93,18 @@ class PresetSampler(Sampler):
     def __init__(
         self,
         dataset: PresetPackDataset,
-        global_order: np.ndarray | str,
+        sampler_config_path: str,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
         seed: int | None = None,
     ) -> None:
         super().__init__()
+
+        if not isinstance(sampler_config_path, str):
+            raise TypeError(
+                "PresetSampler: sampler_config_path must be a str path to a .npy file, "
+                f"got {type(sampler_config_path).__name__}."
+            )
 
         if dp_mesh is not None:
             self.rank = dp_mesh.get_local_rank()
@@ -115,71 +117,47 @@ class PresetSampler(Sampler):
         self.global_batch_size = global_batch_size
         self.seed = seed  # kept for API compat, not used
 
-        # ------------------------------------------------------------------
-        # Load order from file if a path was given (mmap only)
-        # ------------------------------------------------------------------
-        if isinstance(global_order, str):
-            logger.info(f"PresetSampler: loading sampler order (mmap) from {global_order}.")
-            global_order = _load_sampler_config(global_order)
+        logger.info(f"PresetSampler: loading sampler order (mmap) from {sampler_config_path}.")
+        order = _load_sampler_config(sampler_config_path)
 
-        if not isinstance(global_order, np.ndarray):
-            raise TypeError(
-                "PresetSampler: global_order must be a numpy.ndarray (1-D integer), "
-                f"got {type(global_order).__name__}. Use np.asarray(..., dtype=np.int64) "
-                "or pass a path to a .npy file."
-            )
-        if global_order.ndim != 1:
-            raise ValueError(f"PresetSampler: global_order must be 1-D, got shape {global_order.shape}")
-        if not np.issubdtype(global_order.dtype, np.integer):
-            raise ValueError(f"PresetSampler: global_order must have an integer dtype, got {global_order.dtype}")
+        if order.ndim != 1:
+            raise ValueError(f"PresetSampler: sampler order must be 1-D, got shape {order.shape}")
+        if not np.issubdtype(order.dtype, np.integer):
+            raise ValueError(f"PresetSampler: sampler order must have an integer dtype, got {order.dtype}")
 
         num_packs = len(dataset)
 
-        # ------------------------------------------------------------------
-        # Validate
-        # ------------------------------------------------------------------
-        _validate_pack_indices(global_order, num_packs)
+        _validate_pack_indices(order, num_packs)
 
-        # ------------------------------------------------------------------
-        # Round-down to multiple of global_batch_size * world_size (basic slice)
-        # ------------------------------------------------------------------
         step_size = global_batch_size * self.world_size
-        raw_len = len(global_order)
+        raw_len = len(order)
         if raw_len == 0:
-            raise ValueError("PresetSampler: global_order is empty.")
+            raise ValueError("PresetSampler: sampler order is empty.")
         rounded_len = (raw_len // step_size) * step_size
         if rounded_len == 0:
             raise ValueError(
-                f"PresetSampler: global_order length {raw_len} is smaller than "
+                f"PresetSampler: sampler order length {raw_len} is smaller than "
                 f"global_batch_size*world_size={step_size}; "
                 "cannot round down to a positive multiple. "
                 "Increase the order length or decrease batch size / world size."
             )
         if rounded_len < raw_len:
             logger.info(
-                f"PresetSampler: truncating global order from {raw_len} to {rounded_len} "
+                f"PresetSampler: truncating sampler order from {raw_len} to {rounded_len} "
                 f"(multiple of {step_size}, round-down)."
             )
 
-        effective = global_order[:rounded_len]
+        effective = order[:rounded_len]
         self.global_order = effective
 
-        # Local indices for this rank: interleaved slicing (view if ndarray)
         self._local_indices = effective[self.rank :: self.world_size]
-        self.total_size = rounded_len  # global total (all ranks)
-        self.num_samples = len(self._local_indices)  # per-rank
+        self.total_size = rounded_len
+        self.num_samples = len(self._local_indices)
 
         self.epoch = 0
         self.step = 0
 
-        # ------------------------------------------------------------------
-        # Log coverage summary
-        # ------------------------------------------------------------------
         _log_coverage_summary(effective, num_packs)
-
-    # ------------------------------------------------------------------
-    # Sampler interface
-    # ------------------------------------------------------------------
 
     def __iter__(self) -> Iterator[int]:
         yield from self._local_indices[self.step :]
@@ -191,13 +169,7 @@ class PresetSampler(Sampler):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
-    # ------------------------------------------------------------------
-    # State dict
-    # ------------------------------------------------------------------
-
     def get_state_dict(self, step: int) -> dict:
-        # step here is consumed_samples (global, across all ranks).
-        # Convert to local epoch offset.
         local_step = step % self.total_size
         return {
             "epoch": self.epoch,

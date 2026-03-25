@@ -163,7 +163,7 @@ with open(os.path.join(pack_dir, "paths.json"), "w") as f:
 
 5. **DataloaderConfig 集成**
 
-当 `DataloaderConfig.pack_level = "custom"` 时，自动创建 `PresetPackDataset`，并强制每个 `DatasetConfig` 的以下设置（无需用户手动指定），以保证 `sample_idx` 与文件行号一一对应：
+当 `DataloaderConfig.pack_level = "preset"` 时，自动创建 `PresetPackDataset`，并需配置 `pack_config_path`（pack 目录）与 `sampler_config_path`（采样顺序 `.npy`）。同时强制每个 `DatasetConfig` 的以下设置（无需用户手动指定），以保证 `sample_idx` 与文件行号一一对应：
 
 - `sample_ratio = 1.0`
 - `enable_sequential_sampler = True`
@@ -178,6 +178,7 @@ with open(os.path.join(pack_dir, "paths.json"), "w") as f:
 SamplerConfig 描述了一个有序的「pack 全局消费序列」（1D 整数数组）：
 
 - 仅支持 **NPY**：如 `sampler_order.npy`，shape 为 `(num_steps,)`，运行时以 `numpy.load(..., mmap_mode="r")` 只读映射，便于单机多进程共享映射、降低内存峰值。
+- 配置字段为 `DataloaderConfig.sampler_config_path`；`PresetSampler` 仅接受 `sampler_config_path: str`（路径字符串），不接受内存中的 `ndarray`。
 - 长度按 `global_batch_size * world_size` **向下取整**（截断尾部），不再用重复尾部做向上补齐。
 - 内容如 `[3, 1, 7, 2, 0, 5, 4, 6]`
 
