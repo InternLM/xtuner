@@ -105,6 +105,11 @@ class LMDeployWorker(RolloutWorker):
                 "tools": tools,
                 "tool_choice": tool_choice,
             }
+
+            if "image_data" in rollout_state.extra_fields:
+                assert input_tokens is not None, "input_tokens is required when image_data is provided."
+                payload["image_data"] = rollout_state.extra_fields["image_data"]
+
             if input_tokens is not None:
                 payload["input_ids"] = input_tokens
             else:
