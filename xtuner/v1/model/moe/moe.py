@@ -1266,7 +1266,7 @@ class MoE(BaseModel):
         """
         num_layers = self.config.num_hidden_layers
         if self.config.mtp_config is None:
-            mtp_layers = None
+            mtp_layers = 0
         else:
             mtp_layers = sum([mtp_config.num_layers for mtp_config in self.config.mtp_config])
         # mtp_layers = self.config.mtp_config.num_layers if self.config.mtp_config is not None else 0
