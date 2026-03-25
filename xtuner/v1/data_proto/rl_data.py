@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeAlias
 
+import numpy as np
 import torch
 from pydantic import BaseModel, ConfigDict, field_serializer
 from typing_extensions import NotRequired, TypedDict
@@ -59,9 +60,8 @@ class Status(Enum):
 
 class MultimodalInfo(TypedDict):
     # 使用TypedDict给出pixel_values的类型提示
-    pixel_values: NotRequired[torch.Tensor | RayObjectRef | None]
+    pixel_values: NotRequired[np.ndarray | RayObjectRef | None]
     image_grid_thw: NotRequired[torch.Tensor]
-    position_ids: NotRequired[torch.Tensor]
 
 
 class RolloutState(CacheObj, BaseModel):
@@ -74,7 +74,6 @@ class RolloutState(CacheObj, BaseModel):
     data_source: dict[str, Any] | str | None = None
     mm_info: MultimodalInfo | None = None
     reward_model: dict[str, Any] | None = None
-    num_tokens: int | None = None  # 用于 cache 管理
 
     # --- InferEngine 输入 ---
     session_uid: int | None = None
@@ -101,6 +100,7 @@ class RolloutState(CacheObj, BaseModel):
     seq_staleness: int = 0
     response_mask: list[int] | None = None  # response_ids的长度
     response_rollout_steps: list[int] | None = None  # 记录 response_ids 中每个 token 是在哪个 rollout_step 生成的
+    position_ids: torch.Tensor | None = None
     extra_fields: dict[str, Any] = {}
 
     @field_serializer("routed_experts")
@@ -118,6 +118,11 @@ class RolloutState(CacheObj, BaseModel):
         if type(value).__name__ == "ObjectRef" and "ray" in getattr(type(value), "__module__", ""):
             return None
         return value  # list[int]
+
+    @field_serializer("mm_info")
+    def _serialize_mm_info(self, value: MultimodalInfo | None) -> MultimodalInfo | None:
+        # TODO: Not currently needed
+        return None
 
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:

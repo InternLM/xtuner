@@ -76,7 +76,7 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
 
 
 class RLTextTokenizeFnConfig(BaseModel):
-    model_config = ConfigDict(title="Base RL dataset config for xtuner", extra="forbid")
+    model_config = ConfigDict(title="Text RL dataset config for xtuner", extra="forbid")
     max_length: int | None = None
     tools_schema: list | None = None
 
