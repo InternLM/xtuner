@@ -18,6 +18,10 @@ class LogProbConfig(BaseLossConfig):
     def loss_ctx_cls(self) -> type["LogProbContext"]:
         return LogProbContext
 
+    @property
+    def _loss_kwargs_cls(self) -> type["LogProbKwargs"]:
+        return LogProbKwargs
+
     def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "LogProbContext | None":
         if "shifted_labels" not in data:
             return None

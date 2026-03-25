@@ -613,7 +613,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             batches_loss_ctx = batched_loss_ctx_list[i : i + iters_per_step]
 
             engine_input = [
-                ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)  # type: ignore[typeddict-item]
+                ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
                 for seq_ctx, loss_ctx in zip(batches_seq_ctx, batches_loss_ctx)
             ]
 
@@ -726,7 +726,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         engine_input = [
-            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+            ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+            for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
         ]
 
         train_step_info = self._engine.train_step(engine_input)
