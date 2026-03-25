@@ -290,6 +290,10 @@ class DataloaderConfig(BaseDataloaderConfig):
     pack_chunk_size: Annotated[int, Parameter(help="pack chunk size")] = 10000
     pack_workers: Annotated[int, Parameter(help="pack workers")] = 8
     global_pack: Annotated[bool, Parameter(help="enable or disable global pack mode")] = True
+    sampler_type: Annotated[
+        Literal["none", "preset"],
+        Parameter(help="none means using group_by_length, preset means use preset sampler"),
+    ] = "none"
     group_by_length: Annotated[bool, Parameter(help="enable or disable group by length mode")] = True
     pack_extra_buffer_size: Annotated[
         int, Parameter(help="pack extra buffer size when pack_level is expand_soft model")
@@ -359,7 +363,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     @classmethod
     def _infer_group_by_length(cls, data) -> None:
         if "pack_level" in data and "group_by_length" not in data:
-            if data["pack_level"] in ("none", "preset"):
+            if data["pack_level"] in ("none",):
                 data["group_by_length"] = False
             else:
                 data["group_by_length"] = True
@@ -367,8 +371,6 @@ class DataloaderConfig(BaseDataloaderConfig):
         if "group_by_length" in data and "pack_level" in data:
             if data["pack_level"] == "none" and data["group_by_length"] is True:
                 raise ValueError("group_by_length must be False when pack_level is none.")
-            if data["pack_level"] == "preset" and data["group_by_length"] is True:
-                raise ValueError("group_by_length must be False when pack_level is preset.")
         return data
 
     def build(
@@ -468,7 +470,7 @@ class DataloaderConfig(BaseDataloaderConfig):
             logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
         sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler | PresetSampler
-        if self.pack_level == "preset":
+        if self.sampler_type == "preset":
             assert isinstance(dataset, PresetPackDataset)
             assert self.sampler_config_path is not None
             sampler = PresetSampler(
@@ -481,10 +483,16 @@ class DataloaderConfig(BaseDataloaderConfig):
             assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
             assert isinstance(
                 dataset,
-                (ExpandSoftPackDataset, _LegacySoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset),
+                (
+                    ExpandSoftPackDataset,
+                    _LegacySoftPackDataset,
+                    HardPackDataset,
+                    MLLMPretrainHybridPackDataset,
+                    PresetPackDataset,
+                ),
             ), (
                 "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset, _LegacySoftPackDataset, "
-                f"HardPackDataset, or MLLMPretrainHybridPackDataset, but got {type(dataset)}"
+                f"HardPackDataset, MLLMPretrainHybridPackDataset, or PresetPackDataset, but got {type(dataset)}"
             )
             sampler = LengthGroupedSampler(
                 dataset=dataset, dp_mesh=dp_mesh, global_batch_size=global_batch_size, seed=seed
