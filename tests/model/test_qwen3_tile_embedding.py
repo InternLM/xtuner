@@ -78,12 +78,12 @@ class TestQwen3Dense4B(DistributedTestBase):
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
             engine.train_step(engine_input)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
@@ -153,12 +153,12 @@ class TestQwen3Dense4B(DistributedTestBase):
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
             engine.train_step(engine_input)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)

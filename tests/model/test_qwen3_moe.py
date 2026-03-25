@@ -98,7 +98,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             loss_cfg = CELossConfig(mode=loss_mode)
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
@@ -107,7 +107,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             with torch.no_grad():
                 output = qwen_model(
                     seq_ctx=seq_ctx,
-                    loss_ctx=loss_ctx,
+                    loss_ctx={"lm": loss_ctx},
                 )
             loss = output["loss"]
             losses.append(loss)
@@ -182,7 +182,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             loss_cfg = CELossConfig()
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
@@ -191,7 +191,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             with torch.no_grad():
                 output = qwen_model(
                     seq_ctx=seq_ctx,
-                    loss_ctx=loss_ctx,
+                    loss_ctx={"lm": loss_ctx},
                 )
             loss = output["loss"]
             losses.append(loss)
@@ -258,7 +258,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids.to('cuda'),))
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
@@ -269,7 +269,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             with torch.no_grad():
                 output = qwen_model(
                     seq_ctx=seq_ctx,
-                    loss_ctx=loss_ctx,
+                    loss_ctx={"lm": loss_ctx},
                 )
             assert "loss" in output
 
