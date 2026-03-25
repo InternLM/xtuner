@@ -12,6 +12,8 @@ from transformers import AutoTokenizer
 from xtuner.v1.datasets import PretrainTokenizeFunctionConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.datasets.packing import get_pack_infos_by_hard_split
+from xtuner.v1.datasets.preset_pack import PresetPackDataset
+from xtuner.v1.datasets.sampler import LengthGroupedSampler
 
 
 def get_pack_config_by_simple_hard_split(
@@ -88,8 +90,54 @@ def test_hard_split_pack_config_matches_packing_implementation():
     np.testing.assert_array_equal(simple["samples"], ref["samples"])
 
 
+class _StubJsonl:
+    """Minimal stand-in for ``JsonlDataset``: only ``path`` / ``__len__`` are used by ``PresetPackDataset`` init."""
+
+    def __init__(self, path: str, n_samples: int) -> None:
+        self.path = path
+        self._n = n_samples
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx: int):
+        raise AssertionError("not used in this test")
+
+
+def test_preset_pack_longest_matches_hard_pack_and_length_grouped_sampler(tmp_path: Path) -> None:
+    rng = np.random.RandomState(7)
+    num_tokens = rng.randint(5, 19, size=20).astype(np.int64)
+    inds = rng.permutation(20).astype(np.int64)
+    pack_max_length = 24
+    anno = str((tmp_path / "stub.jsonl").resolve())
+    (tmp_path / "stub.jsonl").write_text("", encoding="utf-8")
+
+    infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=1)
+    ref_longest = infos["longest"]
+    cfg = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
+
+    pack_dir = tmp_path / "pack"
+    pack_dir.mkdir()
+    np.save(pack_dir / "boundaries.npy", cfg["boundaries"])
+    np.save(pack_dir / "samples.npy", cfg["samples"])
+    (pack_dir / "paths.json").write_text(json.dumps([anno]), encoding="utf-8")
+
+    ds = PresetPackDataset(
+        [_StubJsonl(anno, len(num_tokens))],
+        pack_config_path=str(pack_dir),
+        pack_max_length=pack_max_length,
+        mmap=True,
+    )
+    np.testing.assert_array_equal(ds.longest, ref_longest)
+    assert isinstance(ds._samples, np.memmap) or hasattr(ds._samples, "filename")
+
+    LengthGroupedSampler(ds, global_batch_size=2, dp_mesh=None, seed=123)
+
+
 def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
     tokenizer_path = os.environ["QWEN3_MOE_PATH"]
+    # TODO: multiple jsonl files with ConcatDataset
+    # TODO: jsonl file with sample_ratio
     jsonl_path = tmp_path / "data.jsonl"
     records = [
         {"messages": [{"role": "pretrain", "content": f"This is an example of pretrain text sample {i}. " + "xtuner " * (3 + (i % 5))}]}
