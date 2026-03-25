@@ -309,8 +309,9 @@ class LMHeadLossContext(BaseLossContext):
         loss_weight = self.loss_kwargs.loss_weight
         sum_loss_weight = loss_weight.sum()
         mtp_mask = torch.zeros_like(shifted_labels)
-        seq_len = shifted_labels.size(1)
+        bsz, seq_len = shifted_labels.shape
         inside_mtp_zone = False
+        assert bsz == 1, shifted_labels.shape
         for j in range(seq_len):
             token = shifted_labels[0, j].item()
 
@@ -341,7 +342,10 @@ class LMHeadLossContext(BaseLossContext):
         loss_weight = self.loss_kwargs.loss_weight
         sum_loss_weight = loss_weight.sum()
 
-        easy_to_use = torch.cat([shifted_labels, torch.tensor([[0]], device=shifted_labels.device)], dim=-1)
+        easy_to_use = torch.cat([
+            shifted_labels,
+            torch.zeros((shifted_labels.size(0), 1), dtype=shifted_labels.dtype, device=shifted_labels.device)
+        ], dim=-1)
 
         is_digit = torch.where(easy_to_use < 25, easy_to_use > 14, 0)
         is_dot = torch.where(easy_to_use == 13, 1, 0)
@@ -368,7 +372,10 @@ class LMHeadLossContext(BaseLossContext):
         loss_weight = self.loss_kwargs.loss_weight
         sum_loss_weight = loss_weight.sum()
 
-        easy_to_use = torch.cat([shifted_labels, torch.tensor([[0]], device=shifted_labels.device)], dim=-1)
+        easy_to_use = torch.cat([
+            shifted_labels,
+            torch.zeros((shifted_labels.size(0), 1), dtype=shifted_labels.dtype, device=shifted_labels.device)
+        ], dim=-1)
 
         is_digit = torch.where(easy_to_use < 25, easy_to_use > 14, 0)
         is_dot = torch.where(easy_to_use == 13, 1, 0)
