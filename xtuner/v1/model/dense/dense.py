@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from pathlib import Path
-from typing import Self, cast
+from typing import Self, cast, Literal
 
 import torch
 import torch.distributed as dist
@@ -19,7 +19,7 @@ from typing_extensions import overload, override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.loss import CELossContext, BaseLossContext
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -76,7 +76,7 @@ class Dense(BaseModel):
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: CELossContext,
+        loss_ctx: dict[Literal["lm"], BaseLossContext] | None = None,
     ) -> ModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -108,10 +108,17 @@ class Dense(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
+        if loss_ctx is None:
+            # Inference mode
+            _, (logits, _) = self.lm_head(hidden_states, None)
+            output["logits"] = logits
+        else:
+            # Training mode
+            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx["lm"])
+            output["loss"] = loss
+            output["logits"] = logits
+            output["extra_info"] = extra_info
+
         return ModelOutputs(**output)
 
     def build_embeddings(self, config: TransformerConfig):
@@ -160,7 +167,7 @@ class Dense(BaseModel):
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        loss_ctx: CELossContext,
+        loss_ctx: dict[str, CELossContext] | None = None,
     ) -> ModelOutputs: ...
 
     __call__ = nn.Module.__call__
