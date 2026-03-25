@@ -29,7 +29,8 @@ class LMHead(nn.Linear):
     ) -> tuple[Loss, tuple[Logits | None, dict[str, Any]]]: ...
 
     def forward(  # type: ignore[override]
-        self, hidden_states: torch.Tensor, loss_ctx: LMHeadLossContext | None = None
+        self, hidden_states: torch.Tensor, loss_ctx: LMHeadLossContext | None = None,
+        mtp_config = None, layer_idx: int = 0,
     ) -> tuple[Loss | None, tuple[Logits | None, dict[str, Any]]]:
         """Forward pass of the language model head."""
         if isinstance(self.weight, DTensor):
@@ -46,7 +47,7 @@ class LMHead(nn.Linear):
             logits = F.linear(hidden_states, w, b)
             return None, (logits.float(), {})
         else:
-            return loss_ctx.forward(hidden_states, w, b)
+            return loss_ctx.forward(hidden_states, w, b, mtp_config, layer_idx)
 
     @overload  # type: ignore
     def __call__(

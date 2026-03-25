@@ -63,11 +63,12 @@ def roll_packed_tensor(
 
         # Fill the last |shifts| positions along dim to avoid information
         # leakage across sequences.  For shifts=-1 the last 1 position is
-        # filled; for shifts=-2 the last 2 positions are filled, etc.
-        fill_len = -shifts
-        fill_start = (end_idx - start_idx) - fill_len
-        fill_slice = rolled_seq.narrow(dim, fill_start, fill_len)  # type: ignore[arg-type]
-        fill_slice.fill_(fill_value)
+        # zeroed; for shifts=-2 the last 2 positions are zeroed, etc.
+        zero_len = -shifts
+        zero_len = min(zero_len, (end_idx - start_idx))
+        zero_start = (end_idx - start_idx) - zero_len
+        zero_slice = rolled_seq.narrow(dim, zero_start, zero_len)  # type: ignore[arg-type]
+        zero_slice.zero_()
 
         # Write back to the rolled tensor
         rolled_tensor.narrow(dim, start_idx, end_idx - start_idx).copy_(rolled_seq)  # type: ignore[arg-type]

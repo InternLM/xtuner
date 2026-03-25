@@ -26,7 +26,6 @@ from .moe.gpt_oss import GptOss21BA3P6Config, GptOss117BA5P8Config, GptOssConfig
 from .moe.moe import BalancingLossConfig, MoE, MoEConfig, MoEModelOutputs, ZLossConfig
 from .moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoEConfig, Qwen3MoEFoPEConfig
 
-
 model_mapping = {
     "qwen3-moe-30BA3": Qwen3MoE30BA3Config(),
     "qwen3-8B": Qwen3Dense8BConfig(),

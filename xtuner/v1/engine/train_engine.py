@@ -421,6 +421,9 @@ class TrainEngine:
         loss = torch.tensor(0.0, device=DEVICE)
         for key in model_outputs.model_fields:
             value = getattr(model_outputs, key)
-            if "loss" in key and isinstance(value, torch.Tensor):
+            if key == "mtp_loss":
+                for mtp_loss_name, mtp_loss in value.items():
+                    loss += mtp_loss
+            elif "loss" in key and isinstance(value, torch.Tensor):
                 loss += value
         return loss

@@ -58,17 +58,34 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
             # xtuner: mtp_block.layers.{idx}.hnorm -> HF: mtp.pre_fc_norm_hidden
             # xtuner: mtp_block.layers.{idx}.final_layernorm -> HF: mtp.norm
             # Note: Currently assuming single MTP layer (idx=0), may need adjustment for multiple layers
+            # if ".enorm." in key:
+            #     key = re.sub(r"layers\.\d+\.enorm\.", "pre_fc_norm_embedding.", key)
+            # elif ".hnorm." in key:
+            #     key = re.sub(r"layers\.\d+\.hnorm\.", "pre_fc_norm_hidden.", key)
+            # elif ".final_layernorm." in key:
+            #     key = re.sub(r"layers\.\d+\.final_layernorm\.", "norm.", key)
+
+            # Handle MTP normalization layers
+            # xtuner: mtp_block.{mtp_key}.layers.{idx}.enorm -> HF: mtp.{mtp_key}.layers.{idx}.pre_fc_norm_embedding
+            # xtuner: mtp_block.{mtp_key}.layers.{idx}.hnorm -> HF: mtp.{mtp_key}.layers.{idx}.pre_fc_norm_hidden
+            # xtuner: mtp_block.{mtp_key}.layers.{idx}.final_layernorm -> HF: mtp.{mtp_key}.layers.{idx}.norm
             if ".enorm." in key:
-                key = re.sub(r"layers\.\d+\.enorm\.", "pre_fc_norm_embedding.", key)
+                key = re.sub(r"layers\.(\d+)\.enorm\.", r"layers.\1.pre_fc_norm_embedding.", key)
             elif ".hnorm." in key:
-                key = re.sub(r"layers\.\d+\.hnorm\.", "pre_fc_norm_hidden.", key)
+                key = re.sub(r"layers\.(\d+)\.hnorm\.", r"layers.\1.pre_fc_norm_hidden.", key)
             elif ".final_layernorm." in key:
-                key = re.sub(r"layers\.\d+\.final_layernorm\.", "norm.", key)
+                key = re.sub(r"layers\.(\d+)\.final_layernorm\.", r"layers.\1.norm.", key)
+
 
             # Handle MTP projection layer
-            # xtuner: mtp_block.layers.{idx}.eh_proj -> HF: mtp.fc
+            # xtuner: mtp_block.{mtp_key}.layers.{idx}.eh_proj -> HF: mtp.fc
+            # if ".eh_proj." in key:
+            #     key = re.sub(r"layers\.\d+\.eh_proj\.", "fc.", key)
+
+            # Handle MTP projection layer
+            # xtuner: mtp_block.{mtp_key}.layers.{idx}.eh_proj -> HF: mtp.{mtp_key}.layers.{idx}.fc
             if ".eh_proj." in key:
-                key = re.sub(r"layers\.\d+\.eh_proj\.", "fc.", key)
+                key = re.sub(r"layers\.(\d+)\.eh_proj\.", r"layers.\1.fc.", key)
 
             # Handle MoE-specific transformations within MTP layers
             key = re.sub(r"layers\.(\d+)\.(experts|gate|shared_experts|shared_expert_gate)", r"layers.\1.mlp.\2", key)

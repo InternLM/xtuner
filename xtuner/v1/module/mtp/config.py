@@ -1,6 +1,6 @@
 """Configuration for Multi-Token Prediction (MTP)."""
 
-from typing import Annotated
+from typing import Annotated, Sequence
 
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
@@ -37,5 +37,11 @@ class MTPConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    name: Annotated[str, Parameter(group="model")]
     num_layers: Annotated[int, Parameter(group="model")]
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1
+
+    mask_type: Annotated[str | None, Parameter(group="model")]
+    # mask_type v2
+    open_token_list: Annotated[Sequence[int], Parameter(help="Open tokens for mask", group="model")] = []
+    close_token_list: Annotated[Sequence[int], Parameter(help="End tokens for mask", group="model")] = []
