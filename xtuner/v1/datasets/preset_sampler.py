@@ -1,4 +1,4 @@
-"""CustomSampler: consumes packs in a user-supplied global order.
+"""PresetSampler: consumes packs in a user-supplied global order.
 
 Sampler config file format
 --------------------------
@@ -37,7 +37,7 @@ def _load_sampler_config(path: str) -> np.memmap | np.ndarray:
     Uses read-only mmap so multiple training processes can share the same mapping and reduce peak resident memory.
     """
     if not path.endswith(".npy"):
-        raise ValueError(f"CustomSampler: only .npy sampler order files are supported (mmap read). Got path {path!r}.")
+        raise ValueError(f"PresetSampler: only .npy sampler order files are supported (mmap read). Got path {path!r}.")
     arr = np.load(path, mmap_mode="r")
     if arr.ndim != 1:
         raise ValueError(f"sampler config NPY must be 1-D, got shape {arr.shape}")
@@ -54,7 +54,7 @@ def _validate_pack_indices(order: np.ndarray, num_packs: int) -> None:
         first = bad[:5]
         vals = order[first]
         raise ValueError(
-            f"CustomSampler: {bad.size} pack index(es) out of range [0, {num_packs}). "
+            f"PresetSampler: {bad.size} pack index(es) out of range [0, {num_packs}). "
             f"First positions/values (idx -> value): {list(zip(first.tolist(), vals.tolist()))}"
         )
 
@@ -65,12 +65,12 @@ def _log_coverage_summary(order: np.ndarray, num_packs: int) -> None:
     repeated = int(np.sum(counts > 1))
     pct = 100.0 * used_packs / num_packs if num_packs > 0 else 0.0
     logger.info(
-        f"CustomSampler: global_order covers {used_packs}/{num_packs} packs ({pct:.1f}%). "
+        f"PresetSampler: global_order covers {used_packs}/{num_packs} packs ({pct:.1f}%). "
         f"({repeated} packs referenced more than once)"
     )
 
 
-class CustomSampler(Sampler):
+class PresetSampler(Sampler):
     """Distributed sampler that consumes packs in a fixed user-defined order.
 
     Parameters
@@ -119,19 +119,19 @@ class CustomSampler(Sampler):
         # Load order from file if a path was given (mmap only)
         # ------------------------------------------------------------------
         if isinstance(global_order, str):
-            logger.info(f"CustomSampler: loading sampler order (mmap) from {global_order}.")
+            logger.info(f"PresetSampler: loading sampler order (mmap) from {global_order}.")
             global_order = _load_sampler_config(global_order)
 
         if not isinstance(global_order, np.ndarray):
             raise TypeError(
-                "CustomSampler: global_order must be a numpy.ndarray (1-D integer), "
+                "PresetSampler: global_order must be a numpy.ndarray (1-D integer), "
                 f"got {type(global_order).__name__}. Use np.asarray(..., dtype=np.int64) "
                 "or pass a path to a .npy file."
             )
         if global_order.ndim != 1:
-            raise ValueError(f"CustomSampler: global_order must be 1-D, got shape {global_order.shape}")
+            raise ValueError(f"PresetSampler: global_order must be 1-D, got shape {global_order.shape}")
         if not np.issubdtype(global_order.dtype, np.integer):
-            raise ValueError(f"CustomSampler: global_order must have an integer dtype, got {global_order.dtype}")
+            raise ValueError(f"PresetSampler: global_order must have an integer dtype, got {global_order.dtype}")
 
         num_packs = len(dataset)
 
@@ -146,18 +146,18 @@ class CustomSampler(Sampler):
         step_size = global_batch_size * self.world_size
         raw_len = len(global_order)
         if raw_len == 0:
-            raise ValueError("CustomSampler: global_order is empty.")
+            raise ValueError("PresetSampler: global_order is empty.")
         rounded_len = (raw_len // step_size) * step_size
         if rounded_len == 0:
             raise ValueError(
-                f"CustomSampler: global_order length {raw_len} is smaller than "
+                f"PresetSampler: global_order length {raw_len} is smaller than "
                 f"global_batch_size*world_size={step_size}; "
                 "cannot round down to a positive multiple. "
                 "Increase the order length or decrease batch size / world size."
             )
         if rounded_len < raw_len:
             logger.info(
-                f"CustomSampler: truncating global order from {raw_len} to {rounded_len} "
+                f"PresetSampler: truncating global order from {raw_len} to {rounded_len} "
                 f"(multiple of {step_size}, round-down)."
             )
 
@@ -210,7 +210,7 @@ class CustomSampler(Sampler):
     def load_state_dict(self, state_dict: dict) -> None:
         if self.world_size != state_dict.get("world_size"):
             logger.warning(
-                f"CustomSampler: world_size mismatch: checkpoint has "
+                f"PresetSampler: world_size mismatch: checkpoint has "
                 f"{state_dict.get('world_size')}, current is {self.world_size}. "
                 "Resumption may be inaccurate."
             )
