@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, TypeAlias, Typ
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+import numpy as np
 import ray
 import requests
 import torch
@@ -510,13 +511,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             seq_ctx = data["seq_ctx"]
             pixel_values = seq_ctx.pixel_values
             if pixel_values is not None:
-                if not isinstance(pixel_values, torch.Tensor):
+                if not isinstance(pixel_values, np.ndarray):
                     assert isinstance(pixel_values, list), (
                         f"pixel_values should be list of tensor, got {type(pixel_values)}"
                     )
-                    pixel_value_refs = list(pixel_values)
-                    pixel_values = torch.cat(ray.get(pixel_value_refs), dim=0)
+                    pixel_values = [ray.get(pixel_obf) for pixel_obf in pixel_values]
+                    pixel_values = [torch.as_tensor(pixel_value) for pixel_value in pixel_values]
+                    pixel_values = torch.cat(pixel_values, dim=0)
                     seq_ctx.pixel_values = pixel_values
+                else:
+                    raise NotImplementedError("The case where pixel_values is a numpy array is not implemented yet.")
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts
             if rollout_routed_experts is not None:
