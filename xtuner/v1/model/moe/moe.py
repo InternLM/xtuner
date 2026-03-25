@@ -2,7 +2,7 @@
 import os
 import types
 from pathlib import Path
-from typing import Annotated, Literal, Self, Sequence, cast, TypedDict
+from typing import TYPE_CHECKING, Annotated, Literal, Self, Sequence, TypedDict, cast
 
 import torch
 import torch.distributed as dist
@@ -27,17 +27,17 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import (
-    BalancingLoss,
     BalancingLossConfig,
     BalancingLossContext,
-    BalancingLossKwargs,
-    CELossContext,
-    ZLoss,
+    BaseLossContext,
+    LMHeadLossContext,
+    MTPLossContext,
     ZLossConfig,
     ZLossContext,
     ZLossKwargs,
     BaseLossContext,
 )
+from xtuner.v1.loss.mtp_loss import MTPLossConfig
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -59,11 +59,16 @@ from xtuner.v1.module import (
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
+from xtuner.v1.module.mtp import MTPBlock, MTPConfig, MTPLayer
 from xtuner.v1.utils import (
     get_device,
     get_logger,
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
+
+
+if TYPE_CHECKING:
+    from xtuner.v1.datasets.collator import ColateItem
 
 
 DEVICE = get_device()
@@ -96,6 +101,7 @@ class MoEModelOutputs(ModelOutputs):
     balancing_loss: torch.Tensor | None = None
     z_loss: torch.Tensor | None = None
     tokens_per_expert_global: torch.Tensor
+    mtp_loss: torch.Tensor | None = None
 
     def free_nongrad_feature(self):
         """Release large intermediate tensors not needed for backward or
@@ -122,6 +128,7 @@ class MoELossContextDict(TypedDict):
     lm: BaseLossContext
     balancing: BalancingLossContext | None
     z_loss: ZLossContext | None
+    mtp: list[BaseLossContext] | None
 
 
 class MoEConfig(TransformerConfig):
@@ -142,6 +149,7 @@ class MoEConfig(TransformerConfig):
     gate_bias: bool = False
     moe_bias: bool = False
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
+    mtp_config: MTPConfig | None = None
     freeze_routers: bool = False
 
     def build(self) -> "MoE":
@@ -185,6 +193,7 @@ class MoE(BaseModel):
         self.layers = self.build_layers(config)
         self.rotary_emb = self.build_rotary_embedding(config)
         self.embed_tokens = self.build_embeddings(config)
+        self.mtp_block = self.build_mtp_block(config) if config.mtp_config is not None else None
 
         self.fp32_layers = [self.rotary_emb]
 
@@ -299,6 +308,7 @@ class MoE(BaseModel):
                 - "lm": LM loss context
                 - "balancing": Balancing loss context (if configured)
                 - "z_loss": Z-loss context (if configured)
+                - "mtp": MTP loss contexts (if configured)
 
         Note:
             Auxiliary loss contexts are built without parameters.
@@ -307,13 +317,42 @@ class MoE(BaseModel):
             - z_loss_ctx(router_logits)
         """
         # Build LM loss context
-        res = super().build_loss_ctx_batch(data_batch, sp_mesh)
+        _data_batch: list[dict] = data_batch  # type: ignore[assignment]
+        res: list[dict] = super().build_loss_ctx_batch(_data_batch, sp_mesh)
+        cu_seq_lens_list = [data["seq_ctx"].cu_seq_lens_k for data in data_batch]
 
         # Add auxiliary losses
-        self._add_auxiliary_loss("balancing", self.config.balancing_loss_cfg, data_batch, res)
-        self._add_auxiliary_loss("z_loss", self.config.z_loss_cfg, data_batch, res)
+        self._add_auxiliary_loss("balancing", self.config.balancing_loss_cfg, _data_batch, res)
+        self._add_auxiliary_loss("z_loss", self.config.z_loss_cfg, _data_batch, res)
 
-        return res
+        # Add MTP loss contexts if MTP is enabled
+        if self.config.mtp_config is not None:
+            for mtp_idx in range(self.config.mtp_config.num_layers):
+                mtp_loss_cfg = MTPLossConfig(
+                    **self.config.lm_loss_cfg.model_dump(),
+                    mtp_depth=mtp_idx + 1,
+                )
+                mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, _data_batch, sp_mesh)
+                if mtp_loss_ctx_list is not None:
+                    mtp_loss_ctx_list = MTPLossContext.build_batches(  # type: ignore[assignment]
+                        cast(list[MTPLossContext], mtp_loss_ctx_list),  # type: ignore[arg-type]
+                        cu_seq_lens_list=cu_seq_lens_list,
+                        sp_mesh=sp_mesh,
+                    )
+                    for i, mtp_loss_ctx in enumerate(mtp_loss_ctx_list):
+                        if "mtp" not in res[i]:
+                            res[i]["mtp"] = []
+                        res[i]["mtp"].append(mtp_loss_ctx)  # type: ignore[union-attr]
+
+            # Ensure all microbatches have mtp key
+            for loss_ctx_dict in res:
+                if "mtp" not in loss_ctx_dict:
+                    loss_ctx_dict["mtp"] = None
+        else:
+            for loss_ctx_dict in res:
+                loss_ctx_dict["mtp"] = None
+
+        return res  # type: ignore[return-value]
 
     def forward(
         self,
@@ -338,6 +377,11 @@ class MoE(BaseModel):
             )
             if loss_ctx is None:
                 raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
+            if self.mtp_block is not None:
+                raise NotImplementedError(
+                    "MTP is not supported in micro-batch forward mode (intra_layer_micro_batch > 1). "
+                    "Please set intra_layer_micro_batch=1 when using MTP."
+                )
 
             return self._micro_batch_forward(
                 seq_ctx_list=seq_ctx,
@@ -349,12 +393,8 @@ class MoE(BaseModel):
         base_info = super().post_micro_batch_forward(batch_outputs)
         logs_info = base_info["logs_info"]
 
-        tokens_per_expert_global = torch.zeros(
-            self.config.num_hidden_layers - self.config.first_k_dense_replace,
-            self.config.n_routed_experts,
-            dtype=torch.int64,
-            device=DEVICE,
-        )
+        first_tokens_per_expert = batch_outputs[0]["tokens_per_expert_global"]
+        tokens_per_expert_global = torch.zeros_like(first_tokens_per_expert)
         for output in batch_outputs:
             tokens_per_expert_global += output["tokens_per_expert_global"]
 
@@ -477,7 +517,7 @@ class MoE(BaseModel):
         # Extract LM loss context from dict
         lm_loss_ctx_list = [loss_ctx_dict["lm"] for loss_ctx_dict in loss_ctx_list]
         cat_loss_ctx = type(lm_loss_ctx_list[0]).cat(lm_loss_ctx_list)
-        loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cat_loss_ctx)
+        loss, (logits, extra_info) = self.lm_head(cat_hidden_states, cast(LMHeadLossContext, cat_loss_ctx))
 
         # Aggregate losses (mean across micro-batches)
         output["loss"] = loss.sum()
@@ -576,7 +616,14 @@ class MoE(BaseModel):
         if input_ids is not None:
             hidden_states = self.embed_tokens(input_ids)
         else:
-            hidden_states = seq_ctx.inputs_embeds
+            assert seq_ctx.inputs_embeds is not None, "inputs_embeds should not be None when input_ids is None"
+            # The clone here is mainly for ActivationOffload. The current offload implementation modifies
+            # the input tensor in-place, causing subsequent accesses to input_embeds to get a tensor with
+            # empty storage and trigger errors. So we clone here to ensure later accesses to input_embeds
+            # won't fail. However, there are two remaining caveats:
+            # 1. The extra clone may introduce a slight performance overhead.
+            # 2. hidden_states itself still cannot be reused, as offload will leave it with empty storage.
+            hidden_states = seq_ctx.inputs_embeds.clone()
 
         # create position embeddings to be shared across the decoder layers
         assert position_ids is not None
@@ -626,6 +673,7 @@ class MoE(BaseModel):
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
 
+        layer_hidden_states = hidden_states
         hidden_states = self.norm(hidden_states)
 
         # Get LM loss context from dict
@@ -634,6 +682,43 @@ class MoE(BaseModel):
         output["loss"] = loss
         output["logits"] = logits
         output["extra_info"] = extra_info
+
+        # MTP forward pass and loss computation
+        if (
+            self.mtp_block is not None
+            and loss_ctx is not None
+            and (mtp_loss_ctx_list := loss_ctx.get("mtp")) is not None
+        ):
+            mtp_seq_ctx = seq_ctx.copy(
+                input_ids=input_ids.clone() if input_ids is not None else None,
+                position_ids=position_ids.clone(),
+                inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
+            )
+
+            # Forward through MTP block
+            mtp_outputs = self.mtp_block(
+                hidden_states=layer_hidden_states,
+                embed_tokens_fn=self.embed_tokens,
+                position_embeddings=position_embeddings,
+                seq_ctx=mtp_seq_ctx,
+            )
+
+            # Compute MTP losses for each depth
+            mtp_losses = torch.tensor(0.0, device=DEVICE)
+            for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
+                mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
+                mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                mtp_losses += mtp_loss
+
+                output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
+                output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
+
+            # Average MTP losses across depths and scale
+            mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
+            scaled_mtp_loss = mtp_losses * self.config.mtp_config.loss_scaling_factor  # type: ignore
+
+            # Add to total loss
+            output["mtp_loss"] = scaled_mtp_loss
 
         router_logits_list = list(output["router_logits"].values())  # type: ignore
         router_weights_list = list(output["router_weights"].values())  # type: ignore
@@ -746,6 +831,74 @@ class MoE(BaseModel):
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
 
+    def build_mtp_block(self, config: MoEConfig) -> MTPBlock:
+        """Build MTP block with MoE decoder layers.
+
+        Args:
+            config (MoEConfig): Model configuration.
+
+        Returns:
+            MTPBlock: Constructed MTP block.
+        """
+        mtp_config = config.mtp_config
+        assert mtp_config is not None, "mtp_config must be provided"
+
+        mtp_layers = []
+        # Get attention config for MTP layers (use last layer's config)
+        last_layer_idx = config.num_hidden_layers - 1
+        layers_type_list = config.layers_type
+        attention_config: MLAConfig | MHAConfig | GatedDeltaNetConfig
+        if layers_type_list[last_layer_idx] in ["full_attention", "sliding_attention"]:
+            attention_config = config.attention
+        elif layers_type_list[last_layer_idx] == "linear_attention":
+            assert config.linear_attention is not None, (
+                "linear_attention config must be provided for linear_attention layer"
+            )
+            attention_config = config.linear_attention
+        else:
+            raise ValueError(f"Unsupported layer type {layers_type_list[last_layer_idx]}")
+
+        for i in range(mtp_config.num_layers):
+            # Build MoE decoder layer for MTP
+            decoder_layer = MoEDecoderLayer(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                moe_intermediate_size=config.moe_intermediate_size,
+                mlp_bias=config.mlp_bias,
+                gate_bias=config.gate_bias,
+                moe_bias=config.moe_bias,
+                hidden_act=config.hidden_act,
+                rms_norm_eps=config.rms_norm_eps,
+                rms_norm_type=config.rms_norm_type,
+                num_experts_per_tok=config.num_experts_per_tok,
+                n_routed_experts=config.n_routed_experts,
+                n_shared_experts=config.n_shared_experts,
+                with_shared_expert_gate=config.with_shared_expert_gate,
+                hidden_factor=config.hidden_factor,
+                layer_type=layers_type_list[last_layer_idx],
+                attention_config=attention_config,
+                rope_scaling_cfg=config.rope_scaling_cfg,
+                generate_config=config.generate_config,
+                router_config=config.router,
+                moe_act_fn_cfg=config.moe_act_fn_cfg,
+                float8_cfg=config.float8_cfg,
+                layer_idx=config.num_hidden_layers + i,
+                dispatcher=config.dispatcher,
+                ep_mesh=self.ep_mesh,
+            )
+
+            # Wrap decoder layer in MTPLayer
+            mtp_layer = MTPLayer(
+                hidden_size=config.hidden_size,
+                rms_norm_eps=config.rms_norm_eps,
+                rms_norm_type=config.rms_norm_type,
+                decoder_layer=decoder_layer,
+                float8_cfg=config.float8_cfg,
+            )
+            mtp_layers.append(mtp_layer)
+
+        return MTPBlock(mtp_layers=mtp_layers)
+
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
@@ -809,15 +962,17 @@ class MoE(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
 
         for layer_idx, layer in tqdm(self.layers.items(), desc="[FSDP Sharding]"):
             layer_idx = int(layer_idx)
-            if layer_idx < num_recompute_layers - 1:
+            if self._should_recompute(
+                layer_idx=layer_idx,
+                mtp_idx=None,
+            ):
                 layer = checkpoint_wrapper(layer, checkpoint_impl=CheckpointImpl.REENTRANT)
 
             self.layers[str(layer_idx)] = layer
-            if layer_idx >= len(self.layers) - 1:
+            if layer_idx >= len(self.layers) - 1 and self.mtp_block is None:
                 reshard_after_forward = False
             else:
                 reshard_after_forward = self.fsdp_config.reshard_after_forward
@@ -855,10 +1010,35 @@ class MoE(BaseModel):
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=lm_head_mp_policy,
-            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            reshard_after_forward=self.fsdp_config.reshard_after_forward if self.mtp_block is None else False,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
         )
+
+        # Shard MTP block if it exists
+        if self.mtp_block is not None:
+            for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
+                if self._should_recompute(None, mtp_idx=mtp_idx):
+                    mtp_layer = checkpoint_wrapper(mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT)
+                self.mtp_block.layers[mtp_idx] = mtp_layer
+
+                reshard_after_forward = mtp_idx != len(self.mtp_block.layers) - 1
+                self._fully_shard(
+                    mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
+                    mp_policy=mp_policy,
+                    reshard_after_forward=reshard_after_forward,
+                    offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+                    module=mtp_layer,
+                )
+                if mtp_idx == 0:
+                    layer_next.set_modules_to_forward_prefetch([mtp_layer])  # type: ignore
+
+            if self.config.mtp_config is not None and self.config.mtp_config.num_layers > 0:
+                for prev_mtp_layer, next_mtp_layer in zip(
+                    list(self.mtp_block.layers)[:-1],
+                    list(self.mtp_block.layers)[1:],
+                ):
+                    prev_mtp_layer.set_modules_to_forward_prefetch([next_mtp_layer])  # type: ignore
 
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
@@ -1022,6 +1202,62 @@ class MoE(BaseModel):
             self.scale_grad_by_freq,
             self.sparse,
         )
+
+    def _should_recompute(
+        self,
+        layer_idx: int | None,
+        mtp_idx: int | None,
+    ) -> bool:
+        """Determine if a layer should use gradient checkpointing
+        (recomputation).
+
+        The recomputation strategy treats decoder layers and MTP layers as a single
+        sequence. The recompute_ratio is applied to the total layer count. The last
+        layer in the entire model is never recomputed to avoid unnecessary overhead.
+
+        Args:
+            layer_idx (int | None): Index of the decoder layer (0-based). None if this
+                is an MTP layer.
+            mtp_idx (int | None): Index of the MTP layer (0-based). None if this is a
+                decoder layer.
+
+        Returns:
+            bool: True if the layer should use gradient checkpointing, False otherwise.
+
+        Example:
+            Configuration: 7 decoder layers, 3 MTP layers, recompute_ratio=0.8
+            - Total layers: 10
+            - Recompute layers: int(10 * 0.8) = 8
+            - Layer mapping:
+                * Decoder 0-6 → global index 0-6 (7 layers)
+                * MTP 0-2 → global index 7-9 (3 layers)
+            - Recomputation decision:
+                * Global 0-7 (decoder 0-6, MTP 0): recompute ✓
+                * Global 8 (MTP 1): no recompute
+                * Global 9 (MTP 2, last layer): no recompute (forced)
+        """
+        num_layers = self.config.num_hidden_layers
+        mtp_layers = self.config.mtp_config.num_layers if self.config.mtp_config is not None else 0
+        recompute_ratio = self.fsdp_config.recompute_ratio if self.fsdp_config is not None else 0.0
+
+        total_layers = num_layers + mtp_layers
+        num_recompute_layers = int(total_layers * recompute_ratio)
+
+        # Determine the global layer index (0-based)
+        if layer_idx is not None:
+            # This is a decoder layer
+            global_idx = layer_idx
+        else:
+            # This is an MTP layer (comes after all decoder layers)
+            assert mtp_idx is not None, "Either layer_idx or mtp_idx must be provided"
+            global_idx = num_layers + mtp_idx
+
+        # Last layer is never recomputed
+        if global_idx == total_layers - 1:
+            return False
+
+        # Recompute if within the recompute range
+        return global_idx < num_recompute_layers
 
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore

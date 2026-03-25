@@ -594,6 +594,12 @@ class Trainer:
 
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg, fsdp_cfg)
 
+        if intra_layer_micro_batch > 1 and isinstance(model_cfg, MoEConfig) and model_cfg.mtp_config is not None:
+            raise ValueError(
+                "MTP (Multi-Token Prediction) is not supported with intra_layer_micro_batch > 1. "
+                f"Got intra_layer_micro_batch={intra_layer_micro_batch} and mtp_config={model_cfg.mtp_config}."
+            )
+
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
             logger.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
             # For backward compatibility, reserve the dataset_cfg interface, remove it later
