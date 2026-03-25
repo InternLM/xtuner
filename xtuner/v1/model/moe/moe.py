@@ -615,7 +615,14 @@ class MoE(BaseModel):
         if input_ids is not None:
             hidden_states = self.embed_tokens(input_ids)
         else:
-            hidden_states = seq_ctx.inputs_embeds
+            assert seq_ctx.inputs_embeds is not None, "inputs_embeds should not be None when input_ids is None"
+            # The clone here is mainly for ActivationOffload. The current offload implementation modifies
+            # the input tensor in-place, causing subsequent accesses to input_embeds to get a tensor with
+            # empty storage and trigger errors. So we clone here to ensure later accesses to input_embeds
+            # won't fail. However, there are two remaining caveats:
+            # 1. The extra clone may introduce a slight performance overhead.
+            # 2. hidden_states itself still cannot be reused, as offload will leave it with empty storage.
+            hidden_states = seq_ctx.inputs_embeds.clone()
 
         # create position embeddings to be shared across the decoder layers
         assert position_ids is not None
