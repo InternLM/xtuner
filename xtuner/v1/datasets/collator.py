@@ -4,6 +4,7 @@ import torch
 from typing_extensions import TypedDict
 
 from xtuner.v1.data_proto import SequenceContext
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
@@ -18,15 +19,7 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
 
 
-def split_to_chunks(n: int, chunk_size: int) -> list[int]:
-    full, remainder = divmod(n, chunk_size)
-    result = [chunk_size] * full
-    if remainder > 0:
-        result.append(remainder)
-    return result
-
-
-def fake_collator(instances: list[DataItem], **kwargs):
+def fake_collator(instances: list[RolloutState], **kwargs):
     return instances
 
 

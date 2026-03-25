@@ -50,6 +50,23 @@ def check_fa3():
         raise RuntimeError(f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0.")
 
 
+def force_set_tokenize_workers(logger):
+    # To avoid segmentation faults when setting num_workers for the dataloader
+    # The root cause is the incompatibility between fork start method and ray's grpc.
+    # The most fundamental solution is that all processes started in ray should
+    # use spawn start method.
+    tokenize_workers = os.environ.get("XTUNER_TOKENIZE_WORKERS", None)
+    os.environ["XTUNER_TOKENIZE_WORKERS"] = "1"
+    if tokenize_workers is not None and int(tokenize_workers) > 1:
+        logger.warning(
+            f"XTUNER_TOKENIZE_WORKERS is set to {tokenize_workers}, which may cause segmentation faults. Force set XTUNER_TOKENIZE_WORKERS to 1 to avoid this."
+        )
+    else:
+        logger.info(
+            f"Set XTUNER_TOKENIZE_WORKERS to {os.environ['XTUNER_TOKENIZE_WORKERS']} for safe tokenization in dataloader workers."
+        )
+
+
 def bind_train_rollout(
     train_controller: TrainingControllerProxy,
     rollout_controller: RolloutControllerProxy,
@@ -66,20 +83,23 @@ class TrainInfo(TypedDict, total=False):
 
 
 def get_train_seq_ctx(
-    input_ids: torch.LongTensor, multimodal_train_info: dict | None = None, len_response_ids: int = 0
+    input_ids: torch.LongTensor,
+    position_ids: torch.Tensor | None = None,
+    multimodal_train_info: dict | None = None,
+    len_response_ids: int = 0,
 ):
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
-    if multimodal_train_info and len(multimodal_train_info) > 0:
-        position_ids = multimodal_train_info.get("position_ids")  # (1,n) or (3,1,n)
-        if position_ids is not None and len(position_ids.shape) == 3:
-            # qwen3vl 需要特殊处理，其余的不需要额外处理
-            max_value = position_ids.max(dim=-1).values  # (3,1)
-            response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
-                1, len_response_ids + 1, device=max_value.device
-            )
-            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-            seq_ctx.position_ids = position_ids  # type: ignore[assignment]
-            assert position_ids.size(-1) == input_ids.size(-1)
+    if position_ids is not None and len(position_ids.shape) == 3:
+        # qwen3vl 需要特殊处理，其余的不需要额外处理
+        max_value = position_ids.max(dim=-1).values  # (3,1)
+        response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
+            1, len_response_ids + 1, device=max_value.device
+        )
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+        assert position_ids.size(-1) == input_ids.size(-1)
+
+    if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
     return seq_ctx
@@ -275,6 +295,8 @@ class RLColocateTrainer:
         # log
         log_dir = self.exp_dir / "logs"
         self.logger = get_logger(log_dir=log_dir, tag="RLTrainer")
+
+        force_set_tokenize_workers(self.logger)
 
         if skip_checkpoint_validation:
             patch_default_save_plan()
@@ -575,7 +597,12 @@ class RLColocateTrainer:
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
 
-            prompt_ids = group[0].prompt_ids
+            is_vlm_model = "train_prompt_ids" in group[0].extra_fields
+            if is_vlm_model:
+                # TODO(hha): VLM, 不好的设计，后续要去掉
+                prompt_ids = group[0].extra_fields["train_prompt_ids"]
+            else:
+                prompt_ids = group[0].prompt_ids
             assert prompt_ids is not None and len(prompt_ids) > 0, (
                 f"Prompt ids cannot be None or empty in data: {group[0]}"
             )
@@ -654,9 +681,12 @@ class RLColocateTrainer:
                     )
                 else:
                     rollout_logprobs = None
+
+                position_ids = group[i].position_ids
                 multimodal_train_info = group[i].mm_info
                 multi_info_cast = cast(dict | None, multimodal_train_info)
-                seq_ctx = get_train_seq_ctx(input_ids_t, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
+                seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
+
                 data_dict = {
                     "seq_ctx": seq_ctx,
                     "shifted_labels": shifted_labels_t,
