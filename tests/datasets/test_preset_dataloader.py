@@ -12,33 +12,77 @@ from transformers import AutoTokenizer
 from xtuner.v1.datasets import PretrainTokenizeFunctionConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 
-tokenizer_path = os.environ["QWEN3_MOE_PATH"]
+
+def get_pack_config_by_simple_hard_split(
+    inds: np.ndarray, dataset_id: int, num_tokens: np.ndarray, pack_max_length: int, pack_workers: int = 1
+):
+    """Like packing.get_pack_infos_by_hard_split: walk inds order, hard-split at pack_max_length -> preset NPY."""
+    _ = pack_workers
+    rows: list[list[int]] = []
+    boundaries: list[int] = [0]
+    cur: list[list[int]] = []
+    cur_sum = 0
+
+    def close():
+        nonlocal cur, cur_sum
+        if cur_sum != pack_max_length:
+            return
+        rows.extend(cur)
+        boundaries.append(len(rows))
+        cur, cur_sum = [], 0
+
+    for s_idx in inds.astype(np.int64, copy=False).tolist():
+        pos, L = 0, int(num_tokens[s_idx])
+        while pos < L:
+            room = pack_max_length - cur_sum
+            if room == 0:
+                close()
+                room = pack_max_length
+            take = min(L - pos, room)
+            cur.append([dataset_id, s_idx, -1, -1, pos, pos + take])
+            cur_sum += take
+            pos += take
+            close()
+    samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
+    return {"boundaries": np.asarray(boundaries, dtype=np.int64), "samples": samples}
 
 
 def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
+    tokenizer_path = os.environ["QWEN3_MOE_PATH"]
     jsonl_path = tmp_path / "data.jsonl"
-    line = {"messages": [{"role": "pretrain", "content": "hello preset dataloader.\n"}]}
-    jsonl_path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    records = [
+        {"messages": [{"role": "pretrain", "content": f"This is an example of pretrain text sample {i}. " + "xtuner " * (3 + (i % 5))}]}
+        for i in range(12)
+    ]
+    jsonl_path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records), encoding="utf-8")
     anno = str(jsonl_path.resolve())
 
+    # TODO: use JsonlDataset to cache first and get num_tokens from cache
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
     tok_fn = PretrainTokenizeFunctionConfig().build(tokenizer)
-    n_tokens = tok_fn(line)["num_tokens"]
+    num_tokens = np.array([tok_fn(r)["num_tokens"] for r in records], dtype=np.int64)
 
-    # TODO: use hard pack logic
+    pack_max_length = 32
+    inds = np.random.RandomState(0).permutation(len(records))
+
+    # TODO: use hard pack logic, compare with current hard pack logic
+    cfg = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1)
+    assert len(cfg["boundaries"]) >= 3, "need >=2 full packs"
+
+    print(f"\n\n--------------- original samples: {len(records)}, after pack: {len(cfg['boundaries']) - 1}\n\n")
+
     pack_dir = tmp_path / "pack"
     pack_dir.mkdir()
-    np.save(pack_dir / "boundaries.npy", np.array([0, 1], dtype=np.int64))
-    np.save(
-        pack_dir / "samples.npy",
-        np.array([[0, 0, -1, -1, 0, n_tokens]], dtype=np.int64),
-    )
+    np.save(pack_dir / "boundaries.npy", cfg["boundaries"])
+    np.save(pack_dir / "samples.npy", cfg["samples"])
     (pack_dir / "paths.json").write_text(json.dumps([anno]), encoding="utf-8")
 
     # TODO: a dist version of this test
     # TODO: use group by length logic
+    num_packs = int(cfg["boundaries"].shape[0] - 1)
     order_path = tmp_path / "order.npy"
-    np.save(order_path, np.array([0, 0], dtype=np.int64))
+    order = np.arange(num_packs, dtype=np.int64)
+    np.save(order_path, order)
 
     dataloader_cfg = DataloaderConfig(
         dataset_config_list=[
@@ -50,7 +94,8 @@ def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
         pack_level="preset",
         pack_config_path=str(pack_dir),
         sampler_config_path=str(order_path),
-        pack_max_length=n_tokens,
+        pack_max_length=pack_max_length,
+        pad_token_id=None,
         num_workers=0,
     )
 
@@ -67,8 +112,13 @@ def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
     # seed and shuffle should not affect the output in preset mode
     dl_a = _build(1, shuffle=False)
     dl_b = _build(2, shuffle=True)
+
+    _cnt = 0
     for batch_a, batch_b in zip(dl_a, dl_b):
         assert len(batch_a) == len(batch_b)
         for x, y in zip(batch_a, batch_b):
+            _cnt += 1
             assert torch.equal(x["seq_ctx"].input_ids, y["seq_ctx"].input_ids)
             assert torch.equal(x["shifted_labels"], y["shifted_labels"])
+    
+    print(f"--------------- packed samples: {_cnt}, sampler len: {len(order)}")
