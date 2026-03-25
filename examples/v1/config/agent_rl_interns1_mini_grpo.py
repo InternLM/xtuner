@@ -654,7 +654,8 @@ trainer = AgentRLTrainerConfig(
 
 
 import torch.distributed as dist
-from lagent_rl.agent_rl_trainer import AgentRLTrainer
+
+from xtuner.v1.train.agent_rl_trainer import AgentRLTrainer
 
 trainer = AgentRLTrainer.from_config(trainer)
 trainer.fit()
