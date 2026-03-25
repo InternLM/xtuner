@@ -82,7 +82,12 @@ class AgentEnvironment(BaseEnvironment):
                 continue
             if message.finish_reason == 'abort':
                 sample.env.rollout.state = RolloutState.ABORTED
-                sample.env.rollout.extra_info['agent_state_dict'] = self.agent.state_dict(sample.uid.observation_id)
+                agent_state_dict = self.agent.state_dict(sample.uid.observation_id)
+                # remove routed_experts from message extra_info to avoid serialization issue
+                for state in agent_state_dict.values():
+                    for msg in state:
+                        msg['extra_info'].pop('routed_experts', None)
+                sample.env.rollout.extra_info['agent_state_dict'] = agent_state_dict
                 aborted_data_items.append(sample)
             else:
                 completed_data_items.append(sample)

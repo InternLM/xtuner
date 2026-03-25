@@ -2,7 +2,7 @@ from typing import List, Optional
 
 from lagent.schema import AgentMessage as BaseAgentMessage
 from lagent.schema import AgentStatusCode
-from pydantic import Field, field_serializer
+from pydantic import Field
 
 from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem, RolloutState
 
@@ -18,12 +18,6 @@ class AgentMessage(BaseAgentMessage):
     raw_content: Optional[str] = None
     raw_content_ids: Optional[List[int]] = Field(default=None, repr=False)
     raw_content_logprobs: Optional[List[float]] = Field(default=None, repr=False)
-
-    @field_serializer("extra_info")
-    def serialize_extra_info(self, extra_info):
-        if isinstance(extra_info, dict):
-            extra_info.pop('routed_experts', None)
-        return extra_info
 
     def merge_with(self, other: 'AgentMessage') -> 'AgentMessage':
         assert self.finish_reason == 'abort', f"Cannot merge with non-aborted message: {self.finish_reason}"
