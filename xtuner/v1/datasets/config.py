@@ -25,11 +25,11 @@ from .collator import (
     qwen3_vl_sft_collator,
     sft_llm_collator,
 )
-from .custom_sampler import CustomSampler
 from .dataloader import BaseDataloader, Dataloader
 from .jsonl import JsonlDataset
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 from .preset_pack import PresetPackDataset
+from .preset_sampler import PresetSampler
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
 from .vlm_jsonl import VLMJsonlDataset
@@ -467,12 +467,12 @@ class DataloaderConfig(BaseDataloaderConfig):
             logger.info(f"[Dataset] (Original) {ori_samples} samples.")
             logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
-        sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler | CustomSampler
+        sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler | PresetSampler
         if self.pack_level == "custom":
             assert isinstance(dataset, PresetPackDataset)
             assert self.custom_sampler_config_path is not None
             # global_order = _load_sampler_config(self.custom_sampler_config_path)
-            sampler = CustomSampler(
+            sampler = PresetSampler(
                 dataset=dataset,
                 global_order=self.custom_sampler_config_path,
                 global_batch_size=global_batch_size,

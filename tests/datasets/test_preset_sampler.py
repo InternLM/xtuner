@@ -1,9 +1,9 @@
-"""Unit tests for CustomSampler."""
+"""Unit tests for PresetSampler."""
 
 import numpy as np
 import pytest
 
-from xtuner.v1.datasets.custom_sampler import CustomSampler
+from xtuner.v1.datasets.preset_sampler import PresetSampler
 
 
 # ---------------------------------------------------------------------------
@@ -11,7 +11,7 @@ from xtuner.v1.datasets.custom_sampler import CustomSampler
 # ---------------------------------------------------------------------------
 
 class _FakePackDataset:
-    """Minimal stand-in: CustomSampler only calls len() on the dataset."""
+    """Minimal stand-in: PresetSampler only calls len() on the dataset."""
 
     def __init__(self, num_packs: int):
         self._num_packs = num_packs
@@ -33,7 +33,7 @@ def test_basic_single_rank():
     dataset = _FakePackDataset(5)
     global_order = _i64(2, 0, 4, 1, 3)
 
-    sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
+    sampler = PresetSampler(dataset, global_order=global_order, global_batch_size=1)
     assert list(sampler) == [2, 0, 4, 1, 3]
 
 
@@ -42,7 +42,7 @@ def test_round_down():
     dataset = _FakePackDataset(10)
     global_order = np.arange(7, dtype=np.int64)  # 7 items, batch_size=4 → use first 4
 
-    sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=4)
+    sampler = PresetSampler(dataset, global_order=global_order, global_batch_size=4)
     yielded = list(sampler)
 
     assert len(yielded) == 4
@@ -55,18 +55,18 @@ def test_invalid_order_out_of_range():
     dataset = _FakePackDataset(5)
 
     with pytest.raises(ValueError, match="out of range"):
-        CustomSampler(dataset, global_order=_i64(0, 1, 99), global_batch_size=1)
+        PresetSampler(dataset, global_order=_i64(0, 1, 99), global_batch_size=1)
 
 
 def test_load_from_npy_file_mmap(tmp_path):
-    """CustomSampler accepts a .npy file path and keeps mmap-backed order."""
+    """PresetSampler accepts a .npy file path and keeps mmap-backed order."""
     dataset = _FakePackDataset(5)
     order = [2, 0, 1, 3, 4]
 
     npy_path = str(tmp_path / "sampler_order.npy")
     np.save(npy_path, np.array(order, dtype=np.int64))
 
-    sampler = CustomSampler(dataset, global_order=npy_path, global_batch_size=1)
+    sampler = PresetSampler(dataset, global_order=npy_path, global_batch_size=1)
     assert list(sampler) == order
     assert isinstance(sampler.global_order, np.ndarray)
     assert isinstance(sampler.global_order, np.memmap)
@@ -77,13 +77,13 @@ def test_state_dict_resume():
     dataset = _FakePackDataset(6)
     global_order = _i64(0, 1, 2, 3, 4, 5)
 
-    sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
+    sampler = PresetSampler(dataset, global_order=global_order, global_batch_size=1)
 
     # Simulate 3 consumed samples (get_state_dict takes global consumed count as `step`).
     state = sampler.get_state_dict(step=3)
     assert state["step"] == 3
 
-    sampler2 = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
+    sampler2 = PresetSampler(dataset, global_order=global_order, global_batch_size=1)
     sampler2.load_state_dict(state)
 
     assert list(sampler2) == [3, 4, 5]
@@ -94,7 +94,7 @@ def test_state_dict_world_size_mismatch():
     dataset = _FakePackDataset(4)
     global_order = _i64(0, 1, 2, 3)
 
-    sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
+    sampler = PresetSampler(dataset, global_order=global_order, global_batch_size=1)
     state = sampler.get_state_dict(step=0)
     state["world_size"] = 99  # force mismatch
 
@@ -106,7 +106,7 @@ def test_repeated_packs():
     dataset = _FakePackDataset(3)
     global_order = _i64(0, 0, 1, 1, 2, 2)
 
-    sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
+    sampler = PresetSampler(dataset, global_order=global_order, global_batch_size=1)
     yielded = list(sampler)
 
     assert len(yielded) == global_order.size
@@ -118,7 +118,7 @@ def test_len():
     dataset = _FakePackDataset(6)
     global_order = _i64(0, 1, 2, 3, 4, 5)
 
-    sampler = CustomSampler(dataset, global_order=global_order, global_batch_size=1)
+    sampler = PresetSampler(dataset, global_order=global_order, global_batch_size=1)
     assert len(sampler) == 6
 
 
@@ -128,4 +128,4 @@ def test_round_down_too_short_raises():
     global_order = _i64(0, 1, 2)  # len 3, batch 4 * world 1 → 0
 
     with pytest.raises(ValueError, match="round down"):
-        CustomSampler(dataset, global_order=global_order, global_batch_size=4)
+        PresetSampler(dataset, global_order=global_order, global_batch_size=4)
