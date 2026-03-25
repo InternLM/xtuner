@@ -67,10 +67,10 @@ Cache key: `(file xxhash, tokenizer hash, tokenize_fn source hash)`
 - `global_pack=False`: per-dataset packing (default)
 - `global_pack=True`: concat all datasets then pack
 
-**CustomPackDataset** (new):
-- User-provided pack config (JSONL or NPY format)
-- Validates: dataset_id, sample_idx, token ranges
-- Strategies for length mismatch: error/skip/padding (short), error/skip/truncate (long)
+**PresetPackDataset**:
+- User-provided pack config (NPY directory + `paths.json`)
+- Validates structure and token ranges via vectorized numpy
+- Strategies for length mismatch: error/padding (short), error/truncate (long)
 - No state (deterministic from config file)
 
 ## Samplers
@@ -80,10 +80,11 @@ Cache key: `(file xxhash, tokenizer hash, tokenize_fn source hash)`
 - State: `{epoch, step, world_size, num_samples, total_size}`
 - `step` = `consumed_samples % total_size`
 
-**CustomSampler** (new):
-- User-provided global order (JSONL or NPY)
-- Round-up to `global_batch_size * world_size` multiple
-- Per-rank slice: `global_order[local_rank::world_size]`
+**PresetSampler**:
+- User-provided order via `sampler_config_path` (`.npy` path only, mmap read)
+- Round-down to `global_batch_size * world_size` multiple (truncate tail; error if length too short)
+- Per-rank slice: `effective[local_rank::world_size]` on the truncated mmap-backed view (`self.global_order`)
+- `pack_level="preset"` in `DataloaderConfig`; requires `pack_config_path` and `sampler_config_path`
 - State dict compatible with existing resume logic
 
 ## Resume Contract
@@ -117,8 +118,8 @@ dataloader.load_state_dict(state)
 | `jsonl.py` | `JsonlDataset` with shared memory + offset table |
 | `packing.py` | `HardPackDataset`, `ExpandSoftPackDataset` |
 | `sampler.py` | `LengthGroupedSampler`, `ParallelSampler` |
-| `custom_pack.py` | `CustomPackDataset` (new) |
-| `custom_sampler.py` | `CustomSampler` (new) |
+| `preset_pack.py` | `PresetPackDataset` |
+| `preset_sampler.py` | `PresetSampler` |
 | `resume.py` | `get_dataloader_state / load_dataloader_state` |
 | `dataloader.py` | `Dataloader` wrapper |
 | `data_item.py` | `DataItem` schema |

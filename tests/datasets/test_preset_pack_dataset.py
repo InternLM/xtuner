@@ -430,13 +430,13 @@ class TestDisableFilter:
 
 
 # ---------------------------------------------------------------------------
-# Feature 4: DataloaderConfig forces settings for pack_level='custom'
+# Feature 4: DataloaderConfig forces settings for pack_level='preset'
 # ---------------------------------------------------------------------------
 
 
-class TestDataloaderConfigCustomMode:
+class TestDataloaderConfigPresetMode:
     def test_forces_dataset_settings(self):
-        """_force_custom_pack_settings forces sample_ratio=1.0, enable_sequential_sampler=True,
+        """_force_preset_pack_settings forces sample_ratio=1.0, enable_sequential_sampler=True,
         disable_filter=True regardless of original config values."""
         dc = DatasetConfig(
             anno_path="/fake/ds.jsonl",
@@ -445,7 +445,7 @@ class TestDataloaderConfigCustomMode:
             disable_filter=False,
         )
         config_list = [{"dataset": dc, "tokenize_fn": None}]  # type: ignore[list-item]
-        forced = DataloaderConfig._force_custom_pack_settings(config_list)
+        forced = DataloaderConfig._force_preset_pack_settings(config_list)
 
         assert len(forced) == 1
         result_dc = forced[0]["dataset"]
