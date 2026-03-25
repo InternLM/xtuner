@@ -182,6 +182,25 @@ class PresetPackDataset(tud.Dataset):
     def __len__(self) -> int:
         return int(len(self._boundaries) - 1)
 
+    @property
+    def longest(self) -> np.ndarray:
+        """Per-pack max token length among sub-samples (same meaning as
+        ``HardPackDataset.longest``).
+
+        A new int64 vector of shape ``(num_packs,)`` on each access (not cached) so ``_samples`` /
+        ``_boundaries`` stay mmap-backed.
+        """
+        n = len(self)
+        if n == 0:
+            return np.empty(0, dtype=np.int64)
+        b = self._boundaries.astype(np.int64, copy=False)
+        counts = b[1:] - b[:-1]
+        tok_lens = self._samples[:, 5] - self._samples[:, 4]
+        pack_idx = np.repeat(np.arange(n, dtype=np.int64), counts)
+        out = np.zeros(n, dtype=np.int64)
+        np.maximum.at(out, pack_idx, tok_lens)
+        return out
+
     def __getitem__(self, i: int) -> list[DataItem]:
         start = int(self._boundaries[i])
         end = int(self._boundaries[i + 1])

@@ -3,6 +3,7 @@ import math
 import random
 from typing import Iterator, Optional
 
+import numpy as np
 import torch
 from mmengine.dist import sync_random_seed
 from torch.distributed.device_mesh import DeviceMesh
@@ -13,6 +14,7 @@ from xtuner.v1.utils import get_logger
 
 from .jsonl import JsonlDataset
 from .packing import _LegacySoftPackDataset
+from .preset_pack import PresetPackDataset
 
 
 logger = get_logger()
@@ -173,7 +175,7 @@ class LengthGroupedSampler(Sampler):
 
     def __init__(
         self,
-        dataset: _LegacySoftPackDataset,
+        dataset: _LegacySoftPackDataset | PresetPackDataset,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
         seed: Optional[int] = None,
@@ -221,7 +223,7 @@ class LengthGroupedSampler(Sampler):
         self.group_size = self.world_size
 
         self.max_lengths = self.dataset.longest
-        assert isinstance(self.max_lengths, (list, tuple))
+        assert isinstance(self.max_lengths, (list, tuple, np.ndarray))
 
         self.global_batch_size = global_batch_size
 
