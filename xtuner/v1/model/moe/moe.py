@@ -328,12 +328,17 @@ class MoE(BaseModel):
             # Each MTP depth needs its own loss context
             for mtp_config in self.config.mtp_config:
                 for mtp_idx in range(mtp_config.num_layers):
+                    mtp_loss_cfg = MTPLossConfig(
+                        **self.config.lm_loss_cfg.model_dump(),
+                        mtp_depth=mtp_idx + 1,
+                    )
                     # MTP needs to shift labels multiple times. Since rebuild the `shifted_labels` in data_batch
-                    mtp_loss_ctx_list = self._build_loss_ctx(self.config.lm_loss_cfg, _data_batch, sp_mesh)
+                    mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, _data_batch, sp_mesh)
                     if mtp_loss_ctx_list is not None:
-                        loss_ctx_cls = mtp_loss_ctx_list[0].__class__
-                        mtp_loss_ctx_list = loss_ctx_cls.build_batches(
-                            mtp_loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=sp_mesh
+                        mtp_loss_ctx_list = MTPLossContext.build_batches(  # type: ignore[assignment]
+                            cast(list[MTPLossContext], mtp_loss_ctx_list),  # type: ignore[arg-type]
+                            cu_seq_lens_list=cu_seq_lens_list,
+                            sp_mesh=sp_mesh,
                         )
                         for i, mtp_loss_ctx in enumerate(mtp_loss_ctx_list):
                             if "mtp" not in res[i]:
@@ -609,6 +614,8 @@ class MoE(BaseModel):
     def _mtp_forward(self, mtp_config: MTPConfig, output, layer_hidden_states, position_embeddings, seq_ctx, mtp_seq_ctx, mtp_loss_ctx_dict):
         # Forward through MTP block
         name = mtp_config.name
+
+        # Forward through MTP block
         mtp_outputs = self.mtp_block[name](
             hidden_states=layer_hidden_states,
             embed_tokens_fn=self.embed_tokens,
@@ -620,13 +627,8 @@ class MoE(BaseModel):
         mtp_losses = torch.tensor(0.0, device=DEVICE)
         mtp_loss_ctx_list = mtp_loss_ctx_dict[name]
         for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
-            shifted_tensor = mtp_ctx.loss_kwargs.shifted_labels
-            mtp_ctx.loss_kwargs.shifted_labels = roll_packed_tensor(
-                shifted_tensor, seq_ctx.cu_seq_lens_k, -idx - 1, dim=-1
-            )
-
             mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
-            mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(LMHeadLossContext, mtp_ctx), mtp_config=mtp_config, layer_idx=idx)
+            mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx), mtp_config=mtp_config, layer_idx=idx)
             mtp_losses += mtp_loss
 
             output["router_logits"][f"{name}_mtp_layer{idx}"] = mtp_router_results
@@ -636,6 +638,7 @@ class MoE(BaseModel):
         mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
         scaled_mtp_loss = mtp_losses * mtp_config.loss_scaling_factor  # type: ignore
 
+        # Add to total loss
         output[f"mtp_loss"][name] = scaled_mtp_loss
 
         return scaled_mtp_loss
