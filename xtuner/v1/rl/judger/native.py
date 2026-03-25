@@ -50,8 +50,7 @@ class NativeJudger(Judger):
         assert rollout_state.response is not None, (
             "RolloutState must have a response for judging. You should detokenize the response_ids in AgentLoop"
         )
-        # 传入rollout_state方便用户从rollout_state挑选自己想要的字段
-        info = {**self.extra_info, "rollout_state": rollout_state.model_dump(mode="json")}
+        info = {**self.extra_info}
         assert rollout_state.reward_model is not None and "ground_truth" in rollout_state.reward_model, (
             "RolloutState must have reward_model with 'ground_truth' for judging. You should set reward_model in AgentLoop"
         )
