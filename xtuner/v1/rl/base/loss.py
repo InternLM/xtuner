@@ -4,8 +4,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
-from xtuner.v1.loss import BaseLossConfig, BaseLossKwargs
-from xtuner.v1.loss.base_loss_ctx import BaseLossContext
+from xtuner.v1.loss.ce_loss import CELossConfig, CELossContext, CELossKwargs
 from xtuner.v1.loss.utils import sp_gather, sp_split
 from xtuner.v1.utils.device import get_device
 
@@ -24,7 +23,7 @@ def compute_kl_loss_weight(
     return kl_loss_weight
 
 
-class BaseRLLossConfig(BaseLossConfig):
+class BaseRLLossConfig(CELossConfig):
     """Base configuration for reinforcement learning loss functions in XTuner
     RL.
 
@@ -142,7 +141,7 @@ class BaseRLLossConfig(BaseLossConfig):
         return LossContext(self, loss_kwargs)
 
 
-class BaseRLLossKwargs(BaseLossKwargs):
+class BaseRLLossKwargs(CELossKwargs):
     """Keyword arguments for reinforcement learning loss computation.
 
     Args:
@@ -166,7 +165,9 @@ class BaseRLLossKwargs(BaseLossKwargs):
     is_weights: torch.Tensor | None = None
 
     def sp_split(self, sp_mesh: DeviceMesh) -> Self:
-        self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
+        # Call parent class to handle shifted_labels
+        super().sp_split(sp_mesh)
+        # Handle RL-specific fields
         self.advantages = sp_split(self.advantages, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = sp_split(self.rollout_logprobs, sp_mesh=sp_mesh, split_dim=1, padding_value=0.0)
@@ -180,7 +181,9 @@ class BaseRLLossKwargs(BaseLossKwargs):
         return self
 
     def to(self, device: torch.device | str) -> Self:
-        self.shifted_labels = self.shifted_labels.to(device)
+        # Call parent class to handle shifted_labels
+        super().to(device)
+        # Handle RL-specific fields
         self.advantages = self.advantages.to(device)
         if self.old_logprobs is not None:
             self.old_logprobs = self.old_logprobs.to(device)
@@ -199,9 +202,9 @@ class BaseRLLossKwargs(BaseLossKwargs):
         return self
 
 
-class BaseRLLossContext(BaseLossContext):
-    loss_cfg: BaseRLLossConfig
-    loss_kwargs: BaseRLLossKwargs
+class BaseRLLossContext(CELossContext):
+    loss_cfg: BaseRLLossConfig  # type: ignore[assignment]
+    loss_kwargs: BaseRLLossKwargs  # type: ignore[assignment]
 
     def compute_rollout_is(
         self, sp_mesh: DeviceMesh, num_tokens: torch.Tensor
