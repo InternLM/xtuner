@@ -181,6 +181,7 @@ def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
             }
         ],
         pack_level="preset",
+        sampler_type="preset",
         pack_config_path=str(pack_dir),
         sampler_config_path=str(order_path),
         pack_max_length=pack_max_length,
