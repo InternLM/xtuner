@@ -153,7 +153,7 @@ class Dense(BaseModel):
         return layers
 
     def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
-        with torch.device(DEVICE):
+        with torch.device("cpu"):
             return get_rope_embedding(config=config)
 
     @property
