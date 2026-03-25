@@ -476,7 +476,6 @@ class DataloaderConfig(BaseDataloaderConfig):
                 sampler_config_path=self.sampler_config_path,
                 global_batch_size=global_batch_size,
                 dp_mesh=dp_mesh,
-                seed=seed,
             )
         elif self.group_by_length:
             assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."

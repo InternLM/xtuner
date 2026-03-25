@@ -84,8 +84,6 @@ class PresetSampler(Sampler):
     dp_mesh:
         Optional DeviceMesh for distributed training.  If ``None``, assumes
         single-rank training.
-    seed:
-        Unused in this sampler (order is deterministic), kept for API parity.
     """
 
     global_order: np.ndarray
@@ -96,7 +94,6 @@ class PresetSampler(Sampler):
         sampler_config_path: str,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
-        seed: int | None = None,
     ) -> None:
         super().__init__()
 
@@ -115,7 +112,6 @@ class PresetSampler(Sampler):
 
         self.dataset = dataset
         self.global_batch_size = global_batch_size
-        self.seed = seed  # kept for API compat, not used
 
         logger.info(f"PresetSampler: loading sampler order (mmap) from {sampler_config_path}.")
         order = _load_sampler_config(sampler_config_path)
