@@ -45,8 +45,6 @@ from xtuner.v1.module import (
     NoAuxRouter,
     NoAuxRouterConfig,
     RMSNorm,
-    RotaryEmbeddingProtocol,
-    get_rope_embedding,
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig, MoEBlock, MoEDecoderLayer
@@ -714,10 +712,6 @@ class MoE(BaseModel):
 
         layers.__class__.__repr__ = module_dict_repr  # type: ignore[method-assign]
         return layers
-
-    def build_rotary_embedding(self, config: MoEConfig) -> RotaryEmbeddingProtocol:
-        with torch.device("cpu"):
-            return get_rope_embedding(config=config)
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:

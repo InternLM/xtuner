@@ -34,8 +34,6 @@ from xtuner.v1.module import (
     MHAConfig,
     MLAConfig,
     RMSNorm,
-    RotaryEmbeddingProtocol,
-    get_rope_embedding,
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
@@ -151,10 +149,6 @@ class Dense(BaseModel):
                 layer_idx=layer_idx,
             )
         return layers
-
-    def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
-        with torch.device("cpu"):
-            return get_rope_embedding(config=config)
 
     @property
     @override
