@@ -346,6 +346,29 @@ def get_dataset_id_and_sample_idx_from_idx(idx: int, cumulative_sizes: np.ndarra
     return sub_id, sample_idx
 
 
+def get_longest(boundaries: np.ndarray, samples: np.ndarray) -> np.ndarray:
+    """Per-pack max sub-sample token length from CSR ``boundaries`` and
+    ``samples`` rows.
+
+    Args:
+        boundaries: int64, shape ``(num_packs + 1,)`` — CSR pack boundaries.
+        samples: int64, shape ``(total_slices, 6)`` — token span is columns 4 and 5.
+
+    Returns:
+        New int64 vector of shape ``(num_packs,)`` (empty if ``num_packs == 0``).
+    """
+    n = int(len(boundaries) - 1)
+    if n == 0:
+        return np.empty(0, dtype=np.int64)
+    b = boundaries.astype(np.int64, copy=False)
+    counts = b[1:] - b[:-1]
+    tok_lens = samples[:, 5] - samples[:, 4]
+    pack_idx = np.repeat(np.arange(n, dtype=np.int64), counts)
+    out = np.zeros(n, dtype=np.int64)
+    np.maximum.at(out, pack_idx, tok_lens)
+    return out
+
+
 def get_pack_config_from_pack_infos_by_hard_split(
     pack_infos: dict[str, np.ndarray],
     path_id: int,
@@ -381,8 +404,9 @@ def get_pack_config_from_pack_infos_by_hard_split(
                 row_path_id, sample_idx = path_id, idx_i
             rows.append([row_path_id, sample_idx, -1, -1, st, ed])
         boundaries.append(len(rows))
+    boundaries_arr = np.asarray(boundaries, dtype=np.int64)
     samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
-    return {"boundaries": np.asarray(boundaries, dtype=np.int64), "samples": samples}
+    return {"boundaries": boundaries_arr, "samples": samples, "longest": pack_infos["longest"]}
 
 
 def get_sampler_config(

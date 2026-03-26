@@ -28,6 +28,7 @@ from xtuner.v1.datasets.sampler import LengthGroupedSampler
 from xtuner.v1.datasets.utils import (
     concat_cumulative_sizes_from_lengths,
     get_dataset_id_and_sample_idx_from_idx,
+    get_longest,
     get_pack_config_from_pack_infos_by_hard_split,
     get_sampler_config,
 )
@@ -98,8 +99,9 @@ def get_pack_config_by_simple_hard_split(
             cur_sum += take
             pos += take
             close()
+    boundaries_arr = np.asarray(boundaries, dtype=np.int64)
     samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
-    return {"boundaries": np.asarray(boundaries, dtype=np.int64), "samples": samples}
+    return {"boundaries": boundaries_arr, "samples": samples, "longest": get_longest(boundaries_arr, samples)}
 
 
 def test_simple_hard_preset_pack_config_matches_buildin_hard_pack():
@@ -115,6 +117,7 @@ def test_simple_hard_preset_pack_config_matches_buildin_hard_pack():
 
     np.testing.assert_array_equal(simple["boundaries"], ref["boundaries"])
     np.testing.assert_array_equal(simple["samples"], ref["samples"])
+    np.testing.assert_array_equal(simple["longest"], ref["longest"])
 
 
 def test_get_dataset_id_and_sample_idx_matches_torch_concat_dataset():
@@ -171,6 +174,7 @@ def test_preset_pack_config_with_multiple_datasets_matches_concat_dataset_refere
 
     np.testing.assert_array_equal(simple["boundaries"], ref["boundaries"])
     np.testing.assert_array_equal(simple["samples"], ref["samples"])
+    np.testing.assert_array_equal(simple["longest"], ref["longest"])
 
 
 class _StubJsonl:
@@ -247,6 +251,7 @@ def create_dataloader_config(
     pack_dir: Path | None = None
     num_packs_ref: int | None = None
     pack_level: Literal["preset", "hard"]
+    longest: np.ndarray | None = None
 
     if pack_case == "hard_pack":
         assert int(num_tokens.sum()) >= 2 * pack_max_length, "need enough tokens for multiple packs"
@@ -262,6 +267,7 @@ def create_dataloader_config(
             infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=8)
             cfg = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
         assert len(cfg["boundaries"]) >= 3, "need >=2 full packs"
+        longest = cfg["longest"]
 
         print(f"\n\n--------------- original samples: {len(records)}, after pack: {len(cfg['boundaries']) - 1}\n\n")
 
@@ -287,17 +293,11 @@ def create_dataloader_config(
         group_by_length = False
     elif sampler_case == "preset_group_sampler":
         assert pack_dir is not None and num_packs_ref is not None
-        # ``longest`` 只依赖 NPY；用 stub 避免 ``build_datasets`` 里的分布式 collective
-        pack_ds_for_longest = PresetPackDataset(
-            [_StubJsonl(anno, len(records))],
-            pack_config_path=str(pack_dir),
-            pack_max_length=pack_max_length,
-        )
         get_sampler_config(
             order_path,
             mode="length_grouped",
             num_packs=num_packs_ref,
-            longest=pack_ds_for_longest.longest,
+            longest=longest,
             global_batch_size=global_batch_size,
             world_size=dp_size,
             seed=seed_ref,
