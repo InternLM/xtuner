@@ -357,6 +357,41 @@ class ExpandSoftPackDataset(_LegacySoftPackDataset):
         return pack_infos
 
 
+def concat_cumulative_sizes_from_lengths(lengths: Sequence[int]) -> np.ndarray:
+    """Return cumulative lengths for :class:`torch.utils.data.ConcatDataset`
+    (same as ``ConcatDataset.cumsum``)."""
+
+    r: list[int] = []
+    s = 0
+    for e in lengths:
+        s += int(e)
+        r.append(s)
+    return np.asarray(r, dtype=np.int64)
+
+
+def get_dataset_id_and_sample_idx_from_idx(idx: int, cumulative_sizes: np.ndarray) -> tuple[int, int]:
+    """Map a flat index into concatenated datasets to ``(sub_dataset_id,
+    local_sample_idx)``.
+
+    ``cumulative_sizes`` must be the same 1-D int64 array produced by
+    :func:`concat_cumulative_sizes_from_lengths` / :meth:`torch.utils.data.ConcatDataset.cumsum`
+    for the same sub-dataset lengths (in order).
+    """
+
+    idx_i = int(idx)
+    total = int(cumulative_sizes[-1])
+    if idx_i < 0:
+        if -idx_i > total:
+            raise ValueError("absolute value of index should not exceed dataset length")
+        idx_i = total + idx_i
+    sub_id = int(np.searchsorted(cumulative_sizes, idx_i, side="right"))
+    if sub_id == 0:
+        sample_idx = idx_i
+    else:
+        sample_idx = idx_i - int(cumulative_sizes[sub_id - 1])
+    return sub_id, sample_idx
+
+
 def _hard_pack_chunk_core(
     i_chunk: list[int],
     *,

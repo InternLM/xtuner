@@ -14,15 +14,30 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.datasets import PretrainTokenizeFunctionConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig, build_datasets
-from xtuner.v1.datasets.packing import get_pack_infos_by_hard_split
+from xtuner.v1.datasets.packing import (
+    concat_cumulative_sizes_from_lengths,
+    get_dataset_id_and_sample_idx_from_idx,
+    get_pack_infos_by_hard_split,
+)
 from xtuner.v1.datasets.preset_pack import PresetPackDataset
 from xtuner.v1.datasets.sampler import LengthGroupedSampler, get_length_grouped_indices
 
 
 def get_pack_config_by_simple_hard_split(
-    inds: np.ndarray, dataset_id: int, num_tokens: np.ndarray, pack_max_length: int, pack_workers: int = 1
+    inds: np.ndarray,
+    dataset_id: int,
+    num_tokens: np.ndarray,
+    pack_max_length: int,
+    pack_workers: int = 1,
+    *,
+    concat_cumulative_sizes: np.ndarray | None = None,
 ):
-    """Like packing.get_pack_infos_by_hard_split: walk inds order, hard-split at pack_max_length -> preset NPY."""
+    """Like packing.get_pack_infos_by_hard_split: walk inds order, hard-split at pack_max_length -> preset NPY.
+
+    If ``concat_cumulative_sizes`` is set (``ConcatDataset.cumulative_sizes``), ``inds`` / ``num_tokens`` use
+    the flat concatenated index space; each row's ``[path_id, sample_idx, ...]`` uses the mapped sub-dataset id
+    and local index (same convention as :func:`get_dataset_id_and_sample_idx_from_idx`).
+    """
     _ = pack_workers
     rows: list[list[int]] = []
     boundaries: list[int] = [0]
@@ -38,14 +53,19 @@ def get_pack_config_by_simple_hard_split(
         cur, cur_sum = [], 0
 
     for s_idx in inds.astype(np.int64, copy=False).tolist():
-        pos, L = 0, int(num_tokens[s_idx])
+        s_idx_i = int(s_idx)
+        if concat_cumulative_sizes is not None:
+            path_id, local_idx = get_dataset_id_and_sample_idx_from_idx(s_idx_i, concat_cumulative_sizes)
+        else:
+            path_id, local_idx = dataset_id, s_idx_i
+        pos, L = 0, int(num_tokens[s_idx_i])
         while pos < L:
             room = pack_max_length - cur_sum
             if room == 0:
                 close()
                 room = pack_max_length
             take = min(L - pos, room)
-            cur.append([dataset_id, s_idx, -1, -1, pos, pos + take])
+            cur.append([path_id, local_idx, -1, -1, pos, pos + take])
             cur_sum += take
             pos += take
             close()
@@ -54,9 +74,18 @@ def get_pack_config_by_simple_hard_split(
 
 
 def get_pack_config_from_pack_infos_by_hard_split(
-    pack_infos: dict[str, np.ndarray], path_id: int, num_tokens: np.ndarray
+    pack_infos: dict[str, np.ndarray],
+    path_id: int,
+    num_tokens: np.ndarray,
+    *,
+    concat_cumulative_sizes: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
-    """Same keys as ``get_pack_config_by_simple_hard_split``; built from ``get_pack_infos_by_hard_split`` output."""
+    """Same keys as ``get_pack_config_by_simple_hard_split``; built from ``get_pack_infos_by_hard_split`` output.
+
+    When ``concat_cumulative_sizes`` is provided, each ``indices`` entry is a flat ``ConcatDataset`` index and is
+    converted via :func:`get_dataset_id_and_sample_idx_from_idx` to ``(path_id, sample_idx)`` for the preset NPY.
+    Otherwise ``path_id`` is fixed and ``idx`` is written as ``sample_idx`` (single-JsonlDataset case).
+    """
     npack = int(pack_infos["dataset_id"].shape[0])
     rows: list[list[int]] = []
     boundaries: list[int] = [0]
@@ -68,12 +97,15 @@ def get_pack_config_from_pack_infos_by_hard_split(
         indices = ix[i0:i1]
         s_off, e_off = int(starts[item]), int(ends[item])
         for i, idx in enumerate(indices):
-            idx_i = int(idx)  # TODO: ConcatDataset.get_sample_idx_from_idx
+            idx_i = int(idx)
             L = int(num_tokens[idx_i])
             st = 0 if i else s_off
             ed = L if i < len(indices) - 1 else e_off
-            # TODO: ConcatDataset.get_dataset_id_from_idx (path_id)
-            rows.append([path_id, idx_i, -1, -1, st, ed])
+            if concat_cumulative_sizes is not None:
+                row_path_id, sample_idx = get_dataset_id_and_sample_idx_from_idx(idx_i, concat_cumulative_sizes)
+            else:
+                row_path_id, sample_idx = path_id, idx_i
+            rows.append([row_path_id, sample_idx, -1, -1, st, ed])
         boundaries.append(len(rows))
     samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
     return {"boundaries": np.asarray(boundaries, dtype=np.int64), "samples": samples}
@@ -89,6 +121,62 @@ def test_simple_hard_preset_pack_config_matches_buildin_hard_pack():
     simple = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1)
     infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=1)
     ref = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
+
+    np.testing.assert_array_equal(simple["boundaries"], ref["boundaries"])
+    np.testing.assert_array_equal(simple["samples"], ref["samples"])
+
+
+def test_get_dataset_id_and_sample_idx_matches_torch_concat_dataset():
+    from torch.utils.data import ConcatDataset
+
+    class _LenDS(torch.utils.data.Dataset):
+        def __init__(self, n: int) -> None:
+            self._n = n
+
+        def __len__(self) -> int:
+            return self._n
+
+        def __getitem__(self, idx: int):
+            return idx
+
+    lens = [3, 7, 4]
+    cu = concat_cumulative_sizes_from_lengths(lens)
+    ds = ConcatDataset([_LenDS(n) for n in lens])
+    assert len(ds) == int(cu[-1])
+    for flat in range(len(ds)):
+        sub_id, sample_idx = get_dataset_id_and_sample_idx_from_idx(flat, cu)
+        assert ds[flat] == sample_idx
+        # sub-dataset identity: cumulative prefix
+        assert flat < int(cu[sub_id])
+        prev = 0 if sub_id == 0 else int(cu[sub_id - 1])
+        assert flat >= prev
+
+
+@pytest.mark.parametrize("pack_workers", [1, 8])
+def test_preset_pack_config_with_multiple_datasets_matches_concat_dataset_reference(pack_workers: int) -> None:
+    """``ConcatDataset``-style flat indices: preset samples rows use per-jsonl path_id + local sample_idx."""
+    rng = np.random.RandomState(202)
+
+    n0, n1 = 11, 15
+    tok0 = rng.randint(6, 18, size=n0).astype(np.int64)
+    tok1 = rng.randint(6, 18, size=n1).astype(np.int64)
+    num_tokens = np.concatenate([tok0, tok1])
+    cu = concat_cumulative_sizes_from_lengths([n0, n1])
+
+    pack_max_length = 28
+    assert int(num_tokens.sum()) >= 2 * pack_max_length
+
+    # you can filter or do sample_ratio here to get new inds
+    inds = rng.permutation(n0 + n1).astype(np.int64)
+
+    simple = get_pack_config_by_simple_hard_split(
+        inds, 0, num_tokens, pack_max_length, 1, concat_cumulative_sizes=cu
+    )
+
+    infos = get_pack_infos_by_hard_split(
+        inds, 0, num_tokens, pack_max_length, pack_workers=pack_workers
+    )
+    ref = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens, concat_cumulative_sizes=cu)
 
     np.testing.assert_array_equal(simple["boundaries"], ref["boundaries"])
     np.testing.assert_array_equal(simple["samples"], ref["samples"])
@@ -190,6 +278,7 @@ def create_dataloader_config(
     if pack_case == "hard_pack" and sampler_case in ("preset_seq_sampler", "preset_group_sampler"):
         pytest.skip("PresetSampler 需要 pack_level='preset' 与 PresetPackDataset，与 HardPackDataset 不兼容")
 
+    # Step 1: jsonl
     # TODO: multiple jsonl files with ConcatDataset
     # TODO: jsonl file with sample_ratio
     jsonl_path = tmp_path / "data.jsonl"
@@ -211,6 +300,7 @@ def create_dataloader_config(
     tok_fn = PretrainTokenizeFunctionConfig().build(tokenizer)
     num_tokens = np.array([tok_fn(r)["num_tokens"] for r in records], dtype=np.int64)
 
+    # Step 2: pack config
     pack_dir: Path | None = None
     num_packs_ref: int | None = None
     pack_level: Literal["preset", "hard"]
@@ -243,6 +333,7 @@ def create_dataloader_config(
     else:
         raise ValueError(f"unknown pack_case: {pack_case!r}")
 
+    # Step 3: sampler config
     micro_batch_size = global_batch_size // dp_size
     # TODO: a dist version of this test
     order_path = tmp_path / "order.npy"
