@@ -2,6 +2,7 @@
 
 import json
 import os
+import pickle
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,7 +18,9 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.utils.device import get_device
 
-from xtuner.v1.datasets import PretrainTokenizeFunctionConfig
+from itertools import chain
+
+from xtuner.v1.datasets import PretrainTokenizeFunctionConfig, get_dataloader_state, load_dataloader_state
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.datasets.packing import get_pack_infos_by_hard_split
 from xtuner.v1.datasets.preset_pack import PresetPackDataset
@@ -231,7 +234,7 @@ def create_dataloader_config(
 
     dataset_config_list = [
         {
-            "dataset": DatasetConfig(anno_path=anno, disable_filter=True, sample_ratio=1.0),
+            "dataset": DatasetConfig(anno_path=anno, disable_filter=True, sample_ratio=1.0, enable_mmap_shared=True),
             "tokenize_fn": PretrainTokenizeFunctionConfig(),
         }
     ]
@@ -284,7 +287,7 @@ def create_dataloader_config(
         group_by_length = False
     elif sampler_case == "preset_group_sampler":
         assert pack_dir is not None and num_packs_ref is not None
-        # ``longest`` 只依赖 NPY；用 stub 避免 ``build_datasets`` 里的分布式 collective（否则仅 rank0 调会死锁）。
+        # ``longest`` 只依赖 NPY；用 stub 避免 ``build_datasets`` 里的分布式 collective
         pack_ds_for_longest = PresetPackDataset(
             [_StubJsonl(anno, len(records))],
             pack_config_path=str(pack_dir),
@@ -549,5 +552,151 @@ class TestPresetPackSamplerMatchesHardPackGroupSamplerDist(DistributedTestBase):
 
         _pack_info = num_packs_ref if num_packs_ref is not None else "hard (runtime)"
         print(f"[RANK {rank}]--------------- packed samples: {_cnt}, original packed samples: {_pack_info}")
+
+        dist.barrier()
+
+
+class TestPresetPackGroupSamplerResumeDist(DistributedTestBase):
+    """分布式 ``preset_pack`` + ``preset_group_sampler``：中段 checkpoint 后 resume，batch 与连续跑一致。"""
+
+    def create_pg(self, device):
+        ret = super().create_pg(device)
+        os.environ["LOCAL_RANK"] = str(dist.get_rank())
+        os.environ["LOCAL_WORLD_SIZE"] = str(self.world_size)
+        if device == "cuda" or (isinstance(device, torch.device) and device.type == "cuda"):
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
+        return ret
+
+    @property
+    def world_size(self) -> int:
+        return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
+
+    def test_preset_pack_group_sampler_resume_matches_continuous_dist(self):
+        self.create_pg(DEVICE)
+        rank = dist.get_rank()
+        ws = dist.get_world_size()
+
+        tokenizer_path = os.environ["QWEN3_MOE_PATH"]
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+        if rank == 0:
+            tmp_root = tempfile.mkdtemp(prefix="xtuner_preset_resume_dist_")
+        else:
+            tmp_root = None
+        tmp_list: list[str | None] = [tmp_root]
+        dist.broadcast_object_list(tmp_list, src=0)
+        tmp_path = Path(tmp_list[0])  # type: ignore[arg-type]
+
+        # 1. Build dataloader
+        seed = 1
+        global_batch_size = ws
+        half_step = 5
+        common = dict(
+            sample_num=200,
+            pack_max_length=32,
+            global_batch_size=global_batch_size,
+            dp_size=ws,
+            seed_ref=seed,
+            num_workers=2,
+        )
+
+        if rank == 0:
+            pre = create_dataloader_config(
+                tmp_path / "preset_run", tokenizer, "preset_pack", "preset_group_sampler", **common
+            )
+            bundle_list: list = [pre]
+        else:
+            bundle_list = [None]
+        dist.broadcast_object_list(bundle_list, src=0)
+        pre = bundle_list[0]
+        assert isinstance(pre, CreateDataloaderConfigResult)
+
+        dist.barrier()
+        dp_mesh = init_device_mesh(DEVICE, (ws,))
+
+        def _build():
+            return pre.dataloader_cfg.build(
+                tokenizer,
+                dp_mesh=dp_mesh,
+                global_batch_size=pre.global_batch_size,
+                micro_batch_size=pre.micro_batch_size,
+                seed=seed,
+                shuffle=True,
+            )
+
+        dl = _build()
+
+        # 2. Consume data at [0, half_step)
+        data_iter = iter(dl)
+        consumed_samples = 0
+        data_list = []
+        for _ in range(half_step):
+            batch = next(data_iter)
+            data_list.append(batch)
+            consumed_samples += len(batch)
+
+        consumed_samples_list = [None for _ in range(ws)]
+        dist.all_gather_object(consumed_samples_list, consumed_samples)
+        global_consumed_samples = sum(int(x) for x in consumed_samples_list if x is not None)
+
+        # 3. Get ckpt state
+        # dataloader_state = get_dataloader_state(dl, global_consumed_samples)
+        dataloader_state = dl.get_state_dict(global_consumed_samples)
+
+        # 4. Continue to consume data at [half_step, 2*half_step)
+        expected_batches = []
+        for _ in range(half_step):
+            expected_batches.append(next(data_iter))
+
+        first_flat = list(chain(*data_list))
+        expected_flat = list(chain(*expected_batches))
+
+        all_data_list = [None for _ in range(ws)]
+        dist.all_gather_object(all_data_list, first_flat)
+        all_expected = [None for _ in range(ws)]
+        dist.all_gather_object(all_expected, expected_flat)
+        all_data_gathered = list(chain(*zip(*all_data_list)))
+        all_expected_gathered = list(chain(*zip(*all_expected)))
+
+        # 5. save ckpt
+        ckpt_path = tmp_path / "preset_resume.ckpt"
+        if rank == 0:
+            with ckpt_path.open("wb") as f:
+                pickle.dump(
+                    {
+                        "dataloader_state": dataloader_state,
+                        "data_list": all_data_gathered,
+                        "expected_data": all_expected_gathered,
+                        "consumed_samples": consumed_samples,
+                    },
+                    f,
+                )
+
+        dist.barrier()
+
+        # 6. Resume from ckpt
+        dl2 = _build()
+        with ckpt_path.open("rb") as f:
+            ckpt = pickle.load(f)
+        # load_dataloader_state(dl2, ckpt["dataloader_state"])
+        dl2.load_state_dict(ckpt["dataloader_state"])
+
+        resume_iter = iter(dl2)
+        # 7. Continue to consume data at [half_step, 2*half_step)
+        resume_batches = [next(resume_iter) for _ in range(half_step)]
+
+        # 8. Verify the resume result is consistent in each rank
+        assert_dataloader_batches_seq_and_labels_equal(expected_batches, resume_batches)
+
+        # 9. Gather the resume result in all ranks and verify the result is consistent
+        resume_flat = list(chain(*resume_batches))
+        all_resume = [None for _ in range(ws)]
+        dist.all_gather_object(all_resume, resume_flat)
+        all_resume_gathered = list(chain(*zip(*all_resume)))
+        if rank == 0:
+            assert len(ckpt["expected_data"]) == len(all_resume_gathered)
+            for s_exp, s_res in zip(ckpt["expected_data"], all_resume_gathered):
+                assert_dataloader_batches_seq_and_labels_equal([[s_exp]], [[s_res]])
 
         dist.barrier()
