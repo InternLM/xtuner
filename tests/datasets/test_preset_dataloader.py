@@ -134,26 +134,37 @@ def test_preset_pack_longest_matches_hard_pack_and_length_grouped_sampler(tmp_pa
     LengthGroupedSampler(ds, global_batch_size=2, dp_mesh=None, seed=123)
 
 
-def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "variant",
+    [
+        pytest.param("preset_sampler", id="preset_sampler_deterministic"),
+        pytest.param("length_grouped", id="pack_and_group_sampler_consistent"),
+    ],
+)
+def test_preset_dataloader(tmp_path: Path, variant: str) -> None:
     tokenizer_path = os.environ["QWEN3_MOE_PATH"]
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+    # step 1: prepare jsonl and its num_tokens
+    sample_num = 12
     # TODO: multiple jsonl files with ConcatDataset
     # TODO: jsonl file with sample_ratio
     jsonl_path = tmp_path / "data.jsonl"
     records = [
         {"messages": [{"role": "pretrain", "content": f"This is an example of pretrain text sample {i}. " + "xtuner " * (3 + (i % 5))}]}
-        for i in range(12)
+        for i in range(sample_num)
     ]
     jsonl_path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records), encoding="utf-8")
     anno = str(jsonl_path.resolve())
 
     # TODO: use JsonlDataset to cache first and get num_tokens from cache
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
     tok_fn = PretrainTokenizeFunctionConfig().build(tokenizer)
     num_tokens = np.array([tok_fn(r)["num_tokens"] for r in records], dtype=np.int64)
 
-    pack_max_length = 32
-    inds = np.random.RandomState(0).permutation(len(records))
+    inds = np.random.RandomState(0).permutation(sample_num)
 
+    # step 2: prepare pack config
+    pack_max_length = 32
     # TODO: use hard pack logic, compare with current hard pack logic
     cfg = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1)
     assert len(cfg["boundaries"]) >= 3, "need >=2 full packs"
@@ -166,13 +177,23 @@ def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
     np.save(pack_dir / "samples.npy", cfg["samples"])
     (pack_dir / "paths.json").write_text(json.dumps([anno]), encoding="utf-8")
 
+    num_packs = int(cfg["boundaries"].shape[0] - 1)
+    pack_level = "preset"
+
+    # step 3: prepare sampler config
     # TODO: a dist version of this test
     # TODO: use group by length logic
-    num_packs = int(cfg["boundaries"].shape[0] - 1)
     order_path = tmp_path / "order.npy"
     order = np.arange(num_packs, dtype=np.int64)
     np.save(order_path, order)
+    if variant == "preset_sampler":
+        sampler_type = "preset"
+        group_by_length = False
+    else:  # length_grouped
+        sampler_type = "none"
+        group_by_length = True
 
+    # step 4: compose dataloader config
     dataloader_cfg = DataloaderConfig(
         dataset_config_list=[
             {
@@ -180,8 +201,9 @@ def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
                 "tokenize_fn": PretrainTokenizeFunctionConfig(),
             }
         ],
-        pack_level="preset",
-        sampler_type="preset",
+        pack_level=pack_level,
+        sampler_type=sampler_type,
+        group_by_length=group_by_length,
         pack_config_path=str(pack_dir),
         sampler_config_path=str(order_path),
         pack_max_length=pack_max_length,
@@ -189,6 +211,7 @@ def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
         num_workers=0,
     )
 
+    # step 5: build dataloader
     def _build(seed: int, shuffle: bool = False):
         return dataloader_cfg.build(
             tokenizer,
@@ -199,10 +222,16 @@ def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
             shuffle=shuffle,
         )
 
-    # seed and shuffle should not affect the output in preset mode
-    dl_a = _build(1, shuffle=False)
-    dl_b = _build(2, shuffle=True)
+    if variant == "preset_sampler":
+        # preset pack and sampler should be deterministic, and ignore seed and shuffle
+        dl_a = _build(1, shuffle=False)
+        dl_b = _build(2, shuffle=True)
+    else:
+        # With preset pack + length grouping, repeated builds with the same seed should match even when shuffle is on.
+        dl_a = _build(1, shuffle=True)
+        dl_b = _build(1, shuffle=True)
 
+    # step 6: verify dataloader output is consistent
     _cnt = 0
     for batch_a, batch_b in zip(dl_a, dl_b):
         assert len(batch_a) == len(batch_b)
@@ -210,5 +239,5 @@ def test_preset_dataloader_build_is_deterministic(tmp_path: Path) -> None:
             _cnt += 1
             assert torch.equal(x["seq_ctx"].input_ids, y["seq_ctx"].input_ids)
             assert torch.equal(x["shifted_labels"], y["shifted_labels"])
-    
-    print(f"--------------- packed samples: {_cnt}, sampler len: {len(order)}")
+
+    print(f"--------------- packed samples: {_cnt}, original packed samples: {num_packs}")
