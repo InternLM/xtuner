@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -9,10 +10,15 @@ from typing import Literal
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.common_distributed import DistributedTestBase
 from transformers import AutoTokenizer
 
+from xtuner.v1.utils.device import get_device
+
 from xtuner.v1.datasets import PretrainTokenizeFunctionConfig
-from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig, build_datasets
+from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.datasets.packing import get_pack_infos_by_hard_split
 from xtuner.v1.datasets.preset_pack import PresetPackDataset
 from xtuner.v1.datasets.sampler import LengthGroupedSampler
@@ -22,6 +28,25 @@ from xtuner.v1.datasets.utils import (
     get_pack_config_from_pack_infos_by_hard_split,
     get_sampler_config,
 )
+
+DEVICE = get_device()
+
+
+def assert_dataloader_batches_seq_and_labels_equal(batches_a, batches_b) -> int:
+    """对比两份 dataloader 产出：逐 batch、逐样本检查 ``seq_ctx.input_ids`` 与 ``shifted_labels`` 一致。
+
+    Returns:
+        参与比较的样本对数量（所有 batch 内 ``zip`` 后的元素对总数）。
+    """
+    assert len(batches_a) == len(batches_b)
+    n = 0
+    for batch_a, batch_b in zip(batches_a, batches_b):
+        assert len(batch_a) == len(batch_b)
+        for x, y in zip(batch_a, batch_b):
+            n += 1
+            assert torch.equal(x["seq_ctx"].input_ids, y["seq_ctx"].input_ids)
+            assert torch.equal(x["shifted_labels"], y["shifted_labels"])
+    return n
 
 
 def get_pack_config_by_simple_hard_split(
@@ -145,6 +170,20 @@ def test_preset_pack_config_with_multiple_datasets_matches_concat_dataset_refere
     np.testing.assert_array_equal(simple["samples"], ref["samples"])
 
 
+class _StubJsonl:
+    """Minimal stand-in for ``JsonlDataset``: only ``path`` / ``__len__`` are used by ``PresetPackDataset`` init."""
+
+    def __init__(self, path: str, n_samples: int) -> None:
+        self.path = path
+        self._n = n_samples
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx: int):
+        raise AssertionError("not used in this test")
+
+
 @dataclass(frozen=True)
 class CreateDataloaderConfigResult:
     dataloader_cfg: DataloaderConfig
@@ -236,7 +275,6 @@ def create_dataloader_config(
 
     # Step 3: sampler config
     micro_batch_size = global_batch_size // dp_size
-    # TODO: a dist version of this test
     order_path = tmp_path / "order.npy"
     if sampler_case == "preset_seq_sampler":
         assert num_packs_ref is not None
@@ -246,9 +284,9 @@ def create_dataloader_config(
         group_by_length = False
     elif sampler_case == "preset_group_sampler":
         assert pack_dir is not None and num_packs_ref is not None
-        forced = DataloaderConfig._force_preset_pack_settings(dataset_config_list)
+        # ``longest`` 只依赖 NPY；用 stub 避免 ``build_datasets`` 里的分布式 collective（否则仅 rank0 调会死锁）。
         pack_ds_for_longest = PresetPackDataset(
-            build_datasets(forced, tokenizer),
+            [_StubJsonl(anno, len(records))],
             pack_config_path=str(pack_dir),
             pack_max_length=pack_max_length,
         )
@@ -290,20 +328,6 @@ def create_dataloader_config(
         sampler_case=sampler_case,
         num_packs_ref=num_packs_ref,
     )
-
-
-class _StubJsonl:
-    """Minimal stand-in for ``JsonlDataset``: only ``path`` / ``__len__`` are used by ``PresetPackDataset`` init."""
-
-    def __init__(self, path: str, n_samples: int) -> None:
-        self.path = path
-        self._n = n_samples
-
-    def __len__(self) -> int:
-        return self._n
-
-    def __getitem__(self, idx: int):
-        raise AssertionError("not used in this test")
 
 
 def test_preset_pack_longest_matches_buildin_hard_pack(tmp_path: Path) -> None:
@@ -392,13 +416,9 @@ def test_various_dataloader_configs_consistent(tmp_path: Path, pack_case: str, s
         dl_b = _build(seed_ref, shuffle=True)
 
     # step 6: verify dataloader output is consistent
-    _cnt = 0
-    for batch_a, batch_b in zip(dl_a, dl_b):
-        assert len(batch_a) == len(batch_b)
-        for x, y in zip(batch_a, batch_b):
-            _cnt += 1
-            assert torch.equal(x["seq_ctx"].input_ids, y["seq_ctx"].input_ids)
-            assert torch.equal(x["shifted_labels"], y["shifted_labels"])
+    batches_a = list(dl_a)
+    batches_b = list(dl_b)
+    _cnt = assert_dataloader_batches_seq_and_labels_equal(batches_a, batches_b)
 
     _pack_info = num_packs_ref if num_packs_ref is not None else "hard (runtime)"
     print(f"--------------- packed samples: {_cnt}, original packed samples: {_pack_info}")
@@ -438,9 +458,96 @@ def test_preset_pack_sampler_matches_buildin_hard_pack_group_sampler(tmp_path: P
 
     batches_pre = list(dl_pre)
     batches_hard = list(dl_hard)
-    assert len(batches_pre) == len(batches_hard)
-    for batch_pre, batch_hard in zip(batches_pre, batches_hard):
-        assert len(batch_pre) == len(batch_hard)
-        for x, y in zip(batch_pre, batch_hard):
-            assert torch.equal(x["seq_ctx"].input_ids, y["seq_ctx"].input_ids)
-            assert torch.equal(x["shifted_labels"], y["shifted_labels"])
+    assert_dataloader_batches_seq_and_labels_equal(batches_pre, batches_hard)
+
+
+class TestPresetPackSamplerMatchesHardPackGroupSamplerDist(DistributedTestBase):
+    """分布式下 Preset 打包 + PresetSampler 与 HardPack + LengthGroupedSampler 各 rank 局部 batch 一致。"""
+
+    def create_pg(self, device):
+        ret = super().create_pg(device)
+        os.environ["LOCAL_RANK"] = str(dist.get_rank())
+        os.environ["LOCAL_WORLD_SIZE"] = str(self.world_size)
+        if device == "cuda" or (isinstance(device, torch.device) and device.type == "cuda"):
+            if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+                torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
+        return ret
+
+    @property
+    def world_size(self) -> int:
+        return int(os.getenv("XTUNER_TEST_WORLD_SIZE", "8"))
+
+    def test_preset_pack_sampler_matches_buildin_hard_pack_group_sampler_dist(self):
+        self.create_pg(DEVICE)
+        rank = dist.get_rank()
+        ws = dist.get_world_size()
+
+        tokenizer_path = os.environ["QWEN3_MOE_PATH"]
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+        if rank == 0:
+            tmp_root = tempfile.mkdtemp(prefix="xtuner_preset_dist_")
+        else:
+            tmp_root = None
+        tmp_list: list[str | None] = [tmp_root]
+        dist.broadcast_object_list(tmp_list, src=0)
+        tmp_path = Path(tmp_list[0])  # type: ignore[arg-type]
+
+        seed = 1
+        global_batch_size = ws
+        common = dict(
+            sample_num=36,
+            pack_max_length=32,
+            global_batch_size=global_batch_size,
+            dp_size=ws,
+            seed_ref=seed,
+            num_workers=0,
+        )
+
+        if rank == 0:
+            pre = create_dataloader_config(tmp_path / "preset_run", tokenizer, "preset_pack", "preset_group_sampler", **common)
+            hard = create_dataloader_config(tmp_path / "hard_run", tokenizer, "hard_pack", "group_sampler", **common)
+            bundle_list: list = [pre, hard]
+        else:
+            bundle_list = [None, None]
+        dist.broadcast_object_list(bundle_list, src=0)
+        pre, hard = bundle_list[0], bundle_list[1]
+        assert isinstance(pre, CreateDataloaderConfigResult)
+        assert isinstance(hard, CreateDataloaderConfigResult)
+        num_packs_ref = pre.num_packs_ref
+
+        dist.barrier()
+        dp_mesh = init_device_mesh(DEVICE, (ws,))
+
+        dl_pre = pre.dataloader_cfg.build(
+            tokenizer,
+            dp_mesh=dp_mesh,
+            global_batch_size=pre.global_batch_size,
+            micro_batch_size=pre.micro_batch_size,
+            seed=seed,
+            shuffle=True,
+        )
+        dl_hard = hard.dataloader_cfg.build(
+            tokenizer,
+            dp_mesh=dp_mesh,
+            global_batch_size=hard.global_batch_size,
+            micro_batch_size=hard.micro_batch_size,
+            seed=seed,
+            shuffle=True,
+        )
+
+        batches_pre = list(dl_pre)
+        batches_hard = list(dl_hard)
+        self.assertEqual(len(batches_pre), len(batches_hard))
+
+        n_pre = len(batches_pre)
+        n_list = [n_pre]
+        dist.broadcast_object_list(n_list, src=0)
+        self.assertEqual(n_pre, n_list[0])
+
+        _cnt = assert_dataloader_batches_seq_and_labels_equal(batches_pre, batches_hard)
+
+        _pack_info = num_packs_ref if num_packs_ref is not None else "hard (runtime)"
+        print(f"[RANK {rank}]--------------- packed samples: {_cnt}, original packed samples: {_pack_info}")
+
+        dist.barrier()
