@@ -448,6 +448,7 @@ case:
                 config: autotest/config/qwen3_5_moe_30BA3_sp4.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
+                memory_per_task: 800
                 envs:
                     - QWEN3_MOE_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - ALPACA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
