@@ -1,4 +1,4 @@
-"""Integration test: JsonlDataset + PresetPackDataset + PresetSampler via DataloaderConfig.build."""
+"""Integration test: DataloaderConfig.build with preset pack / HardPackDataset and samplers."""
 
 import json
 import os
@@ -199,14 +199,22 @@ def test_preset_pack_longest_matches_hard_pack_and_length_grouped_sampler(tmp_pa
 
 
 @pytest.mark.parametrize(
+    "pack_case",
+    [
+        pytest.param("preset_pack_simple", id="preset_pack_simple"),
+        pytest.param("preset_pack", id="preset_pack"),
+        pytest.param("hard_pack", id="hard_pack"),
+    ],
+)
+@pytest.mark.parametrize(
     "sampler_case",
     [
         pytest.param("preset_seq_sampler", id="preset_seq_sampler"),
         pytest.param("preset_group_sampler", id="preset_group_sampler"),
-        pytest.param("length_grouped", id="pack_and_group_sampler_consistent"),
+        pytest.param("group_sampler", id="pack_and_group_sampler_consistent"),
     ],
 )
-def test_preset_dataloader(tmp_path: Path, sampler_case: str) -> None:
+def test_preset_dataloader(tmp_path: Path, pack_case: str, sampler_case: str) -> None:
     tokenizer_path = os.environ["QWEN3_MOE_PATH"]
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
@@ -222,28 +230,51 @@ def test_preset_dataloader(tmp_path: Path, sampler_case: str) -> None:
     jsonl_path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records), encoding="utf-8")
     anno = str(jsonl_path.resolve())
 
+    dataset_config_list = [
+        {
+            "dataset": DatasetConfig(anno_path=anno),
+            "tokenize_fn": PretrainTokenizeFunctionConfig(),
+        }
+    ]
+
     # TODO: use JsonlDataset to cache first and get num_tokens from cache
     tok_fn = PretrainTokenizeFunctionConfig().build(tokenizer)
     num_tokens = np.array([tok_fn(r)["num_tokens"] for r in records], dtype=np.int64)
 
-    inds = np.random.RandomState(0).permutation(sample_num)
-
-    # step 2: prepare pack config
+    # step 2: preset — NPY pack dir; hard — HardPackDataset inside DataloaderConfig.build (no preset files)
     pack_max_length = 32
-    # TODO: use hard pack logic, compare with current hard pack logic
-    cfg = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1)
-    assert len(cfg["boundaries"]) >= 3, "need >=2 full packs"
+    pack_dir: Path | None = None
+    num_packs_ref: int | None = None
+    pack_level: Literal["preset", "hard"]
 
-    print(f"\n\n--------------- original samples: {len(records)}, after pack: {len(cfg['boundaries']) - 1}\n\n")
+    if pack_case == "hard_pack":
+        if sampler_case in ("preset_seq_sampler", "preset_group_sampler"):
+            pytest.skip("PresetSampler 需要 pack_level='preset' 与 PresetPackDataset，与 HardPackDataset 不兼容")
+        assert int(num_tokens.sum()) >= 2 * pack_max_length, "need enough tokens for multiple packs"
+        pack_level = "hard"
+        num_packs_ref = None
+        print(f"\n\n--------------- original samples: {len(records)}, pack: HardPackDataset in DataloaderConfig.build\n\n")
+    elif pack_case in ("preset_pack_simple", "preset_pack"):
+        inds = np.random.RandomState(0).permutation(sample_num)
+        if pack_case == "preset_pack_simple":
+            cfg = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1)
+        else:
+            infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=8)
+            cfg = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
+        assert len(cfg["boundaries"]) >= 3, "need >=2 full packs"
 
-    pack_dir = tmp_path / "pack"
-    pack_dir.mkdir()
-    np.save(pack_dir / "boundaries.npy", cfg["boundaries"])
-    np.save(pack_dir / "samples.npy", cfg["samples"])
-    (pack_dir / "paths.json").write_text(json.dumps([anno]), encoding="utf-8")
+        print(f"\n\n--------------- original samples: {len(records)}, after pack: {len(cfg['boundaries']) - 1}\n\n")
 
-    num_packs = int(cfg["boundaries"].shape[0] - 1)
-    pack_level = "preset"
+        pack_dir = tmp_path / "pack"
+        pack_dir.mkdir()
+        np.save(pack_dir / "boundaries.npy", cfg["boundaries"])
+        np.save(pack_dir / "samples.npy", cfg["samples"])
+        (pack_dir / "paths.json").write_text(json.dumps([anno]), encoding="utf-8")
+
+        num_packs_ref = int(cfg["boundaries"].shape[0] - 1)
+        pack_level = "preset"
+    else:
+        raise ValueError(f"unknown pack_case: {pack_case!r}")
 
     # step 3: prepare sampler config (.npy order; length_grouped matches LengthGroupedSampler internals)
     global_batch_size = 2
@@ -253,18 +284,14 @@ def test_preset_dataloader(tmp_path: Path, sampler_case: str) -> None:
     micro_batch_size = global_batch_size // dp_size
     # TODO: a dist version of this test
     order_path = tmp_path / "order.npy"
-    dataset_config_list = [
-        {
-            "dataset": DatasetConfig(name="preset", anno_path=anno),
-            "tokenize_fn": PretrainTokenizeFunctionConfig(),
-        }
-    ]
     if sampler_case == "preset_seq_sampler":
-        get_sampler_config(order_path, mode="sequential", num_packs=num_packs)
+        assert num_packs_ref is not None
+        get_sampler_config(order_path, mode="sequential", num_packs=num_packs_ref)
 
         sampler_type = "preset"
         group_by_length = False
     elif sampler_case == "preset_group_sampler":
+        assert pack_dir is not None and num_packs_ref is not None
         forced = DataloaderConfig._force_preset_pack_settings(dataset_config_list)
         pack_ds_for_longest = PresetPackDataset(
             build_datasets(forced, tokenizer),
@@ -274,7 +301,7 @@ def test_preset_dataloader(tmp_path: Path, sampler_case: str) -> None:
         get_sampler_config(
             order_path,
             mode="length_grouped",
-            num_packs=num_packs,
+            num_packs=num_packs_ref,
             longest=pack_ds_for_longest.longest,
             global_batch_size=global_batch_size,
             world_size=dp_size,
@@ -284,7 +311,7 @@ def test_preset_dataloader(tmp_path: Path, sampler_case: str) -> None:
 
         sampler_type = "preset"
         group_by_length = False
-    else:  # length_grouped
+    else:  # group_sampler
         sampler_type = "none"
         group_by_length = True
 
@@ -294,8 +321,8 @@ def test_preset_dataloader(tmp_path: Path, sampler_case: str) -> None:
         pack_level=pack_level,
         sampler_type=sampler_type,
         group_by_length=group_by_length,
-        pack_config_path=str(pack_dir),
-        sampler_config_path=str(order_path),
+        pack_config_path=str(pack_dir) if pack_dir is not None else None,
+        sampler_config_path=str(order_path) if pack_level == "preset" else None,
         pack_max_length=pack_max_length,
         pad_token_id=None,
         num_workers=0,
@@ -330,4 +357,5 @@ def test_preset_dataloader(tmp_path: Path, sampler_case: str) -> None:
             assert torch.equal(x["seq_ctx"].input_ids, y["seq_ctx"].input_ids)
             assert torch.equal(x["shifted_labels"], y["shifted_labels"])
 
-    print(f"--------------- packed samples: {_cnt}, original packed samples: {num_packs}")
+    _pack_info = num_packs_ref if num_packs_ref is not None else "hard (runtime)"
+    print(f"--------------- packed samples: {_cnt}, original packed samples: {_pack_info}")
