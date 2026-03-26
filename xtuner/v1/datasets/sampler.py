@@ -4,7 +4,6 @@ import random
 from typing import Iterator, Optional
 
 import torch
-from datasets.arrow_dataset import Column
 from mmengine.dist import sync_random_seed
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import ConcatDataset as TorchConcatDataset
@@ -15,6 +14,11 @@ from xtuner.v1.utils import get_logger
 from .jsonl import JsonlDataset
 from .packing import _LegacySoftPackDataset
 
+
+try:
+    from datasets.arrow_dataset import Column
+except ImportError:
+    Column = type("Column", (), {})  # Dummy type for backward compatibility
 
 logger = get_logger()
 
