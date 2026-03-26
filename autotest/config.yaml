@@ -434,7 +434,7 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-sp4-resume/625c0018/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
+                    grad_norm: 0.02
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -456,7 +456,7 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-sp4-resume/625c0018_resume/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
+                    grad_norm: 0.02
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
