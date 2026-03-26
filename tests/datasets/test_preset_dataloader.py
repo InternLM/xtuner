@@ -68,10 +68,11 @@ def get_pack_config_from_pack_infos_by_hard_split(
         indices = ix[i0:i1]
         s_off, e_off = int(starts[item]), int(ends[item])
         for i, idx in enumerate(indices):
-            idx_i = int(idx)
+            idx_i = int(idx)  # TODO: ConcatDataset.get_sample_idx_from_idx
             L = int(num_tokens[idx_i])
             st = 0 if i else s_off
             ed = L if i < len(indices) - 1 else e_off
+            # TODO: ConcatDataset.get_dataset_id_from_idx (path_id)
             rows.append([path_id, idx_i, -1, -1, st, ed])
         boundaries.append(len(rows))
     samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
@@ -201,7 +202,7 @@ def create_dataloader_config(
 
     dataset_config_list = [
         {
-            "dataset": DatasetConfig(anno_path=anno),
+            "dataset": DatasetConfig(anno_path=anno, disable_filter=True, sample_ratio=1.0),
             "tokenize_fn": PretrainTokenizeFunctionConfig(),
         }
     ]
