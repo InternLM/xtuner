@@ -436,6 +436,8 @@ class DataloaderConfig(BaseDataloaderConfig):
                 dataset = HardPackDataset(
                     datasets,
                     pack_max_length=self.pack_max_length,
+                    pack_chunk_size=self.pack_chunk_size,
+                    pack_workers=self.pack_workers,
                     global_pack=self.global_pack,
                     seed=seed,
                 )
