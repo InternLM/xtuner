@@ -2,7 +2,9 @@
 
 import json
 import os
+import random
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pytest
@@ -10,10 +12,10 @@ import torch
 from transformers import AutoTokenizer
 
 from xtuner.v1.datasets import PretrainTokenizeFunctionConfig
-from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
+from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig, build_datasets
 from xtuner.v1.datasets.packing import get_pack_infos_by_hard_split
 from xtuner.v1.datasets.preset_pack import PresetPackDataset
-from xtuner.v1.datasets.sampler import LengthGroupedSampler
+from xtuner.v1.datasets.sampler import LengthGroupedSampler, get_length_grouped_indices
 
 
 def get_pack_config_by_simple_hard_split(
@@ -90,6 +92,68 @@ def test_hard_split_pack_config_matches_packing_implementation():
     np.testing.assert_array_equal(simple["samples"], ref["samples"])
 
 
+def get_sampler_config(
+    order_path: Path,
+    *,
+    mode: Literal["sequential", "length_grouped"],
+    num_packs: int,
+    longest: np.ndarray | list | tuple | None = None,
+    global_batch_size: int = 2,
+    world_size: int = 1,
+    seed: int = 0,
+    epoch: int = 0,
+) -> np.ndarray:
+    """Build pack index order and persist to ``order_path`` (``.npy``).
+
+    Args:
+        order_path: Output path for a 1-D int64 array of pack indices (same format as training).
+        mode:
+            ``sequential`` — ``0..num_packs-1`` (legacy / PresetSampler baseline).
+            ``length_grouped`` — same megabatch + sort + group shuffle logic as
+            :class:`LengthGroupedSampler` via :func:`get_length_grouped_indices`.
+        num_packs: Number of valid packs (length of the order permutation).
+        longest: Per-pack max token length; required when ``mode=='length_grouped'``.
+        global_batch_size: Same as dataloader ``global_batch_size`` (drives megabatch sizing).
+        world_size: Same as distributed world size (``group_size`` in length-grouped logic).
+        seed / epoch: Match :class:`LengthGroupedSampler` (`seed + epoch` for both RNGs).
+
+    Returns:
+        The saved order array.
+    """
+    if mode == "sequential":
+        order = np.arange(num_packs, dtype=np.int64)
+    elif mode == "length_grouped":
+        if longest is None:
+            raise ValueError("longest is required when mode is 'length_grouped'")
+        longest_arr = np.asarray(longest)
+        if longest_arr.shape[0] != num_packs:
+            raise ValueError(f"len(longest)={longest_arr.shape[0]} must equal num_packs={num_packs}")
+        mega_batch_mult = min(
+            num_packs // (global_batch_size * LengthGroupedSampler.GROUP_BATCH_FACTOR),
+            LengthGroupedSampler.MAX_GROUP_BATCH_SIZE,
+        )
+        if mega_batch_mult == 0:
+            mega_batch_mult = 1
+        group_batch_size = mega_batch_mult * global_batch_size
+        group_size = world_size
+        torch_generator = torch.Generator()
+        torch_generator.manual_seed(seed + epoch)
+        random_generator = random.Random()
+        random_generator.seed(seed + epoch)
+        order_list = get_length_grouped_indices(
+            max_lengths=longest_arr,
+            group_batch_size=group_batch_size,
+            group_size=group_size,
+            torch_generator=torch_generator,
+            random_generator=random_generator,
+        )
+        order = np.asarray(order_list, dtype=np.int64)
+    else:
+        raise ValueError(f"unknown mode: {mode!r}")
+    np.save(order_path, order)
+    return order
+
+
 class _StubJsonl:
     """Minimal stand-in for ``JsonlDataset``: only ``path`` / ``__len__`` are used by ``PresetPackDataset`` init."""
 
@@ -135,13 +199,14 @@ def test_preset_pack_longest_matches_hard_pack_and_length_grouped_sampler(tmp_pa
 
 
 @pytest.mark.parametrize(
-    "variant",
+    "sampler_case",
     [
-        pytest.param("preset_sampler", id="preset_sampler_deterministic"),
+        pytest.param("preset_seq_sampler", id="preset_seq_sampler"),
+        pytest.param("preset_group_sampler", id="preset_group_sampler"),
         pytest.param("length_grouped", id="pack_and_group_sampler_consistent"),
     ],
 )
-def test_preset_dataloader(tmp_path: Path, variant: str) -> None:
+def test_preset_dataloader(tmp_path: Path, sampler_case: str) -> None:
     tokenizer_path = os.environ["QWEN3_MOE_PATH"]
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
@@ -180,13 +245,43 @@ def test_preset_dataloader(tmp_path: Path, variant: str) -> None:
     num_packs = int(cfg["boundaries"].shape[0] - 1)
     pack_level = "preset"
 
-    # step 3: prepare sampler config
+    # step 3: prepare sampler config (.npy order; length_grouped matches LengthGroupedSampler internals)
+    global_batch_size = 2
+    dp_size = 1
+    seed_ref = 1
+    seed_ref2 = 2
+    micro_batch_size = global_batch_size // dp_size
     # TODO: a dist version of this test
-    # TODO: use group by length logic
     order_path = tmp_path / "order.npy"
-    order = np.arange(num_packs, dtype=np.int64)
-    np.save(order_path, order)
-    if variant == "preset_sampler":
+    dataset_config_list = [
+        {
+            "dataset": DatasetConfig(name="preset", anno_path=anno),
+            "tokenize_fn": PretrainTokenizeFunctionConfig(),
+        }
+    ]
+    if sampler_case == "preset_seq_sampler":
+        get_sampler_config(order_path, mode="sequential", num_packs=num_packs)
+
+        sampler_type = "preset"
+        group_by_length = False
+    elif sampler_case == "preset_group_sampler":
+        forced = DataloaderConfig._force_preset_pack_settings(dataset_config_list)
+        pack_ds_for_longest = PresetPackDataset(
+            build_datasets(forced, tokenizer),
+            pack_config_path=str(pack_dir),
+            pack_max_length=pack_max_length,
+        )
+        get_sampler_config(
+            order_path,
+            mode="length_grouped",
+            num_packs=num_packs,
+            longest=pack_ds_for_longest.longest,
+            global_batch_size=global_batch_size,
+            world_size=dp_size,
+            seed=seed_ref,
+            epoch=0,
+        )
+
         sampler_type = "preset"
         group_by_length = False
     else:  # length_grouped
@@ -195,12 +290,7 @@ def test_preset_dataloader(tmp_path: Path, variant: str) -> None:
 
     # step 4: compose dataloader config
     dataloader_cfg = DataloaderConfig(
-        dataset_config_list=[
-            {
-                "dataset": DatasetConfig(name="preset", anno_path=anno),
-                "tokenize_fn": PretrainTokenizeFunctionConfig(),
-            }
-        ],
+        dataset_config_list=dataset_config_list,
         pack_level=pack_level,
         sampler_type=sampler_type,
         group_by_length=group_by_length,
@@ -216,20 +306,20 @@ def test_preset_dataloader(tmp_path: Path, variant: str) -> None:
         return dataloader_cfg.build(
             tokenizer,
             dp_mesh=None,
-            global_batch_size=2,
-            micro_batch_size=1,
+            global_batch_size=global_batch_size,
+            micro_batch_size=micro_batch_size,
             seed=seed,
             shuffle=shuffle,
         )
 
-    if variant == "preset_sampler":
-        # preset pack and sampler should be deterministic, and ignore seed and shuffle
-        dl_a = _build(1, shuffle=False)
-        dl_b = _build(2, shuffle=True)
+    if sampler_case in ("preset_seq_sampler", "preset_group_sampler"):
+        # PresetSampler follows order.npy; seed/shuffle should not change batches.
+        dl_a = _build(seed_ref, shuffle=False)
+        dl_b = _build(seed_ref2, shuffle=True)
     else:
-        # With preset pack + length grouping, repeated builds with the same seed should match even when shuffle is on.
-        dl_a = _build(1, shuffle=True)
-        dl_b = _build(1, shuffle=True)
+        # LengthGroupedSampler: same seed + shuffle=True on repeated builds should match.
+        dl_a = _build(seed_ref, shuffle=True)
+        dl_b = _build(seed_ref, shuffle=True)
 
     # step 6: verify dataloader output is consistent
     _cnt = 0
