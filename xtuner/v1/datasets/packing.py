@@ -420,7 +420,12 @@ def _merge_pack_infos(infos: list[dict[str, np.ndarray]]) -> dict[str, np.ndarra
 
 
 def get_pack_infos_by_hard_split(
-    inds: np.ndarray, dataset_id: int, num_tokens: np.ndarray, pack_max_length: int, pack_workers: int = 1
+    inds: np.ndarray,
+    dataset_id: int,
+    num_tokens: np.ndarray,
+    pack_max_length: int,
+    pack_workers: int = 1,
+    pack_chunk_size: int = 10000,
 ):
     # number of packed samples
     shfl_inds = inds
@@ -436,7 +441,7 @@ def get_pack_infos_by_hard_split(
     inds_arr = np.asarray(shfl_inds, dtype=np.int64).reshape(-1)
 
     # chunk tasks
-    chunk_size = 10000
+    chunk_size = pack_chunk_size
     i_all = list(range(num_packed_samples))
     chunks = [i_all[i : i + chunk_size] for i in range(0, len(i_all), chunk_size)]
 
@@ -488,9 +493,16 @@ class HardPackDataset(_LegacySoftPackDataset):
     _PACK_INFO_FIELDS = ("dataset_id", "indices", "start_offset", "end_offset", "longest", "indices_cu_len")
 
     def __init__(
-        self, datasets, pack_max_length=2048, global_pack=False, seed: int | None = None, pack_workers: int = 1
+        self,
+        datasets,
+        pack_max_length=2048,
+        global_pack=False,
+        seed: int | None = None,
+        pack_workers: int = 1,
+        pack_chunk_size: int = 10000,
     ):
         self.pack_workers = pack_workers
+        self.pack_chunk_size = pack_chunk_size
         self.random = np.random.RandomState(seed) if seed is not None else np.random.RandomState()  # type: ignore
 
         # Create a single dedicated process group with a generous timeout for
@@ -587,7 +599,12 @@ class HardPackDataset(_LegacySoftPackDataset):
         inds = np.arange(len(dataset), dtype=np.int64)
         self.random.shuffle(inds)  # type: ignore[arg-type]
         return get_pack_infos_by_hard_split(
-            inds, dataset_id, num_tokens, pack_max_length=self.pack_max_length, pack_workers=self.pack_workers
+            inds,
+            dataset_id,
+            num_tokens,
+            pack_max_length=self.pack_max_length,
+            pack_workers=self.pack_workers,
+            pack_chunk_size=self.pack_chunk_size,
         )
 
     def __getitem__(self, item: int):
