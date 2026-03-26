@@ -125,7 +125,7 @@ class PresetSampler(Sampler):
 
         _validate_pack_indices(order, num_packs)
 
-        step_size = global_batch_size * self.world_size
+        step_size = global_batch_size
         raw_len = len(order)
         if raw_len == 0:
             raise ValueError("PresetSampler: sampler order is empty.")
