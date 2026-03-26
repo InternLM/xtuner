@@ -152,7 +152,6 @@ class PresetSampler(Sampler):
             )
 
         self.global_order = order[: self.total_size]
-        self._local_indices = self.global_order[self.rank :: self.world_size]
 
         self.epoch = 0
         self.step = 0
@@ -160,7 +159,9 @@ class PresetSampler(Sampler):
         _log_coverage_summary(self.global_order, num_packs)
 
     def __iter__(self) -> Iterator[int]:
-        yield from self._local_indices[self.step :]
+        # load order from npy → global_order → rank_view 类型均为 memmap, 子视图 的路径仍然保持
+        # memmap 语义（视图、按需分页、文件后端）；单机多进程可共享同一份文件页缓存
+        yield from self.global_order[self.step + self.rank : self.total_size : self.world_size]
         self.step = 0
 
     def __len__(self) -> int:
@@ -170,10 +171,12 @@ class PresetSampler(Sampler):
         self.epoch = epoch
 
     def get_state_dict(self, step: int) -> dict:
-        local_step = step % self.total_size
+        # Same convention as :class:`LengthGroupedSampler`: ``step`` is the global pack offset
+        # (modulo ``total_size``) into ``global_order``, shared across all ranks in the checkpoint.
+        global_step = step % self.total_size
         return {
             "epoch": self.epoch,
-            "step": local_step,
+            "step": global_step,
             "world_size": self.world_size,
             "num_samples": self.num_samples,
             "total_size": self.total_size,
@@ -188,4 +191,5 @@ class PresetSampler(Sampler):
             )
 
         self.epoch = state_dict["epoch"]
-        self.step = state_dict["step"]
+        global_step = int(state_dict["step"])
+        self.step = global_step
