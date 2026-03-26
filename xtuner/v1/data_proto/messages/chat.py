@@ -74,13 +74,29 @@ def tool_formatter(tools: list[dict[str, Any]]) -> str:
     return tool_text
 
 
-def function_formatter(functions: list[dict[str, Any]]) -> str:
+def function_formatter(functions: list[dict[str, Any]], template_name: Optional[str] = None) -> str:
     function_texts = []
-    for function in functions:
-        name = function["function"]["name"]
-        arguments = function["function"]["arguments"]
-        function_texts.append(json.dumps({"name": name, "arguments": json.loads(arguments)}, ensure_ascii=False))
-    return "\n".join([f"<tool_call>\n{text}\n</tool_call>" for text in function_texts])
+    if template_name is None:  # qwen3
+        for function in functions:
+            name = function["function"]["name"]
+            arguments = function["function"]["arguments"]
+            function_texts.append(json.dumps({"name": name, "arguments": json.loads(arguments)}, ensure_ascii=False))
+        return "\n".join([f"<tool_call>\n{text}\n</tool_call>" for text in function_texts])
+    elif template_name == "qwen3.5-vl":  # qwen3.5
+        for function in functions:
+            name = function["function"]["name"]
+            arguments = function["function"]["arguments"]
+            prompt = f"<tool_call>\n<function={name}>"
+            for key, value in arguments.items():
+                prompt += f"\n<parameter={key}>"
+                if not isinstance(value, str):
+                    value = json.dumps(value, ensure_ascii=False)
+                prompt += f"\n{value}\n</parameter>"
+            prompt += "\n</function>\n</tool_call>"
+            function_texts.append(prompt)
+        return "\n".join(function_texts)
+    else:
+        raise NotImplementedError(f"function_formatter for template {template_name} is not implemented.")
 
 
 class ChatMsg(BaseModel):
@@ -137,7 +153,7 @@ class ChatMsg(BaseModel):
             prompt = chat_template.decorate_tool_extractor(text)
         elif self.role == "assistant":
             if self.tool_calls is not None:
-                function_text = function_formatter(self.tool_calls)
+                function_text = function_formatter(self.tool_calls, chat_template.template_name)
                 if text is not None and text != "" and not text.endswith("\n\n"):
                     function_text = "\n" + function_text
                 text += function_text
@@ -204,7 +220,10 @@ def process_message(messages: List[ChatMsg], chat_template: ChatTemplate, tools:
             messages.insert(0, ChatMsg(role="system", content=tool_text, loss=False))
         else:
             assert isinstance(messages[0].content, str), "system message content must be str."
-            messages[0].content += tool_text
+            if chat_template.template_name == "qwen3.5-vl":
+                messages[0].content = tool_text + "\n\n" + messages[0].content
+            else:
+                messages[0].content += tool_text
 
 
 class ChatMessages(BaseMessages):
