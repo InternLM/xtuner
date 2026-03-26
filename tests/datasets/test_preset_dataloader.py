@@ -3,6 +3,7 @@
 import json
 import os
 import random
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -77,7 +78,7 @@ def get_pack_config_from_pack_infos_by_hard_split(
     return {"boundaries": np.asarray(boundaries, dtype=np.int64), "samples": samples}
 
 
-def test_hard_split_pack_config_matches_packing_implementation():
+def test_simple_hard_preset_pack_config_matches_buildin_hard_pack():
     rng = np.random.RandomState(42)
     num_tokens = rng.randint(8, 25, size=24).astype(np.int64)
     inds = rng.permutation(24).astype(np.int64)
@@ -154,72 +155,40 @@ def get_sampler_config(
     return order
 
 
-class _StubJsonl:
-    """Minimal stand-in for ``JsonlDataset``: only ``path`` / ``__len__`` are used by ``PresetPackDataset`` init."""
-
-    def __init__(self, path: str, n_samples: int) -> None:
-        self.path = path
-        self._n = n_samples
-
-    def __len__(self) -> int:
-        return self._n
-
-    def __getitem__(self, idx: int):
-        raise AssertionError("not used in this test")
+@dataclass(frozen=True)
+class CreateDataloaderConfigResult:
+    dataloader_cfg: DataloaderConfig
+    global_batch_size: int
+    micro_batch_size: int
+    seed_ref: int
+    sampler_case: str
+    num_packs_ref: int | None
 
 
-def test_preset_pack_longest_matches_hard_pack_and_length_grouped_sampler(tmp_path: Path) -> None:
-    rng = np.random.RandomState(7)
-    num_tokens = rng.randint(5, 19, size=20).astype(np.int64)
-    inds = rng.permutation(20).astype(np.int64)
-    pack_max_length = 24
-    anno = str((tmp_path / "stub.jsonl").resolve())
-    (tmp_path / "stub.jsonl").write_text("", encoding="utf-8")
+def create_dataloader_config(
+    tmp_path: Path,
+    tokenizer,
+    pack_case: str,
+    sampler_case: str,
+    *,
+    sample_num: int = 12,
+    pack_max_length: int = 32,
+    global_batch_size: int = 2,
+    dp_size: int = 1,
+    seed_ref: int = 1,
+    num_workers: int = 0,
+) -> CreateDataloaderConfigResult:
+    """Prepare jsonl + optional preset NPY / order, then return :class:`DataloaderConfig` and build metadata.
 
-    infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=1)
-    ref_longest = infos["longest"]
-    cfg = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
+    ``seed`` controls the sample permutation for preset packing (``preset_pack*``). For comparisons with
+    ``HardPackDataset``, set it equal to the ``seed`` passed to :meth:`DataloaderConfig.build` so both use the same
+    ``numpy.random.RandomState`` sequence as in ``HardPackDataset._compute_pack_infos``.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
 
-    pack_dir = tmp_path / "pack"
-    pack_dir.mkdir()
-    np.save(pack_dir / "boundaries.npy", cfg["boundaries"])
-    np.save(pack_dir / "samples.npy", cfg["samples"])
-    (pack_dir / "paths.json").write_text(json.dumps([anno]), encoding="utf-8")
+    if pack_case == "hard_pack" and sampler_case in ("preset_seq_sampler", "preset_group_sampler"):
+        pytest.skip("PresetSampler 需要 pack_level='preset' 与 PresetPackDataset，与 HardPackDataset 不兼容")
 
-    ds = PresetPackDataset(
-        [_StubJsonl(anno, len(num_tokens))],
-        pack_config_path=str(pack_dir),
-        pack_max_length=pack_max_length,
-        mmap=True,
-    )
-    np.testing.assert_array_equal(ds.longest, ref_longest)
-    assert isinstance(ds._samples, np.memmap) or hasattr(ds._samples, "filename")
-
-    LengthGroupedSampler(ds, global_batch_size=2, dp_mesh=None, seed=123)
-
-
-@pytest.mark.parametrize(
-    "pack_case",
-    [
-        pytest.param("preset_pack_simple", id="preset_pack_simple"),
-        pytest.param("preset_pack", id="preset_pack"),
-        pytest.param("hard_pack", id="hard_pack"),
-    ],
-)
-@pytest.mark.parametrize(
-    "sampler_case",
-    [
-        pytest.param("preset_seq_sampler", id="preset_seq_sampler"),
-        pytest.param("preset_group_sampler", id="preset_group_sampler"),
-        pytest.param("group_sampler", id="pack_and_group_sampler_consistent"),
-    ],
-)
-def test_preset_dataloader(tmp_path: Path, pack_case: str, sampler_case: str) -> None:
-    tokenizer_path = os.environ["QWEN3_MOE_PATH"]
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-    # step 1: prepare jsonl and its num_tokens
-    sample_num = 12
     # TODO: multiple jsonl files with ConcatDataset
     # TODO: jsonl file with sample_ratio
     jsonl_path = tmp_path / "data.jsonl"
@@ -241,21 +210,18 @@ def test_preset_dataloader(tmp_path: Path, pack_case: str, sampler_case: str) ->
     tok_fn = PretrainTokenizeFunctionConfig().build(tokenizer)
     num_tokens = np.array([tok_fn(r)["num_tokens"] for r in records], dtype=np.int64)
 
-    # step 2: preset — NPY pack dir; hard — HardPackDataset inside DataloaderConfig.build (no preset files)
-    pack_max_length = 32
     pack_dir: Path | None = None
     num_packs_ref: int | None = None
     pack_level: Literal["preset", "hard"]
 
     if pack_case == "hard_pack":
-        if sampler_case in ("preset_seq_sampler", "preset_group_sampler"):
-            pytest.skip("PresetSampler 需要 pack_level='preset' 与 PresetPackDataset，与 HardPackDataset 不兼容")
         assert int(num_tokens.sum()) >= 2 * pack_max_length, "need enough tokens for multiple packs"
         pack_level = "hard"
         num_packs_ref = None
         print(f"\n\n--------------- original samples: {len(records)}, pack: HardPackDataset in DataloaderConfig.build\n\n")
     elif pack_case in ("preset_pack_simple", "preset_pack"):
-        inds = np.random.RandomState(0).permutation(sample_num)
+        inds = np.arange(sample_num, dtype=np.int64)
+        np.random.RandomState(seed_ref).shuffle(inds)  # type: ignore[arg-type]
         if pack_case == "preset_pack_simple":
             cfg = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1)
         else:
@@ -276,11 +242,6 @@ def test_preset_dataloader(tmp_path: Path, pack_case: str, sampler_case: str) ->
     else:
         raise ValueError(f"unknown pack_case: {pack_case!r}")
 
-    # step 3: prepare sampler config (.npy order; length_grouped matches LengthGroupedSampler internals)
-    global_batch_size = 2
-    dp_size = 1
-    seed_ref = 1
-    seed_ref2 = 2
     micro_batch_size = global_batch_size // dp_size
     # TODO: a dist version of this test
     order_path = tmp_path / "order.npy"
@@ -315,7 +276,6 @@ def test_preset_dataloader(tmp_path: Path, pack_case: str, sampler_case: str) ->
         sampler_type = "none"
         group_by_length = True
 
-    # step 4: compose dataloader config
     dataloader_cfg = DataloaderConfig(
         dataset_config_list=dataset_config_list,
         pack_level=pack_level,
@@ -324,9 +284,99 @@ def test_preset_dataloader(tmp_path: Path, pack_case: str, sampler_case: str) ->
         pack_config_path=str(pack_dir) if pack_dir is not None else None,
         sampler_config_path=str(order_path) if pack_level == "preset" else None,
         pack_max_length=pack_max_length,
+        round_up=False,  # preset sampler does not support round up
         pad_token_id=None,
-        num_workers=0,
+        num_workers=num_workers,
     )
+
+    return CreateDataloaderConfigResult(
+        dataloader_cfg=dataloader_cfg,
+        global_batch_size=global_batch_size,
+        micro_batch_size=micro_batch_size,
+        seed_ref=seed_ref,
+        sampler_case=sampler_case,
+        num_packs_ref=num_packs_ref,
+    )
+
+
+class _StubJsonl:
+    """Minimal stand-in for ``JsonlDataset``: only ``path`` / ``__len__`` are used by ``PresetPackDataset`` init."""
+
+    def __init__(self, path: str, n_samples: int) -> None:
+        self.path = path
+        self._n = n_samples
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx: int):
+        raise AssertionError("not used in this test")
+
+
+def test_preset_pack_longest_matches_buildin_hard_pack(tmp_path: Path) -> None:
+    rng = np.random.RandomState(7)
+    num_tokens = rng.randint(5, 19, size=20).astype(np.int64)
+    inds = rng.permutation(20).astype(np.int64)
+    pack_max_length = 24
+    anno = str((tmp_path / "stub.jsonl").resolve())
+    (tmp_path / "stub.jsonl").write_text("", encoding="utf-8")
+
+    infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=1)
+    ref_longest = infos["longest"]
+    cfg = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
+
+    pack_dir = tmp_path / "pack"
+    pack_dir.mkdir()
+    np.save(pack_dir / "boundaries.npy", cfg["boundaries"])
+    np.save(pack_dir / "samples.npy", cfg["samples"])
+    (pack_dir / "paths.json").write_text(json.dumps([anno]), encoding="utf-8")
+
+    ds = PresetPackDataset(
+        [_StubJsonl(anno, len(num_tokens))],
+        pack_config_path=str(pack_dir),
+        pack_max_length=pack_max_length,
+        mmap=True,
+    )
+    np.testing.assert_array_equal(ds.longest, ref_longest)
+    assert isinstance(ds._samples, np.memmap) or hasattr(ds._samples, "filename")
+
+    # check LengthGroupedSampler can be initialized with PresetPackDataset
+    LengthGroupedSampler(ds, global_batch_size=2, dp_mesh=None, seed=123)
+
+
+@pytest.mark.parametrize(
+    "pack_case",
+    [
+        pytest.param("preset_pack_simple", id="preset_pack_simple"),
+        pytest.param("preset_pack", id="preset_pack"),
+        pytest.param("hard_pack", id="hard_pack"),
+    ],
+)
+@pytest.mark.parametrize(
+    "sampler_case",
+    [
+        pytest.param("preset_seq_sampler", id="preset_seq_sampler"),
+        pytest.param("preset_group_sampler", id="preset_group_sampler"),
+        pytest.param("group_sampler", id="pack_and_group_sampler_consistent"),
+    ],
+)
+def test_various_dataloader_configs_consistent(tmp_path: Path, pack_case: str, sampler_case: str) -> None:
+    tokenizer_path = os.environ["QWEN3_MOE_PATH"]
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+    bundle = create_dataloader_config(
+        tmp_path,
+        tokenizer,
+        pack_case,
+        sampler_case,
+        seed_ref=1,
+    )
+    dataloader_cfg = bundle.dataloader_cfg
+    global_batch_size = bundle.global_batch_size
+    micro_batch_size = bundle.micro_batch_size
+    seed_ref = bundle.seed_ref
+    seed_ref2 = seed_ref + 1
+    num_packs_ref = bundle.num_packs_ref
 
     # step 5: build dataloader
     def _build(seed: int, shuffle: bool = False):
@@ -359,3 +409,45 @@ def test_preset_dataloader(tmp_path: Path, pack_case: str, sampler_case: str) ->
 
     _pack_info = num_packs_ref if num_packs_ref is not None else "hard (runtime)"
     print(f"--------------- packed samples: {_cnt}, original packed samples: {_pack_info}")
+
+
+def test_preset_pack_sampler_matches_buildin_hard_pack_group_sampler(tmp_path: Path) -> None:
+    """Preset 打包 + PresetSampler(与 LengthGroupedSampler 同序的 order.npy) 应与运行时 HardPack + LengthGroupedSampler 一致。"""
+    tokenizer_path = os.environ["QWEN3_MOE_PATH"]
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+    seed = 1
+    common = dict(
+        sample_num=12,
+        pack_max_length=32,
+        global_batch_size=3,
+        dp_size=1,
+        seed_ref=seed,
+    )
+    pre = create_dataloader_config(tmp_path / "preset_run", tokenizer, "preset_pack", "preset_group_sampler", **common)
+    hard = create_dataloader_config(tmp_path / "hard_run", tokenizer, "hard_pack", "group_sampler", **common)
+
+    dl_pre = pre.dataloader_cfg.build(
+        tokenizer,
+        dp_mesh=None,
+        global_batch_size=pre.global_batch_size,
+        micro_batch_size=pre.micro_batch_size,
+        seed=seed,
+        shuffle=True,
+    )
+    dl_hard = hard.dataloader_cfg.build(
+        tokenizer,
+        dp_mesh=None,
+        global_batch_size=hard.global_batch_size,
+        micro_batch_size=hard.micro_batch_size,
+        seed=seed,
+        shuffle=True,
+    )
+
+    batches_pre = list(dl_pre)
+    batches_hard = list(dl_hard)
+    assert len(batches_pre) == len(batches_hard)
+    for batch_pre, batch_hard in zip(batches_pre, batches_hard):
+        assert len(batch_pre) == len(batch_hard)
+        for x, y in zip(batch_pre, batch_hard):
+            assert torch.equal(x["seq_ctx"].input_ids, y["seq_ctx"].input_ids)
+            assert torch.equal(x["shifted_labels"], y["shifted_labels"])

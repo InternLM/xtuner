@@ -151,6 +151,8 @@ def build_dataloader(
     shuffle: bool = True,
 ) -> Iterable[list[ColateItem]]:
     assert isinstance(datasets, list), "datasets must be a list of datasets."
+    dp_size = dp_mesh.size() if dp_mesh is not None else 1
+    assert global_batch_size % dp_size == 0, "global_batch_size must be divisible by dp_size."
 
     if dataloader_config.pack_level != "none" and get_rank == 0:
         num_tokens = sum(dset.num_tokens.sum() for dset in datasets if dset.num_tokens is not None)
@@ -309,6 +311,7 @@ class DataloaderConfig(BaseDataloaderConfig):
         str | None,
         Parameter(help="path to sampler order .npy (mmap read); required when pack_level='preset'"),
     ] = None
+    round_up: Annotated[bool, Parameter(help="enable or disable round up mode")] = True
 
     @staticmethod
     def _force_preset_pack_settings(dataset_config_list: "DatasetConfigList") -> "DatasetConfigList":
@@ -480,6 +483,7 @@ class DataloaderConfig(BaseDataloaderConfig):
                 sampler_config_path=self.sampler_config_path,
                 global_batch_size=global_batch_size,
                 dp_mesh=dp_mesh,
+                round_up=self.round_up,
             )
         elif self.group_by_length:
             assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
@@ -490,7 +494,11 @@ class DataloaderConfig(BaseDataloaderConfig):
                 f"but got {type(dataset)}"
             )
             sampler = LengthGroupedSampler(
-                dataset=dataset, dp_mesh=dp_mesh, global_batch_size=global_batch_size, seed=seed
+                dataset=dataset,
+                dp_mesh=dp_mesh,
+                global_batch_size=global_batch_size,
+                seed=seed,
+                round_up=self.round_up,
             )
         else:
             sampler = ParallelSampler(
@@ -499,6 +507,7 @@ class DataloaderConfig(BaseDataloaderConfig):
                 global_batch_size=global_batch_size,
                 shuffle=shuffle,
                 seed=seed,
+                round_up=self.round_up,
             )
 
         ctx = torch.multiprocessing.get_context("fork")
