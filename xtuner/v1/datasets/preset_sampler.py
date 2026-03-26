@@ -94,6 +94,7 @@ class PresetSampler(Sampler):
         sampler_config_path: str,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
+        round_up: bool = False,
     ) -> None:
         super().__init__()
 
@@ -101,6 +102,12 @@ class PresetSampler(Sampler):
             raise TypeError(
                 "PresetSampler: sampler_config_path must be a str path to a .npy file, "
                 f"got {type(sampler_config_path).__name__}."
+            )
+
+        if round_up:
+            round_up = False
+            logger.warning(
+                "PresetSampler: round_up is not supported and ignored for preset sampler, due to mmap array limitation."
             )
 
         if dp_mesh is not None:
@@ -125,35 +132,32 @@ class PresetSampler(Sampler):
 
         _validate_pack_indices(order, num_packs)
 
-        step_size = global_batch_size
         raw_len = len(order)
         if raw_len == 0:
             raise ValueError("PresetSampler: sampler order is empty.")
-        rounded_len = (raw_len // step_size) * step_size
-        if rounded_len == 0:
+
+        self.num_samples = (raw_len // self.global_batch_size) * self.global_batch_size // self.world_size
+        self.total_size = self.num_samples * self.world_size
+
+        if self.total_size == 0:
             raise ValueError(
                 f"PresetSampler: sampler order length {raw_len} is smaller than "
-                f"global_batch_size*world_size={step_size}; "
+                f"global_batch_size={self.global_batch_size}; "
                 "cannot round down to a positive multiple. "
-                "Increase the order length or decrease batch size / world size."
             )
-        if rounded_len < raw_len:
+        if self.total_size < raw_len:
             logger.info(
-                f"PresetSampler: truncating sampler order from {raw_len} to {rounded_len} "
-                f"(multiple of {step_size}, round-down)."
+                f"PresetSampler: truncating sampler order from {raw_len} to {self.total_size} "
+                f"(multiple of {self.global_batch_size}, round-down)."
             )
 
-        effective = order[:rounded_len]
-        self.global_order = effective
-
-        self._local_indices = effective[self.rank :: self.world_size]
-        self.total_size = rounded_len
-        self.num_samples = len(self._local_indices)
+        self.global_order = order[: self.total_size]
+        self._local_indices = self.global_order[self.rank :: self.world_size]
 
         self.epoch = 0
         self.step = 0
 
-        _log_coverage_summary(effective, num_packs)
+        _log_coverage_summary(self.global_order, num_packs)
 
     def __iter__(self) -> Iterator[int]:
         yield from self._local_indices[self.step :]
