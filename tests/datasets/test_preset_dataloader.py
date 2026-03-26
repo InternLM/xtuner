@@ -2,7 +2,6 @@
 
 import json
 import os
-import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -14,13 +13,15 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.datasets import PretrainTokenizeFunctionConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig, build_datasets
-from xtuner.v1.datasets.packing import (
+from xtuner.v1.datasets.packing import get_pack_infos_by_hard_split
+from xtuner.v1.datasets.preset_pack import PresetPackDataset
+from xtuner.v1.datasets.sampler import LengthGroupedSampler
+from xtuner.v1.datasets.utils import (
     concat_cumulative_sizes_from_lengths,
     get_dataset_id_and_sample_idx_from_idx,
-    get_pack_infos_by_hard_split,
+    get_pack_config_from_pack_infos_by_hard_split,
+    get_sampler_config,
 )
-from xtuner.v1.datasets.preset_pack import PresetPackDataset
-from xtuner.v1.datasets.sampler import LengthGroupedSampler, get_length_grouped_indices
 
 
 def get_pack_config_by_simple_hard_split(
@@ -69,44 +70,6 @@ def get_pack_config_by_simple_hard_split(
             cur_sum += take
             pos += take
             close()
-    samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
-    return {"boundaries": np.asarray(boundaries, dtype=np.int64), "samples": samples}
-
-
-def get_pack_config_from_pack_infos_by_hard_split(
-    pack_infos: dict[str, np.ndarray],
-    path_id: int,
-    num_tokens: np.ndarray,
-    *,
-    concat_cumulative_sizes: np.ndarray | None = None,
-) -> dict[str, np.ndarray]:
-    """Same keys as ``get_pack_config_by_simple_hard_split``; built from ``get_pack_infos_by_hard_split`` output.
-
-    When ``concat_cumulative_sizes`` is provided, each ``indices`` entry is a flat ``ConcatDataset`` index and is
-    converted via :func:`get_dataset_id_and_sample_idx_from_idx` to ``(path_id, sample_idx)`` for the preset NPY.
-    Otherwise ``path_id`` is fixed and ``idx`` is written as ``sample_idx`` (single-JsonlDataset case).
-    """
-    npack = int(pack_infos["dataset_id"].shape[0])
-    rows: list[list[int]] = []
-    boundaries: list[int] = [0]
-    cu, ix = pack_infos["indices_cu_len"], pack_infos["indices"]
-    starts, ends = pack_infos["start_offset"], pack_infos["end_offset"]
-    for item in range(npack):
-        i0 = 0 if item == 0 else int(cu[item - 1])
-        i1 = int(cu[item])
-        indices = ix[i0:i1]
-        s_off, e_off = int(starts[item]), int(ends[item])
-        for i, idx in enumerate(indices):
-            idx_i = int(idx)
-            L = int(num_tokens[idx_i])
-            st = 0 if i else s_off
-            ed = L if i < len(indices) - 1 else e_off
-            if concat_cumulative_sizes is not None:
-                row_path_id, sample_idx = get_dataset_id_and_sample_idx_from_idx(idx_i, concat_cumulative_sizes)
-            else:
-                row_path_id, sample_idx = path_id, idx_i
-            rows.append([row_path_id, sample_idx, -1, -1, st, ed])
-        boundaries.append(len(rows))
     samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
     return {"boundaries": np.asarray(boundaries, dtype=np.int64), "samples": samples}
 
@@ -180,68 +143,6 @@ def test_preset_pack_config_with_multiple_datasets_matches_concat_dataset_refere
 
     np.testing.assert_array_equal(simple["boundaries"], ref["boundaries"])
     np.testing.assert_array_equal(simple["samples"], ref["samples"])
-
-
-def get_sampler_config(
-    order_path: Path,
-    *,
-    mode: Literal["sequential", "length_grouped"],
-    num_packs: int,
-    longest: np.ndarray | list | tuple | None = None,
-    global_batch_size: int = 2,
-    world_size: int = 1,
-    seed: int = 0,
-    epoch: int = 0,
-) -> np.ndarray:
-    """Build pack index order and persist to ``order_path`` (``.npy``).
-
-    Args:
-        order_path: Output path for a 1-D int64 array of pack indices (same format as training).
-        mode:
-            ``sequential`` — ``0..num_packs-1`` (legacy / PresetSampler baseline).
-            ``length_grouped`` — same megabatch + sort + group shuffle logic as
-            :class:`LengthGroupedSampler` via :func:`get_length_grouped_indices`.
-        num_packs: Number of valid packs (length of the order permutation).
-        longest: Per-pack max token length; required when ``mode=='length_grouped'``.
-        global_batch_size: Same as dataloader ``global_batch_size`` (drives megabatch sizing).
-        world_size: Same as distributed world size (``group_size`` in length-grouped logic).
-        seed / epoch: Match :class:`LengthGroupedSampler` (`seed + epoch` for both RNGs).
-
-    Returns:
-        The saved order array.
-    """
-    if mode == "sequential":
-        order = np.arange(num_packs, dtype=np.int64)
-    elif mode == "length_grouped":
-        if longest is None:
-            raise ValueError("longest is required when mode is 'length_grouped'")
-        longest_arr = np.asarray(longest)
-        if longest_arr.shape[0] != num_packs:
-            raise ValueError(f"len(longest)={longest_arr.shape[0]} must equal num_packs={num_packs}")
-        mega_batch_mult = min(
-            num_packs // (global_batch_size * LengthGroupedSampler.GROUP_BATCH_FACTOR),
-            LengthGroupedSampler.MAX_GROUP_BATCH_SIZE,
-        )
-        if mega_batch_mult == 0:
-            mega_batch_mult = 1
-        group_batch_size = mega_batch_mult * global_batch_size
-        group_size = world_size
-        torch_generator = torch.Generator()
-        torch_generator.manual_seed(seed + epoch)
-        random_generator = random.Random()
-        random_generator.seed(seed + epoch)
-        order_list = get_length_grouped_indices(
-            max_lengths=longest_arr,
-            group_batch_size=group_batch_size,
-            group_size=group_size,
-            torch_generator=torch_generator,
-            random_generator=random_generator,
-        )
-        order = np.asarray(order_list, dtype=np.int64)
-    else:
-        raise ValueError(f"unknown mode: {mode!r}")
-    np.save(order_path, order)
-    return order
 
 
 @dataclass(frozen=True)
