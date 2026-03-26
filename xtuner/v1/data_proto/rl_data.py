@@ -86,7 +86,7 @@ class RLUIDItem(BaseModel):
 class MultimodalTrainInfo(TypedDict):
     pixel_values: NotRequired[torch.Tensor | RayObjectRef | None]  # type: ignore[valid-type]
     image_grid_thw: NotRequired[torch.Tensor]
-    position_ids: NotRequired[torch.Tensor]
+    position_ids: NotRequired[torch.Tensor | None]
 
 
 class RLDatasetItem(BaseModel):

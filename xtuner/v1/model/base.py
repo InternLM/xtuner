@@ -1017,8 +1017,20 @@ class BaseModel(nn.Module):
                 buffer_name_list.append(load_spec.hf_keys[0])
                 continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
-            local_tensor = local_tensor.to(dtype=self._get_save_dtype(load_spec.hf_keys[0], torch.bfloat16))
-            tensor_size = self._get_tensor_size(param, dtype)
+            if self.fsdp_config.fp32_lm_head and load_spec.hf_keys[0] == "lm_head.weight":
+                logger.info(f"handling same hf param: {load_spec.hf_keys} separately")
+                lm_head_tensor_list = self._fsdp_foreach_allgather([local_tensor], [load_spec])
+                lm_head_tensor_list = [
+                    self.param_to_safetensor(safetensor, name)
+                    for safetensor, name in zip(lm_head_tensor_list, load_spec.hf_keys.copy())
+                ]
+                lm_head_tensor_list = [t.to(device=device) for t in lm_head_tensor_list]
+                yield load_spec.hf_keys.copy(), lm_head_tensor_list
+                del lm_head_tensor_list, local_tensor
+                continue
+            else:
+                local_tensor = local_tensor.to(dtype=self._get_save_dtype(load_spec.hf_keys[0], torch.bfloat16))
+                tensor_size = self._get_tensor_size(param, dtype)
             if safetensor_size + tensor_size > bucket_size and tensor_list:
                 if self.fsdp_mesh is not None:
                     gathered_tensor_list = self._fsdp_foreach_allgather(tensor_list, load_spec_list)

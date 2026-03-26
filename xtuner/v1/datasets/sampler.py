@@ -4,6 +4,7 @@ import random
 from typing import Iterator, Optional
 
 import torch
+from datasets.arrow_dataset import Column
 from mmengine.dist import sync_random_seed
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.data import ConcatDataset as TorchConcatDataset
@@ -221,7 +222,7 @@ class LengthGroupedSampler(Sampler):
         self.group_size = self.world_size
 
         self.max_lengths = self.dataset.longest
-        assert isinstance(self.max_lengths, (list, tuple))
+        assert isinstance(self.max_lengths, (list, tuple, Column))
 
         self.global_batch_size = global_batch_size
 
