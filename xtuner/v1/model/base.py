@@ -510,6 +510,26 @@ class BaseModel(nn.Module):
         if missing := {self._clean_param_name(name) for name, _ in self.named_parameters()} - initialized_params:
             raise RuntimeError(f"{missing} is not initialized")
 
+    def build_rotary_embedding(self, config):
+        # NOTE: XTuner initializes the entire model on meta device to avoid the overhead of allocating and
+        # initializing real tensors upfront — weights will either be loaded from a HuggingFace checkpoint or
+        # initialized from scratch afterward. However, rotary embedding must be initialized on CPU even when the
+        # rest of the model is on meta device, for the following reasons:
+        #
+        # 1. Its buffers (e.g. `inv_freq`) require real arithmetic and cannot be computed on meta device.
+        # 2. Its buffers are not model parameters, so the HuggingFace weight-loading path does not populate them.
+        #    After `.to_empty()`, these buffers remain garbage-initialized, which would silently corrupt training.
+        #
+        # CPU is chosen specifically (rather than CUDA) to keep the computation numerically aligned with inference
+        # engines (e.g. lmdeploy) during RL-phase training.
+        #
+        # To avoid repeating this error-prone logic in every subclass, the construction is encapsulated in
+        # get_rope_embedding, and this default build_rotary_embedding in BaseModel enforces CPU initialization.
+        from xtuner.v1.module.rope import get_rope_embedding
+
+        with torch.device("cpu"):
+            return get_rope_embedding(config=config)
+
     def _init_load_spec(self) -> None:
         # NOTE: (yehaochen) This is a workaround to distinguish between different parameter HF loading methods
         # and model partitioning methods. Although PyTorch provides Shard, Replicate and other Placements, in

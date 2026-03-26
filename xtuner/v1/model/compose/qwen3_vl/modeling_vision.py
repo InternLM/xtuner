@@ -85,7 +85,7 @@ class Qwen3VLVisionRotaryEmbedding(nn.Module):
 
     def forward(self, seqlen: int) -> torch.Tensor:
         seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-        freqs = torch.outer(seq, self.inv_freq)
+        freqs = torch.outer(seq, self.inv_freq).to(DEVICE)
         return freqs
 
 
@@ -254,10 +254,6 @@ class Qwen3VLVisionModel(BaseModel):
         self._hf_prefix = "model.visual."
         self._init_load_spec()
 
-    def build_rotary_embedding(self, config: Qwen3VLVisionConfig):
-        head_dim = config.hidden_size // config.num_attention_heads
-        return Qwen3VLVisionRotaryEmbedding(head_dim // 2)
-
     @torch.no_grad()
     def init_weights(self):
         # If the model is trained from scratch, this will be triggered. It has not been strictly tested.
@@ -303,7 +299,6 @@ class Qwen3VLVisionModel(BaseModel):
         loaded_keys, unloaded_keys, missing_keys = super().from_hf(hf_path, strict)
         # If model is built on meta device, we need to rebuild rotary embedding since from_hf will not
         # load the `inv_freq` of RotaryEmbedding which is a inpersisitent buffer.
-        self.rotary_pos_emb = self.build_rotary_embedding(self.config)
         return loaded_keys, unloaded_keys, missing_keys
 
     @override
@@ -333,8 +328,6 @@ class Qwen3VLVisionModel(BaseModel):
         else:
             for param in self.parameters():
                 param.requires_grad = False
-
-        self.rotary_pos_emb = self.build_rotary_embedding(self.config)
 
         checkpoint_preserve_rng_state = fsdp_config.checkpoint_preserve_rng_state
         num_recompute_layers = int(len(self.blocks) * fsdp_config.vision_recompute_ratio)
