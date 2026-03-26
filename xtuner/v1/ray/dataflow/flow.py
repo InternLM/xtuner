@@ -152,6 +152,8 @@ class RawDataFlow:
         self.skipped_sample_count = 0
         self.failed_sample_count = 0
         self.filtered_samples_count = 0
+        self._raw_reward_sum = 0.0
+        self._raw_reward_count = 0
         self.tb_metrics: Dict[str, Any] = {}
         self.target_batch_size = self.config.global_batch_size
         rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
@@ -190,6 +192,8 @@ class RawDataFlow:
         self.skipped_sample_count = 0
         self.failed_sample_count = 0
         self.filtered_samples_count = 0
+        self._raw_reward_sum = 0.0
+        self._raw_reward_count = 0
         self.tb_metrics = {}
         if global_batch_size and global_batch_size > 0:
             self.target_batch_size = global_batch_size
@@ -254,6 +258,15 @@ class RawDataFlow:
         group_state = determine_group_state(group_data_items)
         self.logger.debug(f"Determined replay state for {action_id}: {group_state}")
         if group_state == RolloutState.COMPLETED:
+            # Accumulate raw rewards before post_processor filters samples out.
+            for item in group_data_items:
+                reward_data = getattr(item.env, "judger", None)
+                if reward_data is not None:
+                    reward_dict = reward_data.reward if hasattr(reward_data, "reward") else reward_data
+                    score = reward_dict.get("score") if isinstance(reward_dict, dict) else None
+                    if score is not None:
+                        self._raw_reward_sum += score
+                        self._raw_reward_count += 1
             if not self.sample_from_expired_storage:
                 group_data_items = self.replay_buffer.post_processor(group_data_items)  # type: ignore[attr-defined]
             if len(group_data_items) > 0:
@@ -490,6 +503,11 @@ class RawDataFlow:
         logging_msg += f"skipped_samples_count: {self.skipped_sample_count}, "
         logging_msg += f"failed_samples_count: {self.failed_sample_count}, "
         logging_msg += f"filtered_samples_count: {self.filtered_samples_count}, "
+        if self._raw_reward_count > 0:
+            avg_raw_reward = self._raw_reward_sum / self._raw_reward_count
+            logging_msg += f"avg_raw_reward: {avg_raw_reward:.6f} (n={self._raw_reward_count}), "
+            self.tb_metrics["reward/avg_raw_reward"] = avg_raw_reward
+            self.tb_metrics["reward/raw_reward_count"] = self._raw_reward_count
         self.logger.info(logging_msg)
 
     def get_replaybuffer_status(self):
