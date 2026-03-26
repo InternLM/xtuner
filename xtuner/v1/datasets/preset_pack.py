@@ -19,6 +19,7 @@ from xtuner.v1.utils import get_logger
 
 from .data_item import DataItem, LongTextDataItem
 from .jsonl import JsonlDataset
+from .utils import get_longest
 
 
 logger = get_logger()
@@ -190,16 +191,7 @@ class PresetPackDataset(tud.Dataset):
         A new int64 vector of shape ``(num_packs,)`` on each access (not cached) so ``_samples`` /
         ``_boundaries`` stay mmap-backed.
         """
-        n = len(self)
-        if n == 0:
-            return np.empty(0, dtype=np.int64)
-        b = self._boundaries.astype(np.int64, copy=False)
-        counts = b[1:] - b[:-1]
-        tok_lens = self._samples[:, 5] - self._samples[:, 4]
-        pack_idx = np.repeat(np.arange(n, dtype=np.int64), counts)
-        out = np.zeros(n, dtype=np.int64)
-        np.maximum.at(out, pack_idx, tok_lens)
-        return out
+        return get_longest(self._boundaries, self._samples)
 
     def __getitem__(self, i: int) -> list[DataItem]:
         start = int(self._boundaries[i])
