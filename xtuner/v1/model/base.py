@@ -1017,7 +1017,11 @@ class BaseModel(nn.Module):
                 buffer_name_list.append(load_spec.hf_keys[0])
                 continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
-            if self.fsdp_config.fp32_lm_head and load_spec.hf_keys[0] == "lm_head.weight":
+            if (
+                self.fsdp_config is not None
+                and self.fsdp_config.fp32_lm_head
+                and load_spec.hf_keys[0] == "lm_head.weight"
+            ):
                 logger.info(f"handling same hf param: {load_spec.hf_keys} separately")
                 lm_head_tensor_list = self._fsdp_foreach_allgather([local_tensor], [load_spec])
                 lm_head_tensor_list = [
