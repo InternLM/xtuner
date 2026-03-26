@@ -328,7 +328,7 @@ case:
         -
             type: sft
             parameters:
-                config: autotest/config/qwen3_5_30B_sft_vl.py
+                config: autotest/config/qwen3_5_35B_sft_vl.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 cpus_per_task: 80
