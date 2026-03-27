@@ -43,8 +43,12 @@ class _SkipEmptyThink(ABC):
         super().__init__(tokenizer, *args, **kwargs)
         self._tokenizer = tokenizer
         if "<think>" in tokenizer.added_tokens_encoder:
+            # <think>\n\n</think>\n\n 不算 loss
+            # <think>\n 不算 loss
+            # <think></think> 原则上要报错，且不算 loss
             self._skip_seq = [
                 tokenizer.added_tokens_encoder["<think>"],
+                *tokenizer.encode("\n\n"),
                 tokenizer.added_tokens_encoder["</think>"],
                 *tokenizer.encode("\n\n"),
             ]
@@ -57,6 +61,8 @@ class _SkipEmptyThink(ABC):
             self._skip_seq = []
             self._skip_seq_fallback = []
             self._think_token = None
+
+        self.skip_token = tokenizer.encode("\n")[0]
 
         if not self._skip_seq:
             logger.warning("`SkipEmptyThink` is disabled because <think> or </think> token is not found in tokenizer.")
@@ -80,17 +86,21 @@ class _SkipEmptyThink(ABC):
         new_labels = []
         buffer = []
         label_buffer = []
+        pre_label_id = None
 
         for label_id, token_id in zip(labels, input_ids):
             buffer.append(token_id)
 
             # Since <think> is filled by chat template, never calculate loss on it
             if label_id == self._think_token:
+                pre_label_id = label_id
                 label_buffer.append(-100)
             else:
+                if pre_label_id == self._think_token and token_id == self.skip_token:
+                    label_id = -100
                 label_buffer.append(label_id)
+                pre_label_id = label_id
 
-            # Check if buffer matches skip_seq
             if buffer == self._skip_seq:
                 # Complete match found, replace with -100
                 new_labels.extend([-100] * len(self._skip_seq))
