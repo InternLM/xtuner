@@ -189,6 +189,53 @@ def test_preset_pack_config_with_multiple_datasets_matches_concat_dataset_refere
     np.testing.assert_array_equal(simple["longest"], ref["longest"])
 
 
+@pytest.mark.parametrize("pack_workers", [1, 8])
+def test_get_pack_config_from_pack_infos_loop_matches_numpy(pack_workers: int) -> None:
+    """``mode='loop'`` 与 ``mode='numpy'`` 输出一致（单数据集与 Concat 索引空间）。"""
+    rng = np.random.RandomState(404)
+
+    n_tokens = 30
+    num_tokens = rng.randint(8, 25, size=n_tokens).astype(np.int64)
+    inds = rng.permutation(n_tokens).astype(np.int64)
+    pack_max_length = 40
+    assert int(num_tokens.sum()) >= 2 * pack_max_length
+
+    pack_paths = ["only.jsonl"]
+    infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=pack_workers)
+    out_loop = get_pack_config_from_pack_infos_by_hard_split(
+        infos, 3, num_tokens, paths=pack_paths, mode="loop"
+    )
+    out_numpy = get_pack_config_from_pack_infos_by_hard_split(
+        infos, 3, num_tokens, paths=pack_paths, mode="numpy"
+    )
+    np.testing.assert_array_equal(out_loop["boundaries"], out_numpy["boundaries"])
+    np.testing.assert_array_equal(out_loop["samples"], out_numpy["samples"])
+    np.testing.assert_array_equal(out_loop["longest"], out_numpy["longest"])
+    assert out_loop["paths"] == out_numpy["paths"]
+
+    n0, n1 = 13, 17
+    tok0 = rng.randint(6, 18, size=n0).astype(np.int64)
+    tok1 = rng.randint(6, 18, size=n1).astype(np.int64)
+    num_tokens_m = np.concatenate([tok0, tok1])
+    cu_m = concat_cumulative_sizes_from_lengths([n0, n1])
+    inds_m = rng.permutation(n0 + n1).astype(np.int64)
+    pack_max_m = 32
+    assert int(num_tokens_m.sum()) >= 2 * pack_max_m
+
+    pack_paths_m = ["ds0.jsonl", "ds1.jsonl"]
+    infos_m = get_pack_infos_by_hard_split(inds_m, 0, num_tokens_m, pack_max_m, pack_workers=pack_workers)
+    out_loop_m = get_pack_config_from_pack_infos_by_hard_split(
+        infos_m, 0, num_tokens_m, concat_cumulative_sizes=cu_m, paths=pack_paths_m, mode="loop"
+    )
+    out_numpy_m = get_pack_config_from_pack_infos_by_hard_split(
+        infos_m, 0, num_tokens_m, concat_cumulative_sizes=cu_m, paths=pack_paths_m, mode="numpy"
+    )
+    np.testing.assert_array_equal(out_loop_m["boundaries"], out_numpy_m["boundaries"])
+    np.testing.assert_array_equal(out_loop_m["samples"], out_numpy_m["samples"])
+    np.testing.assert_array_equal(out_loop_m["longest"], out_numpy_m["longest"])
+    assert out_loop_m["paths"] == out_numpy_m["paths"]
+
+
 class _StubJsonl:
     """Minimal stand-in for ``JsonlDataset``: only ``path`` / ``__len__`` are used by ``PresetPackDataset`` init."""
 

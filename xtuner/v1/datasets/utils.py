@@ -346,6 +346,29 @@ def get_dataset_id_and_sample_idx_from_idx(idx: int, cumulative_sizes: np.ndarra
     return sub_id, sample_idx
 
 
+def _vectorized_flat_to_subdataset_ids(
+    flat_idx: np.ndarray, cumulative_sizes: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Batched version of :func:`get_dataset_id_and_sample_idx_from_idx`."""
+
+    ccs = np.asarray(cumulative_sizes, dtype=np.int64).reshape(-1)
+    idx_i = flat_idx.astype(np.int64, copy=False)
+    total = int(ccs[-1])
+    if np.any(idx_i < 0):
+        idx_i = idx_i.copy()
+        neg = idx_i < 0
+        neg_vals = -idx_i[neg]
+        if np.any(neg_vals > total):
+            raise ValueError("absolute value of index should not exceed dataset length")
+        idx_i[neg] = total + idx_i[neg]
+    sub_id = np.searchsorted(ccs, idx_i, side="right").astype(np.int64, copy=False)
+    prev = np.zeros_like(idx_i, dtype=np.int64)
+    m = sub_id > 0
+    prev[m] = ccs[sub_id[m] - 1]
+    sample_idx = idx_i - prev
+    return sub_id, sample_idx
+
+
 def get_longest(boundaries: np.ndarray, samples: np.ndarray) -> np.ndarray:
     """Per-pack max sub-sample token length from CSR ``boundaries`` and
     ``samples`` rows.
@@ -369,27 +392,15 @@ def get_longest(boundaries: np.ndarray, samples: np.ndarray) -> np.ndarray:
     return out
 
 
-def get_pack_config_from_pack_infos_by_hard_split(
+def _pack_config_from_pack_infos_loop(
     pack_infos: dict[str, np.ndarray],
     path_id: int,
     num_tokens: np.ndarray,
     *,
     paths: list[str],
-    concat_cumulative_sizes: np.ndarray | None = None,
+    concat_cumulative_sizes: np.ndarray | None,
 ) -> dict[str, Any]:
-    """Same keys as ``get_pack_config_by_simple_hard_split``; built from
-    ``get_pack_infos_by_hard_split`` output.
-
-    When ``concat_cumulative_sizes`` is provided, each ``indices`` entry is a flat ``ConcatDataset`` index and is
-    converted via :func:`get_dataset_id_and_sample_idx_from_idx` to ``(path_id, sample_idx)`` for the preset NPY.
-    Otherwise ``path_id`` is fixed and ``idx`` is written as ``sample_idx`` (single-JsonlDataset case).
-
-    ``paths`` is echoed into the returned dict (for writing ``paths.json`` next to preset NPY files).
-    """
-    if concat_cumulative_sizes is None:
-        assert len(paths) == 1
-    else:
-        assert len(paths) == len(concat_cumulative_sizes)
+    """Original Python-loop implementation (reference for ``mode='loop'``)."""
 
     npack = int(pack_infos["dataset_id"].shape[0])
     rows: list[list[int]] = []
@@ -420,6 +431,116 @@ def get_pack_config_from_pack_infos_by_hard_split(
         "longest": pack_infos["longest"],
         "paths": list(paths),
     }
+
+
+def _pack_config_from_pack_infos_numpy(
+    pack_infos: dict[str, np.ndarray],
+    path_id: int,
+    num_tokens: np.ndarray,
+    *,
+    paths: list[str],
+    concat_cumulative_sizes: np.ndarray | None,
+) -> dict[str, Any]:
+    """Vectorized NumPy implementation (``mode='numpy'``)."""
+
+    cu = np.asarray(pack_infos["indices_cu_len"], dtype=np.int64).reshape(-1)
+    ix = np.asarray(pack_infos["indices"], dtype=np.int64).reshape(-1)
+    n_total = int(ix.shape[0])
+    npack = int(cu.shape[0])
+    longest = pack_infos["longest"]
+
+    j = np.arange(n_total, dtype=np.int64)
+    pack_id = np.digitize(j, cu, right=False).astype(np.int64, copy=False)
+    pack_starts = np.empty(npack, dtype=np.int64)
+    pack_starts[0] = 0
+    if npack > 1:
+        pack_starts[1:] = cu[:-1]
+    pos_in_pack = j - pack_starts[pack_id]
+    pack_len = (cu - pack_starts).astype(np.int64, copy=False)
+
+    starts_arr = np.asarray(pack_infos["start_offset"], dtype=np.int64).reshape(-1)
+    ends_arr = np.asarray(pack_infos["end_offset"], dtype=np.int64).reshape(-1)
+    st = np.where(pos_in_pack == 0, starts_arr[pack_id], np.int64(0))
+    L_all = np.take(np.asarray(num_tokens, dtype=np.int64).reshape(-1), ix, mode="raise")
+    is_last = pos_in_pack == (pack_len[pack_id] - 1)
+    ed = np.where(is_last, ends_arr[pack_id], L_all)
+
+    samples = np.empty((n_total, 6), dtype=np.int64)
+    if concat_cumulative_sizes is not None:
+        ccs = np.asarray(concat_cumulative_sizes, dtype=np.int64).reshape(-1)
+        samples[:, 0], samples[:, 1] = _vectorized_flat_to_subdataset_ids(ix, ccs)
+    else:
+        samples[:, 0] = np.int64(path_id)
+        samples[:, 1] = ix
+    samples[:, 2] = -1
+    samples[:, 3] = -1
+    samples[:, 4] = st
+    samples[:, 5] = ed
+
+    boundaries_arr = np.empty(npack + 1, dtype=np.int64)
+    boundaries_arr[0] = 0
+    boundaries_arr[1:] = cu
+
+    return {
+        "boundaries": boundaries_arr,
+        "samples": samples,
+        "longest": longest,
+        "paths": list(paths),
+    }
+
+
+def get_pack_config_from_pack_infos_by_hard_split(
+    pack_infos: dict[str, np.ndarray],
+    path_id: int,
+    num_tokens: np.ndarray,
+    *,
+    paths: list[str],
+    concat_cumulative_sizes: np.ndarray | None = None,
+    mode: Literal["loop", "numpy"] = "numpy",
+) -> dict[str, Any]:
+    """Same keys as ``get_pack_config_by_simple_hard_split``; built from
+    ``get_pack_infos_by_hard_split`` output.
+
+    When ``concat_cumulative_sizes`` is provided, each ``indices`` entry is a flat ``ConcatDataset`` index and is
+    converted via :func:`get_dataset_id_and_sample_idx_from_idx` to ``(path_id, sample_idx)`` for the preset NPY.
+    Otherwise ``path_id`` is fixed and ``idx`` is written as ``sample_idx`` (single-JsonlDataset case).
+
+    ``paths`` is echoed into the returned dict (for writing ``paths.json`` next to preset NPY files).
+
+    Args:
+        mode: ``loop`` — original nested-loop implementation; ``numpy`` — vectorized (default).
+    """
+    if concat_cumulative_sizes is None:
+        assert len(paths) == 1
+    else:
+        assert len(paths) == len(concat_cumulative_sizes)
+
+    if mode not in ("loop", "numpy"):
+        raise ValueError(f"unknown mode: {mode!r}, expected 'loop' or 'numpy'")
+
+    cu = np.asarray(pack_infos["indices_cu_len"], dtype=np.int64).reshape(-1)
+    ix = np.asarray(pack_infos["indices"], dtype=np.int64).reshape(-1)
+    n_total = int(ix.shape[0])
+    longest = pack_infos["longest"]
+
+    if n_total == 0:
+        return {
+            "boundaries": np.array([0], dtype=np.int64),
+            "samples": np.empty((0, 6), dtype=np.int64),
+            "longest": longest,
+            "paths": list(paths),
+        }
+
+    if int(cu[-1]) != n_total:
+        raise ValueError(f"len(indices)={n_total} must equal indices_cu_len[-1]={int(cu[-1])}")
+
+    if mode == "loop":
+        return _pack_config_from_pack_infos_loop(
+            pack_infos, path_id, num_tokens, paths=paths, concat_cumulative_sizes=concat_cumulative_sizes
+        )
+    return _pack_config_from_pack_infos_numpy(
+        pack_infos, path_id, num_tokens, paths=paths, concat_cumulative_sizes=concat_cumulative_sizes
+    )
 
 
 def get_sampler_config(
