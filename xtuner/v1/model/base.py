@@ -8,7 +8,7 @@ from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Iterable, Literal, Mapping, Sequence, cast
+from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -39,7 +39,7 @@ from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
-from xtuner.v1.loss import BaseLossContext
+from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
@@ -106,6 +106,7 @@ class XTunerBaseModelConfig(PydanticBaseModel):
     ] = None
     hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
     dcp_ignore_frozen_params: bool = True
+    lm_loss_cfg: BaseLossConfig = CELossConfig()
 
     @property
     def hf_config(self) -> PretrainedConfig | None:
@@ -250,7 +251,7 @@ def _is_float8_available():
 
 class ModelItem(TypedDict):
     seq_ctx: SequenceContext
-    loss_ctx: BaseLossContext
+    loss_ctx: dict[str, BaseLossContext] | None
 
 
 def is_float8_weight(tensor):
@@ -672,6 +673,82 @@ class BaseModel(nn.Module):
             gathered_tensor_list_new.extend([gathered_tensor_fp8, scale])
             name_list_new.extend([name, f"{name}_scale_inv"])
         return gathered_tensor_list_new, name_list_new
+
+    def build_loss_ctx_batch(
+        self,
+        data_batch: list[dict],
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list[dict[str, dict]]:
+        """Build and calibrate loss contexts for the entire batch.
+
+        For Dense model, only LM loss is needed.
+
+        Args:
+            data_batch (list[dict]): All microbatch data
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh
+            cu_seq_lens_list (list[torch.IntTensor] | None): For calibration
+
+        Returns:
+            list[dict[str, BaseLossContext]]: Loss context dict for each microbatch
+        """
+        cu_seq_lens_list = [data["seq_ctx"].cu_seq_lens_k for data in data_batch]
+        res: list[dict] = [{} for _ in range(len(data_batch))]
+
+        lm_loss_ctx_list = self._build_loss_ctx(self.config.lm_loss_cfg, data_batch, sp_mesh)
+
+        if lm_loss_ctx_list is not None:
+            loss_ctx_cls = lm_loss_ctx_list[0].__class__
+            lm_loss_ctx_list = loss_ctx_cls.build_batches(
+                lm_loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=sp_mesh
+            )
+
+            if lm_loss_ctx_list is not None:
+                for i, lm_loss_ctx in enumerate(lm_loss_ctx_list):
+                    res[i]["lm"] = lm_loss_ctx
+
+        return res
+
+    def _add_auxiliary_loss(
+        self,
+        loss_name: str,
+        loss_cfg: Any,
+        data_batch: list[dict],
+        res: list[dict],
+    ) -> None:
+        """Add auxiliary loss contexts to result.
+
+        This helper builds loss contexts, calibrates them across the batch,
+        and adds them to the result dictionary. If loss_cfg is None, does nothing.
+
+        Args:
+            loss_name (str): Name of the loss (e.g., "balancing", "z_loss").
+            loss_cfg (Any): Loss configuration with a build() method. If None, skipped.
+            data_batch (list[dict]): Batch data.
+            res (list[dict]): Result dictionary to populate. Modified in-place.
+
+        Example:
+            def build_loss_ctx_batch(self, data_batch, sp_mesh):
+                res = super().build_loss_ctx_batch(data_batch, sp_mesh)
+
+                # One line per auxiliary loss
+                self._add_auxiliary_loss("balancing", self.config.balancing_loss_cfg, data_batch, res)
+                self._add_auxiliary_loss("z_loss", self.config.z_loss_cfg, data_batch, res)
+
+                return res
+        """
+        if loss_cfg is None:
+            return
+
+        # Build loss contexts for all microbatches
+        ctx_list = [loss_cfg.build() for _ in data_batch]
+
+        # Calibrate across batch
+        ctx_cls = ctx_list[0].__class__
+        ctx_list = ctx_cls.build_batches(ctx_list)
+
+        # Add to result
+        for i, ctx in enumerate(ctx_list):
+            res[i][loss_name] = ctx  # type: ignore
 
     def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
         step_consumed_tokens = torch.tensor(0, device=DEVICE)
@@ -1461,6 +1538,9 @@ class BaseModel(nn.Module):
                 continue
             _loaded_tensor.append(weight.to(local_tensor.device))
 
+        if not _loaded_tensor:
+            return missing_keys
+
         if not hf_keys:
             # fp8 pad
             assert self.config.float8_cfg is not None
@@ -1800,19 +1880,34 @@ class BaseModel(nn.Module):
             ret[name] = param
         return ret
 
+    def _build_loss_ctx(
+        self, loss_ctx_cfg: BaseLossConfig | None, data_batch: list[dict], sp_mesh: DeviceMesh | None
+    ) -> list[BaseLossContext] | None:
+        if loss_ctx_cfg is None:
+            return None
+
+        first_loss_ctx = loss_ctx_cfg.build(data=data_batch[0], sp_mesh=sp_mesh)
+        # If first build returns None, assume all data in the batch have the same schema
+        # and will also return None (e.g., missing required fields like shifted_labels)
+        if first_loss_ctx is None:
+            return None
+        else:
+            ret = [first_loss_ctx] + [loss_ctx_cfg.build(data=data, sp_mesh=sp_mesh) for data in data_batch[1:]]
+            return ret  # type: ignore[return-value]
+
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        loss_ctx: BaseLossContext | None,
+        loss_ctx: dict[str, BaseLossContext] | None,
     ) -> ModelOutputs: ...
 
     @overload  # type: ignore
     def __call__(  # type: ignore
         self,
         seq_ctx: list[SequenceContext],
-        loss_ctx: list[BaseLossContext],
+        loss_ctx: list[dict[str, BaseLossContext]],
     ) -> ModelOutputs: ...
 
     __call__ = nn.Module.__call__

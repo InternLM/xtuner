@@ -3,17 +3,10 @@ from abc import ABC, abstractmethod
 from typing import Annotated, Any, Literal, TypeVar
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.nn.functional import all_reduce
-from typing_extensions import Self
-
-from xtuner.v1.loss.utils import sp_split
-
-from .chunk_loss import ChunkLoss
 
 
 # Do loss calibration among dp, sp and grad accumulation:
@@ -46,18 +39,13 @@ from .chunk_loss import ChunkLoss
 
 
 class BaseLossKwargs(BaseModel):
-    """Everything needed to compute the loss."""
+    """Everything needed to compute the loss.
+
+    Subclasses should implement sp_split() and to() methods if they contain tensors that need to be split across
+    sequence parallel mesh or moved to device.
+    """
 
     model_config = ConfigDict(title="loss keyword arguments", extra="forbid", arbitrary_types_allowed=True)
-    shifted_labels: torch.Tensor
-
-    def sp_split(self, sp_mesh: DeviceMesh) -> Self:
-        self.shifted_labels = sp_split(self.shifted_labels, sp_mesh=sp_mesh, split_dim=1, padding_value=-100)
-        return self
-
-    def to(self, device: torch.device | str) -> Self:
-        self.shifted_labels = self.shifted_labels.to(device)
-        return self
 
     def chunk(self, chunk_size) -> list["BaseLossKwargs"]:
         tensor_fields: dict[str, tuple[torch.Tensor, ...]] = {}
@@ -114,15 +102,35 @@ class BaseLossConfig(BaseModel):
     chunk_size: Annotated[int | None, Parameter(help="chunk size when mode is chunk")] = 1024
 
     @property
+    @abstractmethod
     def loss_ctx_cls(self) -> type["BaseLossContext"]:
         raise NotImplementedError
 
+    # TODO: private property maybe not a good idea
     @property
+    @abstractmethod
     def _loss_kwargs_cls(self) -> type["BaseLossKwargs"]:
         raise NotImplementedError
 
-    def build(self, *args, **kwargs) -> "BaseLossContext":
-        raise NotImplementedError
+    @abstractmethod
+    def build(
+        self,
+        data: dict,
+        sp_mesh: "DeviceMesh | None" = None,
+    ) -> "BaseLossContext | None":
+        """Build loss context from data dict.
+
+        Subclasses should extract required fields from data dict and construct loss_kwargs.
+
+        Args:
+            data (dict): Data dict containing all possible loss-related fields.
+                Different loss configs extract different fields as needed.
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh.
+
+        Returns:
+            BaseLossContext: Built loss context.
+        """
+        ...
 
 
 # NOTE: Self type for BaseLossContext subclasses (F-bounded polymorphism)
@@ -143,72 +151,10 @@ class BaseLossContext(nn.Module, ABC):
         self._batch_size = 1
 
     @staticmethod
-    @abstractmethod
-    def build_batches(loss_ctx_list: list[_BaseLossContextT], *args, **kwargs) -> list[_BaseLossContextT]: ...
-
-    @abstractmethod
-    def loss_fn(
-        self,
-        hidden_states: torch.Tensor,
-        head_weight: torch.Tensor,
-        head_bias: torch.Tensor | None,
-        loss_kwargs: BaseLossKwargs,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
-        """Step 2.a and 2.b in the loss calculation."""
-        ...
-
-    def eager_mode(
-        self,
-        hidden_states: torch.Tensor,
-        head_weight: torch.Tensor,
-        head_bias: torch.Tensor | None,
-        loss_kwargs: BaseLossKwargs,
-    ):
-        return self.loss_fn(hidden_states, head_weight, head_bias, loss_kwargs)
-
-    def chunk_mode(
-        self,
-        hidden_states: torch.Tensor,
-        head_weight: torch.Tensor,
-        head_bias: torch.Tensor | None,
-        loss_kwargs: BaseLossKwargs,
-    ):
-        assert self.loss_cfg.chunk_size is not None, "chunk_size must be set in chunk mode"
-
-        chunks = loss_kwargs.chunk(self.loss_cfg.chunk_size)
-        loss, extra_info = ChunkLoss.apply(
-            hidden_states, head_weight, head_bias, self.loss_fn, chunks, self.loss_cfg.chunk_size
-        )
-        return loss, (None, extra_info)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_weight: torch.Tensor,
-        head_bias: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
-        from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
-
-        assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
-        if head_bias is not None:
-            raise NotImplementedError("Loss does not support head_bias yet.")
-
-        if self.loss_cfg.mode == "eager":
-            loss, (logits, extra_info) = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
-        else:
-            loss, (logits, extra_info) = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
-
-        # TODO: yanhuida, should be removed
-        if not isinstance(extra_info, ModelForwardExtraLogInfo):
-            extra_info = ModelForwardExtraLogInfo(extra_info)
-
-        extra_info["local_base_loss"] = loss.detach().clone()
-
-        # Step 2.c in the loss calculation: reduce the loss over all ranks using all_reduce with autograd support
-        if dist.is_initialized():
-            loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
-
-        return loss, (logits, extra_info)
+    def build_batches(loss_ctx_list: list[_BaseLossContextT], *args, **kwargs) -> list[_BaseLossContextT]:
+        for ctx in loss_ctx_list:
+            ctx._batch_size = len(loss_ctx_list)
+        return loss_ctx_list
 
     @classmethod
     def cat(cls: type[_BaseLossContextT], chunks: list[_BaseLossContextT]) -> _BaseLossContextT:

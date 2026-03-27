@@ -32,7 +32,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
 from xtuner.v1.engine import TrainEngine
 from xtuner.v1.engine.train_engine import TrainStepInfo
-from xtuner.v1.loss import CELossConfig, CELossContext
+from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model.base import ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.patch import patch_dcp_save_state_dict, patch_dcp_save_with_cache_storage, patch_default_save_plan
@@ -587,7 +587,18 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
+        self._resolve_model_loss_cfg(model_cfg, loss_cfg)
+
+        if loss_cfg is None:
+            loss_cfg = CELossConfig()
+
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg, fsdp_cfg)
+
+        if intra_layer_micro_batch > 1 and isinstance(model_cfg, MoEConfig) and model_cfg.mtp_config is not None:
+            raise ValueError(
+                "MTP (Multi-Token Prediction) is not supported with intra_layer_micro_batch > 1. "
+                f"Got intra_layer_micro_batch={intra_layer_micro_batch} and mtp_config={model_cfg.mtp_config}."
+            )
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
             logger.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
@@ -626,8 +637,6 @@ class Trainer:
         self._lr_cfg = lr_cfg
         self._lr_scheduler = self.build_lr_scheduler(lr_cfg, self.total_step)
 
-        if loss_cfg is None:
-            loss_cfg = CELossConfig()
         self.loss_cfg = loss_cfg
 
         if debug:
@@ -793,28 +802,26 @@ class Trainer:
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
-        loss_cfg: CELossConfig = self.loss_cfg
         seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_list: list[CELossContext] = []
 
+        # 1. Extract seq_ctx
         for data in data_batch:
-            seq_ctx = data.pop("seq_ctx").to(DEVICE)
+            seq_ctx = data["seq_ctx"].to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=self.sp_mesh)
-            loss_ctx_list.append(loss_ctx)
+
+        # 2. Compute cu_seq_lens_list (for calibration)
+        # 3. Call model's interface to build and calibrate all loss_ctx (done in one shot)
+        loss_ctx_dict_list = self._engine.model.build_loss_ctx_batch(data_batch, sp_mesh=self.sp_mesh)
 
         # TODO: Consider moving data_batch deletion to the caller for better memory management.
         del data_batch
 
-        cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
-        loss_ctx_list = CELossContext.build_batches(
-            loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=self.sp_mesh
-        )
-
+        # 4. Return ModelItem
         engine_input = [
-            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx_dict)
+            for seq_ctx, loss_ctx_dict in zip(seq_ctx_list, loss_ctx_dict_list)
         ]
         return engine_input
 
@@ -1734,6 +1741,24 @@ class Trainer:
         if resume_cfg.auto_resume:
             return True
         return auto_resume
+
+    def _resolve_model_loss_cfg(self, model_cfg: XTunerBaseModelConfig, loss_cfg: CELossConfig | None):
+        """Backward compatibility: set Trainer's loss_cfg to model's lm_loss_cfg if not already set.
+
+        Args:
+            model_cfg (XTunerBaseModelConfig): Model configuration
+            loss_cfg (CELossConfig): Loss configuration from Trainer
+        """
+        if loss_cfg is not None:
+            if hasattr(model_cfg, "text_config"):
+                model_cfg.text_config.lm_loss_cfg = loss_cfg
+            else:
+                model_cfg.lm_loss_cfg = loss_cfg
+            if self.rank == 0:
+                logger.warning(
+                    "Setting model_cfg.lm_loss_cfg from Trainer's loss_cfg for backward compatibility. "
+                    "In the future, please set lm_loss_cfg directly in model_cfg instead of Trainer."
+                )
 
     def _resolve_load_checkpoint_cfg(
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
