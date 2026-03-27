@@ -1,17 +1,13 @@
-from collections.abc import Awaitable, Callable
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.utils import get_logger
 
-from .utils import ensure_rollout_request_id
-
-
-logger = get_logger(__name__)
-GenerateHandler = Callable[[RolloutState], Awaitable[RolloutState]]
+from .base import BaseChatAPIAdapter
+from .trace import normalize_trace_payload
 
 
 class AnthropicTextContent(BaseModel):
@@ -34,6 +30,7 @@ class AnthropicMessage(BaseModel):
 class AnthropicMessagesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    session_uid: int | None = None
     model: str | None = None
     system: str | list[AnthropicTextContent] | None = None
     messages: list[AnthropicMessage]
@@ -72,34 +69,37 @@ class AnthropicChatAdapterError(RuntimeError):
         self.request_id = request_id
 
 
-class AnthropicChatAdapter:
+class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, AnthropicMessagesResponse]):
     def __init__(
         self,
-        generate_handler: GenerateHandler,
-        tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str,
+        generate_handler,
+        tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str | None,
         default_model_name: str | None = None,
     ):
-        self._generate_handler = generate_handler
-        self._default_model_name = default_model_name
         if isinstance(tokenizer, str):
-            self._tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
-        else:
-            self._tokenizer = tokenizer
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+        super().__init__(generate_handler, tokenizer=tokenizer)
+        self._default_model_name = default_model_name
 
     async def messages(self, request: AnthropicMessagesRequest) -> AnthropicMessagesResponse:
+        return await self.handle_request(request)
+
+    def validate_request(self, request: AnthropicMessagesRequest) -> None:
         if request.stream:
             raise AnthropicChatAdapterError(
                 "stream=true is not supported yet",
                 "invalid_request_error",
             )
 
-        rollout_state = self._build_rollout_state(request)
-        request_id = ensure_rollout_request_id(rollout_state)
-        response = await self._generate_handler(rollout_state)
+    def request_to_rollout_state(self, request: AnthropicMessagesRequest) -> RolloutState:
+        return RolloutState(
+            uid=uuid4().int,
+            message=self._build_internal_messages(request),
+            session_uid=request.session_uid,
+            sample_params=self._build_sample_params(request),
+        )
 
-        if not response.extra_fields.get("request_id"):
-            response.extra_fields["request_id"] = request_id
-
+    def raise_for_failed_response(self, response: RolloutState, request_id: str) -> None:
         if response.status == Status.FAILED:
             raise AnthropicChatAdapterError(
                 response.error_msg or "Rollout generation failed",
@@ -107,18 +107,34 @@ class AnthropicChatAdapter:
                 request_id,
             )
 
-        return self._build_messages_response(response, request)
+    def normalize_request(self, request: AnthropicMessagesRequest) -> dict[str, Any]:
+        return normalize_trace_payload(request.model_dump(mode="python", exclude_none=True))
 
-    def _build_rollout_state(self, request: AnthropicMessagesRequest) -> RolloutState:
-        messages = self._build_internal_messages(request)
-        rollout_state = RolloutState(
-            message=messages,
-            sample_params=self._build_sample_params(request),
+    def normalize_response(self, response: AnthropicMessagesResponse) -> dict[str, Any]:
+        return normalize_trace_payload(response.model_dump(mode="python", exclude_none=True))
+
+    def rollout_state_to_response(
+        self,
+        rollout_state: RolloutState,
+        request: AnthropicMessagesRequest,
+    ) -> AnthropicMessagesResponse:
+        assert rollout_state.uid is not None, "uid should not be None when generating response"
+        request_id = str(rollout_state.uid)
+        model_name = request.model or self._default_model_name or "rollout-controller"
+        prompt_tokens = self._count_prompt_tokens(rollout_state)
+        completion_tokens = self._count_completion_tokens(rollout_state)
+
+        return AnthropicMessagesResponse(
+            id=f"msg_{request_id}",
+            content=[AnthropicTextContent(text=rollout_state.response or "")],
+            model=model_name,
+            stop_reason=rollout_state.finish_reason,
+            usage=AnthropicUsage(
+                input_tokens=prompt_tokens,
+                output_tokens=completion_tokens,
+            ),
         )
-        logger.info(f"rollout_state built for request: {rollout_state}")
-        ensure_rollout_request_id(rollout_state)
-        return rollout_state
-
+    
     def _build_internal_messages(self, request: AnthropicMessagesRequest) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
 
@@ -150,7 +166,7 @@ class AnthropicChatAdapter:
 
     def _build_sample_params(self, request: AnthropicMessagesRequest) -> SampleParams:
         kwargs = {
-            "return_token_ids": False,
+            "return_token_ids": True,
             "return_logprob": False,
             "stream": request.stream,
             "max_tokens": request.max_tokens,
@@ -161,27 +177,6 @@ class AnthropicChatAdapter:
         if request.top_p is not None:
             kwargs["top_p"] = request.top_p
         return SampleParams(**kwargs)
-
-    def _build_messages_response(
-        self,
-        rollout_state: RolloutState,
-        request: AnthropicMessagesRequest,
-    ) -> AnthropicMessagesResponse:
-        request_id = ensure_rollout_request_id(rollout_state)
-        model_name = request.model or self._default_model_name or "rollout-controller"
-        prompt_tokens = self._count_prompt_tokens(rollout_state)
-        completion_tokens = self._count_completion_tokens(rollout_state)
-
-        return AnthropicMessagesResponse(
-            id=f"msg_{request_id}",
-            content=[AnthropicTextContent(text=rollout_state.response or "")],
-            model=model_name,
-            stop_reason=rollout_state.finish_reason,
-            usage=AnthropicUsage(
-                input_tokens=prompt_tokens,
-                output_tokens=completion_tokens,
-            ),
-        )
 
     def _count_prompt_tokens(self, rollout_state: RolloutState) -> int:
         if rollout_state.tokens is not None:
@@ -204,11 +199,23 @@ class AnthropicChatAdapter:
             return len(self._tokenizer(rollout_state.response, add_special_tokens=False)["input_ids"])
         return 0
 
+    def build_output_message_list(
+        self,
+        rollout_state: RolloutState,
+        request: AnthropicMessagesRequest,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "role": "assistant",
+                "content": rollout_state.response or "",
+            }
+        ]
+
 
 def bind_anthropic_chat_interface(
     rollout_controller: Any,
     default_model_name: str | None = None,
-    tokenizer: Any | None = None,
+    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str | None = None,
 ) -> Any:
     if getattr(rollout_controller, "anthropic_chat_adapter", None) is None:
         rollout_controller.anthropic_chat_adapter = AnthropicChatAdapter(

@@ -7,8 +7,10 @@ from fastapi.responses import JSONResponse
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 
-from .anthropic_chat import AnthropicChatAdapterError, AnthropicMessagesRequest, AnthropicMessagesResponse
-from .openai_chat import (
+from .chat_adapter import (
+    AnthropicChatAdapterError,
+    AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
     ChatCompletionRequest,
     ChatCompletionResponse,
     OpenAIChatAdapterError,

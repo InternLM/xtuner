@@ -15,9 +15,8 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import get_logger
 
-from .anthropic_chat import bind_anthropic_chat_interface
+from .chat_adapter import bind_anthropic_chat_interface, bind_openai_chat_interface
 from .api_server import create_rollout_api_app
-from .openai_chat import bind_openai_chat_interface
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
 from .worker import RolloutConfig, RolloutWorker
 
