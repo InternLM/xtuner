@@ -143,6 +143,13 @@ class RolloutConfig(BaseModel):
             help="Number of GPUs allocated for each inference engine in the rollout worker.",
         ),
     ] = 1
+    data_parallel_size: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of GPUs allocated for processing data batches in parallel (Data Parallelism).",
+        ),
+    ] = 1
     expert_parallel_size: Annotated[
         int,
         Parameter(
