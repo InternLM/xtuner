@@ -1225,6 +1225,42 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rollout_url is None:
             self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
             return
+
+        if os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+
+            def serialize_state_dict(state_dict: dict) -> str:
+                import base64
+                from io import BytesIO
+                from multiprocessing.reduction import ForkingPickler
+
+                from torch.multiprocessing.reductions import reduce_tensor
+
+                data = [(k, reduce_tensor(v)) for k, v in state_dict.items()]
+                buf = BytesIO()
+                ForkingPickler(buf).dump(data)
+                buf.seek(0)
+                return base64.b64encode(buf.read()).decode("utf-8")
+
+            serialized_data = [None] * self.rollout_cfg_info["tp"]
+            dist.gather_object(
+                serialize_state_dict(state_dict),
+                serialized_data if dist.get_rank() == head_rank else None,
+                dst=head_rank,
+                group=cpu_group,
+            )
+            if dist.get_rank() == head_rank:
+                headers = {
+                    "Content-Type": "application/json",
+                }
+                data_ = json.dumps(dict(serialized_named_tensors=serialized_data, finished=finished))
+                data = dict(method="update_weight_npu_ipc", args=[data_])
+                response = requests.post(f"{self.rollout_url}/collective_rpc", headers=headers, json=data)
+                assert response.status_code == 200, f"response.status_code = {response.status_code}"
+
+            if finished:
+                dist.barrier(group=cpu_group)
+            return
+
         if self.rollout_cfg_info["backend"] == "pytorch":
             # TODO(chenchiyu): remove lmdeploy related code
             from lmdeploy.utils import serialize_state_dict
