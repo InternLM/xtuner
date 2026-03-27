@@ -260,7 +260,7 @@ class JudgerController:
                 for name, weight in data_source.items():
                     if name in item.reward:
                         final_reward += item.reward[name]["score"] * weight
-                item.reward["weighted_score"] = final_reward
+                item.reward["score"] = final_reward
         else:
             judger_response_item = await self._call_custom_reward_judger(
                 self.reward_judger, self.reward_judger_names, group_data_item

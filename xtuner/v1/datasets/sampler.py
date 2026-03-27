@@ -15,6 +15,11 @@ from .jsonl import JsonlDataset
 from .packing import _LegacySoftPackDataset
 
 
+try:
+    from datasets.arrow_dataset import Column
+except ImportError:
+    Column = type("Column", (), {})  # Dummy type for backward compatibility
+
 logger = get_logger()
 
 
@@ -221,7 +226,7 @@ class LengthGroupedSampler(Sampler):
         self.group_size = self.world_size
 
         self.max_lengths = self.dataset.longest
-        assert isinstance(self.max_lengths, (list, tuple))
+        assert isinstance(self.max_lengths, (list, tuple, Column))
 
         self.global_batch_size = global_batch_size
 
