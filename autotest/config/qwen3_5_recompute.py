@@ -43,6 +43,7 @@ trainer = TrainerConfig(
     model_cfg=moe_cfg,
     optim_cfg=optim_cfg,
     fsdp_cfg=fsdp_cfg,
+    sp_size=4,
     dataset_cfg=dataset_config,
     dataloader_cfg=dataloader_config,
     lr_cfg=lr_cfg,
