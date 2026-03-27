@@ -1,7 +1,8 @@
+import gc
 import os
 import sys
 import threading
-from functools import reduce
+from functools import cache, reduce
 from math import lcm
 from multiprocessing import resource_tracker as _mprt
 from multiprocessing import shared_memory as _mpshm
@@ -214,3 +215,13 @@ def clean_param_name(name: str) -> str:
     if "_orig_mod." in name:
         name = name.replace("_orig_mod.", "")
     return name
+
+
+@cache
+def run_gc_once() -> None:
+    """Workaround for sporadic memory leaks observed after the first forward
+    pass of the MoE decoder layer on certain devices.
+
+    Forces a garbage collection to prevent extra memory occupation.
+    """
+    gc.collect()
