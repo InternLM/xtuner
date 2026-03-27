@@ -77,7 +77,8 @@ def compute_default_rope_parameters(
     attention_factor = 1.0  # Unused in this type of RoPE
 
     # Compute the inverse frequencies
-    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim))
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim))
+    inv_freq = inv_freq.to(device=device)
     return inv_freq, attention_factor
 
 
@@ -370,15 +371,18 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
 
 def get_rope_embedding(config, device=None) -> RotaryEmbeddingProtocol:
     from xtuner.v1.model import TransformerConfig
+    from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionConfig, Qwen3VLVisionRotaryEmbedding
+
+    if isinstance(config, Qwen3VLVisionConfig):
+        return Qwen3VLVisionRotaryEmbedding(config.hidden_size // config.num_attention_heads // 2)  # type: ignore[return-value]
 
     config = cast(TransformerConfig, config)
     rope_scaling_cfg = config.rope_scaling_cfg
 
     if rope_scaling_cfg is not None and rope_scaling_cfg.type == "qwen3_vl":
         return Qwen3VLTextRotaryEmbedding(config, device=device)
-
-    if rope_scaling_cfg is not None and rope_scaling_cfg.use_fope:
+    elif rope_scaling_cfg is not None and rope_scaling_cfg.use_fope:
         logger.info("Using FoPE rotary embedding.")
         return FourierEmbedding(config, device=device)
-
-    return RotaryEmbedding(config, device=device)
+    else:
+        return RotaryEmbedding(config, device=device)

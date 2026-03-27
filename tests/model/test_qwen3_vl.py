@@ -2,7 +2,7 @@ import os
 from packaging import version
 import parametrize
 import torch
-from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
+from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase, patch_hf_rope
 from transformers import AutoTokenizer, AutoModelForImageTextToText
 import torch.distributed as dist
 import tempfile
@@ -173,6 +173,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
             device_map="cuda"
         ).eval()
         patch_hf_rms_norm(hf_model)
+        patch_hf_rope(hf_model)
 
         with torch.device("meta"):
             model_cfg = Qwen3VLDense4BConfig(compile_cfg=False)
@@ -204,6 +205,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
             device_map="cuda"
         ).eval()
         patch_hf_rms_norm(hf_model)
+        patch_hf_rope(hf_model)
 
         with torch.device("meta"):
             model_cfg = Qwen3VLDense4BConfig(compile_cfg=compile)

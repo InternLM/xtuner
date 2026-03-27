@@ -17,7 +17,7 @@ from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.utils.compile import maybe_compile
 from xtuner.v1.loss.ce_loss import CELossConfig
-from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
+from xtuner._testing import patch_hf_rms_norm, patch_hf_rope, DeterministicDDPTestCase
 from xtuner.v1.model import get_model_config_from_hf, Qwen3MoEConfig
 from xtuner.v1.utils.misc import HF_PATCH_MODULES_CACHE_PREFIX
 
@@ -135,6 +135,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             device_map="cuda"
         )
         patch_hf_rms_norm(hf_model)
+        patch_hf_rope(hf_model)
 
         text_list = [
             "数据应该像山间的清泉，自然地流向它该去的地方",
