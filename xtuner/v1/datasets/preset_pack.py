@@ -15,7 +15,7 @@ from typing import Literal, TypedDict, cast
 import numpy as np
 import torch.utils.data as tud
 
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, profile_time
 
 from .data_item import DataItem, LongTextDataItem
 from .jsonl import JsonlDataset
@@ -103,6 +103,7 @@ class PresetPackDataset(tud.Dataset):
     # ------------------------------------------------------------------
 
     def _validate_arrays(self) -> None:
+        logger.info("PresetPackDataset._validate_arrays: start")
         boundaries = self._boundaries
         samples = self._samples
         paths = self._paths
@@ -143,18 +144,36 @@ class PresetPackDataset(tud.Dataset):
             if np.any(cs < 0) or np.any(ce <= cs):
                 raise ValueError("Invalid char range: require char_start >= 0 and char_end > char_start.")
 
-        # sample_idx range per dataset
-        for path_id_val in range(n_paths):
-            mask = path_ids == path_id_val
-            if not np.any(mask):
-                continue
-            ds_path = str(paths[path_id_val])
-            if ds_path not in self._path_to_ds_idx:
-                raise ValueError(f"dataset_path '{ds_path}' not found in datasets list.")
-            ds_idx = self._path_to_ds_idx[ds_path]
-            n_samples = len(self.datasets[ds_idx])
-            idxs = s_idxs[mask]
-            if np.any(idxs < 0) or np.any(idxs >= n_samples):
+        with profile_time("PresetPackDataset._validate_arrays: sample_idx per path"):
+            # 路径是否在 datasets 里
+            for path_id_val in range(n_paths):
+                ds_path = str(paths[path_id_val])
+                if ds_path not in self._path_to_ds_idx:
+                    raise ValueError(f"dataset_path '{ds_path}' not found in datasets list.")
+
+            n_samples_per_path = np.fromiter(
+                (len(self.datasets[self._path_to_ds_idx[str(paths[p])]]) for p in range(n_paths)),
+                dtype=np.int64,
+                count=n_paths,
+            )
+
+            # sample_idx < 0：对已读取的 s_idxs 做一次 np.any(s_idxs < 0)；若有错，用 flatnonzero 定位首行并沿用原来的报错文案。
+            if np.any(s_idxs < 0):
+                i = int(np.flatnonzero(s_idxs < 0)[0])
+                p = int(path_ids[i])
+                ds_path = str(paths[p])
+                n_samples = int(n_samples_per_path[p])
+                raise ValueError(f"sample_idx out of range [0, {n_samples}) for dataset '{ds_path}'.")
+
+            # 上界检查：不再对每个 path 在 1 亿行上建 mask。对每个 path_id 用 np.maximum.at 在 O(行数) 内聚合成 max_s_idx[path_id]，
+            # 再与长度仅 n_paths 的 n_samples_per_path 比较：若某 path 的最大 sample_idx 都 < n_samples，则该 path 下所有行都合法。
+            max_s_idx = np.full(n_paths, -1, dtype=np.int64)
+            np.maximum.at(max_s_idx, path_ids, s_idxs)
+            bad_paths = max_s_idx >= n_samples_per_path
+            if np.any(bad_paths):
+                p = int(np.flatnonzero(bad_paths)[0])
+                ds_path = str(paths[p])
+                n_samples = int(n_samples_per_path[p])
                 raise ValueError(f"sample_idx out of range [0, {n_samples}) for dataset '{ds_path}'.")
 
         # per-pack token total checks (only for error strategies)
