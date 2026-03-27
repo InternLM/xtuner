@@ -7,7 +7,7 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 from typing_extensions import Annotated
 
-from xtuner.v1.optim import Muon
+from xtuner.v1.optim import Muon, SwapAdamW
 from xtuner.v1.utils import get_logger
 
 
@@ -32,6 +32,7 @@ class AdamWConfig(OptimConfig):
     betas: Annotated[Tuple[float, float], Parameter(help="Beta coefficients for Adam optimizer")] = (0.9, 0.95)
     eps: Annotated[float, Parameter(help="Epsilon value for numerical stability in Adam optimizer")] = 1e-8
     foreach: Annotated[Optional[bool], Parameter(help="Use foreach implementation for AdamW")] = None
+    swap_optimizer: Annotated[Optional[bool], Parameter(help="Swap optimizer states to host memory.")] = False
 
     def build(self, model):
         params = [p for p in model.parameters() if p.requires_grad]
@@ -52,6 +53,15 @@ class AdamWConfig(OptimConfig):
                 f"Total trainable parameters: {num_total_requires_grad // 1e6}M, total parameters: {num_total // 1e6}M"
             )
             logger.info(f"Untrainable parameters names: {untrainable_names}")
+        if self.swap_optimizer:
+            return SwapAdamW(
+                params,
+                lr=self.lr,
+                betas=self.betas,
+                eps=self.eps,
+                weight_decay=self.weight_decay,
+                foreach=self.foreach,
+            )
         return torch.optim.AdamW(
             params, lr=self.lr, betas=self.betas, eps=self.eps, weight_decay=self.weight_decay, foreach=self.foreach
         )

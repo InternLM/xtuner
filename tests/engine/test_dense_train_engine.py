@@ -26,18 +26,11 @@ DEVICE = get_device()
 
 
 class TestDenseEngine(DeterministicDDPTestCase):
-    @parametrize.parametrize(
-        "device,tp_size,sp_size",
-        [
-            ("cuda", 1, 1),
-            ("cuda", 1, 2),
-        ],
-    )
-    def test_dense_engine_train(self, device, tp_size, sp_size):
+    def _run_dense_engine_train_case(self, device, tp_size, sp_size, swap_optimizer: bool = False):
         pg = self.create_pg(device)
 
         dense_cfg = Qwen3Dense8BConfig()
-        optim_cfg: AdamWConfig = AdamWConfig()
+        optim_cfg: AdamWConfig = AdamWConfig(swap_optimizer=swap_optimizer)
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
             cpu_offload=False,
@@ -104,6 +97,26 @@ class TestDenseEngine(DeterministicDDPTestCase):
             dist.destroy_process_group(pg)
         except:
             pass
+
+    @parametrize.parametrize(
+        "device,tp_size,sp_size",
+        [
+            ("cuda", 1, 1),
+            ("cuda", 1, 2),
+        ],
+    )
+    def test_dense_engine_train(self, device, tp_size, sp_size):
+        self._run_dense_engine_train_case(device, tp_size, sp_size, swap_optimizer=False)
+
+    @parametrize.parametrize(
+        "device,tp_size,sp_size",
+        [
+            ("cuda", 1, 1),
+            ("cuda", 1, 2),
+        ],
+    )
+    def test_dense_engine_train_swap_optimizer(self, device, tp_size, sp_size):
+        self._run_dense_engine_train_case(device, tp_size, sp_size, swap_optimizer=True)
 
     @parametrize.parametrize(
         "device,tp_size,hsdp_sharding_size",
