@@ -105,9 +105,10 @@ class TestFoPE(DeterministicDDPTestCase):
             device_map=DEVICE
         )
         print(f"hf_model.model.rotary_emb.num_inv_freq: {hf_model.model.rotary_emb.num_inv_freq}")
-        hf_fope_emb = hf_model.model.rotary_emb.to(torch.float32)
-        hf_fope_emb.sin_coef.copy_(fope.sin_coef)
-        hf_fope_emb.cos_coef.copy_(fope.cos_coef)
+        with torch.no_grad():
+            hf_fope_emb = hf_model.model.rotary_emb.to(torch.float32)
+            hf_fope_emb.sin_coef.copy_(fope.sin_coef)
+            hf_fope_emb.cos_coef.copy_(fope.cos_coef)
 
         ref_cos, ref_sin = hf_fope_emb(x, position_ids)
         print(f"ref_cos.shape: {ref_cos.shape}, ref_sin.shape: {ref_sin.shape}")
