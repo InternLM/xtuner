@@ -24,7 +24,7 @@ from torch.utils.data import Sampler
 
 from xtuner.v1.utils import get_logger
 
-from .custom_pack import CustomPackDataset
+from .preset_pack import PresetPackDataset
 
 
 logger = get_logger()
@@ -59,7 +59,7 @@ class CustomSampler(Sampler):
     Parameters
     ----------
     dataset:
-        The :class:`CustomPackDataset` whose packs are being sampled.
+        The :class:`PresetPackDataset` whose packs are being sampled.
     global_order:
         A pre-loaded list of pack indices specifying the global consumption
         order.  Can also be passed as a path string; in that case the file is
@@ -75,7 +75,7 @@ class CustomSampler(Sampler):
 
     def __init__(
         self,
-        dataset: CustomPackDataset,
+        dataset: PresetPackDataset,
         global_order: list[int] | str,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
