@@ -61,12 +61,15 @@ def get_pack_config_by_simple_hard_split(
     pack_workers: int = 1,
     *,
     concat_cumulative_sizes: np.ndarray | None = None,
+    paths: list[str],
 ):
     """Like packing.get_pack_infos_by_hard_split: walk inds order, hard-split at pack_max_length -> preset NPY.
 
     If ``concat_cumulative_sizes`` is set (``ConcatDataset.cumulative_sizes``), ``inds`` / ``num_tokens`` use
     the flat concatenated index space; each row's ``[path_id, sample_idx, ...]`` uses the mapped sub-dataset id
     and local index (same convention as :func:`get_dataset_id_and_sample_idx_from_idx`).
+
+    ``paths`` is copied into the returned dict for ``paths.json`` beside preset NPY files.
     """
     _ = pack_workers
     rows: list[list[int]] = []
@@ -101,7 +104,12 @@ def get_pack_config_by_simple_hard_split(
             close()
     boundaries_arr = np.asarray(boundaries, dtype=np.int64)
     samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
-    return {"boundaries": boundaries_arr, "samples": samples, "longest": get_longest(boundaries_arr, samples)}
+    return {
+        "boundaries": boundaries_arr,
+        "samples": samples,
+        "longest": get_longest(boundaries_arr, samples),
+        "paths": list(paths),
+    }
 
 
 def test_simple_hard_preset_pack_config_matches_buildin_hard_pack():
@@ -111,9 +119,10 @@ def test_simple_hard_preset_pack_config_matches_buildin_hard_pack():
     pack_max_length = 32
     assert int(num_tokens.sum()) >= 2 * pack_max_length
 
-    simple = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1)
+    pack_paths = ["only.jsonl"]
+    simple = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1, paths=pack_paths)
     infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=1)
-    ref = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
+    ref = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens, paths=pack_paths)
 
     np.testing.assert_array_equal(simple["boundaries"], ref["boundaries"])
     np.testing.assert_array_equal(simple["samples"], ref["samples"])
@@ -163,14 +172,17 @@ def test_preset_pack_config_with_multiple_datasets_matches_concat_dataset_refere
     # you can filter or do sample_ratio here to get new inds
     inds = rng.permutation(n0 + n1).astype(np.int64)
 
+    pack_paths = ["ds0.jsonl", "ds1.jsonl"]
     simple = get_pack_config_by_simple_hard_split(
-        inds, 0, num_tokens, pack_max_length, 1, concat_cumulative_sizes=cu
+        inds, 0, num_tokens, pack_max_length, 1, concat_cumulative_sizes=cu, paths=pack_paths
     )
 
     infos = get_pack_infos_by_hard_split(
         inds, 0, num_tokens, pack_max_length, pack_workers=pack_workers
     )
-    ref = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens, concat_cumulative_sizes=cu)
+    ref = get_pack_config_from_pack_infos_by_hard_split(
+        infos, 0, num_tokens, concat_cumulative_sizes=cu, paths=pack_paths
+    )
 
     np.testing.assert_array_equal(simple["boundaries"], ref["boundaries"])
     np.testing.assert_array_equal(simple["samples"], ref["samples"])
@@ -262,10 +274,10 @@ def create_dataloader_config(
         inds = np.arange(sample_num, dtype=np.int64)
         np.random.RandomState(seed_ref).shuffle(inds)  # type: ignore[arg-type]
         if pack_case == "preset_pack_simple":
-            cfg = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1)
+            cfg = get_pack_config_by_simple_hard_split(inds, 0, num_tokens, pack_max_length, 1, paths=[anno])
         else:
             infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=8)
-            cfg = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
+            cfg = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens, paths=[anno])
         assert len(cfg["boundaries"]) >= 3, "need >=2 full packs"
         longest = cfg["longest"]
 
@@ -275,7 +287,7 @@ def create_dataloader_config(
         pack_dir.mkdir()
         np.save(pack_dir / "boundaries.npy", cfg["boundaries"])
         np.save(pack_dir / "samples.npy", cfg["samples"])
-        (pack_dir / "paths.json").write_text(json.dumps([anno]), encoding="utf-8")
+        (pack_dir / "paths.json").write_text(json.dumps(cfg["paths"]), encoding="utf-8")
 
         num_packs_ref = int(cfg["boundaries"].shape[0] - 1)
         pack_level = "preset"
@@ -343,13 +355,13 @@ def test_preset_pack_longest_matches_buildin_hard_pack(tmp_path: Path) -> None:
 
     infos = get_pack_infos_by_hard_split(inds, 0, num_tokens, pack_max_length, pack_workers=1)
     ref_longest = infos["longest"]
-    cfg = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens)
+    cfg = get_pack_config_from_pack_infos_by_hard_split(infos, 0, num_tokens, paths=[anno])
 
     pack_dir = tmp_path / "pack"
     pack_dir.mkdir()
     np.save(pack_dir / "boundaries.npy", cfg["boundaries"])
     np.save(pack_dir / "samples.npy", cfg["samples"])
-    (pack_dir / "paths.json").write_text(json.dumps([anno]), encoding="utf-8")
+    (pack_dir / "paths.json").write_text(json.dumps(cfg["paths"]), encoding="utf-8")
 
     ds = PresetPackDataset(
         [_StubJsonl(anno, len(num_tokens))],

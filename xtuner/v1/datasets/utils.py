@@ -374,15 +374,23 @@ def get_pack_config_from_pack_infos_by_hard_split(
     path_id: int,
     num_tokens: np.ndarray,
     *,
+    paths: list[str],
     concat_cumulative_sizes: np.ndarray | None = None,
-) -> dict[str, np.ndarray]:
+) -> dict[str, Any]:
     """Same keys as ``get_pack_config_by_simple_hard_split``; built from
     ``get_pack_infos_by_hard_split`` output.
 
     When ``concat_cumulative_sizes`` is provided, each ``indices`` entry is a flat ``ConcatDataset`` index and is
     converted via :func:`get_dataset_id_and_sample_idx_from_idx` to ``(path_id, sample_idx)`` for the preset NPY.
     Otherwise ``path_id`` is fixed and ``idx`` is written as ``sample_idx`` (single-JsonlDataset case).
+
+    ``paths`` is echoed into the returned dict (for writing ``paths.json`` next to preset NPY files).
     """
+    if concat_cumulative_sizes is None:
+        assert len(paths) == 1
+    else:
+        assert len(paths) == len(concat_cumulative_sizes)
+
     npack = int(pack_infos["dataset_id"].shape[0])
     rows: list[list[int]] = []
     boundaries: list[int] = [0]
@@ -406,7 +414,12 @@ def get_pack_config_from_pack_infos_by_hard_split(
         boundaries.append(len(rows))
     boundaries_arr = np.asarray(boundaries, dtype=np.int64)
     samples = np.asarray(rows, dtype=np.int64).reshape(-1, 6) if rows else np.empty((0, 6), dtype=np.int64)
-    return {"boundaries": boundaries_arr, "samples": samples, "longest": pack_infos["longest"]}
+    return {
+        "boundaries": boundaries_arr,
+        "samples": samples,
+        "longest": pack_infos["longest"],
+        "paths": list(paths),
+    }
 
 
 def get_sampler_config(
