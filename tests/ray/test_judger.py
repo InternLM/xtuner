@@ -189,7 +189,7 @@ class TestJudgerController(unittest.TestCase):
         pg = AutoCPUWorkers.build_placement_group(cpu_resources_config)
         judger_controller = JudgerController.remote(judger_cfg, pg)
         res3 = ray.get(judger_controller.run.remote(FAKE_JUDGER_INPUT_ITEM_MULTI_SOURCE))
-        self.assertEqual(res3.reward["weighted_score"], 1.0)  # weighted_score为固定字段，表示加权后的reward
+        self.assertEqual(res3.reward["score"], 1.0)
 
     def test_gsm8k_judger_score(self):
         """Test the judger functionality with single and multiple data sources."""

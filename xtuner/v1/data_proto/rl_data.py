@@ -206,7 +206,7 @@ class RLJudgerResponseItem(BaseModel):
 
     Attributes:
         uid (Optional[int]): A unique ID to identify which input the result corresponds to.
-        reward (Dict[str, Any]): A dictionary of reward scores, e.g., {"judger_type": reward_score, "weighted_scores": score}.
+        reward (Dict[str, Any]): A dictionary of reward scores, e.g., {"score": score}.
         extra_info (Dict[str, Any]): Additional user-defined information.
     """
 
