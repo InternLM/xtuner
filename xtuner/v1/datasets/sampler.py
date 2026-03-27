@@ -3,6 +3,7 @@ import math
 import random
 from typing import Iterator, Optional
 
+import numpy as np
 import torch
 from mmengine.dist import sync_random_seed
 from torch.distributed.device_mesh import DeviceMesh
@@ -13,6 +14,7 @@ from xtuner.v1.utils import get_logger
 
 from .jsonl import JsonlDataset
 from .packing import _LegacySoftPackDataset
+from .preset_pack import PresetPackDataset
 
 
 logger = get_logger()
@@ -82,8 +84,8 @@ class ParallelSampler(Sampler):
             self.num_samples = math.ceil(len(self.dataset) / global_batch_size) * global_batch_size // world_size
             self.total_size = self.num_samples * self.world_size
         else:
-            self.num_samples = math.ceil((len(self.dataset) - rank) / world_size)
-            self.total_size = len(self.dataset)
+            self.num_samples = len(self.dataset) // global_batch_size * global_batch_size // world_size
+            self.total_size = self.num_samples * self.world_size
 
     def __iter__(self) -> Iterator[int]:
         """Iterate the indices."""
@@ -98,6 +100,8 @@ class ParallelSampler(Sampler):
         # add extra samples to make it evenly divisible
         if self.round_up:
             indices = (indices * int(self.total_size / len(indices) + 1))[: self.total_size]
+        else:
+            indices = indices[: self.total_size]
 
         # subsample
         indices = indices[self.step + self.rank : self.total_size : self.world_size]
@@ -173,7 +177,7 @@ class LengthGroupedSampler(Sampler):
 
     def __init__(
         self,
-        dataset: _LegacySoftPackDataset,
+        dataset: _LegacySoftPackDataset | PresetPackDataset,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
         seed: Optional[int] = None,
@@ -206,8 +210,8 @@ class LengthGroupedSampler(Sampler):
             self.num_samples = math.ceil(len(self.dataset) / global_batch_size) * global_batch_size // world_size
             self.total_size = self.num_samples * self.world_size
         else:
-            self.num_samples = math.ceil((len(self.dataset) - rank) / world_size)
-            self.total_size = len(self.dataset)
+            self.num_samples = len(self.dataset) // global_batch_size * global_batch_size // world_size
+            self.total_size = self.num_samples * self.world_size
 
         # Default for mega_batch_mult: 50 or the number to get 4
         # megabatches, whichever is smaller.
@@ -221,7 +225,7 @@ class LengthGroupedSampler(Sampler):
         self.group_size = self.world_size
 
         self.max_lengths = self.dataset.longest
-        assert isinstance(self.max_lengths, (list, tuple))
+        assert isinstance(self.max_lengths, (list, tuple, np.ndarray))
 
         self.global_batch_size = global_batch_size
 
@@ -241,6 +245,8 @@ class LengthGroupedSampler(Sampler):
         # add extra samples to make it evenly divisible
         if self.round_up:
             indices = (indices * int(self.total_size / len(indices) + 1))[: self.total_size]
+        else:
+            indices = indices[: self.total_size]
         # subsample
         assert len(indices) == self.total_size
         indices = indices[self.step + self.rank : self.total_size : self.world_size]
