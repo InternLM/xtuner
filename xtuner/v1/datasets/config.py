@@ -25,6 +25,7 @@ from .collator import (
     qwen3_vl_sft_collator,
     sft_llm_collator,
 )
+from .dpo_collator import qwen3_vl_dpo_collator
 from .custom_pack import CustomPackDataset
 from .custom_sampler import CustomSampler
 from .dataloader import BaseDataloader, Dataloader
@@ -33,6 +34,7 @@ from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridP
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
 from .vlm_jsonl import VLMJsonlDataset
+from .preference_dataset import VLMPreferenceJsonlDataset
 
 
 logger = get_logger()
@@ -68,6 +70,17 @@ class DatasetConfig(BaseModel):
             )
         elif self.class_name == "VLMJsonlDataset":
             return VLMJsonlDataset(
+                tokenize_fn=tokenize_fn,
+                anno_path=self.anno_path,
+                sample_ratio=self.sample_ratio,
+                enable_sequential_sampler=self.enable_sequential_sampler,
+                name=self.name,
+                media_root=self.media_root,
+                cache_dir=self.cache_dir,
+                cache_tag=self.cache_tag,
+            )
+        elif self.class_name == "VLMPreferenceJsonlDataset":
+            return VLMPreferenceJsonlDataset(
                 tokenize_fn=tokenize_fn,
                 anno_path=self.anno_path,
                 sample_ratio=self.sample_ratio,
@@ -276,7 +289,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     dataset_config_list: DatasetConfigList | None = None
 
     collator: Annotated[
-        Literal["sft_llm_collator", "intern_s1_vl_sft_collator", "qwen3_vl_sft_collator", "fake_collator"] | str,
+        Literal["sft_llm_collator", "intern_s1_vl_sft_collator", "qwen3_vl_sft_collator", "fake_collator", "qwen3_vl_dpo_collator"] | str,
         Parameter(help="collator func name"),
     ] = "sft_llm_collator"
     pack_to_max_length: Annotated[bool, Parameter(help="whether to pack to max length")] = True
@@ -312,6 +325,8 @@ class DataloaderConfig(BaseDataloaderConfig):
             return qwen3_vl_sft_collator
         elif self.collator == "fake_collator":
             return fake_collator  # for RL
+        elif self.collator == "qwen3_vl_dpo_collator":
+            return qwen3_vl_dpo_collator
         else:
             collator = pydoc.locate(self.collator)
             if collator is None:
