@@ -86,6 +86,8 @@ def function_formatter(functions: list[dict[str, Any]], template_name: Optional[
         for function in functions:
             name = function["function"]["name"]
             arguments = function["function"]["arguments"]
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
             prompt = f"<tool_call>\n<function={name}>"
             for key, value in arguments.items():
                 prompt += f"\n<parameter={key}>"
