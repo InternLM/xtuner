@@ -50,4 +50,4 @@ jobs:
     - name: unit-test
       run: |
         export PYTHONPYCACHEPREFIX=/tmp
-        python ci/scripts/xtuner_unittest.py "$IMAGE" "source ${{env.WORKSPACE_PREFIX}}/BASE_ENV.sh;source ci/scripts/CI_ENV.sh" "pytest tests"
+        python ci/scripts/xtuner_unittest.py "$IMAGE" "source ${{env.WORKSPACE_PREFIX}}/BASE_ENV.sh;source ci/scripts/CI_ENV.sh" "pytest tests --error-for-skips"
