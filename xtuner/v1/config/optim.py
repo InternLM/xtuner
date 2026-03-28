@@ -62,6 +62,9 @@ class MuonConfig(OptimConfig):
     momentum: Annotated[float, Parameter(help="Momentum coefficients for Muon optimizer")] = 0.95
     betas: Annotated[Tuple[float, float], Parameter(help="Beta coefficients for AdamW optimizer")] = (0.9, 0.95)
     eps: Annotated[float, Parameter(help="Epsilon value for numerical stability in Muon optimizer")] = 1e-8
+    adjust_lr: Annotated[
+        Literal["rms_norm", "spectral_norm", "none"], Parameter(help="Method for adjusting lr in Muon")
+    ] = "rms_norm"
 
     def build(self, model):
         trainable_parameters_names = model.trainable_parameters()
@@ -70,36 +73,22 @@ class MuonConfig(OptimConfig):
         untrainable_names = []
         num_total = 0
         num_total_requires_grad = 0
-        num_muon = 0
+        num_muon_regular = 0
         num_muon_moe = 0
         num_adamw = 0
 
-        # Get MoE config if available
-        num_experts = getattr(model.config, "n_routed_experts", 1) or 1
+        num_experts: int
+        if hasattr(model.config, "text_config"):
+            num_experts = getattr(model.config.text_config, "n_routed_experts", 1) or 1
+        else:
+            num_experts = getattr(model.config, "n_routed_experts", 1) or 1
+
         is_moe_model = num_experts > 1
 
         # Expert parameter patterns for MoE models
         # Note: fused_w1w3 contains both w1 and w3 weights, so num_experts = 2 * n_routed_experts
         fused_w1w3_patterns = ("fused_w1w3",)
         other_expert_patterns = ("fused_w2", "fused_w1", "fused_w3")
-        all_expert_patterns = fused_w1w3_patterns + other_expert_patterns
-
-        for name, p in model.named_parameters():
-            n = p.numel()
-            num_total += n
-            if name in trainable_names:
-                num_total_requires_grad += n
-                is_muon_tensor = p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
-                if is_muon_tensor:
-                    # Check if this is an MoE expert parameter
-                    if is_moe_model and any(pattern in name for pattern in all_expert_patterns):
-                        num_muon_moe += n
-                    else:
-                        num_muon += n
-                else:
-                    num_adamw += n
-            else:
-                untrainable_names.append(name)
 
         # Separate Muon params into regular and MoE expert params
         # fused_w1w3 has 2 * num_experts (w1 and w3 each have num_experts)
@@ -107,23 +96,42 @@ class MuonConfig(OptimConfig):
         muon_params_regular = []
         muon_params_moe_fused_w1w3 = []  # num_experts = 2 * n_routed_experts
         muon_params_moe_other = []  # num_experts = n_routed_experts
+        adamw_params = []
 
         for name, p in model.named_parameters():
+            n = p.numel()
+            num_total += n
             if name in trainable_names:
-                is_muon_tensor = p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
+                num_total_requires_grad += n
+                # we want to avoid using Muon for 1D-tensors, as well as embed_tokens and lm_head.
+                # effectively-1D tensors where one dimension accounts for all elements (e.g. shape [1, D]) should
+                # also be excluded, and hence the `p.numel() not in p.shape` condition.
+                is_muon_tensor = (
+                    p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name and p.numel() not in p.shape
+                )
                 if is_muon_tensor:
                     if is_moe_model and any(pattern in name for pattern in fused_w1w3_patterns):
                         muon_params_moe_fused_w1w3.append(p)
+                        num_muon_moe += n
+                        if dist.get_rank() == 0:
+                            logger.info(f"Muon moe param: [{name}]: shape = {p.shape}")
                     elif is_moe_model and any(pattern in name for pattern in other_expert_patterns):
                         muon_params_moe_other.append(p)
+                        num_muon_moe += n
+                        if dist.get_rank() == 0:
+                            logger.info(f"Muon moe param: [{name}]: shape = {p.shape}")
                     else:
                         muon_params_regular.append(p)
-
-        adamw_params = [
-            p
-            for name, p in model.named_parameters()
-            if name in trainable_names and not (p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name)
-        ]
+                        num_muon_regular += n
+                        if dist.get_rank() == 0:
+                            logger.info(f"Muon regular param: [{name}]: shape = {p.shape}")
+                else:
+                    adamw_params.append(p)
+                    num_adamw += n
+                    if dist.get_rank() == 0:
+                        logger.info(f"AdamW param: [{name}]: shape = {p.shape}")
+            else:
+                untrainable_names.append(name)
 
         # Build parameter groups
         param_groups = []
@@ -137,14 +145,24 @@ class MuonConfig(OptimConfig):
             param_groups.append(dict(params=muon_params_moe_other, num_experts=num_experts))
         param_groups.append(dict(params=adamw_params, algorithm="adamw"))
 
+        # Sanity check: ensure all trainable parameters are assigned to optimizer
+        total_assigned = (
+            len(muon_params_regular) + len(muon_params_moe_fused_w1w3) + len(muon_params_moe_other) + len(adamw_params)
+        )
+        total_trainable = len(trainable_names)
+        assert total_assigned == total_trainable, (
+            f"Parameter assignment mismatch: {total_assigned} assigned vs {total_trainable} trainable. "
+            f"Some parameters may have their gradients not zeroed by optimizer.zero_grad()."
+        )
+
         if dist.get_rank() == 0:
             logger.info(
                 f"Total trainable parameters: {num_total_requires_grad / 1e6:.2f}M, total parameters: {num_total / 1e6:.2f}M"
             )
             if is_moe_model:
                 logger.info(
-                    f"Muon params: {(num_muon + num_muon_moe) / 1e6:.2f}M "
-                    f"(regular: {num_muon / 1e6:.2f}M, MoE expert: {num_muon_moe / 1e6:.2f}M), "
+                    f"Muon params: {(num_muon_regular + num_muon_moe) / 1e6:.2f}M "
+                    f"(regular: {num_muon_regular / 1e6:.2f}M, MoE expert: {num_muon_moe / 1e6:.2f}M), "
                     f"AdamW params: {num_adamw / 1e6:.2f}M (counts by numel)"
                 )
                 logger.info(
@@ -153,7 +171,9 @@ class MuonConfig(OptimConfig):
                     f"other expert params use num_experts={num_experts}"
                 )
             else:
-                logger.info(f"Muon params: {num_muon / 1e6:.2f}M, AdamW params: {num_adamw / 1e6:.2f}M (counts by numel)")
+                logger.info(
+                    f"Muon params: {num_muon_regular / 1e6:.2f}M, AdamW params: {num_adamw / 1e6:.2f}M (counts by numel)"
+                )
             logger.info(f"Untrainable parameters names: {untrainable_names}")
             logger.info(
                 f"using Muon optimizer distributed_mesh_size: {model.fsdp_mesh.size()}, "
@@ -162,16 +182,18 @@ class MuonConfig(OptimConfig):
 
         optimizer = Muon(
             param_groups,
-            distributed_mesh=model.fsdp_mesh,  # TODO: 暂不支持 EP>1
+            distributed_mesh=model.language_model.fsdp_mesh,  # TODO: 暂不支持 EP>1; maybe rm device_mesh dependency?
             lr=self.lr,
             mu=self.momentum,
             betas=self.betas,
             weight_decay=self.weight_decay,
             nesterov=True,
-            adjust_lr="rms_norm",
+            flatten=True,
+            adjust_lr=self.adjust_lr,
             use_triton=False,
             epsilon=self.eps,
         )
+
         return optimizer
 
 
