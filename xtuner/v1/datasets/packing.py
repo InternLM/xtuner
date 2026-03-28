@@ -432,10 +432,9 @@ def get_pack_infos_by_hard_split(
 ):
     # number of packed samples
     shfl_inds = inds
-    num_packed_samples = int(num_tokens.sum() / pack_max_length)
-
     # shuffled cumulative lengths with leading 0
     shfl_lens: np.ndarray = np.take(num_tokens, shfl_inds)
+    num_packed_samples = int(shfl_lens.sum() / pack_max_length)
     shfl_cu_lens = np.cumsum(shfl_lens, dtype=np.int64)
     shfl_cu_lens = np.insert(shfl_cu_lens, 0, 0).astype(np.int64, copy=False)
 
