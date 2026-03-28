@@ -12,7 +12,7 @@ from torch.utils.data import Sampler
 from xtuner.v1.utils import get_logger
 
 from .jsonl import JsonlDataset
-from .packing import _LegacySoftPackDataset
+from .packing import MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 
 
 try:
@@ -54,7 +54,7 @@ class ParallelSampler(Sampler):
 
     def __init__(
         self,
-        dataset: TorchConcatDataset[JsonlDataset] | _LegacySoftPackDataset,
+        dataset: TorchConcatDataset[JsonlDataset] | _LegacySoftPackDataset | MLLMPretrainHybridPackDataset,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
         shuffle: bool = True,
@@ -178,7 +178,7 @@ class LengthGroupedSampler(Sampler):
 
     def __init__(
         self,
-        dataset: _LegacySoftPackDataset,
+        dataset: _LegacySoftPackDataset | MLLMPretrainHybridPackDataset,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
         seed: Optional[int] = None,
