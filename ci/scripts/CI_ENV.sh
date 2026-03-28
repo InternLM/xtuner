@@ -33,6 +33,12 @@ export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 export DISTRIBUTED_TESTS_DEFAULT_TIMEOUT=600
 
 proxy_off
-pip install -e .[all]
+TORCH_VERSION=$(python -c "import torch;print(torch.__version__.split('+')[0])")
+if [[ $TORCH_VERSION == "2.9.1" ]]; then
+    echo "# constraints.txt\nnvidia-cudnn-cu12>=9.15" > ./constraints.txt
+    pip install -c ./constraints.txt -e .[all]
+else
+    pip install -e .[all]
+fi
 
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
