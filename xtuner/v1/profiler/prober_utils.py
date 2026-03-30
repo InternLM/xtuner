@@ -5,6 +5,7 @@ from pathlib import Path
 import torch.nn as nn
 
 from xtuner.v1.model.moe.moe import DenseDecoderLayer, LMHead, MoEBlock, MoEDecoderLayer
+from xtuner.v1.module.attention.gated_deltanet import GatedDeltaNet
 from xtuner.v1.module.attention.mha import MultiHeadAttention
 from xtuner.v1.module.attention.mla import MultiLatentAttention
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate
@@ -27,7 +28,7 @@ def register_prober_list(model: nn.Module):
         elif isinstance(module, RMSNorm):
             wrapped = ProberList.wrap_rms_norm_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
-        elif isinstance(module, (MultiHeadAttention, MultiLatentAttention)):
+        elif isinstance(module, (MultiHeadAttention, MultiLatentAttention, GatedDeltaNet)):
             wrapped = ProberList.wrap_attention_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
         elif isinstance(module, MoEGate):
