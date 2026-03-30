@@ -9,9 +9,7 @@ from xtuner.v1.utils import get_logger
 logger = get_logger()
 
 
-def _resolve_routed_experts(routed_experts: list[int] | ray.ObjectRef | None) -> list[int] | None:
-    if routed_experts is None:
-        return None
+def _resolve_routed_experts(routed_experts: list[int] | ray.ObjectRef) -> list[int]:
     if isinstance(routed_experts, ray.ObjectRef):
         routed_experts = ray.get(routed_experts)
     if hasattr(routed_experts, "tolist"):
@@ -83,8 +81,8 @@ class PartialRolloutHandler:
         cur_routed_experts_ref = rollout_state.routed_experts
         if history_routed_experts_ref is not None and cur_routed_experts_ref is not None:
             start_time = time.time()
-            history_routed_experts = _resolve_routed_experts(history_dict.get("routed_experts"))
-            cur_routed_experts = _resolve_routed_experts(rollout_state.routed_experts)
+            history_routed_experts = _resolve_routed_experts(history_routed_experts_ref)
+            cur_routed_experts = _resolve_routed_experts(cur_routed_experts_ref)
             cur_routed_experts_len = len(cur_routed_experts)
             history_routed_experts_len = len(history_routed_experts)
             assert history_routed_experts_len - 1 <= cur_routed_experts_len, (

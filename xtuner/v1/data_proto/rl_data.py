@@ -108,7 +108,7 @@ class RolloutState(CacheObj, BaseModel):
     extra_fields: dict[str, Any] = {}
 
     @field_serializer("routed_experts")
-    def _serialize_routed_experts(self, value: torch.Tensor | RayObjectRef | None) -> list | None:
+    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list | None:
         """Dump 时跳过 ray.ObjectRef，序列化为 None，避免 PydanticSerializationError。"""
         if value is None:
             return None
@@ -121,7 +121,7 @@ class RolloutState(CacheObj, BaseModel):
             pass
         if type(value).__name__ == "ObjectRef" and "ray" in getattr(type(value), "__module__", ""):
             return None
-        return value.tolist()
+        return value
 
 
 def update_status_from_finish_reason(finish_reason: str | None) -> Status:
