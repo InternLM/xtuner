@@ -16,7 +16,7 @@ from xtuner.v1.data_proto.rl_data import (
     update_rollout_item,
 )
 from xtuner.v1.ray.environment.base_env import BaseEnvironment
-from xtuner.v1.utils import get_logger, ray_method
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, ray_method
 
 
 class RawSingleTurnEnvironment(BaseEnvironment):
@@ -65,6 +65,7 @@ class RawSingleTurnEnvironment(BaseEnvironment):
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
+        self.rollout_cfg = rollout_cfg
 
     async def generate(  # type: ignore[override]
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
@@ -93,11 +94,13 @@ class RawSingleTurnEnvironment(BaseEnvironment):
             extra_params = {}
         if self.rollout_controller:
             response_future = []
-            for sample in group_data_items:
+            for i, sample in enumerate(group_data_items):
                 rollout_extra_info = dict(sample.data.extra_info)
                 rollout_extra_info["root_id"] = sample.uid.root_id
                 rollout_extra_info["action_id"] = sample.uid.action_id
                 update_sample_params = sample_params
+                if XTUNER_DETERMINISTIC:
+                    update_sample_params.sampling_seed = self.rollout_cfg.random_seed + i
 
                 if "partial_rollout_input_ids" in sample.env.rollout.extra_info:
                     input_ids_length = len(sample.data.input_ids) if sample.data.input_ids is not None else 0

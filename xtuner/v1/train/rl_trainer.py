@@ -535,11 +535,33 @@ class RLTrainer:
                 global_step=0,
             )
 
+    @staticmethod
+    def _group_item_sort_key(item):
+        return item.uid.action_id, item.uid.observation_id
+
+    def _sort_rollout_outputs(self, data_groups, multimodal_train_infos=None):
+        sorted_data_groups = [sorted(group, key=self._group_item_sort_key) for group in data_groups]
+
+        if multimodal_train_infos:
+            grouped_items = list(zip(sorted_data_groups, multimodal_train_infos))
+            grouped_items.sort(key=lambda item: item[0][0].uid.root_id if item[0] else -1)
+            return [item[0] for item in grouped_items], [item[1] for item in grouped_items]
+
+        sorted_data_groups.sort(key=lambda group: group[0].uid.root_id if group else -1)
+        return sorted_data_groups, multimodal_train_infos
+
     def _rollout_step(self, rollout_idx: int, step_timer_dict: dict) -> RolloutInfo:
         """Performs a single rollout step to generate experience."""
         with timer("generation", step_timer_dict):
             ray.get(self._rollout_env_controller.update_active_workers.remote())
             dataflow_result = ray.get(self._rollout_dataflow.run.remote())
+
+        if XTUNER_DETERMINISTIC:
+            data_groups, multimodal_train_infos = self._sort_rollout_outputs(
+                dataflow_result["data_groups"], dataflow_result.get("mm_train_infos", None)
+            )
+            dataflow_result["data_groups"] = data_groups
+            dataflow_result["mm_train_infos"] = multimodal_train_infos
 
         with timer("save_trajectory", step_timer_dict):
             trajectory_save_path = self.exp_dir / f"rollout_idx_{rollout_idx}_trajectory.jsonl"
