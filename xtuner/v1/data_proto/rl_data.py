@@ -83,11 +83,18 @@ class RolloutState(CacheObj, BaseModel):
     sample_params: SampleParams = SampleParams()
 
     # --- InferEngine 输出 ---
+    # 每一次推理引擎的实际输出, 在rollout worker中被覆盖写
     response: str | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
     routed_experts: list[int] | RayObjectRef | None = None
     finish_reason: str | None = None
+    # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
+    response_mask: list[int] | None = None
+    # response_rollout_steps：记录 response_ids 中每个 token 是在哪个 rollout_step 生成的，与 response_ids 长度相同，每轮rollout在agent_loop中后处理中覆盖写
+    response_rollout_steps: list[int] | None = None
+    # 记录该样本过期程度，即最先生成的token与当前的训练步数的差值，数值越大表示越过期，在 agent_loop 中后处理中覆盖写
+    seq_staleness: int = 0
 
     #  --- Judger 输出 ---
     reward: dict[str, Any] | None = None
@@ -97,14 +104,11 @@ class RolloutState(CacheObj, BaseModel):
     task_name: str | None = None
     status: Status = Status.INIT
     error_msg: str | None = None
-    seq_staleness: int = 0
-    response_mask: list[int] | None = None  # response_ids的长度
-    response_rollout_steps: list[int] | None = None  # 记录 response_ids 中每个 token 是在哪个 rollout_step 生成的
     position_ids: torch.Tensor | None = None
     extra_fields: dict[str, Any] = {}
 
     @field_serializer("routed_experts")
-    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | None:
+    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list | None:
         """Dump 时跳过 ray.ObjectRef，序列化为 None，避免 PydanticSerializationError。"""
         if value is None:
             return None
@@ -117,7 +121,7 @@ class RolloutState(CacheObj, BaseModel):
             pass
         if type(value).__name__ == "ObjectRef" and "ray" in getattr(type(value), "__module__", ""):
             return None
-        return value  # list[int]
+        return value
 
     @field_serializer("mm_info")
     def _serialize_mm_info(self, value: MultimodalInfo | None) -> MultimodalInfo | None:
