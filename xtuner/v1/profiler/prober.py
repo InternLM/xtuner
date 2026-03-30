@@ -575,6 +575,11 @@ class AccProber(BaseProber):
 
     @classmethod
     def after_attention(cls, name: str, outputs: torch.Tensor):
+        if isinstance(outputs, dict):
+            outputs = outputs["projected_output"]
+        else:
+            assert isinstance(outputs, torch.Tensor), f"Unsupported outputs type: {type(outputs)}"
+
         cls.record_tensor(outputs, f"[{name}][after]outputs")
 
     # ******************************* MoE Block *******************************
