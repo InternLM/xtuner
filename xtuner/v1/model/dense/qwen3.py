@@ -2,11 +2,13 @@ import re
 from pathlib import Path
 
 import torch
+from pydantic import Field
 from typing_extensions import Self
 
 from transformers.models.qwen3 import Qwen3Config as HFQwen3DenseConfig
 from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.module.attention import MHAConfig
+from xtuner.v1.module.rope import RopeParametersConfig
 
 from .dense import Dense
 
@@ -45,6 +47,7 @@ class Qwen3DenseConfig(TransformerConfig):
 
         assert isinstance(hf_config, HFConfig)
 
+        rope_params = RopeParametersConfig.from_hf_config(hf_config)
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
@@ -56,7 +59,7 @@ class Qwen3DenseConfig(TransformerConfig):
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
-            rope_theta=hf_config.rope_theta,
+            rope_parameters=rope_params,
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
@@ -109,7 +112,7 @@ class Qwen3Dense8BConfig(Qwen3DenseConfig):
     hidden_size: int = 4096
     intermediate_size: int = 12288
     rms_norm_eps: float = 1e-6
-    rope_theta: float = 1000000.0
+    rope_parameters: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0))
     hidden_act: str = "silu"
 
     attention: MHAConfig = MHAConfig(
@@ -128,7 +131,7 @@ class Qwen3Dense4BConfig(Qwen3DenseConfig):
     hidden_size: int = 2560
     intermediate_size: int = 9728
     rms_norm_eps: float = 1e-6
-    rope_theta: float = 5000000.0
+    rope_parameters: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=5000000.0))
     hidden_act: str = "silu"
 
     attention: MHAConfig = MHAConfig(
@@ -147,7 +150,7 @@ class Qwen3Dense0P6BConfig(Qwen3DenseConfig):
     hidden_size: int = 1024
     intermediate_size: int = 3072
     rms_norm_eps: float = 1e-6
-    rope_theta: float = 1000000.0
+    rope_parameters: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0))
     hidden_act: str = "silu"
 
     attention: MHAConfig = MHAConfig(

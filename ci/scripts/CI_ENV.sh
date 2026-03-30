@@ -14,6 +14,7 @@ export VERL_ROLLOUT_DATA_PATH=${CI_SHARE_DATA}/verl-rollout-step0.jsonl
 export QWEN3_PATH=${CI_SHARE_MODEL}/Qwen3-8B
 export QWEN3_VL_PATH=${CI_SHARE_MODEL}/Qwen2.5-VL-3B-Instruct
 export QWEN3_MOE_PATH=${CI_SHARE_MODEL}/Qwen3-30B-A3B
+export QWEN3_5_MOE_PATH=${CI_SHARE_MODEL}/Qwen3.5-35B-A3B
 export QWEN3_MOE_FOPE_PATH=${CI_SHARE_MODEL}/Qwen3_30B_fope_g0.1_sephead
 export INTERNS1_DENSE_PATH=${CI_SHARE_MODEL}/intern-s1-mini
 export ROLLOUT_MODEL_PATH=${CI_SHARE_MODEL}/Qwen3-8B
@@ -33,12 +34,11 @@ export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 export DISTRIBUTED_TESTS_DEFAULT_TIMEOUT=600
 
 proxy_off
+pip install .[all]
+
 TORCH_VERSION=$(python -c "import torch;print(torch.__version__.split('+')[0])")
 if [[ $TORCH_VERSION == "2.9.1" ]]; then
-    echo "# constraints.txt\nnvidia-cudnn-cu12>=9.15" > ./constraints.txt
-    pip install -c ./constraints.txt -e .[all]
-else
-    pip install -e .[all]
+    pip install nvidia-cudnn-cu12==9.15.1.9
 fi
 
 export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH

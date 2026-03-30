@@ -18,7 +18,8 @@ import torch.nn.functional as F
 from cyclopts import Parameter
 from more_itertools import consume
 from pydantic import BaseModel as PydanticBaseModel
-from pydantic import ConfigDict, computed_field
+from pydantic import ConfigDict, Field, computed_field, model_validator
+from pydantic.fields import FieldInfo
 from safetensors.torch import save_file
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
@@ -45,7 +46,7 @@ from xtuner.v1.float8.fsdp_utils import (
 )
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
-from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.module.rope import RopeParametersConfig, RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
 from xtuner.v1.utils.compile import MaybeCompile, is_compiled_function, maybe_compile
@@ -164,6 +165,16 @@ DEFAULT_FLOAT8_CFG = {
 
 
 class TransformerConfig(XTunerBaseModelConfig):
+    """Base transformer configuration with unified RoPE parameters.
+
+    This config uses `rope_parameters` as the primary source of truth for all RoPE-related
+    settings. The legacy fields `rope_theta` and `rope_scaling_cfg` are kept for backward
+    compatibility and are synchronized with `rope_parameters` via model validator.
+
+    For new code, use `rope_parameters` directly. For loading old configs or HF models,
+    use `RopeParametersConfig.from_legacy_cfg()` or `RopeParametersConfig.from_hf_config()`.
+    """
+
     model_config = ConfigDict(
         title="Base model config for xtuner",
         extra="forbid",
@@ -178,7 +189,6 @@ class TransformerConfig(XTunerBaseModelConfig):
     intermediate_size: Annotated[int, Parameter(group="model")]
     rms_norm_eps: Annotated[float, Parameter(group="model")]
     rms_norm_type: Annotated[Literal["default", "zero_centered"], Parameter(group="model")] = "default"
-    rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: MLAConfig | MHAConfig
     linear_attention: Annotated[GatedDeltaNetConfig | None, Parameter(group="model")] = None
@@ -189,57 +199,131 @@ class TransformerConfig(XTunerBaseModelConfig):
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
-    rope_scaling_cfg: RopeScalingConfig | None = None
-    rope_parameters: dict | None = None  # For transformers 5.2.0+ compatibility
+    rope_parameters: Annotated[RopeParametersConfig | None, Parameter(group="model")] = Field(
+        default_factory=RopeParametersConfig
+    )
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
         "default"
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _handle_legacy_rope_params(cls, data: Any) -> Any:
+        """Handle legacy rope_theta and rope_scaling_cfg construction
+        parameters.
+
+        Converts rope_theta and rope_scaling_cfg into rope_parameters before validation.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        # Make a copy to avoid modifying the input
+        data = dict(data)
+
+        # Extract legacy parameters
+        legacy_rope_theta = data.pop("rope_theta", None)
+        legacy_rope_scaling_cfg = data.pop("rope_scaling_cfg", None)
+
+        rope_params_field = cls.model_fields.get("rope_parameters")
+        if isinstance(rope_params_field, FieldInfo):
+            default_rope_parameters = rope_params_field.get_default(call_default_factory=True)
+        else:
+            default_rope_parameters = None
+        default_params_data = default_rope_parameters.model_dump() if default_rope_parameters is not None else {}
+
+        # Get existing rope_parameters if any
+        rope_params_data = data.get("rope_parameters")
+        if isinstance(rope_params_data, RopeParametersConfig):
+            rope_params_data = rope_params_data.model_dump()
+        elif isinstance(rope_params_data, dict):
+            rope_params_data = dict(rope_params_data)
+        else:
+            # legacy case
+            rope_params_data = {}
+
+            # Apply legacy rope_theta if provided
+            if legacy_rope_theta is not None:
+                rope_params_data["rope_theta"] = legacy_rope_theta
+
+            # Apply legacy rope_scaling_cfg if provided
+            if legacy_rope_scaling_cfg is not None:
+                # Convert dict to RopeScalingConfig if needed
+                if isinstance(legacy_rope_scaling_cfg, dict):
+                    legacy_rope_scaling_cfg = RopeScalingConfig(**legacy_rope_scaling_cfg)
+
+                for src_field, dst_field in RopeParametersConfig._get_rope_scaling_to_parameters_mapping().items():
+                    if hasattr(legacy_rope_scaling_cfg, src_field):
+                        value = getattr(legacy_rope_scaling_cfg, src_field)
+                        if value is not None:
+                            rope_params_data[dst_field] = value
+
+        # Replace rope_parameters by the updated default_params_data with new values
+        default_params_data.update(rope_params_data)
+        data["rope_parameters"] = RopeParametersConfig(**default_params_data)
+
+        return data
+
+    @property
+    def rope_theta(self) -> float | None:
+        """Get rope_theta from rope_parameters (backward compatibility)."""
+        return self.rope_parameters.rope_theta if self.rope_parameters is not None else None
+
+    @rope_theta.setter
+    def rope_theta(self, value: float | None) -> None:
+        """Set rope_theta and update rope_parameters (backward
+        compatibility)."""
+        params_dict = self.rope_parameters.model_dump() if self.rope_parameters is not None else {}
+        params_dict["rope_theta"] = value
+        self.rope_parameters = RopeParametersConfig(**params_dict)
+
+    @property
+    def rope_scaling_cfg(self) -> RopeScalingConfig | None:
+        """Get RopeScalingConfig from rope_parameters (backward compatibility).
+
+        Returns None if rope_type is default and no FoPE is used.
+        """
+        if self.rope_parameters is None or (
+            self.rope_parameters.rope_type == "default" and not self.rope_parameters.use_fope
+        ):
+            return None
+
+        # Build RopeScalingConfig from rope_parameters dynamically
+        kwargs = {"type": self.rope_parameters.rope_type}
+
+        for field_name in RopeParametersConfig.get_rope_scaling_field_names():
+            value = getattr(self.rope_parameters, field_name)
+            if value is not None:
+                kwargs[field_name] = value
+
+        return RopeScalingConfig(**kwargs)
+
+    @rope_scaling_cfg.setter
+    def rope_scaling_cfg(self, value: RopeScalingConfig | None) -> None:
+        """Set rope_scaling_cfg and update rope_parameters (backward
+        compatibility)."""
+        params_dict = self.rope_parameters.model_dump() if self.rope_parameters is not None else {}
+
+        if value is None:
+            # Reset to default rope_type and clear scaling parameters dynamically
+            params_dict["rope_type"] = "default"
+            for field_name in RopeParametersConfig.get_rope_scaling_field_names():
+                params_dict[field_name] = None
+            params_dict["partial_rotary_factor"] = 1.0
+            params_dict["truncate"] = False
+        else:
+            for src_field, dst_field in RopeParametersConfig._get_rope_scaling_to_parameters_mapping().items():
+                if hasattr(value, src_field):
+                    field_value = getattr(value, src_field)
+                    if field_value is not None:
+                        params_dict[dst_field] = field_value
+
+        self.rope_parameters = RopeParametersConfig(**params_dict)
+
     @computed_field  # type: ignore[misc]
     @property
     def rope_scaling(self) -> dict | None:
-        if self.rope_scaling_cfg is not None:
-            return self.rope_scaling_cfg.model_dump()
-        return None
-
-    def standardize_rope_params(self):
-        """Helper to standardize the config's rope params field for
-        compatibility with transformers 5.2.0+.
-
-        This method creates a `rope_parameters` dict that is compatible with transformers' rope initialization
-        functions like `_compute_yarn_parameters`. For old model configs, the fn will duplicate a single rope
-        param in each layer type (backward compatibility).
-        """
-        # Initialize rope_parameters if not exists
-        if not hasattr(self, "rope_parameters") or self.rope_parameters is None:
-            self.rope_parameters = {}
-
-        # Get rope scaling config values
-        rope_scaling = self.rope_scaling
-        rope_theta = getattr(self, "rope_theta", None)
-
-        # Case 0: no RoPE params defined
-        if not (rope_scaling or rope_theta):
-            return
-
-        # Get rope type from config
-        rope_type = rope_scaling.get("type", "default") if rope_scaling else "default"
-
-        # Set basic rope parameters
-        self.rope_parameters["rope_type"] = rope_type
-        if rope_theta is not None:
-            self.rope_parameters["rope_theta"] = rope_theta
-
-        # Add scaling-specific parameters for yarn/llama3/longrope types
-        if rope_type in ["yarn", "llama3", "longrope"] and rope_scaling:
-            self.rope_parameters["factor"] = rope_scaling.get("factor", 1.0)
-            self.rope_parameters["beta_fast"] = rope_scaling.get("beta_fast", 32.0)
-            self.rope_parameters["beta_slow"] = rope_scaling.get("beta_slow", 1.0)
-            self.rope_parameters["original_max_position_embeddings"] = rope_scaling.get(
-                "original_max_position_embeddings", self.max_position_embeddings
-            )
-            if "truncate" in rope_scaling:
-                self.rope_parameters["truncate"] = rope_scaling.get("truncate", False)
+        """Get rope_scaling dict for HF compatibility."""
+        return self.rope_parameters.to_rope_scaling_dict() if self.rope_parameters is not None else None
 
     @computed_field
     def num_attention_heads(self) -> int:

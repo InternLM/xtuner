@@ -2,7 +2,7 @@ import re
 from typing import Literal
 
 import torch
-from pydantic import computed_field
+from pydantic import Field, computed_field
 from typing_extensions import override
 
 from xtuner.v1.model.base import (
@@ -12,7 +12,7 @@ from xtuner.v1.model.base import (
 )
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig
-from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .qwen3vl_text import Qwen3VLTextMoE
@@ -228,7 +228,6 @@ class Qwen3_5_VLTextMoE35BA3BConfig(Qwen3_5_VLTextMoEConfig):
     hidden_size: int = 2048
     intermediate_size: int = 0  # not used
     rms_norm_eps: float = 1e-6
-    rope_theta: float = 10000000.0
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         with_gate=True,
@@ -261,8 +260,13 @@ class Qwen3_5_VLTextMoE35BA3BConfig(Qwen3_5_VLTextMoEConfig):
         norm_topk_prob=True,
         router_scaling_factor=1.0,
     )
-    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(
-        type="qwen3_vl", mrope_section=[11, 11, 10], partial_rotary_factor=0.25
+    rope_parameters: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(
+            rope_theta=10000000.0,
+            rope_type="qwen3_vl",
+            mrope_section=[11, 11, 10],
+            partial_rotary_factor=0.25,
+        )
     )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
