@@ -69,12 +69,21 @@ class RLOOAdvantageConfig(BaseAdvantageConfig):
 
 
 class OPOAdvantageConfig(BaseAdvantageConfig):
-    """Configuration for :class:`~xtuner.v1.rl.advantage.opo.OPOEstimator`."""
+    """Configuration for :class:`~xtuner.v1.rl.advantage.opo.OPOEstimator`.
+
+    Attributes:
+        eps (float): Small constant for numerical stability. Default 1e-8.
+    """
+
+    eps: Annotated[
+        float,
+        Parameter(group=advantage_group, help="Small constant for numerical stability."),
+    ] = 1e-8
 
     def build(self) -> AdvantageEstimator:
         from xtuner.v1.rl.advantage.opo import OPOEstimator
 
-        return OPOEstimator()
+        return OPOEstimator(eps=self.eps)
 
 
 class PassKAdvantageConfig(BaseAdvantageConfig):

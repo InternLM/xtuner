@@ -25,7 +25,13 @@ class OPOEstimator(AdvantageEstimator):
 
     This encourages the model to produce longer correct responses and
     shorter incorrect responses.
+
+    Args:
+        eps (float): Small constant for numerical stability. Default 1e-8.
     """
+
+    def __init__(self, eps: float = 1e-8) -> None:
+        self.eps = eps
 
     def compute(self, rewards: torch.Tensor, group: list["RLDataFlowItem"]) -> torch.Tensor:
         lengths = torch.tensor(
@@ -33,7 +39,7 @@ class OPOEstimator(AdvantageEstimator):
             dtype=torch.float32,
             device=rewards.device,
         )
-        baseline = (rewards * lengths).sum() / (lengths.sum() + 1e-8)
+        baseline = (rewards * lengths).sum() / (lengths.sum() + self.eps)
         return rewards - baseline
 
     def __repr__(self) -> str:
