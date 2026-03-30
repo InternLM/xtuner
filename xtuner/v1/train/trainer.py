@@ -1490,7 +1490,7 @@ class Trainer:
         """Log the training step information.
 
         Args:
-            loss_log (LossLog): Loss values for the current step.
+            train_step_info (TrainStepInfo): Info returned per engine train_step.
             training_metrics (TrainingMetrics): Computed training metrics including tokens and throughput.
             grad_norm (float): Gradient norm value.
             data_time (float): Time spent loading data in seconds.
