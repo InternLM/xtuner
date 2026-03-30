@@ -440,9 +440,12 @@ class DataloaderConfig(BaseDataloaderConfig):
             )
         elif self.group_by_length:
             assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
-            assert isinstance(dataset, (ExpandSoftPackDataset, _LegacySoftPackDataset, HardPackDataset)), (
-                "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset or _LegacySoftPackDataset, "
-                f"but got {type(dataset)}"
+            assert isinstance(
+                dataset,
+                (ExpandSoftPackDataset, _LegacySoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset),
+            ), (
+                "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset, _LegacySoftPackDataset, "
+                f"HardPackDataset, or MLLMPretrainHybridPackDataset, but got {type(dataset)}"
             )
             sampler = LengthGroupedSampler(
                 dataset=dataset, dp_mesh=dp_mesh, global_batch_size=global_batch_size, seed=seed
