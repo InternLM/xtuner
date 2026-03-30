@@ -5,23 +5,21 @@
 可选: WORLD_SIZE, ENABLE_RETURN_ROUTED_EXPERTS, LOSS_TYPE, LOSS_MODE, SP_SIZE
 """
 import os
-from pathlib import Path
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
-from xtuner.v1.model import get_model_config_from_hf
+from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
+from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense8BConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.judger import GSM8KJudgerConfig
+from xtuner.v1.rl.judger import GEO3KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SingleTurnAgentLoopConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
-from xtuner.v1.rl.agent_loop.gsm8k_with_tool import GSM8KToolAgentLoopConfig
 
 # env
 work_dir = os.environ["WORK_DIR"]
@@ -30,19 +28,20 @@ data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0")
 NNODE = int(os.environ.get("WORLD_SIZE", "1"))
+media_root = os.environ["MEDIA_ROOT"]
 
 # basic settings
-experimental_name = "grpo_gsm8k_with_tool"
-rollout_steps = 45
+experimental_name = "grpo_geo3k"
+rollout_steps = 45  # TODO: total_epoch
 evaluate_step = 45
-train_optimizer_steps = 1
-global_batch_size = 64 * train_optimizer_steps
+train_optimizer_steps = 4
+global_batch_size = 1024
 prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 1
 max_prompt_length = 1024
 max_response_length = 2048
-pack_max_length = 8 * 1024
+pack_max_length = 32 * 1024
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -66,16 +65,19 @@ rollout_config = RolloutConfig(
 )
 
 # 3. judger
-judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
+judger_config = GEO3KJudgerConfig(judger_type="router")
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
-model_cfg = get_model_config_from_hf(Path(model_path))
-if hasattr(model_cfg, "balancing_loss_cfg"):
-    model_cfg.balancing_loss_cfg = None
-if hasattr(model_cfg, "z_loss_cfg"):
-    model_cfg.z_loss_cfg = None
+
+# TODO: support get_model_config_from_hf
+model_cfg = Qwen3VLDense8BConfig(freeze_vision=True, freeze_projector=True)
+
+if hasattr(model_cfg.text_config, "balancing_loss_cfg"):
+    model_cfg.text_config.balancing_loss_cfg = None
+if hasattr(model_cfg.text_config, "z_loss_cfg"):
+    model_cfg.text_config.z_loss_cfg = None
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
@@ -106,33 +108,24 @@ train_worker_cfg = WorkerConfig(
 )
 
 # 5. train agent loop manager
-gsm8k_tools = [
+train_dataset_cfg = [
     {
-        "type": "function",
-        "function": {
-            "name": "calc_gsm8k_reward",
-            "description": "A tool for calculating the reward of gsm8k. (1.0 if parsed answer is correct, 0.0 if parsed answer is incorrect or not correctly parsed)",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "answer": {
-                        "type": "string",
-                        "description": "The model's answer to the GSM8K math problem, must be a digits",
-                    },
-                    "required": ["answer"],
-                },
-            },
-        },
+            "dataset": DatasetConfig(name="geo3k",
+                                     anno_path=data_path,
+                                     class_name='VLMJsonlDataset',
+                                     media_root=media_root,
+                                     sample_ratio=1.0),
+            "tokenize_fn": RLQwen3VLTokenizeFnConfig(processor_path=model_path, 
+                                                     max_length=max_prompt_length),
     }
 ]
-train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
-tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length, tools_schema=gsm8k_tools)
-train_dataset_cfg = [{"dataset": train_dataset, "tokenize_fn": tokenizer_config}]
+
 dataloader_cfg = DataloaderConfig(
     dataset_config_list=train_dataset_cfg,
     pack_max_length=pack_max_length,
     collator="fake_collator",
     pack_level="none",
+    num_workers=8,
 )
 sampler_config = SamplerConfig(
     dataloader_cfg=dataloader_cfg,
@@ -145,8 +138,7 @@ training_sample_params = SampleParams(
     temperature=1.0,
     min_tokens=0,
 )
-agent_loop_config = GSM8KToolAgentLoopConfig(
-    max_turns=2,
+agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
 )
@@ -159,15 +151,25 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
 )
 
 # 6. eval agent loop manager
-eval_dataset = DatasetConfig(
-    name=experimental_name, anno_path=eval_data_path, sample_ratio=1.0
-)
-eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
+eval_dataset_cfg = [
+    {
+            "dataset": DatasetConfig(name="geo3k",
+                                     anno_path=eval_data_path,
+                                     class_name='VLMJsonlDataset',
+                                     media_root=media_root,
+                                     sample_ratio=1.0),
+            "tokenize_fn": RLQwen3VLTokenizeFnConfig(processor_path=model_path, 
+                                                     max_length=max_prompt_length,
+                                                     ignore_multimodal_info=True),
+    }
+]
+
 eval_dataloader_cfg = DataloaderConfig(
     dataset_config_list=eval_dataset_cfg,
     pack_max_length=pack_max_length,
     collator="fake_collator",
     pack_level="none",
+    num_workers=8,
 )
 eval_sampler_config = SamplerConfig(
     dataloader_cfg=eval_dataloader_cfg,
@@ -180,8 +182,7 @@ evaluation_sample_params = SampleParams(
     temperature=0.0,
     min_tokens=0,
 )
-eval_agent_loop_config = GSM8KToolAgentLoopConfig(
-    max_turns=2,
+eval_agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
 )

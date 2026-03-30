@@ -9,6 +9,7 @@ from pathlib import Path
 from types import FunctionType
 from typing import Annotated
 
+import torch
 from huggingface_hub import constants
 from mmengine import is_installed
 
@@ -23,6 +24,13 @@ HF_PATCH_MODULES_CACHE_PREFIX = "modules_pid_"
 
 logger = get_logger()
 XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
+
+
+def set_deterministic():
+    if XTUNER_DETERMINISTIC:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
 
 # https://github.com/python/cpython/issues/82300#issuecomment-2169035092
 if sys.version_info >= (3, 13):

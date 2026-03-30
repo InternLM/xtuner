@@ -299,7 +299,7 @@ class DataloaderConfig(BaseDataloaderConfig):
         elif self.collator == "qwen3_vl_sft_collator":
             return qwen3_vl_sft_collator
         elif self.collator == "fake_collator":
-            return fake_collator  # for RL
+            return fake_collator
         else:
             collator = pydoc.locate(self.collator)
             if collator is None:
