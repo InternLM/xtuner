@@ -28,6 +28,7 @@ model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_evaluate = True if eval_data_path != "" else False
+enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
 
 # basic settings
 experimental_name = "grpo_gsm8k_tiny"
@@ -40,6 +41,8 @@ max_prompt_length = 512
 max_response_length = 1024
 pack_max_length = 32768
 train_optimizer_steps = 1
+hf_interval = 100
+enable_initial_evaluate = True
 evaluate_step = 15
 
 # 1. resources
@@ -93,13 +96,13 @@ dataflow_config = DataFlowConfig(
     prompt_repeat_k=prompt_repeat_k,
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
-    max_concurrent=512,
+    enable_partial_rollout=enbale_partial_rollout,
 )
 
 evaluator_cfg = (
     EvaluatorConfig(
         enable_evaluate=enable_evaluate,
-        enable_initial_evaluate=True,
+        enable_initial_evaluate=enable_initial_evaluate,
         dataset_cfg=eval_dataset_cfg,
         tokenizer=tokenizer,
         evaluate_step=evaluate_step,
@@ -158,5 +161,6 @@ trainer = RLTrainerConfig(
     tokenizer_path=model_path,
     work_dir=work_dir,
     total_epochs=total_epochs,
+    hf_interval=hf_interval,
     exp_tracker="jsonl",
 )
