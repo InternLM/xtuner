@@ -233,6 +233,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         hash: str | None = None,
         add_eos_token: bool = True,  # for mllm pretrain
         add_bos_token: bool = False,  # for mllm pretrain
+        template_name: str = "qwen3-vl",
     ):
         self.oss_loader = None
         self.debug = debug
@@ -294,7 +295,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"rand_video_max_frames: {self.rand_video_max_frames}"
         )
 
-        self.chat_template = CHAT_TEMPLATE_MAP["qwen3-vl"]
+        self.chat_template = copy.deepcopy(CHAT_TEMPLATE_MAP[template_name])
         if system_message is not None:
             self.chat_template.default_system = system_message
 
@@ -904,6 +905,8 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     # it's helpful to add labels to the images and videos for better reference.
     add_vision_id: bool = True
 
+    template_name: str = "qwen3_vl"
+
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
     ) -> Qwen3VLTokenizeFunction:
@@ -911,6 +914,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             tokenizer,
             self.processor_path,
             anno_name,
+            template_name=self.template_name,
             min_pixels=self.min_pixels,
             max_pixels=self.max_pixels,
             oss_loader_cfg=self.oss_loader_cfg,

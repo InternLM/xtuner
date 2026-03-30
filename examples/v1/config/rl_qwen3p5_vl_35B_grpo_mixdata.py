@@ -46,6 +46,7 @@ resources = AcceleratorResourcesConfig(
 
 # 2. rollout
 rollout_config = RolloutConfig(
+    fp32_lm_head=True,
     env=experimental_name,
     device=resources.accelerator,
     model_path=model_path,
@@ -67,12 +68,16 @@ training_sample_params = SampleParams(
     min_tokens=0,
 )
 
-tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path, max_length=max_prompt_length)
+
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
 ds_collections = json.loads(open(meta_data_path).read())
 train_dataset_cfg = []
 for name, _data in ds_collections.items():
+    tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path, 
+                                            max_length=max_prompt_length, 
+                                            system_message=_data.get('system_message', None),
+                                            template_name="qwen3.5-vl-rl")
     _data_cfg = {"dataset": DatasetConfig(name=name,
                                           anno_path=_data['annotation'],
                                           media_root=_data.get('media_root', ''),
@@ -144,7 +149,7 @@ loss_cfg = GRPOLossConfig(
     ),
 )
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
+fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, fp32_lm_head=True)
 train_worker_cfg: WorkerConfig = WorkerConfig(
     model_cfg=model_cfg,
     load_from=model_path,
