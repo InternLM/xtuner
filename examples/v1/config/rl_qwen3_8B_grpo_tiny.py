@@ -21,6 +21,7 @@ from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.rl_trainer import RLTrainerConfig
 from xtuner.v1.model import get_model_config_from_hf
+from xtuner.v1.rl.config.advantage import GRPOAdvantageConfig
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -131,4 +132,5 @@ trainer = RLTrainerConfig(
     tokenizer_path=model_path,
     work_dir=work_dir,
     total_epochs=total_epochs,
+    advantage_estimator_config=GRPOAdvantageConfig(eps=1e-8),
 )
