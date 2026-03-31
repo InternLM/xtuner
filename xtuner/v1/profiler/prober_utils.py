@@ -6,10 +6,11 @@ import torch
 import torch.nn as nn
 
 from xtuner.v1.model.moe.moe import DenseDecoderLayer, LMHead, MoEBlock, MoEDecoderLayer
-from xtuner.v1.module.attention.gated_deltanet import GatedDeltaNet
+from xtuner.v1.module.attention.gated_deltanet import FusedRMSNormGated, GatedDeltaNet
 from xtuner.v1.module.attention.mha import MultiHeadAttention
 from xtuner.v1.module.attention.mla import MultiLatentAttention
-from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate
+from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEGate, MoEMLP
+from xtuner.v1.module.linear.linear import _Linear
 from xtuner.v1.module.rms_norm.rms_norm import RMSNorm
 from xtuner.v1.module.rope.rope import FourierEmbedding, Qwen3VLTextRotaryEmbedding, RotaryEmbedding
 from xtuner.v1.profiler.prober import ProberList
@@ -29,9 +30,23 @@ def register_prober_list(model: nn.Module):
         elif isinstance(module, RMSNorm):
             wrapped = ProberList.wrap_rms_norm_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
-        elif isinstance(module, (MultiHeadAttention, MultiLatentAttention, GatedDeltaNet)):
+        elif FusedRMSNormGated is not None and isinstance(module, FusedRMSNormGated):
+            wrapped = ProberList.wrap_fused_rms_norm_gated_forward(module.forward, name)
+            module.forward = types.MethodType(wrapped, module)  # type: ignore
+        elif isinstance(module, MoEMLP):
+            wrapped = ProberList.wrap_moe_mlp_forward(module.forward, name)
+            module.forward = types.MethodType(wrapped, module)  # type: ignore
+        elif isinstance(module, _Linear):
+            wrapped = ProberList.wrap_linear_forward(module.forward, name)
+            module.forward = types.MethodType(wrapped, module)  # type: ignore
+        elif isinstance(module, (MultiHeadAttention, MultiLatentAttention)):
             wrapped = ProberList.wrap_attention_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
+        elif isinstance(module, GatedDeltaNet):
+            wrapped = ProberList.wrap_attention_forward(module.forward, name)
+            module.forward = types.MethodType(wrapped, module)  # type: ignore
+            module.causal_conv1d_fn = ProberList.wrap_causal_conv1d_fn(module.causal_conv1d_fn, name)
+            module.chunk_gated_delta_rule = ProberList.wrap_chunk_gated_delta_rule(module.chunk_gated_delta_rule, name)
         elif isinstance(module, MoEGate):
             wrapped = ProberList.wrap_moe_gate_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore

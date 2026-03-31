@@ -234,6 +234,172 @@ class TestAccProberForwardRecordsCompiled(DeterministicDDPTestCase):
 
 
 # ---------------------------------------------------------------------------
+# GatedDeltaNet internal tensors capture test (compile=True)
+# ---------------------------------------------------------------------------
+
+class TestAccProberGatedDeltaNetInternalsCompiled(DeterministicDDPTestCase):
+    """Verify that GatedDeltaNet internal tensors are recorded with compile=True.
+
+    The 4-layer config has 3 GatedDeltaNet layers (0-2) and 1 MHA layer (3).
+    After adding prober wrappers for _Linear, causal_conv1d_fn,
+    chunk_gated_delta_rule, and FusedRMSNormGated, the JSONL must contain:
+
+      - [before]input / [after]output    for in_proj_b, in_proj_a, etc. (_Linear)
+      - [before]conv1d_x / [after]conv1d_out                             (causal_conv1d_fn)
+      - [before]q/k/v/g/beta / [after]core_attn_out                      (chunk_gated_delta_rule)
+      - [before]norm_x / [before]norm_g / [after]norm_out                (FusedRMSNormGated)
+    """
+
+    def test_gated_deltanet_internals_with_compile(self):
+        self.create_pg("cuda")
+        _reset_acc_prober()
+        torch._dynamo.reset()
+
+        config = _make_small_model_config()
+        config.compile_cfg = True
+        model = config.build().to(torch.bfloat16).cuda()
+
+        PROBE_STEP = 1
+        SEQ_LEN = 16
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ProberList.setup(Path(tmp_dir), [PROBE_STEP], ["AccProber"])
+            register_prober_list(model)
+
+            ProberList.set_step(PROBE_STEP)
+            ProberList.set_micro_batch_iter(0)
+
+            input_ids = torch.randint(0, config.vocab_size, (1, SEQ_LEN), device="cuda")
+            shifted_labels = input_ids[:, 1:].clone()
+            shift_input_ids = input_ids[:, :-1]
+
+            seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids,))
+            loss_cfg = CELossConfig()
+            LossCtx = loss_cfg.loss_ctx_cls
+            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = LossCtx.build_batches([loss_ctx])[0]
+
+            with torch.no_grad():
+                model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+
+            AccProber.after_micro_iter_forward()
+
+            dump_file = (
+                Path(tmp_dir)
+                / "acc_prober"
+                / f"Step_{PROBE_STEP}_MicroIter_0_RANK_{dist.get_rank()}_forward_records.jsonl"
+            )
+            self.assertTrue(dump_file.exists(), f"Dump file not found: {dump_file}")
+
+            records = [json.loads(line) for line in dump_file.read_text().splitlines() if line.strip()]
+            names = [r["name"] for r in records]
+
+            # ---- _Linear projections (in_proj_b, in_proj_a, etc.) ----
+            linear_before = [n for n in names if "[before]input" in n and "in_proj" in n]
+            linear_after  = [n for n in names if "[after]output" in n and "in_proj" in n]
+            self.assertGreater(len(linear_before), 0,
+                "[compile] No _Linear before records. Got:\n" + "\n".join(names))
+            self.assertGreater(len(linear_after),  0, "[compile] No _Linear after records.")
+
+            # ---- causal_conv1d_fn ----
+            conv1d_before = [n for n in names if "[before]conv1d_x" in n]
+            conv1d_after  = [n for n in names if "[after]conv1d_out" in n]
+            self.assertGreater(len(conv1d_before), 0, "[compile] No causal_conv1d before records.")
+            self.assertGreater(len(conv1d_after),  0, "[compile] No causal_conv1d after records.")
+
+            # ---- chunk_gated_delta_rule ----
+            cgdr_q    = [n for n in names if "[before]q" in n and "self_attn" in n]
+            cgdr_out  = [n for n in names if "[after]core_attn_out" in n]
+            self.assertGreater(len(cgdr_q),   0, "[compile] No chunk_gated_delta_rule q records.")
+            self.assertGreater(len(cgdr_out),  0, "[compile] No chunk_gated_delta_rule output records.")
+
+            # ---- FusedRMSNormGated ----
+            norm_x   = [n for n in names if "[before]norm_x" in n]
+            norm_out = [n for n in names if "[after]norm_out" in n]
+            self.assertGreater(len(norm_x),   0, "[compile] No FusedRMSNormGated norm_x records.")
+            self.assertGreater(len(norm_out),  0, "[compile] No FusedRMSNormGated norm_out records.")
+
+        _reset_acc_prober()
+        torch._dynamo.reset()
+
+
+# ---------------------------------------------------------------------------
+# MoEMLP (shared_experts) capture test (compile=True)
+# ---------------------------------------------------------------------------
+
+class TestAccProberMoEMLPCompiled(DeterministicDDPTestCase):
+    """Verify that shared_experts (MoEMLP) input/output tensors are recorded
+    with compile=True.
+
+    Layers 0-2 are MoEDecoderLayer (with n_shared_experts=1), so each has a
+    shared_experts MoEMLP sub-module whose forward is wrapped by the prober.
+    _shared_experts_forward is compiled with fullgraph=True; list.append in
+    record_tensor is inlined as a Python side effect, so records are captured.
+    """
+
+    def test_moe_mlp_shared_experts_with_compile(self):
+        self.create_pg("cuda")
+        _reset_acc_prober()
+        torch._dynamo.reset()
+
+        config = _make_small_model_config()
+        config.compile_cfg = True
+        model = config.build().to(torch.bfloat16).cuda()
+
+        PROBE_STEP = 1
+        SEQ_LEN = 16
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ProberList.setup(Path(tmp_dir), [PROBE_STEP], ["AccProber"])
+            register_prober_list(model)
+
+            ProberList.set_step(PROBE_STEP)
+            ProberList.set_micro_batch_iter(0)
+
+            input_ids = torch.randint(0, config.vocab_size, (1, SEQ_LEN), device="cuda")
+            shifted_labels = input_ids[:, 1:].clone()
+            shift_input_ids = input_ids[:, :-1]
+
+            seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids,))
+            loss_cfg = CELossConfig()
+            LossCtx = loss_cfg.loss_ctx_cls
+            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = LossCtx.build_batches([loss_ctx])[0]
+
+            with torch.no_grad():
+                model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+
+            AccProber.after_micro_iter_forward()
+
+            dump_file = (
+                Path(tmp_dir)
+                / "acc_prober"
+                / f"Step_{PROBE_STEP}_MicroIter_0_RANK_{dist.get_rank()}_forward_records.jsonl"
+            )
+            self.assertTrue(dump_file.exists(), f"Dump file not found: {dump_file}")
+
+            records = [json.loads(line) for line in dump_file.read_text().splitlines() if line.strip()]
+            names = [r["name"] for r in records]
+
+            # shared_experts MoEMLP input and output must appear.
+            # Module path is layers.{0,1,2}.shared_experts for the 3 MoE layers.
+            mlp_before = [n for n in names if "shared_experts" in n and "[before]x" in n]
+            mlp_after  = [n for n in names if "shared_experts" in n and "[after]out" in n]
+
+            self.assertGreater(
+                len(mlp_before), 0,
+                "[compile] No shared_experts MoEMLP before records. Got:\n" + "\n".join(names),
+            )
+            self.assertGreater(
+                len(mlp_after), 0,
+                "[compile] No shared_experts MoEMLP after records.",
+            )
+
+        _reset_acc_prober()
+        torch._dynamo.reset()
+
+
+# ---------------------------------------------------------------------------
 # MHA fullgraph=True + prober q/k norm capture test
 # ---------------------------------------------------------------------------
 

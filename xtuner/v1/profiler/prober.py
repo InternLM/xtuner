@@ -104,6 +104,24 @@ class BaseProber(ABC):
     def after_rms_norm(cls, name: str, hidden_states: torch.Tensor):
         pass
 
+    # ******************************* Linear *******************************
+    @classmethod
+    def before_linear(cls, name: str, input: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_linear(cls, name: str, output: torch.Tensor):
+        pass
+
+    # ******************************* MoEMLP (shared experts) *******************************
+    @classmethod
+    def before_moe_mlp(cls, name: str, x: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_moe_mlp(cls, name: str, out: torch.Tensor):
+        pass
+
     # ******************************* Attention Block *******************************
     @classmethod
     def before_attention(cls, name: str, hidden_states: torch.Tensor):
@@ -111,6 +129,39 @@ class BaseProber(ABC):
 
     @classmethod
     def after_attention(cls, name: str, outputs: torch.Tensor):
+        pass
+
+    # ******************************* GatedDeltaNet ops *******************************
+    @classmethod
+    def before_causal_conv1d(cls, name: str, x: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_causal_conv1d(cls, name: str, out: torch.Tensor):
+        pass
+
+    @classmethod
+    def before_chunk_gated_delta_rule(
+        cls,
+        name: str,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor | None,
+        beta: torch.Tensor | None,
+    ):
+        pass
+
+    @classmethod
+    def after_chunk_gated_delta_rule(cls, name: str, core_attn_out: torch.Tensor):
+        pass
+
+    @classmethod
+    def before_fused_rms_norm_gated(cls, name: str, x: torch.Tensor, g: torch.Tensor):
+        pass
+
+    @classmethod
+    def after_fused_rms_norm_gated(cls, name: str, out: torch.Tensor):
         pass
 
     # ******************************* MoE Block *******************************
@@ -286,6 +337,30 @@ class ProberList:
         return wrapped_forward
 
     @classmethod
+    def wrap_linear_forward(cls, forward: Callable, name: str):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            input = args[0] if args else kwargs["input"]
+            ProberList.before_linear(name, input)
+            output = forward(*args, **kwargs)
+            ProberList.after_linear(name, output)
+            return output
+
+        return wrapped_forward
+
+    @classmethod
+    def wrap_moe_mlp_forward(cls, forward: Callable, name: str):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            x = args[0] if args else kwargs["x"]
+            ProberList.before_moe_mlp(name, x)
+            out = forward(*args, **kwargs)
+            ProberList.after_moe_mlp(name, out)
+            return out
+
+        return wrapped_forward
+
+    @classmethod
     def wrap_attention_forward(cls, forward: Callable, name: str):
         @functools.wraps(forward)
         def wrapped_forward(self, *args, **kwargs):
@@ -301,6 +376,47 @@ class ProberList:
                 hidden_states = outputs
             ProberList.after_attention(name, hidden_states)
             return outputs
+
+        return wrapped_forward
+
+    @classmethod
+    def wrap_causal_conv1d_fn(cls, fn: Callable, name: str) -> Callable:
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            x = kwargs.get("x", args[0] if args else None)
+            ProberList.before_causal_conv1d(name, x)
+            out = fn(*args, **kwargs)
+            ProberList.after_causal_conv1d(name, out)
+            return out
+
+        return wrapped
+
+    @classmethod
+    def wrap_chunk_gated_delta_rule(cls, fn: Callable, name: str) -> Callable:
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            q = args[0] if len(args) > 0 else kwargs.get("q")
+            k = args[1] if len(args) > 1 else kwargs.get("k")
+            v = args[2] if len(args) > 2 else kwargs.get("v")
+            g = kwargs.get("g")
+            beta = kwargs.get("beta")
+            ProberList.before_chunk_gated_delta_rule(name, q, k, v, g, beta)
+            out = fn(*args, **kwargs)
+            ProberList.after_chunk_gated_delta_rule(name, out[0])
+            return out
+
+        return wrapped
+
+    @classmethod
+    def wrap_fused_rms_norm_gated_forward(cls, forward: Callable, name: str):
+        @functools.wraps(forward)
+        def wrapped_forward(self, *args, **kwargs):
+            x = args[0] if args else kwargs["x"]
+            g = args[1] if len(args) > 1 else kwargs.get("g")
+            ProberList.before_fused_rms_norm_gated(name, x, g)
+            out = forward(*args, **kwargs)
+            ProberList.after_fused_rms_norm_gated(name, out)
+            return out
 
         return wrapped_forward
 
@@ -401,6 +517,28 @@ class ProberList:
         for prober_cls in cls.prober_list:
             prober_cls.after_rms_norm(name, hidden_states)
 
+    # ******************************* Linear *******************************
+    @classmethod
+    def before_linear(cls, name: str, input: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_linear(name, input)
+
+    @classmethod
+    def after_linear(cls, name: str, output: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_linear(name, output)
+
+    # ******************************* MoEMLP (shared experts) *******************************
+    @classmethod
+    def before_moe_mlp(cls, name: str, x: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_moe_mlp(name, x)
+
+    @classmethod
+    def after_moe_mlp(cls, name: str, out: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_moe_mlp(name, out)
+
     # ******************************* Attention Block *******************************
     @classmethod
     def before_attention(cls, name: str, hidden_states: torch.Tensor):
@@ -411,6 +549,45 @@ class ProberList:
     def after_attention(cls, name: str, outputs: torch.Tensor):
         for prober_cls in cls.prober_list:
             prober_cls.after_attention(name, outputs)
+
+    # ******************************* GatedDeltaNet ops *******************************
+    @classmethod
+    def before_causal_conv1d(cls, name: str, x: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_causal_conv1d(name, x)
+
+    @classmethod
+    def after_causal_conv1d(cls, name: str, out: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_causal_conv1d(name, out)
+
+    @classmethod
+    def before_chunk_gated_delta_rule(
+        cls,
+        name: str,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor | None,
+        beta: torch.Tensor | None,
+    ):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_chunk_gated_delta_rule(name, q, k, v, g, beta)
+
+    @classmethod
+    def after_chunk_gated_delta_rule(cls, name: str, core_attn_out: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_chunk_gated_delta_rule(name, core_attn_out)
+
+    @classmethod
+    def before_fused_rms_norm_gated(cls, name: str, x: torch.Tensor, g: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.before_fused_rms_norm_gated(name, x, g)
+
+    @classmethod
+    def after_fused_rms_norm_gated(cls, name: str, out: torch.Tensor):
+        for prober_cls in cls.prober_list:
+            prober_cls.after_fused_rms_norm_gated(name, out)
 
     # ******************************* MoE Block *******************************
     @classmethod
@@ -585,6 +762,24 @@ class AccProber(BaseProber):
     def after_rms_norm(cls, name: str, hidden_states: torch.Tensor):
         cls.record_tensor(hidden_states, f"[{name}][after]hidden_states")
 
+    # ******************************* Linear *******************************
+    @classmethod
+    def before_linear(cls, name: str, input: torch.Tensor):
+        cls.record_tensor(input, f"[{name}][before]input")
+
+    @classmethod
+    def after_linear(cls, name: str, output: torch.Tensor):
+        cls.record_tensor(output, f"[{name}][after]output")
+
+    # ******************************* MoEMLP (shared experts) *******************************
+    @classmethod
+    def before_moe_mlp(cls, name: str, x: torch.Tensor):
+        cls.record_tensor(x, f"[{name}][before]x")
+
+    @classmethod
+    def after_moe_mlp(cls, name: str, out: torch.Tensor):
+        cls.record_tensor(out, f"[{name}][after]out")
+
     # ******************************* Attention Block *******************************
     @classmethod
     def before_attention(cls, name: str, hidden_states: torch.Tensor):
@@ -598,6 +793,44 @@ class AccProber(BaseProber):
             assert isinstance(outputs, torch.Tensor), f"Unsupported outputs type: {type(outputs)}"
 
         cls.record_tensor(outputs, f"[{name}][after]outputs")
+
+    # ******************************* GatedDeltaNet ops *******************************
+    @classmethod
+    def before_causal_conv1d(cls, name: str, x: torch.Tensor):
+        cls.record_tensor(x, f"[{name}][before]conv1d_x")
+
+    @classmethod
+    def after_causal_conv1d(cls, name: str, out: torch.Tensor):
+        cls.record_tensor(out, f"[{name}][after]conv1d_out")
+
+    @classmethod
+    def before_chunk_gated_delta_rule(
+        cls,
+        name: str,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor | None,
+        beta: torch.Tensor | None,
+    ):
+        cls.record_tensor(q, f"[{name}][before]q")
+        cls.record_tensor(k, f"[{name}][before]k")
+        cls.record_tensor(v, f"[{name}][before]v")
+        cls.record_tensor(g, f"[{name}][before]g")
+        cls.record_tensor(beta, f"[{name}][before]beta")
+
+    @classmethod
+    def after_chunk_gated_delta_rule(cls, name: str, core_attn_out: torch.Tensor):
+        cls.record_tensor(core_attn_out, f"[{name}][after]core_attn_out")
+
+    @classmethod
+    def before_fused_rms_norm_gated(cls, name: str, x: torch.Tensor, g: torch.Tensor):
+        cls.record_tensor(x, f"[{name}][before]norm_x")
+        cls.record_tensor(g, f"[{name}][before]norm_g")
+
+    @classmethod
+    def after_fused_rms_norm_gated(cls, name: str, out: torch.Tensor):
+        cls.record_tensor(out, f"[{name}][after]norm_out")
 
     # ******************************* MoE Block *******************************
     @classmethod
