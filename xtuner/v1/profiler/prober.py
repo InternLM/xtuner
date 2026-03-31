@@ -524,20 +524,31 @@ class AccProber(BaseProber):
 
     @classmethod
     def record_tensor(cls, tensor: torch.Tensor | None, name: str):
-        """Buffer a tensor clone for deferred serialization.
+        """Buffer compact tensor stats for deferred serialization.
 
-        Only tensor-copy ops happen here so this method is compatible with torch.compile.  String formatting and JSON
-        ops are deferred to after_micro_iter_forward(), which always runs in eager Python.
+        Only light tensor ops happen here so this method is compatible with
+        torch.compile.  Expensive Python ops (.item(), .tolist(), str) are
+        deferred to after_micro_iter_forward(), which always runs in eager mode.
 
-        torch.compile behavior:   _skip_flag=True  → `if cls.skip(): return` compiles to a no-op (dead-code
-        elimination); no graph breaks.   _skip_flag=False → proceeds to list.append(); Dynamo creates a graph break
-        (fine with fullgraph=False).
+        What is stored per tensor:
+          - tensor_sum  : scalar tensor (float32)
+          - shape       : torch.Size  (compile-time constant in static-shape mode)
+          - dtype_str   : str of tensor.dtype (compile-time constant)
+          - first_10    : 1-D float32 tensor with up to 10 flattened elements
+
+        torch.compile behavior:
+          _skip_flag=True  → dead-code elimination; no graph breaks.
+          _skip_flag=False → tensor ops are compiled; list.append is inlined
+                             as a Python side effect (no graph break).
         """
         if cls.skip():
             return
         if tensor is None:
             return
-        cls._pending_tensors.append((name, tensor.detach().clone()))
+        t = tensor.detach().float()
+        tensor_sum = t.sum()
+        first_10 = t.flatten()[:10].clone()
+        cls._pending_tensors.append((name, tensor_sum, tensor.shape, str(tensor.dtype), first_10))
 
     ############################## forward hooks #################################
     @classmethod
@@ -666,15 +677,15 @@ class AccProber(BaseProber):
         # Serialize buffered tensors here — outside any compiled region, so full
         # Python / string ops are safe.  tensor_info (str(tensor)) is included
         # because we are in eager mode at this point.
-        for name, tensor in cls._pending_tensors:
+        for name, tensor_sum, shape, dtype_str, first_10 in cls._pending_tensors:
             cur_json = {
                 "name": name,
-                "tensor_sum": tensor.float().sum().item(),
-                "shape": list(tensor.shape),
-                "dtype": str(tensor.dtype),
+                "tensor_sum": tensor_sum.item(),
+                "shape": list(shape),
+                "dtype": dtype_str,
                 "step": cls.cur_step,
                 "micro_batch_iter": cls.cur_micro_batch_iter,
-                "tensor_info": str(tensor),
+                "first_10": first_10.tolist(),
             }
             cls.forward_records.append(json.dumps(cur_json, ensure_ascii=False))
         cls._pending_tensors = []
