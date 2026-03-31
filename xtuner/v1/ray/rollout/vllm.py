@@ -1,6 +1,5 @@
 import asyncio
 import os
-import time
 import traceback
 from argparse import Namespace
 from typing import Any, Dict, List, Union
@@ -8,14 +7,12 @@ from typing import Any, Dict, List, Union
 import ray
 import requests
 import torch
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.utils import cli_env_setup
 from vllm.utils import FlexibleArgumentParser
 
 from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem, RolloutState
-from xtuner.v1.ray.base import AutoAcceleratorWorkers
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.ray.rollout.worker import RolloutWorker
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -106,7 +103,7 @@ class WorkerWrap:
         return current_pid
 
 
-# @ray.remote
+@ray.remote
 class VllmServerWrapper:
     def __init__(self, server_namespace: Namespace):
         cli_env_setup()
@@ -121,9 +118,15 @@ class VllmServerWrapper:
             stack_trace = traceback.format_exc()
             print(error_msg)
             print(stack_trace)
+            raise  # Re-raise the exception to prevent silent failure
 
     def actor_health(self):
         return "healthy"
+
+
+# Add a dummy task.
+def run_lmdeploy_server_wrapper(server_namespace: Namespace):
+    return ray.get(VllmServerWrapper.remote(server_namespace).actor_health.remote())  # type: ignore
 
 
 class vLLMWorker(RolloutWorker):
@@ -138,6 +141,7 @@ class vLLMWorker(RolloutWorker):
     ):
         super().__init__(config, rank, master_addr, master_port, world_size, accelerator)
         self.router_func = ""
+        self.server_func = run_lmdeploy_server_wrapper
         self.endpoints["health_generate"] = "health"
         self.endpoints["v1/chat/completions"] = "v1/chat/completions"
         self.endpoints["generate"] = "v1/chat/completions"
@@ -155,74 +159,6 @@ class vLLMWorker(RolloutWorker):
             f"tensor_parallel_size ({self.config.tensor_parallel_size}) must be divisible by data_parallel_size ({self.dp_size})"
         )
         self.tp_size = self.config.tensor_parallel_size // self.dp_size
-
-    def launch_server(self):
-        """Launch the inference server as a separate process or Ray task.
-
-        It waits for the server to become healthy before returning.
-
-        Raises:
-            TimeoutError: If the server fails to start within the specified
-                timeout.
-            Exception: If the server task terminates unexpectedly.
-        """
-        server_configs = self._transform_rollout_config_to_server_configs()
-        timeout = 3600.0
-        start_time = time.perf_counter()
-        last_log_time = start_time
-        headers = {
-            "Content-Type": "application/json; charset=utf-8",
-            "Authorization": f"Bearer {server_configs.api_key}",
-        }
-
-        self.logger.info(f"Launch server task on server_url: {self.server_url}")
-
-        # launch the server as ray task
-        # so that the lmdeploy backend could get externl pg
-        current_pg = ray.util.get_current_placement_group()
-
-        scheduling_strategy = PlacementGroupSchedulingStrategy(
-            placement_group=current_pg,
-            placement_group_capture_child_tasks=True,
-            placement_group_bundle_index=self.engine_bundle_idxs[0],
-        )
-        assert ray.is_initialized()
-        ray_kwargs = (
-            {"runtime_env": server_configs.ray_runtime_env} if hasattr(server_configs, "ray_runtime_env") else {}
-        )
-        self.server_task = (
-            ray.remote(VllmServerWrapper)
-            .options(
-                scheduling_strategy=scheduling_strategy,
-                **AutoAcceleratorWorkers.get_pg_options(current_pg),
-                **ray_kwargs,
-            )
-            .remote(server_configs)
-        )
-        with requests.Session() as session:
-            while time.perf_counter() - start_time < timeout:
-                try:
-                    response = session.get(f"{self.server_url}/{self.endpoints['health_generate']}", headers=headers)
-                    if response.status_code == 200:
-                        return
-                except requests.RequestException:
-                    pass
-
-                try:
-                    ray.get(self.server_task.actor_health.remote(), timeout=0.1)
-                    raise Exception("Server task terminated unexpectedly.")
-                except ray.exceptions.GetTimeoutError:
-                    pass
-                except Exception as e:
-                    raise e
-
-                current_time = time.perf_counter()
-                if current_time - last_log_time >= 15:
-                    self.logger.info(f"Waiting for server to start... Elapsed time: {current_time - start_time:.2f}s")
-                    last_log_time = current_time
-
-            ray.cancel(self.server_task)
-            raise TimeoutError("Server failed to start within the timeout period.")
 
     async def _create_request(
         self,
@@ -337,12 +273,7 @@ class vLLMWorker(RolloutWorker):
         return self.sleep(level=2)
 
     def reset_prefix_cache(self, tags: List[str] | None = None):
-        url = f"{self.server_url}/{self.endpoints['reset_prefix_cache']}"
-        headers = {"Content-Type": "application/json"}
-        data = {"tags": tags}
-        response = requests.post(url, headers=headers, json=data)
-        assert response.status_code == 200, response.status_code
-        return response.json()
+        raise NotImplementedError("The 'reset_prefix_cache' API is not yet implemented in the vLLM server.")
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         # use vllm FlexibleArgumentParser to parse the config

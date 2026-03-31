@@ -842,6 +842,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
         if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
             self.rollout_cfg_info["backend"] = "sglang"
+        elif os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+            self.rollout_cfg_info["backend"] = "vllm"
         else:
             self.rollout_cfg_info["backend"] = (rollout_config.extra_rollout_config or dict()).get(
                 "lmdeploy_backend", "pytorch"
@@ -926,7 +928,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.request_update_params(state_dict, finished=False)
             del state_dict, name_list, param_list
 
-        if self.rollout_cfg_info["backend"] == "pytorch" and final_update:
+        if self.rollout_cfg_info["backend"] in ("pytorch", "vllm") and final_update:
             self.request_update_params({}, finished=True)
 
         dist.barrier()
@@ -1031,7 +1033,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
             self.request_update_params(state_dict)
 
-        if self.rollout_cfg_info["backend"] == "pytorch":
+        if self.rollout_cfg_info["backend"] in ("pytorch", "vllm"):
             self.request_update_params({}, finished=True)
 
         dist.barrier()
@@ -1235,7 +1237,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
             return
 
-        if os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+        if self.rollout_cfg_info["backend"] == "vllm":
 
             def serialize_state_dict(state_dict: dict) -> str:
                 import base64
