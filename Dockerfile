@@ -205,29 +205,69 @@ RUN unzip ${DEEP_GEMM_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 RUN unzip ${CAUSAL_CONV1D_DIR}/*.whl -d ${PYTHON_SITE_PACKAGE_PATH}
 
 # install sglang and its runtime requirements
-ARG SGLANG_VERSION
+
+ENV XTUNER_SGLANG_ENVS_DIR=/envs/sglang
 
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
-   pip install sglang==${SGLANG_VERSION} sgl-kernel==0.3.14.post1 pybase64 orjson uvloop setproctitle msgspec \
-   compressed_tensors python-multipart torch_memory_saver \
-   grpcio-tools==1.75.1 hf_transfer interegular llguidance==0.7.11 \
-   xgrammar==0.1.24 blobfile==3.0.0 flashinfer_python==0.4.0 --no-cache-dir --no-deps
+   pip install --target ${XTUNER_SGLANG_ENVS_DIR} \
+   sglang==0.5.9 sgl-kernel==0.3.21 \
+   apache-tvm-ffi==0.1.9 \
+   anthropic==0.86.0 \
+   build==1.4.0 \
+   cuda-python==12.9.0 \
+   decord2==3.2.0 \
+   flashinfer_python==0.6.3 \
+   flashinfer_cubin==0.6.3 \
+   gguf==0.18.0 \
+   modelscope==1.35.3 \
+   nvidia-cutlass-dsl==4.4.2 \
+   openai-harmony==0.0.4 \
+   openai==2.6.1 \
+   outlines==0.1.11 \
+   quack-kernels==0.2.4 \
+   timm==1.0.16 \
+   torchao==0.9.0 \
+   torchaudio==2.9.1 \
+   torchcodec==0.8.0 \
+   xgrammar==0.1.27 \
+   smg-grpc-proto==0.4.5 \
+   grpcio==1.78.1 \
+   grpcio-reflection==1.78.1 \
+   grpcio-health-checking==1.80.0 \
+   pycryptodomex==3.23.0 \
+   lxml==6.0.2 \
+   cuda-bindings==12.9.6 \
+   cuda-pathfinder==1.5.0 \
+   nvidia-cudnn-frontend==1.21.0 \
+   lark==1.3.1 \
+   pycountry==26.2.16 \
+   airportsdata==20260315 \
+   outlines_core==0.1.26 \
+   torch-c-dlpack-ext==0.1.5 \
+   pyproject_hooks==1.2.0 \
+   huggingface_hub==0.36.2 \
+   torch_memory_saver==0.0.9 \
+   llguidance==0.7.11 blobfile==3.0.0 \
+   pybase64 orjson uvloop setproctitle msgspec \
+   compressed_tensors python-multipart \
+   hf_transfer interegular --no-cache-dir --no-deps
 
 # install lmdeploy and its missing runtime requirements
 ARG LMDEPLOY_VERSION
 ARG LMDEPLOY_URL
+ENV XTUNER_LMDEPLOY_ENVS_DIR=/envs/lmdeploy
 
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     pip install fastapi fire openai outlines \
         partial_json_parser ray[default] shortuuid uvicorn \
-        'pydantic>2' openai_harmony dlblas --no-cache-dir  && \
+        'pydantic>2' openai_harmony dlblas --target ${XTUNER_LMDEPLOY_ENVS_DIR} --no-cache-dir && \
     if [ -n "${LMDEPLOY_VERSION}" ]; then \
-        pip install lmdeploy==${LMDEPLOY_VERSION} --no-deps --no-cache-dir; \
+        pip install lmdeploy==${LMDEPLOY_VERSION} --target ${XTUNER_LMDEPLOY_ENVS_DIR} --no-deps --no-cache-dir; \
     else \
         git clone $(echo ${LMDEPLOY_URL} | cut -d '@' -f 1) && \
         cd ${CODESPACE}/lmdeploy && \
         git checkout $(echo ${LMDEPLOY_URL} | cut -d '@' -f 2) && \
-        pip install . -v --no-deps --no-cache-dir; \
+        pip install . -v --target ${XTUNER_LMDEPLOY_ENVS_DIR} --no-deps --no-cache-dir; \
     fi
 
 ## install xtuner
@@ -242,6 +282,9 @@ COPY . ${CODESPACE}/xtuner
 WORKDIR ${CODESPACE}/xtuner
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     pip install .[all] -v --no-cache-dir
+
+# Install custom .pth file for conditional lmdeploy and sglang path injection
+RUN cp .dev_scripts/xtuner_rl_path.pth ${PYTHON_SITE_PACKAGE_PATH}/xtuner_rl_path.pth
 
 WORKDIR ${CODESPACE}
 
