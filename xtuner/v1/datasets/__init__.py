@@ -8,7 +8,6 @@ from .config import (
     DatasetConfigList,
     DatasetConfigListAdatper,
 )
-from .custom_sampler import CustomSampler
 from .ftdp import FTDPTokenizeFnConfig, FtdpTokenizeFunction
 from .jsonl import JsonlDataset
 from .mllm_tokenize_fn import (
@@ -19,6 +18,7 @@ from .mllm_tokenize_fn import (
 )
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 from .preset_pack import PresetPackDataset
+from .preset_sampler import PresetSampler
 from .pt_tokenize_fn import (
     LongTextPretrainTokenizeFunction,
     LongTextPretrainTokenizeFunctionConfig,
@@ -38,7 +38,7 @@ from . import _hardcode_patch  # isort: skip
 
 __all__ = [
     "PresetPackDataset",
-    "CustomSampler",
+    "PresetSampler",
     "JsonlDataset",
     "CachableTokenizeFunction",
     "calculate_file_sha256",
