@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import io
+import logging
 import os
 import re
 import time
@@ -8,7 +9,6 @@ from typing import Literal
 
 import numpy as np
 import torch
-from loguru import logger
 from PIL import Image
 
 from transformers.image_utils import ChannelDimension
@@ -260,7 +260,7 @@ class Qwen3VLOSSLoader:
 _TRIM_MEMORY_WARNED = False
 
 
-def trim_memory(logger: logger | None = None):
+def trim_memory(logger: logging.Logger | None = None):
     """Try to return free heap pages to OS.
 
     Best-effort only: on platforms without `malloc_trim` (or when unavailable),
