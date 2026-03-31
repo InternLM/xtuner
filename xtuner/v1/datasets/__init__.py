@@ -8,7 +8,6 @@ from .config import (
     DatasetConfigList,
     DatasetConfigListAdatper,
 )
-from .custom_pack import CustomPackDataset
 from .custom_sampler import CustomSampler
 from .ftdp import FTDPTokenizeFnConfig, FtdpTokenizeFunction
 from .jsonl import JsonlDataset
@@ -19,6 +18,7 @@ from .mllm_tokenize_fn import (
     Qwen3VLTokenizeFunction,
 )
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
+from .preset_pack import PresetPackDataset
 from .pt_tokenize_fn import (
     LongTextPretrainTokenizeFunction,
     LongTextPretrainTokenizeFunctionConfig,
@@ -37,7 +37,7 @@ from . import _hardcode_patch  # isort: skip
 
 
 __all__ = [
-    "CustomPackDataset",
+    "PresetPackDataset",
     "CustomSampler",
     "JsonlDataset",
     "CachableTokenizeFunction",
