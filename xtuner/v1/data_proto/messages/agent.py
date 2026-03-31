@@ -30,6 +30,7 @@ class AgentMessage(BaseAgentMessage):
         self.reward = other.reward
         self.finish_reason = other.finish_reason
         self.stream_state = other.stream_state
+        self.extra_info = other.extra_info
         return self
 
     @classmethod
