@@ -4,6 +4,7 @@ from typing import Literal, TypedDict
 
 import ray
 import torch
+from ray import ObjectRef
 from ray.actor import ActorProxy
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -27,6 +28,23 @@ class ColateItem(TypedDict):
 class RawTrainingController:
     def __init__(self, workers: list[TrainingWorker]) -> None:
         self.workers = workers
+
+    def _collect_object_refs(self, obj, refs: list[ObjectRef]):
+        if isinstance(obj, ObjectRef):
+            refs.append(obj)
+            return
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                self._collect_object_refs(item, refs)
+
+    def _free_batch_object_refs(self, data_batches):
+        refs: list[ObjectRef] = []
+        for data in data_batches:
+            seq_ctx = data["seq_ctx"]
+            self._collect_object_refs(seq_ctx.pixel_values, refs)
+            self._collect_object_refs(seq_ctx.rollout_routed_experts, refs)
+        if refs:
+            ray.internal.free(refs, local_only=False)
 
     # TODO(hha): 这个逻辑不够通用，应该复用 sft 函数，从而支持 expand soft pack
     def _get_pack_infos(self, dataset, num_tokens, target, random=None):
@@ -260,7 +278,10 @@ class RawTrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        try:
+            log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        finally:
+            self._free_batch_object_refs(packed_data_batches)
         return log_infos
 
     @ray_method
