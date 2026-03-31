@@ -13,6 +13,7 @@ from xtuner.v1.utils import get_logger
 
 from ..data_item import BaseMLLMDataItem, CacheItem
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
+from .qwen3_vl_utils import trim_memory
 
 
 logger = get_logger()
@@ -118,7 +119,8 @@ def replace_image_token(
 
 
 def load_image(image_path: str):
-    return Image.open(image_path).convert("RGB")
+    with Image.open(image_path) as img:
+        return img.convert("RGB")
 
 
 def get_image_path(image_path: str, media_root: str):
@@ -213,16 +215,19 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
             else:
                 ret = self.multi_modal_get_item(item, media_root)
+                trim_memory(logger)
         elif len(self._video_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_video_get_item(item)
             else:
                 ret = self.video_get_item(item, media_root)
+                trim_memory(logger)
         else:
             if self.state == "cache":
                 ret = self.calc_num_tokens_pure_text_get_item(item)
             else:
                 ret = self.pure_text_get_item(item)
+
         return ret
 
     def hash(self) -> str:

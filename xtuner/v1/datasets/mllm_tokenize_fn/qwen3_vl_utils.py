@@ -8,10 +8,12 @@ from typing import Literal
 
 import numpy as np
 import torch
+from loguru import logger
 from PIL import Image
 
 from transformers.image_utils import ChannelDimension
 from transformers.video_utils import to_channel_dimension_format
+from xtuner.v1.utils.logger import get_logger
 from xtuner.v1.utils.oss_utils import get_oss_backend
 
 
@@ -22,9 +24,10 @@ except ImportError:
 
 
 def pil_loader(img_str):
-    buff = io.BytesIO(img_str)
-    img = Image.open(buff)
-    return img.convert("RGB")
+    # Ensure both the BytesIO buffer and PIL image file handle are closed promptly.
+    with io.BytesIO(img_str) as buff:
+        with Image.open(buff) as img:
+            return img.convert("RGB")
 
 
 def extract_frame_number(filename):
@@ -109,12 +112,13 @@ def read_frames_folder(
             start_time = time.time()
             image_byte = client.get(image_list[frame_index])
             oss_read_time += time.time() - start_time
-            frame = Image.open(io.BytesIO(image_byte))
-            frame_list.append(np.array(frame))
+            with io.BytesIO(image_byte) as buff:
+                with Image.open(buff) as frame:
+                    frame_list.append(np.array(frame))
         else:
             fp = os.path.join(video_path, image_list[frame_index])
-            frame = Image.open(fp).convert("RGB")
-            frame_list.append(np.array(frame))
+            with Image.open(fp) as frame:
+                frame_list.append(np.array(frame.convert("RGB")))
 
     frames = numpy_to_tensor(frame_list)
     return frames, oss_read_time, len(frames), frames_indices, timestamps
@@ -251,3 +255,27 @@ class Qwen3VLOSSLoader:
             )
         else:
             raise ValueError(f"Unsupported image type: {image_type}")
+
+
+_TRIM_MEMORY_WARNED = False
+
+
+def trim_memory(logger: logger | None = None):
+    """Try to return free heap pages to OS.
+
+    Best-effort only: on platforms without `malloc_trim` (or when unavailable),
+    this will fail. We log the failure once per process to avoid spamming.
+    """
+    global _TRIM_MEMORY_WARNED
+    if logger is None:
+        logger = get_logger()
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        return libc.malloc_trim(0)
+    except Exception as e:
+        if not _TRIM_MEMORY_WARNED:
+            logger.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
+            _TRIM_MEMORY_WARNED = True
+        return False
