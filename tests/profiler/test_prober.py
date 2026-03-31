@@ -238,73 +238,82 @@ class TestAccProberForwardRecordsCompiled(DeterministicDDPTestCase):
 # ---------------------------------------------------------------------------
 
 class TestAccProberMHAFullgraph(DeterministicDDPTestCase):
-    """Verify that MultiHeadAttention.forward is compiled with fullgraph=True
-    AND that the prober still captures q_norm / k_norm tensors from inside it.
+    """Call MultiHeadAttention.forward directly (not the full model) and verify:
 
-    The mechanism: _pre_moe_forward (fullgraph=False) inlines original_mha_forward
-    during compilation, dropping the fullgraph=True constraint in the inlined
-    context. Graph breaks from list.append are allowed in the outer fullgraph=False
-    context, so q_norm wrappers' record_tensor calls are captured.
+      1. MultiHeadAttention.forward is a compiled function (fullgraph=True).
+      2. The prober's list.append inside record_tensor is NOT a graph break in
+         this PyTorch version — Dynamo inlines it as a Python side effect within
+         the fullgraph=True compilation. Consequently counters["graph_break"]
+         stays at zero after the forward.
+      3. Because list.append runs inline during compiled execution, q_norm /
+         k_norm tensors ARE captured in the JSONL dump.
 
-    The test passes without exceptions only if MHA genuinely ran fullgraph=True
-    (suppress_errors=False means no silent eager fallback).
+    Why no warm-up step: a prior non-profile forward would compile MHA.forward
+    with _skip_flag=True (list.append dead-code-eliminated).  The subsequent
+    guard failure on _skip_flag would re-use the old cached graph rather than
+    recompiling, producing no records.
     """
 
     def test_mha_fullgraph_with_prober_dumps_qk_norm(self):
-        """Verify that MultiHeadAttention.forward is configured with fullgraph=True compile
-        AND that the prober captures q_norm / k_norm tensors from inside MHA.
-
-        When the profile step is the *first* compilation of DenseDecoderLayer.forward
-        (fullgraph=True), Dynamo encounters list.append from the prober wrappers and
-        falls back to eager for that layer.  In eager mode the MHA instance wrappers
-        (including q_norm / k_norm sub-module wrappers) run normally and record tensors.
-
-        A warm-up step (non-profile) must NOT precede the profile step here, because
-        a successful fullgraph=True compilation with _skip_flag=True would bake the
-        "skip" branch as a constant; the subsequent guard failure on _skip_flag would
-        then fall back to the old compiled graph rather than eager, producing no records.
-        """
+        import torch._dynamo.utils as _dynamo_utils
         from xtuner.v1.utils.compile import is_compiled_function
 
         self.create_pg("cuda")
         _reset_acc_prober()
         torch._dynamo.reset()
 
+        # Build the tiny model only to (a) trigger class-level torch.compile on
+        # MultiHeadAttention.forward and (b) borrow the rotary_emb module.
         config = _make_small_model_config()
         config.compile_cfg = True
         model = config.build().to(torch.bfloat16).cuda()
 
-        # Verify MHA.forward is class-level compiled (fullgraph=True)
+        # Layer 3 is the full_attention (DenseDecoderLayer) in the 4-layer config.
+        mha = model.layers["3"].self_attn  # MultiHeadAttention with qk_norm=True
+
+        # MHA.forward class attribute must be a compiled function (fullgraph=True).
         self.assertTrue(
-            is_compiled_function(MultiHeadAttention.forward),
+            is_compiled_function(mha.forward),
             "MultiHeadAttention.forward should be a compiled function",
         )
 
+
+        B, SEQ_LEN = 1, 16
         PROBE_STEP = 1
-        SEQ_LEN = 16
 
         with tempfile.TemporaryDirectory() as tmp_dir:
+            # Register prober ONLY on the MHA module (and its sub-modules q_norm, k_norm).
             ProberList.setup(Path(tmp_dir), [PROBE_STEP], ["AccProber"])
-            register_prober_list(model)
+            register_prober_list(mha)
 
-            # Profile step is the first (and only) forward — no warm-up.
-            # DenseDecoderLayer.forward (fullgraph=True) encounters a graph break
-            # from the prober's list.append and falls back to eager, where all
-            # sub-module prober wrappers (including q_norm / k_norm) run normally.
             ProberList.set_step(PROBE_STEP)
             ProberList.set_micro_batch_iter(0)
 
-            input_ids = torch.randint(0, config.vocab_size, (1, SEQ_LEN), device="cuda")
-            shifted_labels = input_ids[:, 1:].clone()
-            shift_input_ids = input_ids[:, :-1]
-            seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids,))
-            loss_cfg = CELossConfig()
-            LossCtx = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
-            loss_ctx = LossCtx.build_batches([loss_ctx])[0]
+            # Build inputs for MHA.forward.
+            hidden_states = torch.randn(
+                B, SEQ_LEN, config.hidden_size, dtype=torch.bfloat16, device="cuda"
+            )
+            position_ids = torch.arange(SEQ_LEN, device="cuda").unsqueeze(0)
+            with torch.no_grad():
+                # Use the model's shared rotary_emb for correctly-shaped cos/sin.
+                cos, sin = model.rotary_emb(hidden_states, position_ids)
+
+            input_ids = torch.randint(0, config.vocab_size, (B, SEQ_LEN), device="cuda")
+            seq_ctx = SequenceContext.from_input_ids(input_ids=(input_ids,))
+
+            _dynamo_utils.counters.clear()
 
             with torch.no_grad():
-                model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+                mha(hidden_states, position_embeddings=(cos, sin), seq_ctx=seq_ctx)
+
+            # ---- 1. list.append is NOT a graph break in fullgraph=True ----
+            # Dynamo inlines it as a Python side effect; no split points are created.
+            graph_break_count = sum(_dynamo_utils.counters["graph_break"].values())
+            self.assertEqual(
+                graph_break_count, 0,
+                f"Expected zero graph breaks: list.append is inlined by Dynamo. "
+                f"Got: {dict(_dynamo_utils.counters['graph_break'])}",
+            )
 
             AccProber.after_micro_iter_forward()
 
@@ -318,6 +327,7 @@ class TestAccProberMHAFullgraph(DeterministicDDPTestCase):
             records = [json.loads(line) for line in dump_file.read_text().splitlines() if line.strip()]
             names = [r["name"] for r in records]
 
+            # ---- 2. q_norm / k_norm tensors must be captured ----
             q_norm_records = [n for n in names if "q_norm" in n]
             k_norm_records = [n for n in names if "k_norm" in n]
 
