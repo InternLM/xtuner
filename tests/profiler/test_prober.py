@@ -15,6 +15,7 @@ Two levels of tests:
 """
 
 import json
+import re
 import tempfile
 import types
 import unittest
@@ -64,7 +65,9 @@ def _reset_acc_prober():
     AccProber.initialized = False
     AccProber.cur_step = 0
     AccProber.cur_micro_batch_iter = 0
+    AccProber._skip_flag = True
     AccProber.forward_records = []
+    AccProber._pending_tensors = []
     ProberList.prober_list = []
 
 
@@ -147,3 +150,185 @@ class TestAccProberForwardRecords(DeterministicDDPTestCase):
             )
 
         _reset_acc_prober()
+
+
+# ---------------------------------------------------------------------------
+# Compiled-mode integration test
+# ---------------------------------------------------------------------------
+
+class TestAccProberForwardRecordsCompiled(DeterministicDDPTestCase):
+    """Same as TestAccProberForwardRecords but with torch.compile enabled.
+
+    Verifies that the buffer-based record_tensor approach captures the same
+    module-level tensors as non-compiled mode (decoder-layer before/after,
+    self_attn before/after, experts before/after) without using
+    @torch._dynamo.disable on any wrapper.
+    """
+
+    def test_acc_prober_records_with_compile(self):
+        self.create_pg("cuda")
+        _reset_acc_prober()
+        torch._dynamo.reset()
+
+        config = _make_small_model_config()
+        # compile_cfg=True enables torch.compile via default_compile_cfg
+        config.compile_cfg = True
+        model = config.build().to(torch.bfloat16).cuda()
+
+        PROBE_STEP = 1
+        SEQ_LEN = 16
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ProberList.setup(Path(tmp_dir), [PROBE_STEP], ["AccProber"])
+            register_prober_list(model)
+
+            ProberList.set_step(PROBE_STEP)
+            ProberList.set_micro_batch_iter(0)
+
+            input_ids = torch.randint(0, config.vocab_size, (1, SEQ_LEN), device="cuda")
+            shifted_labels = input_ids[:, 1:].clone()
+            shift_input_ids = input_ids[:, :-1]
+
+            seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids,))
+            loss_cfg = CELossConfig()
+            LossCtx = loss_cfg.loss_ctx_cls
+            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = LossCtx.build_batches([loss_ctx])[0]
+
+            with torch.no_grad():
+                model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+
+            AccProber.after_micro_iter_forward()
+
+            dump_file = (
+                Path(tmp_dir)
+                / "acc_prober"
+                / f"Step_{PROBE_STEP}_MicroIter_0_RANK_{dist.get_rank()}_forward_records.jsonl"
+            )
+            self.assertTrue(dump_file.exists(), f"Compiled dump file not found: {dump_file}")
+
+            records = [json.loads(line) for line in dump_file.read_text().splitlines() if line.strip()]
+            names = [r["name"] for r in records]
+
+            # Attention tensors must appear for both GatedDeltaNet and MHA layers
+            attn_before = [n for n in names if "self_attn" in n and "[before]hidden_states" in n]
+            attn_after  = [n for n in names if "self_attn" in n and "[after]outputs" in n]
+            self.assertGreater(len(attn_before), 0,
+                f"[compile] No self_attn before records. Got:\n" + "\n".join(names))
+            self.assertGreater(len(attn_after),  0, "[compile] No self_attn after records.")
+
+            # Decoder-layer before/after must appear
+            layer_before = [n for n in names if re.search(r"layers\.\d+\]\[before\]hidden_states", n)]
+            layer_after  = [n for n in names if re.search(r"layers\.\d+\]\[after\]hidden_states", n)]
+            self.assertGreater(len(layer_before), 0, "[compile] No decoder-layer before records.")
+            self.assertGreater(len(layer_after),  0, "[compile] No decoder-layer after records.")
+
+            # MoE experts must appear
+            experts_before = [n for n in names if "experts" in n and "[before]" in n]
+            experts_after  = [n for n in names if "experts" in n and "[after]" in n]
+            self.assertGreater(len(experts_before), 0, "[compile] No experts before records.")
+            self.assertGreater(len(experts_after),  0, "[compile] No experts after records.")
+
+        _reset_acc_prober()
+        torch._dynamo.reset()
+
+
+# ---------------------------------------------------------------------------
+# MHA fullgraph=True + prober q/k norm capture test
+# ---------------------------------------------------------------------------
+
+class TestAccProberMHAFullgraph(DeterministicDDPTestCase):
+    """Verify that MultiHeadAttention.forward is compiled with fullgraph=True
+    AND that the prober still captures q_norm / k_norm tensors from inside it.
+
+    The mechanism: _pre_moe_forward (fullgraph=False) inlines original_mha_forward
+    during compilation, dropping the fullgraph=True constraint in the inlined
+    context. Graph breaks from list.append are allowed in the outer fullgraph=False
+    context, so q_norm wrappers' record_tensor calls are captured.
+
+    The test passes without exceptions only if MHA genuinely ran fullgraph=True
+    (suppress_errors=False means no silent eager fallback).
+    """
+
+    def test_mha_fullgraph_with_prober_dumps_qk_norm(self):
+        """Verify that MultiHeadAttention.forward is configured with fullgraph=True compile
+        AND that the prober captures q_norm / k_norm tensors from inside MHA.
+
+        When the profile step is the *first* compilation of DenseDecoderLayer.forward
+        (fullgraph=True), Dynamo encounters list.append from the prober wrappers and
+        falls back to eager for that layer.  In eager mode the MHA instance wrappers
+        (including q_norm / k_norm sub-module wrappers) run normally and record tensors.
+
+        A warm-up step (non-profile) must NOT precede the profile step here, because
+        a successful fullgraph=True compilation with _skip_flag=True would bake the
+        "skip" branch as a constant; the subsequent guard failure on _skip_flag would
+        then fall back to the old compiled graph rather than eager, producing no records.
+        """
+        from xtuner.v1.utils.compile import is_compiled_function
+
+        self.create_pg("cuda")
+        _reset_acc_prober()
+        torch._dynamo.reset()
+
+        config = _make_small_model_config()
+        config.compile_cfg = True
+        model = config.build().to(torch.bfloat16).cuda()
+
+        # Verify MHA.forward is class-level compiled (fullgraph=True)
+        self.assertTrue(
+            is_compiled_function(MultiHeadAttention.forward),
+            "MultiHeadAttention.forward should be a compiled function",
+        )
+
+        PROBE_STEP = 1
+        SEQ_LEN = 16
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ProberList.setup(Path(tmp_dir), [PROBE_STEP], ["AccProber"])
+            register_prober_list(model)
+
+            # Profile step is the first (and only) forward — no warm-up.
+            # DenseDecoderLayer.forward (fullgraph=True) encounters a graph break
+            # from the prober's list.append and falls back to eager, where all
+            # sub-module prober wrappers (including q_norm / k_norm) run normally.
+            ProberList.set_step(PROBE_STEP)
+            ProberList.set_micro_batch_iter(0)
+
+            input_ids = torch.randint(0, config.vocab_size, (1, SEQ_LEN), device="cuda")
+            shifted_labels = input_ids[:, 1:].clone()
+            shift_input_ids = input_ids[:, :-1]
+            seq_ctx = SequenceContext.from_input_ids(input_ids=(shift_input_ids,))
+            loss_cfg = CELossConfig()
+            LossCtx = loss_cfg.loss_ctx_cls
+            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels, sp_mesh=None)
+            loss_ctx = LossCtx.build_batches([loss_ctx])[0]
+
+            with torch.no_grad():
+                model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+
+            AccProber.after_micro_iter_forward()
+
+            dump_file = (
+                Path(tmp_dir)
+                / "acc_prober"
+                / f"Step_{PROBE_STEP}_MicroIter_0_RANK_{dist.get_rank()}_forward_records.jsonl"
+            )
+            self.assertTrue(dump_file.exists(), f"Dump file not found: {dump_file}")
+
+            records = [json.loads(line) for line in dump_file.read_text().splitlines() if line.strip()]
+            names = [r["name"] for r in records]
+
+            q_norm_records = [n for n in names if "q_norm" in n]
+            k_norm_records = [n for n in names if "k_norm" in n]
+
+            self.assertGreater(
+                len(q_norm_records), 0,
+                "Expected q_norm records from inside MHA.forward. Got names:\n" + "\n".join(names),
+            )
+            self.assertGreater(
+                len(k_norm_records), 0,
+                "Expected k_norm records from inside MHA.forward. Got names:\n" + "\n".join(names),
+            )
+
+        _reset_acc_prober()
+        torch._dynamo.reset()

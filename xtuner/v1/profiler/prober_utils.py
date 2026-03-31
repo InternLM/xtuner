@@ -2,6 +2,7 @@
 import types
 from pathlib import Path
 
+import torch
 import torch.nn as nn
 
 from xtuner.v1.model.moe.moe import DenseDecoderLayer, LMHead, MoEBlock, MoEDecoderLayer
@@ -47,3 +48,4 @@ def setup_prober_list(exp_dir: Path, profile_step: list[int] | None, model: nn.M
         return
     ProberList.setup(exp_dir, profile_step, prober_list)
     register_prober_list(model)
+    torch._dynamo.reset()  # clear compile cache so next forward recompiles with prober wrappers active

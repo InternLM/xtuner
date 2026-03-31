@@ -37,6 +37,10 @@ class BaseProber(ABC):
     initialized: ClassVar[bool] = False
     cur_step: ClassVar[int] = 0
     cur_micro_batch_iter: ClassVar[int] = 0
+    # Pre-computed skip flag: True means "do not record".  Updated in set_step()
+    # so that torch.compile guards on a bool that changes only at profile-step
+    # transitions (not on cur_step, which changes every step).
+    _skip_flag: ClassVar[bool] = True
 
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int]):
@@ -45,18 +49,19 @@ class BaseProber(ABC):
         cls.dump_dir.mkdir(parents=True, exist_ok=True)
         cls.profile_step = profile_step
         cls.initialized = True
+        cls._skip_flag = True  # reset; will be updated by first set_step() call
 
     @classmethod
     def skip(cls) -> bool:
-        if cls.profile_step is None or cls.cur_step not in cls.profile_step:
-            return True
-        # if dist.get_rank() != 0:
-        #     return True
-        return False
+        return cls._skip_flag
 
     @classmethod
     def set_step(cls, step: int):
         cls.cur_step = step
+        if cls.profile_step is None:
+            cls._skip_flag = True
+        else:
+            cls._skip_flag = step not in cls.profile_step
 
     @classmethod
     def set_micro_batch_iter(cls, iter: int):
@@ -503,35 +508,36 @@ class AccProber(BaseProber):
     initialized: ClassVar[bool] = False
     cur_step: ClassVar[int] = 0
     cur_micro_batch_iter: ClassVar[int] = 0
+    _skip_flag: ClassVar[bool] = True
 
     forward_records: ClassVar[list] = []
+    # Tensors buffered during the forward pass; serialized in after_micro_iter_forward
+    # so that no Python string / JSON ops occur inside torch.compile regions.
+    _pending_tensors: ClassVar[list] = []
 
     @classmethod
     def setup(cls, dump_home: Path, profile_step: list[int]):
         super().setup(dump_home / "acc_prober", profile_step)
         cls.forward_records = []
+        cls._pending_tensors = []
         log_rank0.info(f"AccProber initialized at {cls.dump_dir}")
 
     @classmethod
     def record_tensor(cls, tensor: torch.Tensor | None, name: str):
-        """记录张量信息."""
+        """Buffer a tensor clone for deferred serialization.
+
+        Only tensor-copy ops happen here so this method is compatible with torch.compile.  String formatting and JSON
+        ops are deferred to after_micro_iter_forward(), which always runs in eager Python.
+
+        torch.compile behavior:   _skip_flag=True  → `if cls.skip(): return` compiles to a no-op (dead-code
+        elimination); no graph breaks.   _skip_flag=False → proceeds to list.append(); Dynamo creates a graph break
+        (fine with fullgraph=False).
+        """
         if cls.skip():
             return
-        assert cls.initialized, "AccProber is not initialized, please call setup() first"
         if tensor is None:
-            # logger.warning(f"[AccProber] Warning: {name} is None, skip recording")
             return
-        tensor = tensor.detach().clone()
-        cur_json = {
-            "name": name,
-            "tensor_sum": tensor.float().sum().item(),
-            "shape": list(tensor.shape),
-            "dtype": str(tensor.dtype),
-            "step": cls.cur_step,
-            "micro_batch_iter": cls.cur_micro_batch_iter,
-            "tensor_info": str(tensor),
-        }
-        cls.forward_records.append(json.dumps(cur_json, ensure_ascii=False))
+        cls._pending_tensors.append((name, tensor.detach().clone()))
 
     ############################## forward hooks #################################
     @classmethod
@@ -657,6 +663,22 @@ class AccProber(BaseProber):
         if cls.skip():
             return
         assert cls.initialized, "AccProber is not initialized, please call setup() first"
+        # Serialize buffered tensors here — outside any compiled region, so full
+        # Python / string ops are safe.  tensor_info (str(tensor)) is included
+        # because we are in eager mode at this point.
+        for name, tensor in cls._pending_tensors:
+            cur_json = {
+                "name": name,
+                "tensor_sum": tensor.float().sum().item(),
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+                "step": cls.cur_step,
+                "micro_batch_iter": cls.cur_micro_batch_iter,
+                "tensor_info": str(tensor),
+            }
+            cls.forward_records.append(json.dumps(cur_json, ensure_ascii=False))
+        cls._pending_tensors = []
+
         dump_file = cls.dump_dir.joinpath(
             f"Step_{cls.cur_step}_MicroIter_{cls.cur_micro_batch_iter}_RANK_{dist.get_rank()}_forward_records.jsonl"
         )
