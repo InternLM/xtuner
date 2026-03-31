@@ -22,9 +22,9 @@ except ImportError:
 
 
 def pil_loader(img_str):
-    buff = io.BytesIO(img_str)
-    img = Image.open(buff)
-    return img.convert("RGB")
+    with io.BytesIO(img_str) as buff:
+        with Image.open(buff) as img:
+            return img.convert("RGB")
 
 
 def extract_frame_number(filename):
@@ -109,12 +109,13 @@ def read_frames_folder(
             start_time = time.time()
             image_byte = client.get(image_list[frame_index])
             oss_read_time += time.time() - start_time
-            frame = Image.open(io.BytesIO(image_byte))
-            frame_list.append(np.array(frame))
+            with io.BytesIO(image_byte) as buff:
+                with Image.open(buff) as frame:
+                    frame_list.append(np.array(frame))
         else:
             fp = os.path.join(video_path, image_list[frame_index])
-            frame = Image.open(fp).convert("RGB")
-            frame_list.append(np.array(frame))
+            with Image.open(fp) as frame:
+                frame_list.append(np.array(frame.convert("RGB")))
 
     frames = numpy_to_tensor(frame_list)
     return frames, oss_read_time, len(frames), frames_indices, timestamps
