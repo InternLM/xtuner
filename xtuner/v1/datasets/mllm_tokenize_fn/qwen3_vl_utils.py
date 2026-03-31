@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import io
-import logging
 import os
 import re
 import time
@@ -13,7 +12,6 @@ from PIL import Image
 
 from transformers.image_utils import ChannelDimension
 from transformers.video_utils import to_channel_dimension_format
-from xtuner.v1.utils.logger import get_logger
 from xtuner.v1.utils.oss_utils import get_oss_backend
 
 
@@ -255,27 +253,3 @@ class Qwen3VLOSSLoader:
             )
         else:
             raise ValueError(f"Unsupported image type: {image_type}")
-
-
-_TRIM_MEMORY_WARNED = False
-
-
-def trim_memory(logger: logging.Logger | None = None):
-    """Try to return free heap pages to OS.
-
-    Best-effort only: on platforms without `malloc_trim` (or when unavailable),
-    this will fail. We log the failure once per process to avoid spamming.
-    """
-    global _TRIM_MEMORY_WARNED
-    if logger is None:
-        logger = get_logger()
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL("libc.so.6")
-        return libc.malloc_trim(0)
-    except Exception as e:
-        if not _TRIM_MEMORY_WARNED:
-            logger.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
-            _TRIM_MEMORY_WARNED = True
-        return False
