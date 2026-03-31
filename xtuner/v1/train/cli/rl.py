@@ -20,19 +20,20 @@ app = App(
 )
 
 
-def rl_monitor_actor_memory(work_dir, interval: int = 60):
-    while True:
-        try:
-            ray.init(address="auto")
-            time.sleep(interval)
-            break
-        except KeyboardInterrupt:
-            print("\n监控已停止")
-            break
-        except Exception:
-            print("连接 Ray 集群失败, 等等")
+def rl_monitor_actor_memory(work_dir, interval: int = 60, object_limit: int = 5000, top_k: int = 10):
+    if not ray.is_initialized():
+        while True:
+            try:
+                ray.init(address="auto")
+                time.sleep(interval)
+                break
+            except KeyboardInterrupt:
+                print("\n监控已停止")
+                return
+            except Exception:
+                print("连接 Ray 集群失败, 等等")
 
-    monitor_actor_memory(work_dir=work_dir, interval=interval)
+    monitor_actor_memory(work_dir=work_dir, interval=interval, object_limit=object_limit, top_k=top_k)
 
 
 @app.default()
@@ -51,7 +52,13 @@ def main(
 
     if os.getenv("XTUNER_RL_MEM_DIR"):
         print("Start to monitor actor memory")
-        track_thread = threading.Thread(target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"),))
+        monitor_interval = int(os.getenv("XTUNER_RL_MEM_INTERVAL", "60"))
+        object_limit = int(os.getenv("XTUNER_RL_OBJECT_LIMIT", "5000"))
+        top_k = int(os.getenv("XTUNER_RL_OBJECT_TOP_K", "10"))
+        track_thread = threading.Thread(
+            target=rl_monitor_actor_memory,
+            args=(os.getenv("XTUNER_RL_MEM_DIR"), monitor_interval, object_limit, top_k),
+        )
         track_thread.daemon = True
         track_thread.start()
 
