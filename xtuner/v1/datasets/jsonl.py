@@ -278,8 +278,6 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
     _thread_executor: ThreadPoolExecutor | None = None
     # TODO: Using shared memory should be optional since the size of `/dev/shm` could be not enough for some devices
     _shared_memory: SharedMemory | None = None
-    offsets: np.ndarray
-    num_tokens: np.ndarray | None
     _meta: dict[str, np.ndarray]
 
     def __init__(
@@ -293,9 +291,11 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         cache_tag: str | None = None,
         enable_sequential_sampler: bool = False,
         enable_mmap_shared: bool = False,
+        disable_filter: bool = False,
     ):
         super().__init__()
 
+        self.disable_filter = disable_filter
         self.tokenize_fn = tokenize_fn
         self.path = str(anno_path)
         self.name = name
@@ -316,7 +316,6 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             offsets = np.load(offset_path, mmap_mode="r" if enable_mmap_shared else None)
             if meta_path:
                 _meta = load_dict_from_npy_dir(meta_path, mmap=enable_mmap_shared)
-                num_tokens = _meta["num_tokens"]
         elif cache_dir:
             self._shared_memory = self._init_shared_memory(anno_path)
             assert self.meta_path is not None
@@ -399,10 +398,8 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 if os.path.exists(_meta_file):
                     logger.info(f"Loading tokenize meta from cache: {_meta_file}")
                     _meta = load_dict_from_npy_dir(_meta_file, mmap=enable_mmap_shared)
-                    num_tokens = _meta["num_tokens"]
                 else:
                     _meta = self.count_tokens(offsets, tok_cache_dir)
-                    num_tokens = _meta["num_tokens"]
 
                 if get_rank() == 0:
                     with open(self.meta_path, "r+") as f:
@@ -446,22 +443,21 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                     "be re-tokenized during training!"
                 )
                 _meta = self.count_tokens(offsets)
-                num_tokens = _meta["num_tokens"]
             else:
                 offsets = offsets
-                num_tokens = None
                 _meta = {}
         else:
             self._shared_memory = self._init_shared_memory(anno_path)
             offsets = self.count_offsets()
-            num_tokens = None
             _meta = {}
             if tokenize_fn is not None:
                 _meta = self.count_tokens(offsets)
-                num_tokens = _meta["num_tokens"]
 
-        # remove num_tokens from _meta, because variable `num_tokens` is already set
-        _meta.pop("num_tokens", None)
+        _meta["offsets"] = offsets
+        if _meta["num_tokens"] is None:
+            _meta.pop("num_tokens")
+
+        ################################## Post-processing of offsets, num_tokens and _meta #######################################
 
         tok_hash_str = ""
         if isinstance(
@@ -480,84 +476,113 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         )
 
         if enable_mmap_shared and dist.is_initialized() and _get_local_concurrency() > 1:
-            # Only local rank0 computes sampling and saves to tmp; others mmap-load to share physical pages.
+            _meta_need_update = {}
             if _is_local_rank0():
-                self._set_meta_attrs(
-                    offsets,
-                    num_tokens,
+                _meta_need_update = self._get_meta_need_update(
                     _meta,
                     sample_ratio=sample_ratio,
                     max_length=max_length,
                     enable_sequential_sampler=enable_sequential_sampler,
                 )
-                os.makedirs(tmp_dir, exist_ok=True)
-                np.save(os.path.join(tmp_dir, "offsets.npy"), self.offsets)
-                if self.num_tokens is not None:
-                    np.save(os.path.join(tmp_dir, "num_tokens.npy"), self.num_tokens)
-                save_dict_to_npy_dir(self._meta, os.path.join(tmp_dir, "meta"))
+                save_dict_to_npy_dir(_meta_need_update, tmp_dir)
                 atexit.register(shutil.rmtree, tmp_dir, True)
-            else:
-                del _meta, offsets
-                if num_tokens is not None:
-                    del num_tokens
+
             dist.barrier()
-            self.offsets = np.load(os.path.join(tmp_dir, "offsets.npy"), mmap_mode="r")
-            nt_path = os.path.join(tmp_dir, "num_tokens.npy")
-            self.num_tokens = np.load(nt_path, mmap_mode="r") if os.path.exists(nt_path) else None
-            self._meta = load_dict_from_npy_dir(os.path.join(tmp_dir, "meta"), mmap=True)
+            _meta_need_update = load_dict_from_npy_dir(tmp_dir, mmap=True)
         else:
-            self._set_meta_attrs(
-                offsets,
-                num_tokens,
+            _meta_need_update = self._get_meta_need_update(
                 _meta,
                 sample_ratio=sample_ratio,
                 max_length=max_length,
                 enable_sequential_sampler=enable_sequential_sampler,
             )
 
+        _meta.update(_meta_need_update)
+        self._meta = _meta
+
         if self._shared_memory is not None:
             self._release_shared_memory()
 
-    def _set_meta_attrs(
+    def _get_meta_need_update(
         self,
-        offsets: np.ndarray,
-        num_tokens: np.ndarray | None,
-        _meta: dict,
+        _meta: dict[str, np.ndarray],
         *,
         sample_ratio: float,
         max_length: int | None,
         enable_sequential_sampler: bool,
-    ) -> None:
-        """Compute sampling and set self.offsets, self.num_tokens,
-        self._meta."""
+    ) -> dict[str, np.ndarray]:
+        """对 _meta 做过滤、采样，返回 _meta 中需要更新的 key-value (即 _meta_need_update)。
+
+        如果使用 LongTextPretrainTokenizeFunction (即 self._has_chunk=True)，还需要将offsets更新为 chunk 对齐后的 offsets。
+
+        需要更新的 _meta_need_update, 在不使用 mmap (enable_mmap_shared=False) 时，后续在各rank会更新_meta。
+        而在使用 mmap 时，local rank0会将 _meta_need_update 保存到 tmp 目录，然后所有rank将通过mmap共享物理页加载。
+
+        在使用 mmap 时，具体有3种情况:
+        1. disable_filter and sample_ratio == 1.0 and not self._has_chunk:
+             所有rank直接使用_meta，因为_meta已经是mmap模式。这是高速通路，保持了meta数据懒加载
+        2. disable_filter and sample_ratio == 1.0 and self._has_chunk:
+            所有rank直接使用_meta，除了_meta["offsets"]。因为 offsets 在 LongTextPretrainTokenizeFunction 时会做扩增。
+            Local rank0将offsets保存到tmp，然后所有rank将通过mmap共享物理页加载。
+        3. 其他情况:
+           只有local rank0过滤和采样样本，然后保存到tmp；所有rank将通过mmap共享物理页加载。
+           这时 offsets.npy 和 jsonl_meta 虽然是懒加载，但是在过滤和采样时都会被加载到内存。是慢速通路。
+
+        Returns:
+            无过滤且 `sample_ratio==1` 时，
+              1) _has_chunk=False 为 `{}`，
+              2) _has_chunk=True 为 `{"offsets": ...}`，
+            3) 否则为与 `_meta` 相同的完整字典。
+        """
+        _meta_need_update = {}
         if self._has_chunk:
             line_idxs = _meta.pop("line_idxs")
-            offsets = offsets[line_idxs]
+            _meta["offsets"] = _meta["offsets"][line_idxs]
             # After line_idxs indexing, offsets has exactly num_chunks elements
             # (no trailing sentinel), so use len(offsets) directly.
-            base_len = len(offsets)
+            base_len = len(_meta["offsets"])
+            _meta_need_update["offsets"] = _meta["offsets"]
         else:
             # offsets has trailing sentinel (file_size), so samples are num_offsets - 1
-            base_len = len(offsets) - 1
+            _meta["offsets"] = _meta["offsets"][:-1]
+            # [:-1] 是 基本切片（basic slicing），得到的是 视图（view），与原来的 _meta["offsets"] 共享同一段底层缓冲区。
+            # 若原数组是 np.load(..., mmap_mode="r") 得到的 memmap，这段缓冲区就是文件 mmap 出来的；
+            # 切片后的数组只是换了 shape/偏移，仍然通过视图链指向同一块 mmap 内存。
+            base_len = len(_meta["offsets"])
+
+        if self.disable_filter and sample_ratio == 1.0:
+            # self._meta = _meta
+            return _meta_need_update
+
         dtype = np.int32 if base_len < np.iinfo(np.int32).max else np.int64
         _sampled = np.arange(base_len, dtype=dtype)
-        _sampled = _filter_sampled_indices(_sampled, num_tokens, max_length)
-        sampled = _apply_sample_ratio(
-            _sampled,
-            sample_ratio=sample_ratio,
-            enable_sequential_sampler=enable_sequential_sampler,
-        )
-        if num_tokens is not None:
-            assert isinstance(num_tokens, np.ndarray)
-            num_tokens = num_tokens[sampled]
-        self.num_tokens = num_tokens
-        self.offsets = offsets[sampled]
+
+        if not self.disable_filter:
+            _sampled = _filter_sampled_indices(_sampled, _meta.get("num_tokens"), max_length)
+
+        if sample_ratio != 1.0:
+            _sampled = _apply_sample_ratio(
+                _sampled,
+                sample_ratio=sample_ratio,
+                enable_sequential_sampler=enable_sequential_sampler,
+            )
+
         for _, v in _meta.items():
             assert base_len == len(v)
-        self._meta = {}
+        _meta_need_update = {}
         for k, v in _meta.items():
             assert isinstance(v, np.ndarray)
-            self._meta[k] = v[sampled]
+            _meta_need_update[k] = v[_sampled]
+
+        return _meta_need_update
+
+    @property
+    def offsets(self) -> np.ndarray:
+        return self._meta["offsets"]
+
+    @property
+    def num_tokens(self) -> np.ndarray | None:
+        return self._meta.get("num_tokens")
 
     @property
     def proxy_attn_flops(self) -> np.ndarray:

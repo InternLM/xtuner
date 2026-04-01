@@ -8,7 +8,7 @@ from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Iterable, Literal, Mapping, Sequence, cast
+from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -39,7 +39,7 @@ from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
-from xtuner.v1.loss import BaseLossContext
+from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
 from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
@@ -106,6 +106,7 @@ class XTunerBaseModelConfig(PydanticBaseModel):
     ] = None
     hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
     dcp_ignore_frozen_params: bool = True
+    lm_loss_cfg: BaseLossConfig = CELossConfig()
 
     @property
     def hf_config(self) -> PretrainedConfig | None:
@@ -250,7 +251,7 @@ def _is_float8_available():
 
 class ModelItem(TypedDict):
     seq_ctx: SequenceContext
-    loss_ctx: BaseLossContext
+    loss_ctx: dict[str, BaseLossContext] | None
 
 
 def is_float8_weight(tensor):
@@ -510,6 +511,26 @@ class BaseModel(nn.Module):
         if missing := {self._clean_param_name(name) for name, _ in self.named_parameters()} - initialized_params:
             raise RuntimeError(f"{missing} is not initialized")
 
+    def build_rotary_embedding(self, config):
+        # NOTE: XTuner initializes the entire model on meta device to avoid the overhead of allocating and
+        # initializing real tensors upfront — weights will either be loaded from a HuggingFace checkpoint or
+        # initialized from scratch afterward. However, rotary embedding must be initialized on CPU even when the
+        # rest of the model is on meta device, for the following reasons:
+        #
+        # 1. Its buffers (e.g. `inv_freq`) require real arithmetic and cannot be computed on meta device.
+        # 2. Its buffers are not model parameters, so the HuggingFace weight-loading path does not populate them.
+        #    After `.to_empty()`, these buffers remain garbage-initialized, which would silently corrupt training.
+        #
+        # CPU is chosen specifically (rather than CUDA) to keep the computation numerically aligned with inference
+        # engines (e.g. lmdeploy) during RL-phase training.
+        #
+        # To avoid repeating this error-prone logic in every subclass, the construction is encapsulated in
+        # get_rope_embedding, and this default build_rotary_embedding in BaseModel enforces CPU initialization.
+        from xtuner.v1.module.rope import get_rope_embedding
+
+        with torch.device("cpu"):
+            return get_rope_embedding(config=config)
+
     def _init_load_spec(self) -> None:
         # NOTE: (yehaochen) This is a workaround to distinguish between different parameter HF loading methods
         # and model partitioning methods. Although PyTorch provides Shard, Replicate and other Placements, in
@@ -672,6 +693,82 @@ class BaseModel(nn.Module):
             gathered_tensor_list_new.extend([gathered_tensor_fp8, scale])
             name_list_new.extend([name, f"{name}_scale_inv"])
         return gathered_tensor_list_new, name_list_new
+
+    def build_loss_ctx_batch(
+        self,
+        data_batch: list[dict],
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list[dict[str, dict]]:
+        """Build and calibrate loss contexts for the entire batch.
+
+        For Dense model, only LM loss is needed.
+
+        Args:
+            data_batch (list[dict]): All microbatch data
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh
+            cu_seq_lens_list (list[torch.IntTensor] | None): For calibration
+
+        Returns:
+            list[dict[str, BaseLossContext]]: Loss context dict for each microbatch
+        """
+        cu_seq_lens_list = [data["seq_ctx"].cu_seq_lens_k for data in data_batch]
+        res: list[dict] = [{} for _ in range(len(data_batch))]
+
+        lm_loss_ctx_list = self._build_loss_ctx(self.config.lm_loss_cfg, data_batch, sp_mesh)
+
+        if lm_loss_ctx_list is not None:
+            loss_ctx_cls = lm_loss_ctx_list[0].__class__
+            lm_loss_ctx_list = loss_ctx_cls.build_batches(
+                lm_loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=sp_mesh
+            )
+
+            if lm_loss_ctx_list is not None:
+                for i, lm_loss_ctx in enumerate(lm_loss_ctx_list):
+                    res[i]["lm"] = lm_loss_ctx
+
+        return res
+
+    def _add_auxiliary_loss(
+        self,
+        loss_name: str,
+        loss_cfg: Any,
+        data_batch: list[dict],
+        res: list[dict],
+    ) -> None:
+        """Add auxiliary loss contexts to result.
+
+        This helper builds loss contexts, calibrates them across the batch,
+        and adds them to the result dictionary. If loss_cfg is None, does nothing.
+
+        Args:
+            loss_name (str): Name of the loss (e.g., "balancing", "z_loss").
+            loss_cfg (Any): Loss configuration with a build() method. If None, skipped.
+            data_batch (list[dict]): Batch data.
+            res (list[dict]): Result dictionary to populate. Modified in-place.
+
+        Example:
+            def build_loss_ctx_batch(self, data_batch, sp_mesh):
+                res = super().build_loss_ctx_batch(data_batch, sp_mesh)
+
+                # One line per auxiliary loss
+                self._add_auxiliary_loss("balancing", self.config.balancing_loss_cfg, data_batch, res)
+                self._add_auxiliary_loss("z_loss", self.config.z_loss_cfg, data_batch, res)
+
+                return res
+        """
+        if loss_cfg is None:
+            return
+
+        # Build loss contexts for all microbatches
+        ctx_list = [loss_cfg.build() for _ in data_batch]
+
+        # Calibrate across batch
+        ctx_cls = ctx_list[0].__class__
+        ctx_list = ctx_cls.build_batches(ctx_list)
+
+        # Add to result
+        for i, ctx in enumerate(ctx_list):
+            res[i][loss_name] = ctx  # type: ignore
 
     def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
         step_consumed_tokens = torch.tensor(0, device=DEVICE)
@@ -1017,8 +1114,24 @@ class BaseModel(nn.Module):
                 buffer_name_list.append(load_spec.hf_keys[0])
                 continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
-            local_tensor = local_tensor.to(dtype=self._get_save_dtype(load_spec.hf_keys[0], torch.bfloat16))
-            tensor_size = self._get_tensor_size(param, dtype)
+            if (
+                self.fsdp_config is not None
+                and self.fsdp_config.fp32_lm_head
+                and load_spec.hf_keys[0] == "lm_head.weight"
+            ):
+                logger.info(f"handling same hf param: {load_spec.hf_keys} separately")
+                lm_head_tensor_list = self._fsdp_foreach_allgather([local_tensor], [load_spec])
+                lm_head_tensor_list = [
+                    self.param_to_safetensor(safetensor, name)
+                    for safetensor, name in zip(lm_head_tensor_list, load_spec.hf_keys.copy())
+                ]
+                lm_head_tensor_list = [t.to(device=device) for t in lm_head_tensor_list]
+                yield load_spec.hf_keys.copy(), lm_head_tensor_list
+                del lm_head_tensor_list, local_tensor
+                continue
+            else:
+                local_tensor = local_tensor.to(dtype=self._get_save_dtype(load_spec.hf_keys[0], torch.bfloat16))
+                tensor_size = self._get_tensor_size(param, dtype)
             if safetensor_size + tensor_size > bucket_size and tensor_list:
                 if self.fsdp_mesh is not None:
                     gathered_tensor_list = self._fsdp_foreach_allgather(tensor_list, load_spec_list)
@@ -1445,6 +1558,9 @@ class BaseModel(nn.Module):
                 continue
             _loaded_tensor.append(weight.to(local_tensor.device))
 
+        if not _loaded_tensor:
+            return missing_keys
+
         if not hf_keys:
             # fp8 pad
             assert self.config.float8_cfg is not None
@@ -1784,19 +1900,34 @@ class BaseModel(nn.Module):
             ret[name] = param
         return ret
 
+    def _build_loss_ctx(
+        self, loss_ctx_cfg: BaseLossConfig | None, data_batch: list[dict], sp_mesh: DeviceMesh | None
+    ) -> list[BaseLossContext] | None:
+        if loss_ctx_cfg is None:
+            return None
+
+        first_loss_ctx = loss_ctx_cfg.build(data=data_batch[0], sp_mesh=sp_mesh)
+        # If first build returns None, assume all data in the batch have the same schema
+        # and will also return None (e.g., missing required fields like shifted_labels)
+        if first_loss_ctx is None:
+            return None
+        else:
+            ret = [first_loss_ctx] + [loss_ctx_cfg.build(data=data, sp_mesh=sp_mesh) for data in data_batch[1:]]
+            return ret  # type: ignore[return-value]
+
     # NOTE: Add this overload for inferring the return type for easier type checking and using
     @overload  # type: ignore
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        loss_ctx: BaseLossContext | None,
+        loss_ctx: dict[str, BaseLossContext] | None,
     ) -> ModelOutputs: ...
 
     @overload  # type: ignore
     def __call__(  # type: ignore
         self,
         seq_ctx: list[SequenceContext],
-        loss_ctx: list[BaseLossContext],
+        loss_ctx: list[dict[str, BaseLossContext]],
     ) -> ModelOutputs: ...
 
     __call__ = nn.Module.__call__

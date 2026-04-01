@@ -19,7 +19,7 @@ from typing_extensions import overload, override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.loss import BaseLossContext, CELossContext
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -34,8 +34,6 @@ from xtuner.v1.module import (
     MHAConfig,
     MLAConfig,
     RMSNorm,
-    RotaryEmbeddingProtocol,
-    get_rope_embedding,
 )
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
@@ -78,7 +76,7 @@ class Dense(BaseModel):
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: CELossContext,
+        loss_ctx: dict[str, BaseLossContext | list[BaseLossContext]] | None = None,
     ) -> ModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -110,10 +108,17 @@ class Dense(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
+        if loss_ctx is None:
+            # Inference mode
+            _, (logits, _) = self.lm_head(hidden_states, None)
+            output["logits"] = logits
+        else:
+            # Training mode
+            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx["lm"])  # type: ignore[call-overload]
+            output["loss"] = loss
+            output["logits"] = logits
+            output["extra_info"] = extra_info
+
         return ModelOutputs(**output)
 
     def build_embeddings(self, config: TransformerConfig):
@@ -152,10 +157,6 @@ class Dense(BaseModel):
             )
         return layers
 
-    def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
-        with torch.device(DEVICE):
-            return get_rope_embedding(config=config)
-
     @property
     @override
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
@@ -166,7 +167,7 @@ class Dense(BaseModel):
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        loss_ctx: CELossContext,
+        loss_ctx: dict[str, CELossContext] | None = None,
     ) -> ModelOutputs: ...
 
     __call__ = nn.Module.__call__
