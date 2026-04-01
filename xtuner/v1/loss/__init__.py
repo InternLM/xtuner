@@ -1,6 +1,12 @@
 from .base_loss_ctx import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from .ce_loss import CELossConfig, CELossContext, LMHeadLossContext
 from .chunk_loss import ChunkLoss
+from .layer_moe_loss import (
+    LayerBalancingLoss,
+    LayerBalancingLossConfig,
+    LayerBalancingLossContext,
+    LayerBalancingLossKwargs,
+)
 from .moe_loss import (
     BalancingLoss,
     BalancingLossConfig,
@@ -20,6 +26,10 @@ __all__ = [
     "BalancingLossConfig",
     "BalancingLossContext",
     "BalancingLossKwargs",
+    "LayerBalancingLoss",
+    "LayerBalancingLossConfig",
+    "LayerBalancingLossContext",
+    "LayerBalancingLossKwargs",
     "ZLoss",
     "ZLossConfig",
     "ZLossContext",
