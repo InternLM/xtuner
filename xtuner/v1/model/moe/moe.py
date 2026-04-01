@@ -433,8 +433,8 @@ class MoE(BaseModel):
         cat_position_embeddings = self.rotary_emb(cat_hidden_states, cat_position_ids)  # type: ignore
         position_embeddings_list = list(
             zip(
-                cat_position_embeddings[0].chunk(len(seq_ctx_list), dim=1),
-                cat_position_embeddings[1].chunk(len(seq_ctx_list), dim=1),
+                cat_position_embeddings[0].chunk(len(seq_ctx_list), dim=2),
+                cat_position_embeddings[1].chunk(len(seq_ctx_list), dim=2),
             )
         )
 
