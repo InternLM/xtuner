@@ -14,6 +14,7 @@ EVAL_DATA_PATH=${4:-""}
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
 # deterministic 环境变量
+# NOTE: you should use sglang==0.5.5 to reproduce our results deterministic results.
 export XTUNER_USE_SGLANG=1
 export XTUNER_USE_LMDEPLOY=0
 export XTUNER_USE_VLLM=0
