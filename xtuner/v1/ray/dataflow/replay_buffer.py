@@ -26,6 +26,7 @@ from xtuner.v1.data_proto.rl_data import (
     is_valid_for_replaybuffer,
 )
 from xtuner.v1.datasets.config import DataloaderConfig
+from xtuner.v1.ray.utils import free_object_refs
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.device import get_device
 
@@ -118,23 +119,38 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     return replay_meta
 
 
-def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowItem]:
+def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta, *, consume_refs: bool = False) -> List[RLDataFlowItem]:
     env_str = replay_meta.env
     root_id = replay_meta.root_id
     action_id = replay_meta.action_id
-    data_ref = ray.get(replay_meta.action_ref)
-    group_data_item = []
-    for obs_id, obs_ref in zip(replay_meta.observation_ids, replay_meta.observation_refs):
-        env_data = ray.get(obs_ref)
-        # NOTE: This mapping function used by both dump and get. ObjectRefs are kept during dump (for training continuity)
-        # but released during get (via del replaymeta) when no longer needed. So we do not free them manually here.
-        # ray._private.internal_api.free(obs_ref)
 
+    action_ref = replay_meta.action_ref
+    observation_refs = list(replay_meta.observation_refs)
+
+    data_value = ray.get(action_ref) if action_ref is not None else None
+
+    env_values = [ray.get(obs_ref) for obs_ref in observation_refs]
+
+    if consume_refs:
+        refs_to_free: List[ObjectRef] = []
+        if isinstance(action_ref, ObjectRef):
+            refs_to_free.append(action_ref)
+        refs_to_free.extend([ref for ref in observation_refs if isinstance(ref, ObjectRef)])
+        free_object_refs(refs_to_free)
+        replay_meta.action_ref = None
+        replay_meta.observation_refs.clear()
+
+    group_data_item = []
+    for obs_id, env_data in zip(replay_meta.observation_ids, env_values):
         item = RLDataFlowItem(
             uid=RLUIDItem(
-                env=env_str, root_id=root_id, action_id=action_id, observation_id=obs_id, version=replay_meta.version
+                env=env_str,
+                root_id=root_id,
+                action_id=action_id,
+                observation_id=obs_id,
+                version=replay_meta.version,
             ),
-            data=data_ref,
+            data=data_value,
             env=env_data,
             extra_info=RLExtraDataItem(),
         )
@@ -323,6 +339,25 @@ class ReplayBufferStorage:
         self.sample_from_aborted_count = 0
         self.sample_from_expired_count = 0
 
+    def _update_replay_meta_state(self, replay_meta: ReplayMeta, new_state: RolloutState):
+        for observation_id in replay_meta.observation_ids:
+            old_state = self._observations2states.get(observation_id)
+            if old_state and observation_id in self._states.get(old_state, []):
+                self._states[old_state].remove(observation_id)
+            self._observations2states[observation_id] = new_state
+            if observation_id not in self._states[new_state]:
+                self._states[new_state].append(observation_id)
+        replay_meta.state = new_state
+
+    def _strip_rollout_payload_for_rerun(self, replay_meta: ReplayMeta, new_state: RolloutState):
+        """Keep prompt refs only and drop rollout outputs that will not be
+        reused."""
+        old_obs_refs = [ref for ref in replay_meta.observation_refs if ref is not None]
+        if old_obs_refs:
+            ray.internal.free(old_obs_refs, local_only=False)
+        replay_meta.observation_refs = [ray.put(RLEnvDataItem()) for _ in replay_meta.observation_ids]
+        self._update_replay_meta_state(replay_meta, new_state)
+
     def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
 
@@ -392,7 +427,7 @@ class ReplayBufferStorage:
                 self.logger.warning("Get action_id None from completed_actions and skip this iteration.")
                 continue
             replay_meta = self._actions.pop(action_id)
-            group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+            group_samples = mapping_replaymeta_to_dataitem(replay_meta, consume_refs=True)
             # 将这条数据彻底清除,不用再记录root_id对应的action_ids了
             self._clear_meta_for_root(replay_meta)
             multimodal_train_info = None
@@ -426,6 +461,9 @@ class ReplayBufferStorage:
         return []
 
     def clear(self):
+        for replay_meta in list(self._actions.values()):
+            self._release_replay_meta_refs(replay_meta)
+
         attrs_to_clear = [
             "_aborted_actions",
             "_completed_actions",
@@ -487,9 +525,10 @@ class ReplayBufferStorage:
                     data_item.data.multimodal_train_info["pixel_values"] = pixel_values_ref  # type: ignore[index]
         # convert rollout.extra_info.router_experts to ray.ObjectRef
         if "routed_experts" in data_item.env.rollout.extra_info:
-            routed_experts_ref = ray.put(data_item.env.rollout.extra_info["routed_experts"])
-            del data_item.env.rollout.extra_info["routed_experts"]
-            data_item.env.rollout.extra_info["routed_experts"] = routed_experts_ref
+            if not isinstance(data_item.env.rollout.extra_info["routed_experts"], ray.ObjectRef):
+                routed_experts_ref = ray.put(data_item.env.rollout.extra_info["routed_experts"])
+                del data_item.env.rollout.extra_info["routed_experts"]
+                data_item.env.rollout.extra_info["routed_experts"] = routed_experts_ref
 
     def has_objectref(self, item: RLDataFlowItem) -> bool:
         def check(obj):
@@ -519,13 +558,15 @@ class ReplayBufferStorage:
             file_path (str): The path to the file where the state will be
                 saved.
         """
-        all_data_items = [mapping_replaymeta_to_dataitem(replay_meta) for replay_meta in self._actions.values()]
-
-        for data_items in all_data_items:
+        all_data_items = []
+        for replay_meta in self._actions.values():
+            # dump 仅用于序列化快照，这里可直接消费 refs，避免长时间占用 object store
+            data_items = mapping_replaymeta_to_dataitem(replay_meta, consume_refs=True)
             for item in data_items:
                 self.resolve_ray_objects(item)
                 res = self.has_objectref(item)
                 assert not res, "ReplayBufferStorage.dump found unresolved ray.ObjectRef in RLDataFlowItem"
+            all_data_items.append(data_items)
 
         state = {
             "_completed_actions": self._completed_actions,
@@ -603,7 +644,7 @@ class ReplayBufferStorage:
         assert len(self._expired_actions) > 0
         action_id = self._expired_actions.pop()
         replay_meta = self._actions.pop(action_id)
-        group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+        group_samples = mapping_replaymeta_to_dataitem(replay_meta, consume_refs=True)
         # 把这条数据上次的记录全部删掉,重新开始rollout,root2actions也要清除
         self._clear_meta_for_root(replay_meta)
 
@@ -638,7 +679,7 @@ class ReplayBufferStorage:
         # 通过self.aborted_samples_count判断过这里不会返回None
         replay_meta = self._actions.pop(action_id)  # type: ignore[arg-type]
         replay_meta_version = replay_meta.version
-        group_samples = mapping_replaymeta_to_dataitem(replay_meta)
+        group_samples = mapping_replaymeta_to_dataitem(replay_meta, consume_refs=True)
         # 把这条数据上次rollout产生的输出的记录都删掉，上次的数据已经记录在了RLEnvDataItem中了
         self._clear_meta_for_actions(replay_meta)
 
@@ -699,6 +740,10 @@ class ReplayBufferStorage:
 
         for version in expired_versions:
             bucket = self._completed_actions.pop(version)
+            for action_id in bucket:
+                replay_meta = self._actions.get(action_id)
+                if replay_meta is not None:
+                    self._strip_rollout_payload_for_rerun(replay_meta, RolloutState.EXPIRED)
             self._expired_actions.extend(bucket)
             self.logger.info(
                 f"Moved {len(bucket)} completed samples with version {version} to expired samples due to exceeding tail_batch_candidate_steps."
@@ -709,11 +754,24 @@ class ReplayBufferStorage:
             return
 
         for version, bucket in self._completed_actions.items():
+            for action_id in bucket:
+                replay_meta = self._actions.get(action_id)
+                if replay_meta is not None:
+                    self._strip_rollout_payload_for_rerun(replay_meta, RolloutState.ABORTED)
             self._aborted_actions[0].extend(bucket)
             self.logger.info(
                 f"Moved {len(bucket)} completed samples with version {version} to aborted samples due to partial rollout disabled."
             )
         self._completed_actions.clear()
+
+    def _release_replay_meta_refs(self, replay_meta: ReplayMeta):
+        refs_to_free: List[ObjectRef] = []
+        if isinstance(replay_meta.action_ref, ObjectRef):
+            refs_to_free.append(replay_meta.action_ref)
+        refs_to_free.extend([ref for ref in replay_meta.observation_refs if isinstance(ref, ObjectRef)])
+        free_object_refs(refs_to_free)
+        replay_meta.action_ref = None
+        replay_meta.observation_refs.clear()
 
     def _clear_meta_for_actions(self, replay_meta: ReplayMeta):
         """Completely removes an action and all its associated data from the
@@ -723,12 +781,15 @@ class ReplayBufferStorage:
         """
         action_id = replay_meta.action_id
 
+        self._release_replay_meta_refs(replay_meta)
+
         for observation_id in replay_meta.observation_ids:
             self._observations.pop(observation_id, None)
             state = self._observations2states.pop(observation_id, None)
             if state and observation_id in self._states.get(state, []):
                 self._states[state].remove(observation_id)
 
+        self._actions.pop(action_id, None)
         self._action2observations.pop(action_id, None)
         del replay_meta
 
@@ -747,13 +808,18 @@ class ReplayBufferStorage:
                 and clear all related actions.
         """
         root_id = replay_meta.root_id
+        current_action_id = replay_meta.action_id
+
+        self._clear_meta_for_actions(replay_meta)
+
         if root_id in self._root2actions:
             for action_id in self._root2actions[root_id]:
+                if action_id == current_action_id:
+                    continue
                 new_replay_meta = self._actions.pop(action_id, None)
                 if new_replay_meta:
                     self._clear_meta_for_actions(new_replay_meta)
             del self._root2actions[root_id]
-        del replay_meta
 
     def _check_rollout_state_and_insert(self, replay_meta: ReplayMeta):
         """Checks the rollout state of a ReplayMeta object and inserts its
@@ -776,10 +842,13 @@ class ReplayBufferStorage:
             if self.tail_batch_candidate_steps > 0 and replay_meta.version >= self.tail_batch_candidate_steps:
                 # 过期的数据需要重置状态
                 self._expired_actions.append(action_id)
+                self._strip_rollout_payload_for_rerun(replay_meta, RolloutState.EXPIRED)
                 self.logger.debug(
                     f"Add expired sample with action_id: {action_id} to _expired_actions because version: {replay_meta.version} >= tail_batch_candidate_steps: {self.tail_batch_candidate_steps}."
                 )
             else:
+                if not self.enable_partial_rollout:
+                    self._strip_rollout_payload_for_rerun(replay_meta, RolloutState.ABORTED)
                 self._aborted_actions[replay_meta.version].append(action_id)
                 self.logger.debug(
                     f"Add aborted sample with action_id: {action_id} version: {replay_meta.version} to _aborted_actions."

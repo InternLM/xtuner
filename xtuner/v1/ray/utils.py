@@ -5,6 +5,7 @@ from asyncio import AbstractEventLoop, Task
 from typing import TYPE_CHECKING, Callable, Coroutine, List, Optional, cast
 
 import ray
+from ray import ObjectRef
 
 
 if TYPE_CHECKING:
@@ -208,3 +209,13 @@ def create_task(
     for callback in done_callbacks:
         task.add_done_callback(callback)
     return task
+
+
+def free_object_refs(refs: List[ObjectRef]) -> None:
+    valid_refs = [ref for ref in refs if isinstance(ref, ObjectRef)]
+    if not valid_refs:
+        return
+    try:
+        ray._private.internal_api.free(valid_refs, local_only=False)
+    except Exception:
+        ray.internal.free(valid_refs, local_only=False)

@@ -573,6 +573,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
                             data = base64.b64decode(routed_experts)
                             routed_experts = ray.cloudpickle.loads(data)
+                            del data
                         else:
                             routed_experts = torch.tensor(routed_experts)  # n,layer,expert
                             routed_experts = ray.put(routed_experts)
@@ -586,13 +587,14 @@ class RolloutWorker(SingleAcceleratorWorker):
                             routed_experts = ray.cloudpickle.loads(data)
                             cur_routed_experts = await routed_experts  # n,layer,expert
                             ray.internal.free(routed_experts, local_only=False)
+                            del data
                         else:
                             routed_experts = torch.tensor(routed_experts)  # n,layer,expert
                             cur_routed_experts = routed_experts
 
                         history_routed_experts = await input_extra_info["routed_experts"]  # n, layer, expert
                         ray.internal.free(input_extra_info["routed_experts"], local_only=False)
-                        del input_extra_info["routed_experts"]
+                        del input_extra_info
 
                         assert (history_routed_experts.shape[0] - 1) > 0 and history_routed_experts.shape[
                             0
@@ -613,6 +615,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                             f"Experts(exist={history_routed_experts.shape}, init_cur={init_cur_roued_experts}, cur={cur_routed_experts.shape}, concat={concat_routed_experts.shape})"
                         )
                         extra_info["routed_experts"] = ray.put(concat_routed_experts)
+                        del history_routed_experts
+                        del cur_routed_experts
                     else:
                         assert finish_reason == "abort", (
                             f"routed_experts is None, but finish_reason is {finish_reason}, expected abort. response: {response}"

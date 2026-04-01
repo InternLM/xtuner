@@ -118,7 +118,7 @@ def get_train_seq_ctx(
 ):
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     if multimodal_train_info and len(multimodal_train_info) > 0:
-        position_ids = multimodal_train_info.get("position_ids")  # (1,n) or (3,1,n)
+        position_ids = multimodal_train_info.pop("position_ids")  # (1,n) or (3,1,n)
         if position_ids is not None and len(position_ids.shape) == 3:
             # qwen3vl 需要特殊处理，其余的不需要额外处理
             max_value = position_ids.max(dim=-1).values  # (3,1)
@@ -128,8 +128,9 @@ def get_train_seq_ctx(
             position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
             seq_ctx.position_ids = position_ids  # type: ignore[assignment]
             assert position_ids.size(-1) == input_ids.size(-1)
-        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
-        seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
+        seq_ctx.pixel_values = multimodal_train_info.pop("pixel_values")
+        seq_ctx.image_grid_thw = multimodal_train_info.pop("image_grid_thw")
+        del multimodal_train_info
     return seq_ctx
 
 
@@ -623,6 +624,8 @@ class RLTrainer:
                 # 1. Rollout to generate experience
                 rollout_info = self._rollout_step(rollout_idx, step_timer_dict)
 
+                train_log_info = {}
+                eval_log_info = {}
                 if not self._debug_rollout:
                     # 2. Train on the generated experience
                     train_log_info = self._train_step(
