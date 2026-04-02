@@ -29,6 +29,7 @@ jobs:
   ete_test:
     if: ${{!cancelled() }}
     runs-on: [h_cluster_ete]
+    timeout-minutes: 720
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
