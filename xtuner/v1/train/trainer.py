@@ -1810,11 +1810,15 @@ class Trainer:
         self._cur_step = train_state["cur_step"]
         self._cur_epoch = train_state["cur_epoch"]
 
-        self._init_total_tokens = train_state.get("total_consumed_tokens", 0)  # default 0 for BC
-        self._init_total_samples = train_state.get("total_consumed_samples", 0)  # default 0 for BC
-
         if load_checkpoint_cfg.load_dataset:
             self._train_time_offset = train_state["train_time_offset"]
+            self._init_total_tokens = train_state.get("total_consumed_tokens", 0)  # default 0 for BC
+            # TODO: total_samples 由 Dataloader 维护, 包括 save/resume
+            # self._init_total_samples 会影响 save dcp时 dataloader.get_state_dict的状态。
+            # 1) 如果加载 dataset，应该恢复_total_consumed_samples为checkpoint中的值。
+            # 2) 如果不加载 dataset，应该保持 self._init_total_samples为初始值0，否则如果加载上旧dataloader的total_consumed_samples
+            #    会导致存储新dataloader时 total_consumed_samples 是不正确的值。
+            self._init_total_samples = train_state.get("total_consumed_samples", 0)  # default 0 for BC
 
             dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
             self._resume_dataloader(dataloader_path)
