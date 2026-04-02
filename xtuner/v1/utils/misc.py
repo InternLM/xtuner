@@ -68,20 +68,6 @@ else:
                     _mprt.unregister(self._name, "shared_memory")  # type: ignore[attr-defined]
 
 
-def is_local_rank0() -> bool:
-    """Return whether the current process is local rank 0 on its node.
-
-    In non-distributed settings (``LOCAL_RANK`` unset) every process is
-    considered local rank 0 and this function returns ``True``.
-
-    Returns:
-        bool: ``True`` if ``LOCAL_RANK`` is unset or equal to ``"0"``,
-        ``False`` otherwise.
-    """
-    local_rank = os.getenv("LOCAL_RANK")
-    return local_rank is None or local_rank == "0"
-
-
 def get_padding_length(length: int, divisors: list[int]) -> int:
     """Calculate the padding length needed to make the input length divisible
     by divisors.
