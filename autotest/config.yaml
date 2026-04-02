@@ -380,6 +380,8 @@ case:
                 base_metric: qwen3-5-sft-vl-moe/e968368a/tracker.jsonl
                 check_metrics:
                     grad_norm: 5
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 5
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -406,6 +408,8 @@ case:
                 base_metric: qwen3-5-sft-fp8/625c0018/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.1
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -430,6 +434,8 @@ case:
                 base_metric: qwen3-5-sft-recompute/625c0018/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.02
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -452,6 +458,8 @@ case:
                 base_metric: qwen3-5-sft-tp2/625c0018/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.05
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -474,6 +482,8 @@ case:
                 base_metric: qwen3-5-sft-sp4-resume/625c0018/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.02
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -496,6 +506,8 @@ case:
                 base_metric: qwen3-5-sft-sp4-resume/625c0018_resume/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.02
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
