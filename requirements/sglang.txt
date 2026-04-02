@@ -13,7 +13,7 @@ hf_transfer
 interegular
 llguidance==0.7.11
 torchaudio==2.8.0
-xgrammar==0.1.24
+xgrammar==0.1.32
 anthropic>=0.20.0
 blobfile==3.0.0
 build
