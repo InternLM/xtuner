@@ -365,7 +365,9 @@ class RLTrainer:
             with train_state_path.open("r") as f:
                 train_state = json.load(f)
                 self._cur_step = train_state["cur_step"]
+        
 
+        ray.get(self._train_controller.offload.remote(target="all"))
         self._rollout_env_controller, self._rollout_dataflow = self._build_rollout_dataflow(
             dataflow_cfg=dataflow_config,
             rollout_cfg=rollout_config,
@@ -394,7 +396,7 @@ class RLTrainer:
         if rollout_steps is not None:
             self._rollout_steps = rollout_steps
             self.logger.info(f"Set rollout steps to {self._rollout_steps} according to rollout_steps arg")
-
+        
         bind_train_rollout(train_controller=self._train_controller, env_controller=self._rollout_env_controller)
         # update weights if rollout_config.skip_load_weights == True
         if rollout_config.skip_load_weights:
@@ -407,7 +409,8 @@ class RLTrainer:
             ray.get(self._rollout_env_controller.onload_kvcache.remote())
             self.logger.info("Rollout workers has updated weights from train workers.")
         else:
-            ray.get(self._train_controller.offload.remote(target="all"))
+            pass
+            # ray.get(self._train_controller.offload.remote(target="all"))
 
         self._train_worker_cfg = train_worker_cfg
 
@@ -523,7 +526,7 @@ class RLTrainer:
         if self._debug_rollout:
             return
         if self._enable_initial_evaluate and self._enable_evaluate and self._evaluator:
-            ray.get(self._rollout_env_controller.update_active_workers.remote())
+            # ray.get(self._rollout_env_controller.update_active_workers.remote())
             scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
             trajectory_save_path = self.exp_dir / "eval_0_trajectory.jsonl"
             self._save_trajectories(eval_data_groups, trajectory_save_path)
@@ -537,7 +540,7 @@ class RLTrainer:
     def _rollout_step(self, rollout_idx: int, step_timer_dict: dict) -> RolloutInfo:
         """Performs a single rollout step to generate experience."""
         with timer("generation", step_timer_dict):
-            ray.get(self._rollout_env_controller.update_active_workers.remote())
+            # ray.get(self._rollout_env_controller.update_active_workers.remote())
             dataflow_result = ray.get(self._rollout_dataflow.run.remote())
 
         with timer("save_trajectory", step_timer_dict):

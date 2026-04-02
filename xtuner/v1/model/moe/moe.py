@@ -685,17 +685,21 @@ class MoE(BaseModel):
             self.mtp_block is not None
             and loss_ctx is not None
             and (mtp_loss_ctx_list := loss_ctx.get("mtp")) is not None
-        ):
+        ):  
             mtp_seq_ctx = seq_ctx.copy(
                 input_ids=input_ids.clone() if input_ids is not None else None,
                 position_ids=position_ids.clone(),
                 inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
             )
+            
+
+            layer_hidden_states = layer_hidden_states.detach()
+            mtp_seq_ctx.inputs_embeds = mtp_seq_ctx.inputs_embeds.detach()
 
             # Forward through MTP block
             mtp_outputs = self.mtp_block(
                 hidden_states=layer_hidden_states,
-                embed_tokens_fn=self.embed_tokens,
+                embed_tokens_fn=self.embed_tokens, # 不会用到
                 position_embeddings=position_embeddings,
                 seq_ctx=mtp_seq_ctx,
             )
@@ -704,7 +708,9 @@ class MoE(BaseModel):
             mtp_losses = torch.tensor(0.0, device=DEVICE)
             for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
                 mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
+                
                 mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+
                 mtp_losses += mtp_loss
 
                 output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results

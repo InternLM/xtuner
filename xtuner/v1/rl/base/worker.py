@@ -17,7 +17,7 @@ from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 from typing_extensions import NotRequired
-
+from xtuner.v1.loss.mtp_loss import MTPLossConfig
 from transformers import AutoTokenizer
 from xtuner.v1.config.fsdp import FSDPConfig
 from xtuner.v1.config.optim import LRConfig, OptimConfig
@@ -26,7 +26,7 @@ from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.engine.train_engine import TrainEngine, TrainStepInfo
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import CELossConfig, LogProbConfig
+from xtuner.v1.loss import CELossConfig, LogProbConfig, MTPLossContext
 from xtuner.v1.loss.ce_loss import CELossContext
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
@@ -253,6 +253,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         else:
             mode = "eager"
         self.logprob_cfg = LogProbConfig(chunk_size=worker_cfg.loss_cfg.chunk_size, mode=mode)
+        
+        self.mtp_config = None
+        if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
+            if hasattr(worker_cfg.model_cfg.text_config, 'mtp_config'):
+                self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -405,22 +410,28 @@ class TrainingWorker(SingleAcceleratorWorker):
             if isinstance(self.config.model_cfg, BaseComposeConfig)
             else self.config.model_cfg
         )
-
+        
         to_free_routed_expert_refs: list[ray.ObjectRef] = []
         if isinstance(rollout_routed_experts, list):
             # list[n,l,e]
             out_rollout_routed_expert = []
             for rollout_routed_expert in rollout_routed_experts:
                 if isinstance(rollout_routed_expert, torch.Tensor):
-                    rollout_routed_experts_tensor = torch.randint(
-                        low=0,
-                        high=language_cfg.n_routed_experts,
-                        size=(
-                            rollout_routed_expert.size(0),
-                            language_cfg.num_hidden_layers,
-                            language_cfg.num_experts_per_tok,
-                        ),
-                    )
+                    if rollout_routed_expert.ndim == 3:
+                        rollout_routed_experts_tensor = torch.randint(
+                            low=0,
+                            high=language_cfg.n_routed_experts,
+                            size=(
+                                rollout_routed_expert.size(0),
+                                language_cfg.num_hidden_layers,
+                                language_cfg.num_experts_per_tok,
+                            ),
+                        )
+                    else:
+                        # sglang
+                        rollout_routed_experts_tensor = rollout_routed_expert.reshape(-1, 
+                                                                                    language_cfg.num_hidden_layers, 
+                                                                                    language_cfg.num_experts_per_tok)
                     out_rollout_routed_expert.append(rollout_routed_experts_tensor)
                 else:
                     rollout_routed_expert_refs = rollout_routed_expert
@@ -461,6 +472,9 @@ class TrainingWorker(SingleAcceleratorWorker):
 
     @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:
+        # import debugpy
+        # debugpy.connect(('10.102.151.17', 5680))
+        
         # NOTE: sglang会清除logger handle, 重新创建
         self.logger = get_logger(log_dir=self.log_dir, tag="TrainingWorker")
         loss_cfg: BaseRLLossConfig = self.config.loss_cfg
@@ -475,6 +489,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         # Init loss_ctx: shifted_labels, advantages, rollout_logprobs
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[BaseRLLossContext] = []
+        mtp_loss_ctx_list: list[MTPLossContext] = []
+        
         for data in data_batches:
             # update seq_ctx
             seq_ctx = data["seq_ctx"]
@@ -513,6 +529,13 @@ class TrainingWorker(SingleAcceleratorWorker):
             seq_ctx_list.append(seq_ctx)
             assert loss_ctx is not None
             loss_ctx_list.append(loss_ctx)
+            
+            if self.mtp_config is not None:
+                mtp_loss_cfg = MTPLossConfig(
+                    mode='chunk',
+                    mtp_depth=1, # TODO: 写死
+                )
+                mtp_loss_ctx_list.append(mtp_loss_cfg.build(data={"shifted_labels": shifted_labels, 'seq_ctx': seq_ctx}, sp_mesh=self.sp_mesh))
 
         del data_batches
 
@@ -600,6 +623,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         # compute batched loss context
         batched_loss_ctx_list: list[BaseRLLossContext] = []
+        batched_mtp_loss_ctx_list: list[MTPLossContext] = []
         LossContext = loss_cfg.loss_ctx_cls
         for i in range(0, len(loss_ctx_list), iters_per_step):
             batches_loss_ctx = loss_ctx_list[i : i + iters_per_step]
@@ -607,15 +631,35 @@ class TrainingWorker(SingleAcceleratorWorker):
                 LossContext.build_batches(batches_loss_ctx)  # type: ignore[arg-type]
             )
 
+            if self.mtp_config is not None:
+                batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
+                batches_mtp_loss_ctx = mtp_loss_ctx_list[i : i + iters_per_step]
+                cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in batches_seq_ctx]
+                batched_mtp_loss_ctx_list.extend(
+                    MTPLossContext.build_batches(  # type: ignore[assignment]
+                        cast(list[MTPLossContext], batches_mtp_loss_ctx),  # type: ignore[arg-type]
+                        cu_seq_lens_list=cu_seq_lens_list,
+                        sp_mesh=self.sp_mesh,
+                    )
+                )
+            
+
         # train optimizer steps
         for i in range(0, len(seq_ctx_list), iters_per_step):
             batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
             batches_loss_ctx = batched_loss_ctx_list[i : i + iters_per_step]
-
+            
             engine_input = [
                 ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
                 for seq_ctx, loss_ctx in zip(batches_seq_ctx, batches_loss_ctx)
             ]
+
+            if self.mtp_config is not None:
+                batches_mtp_loss_ctx = batched_mtp_loss_ctx_list[i : i + iters_per_step]
+                engine_input= [
+                    ModelItem(seq_ctx=seq_ctx, loss_ctx={"mtp": [mtp_loss_ctx], "lm": loss_ctx}) # 这个 [ ] 写法是临时代码
+                    for seq_ctx, loss_ctx, mtp_loss_ctx in zip(batches_seq_ctx, batches_loss_ctx, batches_mtp_loss_ctx)
+                ]
 
             train_step_info = self._engine.train_step(
                 data_batches=engine_input,

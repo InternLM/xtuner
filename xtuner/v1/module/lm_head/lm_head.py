@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from typing_extensions import overload
 
-from xtuner.v1.loss import LMHeadLossContext
+from xtuner.v1.loss import LMHeadLossContext, MTPLossContext
 
 
 Loss: TypeAlias = torch.Tensor
@@ -46,6 +46,9 @@ class LMHead(nn.Linear):
             logits = F.linear(hidden_states, w, b)
             return None, (logits.float(), {})
         else:
+            if isinstance(loss_ctx, MTPLossContext):
+                w = w.detach()
+                b = b.detach() if b is not None else None
             return loss_ctx.forward(hidden_states, w, b)
 
     @overload  # type: ignore

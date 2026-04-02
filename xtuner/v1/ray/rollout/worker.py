@@ -572,7 +572,11 @@ class RolloutWorker(SingleAcceleratorWorker):
                             import base64
 
                             data = base64.b64decode(routed_experts)
-                            routed_experts = ray.cloudpickle.loads(data)
+                            routed_experts = torch.frombuffer(
+                                    base64.b64decode(routed_experts.encode("ascii")),
+                                    dtype=torch.int32,
+                                ) 
+                            # routed_experts = ray.cloudpickle.loads(data)
                         else:
                             routed_experts = torch.tensor(routed_experts)  # n,layer,expert
                             routed_experts = ray.put(routed_experts)

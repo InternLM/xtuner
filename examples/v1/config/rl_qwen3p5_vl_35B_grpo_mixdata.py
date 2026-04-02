@@ -18,6 +18,7 @@ from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.rl_trainer import RLTrainerConfig
 from xtuner.v1.datasets import RLTokenizeFnConfig, DatasetConfig, Qwen3VLTokenizeFnConfig, DataloaderConfig
 from xtuner.v1.rl.base.rollout_is import RolloutImportanceSampling
+from xtuner.v1.model.moe.moe import MTPConfig
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -26,14 +27,14 @@ meta_data_path = os.environ["DATA_PATH"]
 # basic settings
 experimental_name = "grpo_mix_data"
 total_epochs = 15
-global_batch_size = 256
-prompt_repeat_k = 8
+global_batch_size = 32
+prompt_repeat_k = 4
 rollout_tp_size = 2
 rollout_ep_size = 1
 max_prompt_length = 2048
 max_response_length = 8192
 pack_max_length = 32768
-train_optimizer_steps = 8
+train_optimizer_steps = 4
 hf_interval = 15
 
 # 1. resources
@@ -46,17 +47,24 @@ resources = AcceleratorResourcesConfig(
 
 # 2. rollout
 rollout_config = RolloutConfig(
-    fp32_lm_head=True,
+    # fp32_lm_head=True,
     env=experimental_name,
     device=resources.accelerator,
     model_path=model_path,
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=0.7,
     context_length = max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=512,
+    extra_rollout_config={"sglang_speculative_algorithm": "EAGLE",
+                          "sglang_speculative_num_steps": 3,
+                          "sglang_speculative_eagle_topk": 1,
+                          "sglang_speculative_num_draft_tokens": 4,
+                          'sglang_log_level': 'info',
+                          'sglang_log_level_http': 'info',
+                          },
 )
 
 # sampling params
@@ -124,6 +132,8 @@ replay_buffer_cfg = ReplayBufferConfig(
 # 5. Train worker
 # NOTE: modify model_cfg
 model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
+model_cfg.text_config.mtp_config = MTPConfig(num_layers=1, loss_scaling_factor=0.2)
+
 optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
@@ -149,7 +159,9 @@ loss_cfg = GRPOLossConfig(
     ),
 )
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, fp32_lm_head=True)
+fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, 
+# fp32_lm_head=True
+)
 train_worker_cfg: WorkerConfig = WorkerConfig(
     model_cfg=model_cfg,
     load_from=model_path,
