@@ -27,14 +27,14 @@ meta_data_path = os.environ["DATA_PATH"]
 # basic settings
 experimental_name = "grpo_mix_data"
 total_epochs = 15
-global_batch_size = 32
-prompt_repeat_k = 4
+global_batch_size = 256
+prompt_repeat_k = 8
 rollout_tp_size = 2
 rollout_ep_size = 1
-max_prompt_length = 2048
+max_prompt_length = 4096
 max_response_length = 8192
 pack_max_length = 32768
-train_optimizer_steps = 4
+train_optimizer_steps = 8
 hf_interval = 15
 
 # 1. resources

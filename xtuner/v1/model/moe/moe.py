@@ -694,7 +694,6 @@ class MoE(BaseModel):
             
 
             layer_hidden_states = layer_hidden_states.detach()
-            mtp_seq_ctx.inputs_embeds = mtp_seq_ctx.inputs_embeds.detach()
 
             # Forward through MTP block
             mtp_outputs = self.mtp_block(

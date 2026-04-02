@@ -102,11 +102,12 @@ class MTPBlock(nn.Module):
             # This shifts each packed sequence independently, respecting boundaries
             current_seq_ctx = roll_sequence_context(current_seq_ctx, shifts=-1)
 
-            # Get embeddings for future tokens
+            # Get embeddings for future tokens.
+            # Detach so MTP CE loss does not update the main model's embedding weights.
             if current_seq_ctx.inputs_embeds is None:
-                future_embeddings = embed_tokens_fn(current_seq_ctx.input_ids)  # type: ignore[arg-type]
+                future_embeddings = embed_tokens_fn(current_seq_ctx.input_ids).detach()  # type: ignore[arg-type]
             else:
-                future_embeddings = current_seq_ctx.inputs_embeds
+                future_embeddings = current_seq_ctx.inputs_embeds.detach()
 
             # Forward through MTP layer
             current_hidden_states = layer(
