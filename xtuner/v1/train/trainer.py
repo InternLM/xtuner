@@ -87,7 +87,7 @@ class PerformanceStatistics(TypedDict):
     local_step_consumed_tokens: int
     local_step_consumed_img_tokens: int | None
     local_total_consumed_tokens: int
-    total_consumed_tokens: int
+    approximate_total_consumed_tokens: int
     tgs: float
     exp_tgs: float
     eta_seconds: float
@@ -535,9 +535,12 @@ class Trainer:
         self._debug = debug
         self._seed = seed
 
+        # 日志变量前缀规则：
+        # 空间上，当前rank的用 local_，默认 reduced 无前缀
+        # 时间上，当前步用 step_, 累积用 total_
+        # self._local_total_consumed_tokens 表示时间上累积到现在的当前rank的和，resume则只考虑resume步数到现在
         self._local_total_consumed_tokens = 0
-        self._local_exp_consumed_tokens = 0
-        self._local_consumed_samples = 0
+        self._local_total_samples = 0
         self._init_total_tokens = 0
         self._init_total_samples = 0
 
@@ -761,8 +764,7 @@ class Trainer:
             self._cur_step += 1
             step_tokens = train_step_info["step_consumed_tokens"]
             self._local_total_consumed_tokens += step_tokens
-            self._local_exp_consumed_tokens += step_tokens
-            self._local_consumed_samples += consumed_samples
+            self._local_total_samples += consumed_samples
             self._train_time = time_after_train_step - train_begin
 
             # Compute training metrics
@@ -1131,9 +1133,7 @@ class Trainer:
         total_consumed_tokens = (
             self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
         )
-        total_consumed_samples = (
-            self._reduce_number_across_rank(self._local_consumed_samples) + self._init_total_samples
-        )
+        total_consumed_samples = self._reduce_number_across_rank(self._local_total_samples) + self._init_total_samples
 
         # Save dataloader
         self._save_dataloader(dataloader_path, total_consumed_samples=total_consumed_samples)
@@ -1465,12 +1465,14 @@ class Trainer:
         e2e_train_time = self._train_time + self._train_time_offset
 
         tgs = local_step_consumed_tokens / step_time
-        total_consumed_tokens = self._init_total_tokens + self._local_total_consumed_tokens * self.world_size
-        total_consumed_tokens_per_rank = total_consumed_tokens / self.world_size
-        exp_tgs = self._local_exp_consumed_tokens / self._train_time if self._train_time > 0 else 0.0
+        approximate_total_consumed_tokens = (
+            self._init_total_tokens + self._local_total_consumed_tokens * self.world_size
+        )
+        approximate_total_consumed_tokens_per_rank = approximate_total_consumed_tokens / self.world_size
+        exp_tgs = self._local_total_consumed_tokens / self._train_time if self._train_time > 0 else 0.0
 
         remaining_steps = self.total_step - self.cur_step
-        avg_tokens_per_step = total_consumed_tokens_per_rank / self.cur_step
+        avg_tokens_per_step = approximate_total_consumed_tokens_per_rank / self.cur_step
         remaining_tokens = remaining_steps * avg_tokens_per_step
         eta_seconds = remaining_tokens / max(tgs, 1)
         eta_hms = str(timedelta(seconds=int(eta_seconds)))
@@ -1479,7 +1481,7 @@ class Trainer:
             local_step_consumed_tokens=local_step_consumed_tokens,
             local_step_consumed_img_tokens=local_step_consumed_img_tokens,
             local_total_consumed_tokens=self._local_total_consumed_tokens,
-            total_consumed_tokens=total_consumed_tokens,
+            approximate_total_consumed_tokens=approximate_total_consumed_tokens,
             tgs=tgs,
             exp_tgs=exp_tgs,
             eta_seconds=eta_seconds,
@@ -1535,7 +1537,7 @@ class Trainer:
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
             f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {training_metrics['local_step_consumed_tokens']} {img_tokens_str}"
-            f"total_consumed_tokens: {training_metrics['total_consumed_tokens']} "
+            f"approximate_total_consumed_tokens: {training_metrics['approximate_total_consumed_tokens']} "
             f"{loss_log_str} "
             f"{data_info_str} "
             f"{extra_info_str} "
@@ -1554,7 +1556,7 @@ class Trainer:
             "time/train_time": round(self._train_time, 4),
             "time/eta_seconds": round(training_metrics["eta_seconds"], 1),
             "runtime_info/text_tokens": training_metrics["local_step_consumed_tokens"],
-            "runtime_info/total_consumed_tokens": training_metrics["total_consumed_tokens"],
+            "runtime_info/approximate_total_consumed_tokens": training_metrics["approximate_total_consumed_tokens"],
             "runtime_info/tgs": training_metrics["tgs"],
             "runtime_info/exp_tgs": training_metrics["exp_tgs"],
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
