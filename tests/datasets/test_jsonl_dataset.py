@@ -24,7 +24,7 @@ from xtuner.v1.datasets.jsonl import (
     JsonlDataset,
     _apply_sample_ratio,
     _filter_sampled_indices,
-    _get_local_concurrency,
+    get_local_world_size,
     load_dict_from_npy_dir,
     save_dict_to_npy_dir,
 )
@@ -278,9 +278,9 @@ class TestJsonlDatasetDist(DistributedTestBase):
 
         self.create_pg(DEVICE)
         rank = dist.get_rank()
-        is_local_master = dist.get_rank() % _get_local_concurrency() == 0
+        is_local_master = dist.get_rank() % get_local_world_size() == 0
 
-        if _get_local_concurrency() <= 1:
+        if get_local_world_size() <= 1:
             self.skipTest("需要 LOCAL_WORLD_SIZE>1 才能走 enable_mmap_shared 的 mmap 多进程分支")
 
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)

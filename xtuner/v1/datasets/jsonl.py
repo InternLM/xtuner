@@ -30,7 +30,7 @@ from xtuner.v1.datasets.data_item import CacheItem
 from xtuner.v1.datasets.pt_tokenize_fn.long_text import LongTextPretrainTokenizeFunction
 from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFn
 from xtuner.v1.utils import SharedMemory, get_logger
-from xtuner.v1.utils.device import get_torch_device_module
+from xtuner.v1.utils.dist_utils import get_local_process_group, get_local_world_size, is_local_rank0
 
 from .utils import CachableTokenizeFunction, calculate_xxhash
 
@@ -38,7 +38,6 @@ from .utils import CachableTokenizeFunction, calculate_xxhash
 T = TypeVar("T")
 logger = get_logger()
 _lock = Lock()
-DEVICE_MODULE = get_torch_device_module()
 
 CACHE_META = ".xpuyu-cache-meta.json"
 XTUNER_FILE_OPEN_CONCURRENCY = int(os.environ.get("XTUNER_FILE_OPEN_CONCURRENCY", "8"))
@@ -207,26 +206,6 @@ def chunk_data_to_queue(
         data_queue.put(None)
 
 
-def _get_local_concurrency():
-    """Get the local concurrency level based on the environment variable."""
-    if dist.is_initialized():
-        local_rank_concurrency = os.getenv("LOCAL_WORLD_SIZE")
-        if local_rank_concurrency is None:
-            local_rank_concurrency = os.getenv("PROC_PER_NODE")
-        if local_rank_concurrency is None:
-            local_rank_concurrency = DEVICE_MODULE.device_count()
-    else:
-        local_rank_concurrency = 1
-    return int(local_rank_concurrency)
-
-
-def _is_local_rank0() -> bool:
-    """Return True if this process is local rank 0."""
-    if not dist.is_initialized():
-        return True
-    return dist.get_rank() % _get_local_concurrency() == 0
-
-
 # NOTE: The `map` or `submit` function of `concurrent.futures.ProcessPoolExecutor` will cause frequent serialization
 # and deserialization of the tokenizer, processing 1000 samples will serialize and deserialize 1000 times, thus
 # affecting performance. Here we redefine `parallel_execute` to bind processes with `tokenize_fn`, so the tokenizer
@@ -240,7 +219,7 @@ def parallel_execute(
     rank: int,
 ):
     cpu_ids = list(os.sched_getaffinity(0))
-    local_rank_concurrency = _get_local_concurrency()
+    local_rank_concurrency = get_local_world_size()
     local_cpu_ids = cpu_ids[rank::local_rank_concurrency]
 
     processes: list[Process] = []
@@ -475,9 +454,9 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
             ).hexdigest(),
         )
 
-        if enable_mmap_shared and dist.is_initialized() and _get_local_concurrency() > 1:
+        if enable_mmap_shared and dist.is_initialized() and get_local_world_size() > 1:
             _meta_need_update = {}
-            if _is_local_rank0():
+            if is_local_rank0():
                 _meta_need_update = self._get_meta_need_update(
                     _meta,
                     sample_ratio=sample_ratio,
@@ -487,7 +466,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 save_dict_to_npy_dir(_meta_need_update, tmp_dir)
                 atexit.register(shutil.rmtree, tmp_dir, True)
 
-            dist.barrier()
+            dist.barrier(group=get_local_process_group())
             _meta_need_update = load_dict_from_npy_dir(tmp_dir, mmap=True)
         else:
             _meta_need_update = self._get_meta_need_update(
@@ -592,7 +571,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         if dist.is_initialized():
             rank = dist.get_rank()
             output: list[None | str] = [None] * dist.get_world_size()
-            local_concurrency = _get_local_concurrency()
+            local_concurrency = get_local_world_size()
             # Asumming that each node has the same rank
             # This allgather eunsure that each node rank share the same shared memory.
             # For example:
@@ -691,7 +670,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
                 shm_name=shm_name,
                 nproc=self.tokenizer_workers,
                 chunksize=chunked_size,
-                rank=rank % _get_local_concurrency(),
+                rank=rank % get_local_world_size(),
             )
         else:
             tokenized = []
@@ -800,7 +779,7 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         else:
             self._shared_memory.close()
 
-        local_rank_concurrency = _get_local_concurrency()
+        local_rank_concurrency = get_local_world_size()
         if not dist.is_initialized() or dist.get_rank() % local_rank_concurrency == 0:
             self._shared_memory.unlink()
         self._shared_memory = None
