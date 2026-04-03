@@ -4,6 +4,7 @@ from typing import Iterator, cast
 import torch
 
 from xtuner.v1.datasets.collator import ColateItem
+from xtuner.v1.datasets.consumed_steps import ConsumedStepsTracker
 from xtuner.v1.datasets.resume import get_dataloader_state, load_dataloader_state
 from xtuner.v1.utils import get_logger
 
@@ -42,6 +43,11 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         state_dict: dict,
         train_state_total_consumed_samples: int | None = None,
     ) -> None:
+        if train_state_total_consumed_samples is not None:
+            logger.warning(
+                "Dataloader.load_state_dict(train_state_total_consumed_samples=...) is deprecated; "
+                "use the default (None). Consumed samples are tracked on the sampler."
+            )
         load_dataloader_state(
             self,
             state_dict,
@@ -58,7 +64,17 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         dataloader_state = get_dataloader_state(self, consumed_samples)
         return cast(dict, dataloader_state)
 
-    # __iter__ is inherited from torch.utils.data.DataLoader
+    def __iter__(self) -> Iterator[list[ColateItem]]:  # type: ignore[override]
+        # Override to count delivered batches, not prefetched indices.
+        # With num_workers > 0 the sampler is iterated ahead by DataLoader's prefetch queue,
+        # so recording inside sampler.__iter__ would count too many samples.  Instead we
+        # increment _consumed exactly once per batch that reaches the caller.
+        sampler = self.sampler
+        consumed: ConsumedStepsTracker | None = getattr(sampler, "_consumed", None)
+        for batch in super().__iter__():
+            if consumed is not None:
+                consumed.record(len(batch))
+            yield batch
 
     # Streaming dataloader may not have `set_epoch` and `__len__` method, so we add here.
     def set_epoch(self, epoch: int) -> None:
