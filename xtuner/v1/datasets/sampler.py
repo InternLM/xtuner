@@ -113,9 +113,7 @@ class ParallelSampler(Sampler):
         # subsample
         indices = indices[self.step + self.rank : self.total_size : self.world_size]
 
-        for idx in indices:
-            self._consumed.record(1)
-            yield idx
+        yield from indices
         self.step = 0
 
     def __len__(self) -> int:
@@ -268,9 +266,7 @@ class LengthGroupedSampler(Sampler):
         assert len(indices) == self.total_size
         indices = indices[self.step + self.rank : self.total_size : self.world_size]
         assert len(indices) == self.num_samples - self.step // self.world_size
-        for idx in indices:
-            self._consumed.record(1)
-            yield idx
+        yield from indices
         self.step = 0
 
     def __len__(self) -> int:
