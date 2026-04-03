@@ -57,12 +57,6 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         dataloader_state = get_dataloader_state(self, consumed_samples)
         return cast(dict, dataloader_state)
 
-    def get_total_consumed_samples(self) -> int:
-        sampler = self.sampler
-        if hasattr(sampler, "get_total_consumed_steps"):
-            return int(sampler.get_total_consumed_steps())
-        return 0
-
     # __iter__ is inherited from torch.utils.data.DataLoader
 
     # Streaming dataloader may not have `set_epoch` and `__len__` method, so we add here.
