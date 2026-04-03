@@ -57,10 +57,6 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         dataloader_state = get_dataloader_state(self, consumed_samples)
         return cast(dict, dataloader_state)
 
-    def record_consumed_samples(self, n: int) -> None:
-        if hasattr(self.sampler, "record_consumed_samples"):
-            self.sampler.record_consumed_samples(n)
-
     def get_total_consumed_samples(self) -> int:
         sampler = self.sampler
         if hasattr(sampler, "get_total_consumed_steps"):
