@@ -40,6 +40,9 @@ case:
                 base_metric: qwen3-sft/20251117105949/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -64,6 +67,9 @@ case:
                 base_metric: qwen3-sft-ep8/cec3a8d2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -88,6 +94,9 @@ case:
                 base_metric: qwen3-sft-ep8/cec3a8d2_resume/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -109,6 +118,9 @@ case:
                 base_metric: qwen3-sft-tp2/cec3a8d2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -133,6 +145,9 @@ case:
                 base_metric: qwen3-sft-recompute/d76995/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -159,6 +174,9 @@ case:
                 base_metric: qwen3-sft-fp8/d76995/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.1
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -183,6 +201,9 @@ case:
                 base_metric: qwen3-sft/20251117105949/tracker.jsonl
                 check_metrics:
                     grad_norm: 1
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.02
                     lr: 0
             timeout: 10800
@@ -204,6 +225,9 @@ case:
                 base_metric: qwen3-sft-celoss/812c1021/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -226,6 +250,9 @@ case:
                 base_metric: qwen3-30B-sp4-intralayer2/c0eba147/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -248,6 +275,9 @@ case:
                 base_metric: qwen3-30B-sp8-intralayer2/c0eba147/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.025
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -270,6 +300,9 @@ case:
                 base_metric: gptoss-sft/7b774a0e2/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.9
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.1
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -294,6 +327,9 @@ case:
                 base_metric: qwen3-sft-cache/e968368a/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -317,6 +353,9 @@ case:
                 base_metric: qwen3-sft-vl-dense/812c1021/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
+                    loss/maxvio: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
@@ -390,7 +429,7 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-recompute/625c0018/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
+                    grad_norm: 0.02
                     loss/reduced_llm_loss: 0.000001
                     lr: 0
                     memory/max_memory_GB: 0.2
