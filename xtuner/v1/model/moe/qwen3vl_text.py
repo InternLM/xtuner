@@ -193,16 +193,17 @@ class Qwen3VLTextMoE(Qwen3MoE):
         router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
         router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
 
+        batch_size = loss_ctx.batch_size if loss_ctx is not None else 1
         if self.balancing_loss:
             balancing_loss = self.balancing_loss(
                 router_weights=router_weights,
                 n_routed_experts=self.config.n_routed_experts,
                 num_experts_per_tok=self.config.num_experts_per_tok,
-            )
+            ) / batch_size
             output["balancing_loss"] = balancing_loss
 
         if self.z_loss:
-            z_loss = self.z_loss(router_logits=router_logits)
+            z_loss = self.z_loss(router_logits=router_logits) / batch_size
             output["z_loss"] = z_loss
 
         tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
