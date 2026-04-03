@@ -21,14 +21,6 @@ import random
 from itertools import repeat, chain
 
 
-def _alloc_master_port() -> None:
-    """Bind an ephemeral TCP port so concurrent test runs avoid EADDRINUSE on a fixed port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        os.environ["MASTER_PORT"] = str(s.getsockname()[1])
-
-
-
 class RandomDataset:
     def __init__(self, size: int, **kwargs):
         self.size = size
@@ -294,9 +286,8 @@ def _test_resume_spmd(
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    if "MASTER_PORT" not in os.environ:
-        raise RuntimeError("tests must call _alloc_master_port() before torch.multiprocessing.spawn")
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "29505"
 
     torch.distributed.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
@@ -408,7 +399,6 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
 
     world_size = 2
     save_path1 = tmp_path / "dataloader_state.pkl"
-    _alloc_master_port()
     spawn(
         _test_resume_spmd,
         args=(
@@ -431,7 +421,6 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
 
     # 2. tet Rsume with same world size
     save_path2 = tmp_path / "dataloader_state2.pkl"
-    _alloc_master_port()
     spawn(
         _test_resume_spmd,
         args=(
@@ -457,7 +446,6 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
 
     world_size = 4
     save_path3 = tmp_path / "dataloader_state3.pkl"
-    _alloc_master_port()
     spawn(
         _test_resume_spmd,
         args=(
