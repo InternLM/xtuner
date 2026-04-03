@@ -727,7 +727,6 @@ class Trainer:
         train_begin = time.time()
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
-            consumed_samples = len(data_batch)
             time_before_train_step = time.time()
 
             ProberList.set_step(self._cur_step + 1)
@@ -762,7 +761,6 @@ class Trainer:
             self._cur_step += 1
             step_tokens = train_step_info["step_consumed_tokens"]
             self._local_total_consumed_tokens += step_tokens
-            self._dataloader.record_consumed_samples(consumed_samples)
             self._train_time = time_after_train_step - train_begin
 
             # Compute training metrics

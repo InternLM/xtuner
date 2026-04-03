@@ -163,7 +163,9 @@ class PresetSampler(Sampler):
     def __iter__(self) -> Iterator[int]:
         # load order from npy → global_order → rank_view 类型均为 memmap, 子视图 的路径仍然保持
         # memmap 语义（视图、按需分页、文件后端）；单机多进程可共享同一份文件页缓存
-        yield from self.global_order[self.step + self.rank : self.total_size : self.world_size]
+        for idx in self.global_order[self.step + self.rank : self.total_size : self.world_size]:
+            self._consumed.record(1)
+            yield int(idx)
         self.step = 0
 
     def __len__(self) -> int:
@@ -171,9 +173,6 @@ class PresetSampler(Sampler):
 
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
-
-    def record_consumed_samples(self, n: int) -> None:
-        self._consumed.record(n)
 
     def get_total_consumed_steps(self) -> int:
         return self._consumed.total_for_checkpoint()

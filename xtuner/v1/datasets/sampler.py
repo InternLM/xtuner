@@ -113,7 +113,9 @@ class ParallelSampler(Sampler):
         # subsample
         indices = indices[self.step + self.rank : self.total_size : self.world_size]
 
-        yield from iter(indices)
+        for idx in indices:
+            self._consumed.record(1)
+            yield idx
         self.step = 0
 
     def __len__(self) -> int:
@@ -132,9 +134,6 @@ class ParallelSampler(Sampler):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
-
-    def record_consumed_samples(self, n: int) -> None:
-        self._consumed.record(n)
 
     def get_total_consumed_steps(self) -> int:
         return self._consumed.total_for_checkpoint()
@@ -275,7 +274,9 @@ class LengthGroupedSampler(Sampler):
         assert len(indices) == self.total_size
         indices = indices[self.step + self.rank : self.total_size : self.world_size]
         assert len(indices) == self.num_samples - self.step // self.world_size
-        yield from iter(indices)
+        for idx in indices:
+            self._consumed.record(1)
+            yield idx
         self.step = 0
 
     def __len__(self) -> int:
@@ -293,9 +294,6 @@ class LengthGroupedSampler(Sampler):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
-
-    def record_consumed_samples(self, n: int) -> None:
-        self._consumed.record(n)
 
     def get_total_consumed_steps(self) -> int:
         return self._consumed.total_for_checkpoint()
