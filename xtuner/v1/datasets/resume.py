@@ -5,6 +5,7 @@ from xtuner.v1.utils import get_logger
 
 from .consumed_steps import apply_old_ckpt_init_steps
 from .packing import ExpandSoftPackDataset, _LegacySoftPackDataset
+from .preset_sampler import PresetSampler
 from .sampler import LengthGroupedSampler, ParallelSampler
 
 
@@ -45,7 +46,7 @@ def load_dataloader_state(
     state: dict,
     train_state_total_consumed_samples: int | None = None,
 ):
-    sampler = dataloader.sampler
+    sampler: ParallelSampler | LengthGroupedSampler | PresetSampler = dataloader.sampler  # type: ignore[assignment]
     dataset = dataloader.dataset
 
     # Sampler require `load_state_dict` to restore the training progress since the sampler state will

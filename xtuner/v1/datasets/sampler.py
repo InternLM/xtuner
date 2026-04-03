@@ -141,11 +141,8 @@ class ParallelSampler(Sampler):
         Args:
             state_dict (dict): The state of the sampler.
         """
-        tc = state_dict.get("total_consumed_steps")
-        if tc is not None:
-            self._consumed.set_init_from_checkpoint(int(tc))
-        else:
-            self._consumed.set_init_from_checkpoint(0)
+        tc = int(state_dict.get("total_consumed_steps", 0))
+        self._consumed.set_init_from_checkpoint(tc)
         self.epoch = state_dict["epoch"]
         self.step = state_dict["step"]
 
@@ -298,11 +295,8 @@ class LengthGroupedSampler(Sampler):
         Args:
             state_dict (dict): The state of the sampler.
         """
-        tc = state_dict.get("total_consumed_steps")
-        if tc is not None:
-            self._consumed.set_init_from_checkpoint(int(tc))
-        else:
-            self._consumed.set_init_from_checkpoint(0)
+        tc = int(state_dict.get("total_consumed_steps", 0))
+        self._consumed.set_init_from_checkpoint(tc)
         self.epoch = state_dict["epoch"]
         self.step = state_dict["step"]
 
