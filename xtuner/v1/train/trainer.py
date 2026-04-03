@@ -1129,10 +1129,9 @@ class Trainer:
         total_consumed_tokens = (
             self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
         )
-        total_consumed_samples = self._dataloader.get_total_consumed_samples()
 
         # Save dataloader
-        self._save_dataloader(dataloader_path)
+        total_consumed_samples = self._save_dataloader(dataloader_path)
 
         DEVICE_MODULE.empty_cache()
 
@@ -1211,10 +1210,11 @@ class Trainer:
 
         return True
 
-    def _save_dataloader(self, dataloader_path: Path | str):
+    def _save_dataloader(self, dataloader_path: Path | str) -> int:
         dataloader_state = self._dataloader.get_state_dict()
         if self.rank == 0:
             torch.save(dataloader_state, dataloader_path)
+        return int(dataloader_state.get("sampler", {}).get("total_consumed_steps", 0))
 
     @property
     def work_dir(self) -> Path:

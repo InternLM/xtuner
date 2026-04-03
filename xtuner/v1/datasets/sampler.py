@@ -135,9 +135,6 @@ class ParallelSampler(Sampler):
         """
         self.epoch = epoch
 
-    def get_total_consumed_steps(self) -> int:
-        return self._consumed.total_for_checkpoint()
-
     def load_state_dict(self, state_dict) -> None:
         """Load the sampler state.
 
@@ -294,9 +291,6 @@ class LengthGroupedSampler(Sampler):
             epoch (int): Epoch number.
         """
         self.epoch = epoch
-
-    def get_total_consumed_steps(self) -> int:
-        return self._consumed.total_for_checkpoint()
 
     def load_state_dict(self, state_dict: dict) -> None:
         """Load the sampler state.
