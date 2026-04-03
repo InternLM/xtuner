@@ -10,9 +10,6 @@ from xtuner.v1.datasets import (
     DatasetConfig,
     FTDPTokenizeFnConfig,
     build_dataloader,
-    build_datasets,
-    get_dataloader_state,
-    load_dataloader_state,
 )
 from xtuner.v1.train.toy_tokenizer import UTF8ByteTokenizer
 from torch.multiprocessing import spawn
@@ -197,11 +194,12 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     dataset_configs = [
         {
             "dataset": DatasetConfig(anno_path=str(data_dir1)),
-            "tokenize_fn": FTDPTokenizeFnConfig(max_length=1024)
+            "tokenize_fn": FTDPTokenizeFnConfig(max_length=1024),
         },
     ]
 
     dataloader_config = DataloaderConfig(
+        dataset_config_list=dataset_configs,
         pack_max_length=1024,
         pack_level=pack_level,
         num_workers=num_workers,
@@ -209,13 +207,9 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
         pack_workers=pack_workers,
     )
 
-    datasets = build_datasets(
-        dataset_config=dataset_configs,
+    dataloader1 = dataloader_config.build(
         tokenizer=tokenizer,
-    )
-    dataloader1 = build_dataloader(
-        dataloader_config=dataloader_config,
-        datasets=datasets,
+        dp_mesh=None,
         global_batch_size=GLOBAL_BATCH_SIZE,
         micro_batch_size=BATCH_SIZE,
         seed=10,
@@ -225,26 +219,22 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     assert len(dataloader1) > 10
 
     dataloader_iter = iter(dataloader1)
-    consumed_sample = 0
     for _ in range(RESUME_ITER):
-        batch = next(dataloader_iter)
-        consumed_sample += len(batch)
+        next(dataloader_iter)
 
-    dataloader_state = get_dataloader_state(dataloader1, consumed_sample)
+    dataloader_state = dataloader1.get_state_dict()
     expected_data = []
     for _ in range(AFTER_RESUME_ITER):
-        batch = next(dataloader_iter)
-        consumed_sample += len(batch)
-        expected_data.append(batch)
+        expected_data.append(next(dataloader_iter))
 
-    new_dataloader1 = build_dataloader(
-        dataloader_config=dataloader_config,
-        datasets=datasets,
+    new_dataloader1 = dataloader_config.build(
+        tokenizer=tokenizer,
+        dp_mesh=None,
         global_batch_size=GLOBAL_BATCH_SIZE,
         micro_batch_size=BATCH_SIZE,
         seed=10,
     )
-    load_dataloader_state(new_dataloader1, dataloader_state)
+    new_dataloader1.load_state_dict(dataloader_state)
     new_dataloader_iter = iter(new_dataloader1)
 
     resume_data = []
@@ -257,32 +247,29 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     # 2. Test resume after consuming multiple epochs
     while True:
         try:
-            batch = next(dataloader_iter)
-            consumed_sample += len(batch)
+            next(dataloader_iter)
         except StopIteration:
             break
 
-
     dataloader_iter = iter(dataloader1)
 
-    for batch in range(RESUME_ITER):
-        batch = next(dataloader_iter)
-        consumed_sample += len(batch)
+    for _ in range(RESUME_ITER):
+        next(dataloader_iter)
 
-    dataloader_state = get_dataloader_state(dataloader1, consumed_sample)
+    dataloader_state = dataloader1.get_state_dict()
 
     expected_data = []
     for _ in range(AFTER_RESUME_ITER):
         expected_data.append(next(dataloader_iter))
 
-    new_dataloader2 = build_dataloader(
-        dataloader_config=dataloader_config,
-        datasets=datasets,
+    new_dataloader2 = dataloader_config.build(
+        tokenizer=tokenizer,
+        dp_mesh=None,
         global_batch_size=GLOBAL_BATCH_SIZE,
         micro_batch_size=BATCH_SIZE,
         seed=10,
     )
-    load_dataloader_state(new_dataloader2, dataloader_state)
+    new_dataloader2.load_state_dict(dataloader_state)
     new_dataloader_iter2 = iter(new_dataloader2)
 
     resume_data = []
