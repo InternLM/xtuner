@@ -54,6 +54,7 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
                 "Dataloader.get_state_dict(consumed_samples=...) is deprecated; use the default (-1). "
                 "Consumed samples are tracked on the sampler."
             )
+        # TODO: remove consumed_samples parameter in get_dataloader_state in next major release
         dataloader_state = get_dataloader_state(self, consumed_samples)
         return cast(dict, dataloader_state)
 

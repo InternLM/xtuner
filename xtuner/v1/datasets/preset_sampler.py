@@ -192,11 +192,8 @@ class PresetSampler(Sampler):
         }
 
     def load_state_dict(self, state_dict: dict) -> None:
-        tc = state_dict.get("total_consumed_steps")
-        if tc is not None:
-            self._consumed.set_init_from_checkpoint(int(tc))
-        else:
-            self._consumed.set_init_from_checkpoint(0)
+        tc = int(state_dict.get("total_consumed_steps", 0))
+        self._consumed.set_init_from_checkpoint(tc)
         if self.world_size != state_dict.get("world_size"):
             logger.warning(
                 f"PresetSampler: world_size mismatch: checkpoint has "
