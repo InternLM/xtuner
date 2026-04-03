@@ -5,6 +5,10 @@ import torch
 
 from xtuner.v1.datasets.collator import ColateItem
 from xtuner.v1.datasets.resume import get_dataloader_state, load_dataloader_state
+from xtuner.v1.utils import get_logger
+
+
+logger = get_logger()
 
 
 class BaseDataloader(ABC):
@@ -16,10 +20,10 @@ class BaseDataloader(ABC):
     """
 
     @abstractmethod
-    def load_state_dict(self, state_dict: dict) -> None: ...
+    def load_state_dict(self, state_dict: dict, train_state_total_consumed_samples: int | None = None) -> None: ...
 
     @abstractmethod
-    def get_state_dict(self, consumed_samples: int) -> dict: ...
+    def get_state_dict(self, consumed_samples: int = -1) -> dict: ...
 
     @abstractmethod
     def __iter__(self) -> Iterator[list[ColateItem]]: ...
@@ -33,12 +37,35 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
     implement.
     """
 
-    def load_state_dict(self, state_dict: dict) -> None:
-        load_dataloader_state(self, state_dict)
+    def load_state_dict(
+        self,
+        state_dict: dict,
+        train_state_total_consumed_samples: int | None = None,
+    ) -> None:
+        load_dataloader_state(
+            self,
+            state_dict,
+            train_state_total_consumed_samples=train_state_total_consumed_samples,
+        )
 
-    def get_state_dict(self, consumed_samples: int) -> dict:
+    def get_state_dict(self, consumed_samples: int = -1) -> dict:
+        if consumed_samples != -1:
+            logger.warning(
+                "Dataloader.get_state_dict(consumed_samples=...) is deprecated; use the default (-1). "
+                "Consumed samples are tracked on the sampler."
+            )
         dataloader_state = get_dataloader_state(self, consumed_samples)
         return cast(dict, dataloader_state)
+
+    def record_consumed_samples(self, n: int) -> None:
+        if hasattr(self.sampler, "record_consumed_samples"):
+            self.sampler.record_consumed_samples(n)
+
+    def get_total_consumed_samples(self) -> int:
+        sampler = self.sampler
+        if hasattr(sampler, "get_total_consumed_steps"):
+            return int(sampler.get_total_consumed_steps())
+        return 0
 
     # __iter__ is inherited from torch.utils.data.DataLoader
 
