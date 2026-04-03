@@ -22,6 +22,7 @@ from torch.utils.data import Sampler
 
 from xtuner.v1.utils import get_logger
 
+from .consumed_steps import ConsumedStepsTracker
 from .preset_pack import PresetPackDataset
 
 
@@ -116,6 +117,7 @@ class PresetSampler(Sampler):
         else:
             self.rank = 0
             self.world_size = 1
+        self._consumed = ConsumedStepsTracker(dp_mesh)
 
         self.dataset = dataset
         self.global_batch_size = global_batch_size
@@ -170,19 +172,35 @@ class PresetSampler(Sampler):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
-    def get_state_dict(self, step: int) -> dict:
+    def record_consumed_samples(self, n: int) -> None:
+        self._consumed.record(n)
+
+    def get_total_consumed_steps(self) -> int:
+        return self._consumed.total_for_checkpoint()
+
+    def get_state_dict(self, step: int | None = None) -> dict:
         # Same convention as :class:`LengthGroupedSampler`: ``step`` is the global pack offset
         # (modulo ``total_size``) into ``global_order``, shared across all ranks in the checkpoint.
-        global_step = step % self.total_size
+        if step is None:
+            total_consumed = self._consumed.total_for_checkpoint()
+        else:
+            total_consumed = int(step)
+        global_step = total_consumed % self.total_size
         return {
             "epoch": self.epoch,
             "step": global_step,
+            "total_consumed_steps": total_consumed,
             "world_size": self.world_size,
             "num_samples": self.num_samples,
             "total_size": self.total_size,
         }
 
     def load_state_dict(self, state_dict: dict) -> None:
+        tc = state_dict.get("total_consumed_steps")
+        if tc is not None:
+            self._consumed.set_init_from_checkpoint(int(tc))
+        else:
+            self._consumed.set_init_from_checkpoint(0)
         if self.world_size != state_dict.get("world_size"):
             logger.warning(
                 f"PresetSampler: world_size mismatch: checkpoint has "
@@ -191,5 +209,4 @@ class PresetSampler(Sampler):
             )
 
         self.epoch = state_dict["epoch"]
-        global_step = int(state_dict["step"])
-        self.step = global_step
+        self.step = int(state_dict["step"])

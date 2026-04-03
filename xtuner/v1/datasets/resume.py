@@ -3,6 +3,7 @@ from typing_extensions import TypedDict
 
 from xtuner.v1.utils import get_logger
 
+from .consumed_steps import apply_old_ckpt_init_steps
 from .packing import ExpandSoftPackDataset, _LegacySoftPackDataset
 from .sampler import LengthGroupedSampler, ParallelSampler
 
@@ -15,15 +16,21 @@ class DataloaderState(TypedDict):
     dataset: dict
 
 
-def get_dataloader_state(dataloader: DataLoader, consumed_samples: int) -> DataloaderState:
+def get_dataloader_state(dataloader: DataLoader, consumed_samples: int = -1) -> DataloaderState:
     sampler: ParallelSampler | LengthGroupedSampler = dataloader.sampler  # type: ignore[assignment]
     dataset: ExpandSoftPackDataset | _LegacySoftPackDataset = dataloader.dataset  # type: ignore[assignment]
     dataloader_state = DataloaderState(sampler={}, dataset={})
 
     if not hasattr(sampler, "load_state_dict") or not hasattr(sampler, "get_state_dict"):
         logger.warning(f"Resuming from {type(sampler)} is risky.")
-    else:
+    elif consumed_samples != -1:
+        logger.warning(
+            "Passing consumed_samples to get_dataloader_state is deprecated; "
+            "consumed sample totals are tracked on the sampler. Use the default consumed_samples=-1."
+        )
         dataloader_state["sampler"].update(sampler.get_state_dict(step=consumed_samples))
+    else:
+        dataloader_state["sampler"].update(sampler.get_state_dict())
 
     if not hasattr(dataset, "load_state_dict") or not hasattr(dataset, "get_state_dict"):
         logger.warning(f"Resuming from {type(dataset)} is risky.")
@@ -33,7 +40,11 @@ def get_dataloader_state(dataloader: DataLoader, consumed_samples: int) -> Datal
     return dataloader_state
 
 
-def load_dataloader_state(dataloader: DataLoader, state: dict):
+def load_dataloader_state(
+    dataloader: DataLoader,
+    state: dict,
+    train_state_total_consumed_samples: int | None = None,
+):
     sampler = dataloader.sampler
     dataset = dataloader.dataset
 
@@ -44,6 +55,7 @@ def load_dataloader_state(dataloader: DataLoader, state: dict):
 
     if hasattr(sampler, "load_state_dict"):
         sampler.load_state_dict(state["sampler"])
+        apply_old_ckpt_init_steps(sampler, state["sampler"], train_state_total_consumed_samples)
 
     # If the dataset records the training progress, we also restore it.
     if hasattr(dataset, "load_state_dict"):

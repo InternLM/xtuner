@@ -540,9 +540,7 @@ class Trainer:
         # 时间上，当前步用 step_, 累积用 total_
         # self._local_total_consumed_tokens 表示时间上累积到现在的当前rank的和，resume则只考虑resume步数到现在
         self._local_total_consumed_tokens = 0
-        self._local_total_samples = 0
         self._init_total_tokens = 0
-        self._init_total_samples = 0
 
         self._train_time = 0
         self._train_time_offset = 0
@@ -764,7 +762,7 @@ class Trainer:
             self._cur_step += 1
             step_tokens = train_step_info["step_consumed_tokens"]
             self._local_total_consumed_tokens += step_tokens
-            self._local_total_samples += consumed_samples
+            self._dataloader.record_consumed_samples(consumed_samples)
             self._train_time = time_after_train_step - train_begin
 
             # Compute training metrics
@@ -1133,10 +1131,10 @@ class Trainer:
         total_consumed_tokens = (
             self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
         )
-        total_consumed_samples = self._reduce_number_across_rank(self._local_total_samples) + self._init_total_samples
+        total_consumed_samples = self._dataloader.get_total_consumed_samples()
 
         # Save dataloader
-        self._save_dataloader(dataloader_path, total_consumed_samples=total_consumed_samples)
+        self._save_dataloader(dataloader_path)
 
         DEVICE_MODULE.empty_cache()
 
@@ -1215,9 +1213,9 @@ class Trainer:
 
         return True
 
-    def _save_dataloader(self, dataloader_path: Path | str, total_consumed_samples: int):
+    def _save_dataloader(self, dataloader_path: Path | str):
+        dataloader_state = self._dataloader.get_state_dict()
         if self.rank == 0:
-            dataloader_state = self._dataloader.get_state_dict(total_consumed_samples)
             torch.save(dataloader_state, dataloader_path)
 
     @property
@@ -1813,15 +1811,12 @@ class Trainer:
         if load_checkpoint_cfg.load_dataset:
             self._train_time_offset = train_state["train_time_offset"]
             self._init_total_tokens = train_state.get("total_consumed_tokens", 0)  # default 0 for BC
-            # TODO: total_samples 由 Dataloader 维护, 包括 save/resume
-            # self._init_total_samples 会影响 save dcp时 dataloader.get_state_dict的状态。
-            # 1) 如果加载 dataset，应该恢复_total_consumed_samples为checkpoint中的值。
-            # 2) 如果不加载 dataset，应该保持 self._init_total_samples为初始值0，否则如果加载上旧dataloader的total_consumed_samples
-            #    会导致存储新dataloader时 total_consumed_samples 是不正确的值。
-            self._init_total_samples = train_state.get("total_consumed_samples", 0)  # default 0 for BC
 
             dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
-            self._resume_dataloader(dataloader_path)
+            self._resume_dataloader(
+                dataloader_path,
+                train_state_total_consumed_samples=train_state.get("total_consumed_samples"),
+            )
 
         if load_checkpoint_cfg.load_scheduler:
             scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
@@ -1834,11 +1829,14 @@ class Trainer:
             scheduler_step = self.total_step - self._cur_step
             self._lr_scheduler = self.build_lr_scheduler(self._lr_cfg, scheduler_step)
 
-    def _resume_dataloader(self, dataloader_path: Path):
+    def _resume_dataloader(self, dataloader_path: Path, train_state_total_consumed_samples: int | None = None):
         if not dataloader_path.exists():
             raise FileNotFoundError(f"Dataloader path {dataloader_path} does not exist.")
         dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
-        self._dataloader.load_state_dict(dataloader_state)
+        self._dataloader.load_state_dict(
+            dataloader_state,
+            train_state_total_consumed_samples=train_state_total_consumed_samples,
+        )
 
     def _setup_hooks(self, hooks_config: HooksConfig) -> HooksConfig:
         for stage in HookStage:
