@@ -252,6 +252,20 @@ def main():
         with open(pack_config_dir / "paths.json", "w", encoding="utf-8") as f:
             json.dump(dataset_paths, f, ensure_ascii=False, indent=2)
 
+        meta = {
+            "world_size": args.world_size,
+            "global_batch_size": global_batch_size,
+            "sampler_strategy": args.sampler_strategy,
+            "pack_max_length": pack_max_length,
+            "seed": args.seed,
+            "num_packs": num_packs,
+            "total_samples": total_samples,
+            "total_sampled": total_sampled,
+            "total_tokens": total_tokens,
+        }
+        with open(pack_config_dir / "meta.json", "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
     # Generate sampler order
     with profile_time("Generating sampler order"):
         longest = pack_infos["longest"]
