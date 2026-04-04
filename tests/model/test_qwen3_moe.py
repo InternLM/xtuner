@@ -1,5 +1,6 @@
 import os
 import json
+import unittest
 
 import inspect
 import parametrize
@@ -7,6 +8,8 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import AutoConfig
+from packaging.version import Version
+from transformers import __version__ as transformers_version
 import tempfile
 from pathlib import Path
 from safetensors import safe_open
@@ -25,6 +28,15 @@ from xtuner.v1.utils.misc import HF_PATCH_MODULES_CACHE_PREFIX
 # Qwen3 30B A3
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 QWEN3_MOE_FOPE_PATH = os.environ["QWEN3_MOE_FOPE_PATH"]
+
+
+# Skip fope tests for transformers >= 5.2.0 due to SlidingWindowCache incompatibility
+# in the model's remote code
+def skip_if_fope_incompatible(model_type):
+    """Skip fope model tests if transformers version is incompatible."""
+    if model_type == "qwen3_moe_fope" and Version(transformers_version) >= Version("5.2.0"):
+        return True
+    return False
 
 
 class TestQwen3MoE(DeterministicDDPTestCase):
@@ -46,6 +58,8 @@ class TestQwen3MoE(DeterministicDDPTestCase):
     )
     def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol, loss_mode, model_type):
         assert model_type in ["qwen3_moe", "qwen3_moe_fope"]
+        if skip_if_fope_incompatible(model_type):
+            raise unittest.SkipTest(f"Skipping fope test for transformers {transformers_version} due to SlidingWindowCache incompatibility")
         os.environ["TRITON_CACHE_DIR"] = str(Path(self.temp_dir.name) / "triton_cache")
         self.create_pg(device)
 
@@ -125,6 +139,8 @@ class TestQwen3MoE(DeterministicDDPTestCase):
     )
     def test_fsdp_accuracy(self, device, dispatcher, ep_size, model_type):
         assert model_type in ["qwen3_moe", "qwen3_moe_fope"]
+        if skip_if_fope_incompatible(model_type):
+            raise unittest.SkipTest(f"Skipping fope test for transformers {transformers_version} due to SlidingWindowCache incompatibility")
         self.create_pg(device)
 
         hf_model_path = QWEN3_MOE_PATH if model_type == "qwen3_moe" else QWEN3_MOE_FOPE_PATH
@@ -366,6 +382,8 @@ class TestQwen3MoE(DeterministicDDPTestCase):
         ],
     )
     def test_save_hf_fope(self, device, dispatcher, ep_size):
+        if Version(transformers_version) >= Version("5.2.0"):
+            raise unittest.SkipTest(f"Skipping fope test for transformers {transformers_version} due to SlidingWindowCache incompatibility")
         self.create_pg(device)
         with tempfile.TemporaryDirectory() as tmpdir:
             load_from = Path(QWEN3_MOE_FOPE_PATH)

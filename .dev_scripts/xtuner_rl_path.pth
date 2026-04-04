@@ -1,0 +1,25 @@
+import os
+import sys
+import warnings
+
+if os.getenv('XTUNER_USE_LMDEPLOY').lower() in ['1', 'on', 'true']:
+    lmdeploy_envs_dir = os.getenv('XTUNER_LMDEPLOY_ENVS_DIR', '/envs/lmdeploy')
+    if lmdeploy_envs_dir not in sys.path:
+        sys.path.insert(0, lmdeploy_envs_dir)
+        warnings.warn(
+            f"XTUNER_USE_LMDEPLOY is set to true. Injected {lmdeploy_envs_dir} into sys.path for lmdeploy imports."
+        )
+
+elif os.getenv('XTUNER_USE_SGLANG').lower() in ['1', 'on', 'true']:
+    sglang_envs_dir = os.getenv('XTUNER_SGLANG_ENVS_DIR', '/envs/sglang')
+    if sglang_envs_dir not in sys.path:
+        sys.path.insert(0, sglang_envs_dir)
+        warnings.warn(
+            f"XTUNER_USE_SGLANG is set to true. Injected {sglang_envs_dir} into sys.path for sglang imports."
+        )
+
+# else:
+#     warnings.warn(
+#         "Neither XTUNER_USE_LMDEPLOY nor XTUNER_USE_SGLANG is set to true. No custom paths will be injected."
+#     )    
+
