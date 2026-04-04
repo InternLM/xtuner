@@ -37,6 +37,7 @@ from xtuner.v1.module.grouped_linear.moe_group_linear import build_grouped_linea
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.act_fn import get_act_fn
 from xtuner.v1.utils import ForwardState
+from xtuner.v1.utils.misc import run_gc_once
 
 from ..linear import build_linear
 
@@ -452,6 +453,7 @@ class MoEDecoderLayer(nn.Module):
             residual=residual,
             shared_experts_out=shared_experts_out,
         )
+        run_gc_once()
         return hidden_states, router_results["logits"], router_results["router_weights"]
 
     def _micro_batch_forward(
@@ -586,6 +588,7 @@ class MoEDecoderLayer(nn.Module):
 
         router_logits = [router_results["logits"] for router_results in router_results_list]
         router_weights = [router_results["router_weights"] for router_results in router_results_list]
+        run_gc_once()
         return tuple(hidden_states_out_list + router_logits + router_weights)
 
     def _pre_moe_forward(
