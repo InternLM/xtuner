@@ -63,6 +63,49 @@ class ReplayMeta:
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
 
+def summarize_group_payload(grouped_dataitem: List[RLDataFlowItem]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "payload_mode": "full",
+        "observation_count": len(grouped_dataitem),
+        "response_tokens": 0,
+        "response_chars": 0,
+        "versioned_segments": 0,
+        "versioned_tokens": 0,
+        "routed_expert_payloads": 0,
+        "judged_observations": 0,
+        "has_multimodal_prompt": False,
+    }
+    if not grouped_dataitem:
+        return summary
+
+    first_data = grouped_dataitem[0].data
+    summary["has_multimodal_prompt"] = bool(
+        getattr(first_data, "multimodal_train_info", None) and len(first_data.multimodal_train_info) > 0
+    )
+
+    for item in grouped_dataitem:
+        rollout = item.env.rollout
+        judger = item.env.judger
+        response_ids = rollout.response_ids or []
+        response_text = rollout.response or ""
+        versioned_response_ids = rollout.versioned_response_ids or []
+        versioned_num_return_tokens = rollout.versioned_num_return_tokens or []
+
+        summary["response_tokens"] += len(response_ids)
+        summary["response_chars"] += len(response_text)
+        summary["versioned_segments"] += len(versioned_response_ids)
+        if versioned_num_return_tokens:
+            summary["versioned_tokens"] += sum(versioned_num_return_tokens)
+        else:
+            summary["versioned_tokens"] += sum(len(ids) for ids in versioned_response_ids)
+        if rollout.extra_info.get("routed_experts", None) is not None:
+            summary["routed_expert_payloads"] += 1
+        if judger.uid is not None or judger.reward.get("score", 0.0) != 0.0 or len(judger.extra_info) > 0:
+            summary["judged_observations"] += 1
+
+    return summary
+
+
 def determine_group_state(group_data_items: List[RLDataFlowItem]) -> RolloutState:
     """Determines the processing strategy for a group of rollout samples based
     on their state."""
@@ -113,7 +156,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         observation_refs=observation_refs,
         state=group_state,
         version=group_version,
-        extra_info={},
+        extra_info=summarize_group_payload(grouped_dataitem),
     )
     return replay_meta
 
@@ -323,6 +366,87 @@ class ReplayBufferStorage:
         self.sample_from_aborted_count = 0
         self.sample_from_expired_count = 0
 
+    def _free_replay_meta_refs(self, replay_meta: ReplayMeta, include_action_ref: bool = True):
+        refs = []
+        if include_action_ref and replay_meta.action_ref is not None:
+            refs.append(replay_meta.action_ref)
+        refs.extend([ref for ref in replay_meta.observation_refs if ref is not None])
+        if refs:
+            ray.internal.free(refs, local_only=False)
+
+    def _update_replay_meta_state(self, replay_meta: ReplayMeta, new_state: RolloutState):
+        for observation_id in replay_meta.observation_ids:
+            old_state = self._observations2states.get(observation_id)
+            if old_state and observation_id in self._states.get(old_state, []):
+                self._states[old_state].remove(observation_id)
+            self._observations2states[observation_id] = new_state
+            if observation_id not in self._states[new_state]:
+                self._states[new_state].append(observation_id)
+        replay_meta.state = new_state
+
+    def _strip_rollout_payload_for_rerun(self, replay_meta: ReplayMeta, new_state: RolloutState):
+        """Keep prompt refs only and drop rollout outputs that will not be reused."""
+        old_obs_refs = [ref for ref in replay_meta.observation_refs if ref is not None]
+        if old_obs_refs:
+            ray.internal.free(old_obs_refs, local_only=False)
+        replay_meta.observation_refs = [ray.put(RLEnvDataItem()) for _ in replay_meta.observation_ids]
+        replay_meta.extra_info.update(
+            {
+                "payload_mode": "prompt_only",
+                "response_tokens": 0,
+                "response_chars": 0,
+                "versioned_segments": 0,
+                "versioned_tokens": 0,
+                "routed_expert_payloads": 0,
+                "judged_observations": 0,
+            }
+        )
+        self._update_replay_meta_state(replay_meta, new_state)
+
+    def get_storage_stats(self) -> Dict[str, float]:
+        stats: Dict[str, float] = {
+            "tracked_actions_count": float(len(self._actions)),
+            "tracked_roots_count": float(len(self._root2actions)),
+            "tracked_observations_count": float(len(self._observations)),
+            "completed_actions_count": float(sum(len(bucket) for bucket in self._completed_actions.values())),
+            "aborted_actions_count": float(sum(len(bucket) for bucket in self._aborted_actions.values())),
+            "expired_actions_count": float(len(self._expired_actions)),
+            "completed_versions_count": float(len(self._completed_actions)),
+            "aborted_versions_count": float(len(self._aborted_actions)),
+            "payload_full_actions_count": 0.0,
+            "payload_prompt_only_actions_count": 0.0,
+            "payload_full_observations_count": 0.0,
+            "payload_prompt_only_observations_count": 0.0,
+            "stored_response_tokens": 0.0,
+            "stored_response_chars": 0.0,
+            "stored_versioned_segments": 0.0,
+            "stored_versioned_tokens": 0.0,
+            "stored_routed_expert_payloads": 0.0,
+            "stored_judged_observations": 0.0,
+            "multimodal_actions_count": 0.0,
+        }
+
+        for replay_meta in self._actions.values():
+            summary = replay_meta.extra_info
+            observation_count = float(summary.get("observation_count", len(replay_meta.observation_ids)))
+            if summary.get("payload_mode", "full") == "prompt_only":
+                stats["payload_prompt_only_actions_count"] += 1.0
+                stats["payload_prompt_only_observations_count"] += observation_count
+            else:
+                stats["payload_full_actions_count"] += 1.0
+                stats["payload_full_observations_count"] += observation_count
+
+            stats["stored_response_tokens"] += float(summary.get("response_tokens", 0))
+            stats["stored_response_chars"] += float(summary.get("response_chars", 0))
+            stats["stored_versioned_segments"] += float(summary.get("versioned_segments", 0))
+            stats["stored_versioned_tokens"] += float(summary.get("versioned_tokens", 0))
+            stats["stored_routed_expert_payloads"] += float(summary.get("routed_expert_payloads", 0))
+            stats["stored_judged_observations"] += float(summary.get("judged_observations", 0))
+            if summary.get("has_multimodal_prompt", False):
+                stats["multimodal_actions_count"] += 1.0
+
+        return stats
+
     def add(self, grouped_dataitem: List[RLDataFlowItem]):
         """Adds a group of data items to the storage.
 
@@ -426,6 +550,8 @@ class ReplayBufferStorage:
         return []
 
     def clear(self):
+        for replay_meta in self._actions.values():
+            self._free_replay_meta_refs(replay_meta)
         attrs_to_clear = [
             "_aborted_actions",
             "_completed_actions",
@@ -699,6 +825,10 @@ class ReplayBufferStorage:
 
         for version in expired_versions:
             bucket = self._completed_actions.pop(version)
+            for action_id in bucket:
+                replay_meta = self._actions.get(action_id)
+                if replay_meta is not None:
+                    self._strip_rollout_payload_for_rerun(replay_meta, RolloutState.EXPIRED)
             self._expired_actions.extend(bucket)
             self.logger.info(
                 f"Moved {len(bucket)} completed samples with version {version} to expired samples due to exceeding tail_batch_candidate_steps."
@@ -709,6 +839,10 @@ class ReplayBufferStorage:
             return
 
         for version, bucket in self._completed_actions.items():
+            for action_id in bucket:
+                replay_meta = self._actions.get(action_id)
+                if replay_meta is not None:
+                    self._strip_rollout_payload_for_rerun(replay_meta, RolloutState.ABORTED)
             self._aborted_actions[0].extend(bucket)
             self.logger.info(
                 f"Moved {len(bucket)} completed samples with version {version} to aborted samples due to partial rollout disabled."
@@ -729,7 +863,9 @@ class ReplayBufferStorage:
             if state and observation_id in self._states.get(state, []):
                 self._states[state].remove(observation_id)
 
+        self._actions.pop(action_id, None)
         self._action2observations.pop(action_id, None)
+        self._free_replay_meta_refs(replay_meta)
         del replay_meta
 
     def _clear_meta_for_root(self, replay_meta: ReplayMeta):
@@ -747,13 +883,16 @@ class ReplayBufferStorage:
                 and clear all related actions.
         """
         root_id = replay_meta.root_id
+        current_action_id = replay_meta.action_id
+        self._clear_meta_for_actions(replay_meta)
         if root_id in self._root2actions:
             for action_id in self._root2actions[root_id]:
+                if action_id == current_action_id:
+                    continue
                 new_replay_meta = self._actions.pop(action_id, None)
                 if new_replay_meta:
                     self._clear_meta_for_actions(new_replay_meta)
             del self._root2actions[root_id]
-        del replay_meta
 
     def _check_rollout_state_and_insert(self, replay_meta: ReplayMeta):
         """Checks the rollout state of a ReplayMeta object and inserts its
@@ -775,11 +914,14 @@ class ReplayBufferStorage:
         if state == RolloutState.ABORTED:
             if self.tail_batch_candidate_steps > 0 and replay_meta.version >= self.tail_batch_candidate_steps:
                 # 过期的数据需要重置状态
+                self._strip_rollout_payload_for_rerun(replay_meta, RolloutState.EXPIRED)
                 self._expired_actions.append(action_id)
                 self.logger.debug(
                     f"Add expired sample with action_id: {action_id} to _expired_actions because version: {replay_meta.version} >= tail_batch_candidate_steps: {self.tail_batch_candidate_steps}."
                 )
             else:
+                if not self.enable_partial_rollout:
+                    self._strip_rollout_payload_for_rerun(replay_meta, RolloutState.ABORTED)
                 self._aborted_actions[replay_meta.version].append(action_id)
                 self.logger.debug(
                     f"Add aborted sample with action_id: {action_id} version: {replay_meta.version} to _aborted_actions."
@@ -903,7 +1045,7 @@ class ReplayBuffer:
         self.storage.add(grouped_dataitem)
 
     def status(self):
-        return {
+        status = {
             "remain_completed_samples_count": self.storage.completed_samples_count,
             "remain_aborted_samples_count": self.storage.aborted_samples_count,
             "remain_expired_samples_count": self.storage.expired_samples_count,
@@ -911,6 +1053,8 @@ class ReplayBuffer:
             "sample_from_aborted_count": self.storage.sample_from_aborted_count,
             "sample_from_expired_count": self.storage.sample_from_expired_count,
         }
+        status.update(self.storage.get_storage_stats())
+        return status
 
     def save(self, file_path: Path | str):
         """Saves the replay buffer's storage to a file.

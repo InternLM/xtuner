@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, trim_memory
 
 from ..data_item import BaseMLLMDataItem, CacheItem
 from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
@@ -118,7 +118,8 @@ def replace_image_token(
 
 
 def load_image(image_path: str):
-    return Image.open(image_path).convert("RGB")
+    with Image.open(image_path) as img:
+        return img.convert("RGB")
 
 
 def get_image_path(image_path: str, media_root: str):
@@ -144,6 +145,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         data_name: str | None = None,
         llm_pack_weight: float = 1.0,
         visual_pack_weight: float = 0.0,
+        trim_memory_step: int = 1,
     ):
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
@@ -157,9 +159,16 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._image_wh_list: list[list] = []
         self._video_wh_list: list[list] = []
         self._video_extra_info_list: list[dict] = []
+        self._trim_memory_step = max(1, trim_memory_step)
+        self._trim_memory_count = 0
 
         self._hash_str += f"llm_pack_weight:{llm_pack_weight}_visual_pack_weight:{visual_pack_weight}"
         super().__init__(tokenizer, llm_pack_weight=llm_pack_weight, visual_pack_weight=visual_pack_weight)
+
+    def _maybe_trim_memory(self):
+        self._trim_memory_count += 1
+        if self._trim_memory_count % self._trim_memory_step == 0:
+            trim_memory(logger)
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         raise NotImplementedError
@@ -213,11 +222,13 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
             else:
                 ret = self.multi_modal_get_item(item, media_root)
+                self._maybe_trim_memory()
         elif len(self._video_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_video_get_item(item)
             else:
                 ret = self.video_get_item(item, media_root)
+                self._maybe_trim_memory()
         else:
             if self.state == "cache":
                 ret = self.calc_num_tokens_pure_text_get_item(item)
@@ -257,6 +268,7 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
     add_bos_token: bool = False  # for mllm pretrain
     llm_pack_weight: float = 1.0
     visual_pack_weight: float = 0.0
+    trim_memory_step: int = 1
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
