@@ -94,14 +94,14 @@ class RawSingleTurnEnvironment(BaseEnvironment):
         if self.rollout_controller:
             response_future = []
             for sample in group_data_items:
-                sample.data.extra_info["root_id"] = sample.uid.root_id
-                sample.data.extra_info["action_id"] = sample.uid.action_id
+                rollout_extra_info = dict(sample.data.extra_info)
+                rollout_extra_info["root_id"] = sample.uid.root_id
+                rollout_extra_info["action_id"] = sample.uid.action_id
                 update_sample_params = sample_params
 
                 if "partial_rollout_input_ids" in sample.env.rollout.extra_info:
                     input_ids_length = len(sample.data.input_ids) if sample.data.input_ids is not None else 0
                     current_partial_length = len(sample.env.rollout.extra_info["partial_rollout_input_ids"])
-                    rollout_extra_info = copy.deepcopy(sample.data.extra_info)
                     rollout_extra_info["partial_rollout_input_ids"] = sample.env.rollout.extra_info[
                         "partial_rollout_input_ids"
                     ]
@@ -113,8 +113,6 @@ class RawSingleTurnEnvironment(BaseEnvironment):
                     self.logger.debug(
                         f"root_id: {sample.uid.root_id}, action_id {sample.uid.action_id} pass current_partial_length {current_partial_length}, input_ids_length {input_ids_length} to rollout and set max_tokens to {update_sample_params.max_tokens}"
                     )
-                else:
-                    rollout_extra_info = sample.data.extra_info
 
                 if "routed_experts" in sample.env.rollout.extra_info:
                     rollout_extra_info["routed_experts"] = sample.env.rollout.extra_info["routed_experts"]
@@ -126,6 +124,8 @@ class RawSingleTurnEnvironment(BaseEnvironment):
                     extra_params=extra_params,
                     extra_info=rollout_extra_info,
                 )
+                del rollout_extra_info
+
                 response_future.append(fut)
             try:
                 rollout_responses = await asyncio.wait_for(
