@@ -680,7 +680,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         step_time = time_after_train_step - time_before_train_step
         step_consumed_tokens = train_step_info["step_consumed_tokens"]
 
-        self._sft_total_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
+        self._sft_total_consumed_samples += self._reduce_number_across_rank(
+            cur_sample_num, group=self.data_mesh["dp"].get_group()
+        )
         reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
         self._sft_total_consumed_tokens += reduced_step_consumed_tokens
 
@@ -767,9 +769,25 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"tgs: {tgs:.4f}"
         )
 
-    def _reduce_number_across_rank(self, rank_number: int) -> int:
-        _gathered_list = [None for _ in range(dist.get_world_size())]
-        dist.all_gather_object(_gathered_list, rank_number)
+    def _reduce_number_across_rank(self, rank_number: int, group: dist.ProcessGroup | None = None) -> int:
+        """Reduce number across ranks.
+
+        Args:
+            rank_number (int): The number to reduce from current rank.
+            group (dist.ProcessGroup | None): The process group for reduction.
+                If None, reduce across all ranks (world_size).
+                If specified, reduce only within that group (e.g., dp_mesh group).
+
+        Returns:
+            int: Sum of numbers from all ranks in the group.
+        """
+        if group is None:
+            world_size = dist.get_world_size()
+        else:
+            world_size = dist.get_world_size(group)
+
+        _gathered_list = [None for _ in range(world_size)]
+        dist.all_gather_object(_gathered_list, rank_number, group=group)
         reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
         return reduced_number
 

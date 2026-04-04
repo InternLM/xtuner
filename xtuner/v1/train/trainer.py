@@ -826,9 +826,27 @@ class Trainer:
         ]
         return engine_input
 
-    def _reduce_number_across_rank(self, rank_number: int | float) -> int:
-        _gathered_list = [None for _ in range(self.world_size)]
-        dist.all_gather_object(_gathered_list, rank_number)
+    def _reduce_number_across_rank(
+        self, rank_number: int | float, group: dist.ProcessGroup | None = None
+    ) -> int:
+        """Reduce number across ranks.
+
+        Args:
+            rank_number (int | float): The number to reduce from current rank.
+            group (dist.ProcessGroup | None): The process group for reduction.
+                If None, reduce across all ranks (world_size).
+                If specified, reduce only within that group (e.g., dp_mesh group).
+
+        Returns:
+            int: Sum of numbers from all ranks in the group.
+        """
+        if group is None:
+            world_size = self.world_size
+        else:
+            world_size = dist.get_world_size(group)
+
+        _gathered_list = [None for _ in range(world_size)]
+        dist.all_gather_object(_gathered_list, rank_number, group=group)
         reduced_number = sum(_gathered_list)  # type: ignore[arg-type]
         return reduced_number
 
@@ -1133,7 +1151,10 @@ class Trainer:
         total_consumed_tokens = (
             self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
         )
-        total_consumed_samples = self._reduce_number_across_rank(self._local_total_samples) + self._init_total_samples
+        total_consumed_samples = (
+            self._reduce_number_across_rank(self._local_total_samples, group=self.data_mesh["dp"].get_group())
+            + self._init_total_samples
+        )
 
         # Save dataloader
         self._save_dataloader(dataloader_path, total_consumed_samples=total_consumed_samples)
