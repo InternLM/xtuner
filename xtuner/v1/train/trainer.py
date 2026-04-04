@@ -1496,6 +1496,12 @@ class Trainer:
         set_random_seed(seed)
 
     def _try_bind_numa(self):
+        if DEVICE == "npu":
+            from xtuner.v1.utils import npu_cpu_binder
+
+            npu_cpu_binder.run(self.rank)
+            return
+
         if str(DEVICE) != "cuda":
             log_rank0.info("Current device is not cuda, skip numa binding.")
             return
