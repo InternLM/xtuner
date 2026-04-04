@@ -26,7 +26,7 @@ from xtuner.v1.data_proto.rl_data import (
     is_valid_for_replaybuffer,
 )
 from xtuner.v1.datasets.config import DataloaderConfig
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 from xtuner.v1.utils.device import get_device
 
 
@@ -246,6 +246,7 @@ class DatasetSampler:
         self.dataloader_iter = iter(self.dataloader)
         self.cur_epoch = 0
         self.reduced_consumed_samples = 0
+        self._next_root_id = 0
         self.logger = get_logger()
 
     def sample(self, env: str, prompt_repeat_k: int) -> List[RLDataFlowItem]:
@@ -263,8 +264,13 @@ class DatasetSampler:
         Returns:
             List[RLDataFlowItem]: A list of newly created data items for a rollout.
         """
-        root_id = uuid4().int
-        action_id = uuid4().int
+        if XTUNER_DETERMINISTIC:
+            root_id = max(self._next_root_id, self.reduced_consumed_samples * prompt_repeat_k)
+            action_id = root_id
+            self._next_root_id = root_id + prompt_repeat_k
+        else:
+            root_id = uuid4().int
+            action_id = uuid4().int
         group_data_item: List[RLDataFlowItem] = [RLDataFlowItem() for _ in range(prompt_repeat_k)]
         try:
             data = next(self.dataloader_iter)[0]
@@ -280,12 +286,12 @@ class DatasetSampler:
             multimodal_train_info["pixel_values"] = ray.put(multimodal_train_info["pixel_values"])
             data["multimodal_train_info"] = multimodal_train_info
 
-        for data_item in group_data_item:
+        for item_idx, data_item in enumerate(group_data_item):
             data_item.uid = RLUIDItem(
                 env=env,
                 root_id=root_id,
                 action_id=action_id,
-                observation_id=uuid4().int,
+                observation_id=root_id + item_idx if XTUNER_DETERMINISTIC else uuid4().int,
             )
             data_item.data = RLDatasetItem(**data)
             data_item.extra_info = RLExtraDataItem(retry_times=0)
