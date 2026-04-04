@@ -177,7 +177,6 @@ class AsyncRuntime:
             previous_tasks = running_tasks
 
 
-@torch.compile(fullgraph=True)
 def adamw_update(
     X: Tensor,  # Model weights (modified in place)
     G: Tensor,  # Gradient
@@ -224,7 +223,6 @@ def adamw_update(
     X.addcdiv_(M, denom, value=-adj_lr)
 
 
-@torch.compile(fullgraph=True)
 def adamw_update_foreach(  # type: ignore
     X: List[Tensor],  # Model weights (modified in place)
     G: List[Tensor],  # Gradient
@@ -452,7 +450,6 @@ class Muon(Optimizer):
             if not group_params:
                 continue
 
-            # Wrap hyperparameters in tensors for torch.compile
             lr = torch.tensor(group["lr"])
             mu = torch.tensor(group["mu"])
             weight_decay = torch.tensor(group["weight_decay"])
@@ -537,7 +534,6 @@ class Muon(Optimizer):
             momentums = [s["momentum"] for s in states]
             variances = [s["variance"] for s in states]
 
-            # Wrap hyperparameters in tensors for torch.compile
             lr = torch.tensor(group["lr"])
             beta1 = torch.tensor(group["beta1"])
             beta2 = torch.tensor(group["beta2"])
@@ -867,7 +863,6 @@ def adamw_update_foreach_async(
     yield
 
 
-@torch.compile(fullgraph=True)
 def muon_update_pre_orthogonalize(
     G: List[Tensor],
     M: List[Tensor],
@@ -875,11 +870,7 @@ def muon_update_pre_orthogonalize(
     nesterov: bool,
 ) -> List[Tensor]:
     """Update momentum with gradient and compute the input to
-    orthogonalization.
-
-    Inputs and outputs should be lists of regular Tensor, not DTensor. This is a separate function for compatibility
-    with torch.compile().
-    """
+    orthogonalization."""
     dtype = M[0].dtype
     G = [g.to(dtype=dtype) for g in G]
 
@@ -899,7 +890,6 @@ def muon_update_pre_orthogonalize(
     return U
 
 
-@torch.compile(fullgraph=True)
 def muon_update_post_orthogonalize(
     X: List[Tensor],
     U: List[Tensor],
@@ -907,11 +897,7 @@ def muon_update_post_orthogonalize(
     adjusted_lr: Tensor,
     weight_decay: Tensor,
 ):
-    """Apply weight decay and weight update after orthogonalization.
-
-    Inputs and outputs should be lists of regular Tensor, not DTensor. This is a separate function for compatibility
-    with torch.compile().
-    """
+    """Apply weight decay and weight update after orthogonalization."""
     # Apply weight decay
     torch._foreach_mul_(X, 1 - base_lr * weight_decay)
 
@@ -959,7 +945,6 @@ def adjust_lr_spectral_norm(lr, param_shape, num_experts=1):
     return adjusted_lr
 
 
-@torch.compile(fullgraph=True)
 def zeropower_via_newtonschulz5(G: Tensor, epsilon: float = 1e-7, num_experts: int = 1):
     """Newton-Schulz iteration to approximate the orthogonalization of X.
 
