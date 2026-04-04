@@ -6,6 +6,7 @@ from urllib3.exceptions import NewConnectionError
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
+from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
 from .worker import RolloutWorker
 
@@ -24,7 +25,7 @@ class SGLangWorker(RolloutWorker):
         from sglang.srt.entrypoints.http_server import launch_server
 
         self.server_func = launch_server
-        self.endpoints["health_generate"] = "health_generate"
+        self.endpoints["health_generate"] = "health"
         self.endpoints["generate"] = "generate"
         self.endpoints["v1/chat/completions"] = "v1/chat/completions"
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path, trust_remote_code=True)
@@ -86,6 +87,14 @@ class SGLangWorker(RolloutWorker):
         response.raise_for_status()
         return response.json()
 
+    def check_health(self) -> bool:
+        try:
+            response = requests.get(f"{self.server_url}/{self.endpoints['health_generate']}", timeout=5.0)
+            return response.status_code == 200
+        except requests.RequestException as e:
+            self.logger.error(f"Health check failed for server {self.server_url}: {e}")
+            return False
+
     def flush_cache(self):
         """Flush the cache of the server."""
         # TODO: 支持 tp
@@ -144,11 +153,19 @@ class SGLangWorker(RolloutWorker):
         grammar_backend = sglang_config_kwargs.get(
             "grammar_backend", None
         )  # for intern-s1 series models, have to set the grammar_backend to "none"
-        log_level = sglang_config_kwargs.get("log_level", "critical")
-        log_level_http = sglang_config_kwargs.get("log_level_http", "critical")
-        enable_deterministic_inference = sglang_config_kwargs.get("enable_deterministic_inference", False)
-
+        log_level = sglang_config_kwargs.get("log_level", "error")
+        log_level_http = sglang_config_kwargs.get("log_level_http", "error")
         sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
+
+        if 'speculative_algorithm' in sglang_config_kwargs:
+            sglang_server_args.speculative_algorithm = sglang_config_kwargs['speculative_algorithm']
+        if 'speculative_num_steps' in sglang_config_kwargs:
+            sglang_server_args.speculative_num_steps = sglang_config_kwargs['speculative_num_steps']
+        if 'speculative_eagle_topk' in sglang_config_kwargs:
+            sglang_server_args.speculative_eagle_topk = sglang_config_kwargs['speculative_eagle_topk']
+        if 'speculative_num_draft_tokens' in sglang_config_kwargs:
+            sglang_server_args.speculative_num_draft_tokens = sglang_config_kwargs['speculative_num_draft_tokens']
+
         num_gpus_per_engine = (
             self.config.expert_parallel_size
             if self.config.expert_parallel_size > 1
@@ -162,7 +179,6 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.gpu_id_step = 1
         sglang_server_args.nnodes = max(1, num_gpus_per_engine // self.config.gpus_per_node)
         sglang_server_args.skip_server_warmup = True
-
         sglang_server_args.mem_fraction_static = self.config.gpu_memory_utilization
         # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
         sglang_server_args.enable_memory_saver = True
@@ -173,8 +189,9 @@ class SGLangWorker(RolloutWorker):
         sglang_server_args.max_running_requests = self.config.rollout_max_batch_size_per_instance
         sglang_server_args.log_level = log_level
         sglang_server_args.log_level_http = log_level_http
-        sglang_server_args.enable_deterministic_inference = enable_deterministic_inference
-
+        if XTUNER_DETERMINISTIC:
+            sglang_server_args.enable_deterministic_inference = True
+            sglang_server_args.rl_on_policy_target = True
         if self.config.expert_parallel_size > 1:
             sglang_server_args.tp_size = num_gpus_per_engine
             sglang_server_args.ep_size = num_gpus_per_engine
@@ -192,7 +209,8 @@ class SGLangWorker(RolloutWorker):
             sglang_server_args.node_rank = self.rank // self.config.gpus_per_node
         else:
             sglang_server_args.node_rank = 0
-
+        
+        print("===============\nsglang_server_args", sglang_server_args)
         return sglang_server_args
 
     def _transform_sample_params(self, sample_params: Dict):
@@ -212,6 +230,8 @@ class SGLangWorker(RolloutWorker):
             "stop_token_ids": sample_params["stop_token_ids"],
             "skip_special_tokens": sample_params["skip_special_tokens"],
         }
+        if XTUNER_DETERMINISTIC:
+            sglang_sample_params["sampling_seed"] = sample_params["sampling_seed"]
         return sglang_sample_params
 
     def _transform_extra_params(self, extra_params: Dict):
