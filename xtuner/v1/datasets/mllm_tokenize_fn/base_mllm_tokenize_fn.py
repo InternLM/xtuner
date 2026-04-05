@@ -161,7 +161,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._video_extra_info_list: list[dict] = []
 
         self._trim_memory_interval = trim_memory_interval
-        self._trim_memory_count = 0
+        self._trim_memory_counter = 0
 
         self._hash_str += f"llm_pack_weight:{llm_pack_weight}_visual_pack_weight:{visual_pack_weight}"
         super().__init__(tokenizer, llm_pack_weight=llm_pack_weight, visual_pack_weight=visual_pack_weight)
@@ -218,17 +218,17 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
             else:
                 ret = self.multi_modal_get_item(item, media_root)
-                if self._trim_memory_count % self._trim_memory_interval == 0:
-                    self._trim_memory_count += 1
+                if self._trim_memory_counter % self._trim_memory_interval == 0:
                     trim_memory()
+                self._trim_memory_counter += 1
         elif len(self._video_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_video_get_item(item)
             else:
                 ret = self.video_get_item(item, media_root)
-                if self._trim_memory_count % self._trim_memory_interval == 0:
-                    self._trim_memory_count += 1
+                if self._trim_memory_counter % self._trim_memory_interval == 0:
                     trim_memory()
+                self._trim_memory_counter += 1
         else:
             if self.state == "cache":
                 ret = self.calc_num_tokens_pure_text_get_item(item)
