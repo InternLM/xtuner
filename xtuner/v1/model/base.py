@@ -816,7 +816,7 @@ class BaseModel(nn.Module):
             output_copy = output.model_copy()
             for name in output_copy.model_fields:
                 obj = getattr(output_copy, name)
-                if name == "mtp_loss":
+                if name == "mtp_loss" and isinstance(obj, dict):
                     for key, value in obj.items():
                         loss_item = value.item()
                         local_total_loss += loss_item
