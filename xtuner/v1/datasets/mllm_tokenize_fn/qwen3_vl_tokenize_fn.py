@@ -233,7 +233,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         hash: str | None = None,
         add_eos_token: bool = True,  # for mllm pretrain
         add_bos_token: bool = False,  # for mllm pretrain
-        trim_memory_step: int = 1,
+        trim_memory_interval: int = 1,
     ):
         self.oss_loader = None
         self.debug = debug
@@ -336,7 +336,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             data_name=self.data_name,
             llm_pack_weight=llm_pack_weight,
             visual_pack_weight=visual_pack_weight,
-            trim_memory_step=trim_memory_step,
+            trim_memory_interval=trim_memory_interval,
         )
 
     def _truncated_data_item(
@@ -906,7 +906,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     # it's helpful to add labels to the images and videos for better reference.
     add_vision_id: bool = True
 
-    trim_memory_step: int = 1
+    trim_memory_interval: int = 1
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -936,5 +936,5 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             oss_time_log_thr=self.oss_time_log_thr,
             add_eos_token=self.add_eos_token,  # for mllm pretrain
             add_bos_token=self.add_bos_token,  # for mllm pretrain
-            trim_memory_step=self.trim_memory_step,
+            trim_memory_interval=self.trim_memory_interval,
         )

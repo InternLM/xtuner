@@ -1,4 +1,3 @@
-import logging
 import os
 import sys
 import threading
@@ -220,15 +219,13 @@ def clean_param_name(name: str) -> str:
 _TRIM_MEMORY_WARNED = False
 
 
-def trim_memory(logger: logging.Logger | None = None):
+def trim_memory() -> bool:
     """Try to return free heap pages to OS.
 
     Best-effort only: on platforms without `malloc_trim` (or when unavailable),
     this will fail. We log the failure once per process to avoid spamming.
     """
     global _TRIM_MEMORY_WARNED
-    if logger is None:
-        logger = get_logger()
     try:
         import ctypes
 
@@ -236,6 +233,7 @@ def trim_memory(logger: logging.Logger | None = None):
         return libc.malloc_trim(0)
     except Exception as e:
         if not _TRIM_MEMORY_WARNED:
-            logger.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
+            _logger = get_logger()
+            _logger.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
             _TRIM_MEMORY_WARNED = True
         return False
