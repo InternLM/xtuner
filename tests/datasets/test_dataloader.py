@@ -314,7 +314,7 @@ def _test_resume_spmd(
         batch = next(data_iter)
         data_list.append(batch)
 
-    # Snapshot after the first `step` batches so total_consumed_steps matches resume intent.
+    # Snapshot after the first `step` batches so total_consumed_samples matches resume intent.
     dataloader_state = dataloader.get_state_dict()
 
     expected_data = []

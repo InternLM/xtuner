@@ -12,7 +12,6 @@ from torch.utils.data import Sampler
 
 from xtuner.v1.utils import get_logger
 
-from .consumed_steps import ConsumedStepsTracker
 from .jsonl import JsonlDataset
 from .packing import MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
 from .preset_pack import PresetPackDataset
@@ -85,7 +84,6 @@ class ParallelSampler(Sampler):
         self.epoch = 0
         self.step = 0
         self.round_up = round_up
-        self._consumed = ConsumedStepsTracker(dp_mesh)
 
         if self.round_up:
             self.num_samples = math.ceil(len(self.dataset) / global_batch_size) * global_batch_size // world_size
@@ -139,8 +137,6 @@ class ParallelSampler(Sampler):
         Args:
             state_dict (dict): The state of the sampler.
         """
-        tc = int(state_dict.get("total_consumed_steps", 0))
-        self._consumed.set_init_from_checkpoint(tc)
         self.epoch = state_dict["epoch"]
         self.step = state_dict["step"]
 
@@ -150,17 +146,12 @@ class ParallelSampler(Sampler):
                 f"is different from the current shuffle ({self.shuffle})."
             )
 
-    def get_state_dict(self, step: int | None = None):
+    def get_state_dict(self, total_consumed_steps: int):
         # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
-        if step is None:
-            total_consumed = self._consumed.total_for_checkpoint()
-        else:
-            total_consumed = int(step)
-        step_mod = total_consumed % self.total_size
+        step_mod = total_consumed_steps % self.total_size
         return {
             "epoch": self.epoch,
             "step": step_mod,
-            "total_consumed_steps": total_consumed,
             "world_size": self.world_size,
             "shuffle": self.shuffle,
             "round_up": self.round_up,
@@ -242,7 +233,6 @@ class LengthGroupedSampler(Sampler):
         assert isinstance(self.max_lengths, (list, tuple, Column, np.ndarray))
 
         self.global_batch_size = global_batch_size
-        self._consumed = ConsumedStepsTracker(dp_mesh)
 
     def __iter__(self) -> Iterator[int]:
         """Iterate the indices."""
@@ -291,8 +281,6 @@ class LengthGroupedSampler(Sampler):
         Args:
             state_dict (dict): The state of the sampler.
         """
-        tc = int(state_dict.get("total_consumed_steps", 0))
-        self._consumed.set_init_from_checkpoint(tc)
         self.epoch = state_dict["epoch"]
         self.step = state_dict["step"]
 
@@ -310,22 +298,17 @@ class LengthGroupedSampler(Sampler):
             )
             self.group_size = origin_group_size
 
-    def get_state_dict(self, step: int | None = None):
+    def get_state_dict(self, total_consumed_steps: int):
         """Get the sampler state dict.
 
         Returns:
             dict: The state of the sampler.
         """
         # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
-        if step is None:
-            total_consumed = self._consumed.total_for_checkpoint()
-        else:
-            total_consumed = int(step)
-        step_mod = total_consumed % self.total_size
+        step_mod = total_consumed_steps % self.total_size
         return {
             "epoch": self.epoch,
             "step": step_mod,
-            "total_consumed_steps": total_consumed,
             "world_size": self.world_size,
             "round_up": self.round_up,
             "num_samples": self.num_samples,

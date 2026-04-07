@@ -20,7 +20,7 @@ from xtuner.v1.utils.device import get_device
 
 from itertools import chain
 
-from xtuner.v1.datasets import PretrainTokenizeFunctionConfig, get_dataloader_state, load_dataloader_state
+from xtuner.v1.datasets import PretrainTokenizeFunctionConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
 from xtuner.v1.datasets.packing import get_pack_infos_by_hard_split
 from xtuner.v1.datasets.preset_pack import PresetPackDataset
@@ -700,7 +700,7 @@ class TestPresetPackGroupSamplerResumeDist(DistributedTestBase):
         global_consumed_samples = sum(int(x) for x in consumed_samples_list if x is not None)
 
         # 3. Get ckpt state
-        # dataloader_state = get_dataloader_state(dl, global_consumed_samples)
+        # dataloader_state = dl.get_state_dict(global_consumed_samples)
         dataloader_state = dl.get_state_dict(global_consumed_samples)
 
         # 4. Continue to consume data at [half_step, 2*half_step)
@@ -738,7 +738,7 @@ class TestPresetPackGroupSamplerResumeDist(DistributedTestBase):
         dl2 = _build()
         with ckpt_path.open("rb") as f:
             ckpt = pickle.load(f)
-        # load_dataloader_state(dl2, ckpt["dataloader_state"])
+        # dl2.load_state_dict(ckpt["dataloader_state"])
         dl2.load_state_dict(ckpt["dataloader_state"])
 
         resume_iter = iter(dl2)

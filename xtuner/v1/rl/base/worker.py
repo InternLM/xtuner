@@ -1391,7 +1391,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self._sft_dataloader is not None:
             sft_dataloader_path = checkpoint_path / self._SAVE_SFT_DATALOADER_DIR
             dataloader_state = self._sft_dataloader.get_state_dict()
-            total_consumed_samples = int(dataloader_state.get("sampler", {}).get("total_consumed_steps", 0))
+            total_consumed_samples = dataloader_state["total_consumed_samples"]
             if self.rank != 0:
                 return
 

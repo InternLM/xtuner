@@ -87,7 +87,7 @@ def test_state_dict_resume(tmp_path):
 
     sampler = PresetSampler(dataset, sampler_config_path=path, global_batch_size=1)
 
-    state = sampler.get_state_dict(step=3)
+    state = sampler.get_state_dict(3)
     assert state["step"] == 3
 
     sampler2 = PresetSampler(dataset, sampler_config_path=path, global_batch_size=1)
@@ -102,7 +102,7 @@ def test_state_dict_world_size_mismatch(tmp_path):
     path = _write_order_npy(tmp_path, "order.npy", _i64(0, 1, 2, 3))
 
     sampler = PresetSampler(dataset, sampler_config_path=path, global_batch_size=1)
-    state = sampler.get_state_dict(step=0)
+    state = sampler.get_state_dict(0)
     state["world_size"] = 99
 
     sampler.load_state_dict(state)

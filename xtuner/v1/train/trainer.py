@@ -1214,7 +1214,7 @@ class Trainer:
         dataloader_state = self._dataloader.get_state_dict()
         if self.rank == 0:
             torch.save(dataloader_state, dataloader_path)
-        return int(dataloader_state.get("sampler", {}).get("total_consumed_steps", 0))
+        return dataloader_state["total_consumed_samples"]
 
     @property
     def work_dir(self) -> Path:
