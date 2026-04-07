@@ -1,4 +1,3 @@
-import logging
 import os
 import sys
 import threading
@@ -21,8 +20,6 @@ from .logger import get_logger
 
 
 HF_PATCH_MODULES_CACHE_PREFIX = "modules_pid_"
-
-_TRIM_MEMORY_WARNED = False
 
 logger = get_logger()
 XTUNER_DETERMINISTIC = os.getenv("XTUNER_DETERMINISTIC") == "true"
@@ -217,20 +214,3 @@ def clean_param_name(name: str) -> str:
     if "_orig_mod." in name:
         name = name.replace("_orig_mod.", "")
     return name
-
-
-def trim_memory(logger: logging.Logger | None = None):
-    """Try to return free heap pages to OS."""
-    global _TRIM_MEMORY_WARNED
-    if logger is None:
-        logger = get_logger()
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL("libc.so.6")
-        return libc.malloc_trim(0)
-    except Exception as e:
-        if not _TRIM_MEMORY_WARNED:
-            logger.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
-            _TRIM_MEMORY_WARNED = True
-        return False
