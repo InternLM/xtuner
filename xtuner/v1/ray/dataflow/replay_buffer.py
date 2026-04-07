@@ -119,7 +119,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     return replay_meta
 
 
-def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta, *, consume_refs: bool = False) -> List[RLDataFlowItem]:
+def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowItem]:
     env_str = replay_meta.env
     root_id = replay_meta.root_id
     action_id = replay_meta.action_id
@@ -131,14 +131,13 @@ def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta, *, consume_refs: boo
 
     env_values = [ray.get(obs_ref) for obs_ref in observation_refs]
 
-    if consume_refs:
-        refs_to_free: List[ObjectRef] = []
-        if isinstance(action_ref, ObjectRef):
-            refs_to_free.append(action_ref)
-        refs_to_free.extend([ref for ref in observation_refs if isinstance(ref, ObjectRef)])
-        free_object_refs(refs_to_free)
-        replay_meta.action_ref = None
-        replay_meta.observation_refs.clear()
+    refs_to_free: List[ObjectRef] = []
+    if isinstance(action_ref, ObjectRef):
+        refs_to_free.append(action_ref)
+    refs_to_free.extend([ref for ref in observation_refs if isinstance(ref, ObjectRef)])
+    free_object_refs(refs_to_free)
+    replay_meta.action_ref = None
+    replay_meta.observation_refs.clear()
 
     group_data_item = []
     for obs_id, env_data in zip(replay_meta.observation_ids, env_values):
@@ -427,7 +426,7 @@ class ReplayBufferStorage:
                 self.logger.warning("Get action_id None from completed_actions and skip this iteration.")
                 continue
             replay_meta = self._actions.pop(action_id)
-            group_samples = mapping_replaymeta_to_dataitem(replay_meta, consume_refs=True)
+            group_samples = mapping_replaymeta_to_dataitem(replay_meta)
             # 将这条数据彻底清除,不用再记录root_id对应的action_ids了
             self._clear_meta_for_root(replay_meta)
             multimodal_train_info = None
@@ -490,6 +489,7 @@ class ReplayBufferStorage:
         """
 
         # Resolve data.multimodal_train_info
+        free_refs_list = []
         if hasattr(data_item.data, "multimodal_train_info"):
             multimodal_info = data_item.data.multimodal_train_info
             if multimodal_info and "pixel_values" in multimodal_info:
@@ -497,6 +497,7 @@ class ReplayBufferStorage:
                 if isinstance(pixel_values_ref, ObjectRef):
                     multimodal_info["pixel_values"] = ray.get(pixel_values_ref)
                     data_item.data.multimodal_train_info = multimodal_info
+                    free_refs_list.append(pixel_values_ref)
         # Resolve rollout.extra_info.router_experts
         if "routed_experts" in data_item.env.rollout.extra_info:
             if isinstance(data_item.env.rollout.extra_info["routed_experts"], ObjectRef):
@@ -504,7 +505,9 @@ class ReplayBufferStorage:
                 ray.internal.free(data_item.env.rollout.extra_info["routed_experts"], local_only=False)
                 del data_item.env.rollout.extra_info["routed_experts"]
                 data_item.env.rollout.extra_info["routed_experts"] = routed_experts
-                self.logger.info("Resolved routed_experts ObjectRef in rollout.extra_info")
+                free_refs_list.append(pixel_values_ref)
+
+        free_object_refs(free_refs_list)
 
     def convert_to_ray_objref(self, data_item: RLDataFlowItem):
         """Converts large tensors in RLDataFlowItem to ray.ObjectRefs.
@@ -561,7 +564,7 @@ class ReplayBufferStorage:
         all_data_items = []
         for replay_meta in self._actions.values():
             # dump 仅用于序列化快照，这里可直接消费 refs，避免长时间占用 object store
-            data_items = mapping_replaymeta_to_dataitem(replay_meta, consume_refs=True)
+            data_items = mapping_replaymeta_to_dataitem(replay_meta)
             for item in data_items:
                 self.resolve_ray_objects(item)
                 res = self.has_objectref(item)
@@ -644,7 +647,7 @@ class ReplayBufferStorage:
         assert len(self._expired_actions) > 0
         action_id = self._expired_actions.pop()
         replay_meta = self._actions.pop(action_id)
-        group_samples = mapping_replaymeta_to_dataitem(replay_meta, consume_refs=True)
+        group_samples = mapping_replaymeta_to_dataitem(replay_meta)
         # 把这条数据上次的记录全部删掉,重新开始rollout,root2actions也要清除
         self._clear_meta_for_root(replay_meta)
 
@@ -679,7 +682,7 @@ class ReplayBufferStorage:
         # 通过self.aborted_samples_count判断过这里不会返回None
         replay_meta = self._actions.pop(action_id)  # type: ignore[arg-type]
         replay_meta_version = replay_meta.version
-        group_samples = mapping_replaymeta_to_dataitem(replay_meta, consume_refs=True)
+        group_samples = mapping_replaymeta_to_dataitem(replay_meta)
         # 把这条数据上次rollout产生的输出的记录都删掉，上次的数据已经记录在了RLEnvDataItem中了
         self._clear_meta_for_actions(replay_meta)
 
