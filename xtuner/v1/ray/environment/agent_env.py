@@ -19,8 +19,6 @@ from xtuner.v1.utils import get_logger
 
 from .base_env import BaseEnvironment
 
-logger = get_logger()
-
 
 def check_dead_actors():
     # 获取所有 Actor 的列表
@@ -64,7 +62,7 @@ class AgentEnvironment(BaseEnvironment):
 
         async def _inner_agent_call(item):
             if item.env.rollout.state == RolloutState.COMPLETED:
-                logger.debug(f'Rollout already completed for item {item.uid.observation_id}, skip agent call.')
+                get_logger().debug(f'Rollout already completed for item {item.uid.observation_id}, skip agent call.')
                 return 'Passed'
             self.agent.reset(session_id=item.uid.observation_id, recursive=True)
             if 'agent_state_dict' in item.env.rollout.extra_info:
@@ -75,7 +73,7 @@ class AgentEnvironment(BaseEnvironment):
             try:
                 return await self.agent(*agent_inputs, session_id=item.uid.observation_id, **sample_params)
             except BaseException as exc:
-                logger.error(
+                get_logger().error(
                     f'[Agent Inference Error] {exc}. Dead actors: {check_dead_actors()}\n{traceback.format_exc()}'
                 )
                 return 'Failed'
