@@ -79,9 +79,8 @@ def summarize_group_payload(grouped_dataitem: List[RLDataFlowItem]) -> Dict[str,
         return summary
 
     first_data = grouped_dataitem[0].data
-    summary["has_multimodal_prompt"] = bool(
-        getattr(first_data, "multimodal_train_info", None) and len(first_data.multimodal_train_info) > 0
-    )
+    multimodal_train_info = getattr(first_data, "multimodal_train_info", None)
+    summary["has_multimodal_prompt"] = bool(multimodal_train_info)
 
     for item in grouped_dataitem:
         rollout = item.env.rollout
@@ -394,7 +393,8 @@ class ReplayBufferStorage:
         replay_meta.state = new_state
 
     def _strip_rollout_payload_for_rerun(self, replay_meta: ReplayMeta, new_state: RolloutState):
-        """Keep prompt refs only and drop rollout outputs that will not be reused."""
+        """Keep prompt refs only and drop rollout outputs that will not be
+        reused."""
         old_obs_refs = self._filter_releasable_refs(replay_meta.observation_refs)
         if old_obs_refs:
             ray.internal.free(old_obs_refs, local_only=False)
