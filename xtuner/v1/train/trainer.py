@@ -1131,7 +1131,7 @@ class Trainer:
         )
 
         # Save dataloader
-        total_consumed_samples = self._save_dataloader(dataloader_path)
+        self._save_dataloader(dataloader_path)
 
         DEVICE_MODULE.empty_cache()
 
@@ -1161,7 +1161,6 @@ class Trainer:
                         {
                             "cur_step": self.cur_step,
                             "cur_epoch": self._cur_epoch,
-                            "total_consumed_samples": total_consumed_samples,
                             "total_consumed_tokens": total_consumed_tokens,
                             "train_time_offset": self._train_time + self._train_time_offset,
                         }
@@ -1174,7 +1173,6 @@ class Trainer:
         ckp_list.append(str(checkpoint_path))
         current_exp.cur_step = self.cur_step
         current_exp.cur_epoch = self._cur_epoch
-        current_exp.consumed_samples = int(total_consumed_samples)
         current_exp.consumed_tokens = int(total_consumed_tokens)
         current_exp.history[-1]["end"] = self.cur_step
 
@@ -1210,11 +1208,10 @@ class Trainer:
 
         return True
 
-    def _save_dataloader(self, dataloader_path: Path | str) -> int:
+    def _save_dataloader(self, dataloader_path: Path | str):
         dataloader_state = self._dataloader.get_state_dict()
         if self.rank == 0:
             torch.save(dataloader_state, dataloader_path)
-        return dataloader_state["total_consumed_samples"]
 
     @property
     def work_dir(self) -> Path:
@@ -1464,6 +1461,8 @@ class Trainer:
         approximate_total_consumed_tokens = (
             self._init_total_tokens + self._local_total_consumed_tokens * self.world_size
         )
+        # TODO: approximate_total_consumed_tokens_per_rank could be incorrect if world_size changed.
+        #       So calculate `eta_seconds = step_time * remaining_steps` instead?
         approximate_total_consumed_tokens_per_rank = approximate_total_consumed_tokens / self.world_size
         exp_tgs = self._local_total_consumed_tokens / self._train_time if self._train_time > 0 else 0.0
 
