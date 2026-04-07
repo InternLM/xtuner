@@ -170,10 +170,10 @@ class PresetSampler(Sampler):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
-    def get_state_dict(self, step: int) -> dict:
+    def get_state_dict(self, total_consumed_steps: int) -> dict:
         # Same convention as :class:`LengthGroupedSampler`: ``step`` is the global pack offset
         # (modulo ``total_size``) into ``global_order``, shared across all ranks in the checkpoint.
-        global_step = step % self.total_size
+        global_step = total_consumed_steps % self.total_size
         return {
             "epoch": self.epoch,
             "step": global_step,
@@ -191,5 +191,4 @@ class PresetSampler(Sampler):
             )
 
         self.epoch = state_dict["epoch"]
-        global_step = int(state_dict["step"])
-        self.step = global_step
+        self.step = int(state_dict["step"])

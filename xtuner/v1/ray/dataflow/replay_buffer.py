@@ -296,7 +296,7 @@ class DatasetSampler:
         dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
         self.dataloader.load_state_dict(dataloader_state)
         self.dataloader_iter = iter(self.dataloader)
-        self.reduced_consumed_samples = dataloader_state["sampler"]["step"]
+        self.reduced_consumed_samples = int(dataloader_state["total_consumed_samples"])
         self.cur_epoch = dataloader_state["sampler"]["epoch"]
 
 
@@ -923,7 +923,7 @@ class ReplayBuffer:
 
         # save dataloader
         dataloader_path = file_path / "dataloader"
-        dataloader_state = self.sampler.dataloader.get_state_dict(self.sampler.reduced_consumed_samples)
+        dataloader_state = self.sampler.dataloader.get_state_dict()
         torch.save(dataloader_state, dataloader_path)
 
         # save storage

@@ -544,5 +544,6 @@ class DataloaderConfig(BaseDataloaderConfig):
             collate_fn=collator,
             multiprocessing_context=ctx if self.num_workers > 0 else None,
             persistent_workers=self.num_workers > 0,
+            dp_mesh=dp_mesh,
         )
         return dataloader

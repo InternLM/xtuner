@@ -25,7 +25,6 @@ from .pt_tokenize_fn import (
     PretrainTokenizeFunction,
     PretrainTokenizeFunctionConfig,
 )
-from .resume import get_dataloader_state, load_dataloader_state
 from .rl_tokenize_fn import RLTokenizeFnConfig
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .sft_tokenize_fn import OpenaiTokenizeFunction, OpenaiTokenizeFunctionConfig
@@ -68,8 +67,6 @@ __all__ = [
     "InternS1VLTokenizeFnConfig",
     "fake_collator",
     "RLTokenizeFnConfig",
-    "get_dataloader_state",
-    "load_dataloader_state",
     "DatasetConfigList",
     "DataloaderConfig",
     "BaseTokenizeFnConfig",
