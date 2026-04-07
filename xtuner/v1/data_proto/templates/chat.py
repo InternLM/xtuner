@@ -21,6 +21,7 @@ class ChatTemplate(BaseModel):
     default_system: str | None = None
     tool_extractor: str | None = None  # Tool extractor format
     tool_prompt: str | None = None  # Tool prompt format
+    template_name: str | None = None
 
     # only compute loss on the last assistant response ignoring the multiple rounds of assistant
     only_last_assistant_loss: bool = False  # gpt_oss is True

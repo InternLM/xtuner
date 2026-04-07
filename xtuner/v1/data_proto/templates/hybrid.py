@@ -22,6 +22,7 @@ class HybridChatTemplate(BaseModel):
     default_system: Optional[str] = None
     tool_prompt: str | None = None  # Tool prompt format
     tool_extractor: str | None = None  # Tool extractor format
+    template_name: Optional[str] = None
 
     # only compute loss on the last assistant response ignoring the multiple rounds of assistant
     only_last_assistant_loss: bool = False  # gpt_oss is True
