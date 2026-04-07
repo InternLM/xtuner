@@ -29,10 +29,19 @@ from xtuner.v1.loss import (
     BalancingLossConfig,
     BalancingLossContext,
     BaseLossContext,
+    LayerBalancingLoss,
+    LayerBalancingLossConfig,
     LMHeadLossContext,
     MTPLossContext,
     ZLossConfig,
     ZLossContext,
+)
+from xtuner.v1.loss.layer_moe_loss import (
+    accumulate_layer_balancing_loss,
+    finalize_layer_balancing_loss,
+    maybe_offload_tensor,
+    maybe_wait_offload_tensor,
+    prepare_layer_balancing_loss,
 )
 from xtuner.v1.loss.mtp_loss import MTPLossConfig
 from xtuner.v1.model.base import (
@@ -62,6 +71,7 @@ from xtuner.v1.utils import (
     get_logger,
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
+from xtuner.v1.utils.router_offload import AsyncOffloadedTensor
 
 
 if TYPE_CHECKING:
@@ -148,6 +158,7 @@ class MoEConfig(TransformerConfig):
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
     mtp_config: MTPConfig | None = None
     freeze_routers: bool = False
+    layer_balancing_loss_cfg: LayerBalancingLossConfig | None = None
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -156,6 +167,11 @@ class MoEConfig(TransformerConfig):
             assert self.router.use_grouped_router, "AGRS dispatcher requires grouped router"
             assert self.ep_size == self.router.router_n_groups == 8, (
                 "Currently, AGRS dispatcher requires ep_size and router_n_groups to be 8"
+            )
+
+        if self.layer_balancing_loss_cfg is not None:
+            assert self.balancing_loss_cfg is not None, (
+                "layer_balancing_loss_cfg requires balancing_loss_cfg to provide alpha/global_average."
             )
 
         return MoE(self)
@@ -200,6 +216,10 @@ class MoE(BaseModel):
         self._maybe_enable_compile(self.compile_cfg)
 
         self.offload_stream = torch.cuda.Stream()
+        self.layer_balancing_loss: LayerBalancingLoss | None = None
+
+    def _is_layer_balancing_enabled(self) -> bool:
+        return self.config.layer_balancing_loss_cfg is not None
 
     def _select_non_pad_router_logits(
         self,
@@ -437,12 +457,22 @@ class MoE(BaseModel):
                 cat_position_embeddings[1].chunk(len(seq_ctx_list), dim=2),
             )
         )
+        mask_list = torch.cat([ctx.mask for ctx in seq_ctx_list], dim=1)
 
         # Initialize output containers
         output: dict = {}
 
-        router_logits_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
-        router_weights_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
+        router_logits_list: list[dict[str, torch.Tensor | AsyncOffloadedTensor]] = [
+            {} for _ in range(len(seq_ctx_list))
+        ]
+        router_weights_list: list[dict[str, torch.Tensor | AsyncOffloadedTensor]] = [
+            {} for _ in range(len(seq_ctx_list))
+        ]
+        self.layer_balancing_loss = prepare_layer_balancing_loss(
+            self.config.layer_balancing_loss_cfg,
+            num_layers=len(self.layers),
+            n_routed_experts=self.config.n_routed_experts,
+        )
 
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
@@ -503,9 +533,22 @@ class MoE(BaseModel):
                 # Update hidden states and collect router results
                 for i, hidden_states in enumerate(hidden_states):
                     hidden_states_list[i] = hidden_states
-                    router_logits_list[i][f"layer{idx}"] = router_logits[i]
-                    router_weights_list[i][f"layer{idx}"] = router_weights[i]
+                    router_logits_list[i][f"layer{idx}"] = maybe_offload_tensor(
+                        router_logits[i], self._is_layer_balancing_enabled(), self.offload_stream
+                    )
+                    router_weights_list[i][f"layer{idx}"] = maybe_offload_tensor(
+                        router_weights[i], self._is_layer_balancing_enabled(), self.offload_stream
+                    )
 
+                accumulate_layer_balancing_loss(
+                    self.layer_balancing_loss,
+                    layer_idx=layer_idx,
+                    router_weights=torch.cat(router_weights, dim=0).unsqueeze(0),
+                    router_logits=torch.cat(router_logits, dim=0).unsqueeze(0),
+                    mask=mask_list,
+                    dim=1,
+                    num_experts_per_tok=self.config.num_experts_per_tok,
+                )
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
         cat_hidden_states = self.norm(cat_hidden_states)
@@ -523,24 +566,48 @@ class MoE(BaseModel):
             moe_extra_info.append(extra_info)
         output["extra_info"] = moe_extra_info
 
-        # Handle router results for all micro-batches
-        all_router_logits = []
-        all_router_weights = []
+        split_balancing_ctx = next(
+            (ctx["balancing"] for ctx in loss_ctx_list if ctx.get("balancing") is not None), None
+        )
+        split_balancing_output = finalize_layer_balancing_loss(
+            self.layer_balancing_loss,
+            balancing_ctx=split_balancing_ctx,
+            num_experts_per_tok=self.config.num_experts_per_tok,
+            non_pad_token=int(mask_list.sum().item()),
+        )
+        if split_balancing_output is not None:
+            output["balancing_loss"], output["tokens_per_expert_global"] = split_balancing_output
+        else:
+            # Handle router results for all micro-batches
+            all_router_logits = []
+            all_router_weights = []
 
-        for micro_batch_idx, (micro_batch_router_logits, micro_batch_router_weights) in enumerate(
-            zip(router_logits_list, router_weights_list)
-        ):
-            if micro_batch_router_logits:
-                _router_logits_list = list(micro_batch_router_logits.values())
-                _router_weights_list = list(micro_batch_router_weights.values())
+            for micro_batch_idx, (micro_batch_router_logits, micro_batch_router_weights) in enumerate(
+                zip(router_logits_list, router_weights_list)
+            ):
+                if micro_batch_router_logits:
+                    _router_logits_list: list[torch.Tensor] = [
+                        maybe_wait_offload_tensor(
+                            router_logits_tensor,
+                            self._is_layer_balancing_enabled(),
+                        )
+                        for router_logits_tensor in micro_batch_router_logits.values()
+                    ]
+                    _router_weights_list: list[torch.Tensor] = [
+                        maybe_wait_offload_tensor(
+                            router_weights_tensor,
+                            self._is_layer_balancing_enabled(),
+                        )
+                        for router_weights_tensor in micro_batch_router_weights.values()
+                    ]
 
-                attn_mask = seq_ctx_list[micro_batch_idx].mask
-                router_logits = self._select_non_pad_router_logits(_router_logits_list, attn_mask)
-                router_weights = self._select_non_pad_router_logits(_router_weights_list, attn_mask)
-                all_router_logits.append(router_logits)
-                all_router_weights.append(router_weights)
+                    attn_mask = seq_ctx_list[micro_batch_idx].mask
+                    router_logits = self._select_non_pad_router_logits(_router_logits_list, attn_mask)
+                    router_weights = self._select_non_pad_router_logits(_router_weights_list, attn_mask)
+                    all_router_logits.append(router_logits)
+                    all_router_weights.append(router_weights)
 
-        if all_router_logits:
+            assert all_router_logits, "Expected router logits from MoE layers."
             # Concatenate router logits from all micro-batches
             combined_router_logits = torch.cat(all_router_logits, dim=1)  # [num_layers, total_seq, num_experts]
             combined_router_weights = torch.cat(all_router_weights, dim=1)
@@ -593,7 +660,12 @@ class MoE(BaseModel):
             for layer_name in layer_names:
                 layer_router_logits_list: list[torch.Tensor] = []
                 for micro_batch_idx in range(len(seq_ctx_list)):
-                    layer_router_logits_list.append(router_logits_list[micro_batch_idx][layer_name].detach())
+                    layer_router_logits_list.append(
+                        maybe_wait_offload_tensor(
+                            router_logits_list[micro_batch_idx][layer_name],
+                            self._is_layer_balancing_enabled(),
+                        )
+                    )
                 router_logits = torch.stack(layer_router_logits_list, dim=0).unsqueeze(0)
                 router_logits_dict[layer_name] = router_logits
 
@@ -635,6 +707,12 @@ class MoE(BaseModel):
 
         self._mark_dynamic(seq_ctx)
 
+        self.layer_balancing_loss = prepare_layer_balancing_loss(
+            self.config.layer_balancing_loss_cfg,
+            num_layers=len(self.layers),
+            n_routed_experts=self.config.n_routed_experts,
+        )
+
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
                 hidden_states = decoder_layer(
@@ -664,8 +742,21 @@ class MoE(BaseModel):
                         seq_ctx=seq_ctx,
                     )
                 hidden_states, router_results, router_weights = layer_results
-                output["router_logits"][f"layer{idx}"] = router_results
-                output["router_weights"][f"layer{idx}"] = router_weights
+                output["router_logits"][f"layer{idx}"] = maybe_offload_tensor(
+                    router_results, self._is_layer_balancing_enabled(), self.offload_stream
+                )
+                output["router_weights"][f"layer{idx}"] = maybe_offload_tensor(
+                    router_weights, self._is_layer_balancing_enabled(), self.offload_stream
+                )
+                accumulate_layer_balancing_loss(
+                    self.layer_balancing_loss,
+                    layer_idx=int(idx),
+                    router_weights=router_weights,
+                    router_logits=router_results,
+                    mask=seq_ctx.mask,
+                    dim=0,
+                    num_experts_per_tok=self.config.num_experts_per_tok,
+                )
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
@@ -719,39 +810,50 @@ class MoE(BaseModel):
 
         router_logits_list = list(output["router_logits"].values())  # type: ignore
         router_weights_list = list(output["router_weights"].values())  # type: ignore
-        router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
-        router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
+        if self.layer_balancing_loss is None:
+            router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
+            router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
 
         # Calculate balancing loss using loss context
         if loss_ctx is not None:
             balancing_ctx = loss_ctx.get("balancing")
             if balancing_ctx is not None:
-                # Compute balancing loss by passing all parameters to forward
-                balancing_loss = balancing_ctx(
-                    router_weights,
-                    self.config.n_routed_experts,
-                    self.config.num_experts_per_tok,
+                split_balancing_output = finalize_layer_balancing_loss(
+                    self.layer_balancing_loss,
+                    balancing_ctx=balancing_ctx,
+                    num_experts_per_tok=self.config.num_experts_per_tok,
+                    non_pad_token=router_weights.shape[1],
                 )
-                output["balancing_loss"] = balancing_loss
+                if split_balancing_output is not None:
+                    output["balancing_loss"], output["tokens_per_expert_global"] = split_balancing_output
+                else:
+                    # Compute balancing loss by passing all parameters to forward
+                    balancing_loss = balancing_ctx(
+                        router_weights,
+                        self.config.n_routed_experts,
+                        self.config.num_experts_per_tok,
+                    )
+                    output["balancing_loss"] = balancing_loss
 
-        # Calculate z-loss using loss context
-        if loss_ctx is not None:
             z_loss_ctx = loss_ctx.get("z_loss")
-            if z_loss_ctx is not None:
+            if self.layer_balancing_loss is None and z_loss_ctx is not None:
                 # Compute z-loss by passing router_logits to forward
                 z_loss = z_loss_ctx(router_logits)
                 output["z_loss"] = z_loss
 
-        tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
-        output["tokens_per_expert_global"] = tokens_per_expert_global
+            if self.layer_balancing_loss is None or balancing_ctx is None:
+                tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
+                output["tokens_per_expert_global"] = tokens_per_expert_global
 
-        del router_logits
+                del router_logits
 
         if self.config.return_router_results or return_router_logits:
             # raise NotImplementedError
             # TODO: Move router logits to CPU is cost
             for layer_name, router_logits in output["router_logits"].items():
-                output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
+                output["router_logits"][layer_name] = maybe_wait_offload_tensor(
+                    router_logits, self._is_layer_balancing_enabled()
+                ).unsqueeze(0)
         else:
             output["router_logits"] = None
 
