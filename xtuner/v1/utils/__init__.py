@@ -1,6 +1,7 @@
 from .compile import maybe_compile
 from .config import Config
 from .device import get_device, get_torch_device_module
+from .dist_utils import is_local_rank0
 from .dtensor import is_evenly_distributed
 from .enum_helper import StrEnum
 from .exception_helper import ParallelConfigException
@@ -15,8 +16,8 @@ from .misc import (
     get_function_type,
     get_padding_length,
     is_hf_model_path,
-    is_local_rank0,
     record_git_info,
+    trim_memory,
 )
 from .pad import pad_to_max_length, pad_to_multiple_of
 from .profile import profile_time, profile_time_and_memory, timer, timer_logger
@@ -61,4 +62,5 @@ __all__ = [
     "ray_method",
     "profile_time",
     "clean_param_name",
+    "trim_memory",
 ]

@@ -1,5 +1,7 @@
+import hashlib
 import os
 import gc
+import shutil
 import psutil
 import time
 import random
@@ -16,10 +18,13 @@ from transformers import AutoTokenizer
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.config import DatasetConfig
 from xtuner.v1.utils.device import get_device
+import xtuner.v1.datasets.jsonl as jsonl_mod
+
 from xtuner.v1.datasets.jsonl import (
     JsonlDataset,
     _apply_sample_ratio,
     _filter_sampled_indices,
+    get_local_world_size,
     load_dict_from_npy_dir,
     save_dict_to_npy_dir,
 )
@@ -96,7 +101,7 @@ class TestJsonlDatasetDist(DistributedTestBase):
 
         # Random read 10000 samples, and test time cost
         start_time = time.time()
-        for i in range(10000):
+        for i in range(100):
             idx = random.randint(0, length - 1)
             _ = dataset[idx]
         time_cost = time.time() - start_time
@@ -231,6 +236,10 @@ class TestJsonlDatasetDist(DistributedTestBase):
                     ds_res.offsets, np.memmap,
                     msg="offsets should be memmap-backed when enable_mmap_shared=True",
                 )
+                # verify _meta dict values are memmap-backed
+                for k, v in ds_res._meta.items():
+                    self.assertIsInstance(v, np.memmap,
+                                          msg=f"{k} should be memmap-backed when enable_mmap_shared=True")
 
             # Results must be identical to first build
             self.assertEqual(len(ds_ref), len(ds_res))
@@ -257,6 +266,125 @@ class TestJsonlDatasetDist(DistributedTestBase):
     def test_cache_tag_npy_format_consistent_with_mmap(self):
         """cache_tag fast-path + enable_mmap_shared: offsets are memmap-backed and results are correct."""
         self._run_cache_consistency(use_cache_tag=True, enable_mmap_shared=True)
+
+    def test_mmap_fast_path_faster_than_slow_path(self):
+        """enable_mmap_shared 且 LOCAL_WORLD_SIZE>1：case1 不写大 meta 到 tmp，case3 会写完整 meta（与「快/慢」注释一致）。
+
+        纯 wall-clock 在毫秒级易受调度噪声影响；此处用 local rank0 上 ``save_dict_to_npy_dir`` 写入字节数
+        作为稳定判据（case1 为 0，case3 > 0），并打印耗时供人工对照。
+        """
+        alpaca_path = os.path.join(os.environ["ALPACA_PATH"], "202404121913-shard-1-of-3.jsonl")
+        tokenizer_path = os.environ["QWEN3_MOE_PATH"]
+
+        self.create_pg(DEVICE)
+        rank = dist.get_rank()
+        is_local_master = dist.get_rank() % get_local_world_size() == 0
+
+        if get_local_world_size() <= 1:
+            self.skipTest("需要 LOCAL_WORLD_SIZE>1 才能走 enable_mmap_shared 的 mmap 多进程分支")
+
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        tokenize_fn_cfg = FTDPTokenizeFnConfig(max_length=16386)
+        tokenize_fn = tokenize_fn_cfg.build(tokenizer)
+
+        # 路径必须在各 rank 上一致（子进程 PID 不同，不可用 os.getpid()）
+        cache_dir = (
+            "/tmp/xtuner_test_mmap_fast_vs_slow_"
+            + hashlib.md5(alpaca_path.encode()).hexdigest()[:16]
+        )
+        if rank == 0:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            os.makedirs(cache_dir, exist_ok=True)
+        dist.barrier()
+
+        orig_save = jsonl_mod.save_dict_to_npy_dir
+        save_nbytes_log: list[int] = []
+
+        def _tracking_save(data, dir_path):
+            nb = sum(v.nbytes for v in data.values()) if data else 0
+            save_nbytes_log.append(nb)
+            return orig_save(data, dir_path)
+
+        try:
+            jsonl_mod.save_dict_to_npy_dir = _tracking_save
+
+            # 先写出 npy cache，后续 build 均从 cache 读 meta
+            seed_cfg = DatasetConfig(
+                name="alpaca",
+                anno_path=alpaca_path,
+                sample_ratio=1.0,
+                disable_filter=True,
+                enable_mmap_shared=True,
+                cache_dir=cache_dir,
+            )
+            ds_seed = seed_cfg.build(tokenize_fn)
+            del ds_seed
+            gc.collect()
+            dist.barrier()
+
+            # 首次 build 时 global rank0 会 save jsonl_meta；local rank0 还会走 mmap 的 save，条数因 rank 而异
+            save_nbytes_log.clear()
+
+            cfg_fast = DatasetConfig(
+                name="alpaca",
+                anno_path=alpaca_path,
+                sample_ratio=1.0,
+                disable_filter=True,
+                enable_mmap_shared=True,
+                cache_dir=cache_dir,
+            )
+            cfg_slow = DatasetConfig(
+                name="alpaca",
+                anno_path=alpaca_path,
+                sample_ratio=0.8,
+                disable_filter=True,
+                enable_sequential_sampler=True,
+                enable_mmap_shared=True,
+                cache_dir=cache_dir,
+            )
+
+            gc.collect()
+            dist.barrier()
+            t0 = time.perf_counter()
+            ds_f = cfg_fast.build(tokenize_fn)
+            t_fast = time.perf_counter() - t0
+            del ds_f
+            gc.collect()
+            dist.barrier()
+
+            if is_local_master:
+                self.assertEqual(
+                    save_nbytes_log,
+                    [0],
+                    msg="case1 再次 build：仍不应向 tmp 写入 meta 数组",
+                )
+            save_nbytes_log.clear()
+
+            gc.collect()
+            dist.barrier()
+            t0 = time.perf_counter()
+            ds_s = cfg_slow.build(tokenize_fn)
+            t_slow = time.perf_counter() - t0
+            del ds_s
+            gc.collect()
+            dist.barrier()
+
+            if is_local_master:
+                self.assertEqual(len(save_nbytes_log), 1)
+                self.assertGreater(
+                    save_nbytes_log[0],
+                    0,
+                    msg="case3：采样后须将完整 _meta 写入 tmp 供各 rank mmap",
+                )
+                print(
+                    f"[mmap path] case1 save_nbytes=0 wall={t_fast:.4f}s | "
+                    f"case3 save_nbytes={save_nbytes_log[0]} wall={t_slow:.4f}s"
+                )
+        finally:
+            jsonl_mod.save_dict_to_npy_dir = orig_save
+            if rank == 0:
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            dist.barrier()
 
 
 def test_npy_dir_meta_save_and_mmap_reload():

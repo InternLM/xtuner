@@ -8,8 +8,6 @@ from .config import (
     DatasetConfigList,
     DatasetConfigListAdatper,
 )
-from .custom_pack import CustomPackDataset
-from .custom_sampler import CustomSampler
 from .ftdp import FTDPTokenizeFnConfig, FtdpTokenizeFunction
 from .jsonl import JsonlDataset
 from .mllm_tokenize_fn import (
@@ -19,13 +17,14 @@ from .mllm_tokenize_fn import (
     Qwen3VLTokenizeFunction,
 )
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
+from .preset_pack import PresetPackDataset
+from .preset_sampler import PresetSampler
 from .pt_tokenize_fn import (
     LongTextPretrainTokenizeFunction,
     LongTextPretrainTokenizeFunctionConfig,
     PretrainTokenizeFunction,
     PretrainTokenizeFunctionConfig,
 )
-from .resume import get_dataloader_state, load_dataloader_state
 from .rl_tokenize_fn import RLTokenizeFnConfig
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .sft_tokenize_fn import OpenaiTokenizeFunction, OpenaiTokenizeFunctionConfig
@@ -37,8 +36,8 @@ from . import _hardcode_patch  # isort: skip
 
 
 __all__ = [
-    "CustomPackDataset",
-    "CustomSampler",
+    "PresetPackDataset",
+    "PresetSampler",
     "JsonlDataset",
     "CachableTokenizeFunction",
     "calculate_file_sha256",
@@ -68,8 +67,6 @@ __all__ = [
     "InternS1VLTokenizeFnConfig",
     "fake_collator",
     "RLTokenizeFnConfig",
-    "get_dataloader_state",
-    "load_dataloader_state",
     "DatasetConfigList",
     "DataloaderConfig",
     "BaseTokenizeFnConfig",

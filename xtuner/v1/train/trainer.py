@@ -32,7 +32,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import BaseDataloaderConfig, DataloaderConfig, DatasetConfigList
 from xtuner.v1.engine import TrainEngine
 from xtuner.v1.engine.train_engine import TrainStepInfo
-from xtuner.v1.loss import CELossConfig, CELossContext
+from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model.base import ModelItem, XTunerBaseModelConfig
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.patch import patch_dcp_save_state_dict, patch_dcp_save_with_cache_storage, patch_default_save_plan
@@ -86,11 +86,9 @@ class ExpHistory(TypedDict):
 class PerformanceStatistics(TypedDict):
     local_step_consumed_tokens: int
     local_step_consumed_img_tokens: int | None
-    step_consumed_tokens: int
-    total_consumed_tokens: int
-    total_consumed_tokens_per_rank: float
+    local_total_consumed_tokens: int
+    approximate_total_consumed_tokens: int
     tgs: float
-    e2e_tgs: float
     exp_tgs: float
     eta_seconds: float
     eta_hms: str
@@ -537,9 +535,12 @@ class Trainer:
         self._debug = debug
         self._seed = seed
 
-        self._total_consumed_tokens = 0
-        self._exp_consumed_tokens = 0
-        self._total_consumed_samples = 0
+        # 日志变量前缀规则：
+        # 空间上，当前rank的用 local_，默认 reduced 无前缀
+        # 时间上，当前步用 step_, 累积用 total_
+        # self._local_total_consumed_tokens 表示时间上累积到现在的当前rank的和，resume则只考虑resume步数到现在
+        self._local_total_consumed_tokens = 0
+        self._init_total_tokens = 0
 
         self._train_time = 0
         self._train_time_offset = 0
@@ -587,7 +588,18 @@ class Trainer:
             global_batch_size = self.data_mesh["dp"].size()
         self._global_batch_size = global_batch_size
 
+        self._resolve_model_loss_cfg(model_cfg, loss_cfg)
+
+        if loss_cfg is None:
+            loss_cfg = CELossConfig()
+
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg, fsdp_cfg)
+
+        if intra_layer_micro_batch > 1 and isinstance(model_cfg, MoEConfig) and model_cfg.mtp_config is not None:
+            raise ValueError(
+                "MTP (Multi-Token Prediction) is not supported with intra_layer_micro_batch > 1. "
+                f"Got intra_layer_micro_batch={intra_layer_micro_batch} and mtp_config={model_cfg.mtp_config}."
+            )
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0
             logger.warning("`dataset_cfg` is deprecated, please use `dataloader_cfg.dataset_config_list` instead")
@@ -626,8 +638,6 @@ class Trainer:
         self._lr_cfg = lr_cfg
         self._lr_scheduler = self.build_lr_scheduler(lr_cfg, self.total_step)
 
-        if loss_cfg is None:
-            loss_cfg = CELossConfig()
         self.loss_cfg = loss_cfg
 
         if debug:
@@ -717,7 +727,6 @@ class Trainer:
         train_begin = time.time()
         time_before_get_data = time.time()
         for data_batch in self._data_iter():
-            consumed_samples = len(data_batch)
             time_before_train_step = time.time()
 
             ProberList.set_step(self._cur_step + 1)
@@ -750,17 +759,14 @@ class Trainer:
             internal_metrics = self._maybe_pop_model_internal_metrics(engine_input)
 
             self._cur_step += 1
-            reduced_step_consumed_tokens = self._reduce_number_across_rank(train_step_info["step_consumed_tokens"])
-            self._total_consumed_tokens += reduced_step_consumed_tokens
-            self._exp_consumed_tokens += reduced_step_consumed_tokens
-            self._total_consumed_samples += self._reduce_number_across_rank(consumed_samples)
+            step_tokens = train_step_info["step_consumed_tokens"]
+            self._local_total_consumed_tokens += step_tokens
             self._train_time = time_after_train_step - train_begin
 
             # Compute training metrics
             training_metrics = self._compute_performance_metrics(
-                local_step_consumed_tokens=train_step_info["step_consumed_tokens"],
+                local_step_consumed_tokens=step_tokens,
                 local_step_consumed_img_tokens=train_step_info.get("step_consumed_img_tokens"),
-                step_consumed_tokens=reduced_step_consumed_tokens,
                 step_time=step_time,
             )
 
@@ -793,28 +799,26 @@ class Trainer:
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
-        loss_cfg: CELossConfig = self.loss_cfg
         seq_ctx_list: list[SequenceContext] = []
-        loss_ctx_list: list[CELossContext] = []
 
+        # 1. Extract seq_ctx
         for data in data_batch:
-            seq_ctx = data.pop("seq_ctx").to(DEVICE)
+            seq_ctx = data["seq_ctx"].to(DEVICE)
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=self.sp_mesh)
-            loss_ctx_list.append(loss_ctx)
+
+        # 2. Compute cu_seq_lens_list (for calibration)
+        # 3. Call model's interface to build and calibrate all loss_ctx (done in one shot)
+        loss_ctx_dict_list = self._engine.model.build_loss_ctx_batch(data_batch, sp_mesh=self.sp_mesh)
 
         # TODO: Consider moving data_batch deletion to the caller for better memory management.
         del data_batch
 
-        cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in seq_ctx_list]
-        loss_ctx_list = CELossContext.build_batches(
-            loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=self.sp_mesh
-        )
-
+        # 4. Return ModelItem
         engine_input = [
-            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx_dict)
+            for seq_ctx, loss_ctx_dict in zip(seq_ctx_list, loss_ctx_dict_list)
         ]
         return engine_input
 
@@ -1122,6 +1126,10 @@ class Trainer:
             optimizer_dir=optimizer_path,
         )
 
+        total_consumed_tokens = (
+            self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
+        )
+
         # Save dataloader
         self._save_dataloader(dataloader_path)
 
@@ -1153,8 +1161,7 @@ class Trainer:
                         {
                             "cur_step": self.cur_step,
                             "cur_epoch": self._cur_epoch,
-                            "total_consumed_samples": self._total_consumed_samples,
-                            "total_consumed_tokens": self._total_consumed_tokens,
+                            "total_consumed_tokens": total_consumed_tokens,
                             "train_time_offset": self._train_time + self._train_time_offset,
                         }
                     )
@@ -1166,8 +1173,7 @@ class Trainer:
         ckp_list.append(str(checkpoint_path))
         current_exp.cur_step = self.cur_step
         current_exp.cur_epoch = self._cur_epoch
-        current_exp.consumed_samples = int(self._total_consumed_samples)
-        current_exp.consumed_tokens = int(self._total_consumed_tokens)
+        current_exp.consumed_tokens = int(total_consumed_tokens)
         current_exp.history[-1]["end"] = self.cur_step
 
         # Delete checkpoints and update meta's checkpoint_list
@@ -1203,8 +1209,8 @@ class Trainer:
         return True
 
     def _save_dataloader(self, dataloader_path: Path | str):
+        dataloader_state = self._dataloader.get_state_dict()
         if self.rank == 0:
-            dataloader_state = self._dataloader.get_state_dict(self._total_consumed_samples)
             torch.save(dataloader_state, dataloader_path)
 
     @property
@@ -1437,7 +1443,6 @@ class Trainer:
         self,
         local_step_consumed_tokens: int,
         local_step_consumed_img_tokens: int | None,
-        step_consumed_tokens: int,
         step_time: float,
     ) -> PerformanceStatistics:
         """Compute training metrics including tokens and throughput statistics.
@@ -1445,21 +1450,24 @@ class Trainer:
         Args:
             local_step_consumed_tokens (int): Tokens consumed in current step on current rank.
             local_step_consumed_img_tokens (int | None): Image tokens consumed in current step on current rank.
-            step_consumed_tokens (int): Total tokens consumed in current step across all ranks.
             step_time (float): Time spent on current training step in seconds.
 
         Returns:
             TrainingMetrics: Dictionary containing computed training metrics.
         """
         e2e_train_time = self._train_time + self._train_time_offset
-        total_consumed_tokens_per_rank = self._total_consumed_tokens / self.world_size
 
         tgs = local_step_consumed_tokens / step_time
-        e2e_tgs = total_consumed_tokens_per_rank / e2e_train_time
-        exp_tgs = self._exp_consumed_tokens / self.world_size / self._train_time
+        approximate_total_consumed_tokens = (
+            self._init_total_tokens + self._local_total_consumed_tokens * self.world_size
+        )
+        # TODO: approximate_total_consumed_tokens_per_rank could be incorrect if world_size changed.
+        #       So calculate `eta_seconds = step_time * remaining_steps` instead?
+        approximate_total_consumed_tokens_per_rank = approximate_total_consumed_tokens / self.world_size
+        exp_tgs = self._local_total_consumed_tokens / self._train_time if self._train_time > 0 else 0.0
 
         remaining_steps = self.total_step - self.cur_step
-        avg_tokens_per_step = total_consumed_tokens_per_rank / self.cur_step
+        avg_tokens_per_step = approximate_total_consumed_tokens_per_rank / self.cur_step
         remaining_tokens = remaining_steps * avg_tokens_per_step
         eta_seconds = remaining_tokens / max(tgs, 1)
         eta_hms = str(timedelta(seconds=int(eta_seconds)))
@@ -1467,11 +1475,9 @@ class Trainer:
         return PerformanceStatistics(
             local_step_consumed_tokens=local_step_consumed_tokens,
             local_step_consumed_img_tokens=local_step_consumed_img_tokens,
-            step_consumed_tokens=step_consumed_tokens,
-            total_consumed_tokens=self._total_consumed_tokens,
-            total_consumed_tokens_per_rank=total_consumed_tokens_per_rank,
+            local_total_consumed_tokens=self._local_total_consumed_tokens,
+            approximate_total_consumed_tokens=approximate_total_consumed_tokens,
             tgs=tgs,
-            e2e_tgs=e2e_tgs,
             exp_tgs=exp_tgs,
             eta_seconds=eta_seconds,
             eta_hms=eta_hms,
@@ -1490,7 +1496,7 @@ class Trainer:
         """Log the training step information.
 
         Args:
-            loss_log (LossLog): Loss values for the current step.
+            train_step_info (TrainStepInfo): Info returned per engine train_step.
             training_metrics (TrainingMetrics): Computed training metrics including tokens and throughput.
             grad_norm (float): Gradient norm value.
             data_time (float): Time spent loading data in seconds.
@@ -1526,8 +1532,7 @@ class Trainer:
             f"Epoch {self._cur_epoch} Step {self.cur_step}/{self.total_step} "
             f"data_time: {data_time:.4f} lr: {lr:.6e} time: {step_time:.4f} "
             f"text_tokens: {training_metrics['local_step_consumed_tokens']} {img_tokens_str}"
-            f"step_consumed_tokens: {training_metrics['step_consumed_tokens']} "
-            f"total_consumed_tokens: {training_metrics['total_consumed_tokens']} "
+            f"approximate_total_consumed_tokens: {training_metrics['approximate_total_consumed_tokens']} "
             f"{loss_log_str} "
             f"{data_info_str} "
             f"{extra_info_str} "
@@ -1536,7 +1541,6 @@ class Trainer:
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
             f"tgs: {training_metrics['tgs']:.1f} "
             f"exp_tgs: {training_metrics['exp_tgs']:.1f} "
-            f"e2e_tgs: {training_metrics['e2e_tgs']:.1f} "
             f"eta: {training_metrics['eta_hms']} "
         )
 
@@ -1547,11 +1551,9 @@ class Trainer:
             "time/train_time": round(self._train_time, 4),
             "time/eta_seconds": round(training_metrics["eta_seconds"], 1),
             "runtime_info/text_tokens": training_metrics["local_step_consumed_tokens"],
-            "runtime_info/step_consumed_tokens": training_metrics["step_consumed_tokens"],
-            "runtime_info/total_consumed_tokens": training_metrics["total_consumed_tokens"],
+            "runtime_info/approximate_total_consumed_tokens": training_metrics["approximate_total_consumed_tokens"],
             "runtime_info/tgs": training_metrics["tgs"],
             "runtime_info/exp_tgs": training_metrics["exp_tgs"],
-            "runtime_info/e2e_tgs": training_metrics["e2e_tgs"],
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
@@ -1735,6 +1737,24 @@ class Trainer:
             return True
         return auto_resume
 
+    def _resolve_model_loss_cfg(self, model_cfg: XTunerBaseModelConfig, loss_cfg: CELossConfig | None):
+        """Backward compatibility: set Trainer's loss_cfg to model's lm_loss_cfg if not already set.
+
+        Args:
+            model_cfg (XTunerBaseModelConfig): Model configuration
+            loss_cfg (CELossConfig): Loss configuration from Trainer
+        """
+        if loss_cfg is not None:
+            if hasattr(model_cfg, "text_config"):
+                model_cfg.text_config.lm_loss_cfg = loss_cfg
+            else:
+                model_cfg.lm_loss_cfg = loss_cfg
+            if self.rank == 0:
+                logger.warning(
+                    "Setting model_cfg.lm_loss_cfg from Trainer's loss_cfg for backward compatibility. "
+                    "In the future, please set lm_loss_cfg directly in model_cfg instead of Trainer."
+                )
+
     def _resolve_load_checkpoint_cfg(
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
     ) -> LoadCheckpointConfig:
@@ -1786,13 +1806,8 @@ class Trainer:
         self._cur_epoch = train_state["cur_epoch"]
 
         if load_checkpoint_cfg.load_dataset:
-            self._total_consumed_tokens = train_state.get("total_consumed_tokens", 0)  # default 0 for BC
             self._train_time_offset = train_state["train_time_offset"]
-            # _total_consumed_samples 会影响 save dcp时 dataloader.get_state_dict的状态。
-            # 1) 如果加载 dataset，应该恢复_total_consumed_samples为checkpoint中的值。
-            # 2) 如果不加载 dataset，应该保持_total_consumed_samples为初始值0，否则如果加载上旧dataloader的total_consumed_samples
-            #    会导致存储新dataloader时 total_consumed_samples 是不正确的值。
-            self._total_consumed_samples = train_state.get("total_consumed_samples", 0)  # default 0 for BC
+            self._init_total_tokens = train_state.get("total_consumed_tokens", 0)  # default 0 for BC
 
             dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
             self._resume_dataloader(dataloader_path)

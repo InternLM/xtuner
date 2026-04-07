@@ -35,6 +35,7 @@ from xtuner.v1.rl.base import (
     WorkerLogItem,
 )
 from xtuner.v1.rl.base import TrainingWorker as BaseTrainingWorker
+from xtuner.v1.rl.config.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.train import ResumeConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, record_git_info, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -103,6 +104,7 @@ class RLTrainerConfig(BaseModel):
     rollout_steps: int | None = None
     display_all_workers_log: bool = False
     exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
+    advantage_estimator_config: BaseAdvantageConfig = GRPOAdvantageConfig()
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -249,6 +251,7 @@ class RLTrainer:
         exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
         display_all_workers_log: bool = False,
         trainer_cfg: RLTrainerConfig | None = None,
+        advantage_estimator_config: BaseAdvantageConfig = GRPOAdvantageConfig(),
     ):
         """Initialize the RL training system."""
         if os.environ.get("XTUNER_USE_FA3", "0") == "1":
@@ -426,6 +429,8 @@ class RLTrainer:
         self._exp_tracker = self._init_tracker(exp_tracker, log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = display_all_workers_log
 
+        self._advantage_estimator = advantage_estimator_config.build()
+
     def _resolve_load_checkpoint_cfg(
         self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
     ) -> LoadCheckpointConfig:
@@ -479,6 +484,7 @@ class RLTrainer:
             rollout_steps=config.rollout_steps,
             exp_tracker=config.exp_tracker,
             trainer_cfg=config,
+            advantage_estimator_config=config.advantage_estimator_config,
         )
         return self
 
@@ -744,9 +750,10 @@ class RLTrainer:
             rewards = [data.env.judger.reward["score"] for data in group]
             rewards_list.extend(rewards)
             rewards = torch.tensor(rewards, dtype=torch.float32)
-            advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
-
             prompt_repeat_k = len(group)
+
+            advantages = self._advantage_estimator.compute(rewards, group)  # TODO: support PPO advantage estimation
+
             for i in range(prompt_repeat_k):
                 item = group[i].env.rollout.response
                 logprobs = None

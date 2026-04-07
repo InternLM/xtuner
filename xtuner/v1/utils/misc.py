@@ -68,20 +68,6 @@ else:
                     _mprt.unregister(self._name, "shared_memory")  # type: ignore[attr-defined]
 
 
-def is_local_rank0() -> bool:
-    """Return whether the current process is local rank 0 on its node.
-
-    In non-distributed settings (``LOCAL_RANK`` unset) every process is
-    considered local rank 0 and this function returns ``True``.
-
-    Returns:
-        bool: ``True`` if ``LOCAL_RANK`` is unset or equal to ``"0"``,
-        ``False`` otherwise.
-    """
-    local_rank = os.getenv("LOCAL_RANK")
-    return local_rank is None or local_rank == "0"
-
-
 def get_padding_length(length: int, divisors: list[int]) -> int:
     """Calculate the padding length needed to make the input length divisible
     by divisors.
@@ -214,3 +200,26 @@ def clean_param_name(name: str) -> str:
     if "_orig_mod." in name:
         name = name.replace("_orig_mod.", "")
     return name
+
+
+_TRIM_MEMORY_WARNED = False
+
+
+def trim_memory() -> bool:
+    """Try to return free heap pages to OS.
+
+    Best-effort only: on platforms without `malloc_trim` (or when unavailable),
+    this will fail. We log the failure once per process to avoid spamming.
+    """
+    global _TRIM_MEMORY_WARNED
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL("libc.so.6")
+        return libc.malloc_trim(0)
+    except Exception as e:
+        if not _TRIM_MEMORY_WARNED:
+            _logger = get_logger()
+            _logger.warning(f" >>>>>>>>> [trim_memory] Failed to trim memory: {e} <<<<<<<<")
+            _TRIM_MEMORY_WARNED = True
+        return False

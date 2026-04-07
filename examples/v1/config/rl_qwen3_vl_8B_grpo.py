@@ -19,6 +19,7 @@ from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.rl_trainer import RLTrainerConfig
 from xtuner.v1.datasets import RLTokenizeFnConfig, DatasetConfig, Qwen3VLTokenizeFnConfig, DataloaderConfig
 from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
+from xtuner.v1.rl.config.advantage import GRPOAdvantageConfig
 
 
 work_dir = os.environ["WORK_DIR"]
@@ -198,4 +199,5 @@ trainer = RLTrainerConfig(
     work_dir=work_dir,
     total_epochs=total_epochs,
     hf_interval=hf_interval,
+    advantage_estimator_config=GRPOAdvantageConfig(eps=1e-8),
 )

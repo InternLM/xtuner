@@ -5,7 +5,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from typing_extensions import Self
 
-from .utils import pad_to_multiple_of, split_for_sequence_parallel
+from .utils import gather_for_sequence_parallel, pad_to_multiple_of, split_for_sequence_parallel
 
 
 # Avoid using dataclass decorator here to get rid of extra ops called in pytorch 2.8 and above
@@ -50,6 +50,12 @@ class SequenceContext:
     # moe routed_experts
     rollout_routed_experts: torch.Tensor | None
 
+    # Private backing attributes for SP shard reconstruction
+    _raw_input_ids: torch.LongTensor | None
+    _raw_inputs_embeds: torch.FloatTensor | None
+    _shard_start: int
+    _shard_size: int
+
     def __init__(
         self,
         input_ids: torch.LongTensor | None,  # shape (1, seq_len)
@@ -71,6 +77,11 @@ class SequenceContext:
         inputs_embeds: torch.FloatTensor | None = None,
         num_img_tokens: list[list[int]] | None = None,
         rollout_routed_experts: torch.Tensor | None = None,
+        # SP shard metadata: private, accessed via properties below
+        raw_input_ids: torch.LongTensor | None = None,
+        raw_inputs_embeds: torch.FloatTensor | None = None,
+        shard_start: int = 0,
+        shard_size: int = 0,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
@@ -99,6 +110,10 @@ class SequenceContext:
         self.inputs_embeds = inputs_embeds
         self.num_img_tokens = num_img_tokens
         self.rollout_routed_experts = rollout_routed_experts
+        self._raw_input_ids = raw_input_ids
+        self._raw_inputs_embeds = raw_inputs_embeds
+        self._shard_start = shard_start
+        self._shard_size = shard_size
         self.seq_idx = None
 
         seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
@@ -169,6 +184,7 @@ class SequenceContext:
             start = sp_input_ids.shape[1] * sequence_parallel_mesh.get_local_rank()
             end = start + sp_input_ids.shape[1]
             sp_num_padding = max(0, min(sp_input_ids.shape[1], end - num_non_padding))
+            shard_size = sp_input_ids.shape[1]
 
             if self.position_ids is not None:
                 pad_position_ids = pad_to_multiple_of(self.position_ids, 0, multiple_of, -1)
@@ -205,6 +221,9 @@ class SequenceContext:
                 inputs_embeds=self.inputs_embeds,
                 num_img_tokens=self.num_img_tokens,
                 rollout_routed_experts=self.rollout_routed_experts,
+                raw_input_ids=cast(torch.LongTensor, pad_input_ids),
+                shard_start=start,
+                shard_size=shard_size,
             )
             return sp_seq_ctx
         else:
@@ -308,6 +327,71 @@ class SequenceContext:
     def seq_lens_k(self) -> torch.LongTensor:
         return self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]  # type: ignore
 
+    @property
+    def raw_input_ids(self) -> torch.LongTensor | None:
+        """Full (un-split) input_ids across all SP ranks.
+
+        In non-SP mode, returns ``input_ids`` directly. In SP mode, returns the
+        pre-stored full tensor if available; otherwise triggers an allgather and
+        caches the result for subsequent calls.
+
+        Returns:
+            torch.LongTensor | None: The full input_ids tensor, or ``None`` if
+                ``input_ids`` is ``None``.
+        """
+        if self._raw_input_ids is not None:
+            return self._raw_input_ids
+        if self.sequence_parallel_mesh is None or self.sequence_parallel_mesh.size() == 1:
+            return self.input_ids
+        assert self.input_ids is not None
+        gathered = gather_for_sequence_parallel(
+            self.input_ids, dim=1, sp_group=self.sequence_parallel_mesh.get_group()
+        )
+        self._raw_input_ids = cast(torch.LongTensor, gathered)
+        return self._raw_input_ids
+
+    @property
+    def raw_inputs_embeds(self) -> torch.FloatTensor | None:
+        """Full (un-split) inputs_embeds across all SP ranks.
+
+        In non-SP mode, returns ``inputs_embeds`` directly. In SP mode, triggers
+        a single allgather on first access and caches the result for subsequent
+        calls, so the communication cost is paid at most once.
+
+        Returns:
+            torch.FloatTensor | None: The full inputs_embeds tensor, or ``None`` if
+                ``inputs_embeds`` is ``None``.
+        """
+        if self._raw_inputs_embeds is not None:
+            return self._raw_inputs_embeds
+        if self.inputs_embeds is None:
+            return None
+        if self.sequence_parallel_mesh is None or self.sequence_parallel_mesh.size() == 1:
+            return self.inputs_embeds
+        gathered = gather_for_sequence_parallel(
+            self.inputs_embeds, dim=1, sp_group=self.sequence_parallel_mesh.get_group()
+        )
+        self._raw_inputs_embeds = cast(torch.FloatTensor, gathered)
+        return self._raw_inputs_embeds
+
+    @property
+    def raw_position_ids(self) -> torch.LongTensor | None:
+        """Full (un-split) position_ids across all SP ranks.
+
+        Returns:
+            torch.LongTensor | None: The full position_ids tensor.
+        """
+        raise NotImplementedError("raw_position_ids is not yet implemented")
+
+    @property
+    def raw_rollout_routed_experts(self) -> torch.Tensor | None:
+        """Full (un-split) rollout_routed_experts across all SP ranks.
+
+        Returns:
+            torch.Tensor | None: The full rollout_routed_experts tensor.
+        """
+        raise NotImplementedError("raw_rollout_routed_experts is not yet implemented")
+
     # TODO: 暂时没有用到，可能要删掉
     def chunk(self, num_chunks: int) -> list[Self]:
         n = self.seq_lens_q.numel()
@@ -374,6 +458,10 @@ class SequenceContext:
             inputs_embeds=overrides.get("inputs_embeds", self.inputs_embeds),
             num_img_tokens=overrides.get("num_img_tokens", self.num_img_tokens),
             rollout_routed_experts=overrides.get("rollout_routed_experts", self.rollout_routed_experts),
+            raw_input_ids=overrides.get("raw_input_ids", self._raw_input_ids),
+            raw_inputs_embeds=overrides.get("raw_inputs_embeds", self._raw_inputs_embeds),
+            shard_start=overrides.get("shard_start", self._shard_start),
+            shard_size=overrides.get("shard_size", self._shard_size),
         )
 
     def to(self, device: torch.device | str):

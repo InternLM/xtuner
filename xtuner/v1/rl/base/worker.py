@@ -263,7 +263,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         self._rollout_step = 0
         self._sft_cur_epoch = 0
-        self._sft_total_consumed_samples = 0
         self._sft_total_consumed_tokens = 0
 
         if self._sft_dataloader_config is not None:
@@ -377,7 +376,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         self._engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
         old_logprobs_list: list[torch.Tensor] = []
         for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
-            loss_ctx = self.logprob_cfg.build(shifted_labels=shifted_labels)
+            loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
+            assert loss_ctx is not None
             output = self._engine.forward_only(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
             old_logprobs_list.append(output["loss"])
         return old_logprobs_list
@@ -501,10 +501,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             rollout_logprobs = data.get("rollout_logprobs", None)
             rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
             loss_ctx = loss_cfg.build(
-                self.sp_mesh, shifted_labels=shifted_labels, advantages=advantages, rollout_logprobs=rollout_logprobs
+                data={
+                    "shifted_labels": shifted_labels,
+                    "advantages": advantages,
+                    "rollout_logprobs": rollout_logprobs,
+                },
+                sp_mesh=self.sp_mesh,
             )
 
             seq_ctx_list.append(seq_ctx)
+            assert loss_ctx is not None
             loss_ctx_list.append(loss_ctx)
 
         del data_batches
@@ -596,8 +602,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         LossContext = loss_cfg.loss_ctx_cls
         for i in range(0, len(loss_ctx_list), iters_per_step):
             batches_loss_ctx = loss_ctx_list[i : i + iters_per_step]
-            batches_loss_ctx = LossContext.build_batches(batches_loss_ctx)
-            batched_loss_ctx_list.extend(batches_loss_ctx)
+            batched_loss_ctx_list.extend(
+                LossContext.build_batches(batches_loss_ctx)  # type: ignore[arg-type]
+            )
 
         # train optimizer steps
         for i in range(0, len(seq_ctx_list), iters_per_step):
@@ -605,7 +612,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             batches_loss_ctx = batched_loss_ctx_list[i : i + iters_per_step]
 
             engine_input = [
-                ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+                ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
                 for seq_ctx, loss_ctx in zip(batches_seq_ctx, batches_loss_ctx)
             ]
 
@@ -664,7 +671,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         time_before_train_step = time.time()
         data_time = time_before_train_step - time_before_get_data
         DEVICE_MODULE.reset_peak_memory_stats()
-        cur_sample_num = len(data_batch)
 
         train_step_info, grad_norm = self._train_one_step_sft(data_batch)
 
@@ -672,7 +678,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         step_time = time_after_train_step - time_before_train_step
         step_consumed_tokens = train_step_info["step_consumed_tokens"]
 
-        self._sft_total_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
         reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
         self._sft_total_consumed_tokens += reduced_step_consumed_tokens
 
@@ -707,7 +712,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=self.sp_mesh)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=self.sp_mesh)
             loss_ctx_list.append(loss_ctx)
 
         del data_batch
@@ -718,7 +723,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         engine_input = [
-            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+            ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+            for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
         ]
 
         train_step_info = self._engine.train_step(engine_input)
@@ -1382,9 +1388,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         # Save sft dataloader
-        if self.rank == 0 and self._sft_dataloader is not None:
+        if self._sft_dataloader is not None:
             sft_dataloader_path = checkpoint_path / self._SAVE_SFT_DATALOADER_DIR
-            dataloader_state = self._sft_dataloader.get_state_dict(self._sft_total_consumed_samples)
+            dataloader_state = self._sft_dataloader.get_state_dict()
+            total_consumed_samples = dataloader_state["total_consumed_samples"]
+            if self.rank != 0:
+                return
+
             torch.save(dataloader_state, sft_dataloader_path)
 
             train_state_path = checkpoint_path / self._SAVE_SFT_TRAIN_STATE_PATH
@@ -1394,7 +1404,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                         {
                             "cur_step": self._rollout_step,
                             "cur_epoch": self._sft_cur_epoch,
-                            "total_consumed_samples": self._sft_total_consumed_samples,
+                            "total_consumed_samples": total_consumed_samples,
                             "total_consumed_tokens": self._sft_total_consumed_tokens,
                         }
                     )
@@ -1428,24 +1438,23 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         # Resume sft dataloader
-        sft_dataloader_path = resume_from / self._SAVE_SFT_DATALOADER_DIR
         if self._sft_dataloader is not None:
-            if not sft_dataloader_path.exists():
-                raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
-            dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
-            self._sft_dataloader.load_state_dict(dataloader_state)
-            self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
-
             train_state_path = resume_from / self._SAVE_SFT_TRAIN_STATE_PATH
             if not train_state_path.exists():
                 raise FileNotFoundError(f"Train state path {train_state_path} does not exist.")
             with train_state_path.open("r") as f:
                 train_state = json.loads(f.read())
-                self._rollout_step = train_state["cur_step"]
-                self._sft_cur_epoch = train_state["cur_epoch"]
-                self._sft_total_consumed_samples = train_state["total_consumed_samples"]
-                self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
-                self.logger.info(f"Resume sft train state from {train_state_path}")
+            self._rollout_step = train_state["cur_step"]
+            self._sft_cur_epoch = train_state["cur_epoch"]
+            self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
+            self.logger.info(f"Resume sft train state from {train_state_path}")
+
+            sft_dataloader_path = resume_from / self._SAVE_SFT_DATALOADER_DIR
+            if not sft_dataloader_path.exists():
+                raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
+            dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
+            self._sft_dataloader.load_state_dict(dataloader_state)
+            self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
 
     @ray_method
     def ready(self) -> bool:

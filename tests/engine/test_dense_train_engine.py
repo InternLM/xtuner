@@ -26,18 +26,11 @@ DEVICE = get_device()
 
 
 class TestDenseEngine(DeterministicDDPTestCase):
-    @parametrize.parametrize(
-        "device,tp_size,sp_size",
-        [
-            ("cuda", 1, 1),
-            ("cuda", 1, 2),
-        ],
-    )
-    def test_dense_engine_train(self, device, tp_size, sp_size):
+    def _run_dense_engine_train_case(self, device, tp_size, sp_size, swap_optimizer: bool = False):
         pg = self.create_pg(device)
 
         dense_cfg = Qwen3Dense8BConfig()
-        optim_cfg: AdamWConfig = AdamWConfig()
+        optim_cfg: AdamWConfig = AdamWConfig(swap_optimizer=swap_optimizer)
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
             cpu_offload=False,
@@ -83,13 +76,13 @@ class TestDenseEngine(DeterministicDDPTestCase):
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=sp_mesh)
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=sp_mesh)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=sp_mesh)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
 
             seq_ctx = seq_ctx_list[0]
             loss_ctx = loss_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
             loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
@@ -104,6 +97,26 @@ class TestDenseEngine(DeterministicDDPTestCase):
             dist.destroy_process_group(pg)
         except:
             pass
+
+    @parametrize.parametrize(
+        "device,tp_size,sp_size",
+        [
+            ("cuda", 1, 1),
+            ("cuda", 1, 2),
+        ],
+    )
+    def test_dense_engine_train(self, device, tp_size, sp_size):
+        self._run_dense_engine_train_case(device, tp_size, sp_size, swap_optimizer=False)
+
+    @parametrize.parametrize(
+        "device,tp_size,sp_size",
+        [
+            ("cuda", 1, 1),
+            ("cuda", 1, 2),
+        ],
+    )
+    def test_dense_engine_train_swap_optimizer(self, device, tp_size, sp_size):
+        self._run_dense_engine_train_case(device, tp_size, sp_size, swap_optimizer=True)
 
     @parametrize.parametrize(
         "device,tp_size,hsdp_sharding_size",

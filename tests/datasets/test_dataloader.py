@@ -1,20 +1,24 @@
 from pathlib import Path
 import os
 import pickle
+import socket
 
 import torch
 
-from xtuner.v1.datasets import build_dataloader, build_datasets, get_dataloader_state, load_dataloader_state, FTDPTokenizeFnConfig, DatasetConfig, DataloaderConfig
+from xtuner.v1.datasets import (
+    DataloaderConfig,
+    DatasetConfig,
+    FTDPTokenizeFnConfig,
+    build_dataloader,
+)
 from xtuner.v1.train.toy_tokenizer import UTF8ByteTokenizer
-from torch.multiprocessing import spawn, get_context
+from torch.multiprocessing import spawn
 from torch.distributed.device_mesh import init_device_mesh
 import pytest
 
 import jsonlines
 import random
 from itertools import repeat, chain
-
-
 
 
 class RandomDataset:
@@ -182,11 +186,12 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     dataset_configs = [
         {
             "dataset": DatasetConfig(anno_path=str(data_dir1)),
-            "tokenize_fn": FTDPTokenizeFnConfig(max_length=1024)
+            "tokenize_fn": FTDPTokenizeFnConfig(max_length=1024),
         },
     ]
 
     dataloader_config = DataloaderConfig(
+        dataset_config_list=dataset_configs,
         pack_max_length=1024,
         pack_level=pack_level,
         num_workers=num_workers,
@@ -194,13 +199,9 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
         pack_workers=pack_workers,
     )
 
-    datasets = build_datasets(
-        dataset_config=dataset_configs,
+    dataloader1 = dataloader_config.build(
         tokenizer=tokenizer,
-    )
-    dataloader1 = build_dataloader(
-        dataloader_config=dataloader_config,
-        datasets=datasets,
+        dp_mesh=None,
         global_batch_size=GLOBAL_BATCH_SIZE,
         micro_batch_size=BATCH_SIZE,
         seed=10,
@@ -210,26 +211,22 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     assert len(dataloader1) > 10
 
     dataloader_iter = iter(dataloader1)
-    consumed_sample = 0
     for _ in range(RESUME_ITER):
-        batch = next(dataloader_iter)
-        consumed_sample += len(batch)
+        next(dataloader_iter)
 
-    dataloader_state = get_dataloader_state(dataloader1, consumed_sample)
+    dataloader_state = dataloader1.get_state_dict()
     expected_data = []
     for _ in range(AFTER_RESUME_ITER):
-        batch = next(dataloader_iter)
-        consumed_sample += len(batch)
-        expected_data.append(batch)
+        expected_data.append(next(dataloader_iter))
 
-    new_dataloader1 = build_dataloader(
-        dataloader_config=dataloader_config,
-        datasets=datasets,
+    new_dataloader1 = dataloader_config.build(
+        tokenizer=tokenizer,
+        dp_mesh=None,
         global_batch_size=GLOBAL_BATCH_SIZE,
         micro_batch_size=BATCH_SIZE,
         seed=10,
     )
-    load_dataloader_state(new_dataloader1, dataloader_state)
+    new_dataloader1.load_state_dict(dataloader_state)
     new_dataloader_iter = iter(new_dataloader1)
 
     resume_data = []
@@ -242,32 +239,29 @@ def test_dataloader_resume_single_process(tmp_path, pack_level, num_workers, gro
     # 2. Test resume after consuming multiple epochs
     while True:
         try:
-            batch = next(dataloader_iter)
-            consumed_sample += len(batch)
+            next(dataloader_iter)
         except StopIteration:
             break
 
-
     dataloader_iter = iter(dataloader1)
 
-    for batch in range(RESUME_ITER):
-        batch = next(dataloader_iter)
-        consumed_sample += len(batch)
+    for _ in range(RESUME_ITER):
+        next(dataloader_iter)
 
-    dataloader_state = get_dataloader_state(dataloader1, consumed_sample)
+    dataloader_state = dataloader1.get_state_dict()
 
     expected_data = []
     for _ in range(AFTER_RESUME_ITER):
         expected_data.append(next(dataloader_iter))
 
-    new_dataloader2 = build_dataloader(
-        dataloader_config=dataloader_config,
-        datasets=datasets,
+    new_dataloader2 = dataloader_config.build(
+        tokenizer=tokenizer,
+        dp_mesh=None,
         global_batch_size=GLOBAL_BATCH_SIZE,
         micro_batch_size=BATCH_SIZE,
         seed=10,
     )
-    load_dataloader_state(new_dataloader2, dataloader_state)
+    new_dataloader2.load_state_dict(dataloader_state)
     new_dataloader_iter2 = iter(new_dataloader2)
 
     resume_data = []
@@ -282,14 +276,12 @@ def _test_resume_spmd(
     rank: int,
     world_size: int,
     dataloader_config: DataloaderConfig,
-    dataset_configs: list[dict],
     global_batch_size: int,
     micro_batch_size: int,
-    step:int,
+    step: int,
     seed: int,
     save_path: Path,
     dataloader_state: dict | None = None,
-    consumed_samples: int = 0,
 ):
     os.environ["RANK"] = str(rank)
     os.environ["LOCAL_RANK"] = str(rank)
@@ -297,49 +289,38 @@ def _test_resume_spmd(
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "29505"
 
-
     torch.distributed.init_process_group(backend="nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
     data_mesh = init_device_mesh(
         device_type="cuda",
-        mesh_shape=(world_size,)
+        mesh_shape=(world_size,),
     )
     tokenizer = UTF8ByteTokenizer()
 
-    datasets = build_datasets(
-        dataset_config=dataset_configs,
+    dataloader = dataloader_config.build(
         tokenizer=tokenizer,
-    )
-    dataloader = build_dataloader(
-        dataloader_config=dataloader_config,
-        datasets=datasets,
+        dp_mesh=data_mesh,
         global_batch_size=global_batch_size,
         micro_batch_size=micro_batch_size,
         seed=seed,
-        dp_mesh=data_mesh,
     )
 
     if dataloader_state is not None:
-        load_dataloader_state(dataloader, dataloader_state)
+        dataloader.load_state_dict(dataloader_state)
 
     data_iter = iter(dataloader)
     data_list = []
     for _ in range(step):
         batch = next(data_iter)
         data_list.append(batch)
-        consumed_samples += len(batch)
 
-    consumed_samples_list = [None for _ in range(world_size)]
-    torch.distributed.all_gather_object(consumed_samples_list, consumed_samples)
-    global_consumed_samples = sum(consumed_samples_list)
+    # Snapshot after the first `step` batches so total_consumed_samples matches resume intent.
+    dataloader_state = dataloader.get_state_dict()
 
     expected_data = []
-
     for _ in range(step):
         batch = next(data_iter)
         expected_data.append(batch)
-
-    dataloader_state = get_dataloader_state(dataloader, global_consumed_samples)
 
     all_data_list = [None for _ in range(world_size)]
     torch.distributed.all_gather_object(all_data_list, list(chain(*data_list)))
@@ -372,7 +353,6 @@ def _test_resume_spmd(
                         "dataloader_state": dataloader_state,
                         "data_list": all_data_list,
                         "expected_data": all_expected_data,
-                        "consumed_samples": consumed_samples
                     }
                 )
             )
@@ -389,7 +369,6 @@ def _test_resume_spmd(
         ("none", 0, False),
         ("soft", 0, True),
         ("soft", 4, True),
-        ("soft", 4, True),
     ]
 )
 def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, group_by_length):
@@ -402,21 +381,22 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
     _create_fake_dataset(data_dir1 / f"depth3", dataset_num=3, max_depth=3, dup_times=9)
 
     # 1. Test resuming with the same world size
+    dataset_configs = [
+        {
+            "dataset": DatasetConfig(anno_path=str(data_dir1)),
+            "tokenize_fn": FTDPTokenizeFnConfig(max_length=1024),
+        },
+    ]
+
     dataloader_config = DataloaderConfig(
+        dataset_config_list=dataset_configs,
         pack_max_length=1024,
         pack_level=pack_level,
         num_workers=num_workers,
         group_by_length=group_by_length,
-        collator="fake_collator"
+        collator="fake_collator",
     )
-    dataset_configs = [
-        {
-            "dataset": DatasetConfig(anno_path=str(data_dir1)),
-            "tokenize_fn": FTDPTokenizeFnConfig(max_length=1024)
-        },
-    ]
 
-    ctx = get_context("spawn")
     world_size = 2
     save_path1 = tmp_path / "dataloader_state.pkl"
     spawn(
@@ -424,14 +404,12 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
         args=(
             world_size,
             dataloader_config,
-            dataset_configs,
             16,
             BATCH_SIZE,
             TOTAL_STEP,
             10,
             save_path1,
             None,
-            0,
         ),
         nprocs=2,
         join=True,
@@ -448,14 +426,12 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
         args=(
             world_size,
             dataloader_config,
-            dataset_configs,
             16,
             BATCH_SIZE,
             TOTAL_STEP,
             10,
             save_path2,
             result1["dataloader_state"],
-            result1["consumed_samples"],
         ),
         nprocs=world_size,
         join=True,
@@ -475,14 +451,12 @@ def test_dataloader_resume_multi_process(tmp_path, pack_level, num_workers, grou
         args=(
             world_size,
             dataloader_config,
-            dataset_configs,
             16,
             BATCH_SIZE,
             TOTAL_STEP,
             10,
             save_path3,
             result1["dataloader_state"],
-            result1["consumed_samples"],
         ),
         nprocs=world_size,
         join=True,

@@ -3,6 +3,7 @@ import math
 import random
 from typing import Iterator, Optional
 
+import numpy as np
 import torch
 from mmengine.dist import sync_random_seed
 from torch.distributed.device_mesh import DeviceMesh
@@ -12,7 +13,8 @@ from torch.utils.data import Sampler
 from xtuner.v1.utils import get_logger
 
 from .jsonl import JsonlDataset
-from .packing import _LegacySoftPackDataset
+from .packing import MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
+from .preset_pack import PresetPackDataset
 
 
 try:
@@ -54,7 +56,7 @@ class ParallelSampler(Sampler):
 
     def __init__(
         self,
-        dataset: TorchConcatDataset[JsonlDataset] | _LegacySoftPackDataset,
+        dataset: TorchConcatDataset[JsonlDataset] | _LegacySoftPackDataset | MLLMPretrainHybridPackDataset,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
         shuffle: bool = True,
@@ -87,8 +89,8 @@ class ParallelSampler(Sampler):
             self.num_samples = math.ceil(len(self.dataset) / global_batch_size) * global_batch_size // world_size
             self.total_size = self.num_samples * self.world_size
         else:
-            self.num_samples = math.ceil((len(self.dataset) - rank) / world_size)
-            self.total_size = len(self.dataset)
+            self.num_samples = len(self.dataset) // global_batch_size * global_batch_size // world_size
+            self.total_size = self.num_samples * self.world_size
 
     def __iter__(self) -> Iterator[int]:
         """Iterate the indices."""
@@ -103,6 +105,8 @@ class ParallelSampler(Sampler):
         # add extra samples to make it evenly divisible
         if self.round_up:
             indices = (indices * int(self.total_size / len(indices) + 1))[: self.total_size]
+        else:
+            indices = indices[: self.total_size]
 
         # subsample
         indices = indices[self.step + self.rank : self.total_size : self.world_size]
@@ -142,12 +146,12 @@ class ParallelSampler(Sampler):
                 f"is different from the current shuffle ({self.shuffle})."
             )
 
-    def get_state_dict(self, step: int):
+    def get_state_dict(self, total_consumed_steps: int):
         # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
-        step = step % self.total_size
+        step_mod = total_consumed_steps % self.total_size
         return {
             "epoch": self.epoch,
-            "step": step,
+            "step": step_mod,
             "world_size": self.world_size,
             "shuffle": self.shuffle,
             "round_up": self.round_up,
@@ -178,7 +182,7 @@ class LengthGroupedSampler(Sampler):
 
     def __init__(
         self,
-        dataset: _LegacySoftPackDataset,
+        dataset: _LegacySoftPackDataset | MLLMPretrainHybridPackDataset | PresetPackDataset,
         global_batch_size: int,
         dp_mesh: DeviceMesh | None = None,
         seed: Optional[int] = None,
@@ -211,8 +215,8 @@ class LengthGroupedSampler(Sampler):
             self.num_samples = math.ceil(len(self.dataset) / global_batch_size) * global_batch_size // world_size
             self.total_size = self.num_samples * self.world_size
         else:
-            self.num_samples = math.ceil((len(self.dataset) - rank) / world_size)
-            self.total_size = len(self.dataset)
+            self.num_samples = len(self.dataset) // global_batch_size * global_batch_size // world_size
+            self.total_size = self.num_samples * self.world_size
 
         # Default for mega_batch_mult: 50 or the number to get 4
         # megabatches, whichever is smaller.
@@ -226,7 +230,7 @@ class LengthGroupedSampler(Sampler):
         self.group_size = self.world_size
 
         self.max_lengths = self.dataset.longest
-        assert isinstance(self.max_lengths, (list, tuple, Column))
+        assert isinstance(self.max_lengths, (list, tuple, Column, np.ndarray))
 
         self.global_batch_size = global_batch_size
 
@@ -246,6 +250,8 @@ class LengthGroupedSampler(Sampler):
         # add extra samples to make it evenly divisible
         if self.round_up:
             indices = (indices * int(self.total_size / len(indices) + 1))[: self.total_size]
+        else:
+            indices = indices[: self.total_size]
         # subsample
         assert len(indices) == self.total_size
         indices = indices[self.step + self.rank : self.total_size : self.world_size]
@@ -292,17 +298,17 @@ class LengthGroupedSampler(Sampler):
             )
             self.group_size = origin_group_size
 
-    def get_state_dict(self, step: int):
+    def get_state_dict(self, total_consumed_steps: int):
         """Get the sampler state dict.
 
         Returns:
             dict: The state of the sampler.
         """
         # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
-        step = step % self.total_size
+        step_mod = total_consumed_steps % self.total_size
         return {
             "epoch": self.epoch,
-            "step": step,
+            "step": step_mod,
             "world_size": self.world_size,
             "round_up": self.round_up,
             "num_samples": self.num_samples,

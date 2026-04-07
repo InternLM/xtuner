@@ -18,8 +18,14 @@ class LogProbConfig(BaseLossConfig):
     def loss_ctx_cls(self) -> type["LogProbContext"]:
         return LogProbContext
 
-    def build(self, shifted_labels: torch.Tensor, sp_mesh: DeviceMesh | None = None) -> "LogProbContext":
-        loss_kwargs = LogProbKwargs(shifted_labels=shifted_labels)
+    @property
+    def _loss_kwargs_cls(self) -> type["LogProbKwargs"]:
+        return LogProbKwargs
+
+    def build(self, data: dict, sp_mesh: DeviceMesh | None = None) -> "LogProbContext | None":
+        if "shifted_labels" not in data:
+            return None
+        loss_kwargs = LogProbKwargs(shifted_labels=data["shifted_labels"])
         if sp_mesh is not None and sp_mesh.size() > 1:
             loss_kwargs = loss_kwargs.sp_split(sp_mesh)
         return self.loss_ctx_cls(self, loss_kwargs)
@@ -83,5 +89,5 @@ class LogProbContext(BaseLossContext):
         if self.loss_cfg.mode == "chunk":
             logprobs, _ = self.chunk_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
         else:
-            logprobs, _ = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
+            logprobs, _ = self.loss_fn(hidden_states, head_weight, head_bias, self.loss_kwargs)
         return logprobs, (None, {})
