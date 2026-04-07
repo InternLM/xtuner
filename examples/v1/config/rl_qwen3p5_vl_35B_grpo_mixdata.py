@@ -71,7 +71,9 @@ training_sample_params = SampleParams(
 
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-ds_collections = json.loads(open(meta_data_path).read())
+with open(meta_data_path) as f:
+    ds_collections = json.load(f)
+
 train_dataset_cfg = []
 for name, _data in ds_collections.items():
     tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path, 
