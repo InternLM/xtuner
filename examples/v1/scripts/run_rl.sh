@@ -82,9 +82,6 @@ export LMDEPLOY_LOG_FILE="${WORK_DIR}/lmdeploy_log_${current_time}.txt"
 if [ "$ACCELERATOR" = "GPU" ]; then
     # TODO: support NPU RL Memory Monitor
     export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
-    export XTUNER_RL_MEM_INTERVAL="${XTUNER_RL_MEM_INTERVAL:-60}"
-    export XTUNER_RL_OBJECT_LIMIT="${XTUNER_RL_OBJECT_LIMIT:-5000}"
-    export XTUNER_RL_OBJECT_TOP_K="${XTUNER_RL_OBJECT_TOP_K:-10}"
 fi
 
 # 2. Launch Ray cluster
