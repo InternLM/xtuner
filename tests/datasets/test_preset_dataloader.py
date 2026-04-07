@@ -700,8 +700,8 @@ class TestPresetPackGroupSamplerResumeDist(DistributedTestBase):
         global_consumed_samples = sum(int(x) for x in consumed_samples_list if x is not None)
 
         # 3. Get ckpt state
-        # dataloader_state = dl.get_state_dict(global_consumed_samples)
-        dataloader_state = dl.get_state_dict(global_consumed_samples)
+        dataloader_state = dl.get_state_dict()
+        assert dataloader_state["total_consumed_samples"] == global_consumed_samples
 
         # 4. Continue to consume data at [half_step, 2*half_step)
         expected_batches = []

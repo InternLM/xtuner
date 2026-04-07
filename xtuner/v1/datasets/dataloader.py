@@ -46,10 +46,10 @@ class BaseDataloader(ABC):
     """
 
     @abstractmethod
-    def load_state_dict(self, state_dict: dict, train_state_total_consumed_samples: int | None = None) -> None: ...
+    def load_state_dict(self, state_dict: dict) -> None: ...
 
     @abstractmethod
-    def get_state_dict(self, total_consumed_steps_override: int | None = None) -> dict: ...
+    def get_state_dict(self) -> dict: ...
 
     @abstractmethod
     def __iter__(self) -> Iterator[list[ColateItem]]: ...
@@ -70,28 +70,7 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         self._init_total_samples = 0
         self._local_samples = 0
 
-    @staticmethod
-    def _apply_old_ckpt_total_consumed_samples(state: dict, train_state_total: int | None) -> None:
-        """If the checkpoint has no ``total_consumed_samples`` (and no legacy
-        sampler field), copy from ``train_state``."""
-        if train_state_total is None:
-            return
-        if state.get("total_consumed_samples") is not None:
-            return
-        state["total_consumed_samples"] = int(train_state_total)
-
-    def load_state_dict(
-        self,
-        state_dict: dict,
-        train_state_total_consumed_samples: int | None = None,
-    ) -> None:
-        if train_state_total_consumed_samples is not None:
-            logger.warning(
-                "Dataloader.load_state_dict(train_state_total_consumed_samples=...) is deprecated except for "
-                "very old checkpoints missing total_consumed_samples."
-            )
-        self._apply_old_ckpt_total_consumed_samples(state_dict, train_state_total_consumed_samples)
-
+    def load_state_dict(self, state_dict: dict) -> None:
         sampler: ParallelSampler | LengthGroupedSampler | PresetSampler = self.sampler  # type: ignore[assignment]
         dataset = self.dataset
         sampler_state = state_dict["sampler"]
@@ -101,17 +80,14 @@ class Dataloader(torch.utils.data.DataLoader, BaseDataloader):
         else:
             sampler.load_state_dict(sampler_state)
 
-        self._init_total_samples = state_dict["total_consumed_samples"]
+        self._init_total_samples = int(state_dict["total_consumed_samples"])
         self._local_samples = 0
 
         if hasattr(dataset, "load_state_dict"):
             dataset.load_state_dict(state_dict["dataset"])
 
-    def get_state_dict(self, total_consumed_steps_override: int | None = None) -> dict:
-        if total_consumed_steps_override is not None:
-            total_steps = int(total_consumed_steps_override)
-        else:
-            total_steps = self._init_total_samples + reduce_sum_across_dp_group(self._dp_mesh, self._local_samples)
+    def get_state_dict(self) -> dict:
+        total_steps = self._init_total_samples + reduce_sum_across_dp_group(self._dp_mesh, self._local_samples)
         sampler: ParallelSampler | LengthGroupedSampler | PresetSampler = self.sampler  # type: ignore[assignment]
         dataset: ExpandSoftPackDataset | _LegacySoftPackDataset = self.dataset  # type: ignore[assignment]
         dataloader_state: dict = {

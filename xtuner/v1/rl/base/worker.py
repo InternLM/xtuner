@@ -1453,10 +1453,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if not sft_dataloader_path.exists():
                 raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
             dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
-            self._sft_dataloader.load_state_dict(
-                dataloader_state,
-                train_state_total_consumed_samples=train_state.get("total_consumed_samples", 0),
-            )
+            self._sft_dataloader.load_state_dict(dataloader_state)
             self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
 
     @ray_method

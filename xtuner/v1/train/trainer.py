@@ -1811,10 +1811,7 @@ class Trainer:
             self._init_total_tokens = train_state.get("total_consumed_tokens", 0)  # default 0 for BC
 
             dataloader_path = resume_from / self._SAVE_DATALOADER_DIR
-            self._resume_dataloader(
-                dataloader_path,
-                train_state_total_consumed_samples=train_state.get("total_consumed_samples"),
-            )
+            self._resume_dataloader(dataloader_path)
 
         if load_checkpoint_cfg.load_scheduler:
             scheduler_path = resume_from / self._SAVE_SCHEDULER_DIR
@@ -1827,14 +1824,11 @@ class Trainer:
             scheduler_step = self.total_step - self._cur_step
             self._lr_scheduler = self.build_lr_scheduler(self._lr_cfg, scheduler_step)
 
-    def _resume_dataloader(self, dataloader_path: Path, train_state_total_consumed_samples: int | None = None):
+    def _resume_dataloader(self, dataloader_path: Path):
         if not dataloader_path.exists():
             raise FileNotFoundError(f"Dataloader path {dataloader_path} does not exist.")
         dataloader_state = torch.load(dataloader_path, map_location=DEVICE)
-        self._dataloader.load_state_dict(
-            dataloader_state,
-            train_state_total_consumed_samples=train_state_total_consumed_samples,
-        )
+        self._dataloader.load_state_dict(dataloader_state)
 
     def _setup_hooks(self, hooks_config: HooksConfig) -> HooksConfig:
         for stage in HookStage:
