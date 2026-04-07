@@ -77,7 +77,7 @@ for name, _data in ds_collections.items():
     tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path, 
                                             max_length=max_prompt_length, 
                                             system_message=_data.get('system_message', None),
-                                            template_name="qwen3.5-vl-rl")
+                                            chat_template="qwen3-vl-rl")
     _data_cfg = {"dataset": DatasetConfig(name=name,
                                           anno_path=_data['annotation'],
                                           media_root=_data.get('media_root', ''),

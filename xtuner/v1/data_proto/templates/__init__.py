@@ -46,7 +46,7 @@ CHAT_TEMPLATE_MAP = {
         image_context_token="<|image_pad|>",
         video_context_token="<|video_pad|>",
     ),
-    "qwen3.5-vl-rl": HybridChatTemplate(
+    "qwen3-vl-rl": HybridChatTemplate(
         system="<|im_start|>system\n{system}<|im_end|>\n",
         tool_prompt="\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
         "You are provided with function signatures within <tools></tools> XML tags:\n<tools>{tool_text}"
