@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Dict, List, Optional
+from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -12,11 +13,11 @@ class HybridChatTemplate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Normal Chat
-    system: str  # System message format, role
+    system: str | None = None # System message format, role
     developer: str | None = None  # Developer message format, role
-    user: str  # User message format, role
-    assistant: str  # Assistant message format, role
-    stop_words: List[str]  # List of stop words
+    user: str | None = None # User message format, role
+    assistant: str | None = None # Assistant message format, role
+    stop_words: List[str] | None = None # List of stop words
     sep: str = "\n"
     thinking: str | None = None  # Thinking message format, not role
     default_system: Optional[str] = None

@@ -270,6 +270,7 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
     llm_pack_weight: float = 1.0
     visual_pack_weight: float = 0.0
     trim_memory_interval: int = 1
+    chat_template: str | None = None
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
