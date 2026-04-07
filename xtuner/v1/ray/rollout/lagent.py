@@ -142,6 +142,9 @@ class ControllerWrapper:
                 raise ValueError("Routed experts expected in response extra_info but not found.")
 
         response = AgentMessage.from_model_response(response, '')
+        return self.parse_response(response)
+
+    def parse_response(self, response: AgentMessage):
         response = self.reasoning_parser.parse_response(response)
         response = self.tool_call_parser.parse_response(response)
         return response

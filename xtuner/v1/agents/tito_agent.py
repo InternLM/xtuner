@@ -55,6 +55,7 @@ class AsyncTokenInOutAgentMixin:
             response_message.sender = self.name
         if partial_response and partial_response.raw_content:
             response_message = partial_response.merge_with(response_message)
+            response_message = self.llm.parse_response(response_message)
             # remove the partial response from memory, since it's merged into the final response
             self.memory.get(session_id).delete(-1)
         return response_message
