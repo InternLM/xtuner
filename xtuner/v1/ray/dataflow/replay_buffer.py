@@ -351,6 +351,7 @@ class ReplayBufferStorage:
         self.enable_partial_rollout: bool = False
         self.tail_batch_candidate_steps: int = 0
         self.tail_batch_trigger_size: int = 0
+        self._empty_env_ref: Optional[ObjectRef] = None
 
         self._completed_actions: Dict[int, List[int]] = defaultdict(list)
         self._aborted_actions: Dict[int, List[int]] = defaultdict(list)
@@ -366,11 +367,19 @@ class ReplayBufferStorage:
         self.sample_from_aborted_count = 0
         self.sample_from_expired_count = 0
 
+    def _get_empty_env_ref(self) -> ObjectRef:
+        if self._empty_env_ref is None:
+            self._empty_env_ref = ray.put(RLEnvDataItem())
+        return self._empty_env_ref
+
+    def _filter_releasable_refs(self, refs: List[ObjectRef]) -> List[ObjectRef]:
+        return [ref for ref in refs if ref is not None and ref != self._empty_env_ref]
+
     def _free_replay_meta_refs(self, replay_meta: ReplayMeta, include_action_ref: bool = True):
         refs = []
         if include_action_ref and replay_meta.action_ref is not None:
             refs.append(replay_meta.action_ref)
-        refs.extend([ref for ref in replay_meta.observation_refs if ref is not None])
+        refs.extend(self._filter_releasable_refs(replay_meta.observation_refs))
         if refs:
             ray.internal.free(refs, local_only=False)
 
@@ -386,10 +395,11 @@ class ReplayBufferStorage:
 
     def _strip_rollout_payload_for_rerun(self, replay_meta: ReplayMeta, new_state: RolloutState):
         """Keep prompt refs only and drop rollout outputs that will not be reused."""
-        old_obs_refs = [ref for ref in replay_meta.observation_refs if ref is not None]
+        old_obs_refs = self._filter_releasable_refs(replay_meta.observation_refs)
         if old_obs_refs:
             ray.internal.free(old_obs_refs, local_only=False)
-        replay_meta.observation_refs = [ray.put(RLEnvDataItem()) for _ in replay_meta.observation_ids]
+        empty_env_ref = self._get_empty_env_ref()
+        replay_meta.observation_refs = [empty_env_ref for _ in replay_meta.observation_ids]
         replay_meta.extra_info.update(
             {
                 "payload_mode": "prompt_only",

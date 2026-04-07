@@ -36,6 +36,10 @@ class RawTrainingController:
         if isinstance(obj, (list, tuple)):
             for item in obj:
                 self._collect_object_refs(item, refs)
+            return
+        if isinstance(obj, dict):
+            for value in obj.values():
+                self._collect_object_refs(value, refs)
 
     def _free_batch_object_refs(self, data_batches):
         refs: list[ObjectRef] = []
