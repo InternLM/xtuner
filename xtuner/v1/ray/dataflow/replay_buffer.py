@@ -59,6 +59,7 @@ class ReplayMeta:
     observation_ids: List[int] = field(default_factory=list)
     observation_refs: List[ObjectRef] = field(default_factory=list)
     observation_versions: List[int] = field(default_factory=list)  # 目前发数据为按组下发，暂时用不到
+    observation_extra_infos: List[RLExtraDataItem] = field(default_factory=list)
     state: RolloutState = RolloutState.INIT
     version: int = 0  # version for partial rollout
     extra_info: Dict[str, Any] = field(default_factory=dict)
@@ -95,10 +96,14 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     group_version = grouped_dataitem[0].uid.version
     observation_ids = []
     observation_refs = []
+    observation_versions = []
+    observation_extra_infos = []
 
     for item in grouped_dataitem:
         observation_ids.append(item.uid.observation_id)
         observation_refs.append(ray.put(item.env))
+        observation_versions.append(item.uid.version)
+        observation_extra_infos.append(item.extra_info.model_copy(deep=True))
 
     group_state = determine_group_state(grouped_dataitem)
     logger.debug(
@@ -112,6 +117,8 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
         action_ref=ray.put(data),
         observation_ids=observation_ids,
         observation_refs=observation_refs,
+        observation_versions=observation_versions,
+        observation_extra_infos=observation_extra_infos,
         state=group_state,
         version=group_version,
         extra_info={},
@@ -119,7 +126,7 @@ def mapping_dataitem_to_replaymeta(grouped_dataitem: List[RLDataFlowItem]) -> Re
     return replay_meta
 
 
-def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowItem]:
+def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta, consume_refs: bool = True) -> List[RLDataFlowItem]:
     env_str = replay_meta.env
     root_id = replay_meta.root_id
     action_id = replay_meta.action_id
@@ -131,27 +138,40 @@ def mapping_replaymeta_to_dataitem(replay_meta: ReplayMeta) -> List[RLDataFlowIt
 
     env_values = [ray.get(obs_ref) for obs_ref in observation_refs]
 
-    refs_to_free: List[ObjectRef] = []
-    if isinstance(action_ref, ObjectRef):
-        refs_to_free.append(action_ref)
-    refs_to_free.extend([ref for ref in observation_refs if isinstance(ref, ObjectRef)])
-    free_object_refs(refs_to_free)
-    replay_meta.action_ref = None
-    replay_meta.observation_refs.clear()
+    if consume_refs:
+        refs_to_free: List[ObjectRef] = []
+        if isinstance(action_ref, ObjectRef):
+            refs_to_free.append(action_ref)
+        refs_to_free.extend([ref for ref in observation_refs if isinstance(ref, ObjectRef)])
+        free_object_refs(refs_to_free)
+        replay_meta.action_ref = None
+        replay_meta.observation_refs.clear()
 
     group_data_item = []
-    for obs_id, env_data in zip(replay_meta.observation_ids, env_values):
+    observation_versions = replay_meta.observation_versions or [replay_meta.version] * len(replay_meta.observation_ids)
+    observation_extra_infos = replay_meta.observation_extra_infos or [
+        RLExtraDataItem() for _ in replay_meta.observation_ids
+    ]
+    for idx, (obs_id, env_data) in enumerate(zip(replay_meta.observation_ids, env_values)):
+        observation_version = observation_versions[idx] if idx < len(observation_versions) else replay_meta.version
+        extra_info = (
+            observation_extra_infos[idx].model_copy(deep=True)
+            if idx < len(observation_extra_infos)
+            else RLExtraDataItem()
+        )
+        if env_data.rollout.state == RolloutState.INIT and replay_meta.state != RolloutState.INIT:
+            env_data.rollout.state = replay_meta.state
         item = RLDataFlowItem(
             uid=RLUIDItem(
                 env=env_str,
                 root_id=root_id,
                 action_id=action_id,
                 observation_id=obs_id,
-                version=replay_meta.version,
+                version=observation_version,
             ),
             data=data_value,
             env=env_data,
-            extra_info=RLExtraDataItem(),
+            extra_info=extra_info,
         )
         group_data_item.append(item)
     return group_data_item
@@ -473,6 +493,7 @@ class ReplayBufferStorage:
             "_observations2states",
             "_states",
             "_action2observations",
+            "_multimodal_train_infos",
         ]
         for attr in attrs_to_clear:
             getattr(self, attr).clear()
@@ -487,27 +508,32 @@ class ReplayBufferStorage:
         Returns:
             RLDataFlowItem: The data item with ray.ObjectRefs resolved.
         """
-
-        # Resolve data.multimodal_train_info
-        free_refs_list = []
-        if hasattr(data_item.data, "multimodal_train_info"):
-            multimodal_info = data_item.data.multimodal_train_info
-            if multimodal_info and "pixel_values" in multimodal_info:
-                pixel_values_ref = multimodal_info["pixel_values"]
-                if isinstance(pixel_values_ref, ObjectRef):
-                    multimodal_info["pixel_values"] = ray.get(pixel_values_ref)
-                    data_item.data.multimodal_train_info = multimodal_info
-                    free_refs_list.append(pixel_values_ref)
-        # Resolve rollout.extra_info.router_experts
-        if "routed_experts" in data_item.env.rollout.extra_info:
-            if isinstance(data_item.env.rollout.extra_info["routed_experts"], ObjectRef):
-                routed_experts = ray.get(data_item.env.rollout.extra_info["routed_experts"])
-                ray.internal.free(data_item.env.rollout.extra_info["routed_experts"], local_only=False)
-                del data_item.env.rollout.extra_info["routed_experts"]
-                data_item.env.rollout.extra_info["routed_experts"] = routed_experts
-                free_refs_list.append(pixel_values_ref)
-
+        free_refs_list: List[ObjectRef] = []
+        self._resolve_nested_objectrefs(data_item, free_refs_list)
         free_object_refs(free_refs_list)
+
+    def _resolve_nested_objectrefs(self, obj: Any, refs_to_free: List[ObjectRef]):
+        if isinstance(obj, ObjectRef):
+            value = ray.get(obj)
+            refs_to_free.append(obj)
+            return self._resolve_nested_objectrefs(value, refs_to_free)
+        if isinstance(obj, BaseModel):
+            for field_name in type(obj).model_fields:
+                setattr(obj, field_name, self._resolve_nested_objectrefs(getattr(obj, field_name), refs_to_free))
+            return obj
+        if isinstance(obj, list):
+            for idx, value in enumerate(obj):
+                obj[idx] = self._resolve_nested_objectrefs(value, refs_to_free)
+            return obj
+        if isinstance(obj, tuple):
+            return tuple(self._resolve_nested_objectrefs(value, refs_to_free) for value in obj)
+        if isinstance(obj, set):
+            return {self._resolve_nested_objectrefs(value, refs_to_free) for value in obj}
+        if isinstance(obj, dict):
+            for key, value in list(obj.items()):
+                obj[key] = self._resolve_nested_objectrefs(value, refs_to_free)
+            return obj
+        return obj
 
     def convert_to_ray_objref(self, data_item: RLDataFlowItem):
         """Converts large tensors in RLDataFlowItem to ray.ObjectRefs.
@@ -538,7 +564,7 @@ class ReplayBufferStorage:
             if isinstance(obj, ray.ObjectRef):
                 return True
             if isinstance(obj, BaseModel):
-                return any(check(getattr(obj, f)) for f in obj.model_fields)
+                return any(check(getattr(obj, f)) for f in type(obj).model_fields)
             if isinstance(obj, (list, tuple, set)):
                 return any(check(x) for x in obj)
             if isinstance(obj, dict):
@@ -564,7 +590,7 @@ class ReplayBufferStorage:
         all_data_items = []
         for replay_meta in self._actions.values():
             # dump 仅用于序列化快照，这里可直接消费 refs，避免长时间占用 object store
-            data_items = mapping_replaymeta_to_dataitem(replay_meta)
+            data_items = mapping_replaymeta_to_dataitem(replay_meta, consume_refs=False)
             for item in data_items:
                 self.resolve_ray_objects(item)
                 res = self.has_objectref(item)
@@ -580,6 +606,9 @@ class ReplayBufferStorage:
             "_observations2states": self._observations2states,
             "_states": dict(self._states),
             "_action2observations": dict(self._action2observations),
+            "_multimodal_train_infos": self._multimodal_train_infos,
+            "sample_from_aborted_count": self.sample_from_aborted_count,
+            "sample_from_expired_count": self.sample_from_expired_count,
         }
 
         torch.save(state, file_path)
@@ -597,13 +626,16 @@ class ReplayBufferStorage:
 
         state = torch.load(file_path, map_location="cpu", weights_only=False)
 
-        self._completed_actions = state["_completed_actions"]
-        self._aborted_actions = state["_aborted_actions"]
+        self._completed_actions = defaultdict(list, state["_completed_actions"])
+        self._aborted_actions = defaultdict(list, state["_aborted_actions"])
         self._expired_actions = state["_expired_actions"]
         self._root2actions = defaultdict(list, state["_root2actions"])
         self._observations2states = state["_observations2states"]
         self._states = defaultdict(list, state["_states"])
         self._action2observations = defaultdict(list, state["_action2observations"])
+        self._multimodal_train_infos = state.get("_multimodal_train_infos", {})
+        self.sample_from_aborted_count = state.get("sample_from_aborted_count", 0)
+        self.sample_from_expired_count = state.get("sample_from_expired_count", 0)
 
         dump_actions = state["_actions"]
         # 重建 _actions 和 _observations: 与replaymeta相关
@@ -992,6 +1024,7 @@ class ReplayBuffer:
         """
         if isinstance(file_path, str):
             file_path = Path(file_path)
+        file_path.mkdir(parents=True, exist_ok=True)
 
         # save dataloader
         dataloader_path = file_path / "dataloader"

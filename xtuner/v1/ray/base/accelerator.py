@@ -196,6 +196,25 @@ class SingleAcceleratorWorker:
         else:
             raise ValueError(f"Unsupported accelerator type: {self.accelerator}")
 
+    def get_logical_local_rank(self) -> int:
+        """Resolve the assigned accelerator id to the logical local rank.
+
+        Ray reports accelerator ids in the physical numbering space. Torch selects devices from the current visible-
+        device list, which is indexed logically from zero after applying visibility masks.
+        """
+        accelerator_id = str(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
+        visible_devices = os.environ.get(self.device_visible_env_name)
+        if visible_devices is None:
+            return int(accelerator_id)
+
+        visible_device_ids = [device_id.strip() for device_id in visible_devices.split(",") if device_id.strip()]
+        if accelerator_id not in visible_device_ids:
+            raise ValueError(
+                f"Assigned accelerator id {accelerator_id} is not present in "
+                f"{self.device_visible_env_name}={visible_devices}."
+            )
+        return visible_device_ids.index(accelerator_id)
+
     def setup_distributed(self, rank: int, master_addr: str, master_port: int, world_size: int):
         """Set up the distributed environment for the worker.
 
@@ -215,8 +234,7 @@ class SingleAcceleratorWorker:
         os.environ["MASTER_PORT"] = str(master_port)
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
-        os.environ["LOCAL_RANK"] = str(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
-
+        os.environ["LOCAL_RANK"] = str(self.get_logical_local_rank())
         # backend 参数是指定通信后端，不是从环境变量获取
         # - 'nccl': NVIDIA GPU 间通信（推荐用于 GPU）
         # - 'gloo': CPU 通信或跨平台
