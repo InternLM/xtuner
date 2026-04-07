@@ -19,6 +19,8 @@ from xtuner.v1.utils import get_logger
 
 from .base_env import BaseEnvironment
 
+logger = get_logger()
+
 
 def check_dead_actors():
     # 获取所有 Actor 的列表
@@ -61,6 +63,9 @@ class AgentEnvironment(BaseEnvironment):
         sample_params = sample_params.model_dump() if sample_params else {}
 
         async def _inner_agent_call(item):
+            if item.env.rollout.state == RolloutState.COMPLETED:
+                logger.debug(f'Rollout already completed for item {item.uid.observation_id}, skip agent call.')
+                return 'Passed'
             self.agent.reset(session_id=item.uid.observation_id, recursive=True)
             if 'agent_state_dict' in item.env.rollout.extra_info:
                 self.agent.load_state_dict(
@@ -70,17 +75,19 @@ class AgentEnvironment(BaseEnvironment):
             try:
                 return await self.agent(*agent_inputs, session_id=item.uid.observation_id, **sample_params)
             except BaseException as exc:
-                get_logger().error(
+                logger.error(
                     f'[Agent Inference Error] {exc}. Dead actors: {check_dead_actors()}\n{traceback.format_exc()}'
                 )
                 return 'Failed'
 
         results = await asyncio.gather(*[_inner_agent_call(sample) for sample in group_data_items])
-        aborted_data_items, completed_data_items = [], []
+        passed_data_items, completed_data_items = [], []
         for sample, message in zip(group_data_items, results):
             if message == 'Failed':
                 continue
-            if message.finish_reason == 'abort':
+            if message == 'Passed':
+                passed_data_items.append(sample)
+            elif message.finish_reason == 'abort':
                 sample.env.rollout.state = RolloutState.ABORTED
                 agent_state_dict = self.agent.state_dict(sample.uid.observation_id)
                 # remove routed_experts from message extra_info to avoid serialization issue
@@ -88,11 +95,11 @@ class AgentEnvironment(BaseEnvironment):
                     for msg in state:
                         msg['extra_info'].pop('routed_experts', None)
                 sample.env.rollout.extra_info['agent_state_dict'] = agent_state_dict
-                aborted_data_items.append(sample)
+                passed_data_items.append(sample)
             else:
                 completed_data_items.append(sample)
         completed_data_items: list = self.postprocess_func(self, completed_data_items)
-        return aborted_data_items + (
+        return passed_data_items + (
             await completed_data_items if inspect.iscoroutinefunction(self.postprocess_func) else completed_data_items
         )
 
