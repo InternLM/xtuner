@@ -13,8 +13,8 @@ import httpx
 import numpy as np
 import ray
 import requests  # type: ignore[import-untyped]
-import torch
 from packaging.version import Version
+from ray import ObjectRef
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from transformers import AutoTokenizer
@@ -152,6 +152,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.receive_abort_request.clear()
         self.launch_server()
         return (self.rank, self.server_url)
+
+    def _decode_routed_experts(self, routed_experts: Any, meta_info: Dict[str, Any]) -> Any:
+        return routed_experts
 
     def set_engine_rank_mesh_array(self, engine_rank_mesh_array: list[list[int]]):
         self.engine_rank_mesh_array = engine_rank_mesh_array
@@ -360,7 +363,7 @@ class RolloutWorker(SingleAcceleratorWorker):
     ) -> RLRolloutResponseItem:
         uid = extra_info.get("action_id", str(uuid.uuid4()))
         action_id = extra_info.get("action_id", str(uuid.uuid4()))
-        root_id = extra_info.get("action_id", str(uuid.uuid4()))
+        root_id = extra_info.get("root_id", str(uuid.uuid4()))
         response = None
         cur_retry_times = 0
 
@@ -568,28 +571,18 @@ class RolloutWorker(SingleAcceleratorWorker):
                     routed_experts = response["meta_info"].pop("routed_experts")  # token[layer[expert]]
                     if routed_experts is not None and not exist_history_routed_experts:
                         # 不存在历史专家，先把当前专家存起来
-                        if isinstance(routed_experts, str):
-                            import base64
-
-                            data = base64.b64decode(routed_experts)
-                            routed_experts = ray.cloudpickle.loads(data)
-                            del data
-                        else:
-                            routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                        routed_experts = self._decode_routed_experts(routed_experts, response["meta_info"])
+                        if not isinstance(routed_experts, ObjectRef):
                             routed_experts = ray.put(routed_experts)
                         extra_info["routed_experts"] = routed_experts
                     elif routed_experts is not None and exist_history_routed_experts:
                         # 存在历史专家，则不进行put 操作，直接进行concat
-                        if isinstance(routed_experts, str):
-                            import base64
-
-                            data = base64.b64decode(routed_experts)
-                            routed_experts = ray.cloudpickle.loads(data)
+                        routed_experts = self._decode_routed_experts(routed_experts, response["meta_info"])
+                        if isinstance(routed_experts, ObjectRef):
                             cur_routed_experts = await routed_experts  # n,layer,expert
                             ray.internal.free(routed_experts, local_only=False)
                             del data
                         else:
-                            routed_experts = torch.tensor(routed_experts)  # n,layer,expert
                             cur_routed_experts = routed_experts
 
                         history_routed_experts = await input_extra_info["routed_experts"]  # n, layer, expert

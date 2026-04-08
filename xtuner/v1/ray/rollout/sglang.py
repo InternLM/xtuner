@@ -1,10 +1,13 @@
+import base64
 import os
 from typing import Any, Dict, List, Union
 
+import numpy as np
 import requests
+import torch
 from urllib3.exceptions import NewConnectionError
 
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
@@ -29,6 +32,11 @@ class SGLangWorker(RolloutWorker):
         self.endpoints["generate"] = "generate"
         self.endpoints["v1/chat/completions"] = "v1/chat/completions"
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path, trust_remote_code=True)
+        self.model_config = AutoConfig.from_pretrained(self.config.model_path, trust_remote_code=True)
+        text_config = getattr(self.model_config, "text_config", self.model_config)
+        self.model_type = getattr(text_config, "model_type", getattr(self.model_config, "model_type", None))
+        self.routed_experts_num_hidden_layers = getattr(text_config, "num_hidden_layers", None)
+        self.routed_experts_num_experts_per_tok = getattr(text_config, "num_experts_per_tok", None)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
@@ -141,6 +149,37 @@ class SGLangWorker(RolloutWorker):
         self.flush_cache()
         return self._make_request("release_memory_occupation")
 
+    def _decode_routed_experts(self, routed_experts: Any, meta_info: Dict[str, Any]):
+        if not isinstance(routed_experts, str):
+            return super()._decode_routed_experts(routed_experts, meta_info)
+
+        prompt_tokens = meta_info.get("prompt_tokens", 0)
+        completion_tokens = meta_info.get("completion_tokens", 0)
+        num_tokens = prompt_tokens + completion_tokens - 1
+        assert num_tokens > 0, (
+            f"Unexpected routed_experts token count: prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}"
+        )
+        assert self.routed_experts_num_hidden_layers is not None, (
+            "num_hidden_layers is required to decode routed_experts"
+        )
+        assert self.routed_experts_num_experts_per_tok is not None, (
+            "num_experts_per_tok is required to decode routed_experts"
+        )
+
+        routed_experts_flat = np.frombuffer(base64.b64decode(routed_experts), dtype=np.int32)
+        expected_size = num_tokens * self.routed_experts_num_hidden_layers * self.routed_experts_num_experts_per_tok
+        assert routed_experts_flat.size == expected_size, (
+            f"Unexpected routed_experts size {routed_experts_flat.size}, expected {expected_size}. "
+            f"num_tokens={num_tokens}, num_hidden_layers={self.routed_experts_num_hidden_layers}, "
+            f"num_experts_per_tok={self.routed_experts_num_experts_per_tok}"
+        )
+        routed_experts_array = routed_experts_flat.reshape(
+            num_tokens,
+            self.routed_experts_num_hidden_layers,
+            self.routed_experts_num_experts_per_tok,
+        )
+        return torch.from_numpy(routed_experts_array.copy())
+
     def _transform_rollout_config_to_server_configs(self):
         # remove the CUDA_VISIBLE_DEVICES set by ray and use base_gpu_id
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
@@ -150,55 +189,70 @@ class SGLangWorker(RolloutWorker):
         sglang_config_kwargs = {
             k.replace("sglang_", ""): v for k, v in extra_config.items() if k.startswith("sglang_")
         }
-        grammar_backend = sglang_config_kwargs.get(
-            "grammar_backend", None
-        )  # for intern-s1 series models, have to set the grammar_backend to "none"
         log_level = sglang_config_kwargs.get("log_level", "error")
         log_level_http = sglang_config_kwargs.get("log_level_http", "error")
-        sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
         num_gpus_per_engine = (
             self.config.expert_parallel_size
             if self.config.expert_parallel_size > 1
             else self.config.tensor_parallel_size
         )
-        sglang_server_args.host = self.host
-        sglang_server_args.port = self.server_port
-        sglang_server_args.nccl_port = self.nccl_port
-        sglang_server_args.dist_init_addr = self.dist_init_addr
-        sglang_server_args.base_gpu_id = self.rank % self.config.gpus_per_node
-        sglang_server_args.gpu_id_step = 1
-        sglang_server_args.nnodes = max(1, num_gpus_per_engine // self.config.gpus_per_node)
-        sglang_server_args.skip_server_warmup = True
-        sglang_server_args.mem_fraction_static = self.config.gpu_memory_utilization
-        # note: 非共卡模式下无需设置,共卡模式下需要offload必须设置，否则显存释放不了
-        sglang_server_args.enable_memory_saver = True
-
+        tp_size = num_gpus_per_engine if self.config.expert_parallel_size > 1 else self.config.tensor_parallel_size
+        ep_size = num_gpus_per_engine if self.config.expert_parallel_size > 1 else self.config.expert_parallel_size
+        nnodes = max(1, num_gpus_per_engine // self.config.gpus_per_node)
+        node_rank = self.rank // self.config.gpus_per_node if nnodes > 1 else 0
+        init_kwargs = dict(
+            model_path=self.config.model_path,
+            trust_remote_code=True,
+            host=self.host,
+            port=self.server_port,
+            nccl_port=self.nccl_port,
+            dist_init_addr=self.dist_init_addr,
+            base_gpu_id=self.rank % self.config.gpus_per_node,
+            gpu_id_step=1,
+            nnodes=nnodes,
+            node_rank=node_rank,
+            skip_server_warmup=True,
+            mem_fraction_static=self.config.gpu_memory_utilization,
+            enable_memory_saver=True,
+            max_running_requests=self.config.rollout_max_batch_size_per_instance,
+            log_level=log_level,
+            log_level_http=log_level_http,
+            tp_size=tp_size,
+            ep_size=ep_size,
+        )
         if self.enable_return_routed_experts:
-            sglang_server_args.enable_return_routed_experts = True
-
-        sglang_server_args.max_running_requests = self.config.rollout_max_batch_size_per_instance
-        sglang_server_args.log_level = log_level
-        sglang_server_args.log_level_http = log_level_http
+            init_kwargs["enable_return_routed_experts"] = True
         if XTUNER_DETERMINISTIC:
-            sglang_server_args.enable_deterministic_inference = True
-            sglang_server_args.rl_on_policy_target = True
-        if self.config.expert_parallel_size > 1:
-            sglang_server_args.tp_size = num_gpus_per_engine
-            sglang_server_args.ep_size = num_gpus_per_engine
-        else:
-            sglang_server_args.tp_size = self.config.tensor_parallel_size
-            sglang_server_args.ep_size = self.config.expert_parallel_size
+            init_kwargs["enable_deterministic_inference"] = True
+            init_kwargs["rl_on_policy_target"] = "fsdp"
+            init_kwargs["attention_backend"] = "fa3"
+            init_kwargs["random_seed"] = self.config.random_seed
+            # SGLang's deterministic mode does not currently force-disable every
+            # performance-oriented runtime path. For long MoE rollouts we still
+            # observed rare trajectory divergence, so explicitly turn off the
+            # scheduler/cache/graph features that can perturb execution order.
+            init_kwargs["disable_radix_cache"] = True
+            init_kwargs["disable_overlap_schedule"] = True
+            init_kwargs["disable_cuda_graph"] = True
 
-        if grammar_backend is not None:
-            sglang_server_args.grammar_backend = grammar_backend
+        # Forward supported sglang_* extra configs to ServerArgs directly.
+        server_arg_fields = getattr(ServerArgs, "__dataclass_fields__", {})
+        for key, value in sglang_config_kwargs.items():
+            if key in server_arg_fields:
+                init_kwargs[key] = value
+            else:
+                self.logger.warning(f"Ignore unknown SGLang server arg: {key}={value!r}")
+
+        # Qwen3-MoE in sglang 0.5.9 can hit native rotary + fused KV buffer incompatibility
+        # during server startup unless fused qk_norm_rope is enabled.
+        if self.model_type == "qwen3_moe" and "enable_fused_qk_norm_rope" not in sglang_config_kwargs:
+            init_kwargs["enable_fused_qk_norm_rope"] = True
+            self.logger.info("Auto enable SGLang enable_fused_qk_norm_rope for qwen3_moe.")
 
         if self.config.context_length is not None:
-            sglang_server_args.context_length = self.config.context_length
+            init_kwargs["context_length"] = self.config.context_length
 
-        if sglang_server_args.nnodes > 1:
-            sglang_server_args.node_rank = self.rank // self.config.gpus_per_node
-        else:
-            sglang_server_args.node_rank = 0
+        sglang_server_args = ServerArgs(**init_kwargs)
 
         return sglang_server_args
 
