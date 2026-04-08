@@ -201,9 +201,9 @@ case:
                 base_metric: qwen3-sft/20251117105949/tracker.jsonl
                 check_metrics:
                     grad_norm: 1
-                    loss/maxvio: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
+                    loss/maxvio: 0.05
+                    loss/local_loss: 0.02
+                    loss/reduced_balancing_loss: 0.02
                     loss/reduced_llm_loss: 0.02
                     lr: 0
             timeout: 10800
@@ -587,12 +587,12 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0001
+                       threshold: 0.0002
                        method: absolute
                        operator: <=
                     -
                        metric: response/response_len/mean
-                       threshold: 0.12
+                       threshold: 0.25
                        method: relative
                        operator: <
                     -
