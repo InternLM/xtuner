@@ -47,7 +47,7 @@ class Qwen3DenseConfig(TransformerConfig):
 
         assert isinstance(hf_config, HFConfig)
 
-        rope_params = RopeParametersConfig.from_hf_config(hf_config)
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(hf_config)
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
@@ -59,7 +59,7 @@ class Qwen3DenseConfig(TransformerConfig):
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
-            rope_parameters=rope_params,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
@@ -112,7 +112,9 @@ class Qwen3Dense8BConfig(Qwen3DenseConfig):
     hidden_size: int = 4096
     intermediate_size: int = 12288
     rms_norm_eps: float = 1e-6
-    rope_parameters: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0))
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0)
+    )
     hidden_act: str = "silu"
 
     attention: MHAConfig = MHAConfig(
@@ -131,7 +133,9 @@ class Qwen3Dense4BConfig(Qwen3DenseConfig):
     hidden_size: int = 2560
     intermediate_size: int = 9728
     rms_norm_eps: float = 1e-6
-    rope_parameters: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=5000000.0))
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(rope_theta=5000000.0)
+    )
     hidden_act: str = "silu"
 
     attention: MHAConfig = MHAConfig(
@@ -150,7 +154,9 @@ class Qwen3Dense0P6BConfig(Qwen3DenseConfig):
     hidden_size: int = 1024
     intermediate_size: int = 3072
     rms_norm_eps: float = 1e-6
-    rope_parameters: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0))
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0)
+    )
     hidden_act: str = "silu"
 
     attention: MHAConfig = MHAConfig(

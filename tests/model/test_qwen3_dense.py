@@ -55,7 +55,7 @@ class TestQwen3Dense(DeterministicDDPTestCase):
             cfg = Qwen3Dense8BConfig()
             if not compile:
                 cfg.compile_cfg = False
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         shift_input_ids = input_ids[:, :-1]
         shifted_labels = input_ids[:, 1:]
@@ -107,7 +107,7 @@ class TestQwen3Dense(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             cfg = Qwen3Dense8BConfig(compile_cfg=False)
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             tp_size=tp_size,
@@ -158,7 +158,7 @@ class TestQwen3Dense(DeterministicDDPTestCase):
                                  use_sliding_window=use_sliding_window,
                                  max_window_layers=max_window_layers,
                                  attention=attention)
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         loss_cfg = CELossConfig()
 
         if use_sliding_window is False or max_window_layers >= num_hidden_layers:
@@ -186,7 +186,7 @@ class TestQwen3Dense(DeterministicDDPTestCase):
                                      use_sliding_window=use_sliding_window,
                                      max_window_layers=max_window_layers,
                                      attention=attention)
-                qwen_model = cfg.build().to(torch.bfloat16)
+                qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
             fsdp_config = FSDPConfig()
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_PATH, trust_remote_code=True)
@@ -221,7 +221,7 @@ class TestQwen3Dense(DeterministicDDPTestCase):
         self.create_pg(device)
         with torch.device("meta"):
             cfg = Qwen3Dense8BConfig()
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             tp_size=tp_size,

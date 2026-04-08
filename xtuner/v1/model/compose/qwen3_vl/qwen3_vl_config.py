@@ -116,7 +116,7 @@ class Qwen3VLMoE30BA3Config(Qwen3VLBaseConfig):
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig()
     text_config: Qwen3MoE30BA3Config = Qwen3VLTextMoE30BA3Config(
         max_position_embeddings=262144,
-        rope_parameters=RopeParametersConfig(
+        rope_parameters_cfg=RopeParametersConfig(
             rope_theta=5000000.0,
             rope_type="qwen3_vl",
             mrope_section=[24, 20, 20],
@@ -129,7 +129,7 @@ class Qwen3VLMoE235BA22Config(Qwen3VLBaseConfig):
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
     text_config: Qwen3MoE235BA22Config = Qwen3VLTextMoE235BA22Config(
         max_position_embeddings=262144,
-        rope_parameters=RopeParametersConfig(
+        rope_parameters_cfg=RopeParametersConfig(
             rope_theta=5000000.0,
             rope_type="qwen3_vl",
             mrope_section=[24, 20, 20],
@@ -146,7 +146,7 @@ class Qwen3VLDense4BConfig(Qwen3VLBaseConfig):
     )
     text_config: Qwen3VLTextDense4BConfig = Qwen3VLTextDense4BConfig(
         max_position_embeddings=262144,
-        rope_parameters=RopeParametersConfig(
+        rope_parameters_cfg=RopeParametersConfig(
             rope_theta=5000000.0,
             rope_type="qwen3_vl",
             mrope_section=[24, 20, 20],
@@ -159,7 +159,7 @@ class Qwen3VLDense8BConfig(Qwen3VLBaseConfig):
     projector_config: Qwen3VLProjectorConfig = Qwen3VLProjectorConfig(text_hidden_size=4096)
     text_config: Qwen3VLTextDense8BConfig = Qwen3VLTextDense8BConfig(
         max_position_embeddings=262144,
-        rope_parameters=RopeParametersConfig(
+        rope_parameters_cfg=RopeParametersConfig(
             rope_theta=5000000.0,
             rope_type="qwen3_vl",
             mrope_section=[24, 20, 20],

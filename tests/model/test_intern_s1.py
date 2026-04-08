@@ -64,7 +64,7 @@ class TestInternS1(DeterministicDDPTestCase):
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
             model_cfg.compile_cfg = False
-            interns1_model = model_cfg.build().to(torch.bfloat16)
+            interns1_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         
         interns1_model.from_hf(INTERNS1_DENSE_PATH)
         interns1_model.eval()  # avoid open drop_path
@@ -162,7 +162,7 @@ class TestInternS1(DeterministicDDPTestCase):
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
             model_cfg.compile_cfg = False
-            interns1_model = model_cfg.build().to(torch.bfloat16)
+            interns1_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         
         interns1_model.from_hf(INTERNS1_DENSE_PATH)
         interns1_model.eval()  # avoid open drop_path
@@ -238,7 +238,7 @@ class TestInternS1(DeterministicDDPTestCase):
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
             model_cfg.compile_cfg = False
-            interns1_model = model_cfg.build().to(torch.bfloat16)
+            interns1_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         
         fsdp_config = FSDPConfig(
             cpu_offload=False,
@@ -342,7 +342,7 @@ class TestInternS1(DeterministicDDPTestCase):
             model_cfg = InternS1MiniConfig()
             if not compile:
                 model_cfg.compile_cfg = False
-            interns1_model = model_cfg.build().to(torch.bfloat16)
+            interns1_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             cpu_offload=False,
@@ -394,7 +394,7 @@ class TestInternS1(DeterministicDDPTestCase):
         self.create_pg(device)
         with torch.device("meta"):
             model_cfg = InternS1MiniConfig()
-            interns1_model = model_cfg.build().to(torch.bfloat16)
+            interns1_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             tp_size=tp_size,

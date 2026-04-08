@@ -7,8 +7,7 @@ from transformers import AutoModelForCausalLM, AutoConfig
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
-from xtuner.v1.module.rope.rope import FourierEmbedding
-from xtuner.v1.module.rope.rope import RopeScalingConfig
+from xtuner.v1.module.rope.rope import FourierEmbedding, RopeParametersConfig
 from xtuner.v1.utils.device import get_device
 
 DEVICE = get_device()
@@ -36,8 +35,9 @@ class TestFoPE(DeterministicDDPTestCase):
         torch.accelerator.set_device_index(int(dist.get_rank()))
 
         # 1. create & operate
-        model_cfg = Qwen3MoE30BA3Config(rope_scaling_cfg=RopeScalingConfig(
-            type="default",
+        model_cfg = Qwen3MoE30BA3Config(rope_parameters_cfg=RopeParametersConfig(
+            rope_type="default",
+            rope_theta=1000000.0,
             # fope specific parameters
             fope_init_factor=0.1,
             fope_sep_head=True,
@@ -64,7 +64,8 @@ class TestFoPE(DeterministicDDPTestCase):
         torch.accelerator.set_device_index(int(dist.get_rank()))
 
         fope_scaling_kwargs = dict(
-            type="default",
+            rope_type="default",
+            rope_theta=1000000.0,
             fope_init_factor=0.1,
             fope_sep_head=True,
             num_inv_freq=40,
@@ -73,7 +74,7 @@ class TestFoPE(DeterministicDDPTestCase):
         # 1.create xtuner fope and forward
         model_cfg = Qwen3MoE30BA3Config(
             max_position_embeddings=seq_len,
-            rope_scaling_cfg=RopeScalingConfig(
+            rope_parameters_cfg=RopeParametersConfig(
                 **fope_scaling_kwargs,
             ))
         fope = FourierEmbedding(model_cfg).to(DEVICE)
@@ -93,7 +94,8 @@ class TestFoPE(DeterministicDDPTestCase):
             QWEN3_MOE_FOPE_PATH,
             trust_remote_code=True,
         )
-        hf_config.rope_scaling = fope_scaling_kwargs
+        # TODO: change into hf_config.rope_parameters when old version of transformers is not supported
+        hf_config.rope_scaling = model_cfg.rope_parameters_cfg.to_rope_parameters_dict()
         hf_config.max_position_embeddings = seq_len
         print(f"hf_config: {hf_config}")
 

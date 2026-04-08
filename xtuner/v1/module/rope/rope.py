@@ -182,6 +182,10 @@ class RopeParametersConfig(BaseModel):
 
         return result
 
+    def to_rope_parameters_dict(self) -> dict | None:
+        """Convert to rope_parameters dict format for HF compatibility."""
+        return self.model_dump()
+
     @classmethod
     def from_hf_config(cls, hf_config, default_value_dict=None) -> Optional["RopeParametersConfig"]:
         """Create RopeParametersConfig from HF config with version
@@ -255,18 +259,18 @@ def compute_default_rope_parameters(
     config formats.
 
     Supports:
-    - New format: config.rope_parameters (RopeParametersConfig from base.py)
+    - New format: config.rope_parameters_cfg (RopeParametersConfig from base.py)
     - Old format: config.rope_theta + config.rope_scaling_cfg
     """
     from xtuner.v1.model.base import TransformerConfig
 
     config = cast(TransformerConfig, config)
 
-    # Try new format first: rope_parameters
-    if config.rope_parameters is not None:
-        rope_params = config.rope_parameters
-        base = getattr(rope_params, "rope_theta", 10000.0)
-        partial_rotary_factor = getattr(rope_params, "partial_rotary_factor", 1.0)
+    # Try new format first: rope_parameters_cfg
+    if config.rope_parameters_cfg is not None:
+        rope_parameters_cfg = config.rope_parameters_cfg
+        base = getattr(rope_parameters_cfg, "rope_theta", 10000.0)
+        partial_rotary_factor = getattr(rope_parameters_cfg, "partial_rotary_factor", 1.0)
     else:
         # Fall back to old format
         base = getattr(config, "rope_theta", 10000.0)
@@ -297,9 +301,9 @@ class RotaryEmbedding(nn.Module):
         self.rope_type = "default"
         self.config = config
 
-        # Get rope_type from rope_parameters (new format) or rope_scaling_cfg (old format)
-        if config.rope_parameters is not None:
-            self.rope_type = config.rope_parameters.rope_type
+        # Get rope_type from rope_parameters_cfg (new format) or rope_scaling_cfg (old format)
+        if config.rope_parameters_cfg is not None:
+            self.rope_type = config.rope_parameters_cfg.rope_type
         elif config.rope_scaling_cfg is not None:
             self.rope_type = config.rope_scaling_cfg.type
 
@@ -526,9 +530,9 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
-        # Get mrope_section from rope_parameters (new format) or rope_scaling_cfg (old format)
-        if config.rope_parameters is not None:
-            self.mrope_section = config.rope_parameters.mrope_section
+        # Get mrope_section from rope_parameters_cfg (new format) or rope_scaling_cfg (old format)
+        if config.rope_parameters_cfg is not None:
+            self.mrope_section = config.rope_parameters_cfg.mrope_section
         elif config.rope_scaling_cfg is not None:
             self.mrope_section = config.rope_scaling_cfg.mrope_section
         else:
