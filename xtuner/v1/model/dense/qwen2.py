@@ -46,7 +46,7 @@ class Qwen2DenseConfig(TransformerConfig):
 
         assert isinstance(hf_config, HFConfig)
 
-        rope_params = RopeParametersConfig.from_hf_config(hf_config)
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(hf_config)
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
@@ -58,7 +58,7 @@ class Qwen2DenseConfig(TransformerConfig):
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
-            rope_parameters=rope_params,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
@@ -112,7 +112,7 @@ class Qwen2Dense7BConfig(Qwen2DenseConfig):
     hidden_size: int = 3584
     intermediate_size: int = 18944
     rms_norm_eps: float = 1e-06
-    rope_parameters: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=10000.0))
+    rope_parameters_cfg: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=10000.0))
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         num_attention_heads=28,

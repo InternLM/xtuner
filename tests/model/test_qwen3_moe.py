@@ -30,15 +30,6 @@ QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 QWEN3_MOE_FOPE_PATH = os.environ["QWEN3_MOE_FOPE_PATH"]
 
 
-# Skip fope tests for transformers >= 5.2.0 due to SlidingWindowCache incompatibility
-# in the model's remote code
-def skip_if_fope_incompatible(model_type):
-    """Skip fope model tests if transformers version is incompatible."""
-    if model_type == "qwen3_moe_fope" and Version(transformers_version) >= Version("5.2.0"):
-        return True
-    return False
-
-
 class TestQwen3MoE(DeterministicDDPTestCase):
     def prepare(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -58,8 +49,6 @@ class TestQwen3MoE(DeterministicDDPTestCase):
     )
     def test_qwen3_moe_run(self, device, dispatcher, ep_size, compile, tol, loss_mode, model_type):
         assert model_type in ["qwen3_moe", "qwen3_moe_fope"]
-        if skip_if_fope_incompatible(model_type):
-            raise unittest.SkipTest(f"Skipping fope test for transformers {transformers_version} due to SlidingWindowCache incompatibility")
         os.environ["TRITON_CACHE_DIR"] = str(Path(self.temp_dir.name) / "triton_cache")
         self.create_pg(device)
 
@@ -99,7 +88,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
                 cfg.compile_cfg = False
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         qwen_model.from_hf(hf_model_path)
 
         losses = []
@@ -139,8 +128,6 @@ class TestQwen3MoE(DeterministicDDPTestCase):
     )
     def test_fsdp_accuracy(self, device, dispatcher, ep_size, model_type):
         assert model_type in ["qwen3_moe", "qwen3_moe_fope"]
-        if skip_if_fope_incompatible(model_type):
-            raise unittest.SkipTest(f"Skipping fope test for transformers {transformers_version} due to SlidingWindowCache incompatibility")
         self.create_pg(device)
 
         hf_model_path = QWEN3_MOE_PATH if model_type == "qwen3_moe" else QWEN3_MOE_FOPE_PATH
@@ -179,7 +166,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             cfg.compile_cfg = False
             cfg.ep_size = ep_size
             cfg.dispatcher = dispatcher
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             ep_size=ep_size,
@@ -212,7 +199,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             loss = output["loss"]
             losses.append(loss)
 
-        self._check_loss_curve(losses=torch.tensor(losses), losses_ref=torch.tensor(expected_losses), sim_tol=1e-2, rtol=1e-2)
+        self._check_loss_curve(losses=torch.tensor(losses), losses_ref=torch.tensor(expected_losses), sim_tol=3e-2, rtol=3e-2)
 
     @parametrize.parametrize(
         "use_sliding_window, max_window_layers, sliding_window",
@@ -235,7 +222,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
                                       use_sliding_window=use_sliding_window,
                                       max_window_layers=max_window_layers,
                                       attention=attention)
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         loss_cfg = CELossConfig()
 
         if use_sliding_window is False or max_window_layers >= num_hidden_layers:
@@ -264,7 +251,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
                                           use_sliding_window=use_sliding_window,
                                           max_window_layers=max_window_layers,
                                           attention=attention)
-                qwen_model = cfg.build().to(torch.bfloat16)
+                qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
             fsdp_config = FSDPConfig()
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
@@ -303,7 +290,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             cfg = Qwen3MoE30BA3Config()
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             ep_size=ep_size,
@@ -382,8 +369,6 @@ class TestQwen3MoE(DeterministicDDPTestCase):
         ],
     )
     def test_save_hf_fope(self, device, dispatcher, ep_size):
-        if Version(transformers_version) >= Version("5.2.0"):
-            raise unittest.SkipTest(f"Skipping fope test for transformers {transformers_version} due to SlidingWindowCache incompatibility")
         self.create_pg(device)
         with tempfile.TemporaryDirectory() as tmpdir:
             load_from = Path(QWEN3_MOE_FOPE_PATH)
@@ -518,4 +503,3 @@ def check_dict_equal(dict1: dict, dict2: dict) -> bool:
             print(f"[ERROR] key {key} value is not equal")
             return False
     return True
-

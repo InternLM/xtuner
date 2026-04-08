@@ -260,7 +260,7 @@ class Qwen3_5_VLTextMoE35BA3BConfig(Qwen3_5_VLTextMoEConfig):
         norm_topk_prob=True,
         router_scaling_factor=1.0,
     )
-    rope_parameters: RopeParametersConfig = Field(
+    rope_parameters_cfg: RopeParametersConfig = Field(
         default_factory=lambda: RopeParametersConfig(
             rope_theta=10000000.0,
             rope_type="qwen3_vl",
