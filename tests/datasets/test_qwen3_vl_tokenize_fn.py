@@ -115,7 +115,7 @@ class TestMLLMTokenizeFn(TestCase):
                 for msg in messages:
                     if not isinstance(msg['content'], list):
                         msg['content'] = [{"type": "text", "text": msg['content']}]
-                
+
                 ret = self.processor.apply_chat_template(messages,
                                                          add_generation_prompt=False,
                                                          tokenize=True,

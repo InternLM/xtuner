@@ -224,7 +224,7 @@ class TestMLLMTokenizeFn(TestCase):
                                               add_vision_id=add_vision_id).build(
             self.tokenizer)
         data_path = 'tests/resource/mllm_sft_video_example_data_new.jsonl'
-        hf_data_path = 'tests/resource/mllm_sft_video_hf_example_data.jsonl'
+        hf_data_path = 'tests/resource/mllm_sft_video_hf_example_data_new.jsonl'
         hf_raw_datas = []
         with open(hf_data_path) as f:
             for line in f:
