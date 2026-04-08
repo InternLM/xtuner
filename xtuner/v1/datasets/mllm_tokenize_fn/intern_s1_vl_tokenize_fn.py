@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 
+import copy
 import os
 import time
 from itertools import chain
@@ -86,7 +87,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
         visual_pack_weight: float = 0.0,
         hash: str | None = None,
         only_prompt: bool = False,
-        template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
+        chat_template: Literal["intern-s1", "internvl-3.5"] = "intern-s1",
         debug: bool = False,
         oss_time_log_thr: int = 10,  # 10s
         add_eos_token: bool = True,  # for mllm pretrain
@@ -142,7 +143,7 @@ class InternS1VLTokenizeFunction(BaseMLLMTokenizeFunction[InternS1DataItem]):
             f"_{self.min_dynamic_patch}_{self.max_dynamic_patch}_{max_length}"
         )
 
-        self.chat_template = CHAT_TEMPLATE_MAP[template_name]
+        self.chat_template = copy.deepcopy(CHAT_TEMPLATE_MAP[chat_template])
         if system_message is not None:
             self.chat_template.default_system = system_message
 
@@ -479,7 +480,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     max_num_frames: int = 24
     data_augment: bool = False
     oss_loader_cfg: OSSLoaderConfig | None = None
-    template_name: Literal["intern-s1", "internvl-3.5"] = "intern-s1"
+    chat_template: Literal["intern-s1", "internvl-3.5"] = "intern-s1"
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -497,7 +498,7 @@ class InternS1VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
             min_num_frames=self.min_num_frames,
             max_num_frames=self.max_num_frames,
             oss_loader_cfg=self.oss_loader_cfg,
-            template_name=self.template_name,
+            chat_template=self.chat_template,
             llm_pack_weight=self.llm_pack_weight,
             visual_pack_weight=self.visual_pack_weight,
             hash=self.hash,

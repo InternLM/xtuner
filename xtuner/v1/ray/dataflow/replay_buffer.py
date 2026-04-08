@@ -278,7 +278,8 @@ class DatasetSampler:
         multimodal_train_info = data.pop("multimodal_train_info", {})
         if "pixel_values" in multimodal_train_info:
             multimodal_train_info["pixel_values"] = ray.put(multimodal_train_info["pixel_values"])
-            data["multimodal_train_info"] = multimodal_train_info
+        # If it is a mixture of pure text and image data, there will be position_id but no pixel_values
+        data["multimodal_train_info"] = multimodal_train_info
 
         for data_item in group_data_item:
             data_item.uid = RLUIDItem(
