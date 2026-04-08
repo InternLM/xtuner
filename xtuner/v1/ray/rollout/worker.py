@@ -581,7 +581,6 @@ class RolloutWorker(SingleAcceleratorWorker):
                         if isinstance(routed_experts, ObjectRef):
                             cur_routed_experts = await routed_experts  # n,layer,expert
                             ray.internal.free(routed_experts, local_only=False)
-                            del data
                         else:
                             cur_routed_experts = routed_experts
 
