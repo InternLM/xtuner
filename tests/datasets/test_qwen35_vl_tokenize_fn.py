@@ -153,7 +153,7 @@ class TestMLLMTokenizeFn(TestCase):
 
     def test_calc_frame_info(self):
         self.tokenize_fn.state = "cache"
-        data_path = 'tests/resource/mllm_video_frame_test_data.jsonl'
+        data_path = 'tests/resource/mllm_video_frame_test_data_new.jsonl'
         with open(data_path) as f:
             for i, line in enumerate(f):
                 raw_data = json.loads(line)

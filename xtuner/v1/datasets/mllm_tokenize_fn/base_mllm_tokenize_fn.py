@@ -31,16 +31,9 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
             content = msg["content"]
             if isinstance(content, list):
                 for c in content:
-                    if c["type"] == "image_url" or c["type"] == "image":
-                        if c["type"] == "image_url":
-                            image_paths.append(c["image_url"]["url"])
-                        else:
-                            image_paths.append(c["image"]["url"])
-
-                        if "image_url" in c:
-                            key = "image_url"
-                        else:
-                            key = "image"
+                    if c["type"] in ("image_url", "image"):
+                        key = "image_url" if "image_url" in c else "image"
+                        image_paths.append(c[key]["url"])
                         if "image_wh" in c[key]:
                             image_wh = c[key]["image_wh"]
                             if isinstance(image_wh[0], (list, tuple)):
@@ -50,14 +43,10 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                                 image_wh = image_wh[0]
                             image_wh_list.append(image_wh)
                             assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
-                    if c["type"] == "video_url" or c["type"] == "video":
-                        if "video_url" in c:
-                            video_paths.append(c["video_url"]["url"])
-                            video_wh = c["video_url"].get("image_wh")
-                        else:
-                            video_paths.append(c["video"]["url"])
-                            video_wh = c["video"].get("image_wh")
-
+                    if c["type"] in ("video_url", "video"):
+                        key = "video_url" if "video_url" in c else "video"
+                        video_paths.append(c[key]["url"])
+                        video_wh = c[key].get("image_wh")
                         if video_wh is not None:
                             if isinstance(video_wh[0], (list, tuple)):
                                 assert len(video_wh) == 1, (
@@ -68,11 +57,6 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                             assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
 
                         video_extra_dict = {}
-
-                        if "video_url" in c:
-                            key = "video_url"
-                        else:
-                            key = "video"
 
                         if "origin_video_length" in c[key]:
                             video_extra_dict["origin_video_length"] = c[key]["origin_video_length"]

@@ -1,3 +1,4 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import copy
 import json
 from typing import Dict, List, Optional
@@ -293,35 +294,6 @@ def qwen35_tokenize_fn_fastspeed(
     return input_ids, labels
 
 
-def qwen35_process_text_and_loss_mask(text: str, loss_mask: list[bool], tokenizer: PreTrainedTokenizer):
-    assert tokenizer is not None
-    assert len(text) == len(loss_mask), (
-        "text and loss_mask must have the same length. Got {len(text)} and {len(loss_mask)}."
-    )
-
-    try:
-        encoded = tokenizer(
-            text,
-            return_offsets_mapping=True,
-            add_special_tokens=False,
-        )
-        input_ids = encoded["input_ids"]
-        offset_mapping = encoded["offset_mapping"]
-    except Exception:
-        input_ids, offset_mapping = get_offset_mapping(tokenizer, text)
-
-    labels = []
-    for token_id, (start, end) in zip(input_ids, offset_mapping):
-        if start == end:
-            labels.append(-100)
-        elif any(loss_mask[i] for i in range(start, end)):
-            labels.append(token_id)
-        else:
-            labels.append(-100)
-
-    return input_ids, labels
-
-
 def qwen35_tokenize_fn_slowspeed(tokenizer, messages: List[Dict[str, str]], tools=None, add_vision_id=False, **kwargs):
     """
     终极稳定版 Tokenize：基于 Token 级别的绝对对齐 (椒盐算法升级版)。
@@ -397,6 +369,7 @@ def qwen35_tokenize_fn_slowspeed(tokenizer, messages: List[Dict[str, str]], tool
     return total_ids, labels
 
 
+# 我们采用全新逻辑，因此不需要继承 BaseChatMessages，后续之前的 ChatMessages 逻辑全部删除
 class Qwen35ChatMessages(BaseModel):
     model_config = ConfigDict(extra="forbid")
     messages: List[dict]  # 暂时不做校验
