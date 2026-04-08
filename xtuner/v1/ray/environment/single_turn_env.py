@@ -105,6 +105,7 @@ class RawSingleTurnEnvironment(BaseEnvironment):
                 update_sample_params = sample_params
                 session_id = None
                 if XTUNER_DETERMINISTIC:
+                    update_sample_params = copy.deepcopy(sample_params)
                     update_sample_params.sampling_seed = self.rollout_cfg.random_seed + i
                     session_id = build_deterministic_session_id(self.environment, sample)
 

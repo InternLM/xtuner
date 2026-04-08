@@ -222,6 +222,8 @@ def free_object_refs(refs: List[ObjectRef]) -> None:
         ray._private.internal_api.free(valid_refs, local_only=False)
     except Exception:
         ray.internal.free(valid_refs, local_only=False)
+
+
 def deterministic_item_sort_key(sample) -> tuple[int, int, int, int]:
     return (
         sample.uid.root_id,

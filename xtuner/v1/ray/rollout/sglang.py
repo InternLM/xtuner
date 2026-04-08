@@ -227,10 +227,6 @@ class SGLangWorker(RolloutWorker):
             init_kwargs["rl_on_policy_target"] = "fsdp"
             init_kwargs["attention_backend"] = "fa3"
             init_kwargs["random_seed"] = self.config.random_seed
-            # SGLang's deterministic mode does not currently force-disable every
-            # performance-oriented runtime path. For long MoE rollouts we still
-            # observed rare trajectory divergence, so explicitly turn off the
-            # scheduler/cache/graph features that can perturb execution order.
             init_kwargs["disable_radix_cache"] = True
             init_kwargs["disable_overlap_schedule"] = True
             init_kwargs["disable_cuda_graph"] = True
