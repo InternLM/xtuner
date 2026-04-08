@@ -146,12 +146,12 @@ class ParallelSampler(Sampler):
                 f"is different from the current shuffle ({self.shuffle})."
             )
 
-    def get_state_dict(self, step: int):
+    def get_state_dict(self, total_consumed_steps: int):
         # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
-        step = step % self.total_size
+        step_mod = total_consumed_steps % self.total_size
         return {
             "epoch": self.epoch,
-            "step": step,
+            "step": step_mod,
             "world_size": self.world_size,
             "shuffle": self.shuffle,
             "round_up": self.round_up,
@@ -298,17 +298,17 @@ class LengthGroupedSampler(Sampler):
             )
             self.group_size = origin_group_size
 
-    def get_state_dict(self, step: int):
+    def get_state_dict(self, total_consumed_steps: int):
         """Get the sampler state dict.
 
         Returns:
             dict: The state of the sampler.
         """
         # Attention! Do not set self.step here, or it will cause the next __iter__ to get less samples.
-        step = step % self.total_size
+        step_mod = total_consumed_steps % self.total_size
         return {
             "epoch": self.epoch,
-            "step": step,
+            "step": step_mod,
             "world_size": self.world_size,
             "round_up": self.round_up,
             "num_samples": self.num_samples,

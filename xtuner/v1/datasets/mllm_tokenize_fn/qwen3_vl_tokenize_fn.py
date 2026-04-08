@@ -6,7 +6,7 @@ import math
 import os
 from itertools import chain
 from types import SimpleNamespace
-from typing import Dict, Optional, Union
+from typing import Literal, Dict, Optional, Union
 
 import numpy as np
 import torch
@@ -292,7 +292,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         hash: str | None = None,
         add_eos_token: bool = True,  # for mllm pretrain
         add_bos_token: bool = False,  # for mllm pretrain
-        trim_memory_interval: int = 1,
+        trim_memory_interval: int = 1
     ):
         self.oss_loader = None
         self.debug = debug
@@ -354,7 +354,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"rand_video_max_frames: {self.rand_video_max_frames}"
         )
         self.chat_template_name = chat_template
-        self.chat_template = CHAT_TEMPLATE_MAP[chat_template]
+        self.chat_template = copy.deepcopy(CHAT_TEMPLATE_MAP[chat_template])
         if system_message is not None:
             self.chat_template.default_system = system_message
 
@@ -992,7 +992,6 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     model_config = ConfigDict(title="Base dataset config for xtuner", extra="forbid")
     processor_path: str
-    chat_template: str = 'qwen3-vl'
     min_pixels: int | None = None
     max_pixels: int | None = None
     oss_loader_cfg: OSSLoaderConfig | None = None
@@ -1011,6 +1010,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     add_vision_id: bool = True
 
     trim_memory_interval: int = 1
+    chat_template: Literal["qwen3-vl", "qwen3-vl-rl"] = "qwen3-vl"
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs

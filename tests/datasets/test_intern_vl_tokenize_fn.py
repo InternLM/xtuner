@@ -16,7 +16,7 @@ class TestMLLMTokenizeFn(TestCase):
         tokenizer = AutoTokenizer.from_pretrained(INTERN_VL_1B_PATH, trust_remote_code=True)
         self.tokenizer = tokenizer
         self.tokenize_fn = InternS1VLTokenizeFnConfig(model_cfg=model_cfg,
-                                                      template_name='internvl-3.5').build(tokenizer)
+                                                      chat_template='internvl-3.5').build(tokenizer)
         self.tokenize_fn.chat_template.default_system = None
         self.processor = AutoProcessor.from_pretrained(INTERN_VL_1B_PATH, trust_remote_code=True)
 

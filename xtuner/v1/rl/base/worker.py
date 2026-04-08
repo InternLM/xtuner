@@ -263,7 +263,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         self._rollout_step = 0
         self._sft_cur_epoch = 0
-        self._sft_total_consumed_samples = 0
         self._sft_total_consumed_tokens = 0
 
         if self._sft_dataloader_config is not None:
@@ -672,7 +671,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         time_before_train_step = time.time()
         data_time = time_before_train_step - time_before_get_data
         DEVICE_MODULE.reset_peak_memory_stats()
-        cur_sample_num = len(data_batch)
 
         train_step_info, grad_norm = self._train_one_step_sft(data_batch)
 
@@ -680,7 +678,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         step_time = time_after_train_step - time_before_train_step
         step_consumed_tokens = train_step_info["step_consumed_tokens"]
 
-        self._sft_total_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
         reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
         self._sft_total_consumed_tokens += reduced_step_consumed_tokens
 
@@ -1391,9 +1388,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         # Save sft dataloader
-        if self.rank == 0 and self._sft_dataloader is not None:
+        if self._sft_dataloader is not None:
             sft_dataloader_path = checkpoint_path / self._SAVE_SFT_DATALOADER_DIR
-            dataloader_state = self._sft_dataloader.get_state_dict(self._sft_total_consumed_samples)
+            dataloader_state = self._sft_dataloader.get_state_dict()
+            total_consumed_samples = dataloader_state["total_consumed_samples"]
+            if self.rank != 0:
+                return
+
             torch.save(dataloader_state, sft_dataloader_path)
 
             train_state_path = checkpoint_path / self._SAVE_SFT_TRAIN_STATE_PATH
@@ -1403,7 +1404,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                         {
                             "cur_step": self._rollout_step,
                             "cur_epoch": self._sft_cur_epoch,
-                            "total_consumed_samples": self._sft_total_consumed_samples,
+                            "total_consumed_samples": total_consumed_samples,
                             "total_consumed_tokens": self._sft_total_consumed_tokens,
                         }
                     )
@@ -1437,24 +1438,23 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         # Resume sft dataloader
-        sft_dataloader_path = resume_from / self._SAVE_SFT_DATALOADER_DIR
         if self._sft_dataloader is not None:
-            if not sft_dataloader_path.exists():
-                raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
-            dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
-            self._sft_dataloader.load_state_dict(dataloader_state)
-            self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
-
             train_state_path = resume_from / self._SAVE_SFT_TRAIN_STATE_PATH
             if not train_state_path.exists():
                 raise FileNotFoundError(f"Train state path {train_state_path} does not exist.")
             with train_state_path.open("r") as f:
                 train_state = json.loads(f.read())
-                self._rollout_step = train_state["cur_step"]
-                self._sft_cur_epoch = train_state["cur_epoch"]
-                self._sft_total_consumed_samples = train_state["total_consumed_samples"]
-                self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
-                self.logger.info(f"Resume sft train state from {train_state_path}")
+            self._rollout_step = train_state["cur_step"]
+            self._sft_cur_epoch = train_state["cur_epoch"]
+            self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
+            self.logger.info(f"Resume sft train state from {train_state_path}")
+
+            sft_dataloader_path = resume_from / self._SAVE_SFT_DATALOADER_DIR
+            if not sft_dataloader_path.exists():
+                raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
+            dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
+            self._sft_dataloader.load_state_dict(dataloader_state)
+            self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
 
     @ray_method
     def ready(self) -> bool:

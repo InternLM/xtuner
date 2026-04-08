@@ -260,6 +260,7 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
         extra="forbid",
         protected_namespaces=(),
     )
+    chat_template: str
     system_message: str | None = None
     max_length: int | None = None
     hash: str | None = None
