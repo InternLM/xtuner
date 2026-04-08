@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Dict, List, Optional
-from typing import Callable
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -13,11 +12,11 @@ class HybridChatTemplate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Normal Chat
-    system: str | None = None # System message format, role
+    system: str | None = None  # System message format, role
     developer: str | None = None  # Developer message format, role
-    user: str | None = None # User message format, role
-    assistant: str | None = None # Assistant message format, role
-    stop_words: List[str] | None = None # List of stop words
+    user: str | None = None  # User message format, role
+    assistant: str | None = None  # Assistant message format, role
+    stop_words: List[str] | None = None  # List of stop words
     sep: str = "\n"
     thinking: str | None = None  # Thinking message format, not role
     default_system: Optional[str] = None
@@ -62,6 +61,7 @@ class HybridChatTemplate(BaseModel):
 
     def decorate_system(self, text: str) -> str:
         """Decorate text with the `system` template."""
+        assert self.system is not None, "system template is not defined."
         return self.system.format(system=text)
 
     def decorate_developer(self, text: str) -> str:
@@ -72,6 +72,7 @@ class HybridChatTemplate(BaseModel):
 
     def decorate_assistant(self, text: str) -> str:
         """Decorate text with the `assistant` template."""
+        assert self.assistant is not None, "assistant template is not defined."
         return self.assistant.format(assistant=text)
 
     def decorate_thinking(self, text: str) -> str:
@@ -82,6 +83,7 @@ class HybridChatTemplate(BaseModel):
 
     def decorate_user(self, text: str) -> str:
         """Decorate text with the `user` template."""
+        assert self.user is not None, "user template is not defined."
         return self.user.format(user=text)
 
     def decorate_files(self, text: str) -> str:

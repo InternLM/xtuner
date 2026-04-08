@@ -4,6 +4,7 @@ from datetime import datetime
 from .chat import ChatTemplate
 from .hybrid import HybridChatTemplate
 
+
 current_date = datetime.now().strftime("%Y-%m-%d")
 
 CHAT_TEMPLATE_MAP = {
@@ -11,7 +12,7 @@ CHAT_TEMPLATE_MAP = {
         image_start_token="<|vision_start|>",
         image_end_token="<|vision_end|>",
         image_context_token="<|image_pad|>",
-        video_context_token="<|video_pad|>"
+        video_context_token="<|video_pad|>",
     ),
     "intern-s1": HybridChatTemplate(
         system="<|im_start|>system\n{system}<|im_end|>\n",

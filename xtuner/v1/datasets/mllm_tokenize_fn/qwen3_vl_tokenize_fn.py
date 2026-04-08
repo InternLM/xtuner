@@ -6,7 +6,7 @@ import math
 import os
 from itertools import chain
 from types import SimpleNamespace
-from typing import Literal, Dict, Optional, Union
+from typing import Dict, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -20,6 +20,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from xtuner.v1.data_proto.messages import ChatMessages, Qwen35ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP, HybridChatTemplate
 from xtuner.v1.utils import get_logger
+
 from ..data_item import CacheItem, QwenVL3DataItem
 from ..utils import apply_exif_orientation, generate_random_int_from_dict
 from .base_mllm_tokenize_fn import (
@@ -202,30 +203,39 @@ def replace_video_token(
     assert current_image_idx == n_image, f"VIDEO ERROR: total_image_idx: {current_image_idx} != {n_image}"
 
 
-def replace_video_timestamps(messages: list[Dict], timestamps_list: list[list[float]]):
+def replace_video_timestamps_and_num_frame(
+    messages: list[Dict], num_image_token_list: list[list[int]], timestamps_list: list[list[float]]
+):
+    if len(timestamps_list) > 0:
+        assert len(timestamps_list) == len(num_image_token_list), (
+            "timestamps should have the same length as num_image_token_list"
+        )
     video_cnt = 0
     for msg in messages:
-        if msg['role'] == "user":
-            content = msg['content']
+        if msg["role"] == "user" or msg["role"] == "pretrain":
+            content = msg["content"]
             if isinstance(content, list):
                 for item in content:
-                    if 'video' in item:
-                        video_content = item['video']
-                        timestamps = timestamps_list[video_cnt]
-                        video_content['timestamps'] = timestamps
+                    if "video" in item:
+                        video_content = item["video"]
+                        if len(timestamps_list) > 0:
+                            timestamps = timestamps_list[video_cnt]
+                            video_content["timestamps"] = timestamps
+                        if len(num_image_token_list) > 0:
+                            num_frames = num_image_token_list[video_cnt]
+                            video_content["num_frames"] = num_frames
                         video_cnt += 1
 
 
-def replace_qwen35_media_token(tokenized:dict, context_token_id: int, num_media_token_list: list[int] | list[list[int]], total_media_count: int):
+def replace_qwen35_media_token(
+    tokenized: dict, context_token_id: int, num_media_token_list: list[int] | list[list[int]], total_media_count: int
+):
     input_ids = tokenized["input_ids"]
     labels = tokenized.get("labels")
 
-    if isinstance(num_media_token_list, list):
-        # video
-        num_media_token_list = [item for sublist in num_media_token_list for item in sublist]
-    else:
-        # image
-        num_media_token_list = [num_media_token_list]
+    if isinstance(num_media_token_list[0], list):
+        # video flatten list
+        num_media_token_list = [item for sublist in num_media_token_list for item in sublist]  # type: ignore
 
     context_token_count = input_ids.count(context_token_id)
     assert context_token_count == len(num_media_token_list), (
@@ -237,7 +247,7 @@ def replace_qwen35_media_token(tokenized:dict, context_token_id: int, num_media_
     media_idx = 0
     for i, tid in enumerate(input_ids):
         if tid == context_token_id:
-            n = int(num_media_token_list[media_idx])
+            n = int(num_media_token_list[media_idx])  # type: ignore
             new_input_ids.extend([context_token_id] * n)
             if new_labels is not None and labels is not None:
                 lbl = labels[i]
@@ -267,7 +277,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         tokenizer: PreTrainedTokenizer,
         processor_path: str,
         anno_name: str,
-        chat_template: str = 'qwen3-vl', # qwen3.5-vl or qwen3-vl
+        chat_template: str = "qwen3-vl",  # qwen3.5-vl or qwen3-vl
         min_pixels: int | None = None,  # Max image pixels (H*W) for image
         max_pixels: int | None = None,  # Min image pixels (H*W) for image
         video_min_frames: int | None = None,  # Min frames per video
@@ -292,7 +302,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         hash: str | None = None,
         add_eos_token: bool = True,  # for mllm pretrain
         add_bos_token: bool = False,  # for mllm pretrain
-        trim_memory_interval: int = 1
+        trim_memory_interval: int = 1,
     ):
         self.oss_loader = None
         self.debug = debug
@@ -432,7 +442,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         is_pretrain = False
         if self.chat_template_name == "qwen3.5-vl":
             messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
-            if len(data_item["messages"]) == 1 and data_item["messages"][0]['role'] == "pretrain":
+            if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
         else:
             messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
@@ -489,10 +499,12 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         is_pretrain = False
         if self.chat_template_name == "qwen3.5-vl":
             messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
-            if len(data_item["messages"]) == 1 and data_item["messages"][0]['role'] == "pretrain":
+            if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
             tokenized = messages.tokenize(self.tokenizer, self.chat_template, add_vision_id=self.add_vision_id)
-            replace_qwen35_media_token(tokenized, self.img_context_token_id, sum_media_grid_thw, sum_media_grid_thw.sum())
+            replace_qwen35_media_token(
+                tokenized, self.img_context_token_id, sum_media_grid_thw, sum_media_grid_thw.sum()
+            )
         else:
             messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
             replace_image_token(messages, self.chat_template, sum_media_grid_thw, add_vision_id=self.add_vision_id)
@@ -539,15 +551,15 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         visual_processed = self.image_processor.preprocess(image_data_list, return_tensors="pt")
         image_tensor = visual_processed["pixel_values"]
         grid_thw = visual_processed["image_grid_thw"]  # b,3
-        grid_thw_merged = [merged_thw.prod() // self.merge_length for merged_thw in grid_thw]  # type: ignore
+        grid_thw_merged = [merged_thw.prod().item() // self.merge_length for merged_thw in grid_thw]  # type: ignore
 
         is_pretrain = False
         if self.chat_template_name == "qwen3.5-vl":
             messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
-            if len(data_item["messages"]) == 1 and data_item["messages"][0]['role'] == "pretrain":
+            if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
             tokenized = messages.tokenize(self.tokenizer, self.chat_template, add_vision_id=self.add_vision_id)
-            replace_qwen35_media_token(tokenized, self.img_context_token_id, grid_thw_merged, torch.stack(grid_thw_merged, dim=0).sum())
+            replace_qwen35_media_token(tokenized, self.img_context_token_id, grid_thw_merged, sum(grid_thw_merged))
         else:
             messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
             if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
@@ -583,7 +595,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
         # 如果图片被截断，则该数据要丢弃
         num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()
-        num_image_tokens_2 = torch.stack(grid_thw_merged, dim=0).sum()
+        num_image_tokens_2 = sum(grid_thw_merged)
         # assert 会被捕获，该数据会丢弃
         assert num_image_tokens_1 == num_image_tokens_2, (
             f"num_image_tokens of input_ids {num_image_tokens_1} != num_image_tokens of media_grid_thw {num_image_tokens_2}, "
@@ -779,25 +791,24 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             frame_seqlen = grid_h * grid_w // self.merge_length
             num_image_token_list.append([frame_seqlen] * grid_t)
             total_sum_media_grid_thw += sum_media_grid_thw
-        
+
         is_pretrain = False
         if self.chat_template_name == "qwen3.5-vl":
-            if len(timestamps_list) > 0:
-                assert len(timestamps_list) == len(num_image_token_list), (
-                    "timestamps should have the same length as num_image_token_list"
-                )
-                replace_video_timestamps(data_item["messages"], timestamps_list)
-        
+            replace_video_timestamps_and_num_frame(data_item["messages"], num_image_token_list, timestamps_list)
             messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
-            if len(data_item["messages"]) == 1 and data_item["messages"][0]['role'] == "pretrain":
+            if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
-            tokenized = messages.tokenize(self.tokenizer, self.chat_template)
-            replace_qwen35_media_token(tokenized, self.video_context_token_id, num_image_token_list, total_sum_media_grid_thw)
+            tokenized = messages.tokenize(self.tokenizer, self.chat_template, add_vision_id=self.add_vision_id)
+            replace_qwen35_media_token(
+                tokenized, self.video_context_token_id, num_image_token_list, total_sum_media_grid_thw
+            )
         else:
             messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
             if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
                 is_pretrain = True
-            replace_video_token(messages, self.chat_template, num_image_token_list, timestamps_list, add_vision_id=self.add_vision_id)
+            replace_video_token(
+                messages, self.chat_template, num_image_token_list, timestamps_list, add_vision_id=self.add_vision_id
+            )
             tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
 
@@ -917,27 +928,26 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             num_image_tokens_list.append([frame_seqlen] * grid_thw[0][0])
             num_imgs_list.append(num_frames)
             total_sum_media_grid_thw += sum_media_grid_thw
-        
+
         is_pretrain = False
         if self.chat_template_name == "qwen3.5-vl":
-            if len(timestamps_list) > 0:
-                assert len(timestamps_list) == len(num_image_tokens_list), (
-                    "timestamps should have the same length as num_image_token_list"
-                )
-                replace_video_timestamps(data_item["messages"], timestamps_list)
-        
+            replace_video_timestamps_and_num_frame(data_item["messages"], num_image_tokens_list, timestamps_list)
             messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
-            if len(data_item["messages"]) == 1 and data_item["messages"][0]['role'] == "pretrain":
+            if len(data_item["messages"]) == 1 and data_item["messages"][0]["role"] == "pretrain":
                 is_pretrain = True
-            tokenized = messages.tokenize(self.tokenizer, self.chat_template)
-            replace_qwen35_media_token(tokenized, self.video_context_token_id, num_image_tokens_list, total_sum_media_grid_thw)
+            tokenized = messages.tokenize(self.tokenizer, self.chat_template, add_vision_id=self.add_vision_id)
+            replace_qwen35_media_token(
+                tokenized, self.video_context_token_id, num_image_tokens_list, total_sum_media_grid_thw
+            )
         else:
             messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
             if len(messages.messages) == 1 and messages.messages[0].role == "pretrain":
                 is_pretrain = True
-            replace_video_token(messages, self.chat_template, num_image_tokens_list, timestamps_list, add_vision_id=self.add_vision_id)
+            replace_video_token(
+                messages, self.chat_template, num_image_tokens_list, timestamps_list, add_vision_id=self.add_vision_id
+            )
             tokenized = messages.tokenize(self.tokenizer, self.chat_template)
-            
+
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
 
@@ -1010,7 +1020,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     add_vision_id: bool = True
 
     trim_memory_interval: int = 1
-    chat_template: Literal["qwen3-vl", "qwen3-vl-rl"] = "qwen3-vl"
+    chat_template: Literal["qwen3-vl", "qwen3-vl-rl", "qwen3.5-vl"] = "qwen3-vl"
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs

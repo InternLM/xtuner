@@ -1,104 +1,78 @@
 import os
 from unittest import TestCase
 from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig, PretrainTokenizeFunction
-from transformers import AutoTokenizer, AutoProcessor
+from transformers import AutoTokenizer, AutoProcessor,Qwen3VLProcessor
 import json
 import torch
 import parametrize
 from xtuner.v1.utils.test_utils import add_video_root
+from packaging.version import Version
+from transformers import __version__ as transformers_version
+import unittest
+from xtuner.v1.data_proto.messages.qwen35_chat import qwen35_tokenize_fn_slowspeed
 
-QWEN3_VL_PATH = os.environ["QWEN3_VL_MOE_PATH"]
 VIDEO_ROOT = os.environ["VIDEO_ROOT"]
 
 
+@unittest.skipIf(
+    Version(transformers_version) < Version("5.2.0"),
+    f"transformers >= 5.2.0 is required, but got {transformers_version}"
+)
 class TestMLLMTokenizeFn(TestCase):
     def setUp(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(QWEN3_VL_PATH)
-        self.tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
+        QWEN35_VL_PATH = os.environ["QWEN3_5_MOE_PATH"]
+        self.tokenizer = AutoTokenizer.from_pretrained(QWEN35_VL_PATH)
+        self.tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN35_VL_PATH, 
+                                                   chat_template="qwen3.5-vl",
                                                    rand_video_max_frames=14,
                                                    add_vision_id=False).build(
             self.tokenizer)
-        self.processor = AutoProcessor.from_pretrained(QWEN3_VL_PATH)
+        self.processor = AutoProcessor.from_pretrained(QWEN35_VL_PATH)
 
-    def test_qwen3vl_tool_template(self):
-        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH).build(self.tokenizer)
+    def test_qwen35vl_text(self):
+        QWEN35_VL_PATH = os.environ["QWEN3_5_MOE_PATH"]
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN35_VL_PATH, chat_template="qwen3.5-vl", add_vision_id=True).build(self.tokenizer)
 
-        messages = {
-            "messages": [
-                {"role": "system", "content": "这是系统消息"},
-                {"role": "user", "content": "Hey, what's the temperature in Paris right now?"},
-                {"role": "assistant", "content": "我需要先调用一些工具才能知道",
-                 "tool_calls": [
-                     {
-                         "id": "call_123",
-                         "type": "function",
-                         "function": {
-                             "name": "get_weather",
-                             "arguments": "{\"location\": \"Boston\"}"
-                         }
-                     },
-                     {
-                         "id": "call_456",
-                         "type": "function",
-                         "function": {
-                             "name": "get_weather",
-                             "arguments": "{\"location\": \"beijing \"}"
-                         }
-                     }
-                 ],
-                 "reasoning_content": ""},
-                {"role": "tool", "content": "22"},
-                {"role": "assistant", "content": "你问的特别好"}
-            ],
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "get_current_temperature",
-                    "description": "Gets the temperature at a given location.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "location": {
-                                "type": "string",
-                                "description": "The location to get the temperature for"
-                            }
-                        },
-                        "required": [
-                            "location"
-                        ]
-                    }
-                }
-            },
-                {"type": "function", "function": {"name": "get_current_wind_speed",
-                                                  "description": "Get the current wind speed in km/h at a given "
-                                                                 "location.",
-                                                  "parameters": {"type": "object", "properties": {
-                                                      "location": {"type": "string",
-                                                                   "description": "The location to get the wind speed for, in the format \"City, Country\""}},
-                                                                 "required": ["location"]}}}
-            ],
-        }
-        input_ids_ref = self.tokenizer.apply_chat_template(
-            messages["messages"],
-            tools=messages["tools"],
-            tokenize=True,
-            add_generation_prompt=False,
-        )
-        input_ids = tokenize_fn(messages)['input_ids']
-        self.assertEqual(input_ids, input_ids_ref)
+        data_path = 'tests/resource/qwen35_tokenize_data.jsonl'
+        all_data= []
+        with open(data_path, 'r') as f:
+            for line in f:
+                all_data.append(json.loads(line))
+        
+        for j, data in enumerate(all_data):
+            print(f"Processing data {j+1} of {len(all_data)}")
+            if j>=12:
+                break
+            gt_token_ids, gt_labels = qwen35_tokenize_fn_slowspeed(self.tokenizer, data['messages'], tools=data.get('tools'), add_vision_id=True)
+            ret = tokenize_fn(data)
+            input_ids_xtuner = ret['input_ids']
+            labels_xtuner = ret['labels']
+            self.assertEqual(input_ids_xtuner, gt_token_ids)
+            self.assertEqual(labels_xtuner, gt_labels)
+
+            enable_thinking = any("reasoning_content" in msg for msg in data['messages'])
+            decode_str = self.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
+            hf_text = self.tokenizer.apply_chat_template(data['messages'],   
+                                               tools=data.get('tools'),       
+                                               add_vision_id=True,   
+                                               tokenize=False,
+                                               enable_thinking=enable_thinking,
+                                               add_generation_prompt=False)
+            self.assertEqual(decode_str, hf_text)
 
     @parametrize.parametrize("add_vision_id", [(True,), (False,)])
-    def test_qwen3_vl_sft_single_image(self, add_vision_id):
-        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
+    def test_qwen35_vl_sft_single_image(self, add_vision_id):
+        QWEN35_VL_PATH = os.environ["QWEN3_5_MOE_PATH"]
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN35_VL_PATH, chat_template="qwen3.5-vl",
                                               add_vision_id=add_vision_id).build(self.tokenizer)
-        data_path = 'tests/resource/mllm_sft_single_image_example_data.jsonl'
-        total_step = 5
+        data_path = 'tests/resource/mllm_sft_single_image_example_data_new.jsonl'
+        total_step = 50
         with open(data_path) as f:
             for i, line in enumerate(f):
-                if i >= total_step:
+                if i >=total_step:
                     break
                 raw_data = json.loads(line)
-
+                
                 ret = tokenize_fn(raw_data, media_root='tests/')
                 input_ids_xtuner = ret['input_ids']
                 pixel_values_xtuner: torch.Tensor = ret['pixel_values']
@@ -107,15 +81,13 @@ class TestMLLMTokenizeFn(TestCase):
                 # to hf openai format
                 messages = raw_data['messages']
                 messages[0]['content'][0]['type'] = 'image'
-                messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image_url']['url']
-                del messages[0]['content'][0]['image_url']
+                messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image']['url']
+                del messages[0]['content'][0]['image']
 
-                # <IMG_CONTEXT>\n 中的 \n 需要去掉，因为 qwen3 vl chat_template 里面不会加上 \n
-                messages[0]['content'][1]['text'] = messages[0]['content'][1]['text'].replace('<IMG_CONTEXT>', '')
                 for msg in messages:
                     if not isinstance(msg['content'], list):
                         msg['content'] = [{"type": "text", "text": msg['content']}]
-                
+
                 ret = self.processor.apply_chat_template(messages,
                                                          add_generation_prompt=False,
                                                          tokenize=True,
@@ -130,23 +102,17 @@ class TestMLLMTokenizeFn(TestCase):
 
     @parametrize.parametrize("add_vision_id", [(True,), (False,)])
     def test_qwen3_vl_sft_multi_image(self, add_vision_id):
-        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
+        QWEN35_VL_PATH = os.environ["QWEN3_5_MOE_PATH"]
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN35_VL_PATH,
+                                              chat_template="qwen3.5-vl",
                                               add_vision_id=add_vision_id).build(self.tokenizer)
-        data_path = 'tests/resource/mllm_sft_multi_image_example_data.jsonl'
+        data_path = 'tests/resource/mllm_sft_multi_image_example_data_new.jsonl'
         total_index = [0, 1, 2, 3, 4, 10]
         with open(data_path) as f:
             for i, line in enumerate(f):
                 if i not in total_index:
                     continue
                 raw_data = json.loads(line)
-
-                # \n 必须去掉，否则和 hf 无法对齐
-                messages = raw_data['messages']
-                if i != 10:
-                    messages[0]['content'][2]['text'] = messages[0]['content'][2]['text'].replace('\n', '')
-                else:
-                    messages[0]['content'][1]['text'] = messages[0]['content'][1]['text'].replace('\n', '')
-                    messages[4]['content'][1]['text'] = messages[4]['content'][1]['text'].replace('\n', '')
 
                 ret = tokenize_fn(raw_data, media_root='tests/')
                 input_ids_xtuner = ret['input_ids']
@@ -157,22 +123,19 @@ class TestMLLMTokenizeFn(TestCase):
                 messages = raw_data['messages']
                 if i != 10:
                     messages[0]['content'][0]['type'] = 'image'
-                    messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image_url']['url']
+                    messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image']['url']
                     messages[0]['content'][1]['type'] = 'image'
-                    messages[0]['content'][1]['path'] = 'tests/' + messages[0]['content'][1]['image_url']['url']
-                    del messages[0]['content'][0]['image_url']
-                    del messages[0]['content'][1]['image_url']
-                    messages[0]['content'][2]['text'] = messages[0]['content'][2]['text'].replace('<IMG_CONTEXT>', '')
+                    messages[0]['content'][1]['path'] = 'tests/' + messages[0]['content'][1]['image']['url']
+                    del messages[0]['content'][0]['image']
+                    del messages[0]['content'][1]['image']
                 else:
                     messages[0]['content'][0]['type'] = 'image'
-                    messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image_url']['url']
-                    del messages[0]['content'][0]['image_url']
-                    messages[0]['content'][1]['text'] = messages[0]['content'][1]['text'].replace('<IMG_CONTEXT>', '')
+                    messages[0]['content'][0]['path'] = 'tests/' + messages[0]['content'][0]['image']['url']
+                    del messages[0]['content'][0]['image']
 
                     messages[4]['content'][0]['type'] = 'image'
-                    messages[4]['content'][0]['path'] = 'tests/' + messages[4]['content'][0]['image_url']['url']
-                    del messages[4]['content'][0]['image_url']
-                    messages[4]['content'][1]['text'] = messages[4]['content'][1]['text'].replace('<IMG_CONTEXT>', '')
+                    messages[4]['content'][0]['path'] = 'tests/' + messages[4]['content'][0]['image']['url']
+                    del messages[4]['content'][0]['image']
 
                 for msg in messages:
                     if not isinstance(msg['content'], list):
@@ -187,29 +150,6 @@ class TestMLLMTokenizeFn(TestCase):
                 self.assertEqual(input_ids_xtuner, input_ids_hf)
                 self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
                 self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))
-
-    def test_qwen3_vl_sft_pure_text(self):
-        data_path = 'tests/resource/mllm_sft_text_example_data.jsonl'
-        total_step = 5
-        with open(data_path) as f:
-            for i, line in enumerate(f):
-                if i >= total_step:
-                    break
-                raw_data = json.loads(line)
-
-                ret = self.tokenize_fn(raw_data)
-                input_ids_xtuner = ret['input_ids']
-
-                # to hf openai format
-                messages = raw_data['messages']
-                for msg in messages:
-                    if not isinstance(msg['content'], list):
-                        msg['content'] = [{"type": "text", "text": msg['content']}]
-
-                ret = self.processor.apply_chat_template(messages, add_generation_prompt=False, tokenize=True,
-                                                         return_dict=True)
-                input_ids_hf = ret['input_ids'][0]
-                self.assertEqual(input_ids_xtuner, input_ids_hf)
 
     def test_calc_frame_info(self):
         self.tokenize_fn.state = "cache"
@@ -278,10 +218,12 @@ class TestMLLMTokenizeFn(TestCase):
 
     @parametrize.parametrize("add_vision_id", [(True,), (False,)])
     def test_qwen3_vl_sft_video(self, add_vision_id):
-        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH, rand_video_max_frames=14,
+        QWEN35_VL_PATH = os.environ["QWEN3_5_MOE_PATH"]
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN35_VL_PATH, rand_video_max_frames=14,
+                                              chat_template="qwen3.5-vl",
                                               add_vision_id=add_vision_id).build(
             self.tokenizer)
-        data_path = 'tests/resource/mllm_sft_video_example_data.jsonl'
+        data_path = 'tests/resource/mllm_sft_video_example_data_new.jsonl'
         hf_data_path = 'tests/resource/mllm_sft_video_hf_example_data.jsonl'
         hf_raw_datas = []
         with open(hf_data_path) as f:
@@ -348,63 +290,51 @@ class TestMLLMTokenizeFn(TestCase):
                         self.assertTrue(torch.allclose(pixel_values_xtuner, pixel_values_hf))
                         self.assertTrue(torch.allclose(image_grid_thw_xtuner, image_grid_thw_hf))
 
-    def test_qwen3_vl_pretrain_pure_text(self):
-        data_path = 'tests/resource/pretrain_example_data.jsonl'
-        tokenize_fn = PretrainTokenizeFunction(self.tokenizer)
-        total_step = 5
-        with open(data_path, encoding='utf-8') as f:
-            for i, line in enumerate(f):
-                if i >= total_step:
-                    break
-                raw_data = json.loads(line)
-
-                ret = tokenize_fn(raw_data)
-                input_ids_xtuner = ret['input_ids'][:-1]  # remove eos_token_id
-
-                content = raw_data['messages'][0]['content']
-                input_ids_hf = self.tokenizer(content)['input_ids']
-                self.assertEqual(input_ids_xtuner, input_ids_hf)
-
     @parametrize.parametrize("add_vision_id", [(True,), (False,)])
     def test_qwen3_vl_pretrain_image(self, add_vision_id):
-        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN3_VL_PATH,
+        QWEN35_VL_PATH = os.environ["QWEN3_5_MOE_PATH"]
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN35_VL_PATH,
+                                              chat_template="qwen3.5-vl",
                                               add_vision_id=add_vision_id).build(self.tokenizer)
-        data_path = 'tests/resource/mllm_pretrain_image_example_data.jsonl'
-        total_step = 6
+        data_path = 'tests/resource/mllm_pretrain_image_example_data_new.jsonl'
+        total_step = 60
         with open(data_path, encoding='utf-8') as f:
             for i, line in enumerate(f):
                 if i >= total_step:
                     break
                 raw_data = json.loads(line)
-
                 ret = tokenize_fn(raw_data, media_root='tests/')
                 input_ids_xtuner = ret['input_ids']
                 labels_xtuner = torch.tensor(ret['labels'])
                 input_str = tokenize_fn.tokenizer.decode(input_ids_xtuner, skip_special_tokens=False)
                 input_str = input_str.replace('<|image_pad|>', '')
-                input_xtuner_str = input_str.replace('<|vision_start|><|vision_end|>', '<IMG_CONTEXT>')
-                ground_truth_content = raw_data['messages'][0]
-                for item in ground_truth_content['content']:
-                    if item['type'] == 'text':
-                        ground_truth_str = item['text'] + "<|im_end|>"
-                image_cnt = ground_truth_str.count('<IMG_CONTEXT>')
-                if add_vision_id:
-                    for i in range(image_cnt):
-                        ground_truth_str = ground_truth_str.replace('<IMG_CONTEXT>',
-                                                                    f'Picture {i + 1}: <IMG_CONTEXT_1>', 1)
-                    ground_truth_str = ground_truth_str.replace('<IMG_CONTEXT_1>', '<IMG_CONTEXT>')
-                self.assertEqual(input_xtuner_str.strip(), ground_truth_str.strip())
+                input_xtuner_str = input_str.replace('<|vision_start|><|vision_end|>', '<|vision_start|><|image_pad|><|vision_end|>')
+                
+                messages = raw_data['messages']
+                messages[0]['role'] = 'user'
+                hf_text = self.tokenizer.apply_chat_template(raw_data['messages'],          
+                                               add_vision_id=add_vision_id,   
+                                               tokenize=False,
+                                               enable_thinking=False,
+                                               add_generation_prompt=False)
+                hf_text = hf_text.replace('<|im_start|>user\n', '')   
+                hf_text = hf_text[:-1]  # remove \n                   
+                self.assertEqual(input_xtuner_str, hf_text)
                 self.assertTrue((labels_xtuner == self.tokenize_fn.img_context_token_id).sum() == 0)
-
-    def test_qwen3_vl_pretrain_video(self):
-        data_path = 'tests/resource/mllm_pretrain_video_example_data.jsonl'
-        total_step = 6
+    
+    @parametrize.parametrize("add_vision_id", [(True,), (False,)])
+    def test_qwen3_vl_pretrain_video(self, add_vision_id):
+        QWEN35_VL_PATH = os.environ["QWEN3_5_MOE_PATH"]
+        tokenize_fn = Qwen3VLTokenizeFnConfig(processor_path=QWEN35_VL_PATH,
+                                              chat_template="qwen3.5-vl",
+                                              add_vision_id=add_vision_id).build(self.tokenizer)
+        data_path = 'tests/resource/mllm_pretrain_video_example_data_new.jsonl'
+        total_step = 60
         with open(data_path, encoding='utf-8') as f:
             for i, line in enumerate(f):
-                if i >= total_step:
+                if i >= total_step:   
                     break
                 raw_data = json.loads(line)
-
-                ret = self.tokenize_fn(raw_data, media_root=VIDEO_ROOT)
+                ret = tokenize_fn(raw_data, media_root=VIDEO_ROOT)
                 labels_xtuner = torch.tensor(ret['labels'])
-                self.assertTrue((labels_xtuner == self.tokenize_fn.video_context_token_id).sum() == 0)
+                self.assertTrue((labels_xtuner == tokenize_fn.video_context_token_id).sum() == 0)

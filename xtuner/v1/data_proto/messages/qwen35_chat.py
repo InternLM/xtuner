@@ -1,9 +1,11 @@
-from typing import List, Dict, Optional
-import json
-from xtuner.v1.data_proto.messages.base import BaseMessages
-from xtuner.v1.data_proto.templates import HybridChatTemplate
-from transformers import PreTrainedTokenizer
 import copy
+import json
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel, ConfigDict
+
+from transformers import PreTrainedTokenizer
+from xtuner.v1.data_proto.templates import HybridChatTemplate
 
 
 def get_offset_mapping(tokenizer, text: str):
@@ -43,32 +45,35 @@ def render_content(content, do_vision_count, image_count, video_count, add_visio
                 video_count += 1
             if add_vision_id:
                 result += f"Video {video_count}: "
-            
+
             video_content = item.get("video", {})
+            assert isinstance(video_content, dict), f"video_content must be a dict, but got {type(video_content)}"
             timestamps = video_content.get("timestamps", [])
             if len(timestamps) > 0:
                 video_placeholder = ""
                 for timestamp in timestamps:
                     video_placeholder += f"<{timestamp:.1f} seconds><|vision_start|><|video_pad|><|vision_end|>"
                 result += video_placeholder
-            
+            else:
+                # 每个视频可能有 n 帧，每一帧里面可能占据 m 个 token
+                assert "num_frames" in video_content, "num_frames must be in video_content"
+                num_frames = video_content["num_frames"]
+                for _ in range(len(num_frames)):
+                    result += "<|vision_start|><|video_pad|><|vision_end|>"
             conversation_timestamp = video_content.get("conversation_timestamp", [])
             if len(conversation_timestamp) > 0:
-                start_time = conversation_timestamp[0]  
+                start_time = conversation_timestamp[0]
                 end_time = conversation_timestamp[1]
                 timestamps = f"<{start_time:.1f}-{end_time:.1f} seconds>"
                 result += timestamps
+
         elif "text" in item:
             result += item["text"]
     return result, image_count, video_count
 
 
 # Qwen3.5 工具系统提示（与 Qwen3 不同的 XML 格式）
-_QWEN35_TOOL_SYSTEM = (
-    "# Tools\n\n"
-    "You have access to the following functions:\n\n"
-    "<tools>"
-)
+_QWEN35_TOOL_SYSTEM = "# Tools\n\nYou have access to the following functions:\n\n<tools>"
 _QWEN35_TOOL_INSTRUCTIONS = (
     "\n</tools>\n\n"
     "If you choose to call a function ONLY reply in the following format with NO suffix:\n\n"
@@ -117,8 +122,7 @@ def qwen35_tokenize_fn_fastspeed(
     add_generation_prompt=False,
     add_vision_id=False,
     return_labels=True,
-):  
-
+):
     enable_thinking = any("reasoning_content" in msg for msg in messages)
 
     image_count = 0
@@ -162,10 +166,7 @@ def qwen35_tokenize_fn_fastspeed(
         msg = messages[i]
         if multi_step_tool and msg["role"] == "user":
             content_str = _render(msg["content"], False).strip()
-            if not (
-                content_str.startswith("<tool_response>")
-                and content_str.endswith("</tool_response>")
-            ):
+            if not (content_str.startswith("<tool_response>") and content_str.endswith("</tool_response>")):
                 multi_step_tool = False
                 last_query_index = i
 
@@ -185,9 +186,7 @@ def qwen35_tokenize_fn_fastspeed(
                 reasoning_content = message["reasoning_content"]
             else:
                 if "</think>" in content:
-                    reasoning_content = (
-                        content.split("</think>")[0].rstrip("\n").split("<think>")[-1].lstrip("\n")
-                    )
+                    reasoning_content = content.split("</think>")[0].rstrip("\n").split("<think>")[-1].lstrip("\n")
                     content = content.split("</think>")[-1].lstrip("\n")
             # Qwen3.5 模板对 reasoning_content 做 |trim
             reasoning_content = reasoning_content.strip()
@@ -242,7 +241,7 @@ def qwen35_tokenize_fn_fastspeed(
 
                     if isinstance(tc_args, dict):
                         _append(_render_tool_call_args(tc_args), body_is_loss)
-                    _append(f"</function>\n</tool_call>", body_is_loss)
+                    _append("</function>\n</tool_call>", body_is_loss)
 
             _append("<|im_end|>\n", body_is_loss)
 
@@ -296,7 +295,9 @@ def qwen35_tokenize_fn_fastspeed(
 
 def qwen35_process_text_and_loss_mask(text: str, loss_mask: list[bool], tokenizer: PreTrainedTokenizer):
     assert tokenizer is not None
-    assert len(text) == len(loss_mask), "text and loss_mask must have the same length. Got {len(text)} and {len(loss_mask)}."
+    assert len(text) == len(loss_mask), (
+        "text and loss_mask must have the same length. Got {len(text)} and {len(loss_mask)}."
+    )
 
     try:
         encoded = tokenizer(
@@ -333,21 +334,38 @@ def qwen35_tokenize_fn_slowspeed(tokenizer, messages: List[Dict[str, str]], tool
 
     enable_thinking = any("reasoning_content" in msg for msg in messages)
 
-    full_text = tokenizer.apply_chat_template(messages, tokenize=False, tools=tools,add_vision_id=add_vision_id, enable_thinking=enable_thinking, **kwargs)
+    full_text = tokenizer.apply_chat_template(
+        messages, tokenize=False, tools=tools, add_vision_id=add_vision_id, enable_thinking=enable_thinking, **kwargs
+    )
     total_ids = tokenizer.encode(full_text, add_special_tokens=False)
     labels = [-100] * len(total_ids)
     # 记录在 total_ids 中搜索的起始位置，确保不会搜到前面的轮次
     curr_ptr = 0
     for i, msg in enumerate(messages):
-        if msg['role'] == 'assistant' and msg.get('loss', True):
+        if msg["role"] == "assistant" and msg.get("loss", True):
             # 1. 获取包含当前消息之前所有内容的“前缀”文本 (带 generation prompt)
-            prompt_text = tokenizer.apply_chat_template(messages[:i], tokenize=False, add_generation_prompt=True, add_vision_id=add_vision_id, enable_thinking=enable_thinking, tools=tools if i==0 else None, **kwargs)
+            prompt_text = tokenizer.apply_chat_template(
+                messages[:i],
+                tokenize=False,
+                add_generation_prompt=True,
+                add_vision_id=add_vision_id,
+                enable_thinking=enable_thinking,
+                tools=tools if i == 0 else None,
+                **kwargs,
+            )
             # 2. 获取包含当前消息的完整“截断”文本
             # 我们通过修改当前消息的内容，强制在末尾加上一个罕见标记，来准确捕获这部分的内容
             # 为什么要加标记？因为我们想知道当前消息的结束符（如 <|im_end|>）被 tokenizer 编成了什么
-            temp_msgs = [m.copy() for m in messages[:i+1]]
+            temp_msgs = [m.copy() for m in messages[: i + 1]]
             # 提取真实内容
-            m_text = tokenizer.apply_chat_template(temp_msgs, tokenize=False,add_vision_id=add_vision_id, enable_thinking=enable_thinking, tools=tools if i==0 else None, **kwargs)
+            m_text = tokenizer.apply_chat_template(
+                temp_msgs,
+                tokenize=False,
+                add_vision_id=add_vision_id,
+                enable_thinking=enable_thinking,
+                tools=tools if i == 0 else None,
+                **kwargs,
+            )
             # 转换为 Token 序列
             p_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
             m_ids = tokenizer.encode(m_text, add_special_tokens=False)
@@ -357,7 +375,7 @@ def qwen35_tokenize_fn_slowspeed(tokenizer, messages: List[Dict[str, str]], tool
             # 为了最稳健，我们直接在 m_ids 的末尾倒推。
             # 我们知道 m_ids 是由 p_ids + current_content_ids 组成的
             # 我们直接取差集：
-            content_tokens = m_ids[len(p_ids):]
+            content_tokens = m_ids[len(p_ids) :]
             if not content_tokens:
                 continue
             # 4. 在全量 total_ids 中搜索这段 content_tokens
@@ -375,33 +393,41 @@ def qwen35_tokenize_fn_slowspeed(tokenizer, messages: List[Dict[str, str]], tool
                 # 这是允许的，只要它不是当前轮次（我们不强求历史轮次一定要匹配上，因为我们通常只对最后的 Turn 算 loss）
                 # 但如果是最后一条消息还没匹配上，那就一定是出大问题了
                 if i == len(messages) - 1:
-                    raise ValueError(f"严重错误：最后一条 Assistant 消息无法在全量 Token 中对齐。")
+                    raise ValueError("严重错误：最后一条 Assistant 消息无法在全量 Token 中对齐。")
     return total_ids, labels
 
 
-class Qwen35ChatMessages(BaseMessages):
-    messages: List[dict] # 暂时不做校验
+class Qwen35ChatMessages(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    messages: List[dict]  # 暂时不做校验
     tools: Optional[List[Dict]] = None
-    
-    def tokenize(self, tokenizer: PreTrainedTokenizer, chat_template: HybridChatTemplate, add_vision_id=False, **kwargs) -> Dict:
+
+    def tokenize(
+        self, tokenizer: PreTrainedTokenizer, chat_template: HybridChatTemplate, add_vision_id=False, **kwargs
+    ) -> Dict:
         is_pretrain = False
-        if len(self.messages) == 1 and self.messages[0]['role'] == "pretrain":
+        if len(self.messages) == 1 and self.messages[0]["role"] == "pretrain":
             is_pretrain = True
-        
+
         if is_pretrain:
-            text = self.messages[0]['content']
+            text, _, _ = render_content(
+                self.messages[0]["content"],
+                do_vision_count=True,
+                image_count=0,
+                video_count=0,
+                add_vision_id=add_vision_id,
+            )
             token_ids = tokenizer.encode(text, add_special_tokens=False)
             label_ids = copy.deepcopy(token_ids)
         else:
             # replace system message
             if chat_template.default_system is not None:
-                if self.messages[0]['role'] == "system":
-                    self.messages[0]['content'] = chat_template.default_system
+                if self.messages[0]["role"] == "system":
+                    self.messages[0]["content"] = chat_template.default_system
                 else:
-                    self.messages.insert(0, {'role': 'system', 'content': chat_template.default_system})
+                    self.messages.insert(0, {"role": "system", "content": chat_template.default_system})
 
-            token_ids, label_ids = qwen35_tokenize_fn_fastspeed(self.messages, tokenizer, self.tools,
-                                                                add_vision_id=add_vision_id, 
-                                                                return_labels=True)
+            token_ids, label_ids = qwen35_tokenize_fn_fastspeed(
+                self.messages, tokenizer, self.tools, add_vision_id=add_vision_id, return_labels=True
+            )
         return {"input_ids": token_ids, "labels": label_ids}
-
