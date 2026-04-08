@@ -40,7 +40,6 @@ class TestMLLMTokenizeFn(TestCase):
                 all_data.append(json.loads(line))
         
         for j, data in enumerate(all_data):
-            print(f"Processing data {j+1} of {len(all_data)}")
             if j>=12:
                 break
             gt_token_ids, gt_labels = qwen35_tokenize_fn_slowspeed(self.tokenizer, data['messages'], tools=data.get('tools'), add_vision_id=True)
@@ -280,7 +279,6 @@ class TestMLLMTokenizeFn(TestCase):
                         # 测试无法整除且超过最大帧数情况下，均匀采样
                         self.assertEqual(pixel_values_xtuner.size(), (24640, 1536))
                         self.assertEqual(text.count('seconds>'), 7)
-                        print(pixel_values_xtuner.size(), image_grid_thw_xtuner, text.count('seconds>'), 'xxx')
                     else:
                         if i == 7:
                             self.assertEqual(len(input_ids_xtuner), len(input_ids_hf))
