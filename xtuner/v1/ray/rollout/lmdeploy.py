@@ -14,6 +14,8 @@ from xtuner.v1.ray.config import RolloutConfig
 
 from .worker import RolloutWorker
 
+SHARED_STORE = "shared_store"
+SHARED_STORE_NAMESPACE = "lmdeploy"
 
 def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
     """Wrapper function to run the LMDeploy API server.
@@ -75,6 +77,7 @@ class LMDeployWorker(RolloutWorker):
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
+        self.lmdeploy_actor = None
 
     async def _create_request(
         self,
@@ -211,10 +214,10 @@ class LMDeployWorker(RolloutWorker):
 
     def _decode_routed_experts(self, routed_experts: Any):
         if isinstance(routed_experts, str):
-            import base64
-
-            data = base64.b64decode(routed_experts)
-            return ray.cloudpickle.loads(data)
+            if self.lmdeploy_actor is None:
+                self.lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
+            routed_experts_ref = self.lmdeploy_actor.get.remote(routed_experts)
+            return routed_experts_ref
         return torch.tensor(routed_experts)
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
@@ -254,6 +257,8 @@ class LMDeployWorker(RolloutWorker):
         extra_engine_config: Dict[str, Any] = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
+        if backend == "pytorch" and self.config.enable_transfer_obj_ref:
+            extra_engine_config["enable_transfer_obj_ref"] = True
         if backend == "pytorch" and self.config.router_n_groups:
             hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
             hf_overrides.update(router_n_groups=self.config.router_n_groups)
