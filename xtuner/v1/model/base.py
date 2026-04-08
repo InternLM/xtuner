@@ -167,11 +167,11 @@ DEFAULT_FLOAT8_CFG = {
 class TransformerConfig(XTunerBaseModelConfig):
     """Base transformer configuration with unified RoPE parameters.
 
-    This config uses `rope_parameters` as the primary source of truth for all RoPE-related
+    This config uses `rope_parameters_cfg` as the primary source of truth for all RoPE-related
     settings. The legacy fields `rope_theta` and `rope_scaling_cfg` are kept for backward
-    compatibility and are synchronized with `rope_parameters` via model validator.
+    compatibility and are synchronized with `rope_parameters_cfg` via model validator.
 
-    For new code, use `rope_parameters` directly. For loading old configs or HF models,
+    For new code, use `rope_parameters_cfg` directly. For loading old configs or HF models,
     use `RopeParametersConfig.from_legacy_cfg()` or `RopeParametersConfig.from_hf_config()`.
     """
 
@@ -199,7 +199,7 @@ class TransformerConfig(XTunerBaseModelConfig):
     return_hidden_states: Annotated[bool, Parameter(group="model")] = False
     use_sliding_window: Annotated[bool, Parameter(group="model")] = False
     max_window_layers: Annotated[int | None, Parameter(group="model")] = None
-    rope_parameters: Annotated[RopeParametersConfig | None, Parameter(group="model")] = Field(
+    rope_parameters_cfg: Annotated[RopeParametersConfig | None, Parameter(group="model")] = Field(
         default_factory=RopeParametersConfig
     )
     mesh_prefix: Annotated[str, Parameter(help="Prefix for device mesh configuration in distributed training")] = (
@@ -212,7 +212,7 @@ class TransformerConfig(XTunerBaseModelConfig):
         """Handle legacy rope_theta and rope_scaling_cfg construction
         parameters.
 
-        Converts rope_theta and rope_scaling_cfg into rope_parameters before validation.
+        Converts rope_theta and rope_scaling_cfg into rope_parameters_cfg before validation.
         """
         if not isinstance(data, dict):
             return data
@@ -224,15 +224,15 @@ class TransformerConfig(XTunerBaseModelConfig):
         legacy_rope_theta = data.pop("rope_theta", None)
         legacy_rope_scaling_cfg = data.pop("rope_scaling_cfg", None)
 
-        rope_params_field = cls.model_fields.get("rope_parameters")
+        rope_params_field = cls.model_fields.get("rope_parameters_cfg")
         if isinstance(rope_params_field, FieldInfo):
-            default_rope_parameters = rope_params_field.get_default(call_default_factory=True)
+            default_rope_params_cfg = rope_params_field.get_default(call_default_factory=True)
         else:
-            default_rope_parameters = None
-        default_params_data = default_rope_parameters.model_dump() if default_rope_parameters is not None else {}
+            default_rope_params_cfg = None
+        default_params_data = default_rope_params_cfg.model_dump() if default_rope_params_cfg is not None else {}
 
-        # Get existing rope_parameters if any
-        rope_params_data = data.get("rope_parameters")
+        # Get existing rope_parameters_cfg if any
+        rope_params_data = data.get("rope_parameters_cfg")
         if isinstance(rope_params_data, RopeParametersConfig):
             rope_params_data = rope_params_data.model_dump()
         elif isinstance(rope_params_data, dict):
@@ -257,41 +257,42 @@ class TransformerConfig(XTunerBaseModelConfig):
                         if value is not None:
                             rope_params_data[dst_field] = value
 
-        # Replace rope_parameters by the updated default_params_data with new values
+        # Replace rope_parameters_cfg by the updated default_params_data with new values
         default_params_data.update(rope_params_data)
-        data["rope_parameters"] = RopeParametersConfig(**default_params_data)
+        data["rope_parameters_cfg"] = RopeParametersConfig(**default_params_data)
 
         return data
 
     @property
     def rope_theta(self) -> float | None:
-        """Get rope_theta from rope_parameters (backward compatibility)."""
-        return self.rope_parameters.rope_theta if self.rope_parameters is not None else None
+        """Get rope_theta from rope_parameters_cfg (backward compatibility)."""
+        return self.rope_parameters_cfg.rope_theta if self.rope_parameters_cfg is not None else None
 
     @rope_theta.setter
     def rope_theta(self, value: float | None) -> None:
-        """Set rope_theta and update rope_parameters (backward
+        """Set rope_theta and update rope_parameters_cfg (backward
         compatibility)."""
-        params_dict = self.rope_parameters.model_dump() if self.rope_parameters is not None else {}
+        params_dict = self.rope_parameters_cfg.model_dump() if self.rope_parameters_cfg is not None else {}
         params_dict["rope_theta"] = value
-        self.rope_parameters = RopeParametersConfig(**params_dict)
+        self.rope_parameters_cfg = RopeParametersConfig(**params_dict)
 
     @property
     def rope_scaling_cfg(self) -> RopeScalingConfig | None:
-        """Get RopeScalingConfig from rope_parameters (backward compatibility).
+        """Get RopeScalingConfig from rope_parameters_cfg (backward
+        compatibility).
 
         Returns None if rope_type is default and no FoPE is used.
         """
-        if self.rope_parameters is None or (
-            self.rope_parameters.rope_type == "default" and not self.rope_parameters.use_fope
+        if self.rope_parameters_cfg is None or (
+            self.rope_parameters_cfg.rope_type == "default" and not self.rope_parameters_cfg.use_fope
         ):
             return None
 
-        # Build RopeScalingConfig from rope_parameters dynamically
-        kwargs = {"type": self.rope_parameters.rope_type}
+        # Build RopeScalingConfig from rope_parameters_cfg dynamically
+        kwargs = {"type": self.rope_parameters_cfg.rope_type}
 
         for field_name in RopeParametersConfig.get_rope_scaling_field_names():
-            value = getattr(self.rope_parameters, field_name)
+            value = getattr(self.rope_parameters_cfg, field_name)
             if value is not None:
                 kwargs[field_name] = value
 
@@ -299,9 +300,9 @@ class TransformerConfig(XTunerBaseModelConfig):
 
     @rope_scaling_cfg.setter
     def rope_scaling_cfg(self, value: RopeScalingConfig | None) -> None:
-        """Set rope_scaling_cfg and update rope_parameters (backward
+        """Set rope_scaling_cfg and update rope_parameters_cfg (backward
         compatibility)."""
-        params_dict = self.rope_parameters.model_dump() if self.rope_parameters is not None else {}
+        params_dict = self.rope_parameters_cfg.model_dump() if self.rope_parameters_cfg is not None else {}
 
         if value is None:
             # Reset to default rope_type and clear scaling parameters dynamically
@@ -317,13 +318,25 @@ class TransformerConfig(XTunerBaseModelConfig):
                     if field_value is not None:
                         params_dict[dst_field] = field_value
 
-        self.rope_parameters = RopeParametersConfig(**params_dict)
+        self.rope_parameters_cfg = RopeParametersConfig(**params_dict)
 
     @computed_field  # type: ignore[misc]
     @property
     def rope_scaling(self) -> dict | None:
         """Get rope_scaling dict for HF compatibility."""
-        return self.rope_parameters.to_rope_scaling_dict() if self.rope_parameters is not None else None
+        return self.rope_parameters_cfg.to_rope_scaling_dict() if self.rope_parameters_cfg is not None else None
+
+    def standardize_rope_params(self):
+        # This method is for compatibility with transformers 5.x rope_utils
+        # XTuner now use rope_parameters_cfg as the single source of truth for all RoPE-related settings.
+        # No need to standardize rope parameters
+        pass
+
+    @computed_field  # type: ignore[misc]
+    @property
+    def rope_parameters(self) -> dict | None:
+        """Get rope_parameters for HF compatibility."""
+        return self.rope_parameters_cfg.to_rope_parameters_dict() if self.rope_parameters_cfg is not None else None
 
     @computed_field
     def num_attention_heads(self) -> int:
@@ -1971,6 +1984,57 @@ class BaseModel(nn.Module):
                         num_ranks_to_save, best_diff = d, diff
             i += 1
         return list(range(cast(int, num_ranks_to_save)))
+
+    def _to_device_dtype(
+        self,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+        non_blocking: bool = False,
+        skip_buffers_dtype: bool = False,
+    ) -> Self:
+        if device is None and dtype is None:
+            return self
+
+        if dtype is None:
+            self.to(device=device, non_blocking=non_blocking)
+            return self
+
+        if not (dtype.is_floating_point or dtype.is_complex):
+            raise TypeError(
+                f"_to_device_dtype only accepts floating point or complex dtypes, but got desired dtype={dtype}"
+            )
+
+        buffer_ids = set()
+        if skip_buffers_dtype:
+            # `Module._apply()` only passes the tensor itself into `fn`, so we
+            # detect buffers by identity and let `_apply()` keep handling the
+            # recursion for us.
+            buffer_ids = {
+                id(buffer) for module in self.modules() for buffer in module._buffers.values() if buffer is not None
+            }
+
+        def _convert_tensor(tensor: torch.Tensor) -> torch.Tensor:
+            try:
+                if skip_buffers_dtype and id(tensor) in buffer_ids:
+                    if device is None:
+                        return tensor
+                    return tensor.to(device=device, non_blocking=non_blocking)
+
+                return tensor.to(
+                    device=device,
+                    dtype=dtype if tensor.is_floating_point() or tensor.is_complex() else None,
+                    non_blocking=non_blocking,
+                )
+            except NotImplementedError as e:
+                if str(e) == "Cannot copy out of meta tensor; no data!":
+                    raise NotImplementedError(
+                        f"{e} Please use torch.nn.Module.to_empty() instead of torch.nn.Module.to() "
+                        f"when moving module from meta to a different device."
+                    ) from None
+                raise
+
+        self._apply(_convert_tensor)
+        return self
 
     def to_device(self, device: torch.device | str):
         if self.fsdp_config is not None and self.fsdp_config.cpu_offload:

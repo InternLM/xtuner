@@ -1,38 +1,31 @@
-from hashlib import new
-import types
-
 import torch.nn as nn
-
-from xtuner.v1.module import RMSNorm
-from xtuner.v1.module.rope.rope import Qwen3VLTextRotaryEmbedding, RopeScalingConfig
-from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionModel
 from pydantic import BaseModel
+
+from xtuner.v1.model.compose.qwen3_vl.modeling_vision import Qwen3VLVisionModel
+from xtuner.v1.module import RMSNorm
+from xtuner.v1.module.rope.rope import Qwen3VLTextRotaryEmbedding, RopeParametersConfig
 
 
 def patch_hf_rope(module: nn.Module) -> None:
     class FakeXTunerConfig(BaseModel):
-        rope_scaling_cfg: RopeScalingConfig
-        rope_theta: float = 100000.0
+        rope_parameters_cfg: RopeParametersConfig
         max_position_embeddings: int
         hidden_size: int
         num_attention_heads: int
         head_dim: int
 
     replacements = []
-    import torch
 
     for name, submodule in module.named_modules():
         if "Qwen3VLTextRotaryEmbedding" in submodule.__class__.__name__ and isinstance(submodule, nn.Module):
             hf_config = submodule.config
+            rope_parameters_cfg = RopeParametersConfig.from_hf_config(hf_config)
             config = FakeXTunerConfig(
-                rope_theta=hf_config.rope_theta,
+                rope_parameters_cfg=rope_parameters_cfg,
                 max_position_embeddings=hf_config.max_position_embeddings,
                 hidden_size=hf_config.hidden_size,
                 head_dim=hf_config.head_dim,
                 num_attention_heads=hf_config.num_attention_heads,
-                rope_scaling_cfg=RopeScalingConfig(
-                    mrope_section=hf_config.rope_scaling["mrope_section"],
-                ),
             )
             new_submodule = Qwen3VLTextRotaryEmbedding(config)
             parts = name.split(".")

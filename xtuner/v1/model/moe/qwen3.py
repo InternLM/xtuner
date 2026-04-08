@@ -62,7 +62,7 @@ class Qwen3MoEConfig(MoEConfig):
 
         assert isinstance(hf_config, HFQwen3MoeConfig)
 
-        rope_params = RopeParametersConfig.from_hf_config(hf_config)
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(hf_config)
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
@@ -75,7 +75,7 @@ class Qwen3MoEConfig(MoEConfig):
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
             model_type=hf_config.model_type,
-            rope_parameters=rope_params,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
@@ -148,7 +148,9 @@ class Qwen3MoE30BA3Config(Qwen3MoEConfig):
     hidden_size: int = 2048
     intermediate_size: int = 6144
     rms_norm_eps: float = 1e-6
-    rope_parameters: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0))
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0)
+    )
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         num_attention_heads=32, num_key_value_heads=4, head_dim=128, qk_norm=True, sliding_window=1024
@@ -180,7 +182,9 @@ class Qwen3MoE235BA22Config(Qwen3MoEConfig):
     hidden_size: int = 4096
     intermediate_size: int = 12288
     rms_norm_eps: float = 1e-6
-    rope_parameters: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0))
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0)
+    )
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         num_attention_heads=64, num_key_value_heads=4, head_dim=128, qk_norm=True, sliding_window=1024
@@ -208,7 +212,7 @@ class Qwen3MoEFoPEConfig(Qwen3MoEConfig):
 
         assert isinstance(hf_config, PretrainedConfig) and hf_config.model_type == "qwen3_moe_fope"
 
-        rope_params = RopeParametersConfig.from_hf_config(hf_config)
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(hf_config)
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
@@ -221,7 +225,7 @@ class Qwen3MoEFoPEConfig(Qwen3MoEConfig):
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
             model_type=hf_config.model_type,
-            rope_parameters=rope_params,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,

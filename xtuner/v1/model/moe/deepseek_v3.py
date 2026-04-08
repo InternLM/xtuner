@@ -62,7 +62,7 @@ class DeepSeekV3Config(MoEConfig):
     hidden_size: int = 7168
     intermediate_size: int = 18432
     rms_norm_eps: float = 1e-6
-    rope_parameters: RopeParametersConfig = Field(
+    rope_parameters_cfg: RopeParametersConfig = Field(
         default_factory=lambda: RopeParametersConfig(
             rope_theta=10000.0,
             rope_type="yarn",
@@ -111,8 +111,10 @@ class DeepSeekV3Config(MoEConfig):
 
         assert isinstance(cfg, HFDeepseekV3Config)
 
-        default_rope_params = cls.model_fields["rope_parameters"].get_default(call_default_factory=True).model_dump()
-        rope_params = RopeParametersConfig.from_hf_config(cfg, default_rope_params)
+        default_rope_params = (
+            cls.model_fields["rope_parameters_cfg"].get_default(call_default_factory=True).model_dump()
+        )
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(cfg, default_rope_params)
         config = cls(
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
@@ -124,7 +126,7 @@ class DeepSeekV3Config(MoEConfig):
             hidden_size=cfg.hidden_size,
             intermediate_size=cfg.intermediate_size,
             rms_norm_eps=cfg.rms_norm_eps,
-            rope_parameters=rope_params,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=cfg.hidden_act,
             attention=MLAConfig(
                 kv_lora_rank=cfg.kv_lora_rank,

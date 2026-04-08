@@ -268,8 +268,9 @@ ARG LMDEPLOY_WHEELS=https://github.com/InternLM/lmdeploy/releases/download/v${LM
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
     --mount=type=secret,id=NO_PROXY,env=no_proxy \
     pip install fastapi fire openai outlines \
-        partial_json_parser 'ray[default]<3' shortuuid uvicorn \
+        partial_json_parser 'ray[default]<3' shortuuid uvicorn pybase64 \
         'pydantic>2' openai_harmony dlblas --target ${XTUNER_LMDEPLOY_ENVS_DIR} --no-cache-dir -i ${DEFAULT_PYPI_URL} && \
+    pip install xgrammar==0.1.32 --no-cache-dir -i ${DEFAULT_PYPI_URL} --no-deps && \
     if [ -n "${LMDEPLOY_VERSION}" ]; then \
         # pip install lmdeploy==${LMDEPLOY_VERSION} --target ${XTUNER_LMDEPLOY_ENVS_DIR} --no-deps --no-cache-dir -i ${DEFAULT_PYPI_URL}; \
         echo pip install ${LMDEPLOY_WHEELS} --target ${XTUNER_LMDEPLOY_ENVS_DIR} --no-deps --no-cache-dir -i ${DEFAULT_PYPI_URL}; \
@@ -293,7 +294,7 @@ COPY . ${CODESPACE}/xtuner
 WORKDIR ${CODESPACE}/xtuner
 
 # Install custom .pth file for conditional lmdeploy and sglang path injection
-RUN cp .dev_scripts/xtuner_rl_path.pth ${PYTHON_SITE_PACKAGE_PATH}/xtuner_rl_path.pth
+RUN cp -r .dev_scripts/xtuner_rl_path* ${PYTHON_SITE_PACKAGE_PATH}/
 
 # RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 RUN pip install .[all] -v --no-cache-dir -i ${DEFAULT_PYPI_URL}
