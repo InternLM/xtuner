@@ -260,7 +260,10 @@ class RawTrainingController:
                     rollout_idx=rollout_idx,
                 )
             )
-        log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        try:
+            log_infos = ray.get(handles, timeout=TRAIN_RAY_GET_TIMEOUT)
+        finally:
+            del packed_data_batches
         return log_infos
 
     @ray_method
