@@ -124,7 +124,7 @@ class GptOssConfig(MoEConfig):
     tie_word_embeddings: bool = False
     n_shared_experts: int = 0
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig(act_type="clipped_swiglu", clip_alpha=1.702, clip_limit=7)
-    rope_parameters: RopeParametersConfig = Field(
+    rope_parameters_cfg: RopeParametersConfig = Field(
         default_factory=lambda: RopeParametersConfig(
             rope_theta=150000.0,
             rope_type="yarn",
@@ -149,7 +149,7 @@ class GptOssConfig(MoEConfig):
 
         assert isinstance(cfg, HFGptOssConfig)
 
-        rope_params = RopeParametersConfig.from_hf_config(cfg)
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(cfg)
         config = cls(
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
@@ -160,7 +160,7 @@ class GptOssConfig(MoEConfig):
             intermediate_size=cfg.intermediate_size,
             moe_intermediate_size=cfg.intermediate_size,
             rms_norm_eps=cfg.rms_norm_eps,
-            rope_parameters=rope_params,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=cfg.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=cfg.num_attention_heads,

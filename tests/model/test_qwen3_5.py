@@ -199,7 +199,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             model_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
             # hf_save_cfg of text_model is ignored to align with transformers's forward result
             model_cfg.text_config.hf_save_cfg = HFSaveCfg()
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+            qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         qwen3vl_model.from_hf(QWEN3_VL_MOE_PATH)
         qwen3vl_model.eval()
@@ -221,7 +221,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
             model_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
             # hf_save_cfg of text_model is ignored to align with transformers's forward result
             model_cfg.text_config.hf_save_cfg = HFSaveCfg()
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+            qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         
         fsdp_config = FSDPConfig(cpu_offload=False)
         fsdp_mesh = init_world_mesh()
@@ -260,7 +260,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         with torch.device("meta"):
             model_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
             model_cfg.text_config.mtp_config = MTPConfig(num_layers=1, loss_scaling_factor=1)
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+            qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         qwen3vl_model.from_hf(QWEN3_VL_MOE_PATH)
         qwen3vl_model.eval()
@@ -308,7 +308,7 @@ class TestQwen3_5_VL(DeterministicDDPTestCase):
         with torch.device("meta"):
             model_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
             model_cfg.text_config.mtp_config = MTPConfig(num_layers=1)
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+            qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(cpu_offload=False)
         fsdp_mesh = init_world_mesh()

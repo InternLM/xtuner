@@ -33,12 +33,12 @@ export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 # Some DDP test will cost more than 300s, set it to 600 avoid timeout error.
 export DISTRIBUTED_TESTS_DEFAULT_TIMEOUT=600
 
-proxy_off
-pip install .[all]
+# proxy_off
+# pip install .[all]
 
-TORCH_VERSION=$(python -c "import torch;print(torch.__version__.split('+')[0])")
-if [[ $TORCH_VERSION == "2.9.1" ]]; then
-    pip install nvidia-cudnn-cu12==9.15.1.9
-fi
+# TORCH_VERSION=$(python -c "import torch;print(torch.__version__.split('+')[0])")
+# if [[ $TORCH_VERSION == "2.9.1" ]]; then
+#     pip install nvidia-cudnn-cu12==9.15.1.9
+# fi
 
-export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
+# export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
