@@ -429,7 +429,7 @@ class SampleParams(BaseModel):
     stops: Annotated[list[str], Parameter(help="List of stop sequences.")] = []
     stop_token_ids: Annotated[list[int], Parameter(help="List of stop token IDs.")] = []
     skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
-    sampling_seed: Annotated[int, Parameter(help="The seed for random number generator in sampling.")] = 0
+    sampling_seed: Annotated[int | None, Parameter(help="The seed for random number generator in sampling.")] = None
 
 
 class RolloutExtraParams(TypedDict):
