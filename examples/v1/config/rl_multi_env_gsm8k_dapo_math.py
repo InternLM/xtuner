@@ -54,7 +54,7 @@ enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0
 NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 experimental_name = "multi_env_gsm8k_dapo_math"
-rollout_steps = 500
+rollout_steps = 50
 evaluate_step = 5
 train_optimizer_steps = 8
 global_batch_size = 128
