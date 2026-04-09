@@ -153,7 +153,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.launch_server()
         return (self.rank, self.server_url)
 
-    def _decode_routed_experts(self, routed_experts: Any, meta_info: Dict[str, Any]) -> Any:
+    def _decode_routed_experts(self, routed_experts: Any) -> Any:
         return routed_experts
 
     def set_engine_rank_mesh_array(self, engine_rank_mesh_array: list[list[int]]):
@@ -571,13 +571,13 @@ class RolloutWorker(SingleAcceleratorWorker):
                     routed_experts = response["meta_info"].pop("routed_experts")  # token[layer[expert]]
                     if routed_experts is not None and not exist_history_routed_experts:
                         # 不存在历史专家，先把当前专家存起来
-                        routed_experts = self._decode_routed_experts(routed_experts, response["meta_info"])
-                        if not isinstance(routed_experts, ObjectRef):
+                        routed_experts = self._decode_routed_experts(routed_experts)
+                        if not isinstance(routed_experts, ObjectRef):  # 全部转为ray.objectref存储
                             routed_experts = ray.put(routed_experts)
                         extra_info["routed_experts"] = routed_experts
                     elif routed_experts is not None and exist_history_routed_experts:
                         # 存在历史专家，则不进行put 操作，直接进行concat
-                        routed_experts = self._decode_routed_experts(routed_experts, response["meta_info"])
+                        routed_experts = self._decode_routed_experts(routed_experts)
                         if isinstance(routed_experts, ObjectRef):
                             cur_routed_experts = await routed_experts  # n,layer,expert
                             ray.internal.free(routed_experts, local_only=False)

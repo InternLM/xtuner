@@ -101,7 +101,7 @@ class vLLMWorker(RolloutWorker):
         # todo
         pass
 
-    def _decode_routed_experts(self, routed_experts: Any, meta_info: Dict[str, Any]):
+    def _decode_routed_experts(self, routed_experts: Any):
         raise NotImplementedError
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:

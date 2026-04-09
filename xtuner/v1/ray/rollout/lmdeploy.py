@@ -209,7 +209,7 @@ class LMDeployWorker(RolloutWorker):
         """It will implemented for LMDeploy worker in the future."""
         pass
 
-    def _decode_routed_experts(self, routed_experts: Any, meta_info: Dict[str, Any]):
+    def _decode_routed_experts(self, routed_experts: Any):
         if isinstance(routed_experts, str):
             import base64
 

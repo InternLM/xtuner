@@ -4,9 +4,10 @@ from typing import Any, Dict, List, Union
 
 import numpy as np
 import requests
+import torch
 from urllib3.exceptions import NewConnectionError
 
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 from xtuner.v1.ray.config import RolloutConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
@@ -31,6 +32,11 @@ class SGLangWorker(RolloutWorker):
         self.endpoints["generate"] = "generate"
         self.endpoints["v1/chat/completions"] = "v1/chat/completions"
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_path, trust_remote_code=True)
+        self.model_config = AutoConfig.from_pretrained(self.config.model_path, trust_remote_code=True)
+        text_config = getattr(self.model_config, "text_config", self.model_config)
+        self.model_type = getattr(text_config, "model_type", getattr(self.model_config, "model_type", None))
+        self.routed_experts_num_hidden_layers = getattr(text_config, "num_hidden_layers", None)
+        self.routed_experts_num_experts_per_tok = getattr(text_config, "num_experts_per_tok", None)
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
@@ -143,15 +149,16 @@ class SGLangWorker(RolloutWorker):
         self.flush_cache()
         return self._make_request("release_memory_occupation")
 
-    def _decode_routed_experts(self, routed_experts: Any, meta_info: Dict[str, Any]):
-        import ray
-
-        assert isinstance(routed_experts, str), (
-            f"Expected routed_experts to be a base64 string, got {type(routed_experts)}"
-        )
-        routed_experts_flat = np.frombuffer(base64.b64decode(routed_experts), dtype=np.int32)
-        routed_experts_ref = ray.put(routed_experts_flat)  # 将 numpy 数组放入 Ray 对象存储
-        return routed_experts_ref
+    def _decode_routed_experts(self, routed_experts: Any):
+        if isinstance(routed_experts, str):
+            routed_experts_flat = np.frombuffer(base64.b64decode(routed_experts), dtype=np.int32)
+            routed_experts_array = routed_experts_flat.reshape(
+                -1,
+                self.routed_experts_num_hidden_layers,
+                self.routed_experts_num_experts_per_tok,
+            )
+            return torch.from_numpy(routed_experts_array.copy())
+        return routed_experts
 
     def _transform_rollout_config_to_server_configs(self):
         # remove the CUDA_VISIBLE_DEVICES set by ray and use base_gpu_id
