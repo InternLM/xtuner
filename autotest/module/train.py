@@ -51,7 +51,7 @@ class Train:
             elif train_type == "rl":
                 infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
                 command = (
-                    f"cd {current_dir}; pwd; pip install -e .[all]; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
+                    f"/root/codespace/xtuner; pwd; export PYTHONPATH=$PWD:$PYTHONPATH; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + f"bash -x examples/v1/scripts/run_rl.sh {config_path} {infer_type} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )
                 return command, config
