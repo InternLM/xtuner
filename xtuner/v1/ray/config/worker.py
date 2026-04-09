@@ -179,13 +179,6 @@ class RolloutConfig(BaseModel):
             help="Whether to enable returning routed experts for the rollout worker.",
         ),
     ] = False
-    enable_transfer_obj_ref: Annotated[
-        bool,
-        Parameter(
-            group=infer_group,
-            help="Whether to enable returning routed experts for the rollout worker.",
-        ),
-    ] = False
     launch_server_method: Annotated[
         Literal["ray", "multiprocessing"],
         Parameter(
@@ -339,9 +332,6 @@ class RolloutConfig(BaseModel):
         if self.max_retry_per_worker is None:
             self.max_retry_per_worker = self.rollout_max_batch_size_per_instance
 
-        if self.enable_return_routed_experts is True or self.enable_transfer_obj_ref is True:
-            self.enable_transfer_obj_ref = True
-            self.enable_return_routed_experts = True    
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
 
 
