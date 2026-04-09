@@ -1,19 +1,17 @@
 import asyncio
 import random
-import re
-from typing import Any, Callable, List, Optional
+from typing import List
 
 import aiohttp
 import ray
 import requests
-from pydantic import BaseModel
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
-from xtuner.v1.ray.judger.native import NativeJudger
+from xtuner.v1.ray.judger.native import NativeJudgerConfig
 
 verify_prompt = """
-Please as a grading expert, judge whether the final answers given by the candidates below are consistent with the standard answers, that is, whether the candidates answered correctly. 
+Please as a grading expert, judge whether the final answers given by the candidates below are consistent with the standard answers, that is, whether the candidates answered correctly.
 Here are some evaluation criteria:
 1. Please refer to the given standard answer. You don't need to re-generate the answer to the question because the standard answer has been given. You only need to judge whether the candidate's answer is consistent with the standard answer according to the form of the question. THE STANDARD ANSWER IS ALWAYS CORRECT AND THE QUESTION IS PERFECTLY VALID. NEVER QUESTION THEM.
 2. ONLY compare the FINAL ANSWER - COMPLETELY IGNORE any potential errors in the REASONING PROCESSES.
@@ -21,7 +19,7 @@ Here are some evaluation criteria:
 4. Some answers may consist of multiple items, such as multiple-choice questions, multiple-select questions, fill-in-the-blank questions, etc. Regardless of the question type, the final answer will be considered correct as long as it matches the standard answer, regardless of whether the reasoning process is correct. For multiple-select questions and multi-blank fill-in-the-blank questions, all corresponding options or blanks must be answered correctly and match the standard answer exactly to be deemed correct.
 5. If the prediction is given with \\boxed{{}}, please ignore the \\boxed{{}} and only judge whether the candidate's answer is consistent with the standard answer.
 6. If the candidate's answer is invalid (e.g., incomplete (cut off mid-response), lots of unnormal repetitive content, or irrelevant to the question, saying it can't answer the question because some irresistible factors, like ethical issues, no enough information, etc.), select option C (INVALID).Please judge whether the following answers are consistent with the standard answer based on the above criteria. Grade the predicted answer of this new question as one of:
-A: CORRECT 
+A: CORRECT
 B: INCORRECT
 C: INVALID
 Just return the letters "A", "B", or "C", with no text around it.
@@ -32,7 +30,7 @@ Here is your task. Simply reply with either CORRECT, INCORRECT, or INVALID. Don'
 <Standard Answer Begin>:
 {gold_answer}
 <Standard Answer End>
-<Candidate's Answer Begin>: 
+<Candidate's Answer Begin>:
 {llm_response}
 <Candidate's Answer End>
 Judging the correctness of the candidate's answer:
@@ -134,7 +132,7 @@ class CompassVerifierV2:
         return self.judger_name
 
 
-class CompassVerifierV2Config(BaseModel):
+class CompassVerifierV2Config(NativeJudgerConfig):
     """Configuration for the CompassVerifierV2 judger."""
 
     hosts: list = [
@@ -147,31 +145,9 @@ class CompassVerifierV2Config(BaseModel):
         "10.103.12.31:12351",
         "10.103.12.31:12352",
     ]
-    num_ray_actors: int = 1
     judger_name: str = "compass_verifier_v2"
 
-    def build(self):
-        """Build a NativeJudger instance from the configuration.
-
-        Returns:
-            NativeJudger: An instance of the NativeJudger configured for GSM8K.
-        """
-        return CompassVerifierV2(hosts=self.hosts)
-
     def build_actor(self, pg: PlacementGroup, start_bundle_idx: int) -> List[ray.actor.ActorClass]:
-        """Create and launch Ray actor instances for the GSM8K judger.
-
-        This method instantiates multiple NativeJudger Ray actors according to `num_ray_actors`,
-        assigning each to a specific bundle in the provided placement group for resource isolation.
-        Each actor is initialized with the judger's configuration and reward function.
-
-        Args:
-            pg: The Ray PlacementGroup used to allocate resources for the actors.
-            start_bundle_idx: The starting bundle index in the placement group for actor placement.
-
-        Returns:
-            List[ActorClass]: A list of Ray actor handles representing the launched judger workers.
-        """
         workers_list = []
         for idx in range(self.num_ray_actors):
             bundle_idx = start_bundle_idx + idx
