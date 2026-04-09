@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Union
 
 import numpy as np
 import requests
-import torch
 from urllib3.exceptions import NewConnectionError
 
 from transformers import AutoConfig, AutoTokenizer
@@ -150,35 +149,14 @@ class SGLangWorker(RolloutWorker):
         return self._make_request("release_memory_occupation")
 
     def _decode_routed_experts(self, routed_experts: Any, meta_info: Dict[str, Any]):
-        if not isinstance(routed_experts, str):
-            return super()._decode_routed_experts(routed_experts, meta_info)
+        import ray
 
-        prompt_tokens = meta_info.get("prompt_tokens", 0)
-        completion_tokens = meta_info.get("completion_tokens", 0)
-        num_tokens = prompt_tokens + completion_tokens - 1
-        assert num_tokens > 0, (
-            f"Unexpected routed_experts token count: prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}"
+        assert isinstance(routed_experts, str), (
+            f"Expected routed_experts to be a base64 string, got {type(routed_experts)}"
         )
-        assert self.routed_experts_num_hidden_layers is not None, (
-            "num_hidden_layers is required to decode routed_experts"
-        )
-        assert self.routed_experts_num_experts_per_tok is not None, (
-            "num_experts_per_tok is required to decode routed_experts"
-        )
-
         routed_experts_flat = np.frombuffer(base64.b64decode(routed_experts), dtype=np.int32)
-        expected_size = num_tokens * self.routed_experts_num_hidden_layers * self.routed_experts_num_experts_per_tok
-        assert routed_experts_flat.size == expected_size, (
-            f"Unexpected routed_experts size {routed_experts_flat.size}, expected {expected_size}. "
-            f"num_tokens={num_tokens}, num_hidden_layers={self.routed_experts_num_hidden_layers}, "
-            f"num_experts_per_tok={self.routed_experts_num_experts_per_tok}"
-        )
-        routed_experts_array = routed_experts_flat.reshape(
-            num_tokens,
-            self.routed_experts_num_hidden_layers,
-            self.routed_experts_num_experts_per_tok,
-        )
-        return torch.from_numpy(routed_experts_array.copy())
+        routed_experts_ref = ray.put(routed_experts_flat)  # 将 numpy 数组放入 Ray 对象存储
+        return routed_experts_ref
 
     def _transform_rollout_config_to_server_configs(self):
         # remove the CUDA_VISIBLE_DEVICES set by ray and use base_gpu_id

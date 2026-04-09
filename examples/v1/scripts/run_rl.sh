@@ -50,6 +50,7 @@ if [ "$infer_backend_lower" = "sglang" ]; then
   export XTUNER_USE_SGLANG=1
   unset PYTORCH_CUDA_ALLOC_CONF
   export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
+  export SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=False
 elif [ "$infer_backend_lower" = "lmdeploy" ]; then
   export XTUNER_USE_LMDEPLOY=1
   export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
@@ -86,51 +87,51 @@ fi
 
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
-node_count=${NODE_COUNT:-1}
-if [ "$ACCELERATOR" = "GPU" ]; then
-  total_cpus=$((node_count * 128))
-elif [ "$ACCELERATOR" = "NPU" ]; then
-  total_cpus=$((node_count * 256))
-fi
+# node_count=${NODE_COUNT:-1}
+# if [ "$ACCELERATOR" = "GPU" ]; then
+#   total_cpus=$((node_count * 128))
+# elif [ "$ACCELERATOR" = "NPU" ]; then
+#   total_cpus=$((node_count * 256))
+# fi
 
-WORK_DIR=$(realpath "$WORK_DIR")
-if [ "$RAY_RANK" -eq 0 ]; then
-  rm -rf /tmp/ray_log
-  export RAY_LOG_DIR="${WORK_DIR}/ray_${current_time}/"
-  mkdir -p ${RAY_LOG_DIR}
-  ln -sfn "${RAY_LOG_DIR}" /tmp/ray_log
-  ray start --head \
-    --node-ip-address="$RAY_MASTER_ADDR" \
-    --port="$RAY_HEAD_PORT" \
-    --dashboard-host=0.0.0.0 \
-    --dashboard-port=$RAY_DASHBOARD_PORT \
-    --include-dashboard=true \
-    --disable-usage-stats \
-    --num-cpus=$total_cpus \
-    --temp-dir="/tmp/ray_log/"
-else
-  while true; do
-    if curl --connect-timeout 2 "http://${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT}" >/dev/null 2>&1; then
-      echo "Successfully connected to Ray master at ${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT}"
-      break
-    else
-      echo "Waiting for Ray master at ${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT} to be available..."
-      sleep 2
-    fi
-  done
-  ray start --address="$RAY_MASTER_ADDR:$RAY_HEAD_PORT" --block --disable-usage-stats
-fi
+# WORK_DIR=$(realpath "$WORK_DIR")
+# if [ "$RAY_RANK" -eq 0 ]; then
+#   rm -rf /tmp/ray_log
+#   export RAY_LOG_DIR="${WORK_DIR}/ray_${current_time}/"
+#   mkdir -p ${RAY_LOG_DIR}
+#   ln -sfn "${RAY_LOG_DIR}" /tmp/ray_log
+#   ray start --head \
+#     --node-ip-address="$RAY_MASTER_ADDR" \
+#     --port="$RAY_HEAD_PORT" \
+#     --dashboard-host=0.0.0.0 \
+#     --dashboard-port=$RAY_DASHBOARD_PORT \
+#     --include-dashboard=true \
+#     --disable-usage-stats \
+#     --num-cpus=$total_cpus \
+#     --temp-dir="/tmp/ray_log/"
+# else
+#   while true; do
+#     if curl --connect-timeout 2 "http://${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT}" >/dev/null 2>&1; then
+#       echo "Successfully connected to Ray master at ${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT}"
+#       break
+#     else
+#       echo "Waiting for Ray master at ${RAY_MASTER_ADDR}:${RAY_DASHBOARD_PORT} to be available..."
+#       sleep 2
+#     fi
+#   done
+#   ray start --address="$RAY_MASTER_ADDR:$RAY_HEAD_PORT" --block --disable-usage-stats
+# fi
 
-while true; do
-  result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
-  expected_accelerator_count=$((node_count * ${ACCELERATOR_PER_NODE}))
-  if [ "$result" = "$expected_accelerator_count.0" ]; then
-    break
-  else
-    echo "Waiting for ${ACCELERATOR} count to be $expected_accelerator_count, current: $result"
-    sleep 2
-  fi
-done
+# while true; do
+#   result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
+#   expected_accelerator_count=$((node_count * ${ACCELERATOR_PER_NODE}))
+#   if [ "$result" = "$expected_accelerator_count.0" ]; then
+#     break
+#   else
+#     echo "Waiting for ${ACCELERATOR} count to be $expected_accelerator_count, current: $result"
+#     sleep 2
+#   fi
+# done
 
 SCRIPT_NAME=$(basename "$0")
 cp "$0" "${WORK_DIR}/${SCRIPT_NAME}"

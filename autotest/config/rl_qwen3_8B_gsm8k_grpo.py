@@ -28,7 +28,7 @@ model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_evaluate = True if eval_data_path != "" else False
-enbale_partial_rollout = int(os.environ.get("ENBALE_PARTIAL_ROLLOUT", "0"))
+enable_partial_rollout = int(os.environ.get("ENABLE_PARTIAL_ROLLOUT", "0"))
 
 # basic settings
 experimental_name = "grpo_gsm8k_tiny"
@@ -96,7 +96,7 @@ dataflow_config = DataFlowConfig(
     prompt_repeat_k=prompt_repeat_k,
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
-    enable_partial_rollout=enbale_partial_rollout,
+    enable_partial_rollout=enable_partial_rollout,
 )
 
 evaluator_cfg = (

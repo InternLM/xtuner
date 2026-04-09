@@ -432,7 +432,11 @@ class TrainingWorker(SingleAcceleratorWorker):
                         if self.sp_mesh.get_local_rank() == 0:
                             # only free once of sp mesh
                             to_free_routed_expert_refs.append(rollout_routed_expert_refs)
-                    out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
+                    rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
+                    rollout_routed_expert = rollout_routed_expert.reshape(
+                        -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
+                    )
+                    out_rollout_routed_expert.append(rollout_routed_expert)
 
             seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
         else:

@@ -14,7 +14,7 @@ EVAL_DATA_PATH=${4:-""}
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
 # deterministic 环境变量
-# NOTE: you should use sglang==0.5.5 to reproduce our results deterministic results.
+# NOTE: you should use sglang==0.5.9 to reproduce our results deterministic results.
 export XTUNER_USE_SGLANG=1
 export XTUNER_USE_LMDEPLOY=0
 export XTUNER_USE_VLLM=0
@@ -24,7 +24,7 @@ export XTUNER_USE_FA3=0
 # sglang 环境变量
 unset PYTORCH_CUDA_ALLOC_CONF
 export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
-
+export SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=False
 # ray 环境变量
 export MASTER_PORT=6000
 export WORLD_SIZE=${NODE_COUNT:-"1"}
@@ -36,6 +36,7 @@ export RAY_CLIENT_PORT=${RAY_CLIENT_PORT:-"10001"}
 export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-"8265"}
 # TODO: 提供非环境变量方式配置 ray_max_concurrency
 export RAY_MAX_CONCURRENCY=${RAY_MAX_CONCURRENCY:-1024} # dataflow_max_concurrency * prompt_repeat_k
+export ACCELERATOR=${ACCELERATOR:-"GPU"}
 
 # xtuner 环境变量
 export MODEL_PATH=$MODEL_PATH
@@ -48,6 +49,7 @@ current_time=$(date "+%m%d%H")
 # 取模型路径的最后一级作为model_name，取数据路径的倒数第二级作为data_name
 model_dir_name=$(basename "$MODEL_PATH")
 data_dir_name=$(basename "$(dirname "$DATA_PATH")")
+infer_backend_lower="sglang"
 
 if [ "x$WORK_DIR" = "x" ]; then
   DIR=$(pwd)
@@ -99,7 +101,12 @@ fi
 
 while true; do
   result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
-  expected_accelerator_count=$((node_count * 8))
+  accelerator_per_node=${ACCELERATOR_PER_NODE:-8}
+  if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    IFS=',' read -ra visible_devices <<< "${CUDA_VISIBLE_DEVICES}"
+    accelerator_per_node=${#visible_devices[@]}
+  fi
+  expected_accelerator_count=$((node_count * accelerator_per_node))
   if [ "$result" = "$expected_accelerator_count.0" ]; then
     break
   else
