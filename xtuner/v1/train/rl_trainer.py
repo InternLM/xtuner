@@ -120,7 +120,7 @@ def get_train_seq_ctx(
 ):
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
     if multimodal_train_info and len(multimodal_train_info) > 0:
-        position_ids = multimodal_train_info.pop("position_ids")  # (1,n) or (3,1,n)
+        position_ids = multimodal_train_info.get("position_ids")  # (1,n) or (3,1,n)
         if position_ids is not None and len(position_ids.shape) == 3:
             # qwen3vl 需要特殊处理，其余的不需要额外处理
             max_value = position_ids.max(dim=-1).values  # (3,1)
@@ -130,9 +130,8 @@ def get_train_seq_ctx(
             position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
             seq_ctx.position_ids = position_ids  # type: ignore[assignment]
             assert position_ids.size(-1) == input_ids.size(-1)
-        seq_ctx.pixel_values = multimodal_train_info.pop("pixel_values")
-        seq_ctx.image_grid_thw = multimodal_train_info.pop("image_grid_thw")
-        del multimodal_train_info
+        seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
+        seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
     return seq_ctx
 
 
@@ -803,6 +802,8 @@ class RLTrainer:
                     seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
 
                 data_batches.append(data_dict)
+            if multimodal_train_info is not None:
+                del multimodal_train_info
         random.shuffle(data_batches)
 
         rewards_t = torch.tensor(rewards_list).float() if rewards_list else torch.tensor([0.0]).float()
