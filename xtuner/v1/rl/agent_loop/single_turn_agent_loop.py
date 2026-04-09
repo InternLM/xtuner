@@ -1,24 +1,29 @@
 from xtuner.v1.data_proto import RolloutState, SampleParams, Status
 from xtuner.v1.rl.rollout import RolloutController
 
-from .agent_loop import AgentLoop, AgentLoopConfig
+from .agent_loop import AgentLoop, AgentLoopConfig, JudgerSpec
 from .utils import PartialRolloutHandler
 
 
 class SingleTurnAgentLoopConfig(AgentLoopConfig):
-    def build(self, rollout_controller, judger=None, logger=None) -> "SingleTurnAgentLoop":
+    def build(self, rollout_controller, logger=None) -> "SingleTurnAgentLoop":
         return SingleTurnAgentLoop(
             rollout_ctl=rollout_controller,
             sample_params=self.sample_params,
             hf_checkpoint=self.hf_checkpoint,
-            judger=judger,
+            judger=self.build_judger(),
             logger=logger,
         )
 
 
 class SingleTurnAgentLoop(AgentLoop):
     def __init__(
-        self, rollout_ctl: RolloutController, sample_params: SampleParams, hf_checkpoint: str, judger=None, logger=None
+        self,
+        rollout_ctl: RolloutController,
+        sample_params: SampleParams,
+        hf_checkpoint: str,
+        judger: JudgerSpec = None,
+        logger=None,
     ):
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_tokens = self.sample_params.max_tokens

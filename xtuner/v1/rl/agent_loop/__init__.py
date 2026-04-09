@@ -1,4 +1,4 @@
-from .agent_loop import AgentLoop, AgentLoopConfig
+from .agent_loop import AgentLoop, AgentLoopConfig, JudgerConfigSpec, JudgerLike, JudgerSpec
 from .agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
@@ -22,6 +22,9 @@ __all__ = [
     "SingleTurnAgentLoopConfig",
     "AgentLoop",
     "SingleTurnAgentLoop",
+    "JudgerLike",
+    "JudgerSpec",
+    "JudgerConfigSpec",
     "AgentLoopManagerConfig",
     "AgentLoopManager",
     "TaskSpecConfig",

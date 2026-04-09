@@ -79,14 +79,14 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
-            sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)
+            sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
+            judger_config=judger_config,
         )
-        # 2. 创建 rollout_controller, judger
+        # 2. 创建 rollout_controller
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
-        gsm8k_judger = judger_config.build()
         # 3. 创建 AgentLoop
-        agent_loop = agent_loop_cfg.build(rollout_controller=rollout_controller, judger=gsm8k_judger)
+        agent_loop = agent_loop_cfg.build(rollout_controller=rollout_controller)
         # 4. 构造输入数据
         prompt_repeat_k = 4
         rollout_state = FAKE_INPUT_ITEM
@@ -118,7 +118,8 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
-            sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)
+            sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
+            judger_config=judger_config,
         )
         sampler_config = SamplerConfig(
             dataloader_cfg=DataloaderConfig(
@@ -146,16 +147,14 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
-        # 2. 创建 rollout_controller, judger
+        # 2. 创建 rollout_controller
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
-        gsm8k_judger = judger_config.build()
         # 3. 创建 AgentLoopManager
         replay_buffer_cfg = SyncReplayBufferConfig()
         replay_buffer = replay_buffer_cfg.build()
         agent_loop_manager = agent_loop_manager_cfg.build(
             rollout_controller=rollout_controller,
-            judger=gsm8k_judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
         )
