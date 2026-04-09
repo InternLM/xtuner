@@ -11,7 +11,7 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SingleTurnAgentLoopConfig, AsyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, EnvSpecConfig, SingleTurnAgentLoopConfig, AsyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
@@ -142,11 +142,15 @@ produce_strategy_config = AsyncProduceStrategyConfig(
     tail_batch_stale_threshold=1,
     tail_batch_trigger_size=256,
 )
-agent_loop_manager_cfg = AgentLoopManagerConfig.single_env(
-    task_name="train_task",
-    agent_loop_config=agent_loop_config,
-    produce_strategy_config=produce_strategy_config,
-    sampler_config=sampler_config,
+agent_loop_manager_cfg = AgentLoopManagerConfig(
+    envs=[
+        EnvSpecConfig(
+            env_name="train_task",
+            agent_loop_config=agent_loop_config,
+            produce_strategy_config=produce_strategy_config,
+            sampler_config=sampler_config,
+        )
+    ],
 )
 
 # 6. eval agent loop manager
@@ -175,10 +179,14 @@ eval_agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
 )
-eval_agent_loop_manager_cfg = AgentLoopManagerConfig.single_env(
-    task_name="eval_task",
-    agent_loop_config=eval_agent_loop_config,
-    sampler_config=eval_sampler_config,
+eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+    envs=[
+        EnvSpecConfig(
+            env_name="eval_task",
+            agent_loop_config=eval_agent_loop_config,
+            sampler_config=eval_sampler_config,
+        )
+    ],
 )
 
 def dapo_compute_metric(samples):

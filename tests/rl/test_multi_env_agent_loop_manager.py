@@ -75,7 +75,6 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             managed_envs=[
                 _EnvRunner(
                     env_name="env_b",
-                    task_name="task_b",
                     agent_loop=MagicMock(),
                     produce_strategy=strategy_b,
                     sampler=_FakeSampler(),
@@ -84,7 +83,6 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
                 _EnvRunner(
                     env_name="env_a",
-                    task_name="task_a",
                     agent_loop=MagicMock(),
                     produce_strategy=strategy_a,
                     sampler=_FakeSampler(),
@@ -93,7 +91,6 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
                 _EnvRunner(
                     env_name="env_c",
-                    task_name="task_c",
                     agent_loop=MagicMock(),
                     produce_strategy=strategy_c,
                     sampler=_FakeSampler(),
@@ -102,12 +99,11 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
             ],
             replay_buffer=replay_buffer,
-            task_name="root_task",
         )
 
         result = await multi_env_manager.produce_batch(batch_size=7, rollout_step=3)
 
-        self.assertEqual(result.task_batch_sizes, {"task_a": 5, "task_b": 2, "task_c": 0})
+        self.assertEqual(result.task_batch_sizes, {"env_a": 5, "env_b": 2, "env_c": 0})
         self.assertEqual(strategy_a.called_batch_sizes, [5])
         self.assertEqual(strategy_b.called_batch_sizes, [2])
         self.assertEqual(strategy_c.called_batch_sizes, [])
@@ -117,9 +113,9 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.leftover_expired, 0)
         self.assertEqual(result.group_gen_count, 5)
         self.assertAlmostEqual(result.group_gen_mean_s, 1.4)
-        self.assertIn("task_a", result.task_results)
-        self.assertIn("task_b", result.task_results)
-        self.assertIn("task_c", result.task_results)
+        self.assertIn("env_a", result.task_results)
+        self.assertIn("env_b", result.task_results)
+        self.assertIn("env_c", result.task_results)
 
     async def test_custom_get_task_batch_sizes_can_disable_envs(self):
         strategy_a = _FakeProduceStrategy(generate_times_s=[2.0])
@@ -135,13 +131,12 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         class _CustomBatchManager(AgentLoopManager):
             def get_task_batch_sizes(self, global_batch_size: int, rollout_step: int) -> dict[str, int]:
                 self.observed_rollout_step = rollout_step
-                return {"task_a": 0, "task_b": global_batch_size}
+                return {"env_a": 0, "env_b": global_batch_size}
 
         multi_env_manager = _CustomBatchManager(
             managed_envs=[
                 _EnvRunner(
                     env_name="env_a",
-                    task_name="task_a",
                     agent_loop=MagicMock(),
                     produce_strategy=strategy_a,
                     sampler=_FakeSampler(),
@@ -150,7 +145,6 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
                 _EnvRunner(
                     env_name="env_b",
-                    task_name="task_b",
                     agent_loop=MagicMock(),
                     produce_strategy=strategy_b,
                     sampler=_FakeSampler(),
@@ -159,13 +153,12 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 ),
             ],
             replay_buffer=replay_buffer,
-            task_name="root_task",
         )
 
         result = await multi_env_manager.produce_batch(batch_size=2, rollout_step=9)
 
         self.assertEqual(multi_env_manager.observed_rollout_step, 9)
-        self.assertEqual(result.task_batch_sizes, {"task_a": 0, "task_b": 2})
+        self.assertEqual(result.task_batch_sizes, {"env_a": 0, "env_b": 2})
         self.assertEqual(strategy_a.called_batch_sizes, [])
         self.assertEqual(strategy_b.called_batch_sizes, [2])
         self.assertEqual(result.rollout_states, [["b-0"], ["b-1"]])

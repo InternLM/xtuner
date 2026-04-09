@@ -13,6 +13,7 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.rl.agent_loop import (
     AgentLoopManagerConfig,
+    EnvSpecConfig,
     AsyncProduceStrategyConfig,
     SamplerConfig,
     SingleTurnAgentLoopConfig,
@@ -105,11 +106,15 @@ def _build_agent_loop_manager(
 
     replay_buffer = AsyncReplayBufferConfig().build()
 
-    manager_cfg = AgentLoopManagerConfig.single_env(
-        task_name=task_name,
-        agent_loop_config=agent_loop_config,
-        produce_strategy_config=produce_strategy_config,
-        sampler_config=sampler_config,
+    manager_cfg = AgentLoopManagerConfig(
+        envs=[
+            EnvSpecConfig(
+                env_name=task_name,
+                agent_loop_config=agent_loop_config,
+                produce_strategy_config=produce_strategy_config,
+                sampler_config=sampler_config,
+            )
+        ],
     )
     manager = manager_cfg.build(
         rollout_controller=rollout_ctl,

@@ -195,19 +195,16 @@ dapo_train_agent_loop_config = SingleTurnAgentLoopConfig(
 )
 
 agent_loop_manager_cfg = AgentLoopManagerConfig(
-    task_name="train_task",
     envs=[
         EnvSpecConfig(
-            env_name="dapo_math",
-            task_name="train_task:dapo_math",
+            env_name="train_task:dapo_math",
             weight=dapo_env_weight,
             agent_loop_config=dapo_train_agent_loop_config,
             produce_strategy_config=SyncProduceStrategyConfig(),
             sampler_config=dapo_train_sampler_config,
         ),
         EnvSpecConfig(
-            env_name="gsm8k",
-            task_name="train_task:gsm8k",
+            env_name="train_task:gsm8k",
             weight=gsm8k_env_weight,
             agent_loop_config=gsm8k_train_agent_loop_config,
             produce_strategy_config=SyncProduceStrategyConfig(),
@@ -267,18 +264,15 @@ dapo_eval_agent_loop_config = SingleTurnAgentLoopConfig(
 )
 
 eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
-    task_name="eval_task",
     envs=[
         EnvSpecConfig(
-            env_name="dapo_math",
-            task_name="eval_task:dapo_math",
+            env_name="eval_task:dapo_math",
             weight=dapo_env_weight,
             agent_loop_config=dapo_eval_agent_loop_config,
             sampler_config=dapo_eval_sampler_config,
         ),
         EnvSpecConfig(
-            env_name="gsm8k",
-            task_name="eval_task:gsm8k",
+            env_name="eval_task:gsm8k",
             weight=gsm8k_env_weight,
             agent_loop_config=gsm8k_eval_agent_loop_config,
             sampler_config=gsm8k_eval_sampler_config,
