@@ -62,6 +62,19 @@ CHAT_TEMPLATE_MAP = {
         image_context_token="<|image_pad|>",
         video_context_token="<|video_pad|>",
     ),
+    "qwen3.5-vl": HybridChatTemplate(
+        template_name="qwen3.5-vl",
+        system="<|im_start|>system\n{system}<|im_end|>\n",
+        tool_prompt="# Tools\n\nYou have access to the following functions:\n\n<tools>{tool_text}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>",
+        tool_extractor="<|im_start|>user\n<tool_response>\n{tool_extractor}\n</tool_response><|im_end|>\n<|im_start|>assistant\n",
+        user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
+        stop_words=["<|im_end|>", "<|endoftext|>"],
+        assistant="{assistant}<|im_end|>",
+        image_start_token="<|vision_start|>",
+        image_end_token="<|vision_end|>",
+        image_context_token="<|image_pad|>",
+        video_context_token="<|video_pad|>",
+    ),
     "llama3": HybridChatTemplate(
         system="<|start_header_id|>system<|end_header_id|>\n\n{system}<|eot_id|>",
         user=(

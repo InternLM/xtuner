@@ -35,7 +35,6 @@ from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
-from xtuner.v1.ray.utils import free_object_refs
 from xtuner.v1.rl.base.loss import BaseRLLossContext
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
@@ -485,11 +484,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                         f"pixel_values should be list of tensor, got {type(pixel_values)}"
                     )
                     pixel_value_refs = list(pixel_values)
-                    try:
-                        pixel_values = torch.cat(ray.get(pixel_value_refs), dim=0)
-                    finally:
-                        free_object_refs(pixel_value_refs)
-
+                    pixel_values = torch.cat(ray.get(pixel_value_refs), dim=0)
                     seq_ctx.pixel_values = pixel_values
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts
