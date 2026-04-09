@@ -16,7 +16,6 @@ from ray.actor import ActorClass
 from transformers import AutoTokenizer
 from typing_extensions import Self
 
-from xtuner.v1._writer import TensorboardWriter
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.multiturn import tokenize
 from xtuner.v1.patch import patch_default_save_plan
@@ -29,7 +28,12 @@ from xtuner.v1.utils import is_hf_model_path, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 from xtuner.v1.utils.env_check import get_rollout_engine_version
 
-from .rl_trainer import RLTrainer, RLTrainerConfig, bind_train_rollout
+from .rl_trainer import (
+    TRAINER_RAY_GET_TIMEOUT,
+    RLTrainer,
+    RLTrainerConfig,
+    bind_train_rollout,
+)
 from .trainer import LoadCheckpointConfig
 
 # TODO: Move DEVICE to `xtuner.utils.device`
@@ -66,6 +70,8 @@ class AgentRLTrainerConfig(BaseModel):
     debug: bool = False
     debug_rollout: bool = False
     rollout_steps: int | None = None
+    exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
+    display_all_workers_log: bool = False
     skip_load_weights: bool = False
 
     @model_validator(mode="after")
@@ -124,6 +130,8 @@ class AgentRLTrainer(RLTrainer):
         debug: bool = False,
         debug_rollout: bool = False,
         rollout_steps: int | None = None,
+        exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
+        display_all_workers_log: bool = False,
         trainer_cfg: RLTrainerConfig | None = None,
         skip_load_weights: bool = False,
     ):
@@ -278,7 +286,10 @@ class AgentRLTrainer(RLTrainer):
             with env_path.open("w") as f:
                 json.dump(environment_variables, f, indent=2)
 
-        self._writer = TensorboardWriter(log_dir / "tb")
+        self._ray_get_timeout = TRAINER_RAY_GET_TIMEOUT
+        self._exp_tracker = self._init_tracker(exp_tracker, log_dir / self._EXP_TRACKING_PATH)
+        self._display_all_workers_log = display_all_workers_log
+
         self._train_results = defaultdict(list)
         self._eval_results = defaultdict(list)
 
@@ -316,6 +327,8 @@ class AgentRLTrainer(RLTrainer):
             debug=config.debug,
             debug_rollout=config.debug_rollout,
             rollout_steps=config.rollout_steps,
+            exp_tracker=config.exp_tracker,
+            display_all_workers_log=config.display_all_workers_log,
             trainer_cfg=config,
             skip_load_weights=config.skip_load_weights,
         )
@@ -341,14 +354,14 @@ class AgentRLTrainer(RLTrainer):
             self._save_trajectories(eval_data_groups, trajectory_save_path, 0, is_eval=True)
             self.logger.info(f"Initial rollout evaluate scores {scores} and start training")
             tb_scores = {f"eval/{k}": v for k, v in scores.items()}
-            self._writer.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
+            self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
             for name, score in scores.items():
                 self._eval_results[name].append((self._cur_step, score))
             self.visulize_results('eval')
 
     def _rollout_step(self, rollout_idx: int, step_timer_dict: dict):
-        data_groups, multimodal_train_infos = super()._rollout_step(rollout_idx, step_timer_dict)
-        metrics_results = self._compute_metrics(data_groups)
+        rollout_info = super()._rollout_step(rollout_idx, step_timer_dict)
+        metrics_results = self._compute_metrics(rollout_info["data_groups"])
         self.logger.info(
             f"train idx {rollout_idx} scores {metrics_results["avg_reward"]},"
             f" all-zero group ratio {metrics_results.pop("all_zero_ratio", None)},"
@@ -357,23 +370,26 @@ class AgentRLTrainer(RLTrainer):
         for metric, result in metrics_results.items():
             self._train_results[metric].append((self._cur_step, result))
         self.visulize_results('train')
-        return data_groups, multimodal_train_infos
+        return rollout_info
 
     def _evaluate_step(self, rollout_idx: int, step_timer_dict: dict):
         """Performs an evaluation step."""
+        eval_log_info = {}
         if self._enable_evaluate and self._evaluator and rollout_idx % self._eval_step == 0:
             with timer("evaluation", step_timer_dict):
                 scores, eval_data_groups = ray.get(self._evaluator.run.remote(return_samples=True))
                 trajectory_save_path = self.exp_dir / f"eval_{rollout_idx}_trajectory.jsonl"
                 self._save_trajectories(eval_data_groups, trajectory_save_path, rollout_idx, is_eval=True)
                 self.logger.info(f"Evaluate idx {rollout_idx} scores {scores}")
+            eval_log_info.update(scores)
             tb_scores = {f"eval/{k}": v for k, v in scores.items()}
-            self._writer.add_scalars(tag_scalar_dict=tb_scores, global_step=rollout_idx)
+            self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=rollout_idx)
             for name, score in scores.items():
                 self._eval_results[name].append((self._cur_step, score))
             self.visulize_results('eval')
+        return eval_log_info
 
-    def _save_trajectories(self, data_groups, save_path, rollout_idx, is_eval: bool = False):
+    def _save_trajectories(self, data_groups, save_path, rollout_idx=None, is_eval: bool = False):
         rewards = []
         rollout_response_len_list = []
         for group in data_groups:
