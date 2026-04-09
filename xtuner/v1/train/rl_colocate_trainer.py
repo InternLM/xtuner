@@ -17,7 +17,7 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, ProduceBatchResult
+from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, MultiEnvAgentLoopManagerConfig, ProduceBatchResult
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import JudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
@@ -159,8 +159,8 @@ class RLColocateTrainerConfig(BaseModel):
     judger_config: JudgerConfig
     tokenizer_path: Union[str, Path]
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
-    agent_loop_manager_cfg: AgentLoopManagerConfig
-    eval_agent_loop_manager_cfg: AgentLoopManagerConfig
+    agent_loop_manager_cfg: AgentLoopManagerConfig | MultiEnvAgentLoopManagerConfig
+    eval_agent_loop_manager_cfg: AgentLoopManagerConfig | MultiEnvAgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
     load_from: Union[str, Path]
     rollout_steps: int
@@ -373,7 +373,7 @@ class RLColocateTrainer:
         self._evaluate_step = evaluate_step
 
         # build evaluator
-        total_eval_samples = len(self.eval_agent_loop_manager._data_sampler)
+        total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
         self.evaluator = evaluator_config.build(total_eval_samples=total_eval_samples)
 
         # Resume sampler and sync weights if checkpoint exists

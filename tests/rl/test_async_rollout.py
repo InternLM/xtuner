@@ -173,7 +173,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
             task_name="test_1_1",
             over_sample_threshold=self.OVER_SAMPLE_THRESHOLD,
         )
-        replay_buffer = manager._replay_buffer
+        replay_buffer = manager.replay_buffer
 
         await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=1)
 
@@ -224,8 +224,8 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
             # enable_partial_rollout=False (default) so leftover COMPLETED are
             # converted to ABORTED by _process_leftover_samples() in round 2.
         )
-        replay_buffer = manager._replay_buffer
-        original_sample = manager._data_sampler.sample
+        replay_buffer = manager.replay_buffer
+        original_sample = manager.data_sampler.sample
 
         sampled_from_aborted = 0
 
@@ -239,7 +239,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
                 sampled_from_aborted += 1
             return result
 
-        manager._data_sampler.sample = instrumented_sample
+        manager.data_sampler.sample = instrumented_sample
 
         # --- Round 1 ---
         await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=1)
@@ -370,7 +370,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
             enable_partial_rollout=True,
             max_tokens=MAX_RESPONSE_LENGTH,
         )
-        replay_buffer = manager._replay_buffer
+        replay_buffer = manager.replay_buffer
 
         state = self._make_aborted_state(
             uid=injected_uid,
@@ -433,7 +433,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
             enable_partial_rollout=True,
             max_tokens=MAX_RESPONSE_LENGTH,
         )
-        replay_buffer = manager._replay_buffer
+        replay_buffer = manager.replay_buffer
 
         state = self._make_aborted_state(
             uid=injected_uid,
@@ -480,7 +480,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
             enable_partial_rollout=True,
             max_tokens=max_tokens,
         )
-        replay_buffer = manager._replay_buffer
+        replay_buffer = manager.replay_buffer
 
         state = self._make_aborted_state(
             uid=injected_uid,
@@ -527,7 +527,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
             enable_partial_rollout=True,
             max_tokens=max_tokens,
         )
-        replay_buffer = manager._replay_buffer
+        replay_buffer = manager.replay_buffer
 
         state = self._make_aborted_state(
             uid=injected_uid,
@@ -614,7 +614,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             tail_batch_trigger_size=0,  # 只测 EXPIRED 标记，不触发 tail-batch 模式
             max_tokens=8192,  # 让 response 足够长，确保 staleness 能积累到 1（不被 max_tokens 短路）
         )
-        replay_buffer = manager._replay_buffer
+        replay_buffer = manager.replay_buffer
 
         # 3 轮是让 staleness 自然积累并被 _process_leftover_samples 标记的最少轮数：
         #   round1 产生 ABORTED（step=1 tokens）→ round2 续写完成（COMPLETED, staleness=1）
@@ -673,7 +673,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             tail_batch_trigger_size=TRIGGER_SIZE,
             max_tokens=8192,
         )
-        replay_buffer = manager._replay_buffer
+        replay_buffer = manager.replay_buffer
 
         tail_batch_triggered = False
         completed_from_tail_batch = None
