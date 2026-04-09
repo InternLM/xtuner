@@ -136,7 +136,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             ),
             prompt_repeat_k=2,
         )
-        agent_loop_manager_cfg = AgentLoopManagerConfig(
+        agent_loop_manager_cfg = AgentLoopManagerConfig.single_env(
             task_name="test_gsm8k",
             agent_loop_config=agent_loop_cfg,
             produce_strategy_config=SyncProduceStrategyConfig(),

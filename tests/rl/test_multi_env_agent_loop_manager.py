@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock
 
 from xtuner.v1.rl.agent_loop.agent_loop_manager import (
-    MultiEnvAgentLoopManager,
+    AgentLoopManager,
     _EnvRunner,
 )
 from xtuner.v1.rl.agent_loop.producer import ProducerTimings
@@ -71,7 +71,7 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        multi_env_manager = MultiEnvAgentLoopManager(
+        multi_env_manager = AgentLoopManager(
             managed_envs=[
                 _EnvRunner(
                     env_name="env_b",
@@ -132,7 +132,7 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             leftover_counts={},
         )
 
-        class _CustomBatchManager(MultiEnvAgentLoopManager):
+        class _CustomBatchManager(AgentLoopManager):
             def get_task_batch_sizes(self, global_batch_size: int, rollout_step: int) -> dict[str, int]:
                 self.observed_rollout_step = rollout_step
                 return {"task_a": 0, "task_b": global_batch_size}

@@ -135,7 +135,7 @@ produce_strategy_config = AsyncProduceStrategyConfig(
     tail_batch_stale_threshold=1,
     tail_batch_trigger_size=64
 )
-agent_loop_manager_cfg = AgentLoopManagerConfig(
+agent_loop_manager_cfg = AgentLoopManagerConfig.single_env(
     task_name="train_task",
     agent_loop_config=agent_loop_config,
     produce_strategy_config=produce_strategy_config,
@@ -168,7 +168,7 @@ eval_agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
 )
-eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+eval_agent_loop_manager_cfg = AgentLoopManagerConfig.single_env(
     task_name="eval_task",
     agent_loop_config=eval_agent_loop_config,
     sampler_config=eval_sampler_config,

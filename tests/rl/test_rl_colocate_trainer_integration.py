@@ -160,7 +160,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
             sample_params=training_sample_params,
         )
         produce_strategy_config = SyncProduceStrategyConfig()
-        agent_loop_manager_cfg = AgentLoopManagerConfig(
+        agent_loop_manager_cfg = AgentLoopManagerConfig.single_env(
             task_name="train_task",
             agent_loop_config=agent_loop_config,
             produce_strategy_config=produce_strategy_config,
@@ -176,7 +176,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
             hf_checkpoint=model_path,
             sample_params=SampleParams(max_tokens=512, top_k=1, temperature=0.0),
         )
-        eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+        eval_agent_loop_manager_cfg = AgentLoopManagerConfig.single_env(
             task_name="eval_task",
             agent_loop_config=eval_agent_loop_config,
             sampler_config=eval_sampler_config,

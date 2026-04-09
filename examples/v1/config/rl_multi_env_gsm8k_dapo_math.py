@@ -29,8 +29,8 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.agent_loop import (
-    MultiEnvAgentLoopManagerConfig,
-    MultiEnvSpecConfig,
+    AgentLoopManagerConfig,
+    EnvSpecConfig,
     SamplerConfig,
     SingleTurnAgentLoopConfig,
     SyncProduceStrategyConfig,
@@ -194,10 +194,10 @@ dapo_train_agent_loop_config = SingleTurnAgentLoopConfig(
     ),
 )
 
-agent_loop_manager_cfg = MultiEnvAgentLoopManagerConfig(
+agent_loop_manager_cfg = AgentLoopManagerConfig(
     task_name="train_task",
     envs=[
-        MultiEnvSpecConfig(
+        EnvSpecConfig(
             env_name="dapo_math",
             task_name="train_task:dapo_math",
             weight=dapo_env_weight,
@@ -205,7 +205,7 @@ agent_loop_manager_cfg = MultiEnvAgentLoopManagerConfig(
             produce_strategy_config=SyncProduceStrategyConfig(),
             sampler_config=dapo_train_sampler_config,
         ),
-        MultiEnvSpecConfig(
+        EnvSpecConfig(
             env_name="gsm8k",
             task_name="train_task:gsm8k",
             weight=gsm8k_env_weight,
@@ -266,17 +266,17 @@ dapo_eval_agent_loop_config = SingleTurnAgentLoopConfig(
     ),
 )
 
-eval_agent_loop_manager_cfg = MultiEnvAgentLoopManagerConfig(
+eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
     task_name="eval_task",
     envs=[
-        MultiEnvSpecConfig(
+        EnvSpecConfig(
             env_name="dapo_math",
             task_name="eval_task:dapo_math",
             weight=dapo_env_weight,
             agent_loop_config=dapo_eval_agent_loop_config,
             sampler_config=dapo_eval_sampler_config,
         ),
-        MultiEnvSpecConfig(
+        EnvSpecConfig(
             env_name="gsm8k",
             task_name="eval_task:gsm8k",
             weight=gsm8k_env_weight,

@@ -2,10 +2,7 @@ from .agent_loop import AgentLoop, AgentLoopConfig
 from .agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
-    MultiEnvAgentLoopManager,
-    MultiEnvAgentLoopManagerConfig,
-    MultiEnvProduceBatchResult,
-    MultiEnvSpecConfig,
+    EnvSpecConfig,
     ProduceBatchResult,
 )
 from .producer import (
@@ -27,11 +24,8 @@ __all__ = [
     "SingleTurnAgentLoop",
     "AgentLoopManagerConfig",
     "AgentLoopManager",
-    "MultiEnvSpecConfig",
-    "MultiEnvAgentLoopManagerConfig",
-    "MultiEnvAgentLoopManager",
+    "EnvSpecConfig",
     "ProduceBatchResult",
-    "MultiEnvProduceBatchResult",
     "ProduceStrategyConfig",
     "SyncProduceStrategyConfig",
     "AsyncProduceStrategyConfig",

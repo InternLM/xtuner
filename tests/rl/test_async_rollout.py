@@ -105,7 +105,7 @@ def _build_agent_loop_manager(
 
     replay_buffer = AsyncReplayBufferConfig().build()
 
-    manager_cfg = AgentLoopManagerConfig(
+    manager_cfg = AgentLoopManagerConfig.single_env(
         task_name=task_name,
         agent_loop_config=agent_loop_config,
         produce_strategy_config=produce_strategy_config,
