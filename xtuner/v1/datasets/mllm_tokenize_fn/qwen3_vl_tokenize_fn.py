@@ -4,6 +4,7 @@ import copy
 import io
 import math
 import os
+from dataclasses import asdict, is_dataclass
 from itertools import chain
 from types import SimpleNamespace
 from typing import Literal, Optional, Union
@@ -314,7 +315,13 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"{self.add_vision_id}_{system_message}_{max_length}_{self.rand_video_max_frames}"
         )
 
-        self.size = SimpleNamespace(**self.video_processor.size)
+        self.size = SimpleNamespace(
+            **(
+                asdict(self.video_processor.size)
+                if is_dataclass(self.video_processor.size)
+                else self.video_processor.size
+            )
+        )
 
         self.add_eos_token = add_eos_token
         self.add_bos_token = add_bos_token
