@@ -1,9 +1,11 @@
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from xtuner.v1.rl.agent_loop.agent_loop_manager import (
     AgentLoopManager,
-    _EnvRunner,
+    AgentLoopManagerConfig,
+    TaskSpecConfig,
+    _TaskRunner,
 )
 from xtuner.v1.rl.agent_loop.producer import ProducerTimings
 from xtuner.v1.data_proto import Status
@@ -54,7 +56,30 @@ class _FakeReplayBuffer:
         return self._leftover_counts.get((task_name, group_status), 0)
 
 
-class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
+def _fake_agent_loop():
+    rollout_ctl = MagicMock()
+    rollout_ctl.continue_generation.remote = AsyncMock()
+    rollout_ctl.pause_generation.remote = AsyncMock()
+    rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+    agent_loop = MagicMock()
+    agent_loop.rollout_ctl = rollout_ctl
+    return agent_loop
+
+
+class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
+    def test_manager_config_accepts_single_task_spec(self):
+        task = TaskSpecConfig.model_construct(
+            task_name="single_task",
+            agent_loop_config=MagicMock(),
+            produce_strategy_config=MagicMock(),
+            sampler_config=MagicMock(),
+            weight=1.0,
+        )
+
+        manager_config = AgentLoopManagerConfig(tasks=task)
+
+        self.assertEqual(manager_config.tasks.task_name, "single_task")
+
     async def test_produce_batch_allocates_by_weight_and_returns_task_sorted_results(self):
         strategy_a = _FakeProduceStrategy(generate_times_s=[2.0, 2.0])
         strategy_b = _FakeProduceStrategy(generate_times_s=[1.0, 1.0, 1.0])
@@ -71,27 +96,27 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        multi_env_manager = AgentLoopManager(
-            managed_envs=[
-                _EnvRunner(
-                    env_name="env_b",
-                    agent_loop=MagicMock(),
+        multi_task_manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_b",
+                    agent_loop=_fake_agent_loop(),
                     produce_strategy=strategy_b,
                     sampler=_FakeSampler(),
                     weight=1.0,
                     order=0,
                 ),
-                _EnvRunner(
-                    env_name="env_a",
-                    agent_loop=MagicMock(),
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
                     produce_strategy=strategy_a,
                     sampler=_FakeSampler(),
                     weight=2.0,
                     order=1,
                 ),
-                _EnvRunner(
-                    env_name="env_c",
-                    agent_loop=MagicMock(),
+                _TaskRunner(
+                    task_name="task_c",
+                    agent_loop=_fake_agent_loop(),
                     produce_strategy=strategy_c,
                     sampler=_FakeSampler(),
                     weight=0.0,
@@ -101,9 +126,9 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=replay_buffer,
         )
 
-        result = await multi_env_manager.produce_batch(batch_size=7, rollout_step=3)
+        result = await multi_task_manager.produce_batch(batch_size=7, rollout_step=3)
 
-        self.assertEqual(result.task_batch_sizes, {"env_a": 5, "env_b": 2, "env_c": 0})
+        self.assertEqual(result.task_batch_sizes, {"task_a": 5, "task_b": 2, "task_c": 0})
         self.assertEqual(strategy_a.called_batch_sizes, [5])
         self.assertEqual(strategy_b.called_batch_sizes, [2])
         self.assertEqual(strategy_c.called_batch_sizes, [])
@@ -113,11 +138,11 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.leftover_expired, 0)
         self.assertEqual(result.group_gen_count, 5)
         self.assertAlmostEqual(result.group_gen_mean_s, 1.4)
-        self.assertIn("env_a", result.task_results)
-        self.assertIn("env_b", result.task_results)
-        self.assertIn("env_c", result.task_results)
+        self.assertIn("task_a", result.task_results)
+        self.assertIn("task_b", result.task_results)
+        self.assertIn("task_c", result.task_results)
 
-    async def test_custom_get_task_batch_sizes_can_disable_envs(self):
+    async def test_custom_get_task_batch_sizes_can_disable_tasks(self):
         strategy_a = _FakeProduceStrategy(generate_times_s=[2.0])
         strategy_b = _FakeProduceStrategy(generate_times_s=[1.0, 1.0])
         replay_buffer = _FakeReplayBuffer(
@@ -131,21 +156,21 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         class _CustomBatchManager(AgentLoopManager):
             def get_task_batch_sizes(self, global_batch_size: int, rollout_step: int) -> dict[str, int]:
                 self.observed_rollout_step = rollout_step
-                return {"env_a": 0, "env_b": global_batch_size}
+                return {"task_a": 0, "task_b": global_batch_size}
 
-        multi_env_manager = _CustomBatchManager(
-            managed_envs=[
-                _EnvRunner(
-                    env_name="env_a",
-                    agent_loop=MagicMock(),
+        multi_task_manager = _CustomBatchManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
                     produce_strategy=strategy_a,
                     sampler=_FakeSampler(),
                     weight=1.0,
                     order=0,
                 ),
-                _EnvRunner(
-                    env_name="env_b",
-                    agent_loop=MagicMock(),
+                _TaskRunner(
+                    task_name="task_b",
+                    agent_loop=_fake_agent_loop(),
                     produce_strategy=strategy_b,
                     sampler=_FakeSampler(),
                     weight=1.0,
@@ -155,10 +180,10 @@ class TestMultiEnvAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=replay_buffer,
         )
 
-        result = await multi_env_manager.produce_batch(batch_size=2, rollout_step=9)
+        result = await multi_task_manager.produce_batch(batch_size=2, rollout_step=9)
 
-        self.assertEqual(multi_env_manager.observed_rollout_step, 9)
-        self.assertEqual(result.task_batch_sizes, {"env_a": 0, "env_b": 2})
+        self.assertEqual(multi_task_manager.observed_rollout_step, 9)
+        self.assertEqual(result.task_batch_sizes, {"task_a": 0, "task_b": 2})
         self.assertEqual(strategy_a.called_batch_sizes, [])
         self.assertEqual(strategy_b.called_batch_sizes, [2])
         self.assertEqual(result.rollout_states, [["b-0"], ["b-1"]])

@@ -53,8 +53,8 @@ class ProduceBatchResult:
 
 
 @dataclass(frozen=True)
-class _EnvRunner:
-    env_name: str
+class _TaskRunner:
+    task_name: str
     agent_loop: AgentLoop
     produce_strategy: ProduceStrategy
     sampler: Sampler
@@ -62,7 +62,7 @@ class _EnvRunner:
     order: int = 0
 
 
-class _MultiEnvSamplerView:
+class _TaskSamplerView:
     def __init__(self, samplers: list[Sampler]):
         self._samplers = samplers
 
@@ -87,8 +87,8 @@ def _fill_produce_timing_stats(result: ProduceBatchResult, stats: ProducerTiming
     result.group_gen_pause_time_s = stats.pause_time_s
 
 
-async def _produce_single_env_batch(
-    env_runner: _EnvRunner,
+async def _produce_single_task_batch(
+    task_runner: _TaskRunner,
     replay_buffer: ReplayBuffer,
     batch_size: int,
     rollout_step: int,
@@ -96,17 +96,17 @@ async def _produce_single_env_batch(
     manager_name: str,
 ) -> ProduceBatchResult:
     start = time.perf_counter()
-    logger.info(f"[{manager_name}][{env_runner.env_name}] produce_batch start batch={batch_size}")
-    stats: ProducerTimings = await env_runner.produce_strategy.produce_batch(
-        env_runner.agent_loop,
-        env_runner.sampler,
+    logger.info(f"[{manager_name}][{task_runner.task_name}] produce_batch start batch={batch_size}")
+    stats: ProducerTimings = await task_runner.produce_strategy.produce_batch(
+        task_runner.agent_loop,
+        task_runner.sampler,
         replay_buffer,
         batch_size,
-        env_runner.env_name,
+        task_runner.task_name,
         rollout_step,
     )
     logger.info(
-        f"[{manager_name}][{env_runner.env_name}] produce scheduler done elapsed={time.perf_counter() - start:.3f}, and start replay_buffer.get"
+        f"[{manager_name}][{task_runner.task_name}] produce scheduler done elapsed={time.perf_counter() - start:.3f}, and start replay_buffer.get"
     )
 
     result = ProduceBatchResult(rollout_states=[])
@@ -114,16 +114,16 @@ async def _produce_single_env_batch(
 
     start = time.perf_counter()
     batch_rollout_states: list[list[RolloutState]] = await replay_buffer.get(
-        batch_size, env_runner.env_name, Status.COMPLETED
+        batch_size, task_runner.task_name, Status.COMPLETED
     )
     logger.info(
-        f"[{manager_name}][{env_runner.env_name}] replay_buffer.get done completed_groups={len(batch_rollout_states)} elapsed={time.perf_counter() - start:.3f}"
+        f"[{manager_name}][{task_runner.task_name}] replay_buffer.get done completed_groups={len(batch_rollout_states)} elapsed={time.perf_counter() - start:.3f}"
     )
     result.rollout_states = batch_rollout_states
     completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
-        replay_buffer.count(task_name=env_runner.env_name, group_status=Status.COMPLETED),
-        replay_buffer.count(task_name=env_runner.env_name, group_status=Status.ABORTED),
-        replay_buffer.count(task_name=env_runner.env_name, group_status=Status.EXPIRED),
+        replay_buffer.count(task_name=task_runner.task_name, group_status=Status.COMPLETED),
+        replay_buffer.count(task_name=task_runner.task_name, group_status=Status.ABORTED),
+        replay_buffer.count(task_name=task_runner.task_name, group_status=Status.EXPIRED),
     )
     result.leftover_completed = completed_sample_count
     result.leftover_aborted = aborted_sample_count
@@ -131,10 +131,10 @@ async def _produce_single_env_batch(
     return result
 
 
-class EnvSpecConfig(BaseModel):
+class TaskSpecConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    env_name: str = "default"
+    task_name: str
     weight: float = Field(default=1.0, ge=0.0)
     agent_loop_config: AgentLoopConfig
     produce_strategy_config: ProduceStrategyConfig = SyncProduceStrategyConfig()
@@ -144,7 +144,7 @@ class EnvSpecConfig(BaseModel):
 class AgentLoopManagerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    envs: list[EnvSpecConfig]
+    tasks: list[TaskSpecConfig] | TaskSpecConfig
 
     def build(
         self,
@@ -154,66 +154,64 @@ class AgentLoopManagerConfig(BaseModel):
         replay_buffer: ReplayBuffer,
         logger=None,
     ) -> "AgentLoopManager":
-        if not self.envs:
-            raise ValueError("AgentLoopManagerConfig requires at least one env config.")
+        tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
+        if not tasks:
+            raise ValueError("AgentLoopManagerConfig requires at least one task config.")
 
-        seen_env_names: set[str] = set()
         seen_task_names: set[str] = set()
-        managed_envs: list[_EnvRunner] = []
-        for order, env_cfg in enumerate(self.envs):
-            if env_cfg.env_name in seen_env_names:
-                raise ValueError(f"Duplicate env_name found in AgentLoopManagerConfig: {env_cfg.env_name}")
-            seen_env_names.add(env_cfg.env_name)
+        task_runners: list[_TaskRunner] = []
+        for order, task_cfg in enumerate(tasks):
+            if task_cfg.task_name in seen_task_names:
+                raise ValueError(f"Duplicate task_name found in AgentLoopManagerConfig: {task_cfg.task_name}")
+            seen_task_names.add(task_cfg.task_name)
 
-            if env_cfg.env_name in seen_task_names:
-                raise ValueError(f"Duplicate env_name found in AgentLoopManagerConfig after resolution: {env_cfg.env_name}")
-            seen_task_names.add(env_cfg.env_name)
-
-            agent_loop = env_cfg.agent_loop_config.build(
+            agent_loop = task_cfg.agent_loop_config.build(
                 rollout_controller=rollout_controller,
                 judger=judger,
                 logger=logger,
             )
-            produce_strategy = env_cfg.produce_strategy_config.build()
-            sampler = env_cfg.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
-            managed_envs.append(
-                _EnvRunner(
-                    env_name=env_cfg.env_name,
+            produce_strategy = task_cfg.produce_strategy_config.build()
+            sampler = task_cfg.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
+            task_runners.append(
+                _TaskRunner(
+                    task_name=task_cfg.task_name,
                     agent_loop=agent_loop,
                     produce_strategy=produce_strategy,
                     sampler=sampler,
-                    weight=env_cfg.weight,
+                    weight=task_cfg.weight,
                     order=order,
                 )
             )
 
         return AgentLoopManager(
-            managed_envs=managed_envs,
+            task_runners=task_runners,
             replay_buffer=replay_buffer,
             logger=logger,
         )
 
 
 class AgentLoopManager:
-    _ENV_CHECKPOINT_DIR = "envs"
+    _TASK_CHECKPOINT_DIR = "tasks"
 
     def __init__(
         self,
-        managed_envs: list[_EnvRunner],
+        task_runners: list[_TaskRunner],
         replay_buffer: ReplayBuffer,
         logger=None,
     ):
-        if not managed_envs:
-            raise ValueError("AgentLoopManager requires at least one managed env.")
-        if sum(env.weight for env in managed_envs) <= 0:
-            raise ValueError("At least one env weight must be positive for AgentLoopManager.")
+        if not task_runners:
+            raise ValueError("AgentLoopManager requires at least one task runner.")
+        if sum(task.weight for task in task_runners) <= 0:
+            raise ValueError("At least one task weight must be positive for AgentLoopManager.")
 
-        self.managed_envs = managed_envs
+        self.task_runners = task_runners
         self.replay_buffer = replay_buffer
-        self.data_sampler = managed_envs[0].sampler if len(managed_envs) == 1 else _MultiEnvSamplerView(
-            [env.sampler for env in managed_envs]
+        self.data_sampler = (
+            task_runners[0].sampler
+            if len(task_runners) == 1
+            else _TaskSamplerView([task.sampler for task in task_runners])
         )
-        self.name = managed_envs[0].env_name if len(managed_envs) == 1 else "multi_env"
+        self.name = task_runners[0].task_name if len(task_runners) == 1 else "multi_task"
         if logger is None:
             self.logger = get_logger()
         else:
@@ -223,38 +221,38 @@ class AgentLoopManager:
         """Return the per-task batch sizes for the current rollout step.
 
         Subclasses may override this method to implement custom dynamic batch allocation policies. Returning 0 for a
-        task effectively disables that env for the current produce_batch call.
+        task effectively disables that task for the current produce_batch call.
         """
         if global_batch_size < 0:
             raise ValueError(f"global_batch_size must be non-negative, got {global_batch_size}")
 
-        total_weight = sum(env.weight for env in self.managed_envs)
+        total_weight = sum(task.weight for task in self.task_runners)
         if total_weight <= 0:
-            raise ValueError("Sum of env weights must be positive.")
+            raise ValueError("Sum of task weights must be positive.")
         if global_batch_size == 0:
-            return {env.env_name: 0 for env in self.managed_envs}
+            return {task.task_name: 0 for task in self.task_runners}
 
-        raw_allocations = [global_batch_size * env.weight / total_weight for env in self.managed_envs]
+        raw_allocations = [global_batch_size * task.weight / total_weight for task in self.task_runners]
         floor_allocations = [math.floor(raw) for raw in raw_allocations]
         remaining = global_batch_size - sum(floor_allocations)
 
-        task_batch_sizes = {env.env_name: floor_allocations[idx] for idx, env in enumerate(self.managed_envs)}
+        task_batch_sizes = {task.task_name: floor_allocations[idx] for idx, task in enumerate(self.task_runners)}
         if remaining <= 0:
             return task_batch_sizes
 
-        ranked_envs = sorted(
-            enumerate(self.managed_envs),
+        ranked_tasks = sorted(
+            enumerate(self.task_runners),
             key=lambda item: (
                 -(raw_allocations[item[0]] - floor_allocations[item[0]]),
                 item[1].order,
             ),
         )
-        for idx, env in ranked_envs[:remaining]:
-            task_batch_sizes[env.env_name] += 1
+        for idx, task in ranked_tasks[:remaining]:
+            task_batch_sizes[task.task_name] += 1
         return task_batch_sizes
 
     def _validate_task_batch_sizes(self, task_batch_sizes: dict[str, int], global_batch_size: int) -> None:
-        expected_task_names = {env.env_name for env in self.managed_envs}
+        expected_task_names = {task.task_name for task in self.task_runners}
         actual_task_names = set(task_batch_sizes.keys())
         if actual_task_names != expected_task_names:
             missing_task_names = expected_task_names - actual_task_names
@@ -280,8 +278,8 @@ class AgentLoopManager:
             )
 
     @staticmethod
-    def _aggregate_env_results(
-        ordered_envs: list[_EnvRunner], task_results: dict[str, ProduceBatchResult]
+    def _aggregate_task_results(
+        ordered_tasks: list[_TaskRunner], task_results: dict[str, ProduceBatchResult]
     ) -> ProduceBatchResult:
         rollout_states: list[list[RolloutState]] = []
         leftover_completed = 0
@@ -294,8 +292,8 @@ class AgentLoopManager:
         weighted_group_ratio_sum = 0.0
         total_pause_time_s = 0.0
 
-        for env in ordered_envs:
-            result = task_results[env.env_name]
+        for task in ordered_tasks:
+            result = task_results[task.task_name]
             rollout_states.extend(result.rollout_states)
             leftover_completed += result.leftover_completed
             leftover_aborted += result.leftover_aborted
@@ -313,7 +311,7 @@ class AgentLoopManager:
             leftover_completed=leftover_completed,
             leftover_aborted=leftover_aborted,
             leftover_expired=leftover_expired,
-            task_results={env.env_name: task_results[env.env_name] for env in ordered_envs},
+            task_results={task.task_name: task_results[task.task_name] for task in ordered_tasks},
         )
         if total_group_count > 0:
             aggregated.group_gen_count = total_group_count
@@ -328,13 +326,13 @@ class AgentLoopManager:
         start = time.perf_counter()
         self.logger.info(f"[AgentLoopManager][{self.name}] produce_batch start batch={batch_size}")
 
-        if len(self.managed_envs) == 1:
-            env = self.managed_envs[0]
-            rollout_ctl = env.agent_loop.rollout_ctl
+        if len(self.task_runners) == 1:
+            task = self.task_runners[0]
+            rollout_ctl = task.agent_loop.rollout_ctl
             await continue_generation(rollout_ctl)
             try:
-                return await _produce_single_env_batch(
-                    env_runner=env,
+                return await _produce_single_task_batch(
+                    task_runner=task,
                     replay_buffer=self.replay_buffer,
                     batch_size=batch_size,
                     rollout_step=rollout_step,
@@ -346,57 +344,57 @@ class AgentLoopManager:
 
         task_batch_sizes = self.get_task_batch_sizes(batch_size, rollout_step)
         self._validate_task_batch_sizes(task_batch_sizes, batch_size)
-        active_envs = [env for env in self.managed_envs if task_batch_sizes[env.env_name] > 0]
+        active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
 
         results: list[ProduceBatchResult] = []
-        if active_envs:
-            rollout_ctl = active_envs[0].agent_loop.rollout_ctl
+        if active_tasks:
+            rollout_ctl = active_tasks[0].agent_loop.rollout_ctl
             await continue_generation(rollout_ctl)
             try:
                 results = await asyncio.gather(
                     *[
-                        _produce_single_env_batch(
-                            env_runner=env,
+                        _produce_single_task_batch(
+                            task_runner=task,
                             replay_buffer=self.replay_buffer,
-                            batch_size=task_batch_sizes[env.env_name],
+                            batch_size=task_batch_sizes[task.task_name],
                             rollout_step=rollout_step,
                             logger=self.logger,
                             manager_name="AgentLoopManager",
                         )
-                        for env in active_envs
+                        for task in active_tasks
                     ]
                 )
             finally:
                 await pause_generation(rollout_ctl)
 
-        task_results = {env.env_name: result for env, result in zip(active_envs, results)}
-        for env in self.managed_envs:
-            if env.env_name not in task_results:
-                task_results[env.env_name] = ProduceBatchResult(rollout_states=[])
+        task_results = {task.task_name: result for task, result in zip(active_tasks, results)}
+        for task in self.task_runners:
+            if task.task_name not in task_results:
+                task_results[task.task_name] = ProduceBatchResult(rollout_states=[])
 
-        ordered_envs = sorted(self.managed_envs, key=lambda env: (env.env_name, env.order))
-        aggregated = self._aggregate_env_results(ordered_envs, task_results)
-        aggregated.task_batch_sizes = {env.env_name: task_batch_sizes[env.env_name] for env in ordered_envs}
+        ordered_tasks = sorted(self.task_runners, key=lambda task: (task.task_name, task.order))
+        aggregated = self._aggregate_task_results(ordered_tasks, task_results)
+        aggregated.task_batch_sizes = {task.task_name: task_batch_sizes[task.task_name] for task in ordered_tasks}
 
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done elapsed={time.perf_counter() - start:.3f}, completed_groups={len(aggregated.rollout_states)}"
         )
         return aggregated
 
-    def _env_checkpoint_path(self, checkpoint_path: Path | str, env_name: str) -> Path:
+    def _task_checkpoint_path(self, checkpoint_path: Path | str, task_name: str) -> Path:
         checkpoint_path = Path(checkpoint_path)
-        return checkpoint_path / self._ENV_CHECKPOINT_DIR / env_name
+        return checkpoint_path / self._TASK_CHECKPOINT_DIR / task_name
 
     def save(self, checkpoint_path: Path | str) -> None:
-        """Save all env sampler states and the shared replay buffer."""
-        for env in self.managed_envs:
-            env_checkpoint_path = self._env_checkpoint_path(checkpoint_path, env.env_name)
-            env_checkpoint_path.mkdir(parents=True, exist_ok=True)
-            env.sampler.save(env_checkpoint_path)
+        """Save all task sampler states and the shared replay buffer."""
+        for task in self.task_runners:
+            task_checkpoint_path = self._task_checkpoint_path(checkpoint_path, task.task_name)
+            task_checkpoint_path.mkdir(parents=True, exist_ok=True)
+            task.sampler.save(task_checkpoint_path)
         asyncio_run(self.replay_buffer.save(checkpoint_path))
 
     def resume(self, checkpoint_path: Path | str) -> None:
-        """Resume all env sampler states and the shared replay buffer."""
-        for env in self.managed_envs:
-            env.sampler.resume(self._env_checkpoint_path(checkpoint_path, env.env_name))
+        """Resume all task sampler states and the shared replay buffer."""
+        for task in self.task_runners:
+            task.sampler.resume(self._task_checkpoint_path(checkpoint_path, task.task_name))
         asyncio_run(self.replay_buffer.resume(checkpoint_path))

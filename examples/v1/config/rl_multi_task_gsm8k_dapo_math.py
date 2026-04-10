@@ -1,4 +1,4 @@
-"""RL Colocate Trainer 示例配置（Multi-Env: GSM8K + DAPO Math）。
+"""RL Colocate Trainer 示例配置（Multi-Task: GSM8K + DAPO Math）。
 
 需设置环境变量：
     WORK_DIR
@@ -14,8 +14,8 @@
     LOSS_TYPE
     LOSS_MODE
     SP_SIZE
-    GSM8K_ENV_WEIGHT
-    DAPO_ENV_WEIGHT
+    GSM8K_TASK_WEIGHT
+    DAPO_TASK_WEIGHT
 """
 
 import os
@@ -30,10 +30,10 @@ from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.agent_loop import (
     AgentLoopManagerConfig,
-    EnvSpecConfig,
     SamplerConfig,
     SingleTurnAgentLoopConfig,
     SyncProduceStrategyConfig,
+    TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
@@ -53,13 +53,13 @@ dapo_eval_data_path = os.environ["DAPO_EVAL_DATA_PATH"]
 enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0")
 NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
-experimental_name = "multi_env_gsm8k_dapo_math"
+experimental_name = "multi_task_gsm8k_dapo_math"
 rollout_steps = 50
 evaluate_step = 5
 train_optimizer_steps = 8
 global_batch_size = 128
-gsm8k_env_weight = float(os.environ.get("GSM8K_ENV_WEIGHT", "1.0"))
-dapo_env_weight = float(os.environ.get("DAPO_ENV_WEIGHT", "1.0"))
+gsm8k_task_weight = float(os.environ.get("GSM8K_TASK_WEIGHT", "1.0"))
+dapo_task_weight = float(os.environ.get("DAPO_TASK_WEIGHT", "1.0"))
 rollout_tp_size = 1
 rollout_ep_size = 1
 gsm8k_prompt_repeat_k = 5
@@ -195,17 +195,17 @@ dapo_train_agent_loop_config = SingleTurnAgentLoopConfig(
 )
 
 agent_loop_manager_cfg = AgentLoopManagerConfig(
-    envs=[
-        EnvSpecConfig(
-            env_name="train_task:dapo_math",
-            weight=dapo_env_weight,
+    tasks=[
+        TaskSpecConfig(
+            task_name="train_task:dapo_math",
+            weight=dapo_task_weight,
             agent_loop_config=dapo_train_agent_loop_config,
             produce_strategy_config=SyncProduceStrategyConfig(),
             sampler_config=dapo_train_sampler_config,
         ),
-        EnvSpecConfig(
-            env_name="train_task:gsm8k",
-            weight=gsm8k_env_weight,
+        TaskSpecConfig(
+            task_name="train_task:gsm8k",
+            weight=gsm8k_task_weight,
             agent_loop_config=gsm8k_train_agent_loop_config,
             produce_strategy_config=SyncProduceStrategyConfig(),
             sampler_config=gsm8k_train_sampler_config,
@@ -264,16 +264,16 @@ dapo_eval_agent_loop_config = SingleTurnAgentLoopConfig(
 )
 
 eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
-    envs=[
-        EnvSpecConfig(
-            env_name="eval_task:dapo_math",
-            weight=dapo_env_weight,
+    tasks=[
+        TaskSpecConfig(
+            task_name="eval_task:dapo_math",
+            weight=dapo_task_weight,
             agent_loop_config=dapo_eval_agent_loop_config,
             sampler_config=dapo_eval_sampler_config,
         ),
-        EnvSpecConfig(
-            env_name="eval_task:gsm8k",
-            weight=gsm8k_env_weight,
+        TaskSpecConfig(
+            task_name="eval_task:gsm8k",
+            weight=gsm8k_task_weight,
             agent_loop_config=gsm8k_eval_agent_loop_config,
             sampler_config=gsm8k_eval_sampler_config,
         ),
