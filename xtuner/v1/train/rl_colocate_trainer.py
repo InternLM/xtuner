@@ -373,7 +373,7 @@ class RLColocateTrainer:
         self._evaluate_step = evaluate_step
 
         # build evaluator
-        total_eval_samples = len(self.eval_agent_loop_manager._data_sampler)
+        total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
         self.evaluator = evaluator_config.build(total_eval_samples=total_eval_samples)
 
         # Resume sampler and sync weights if checkpoint exists
