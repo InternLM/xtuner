@@ -14,7 +14,7 @@ def get_offset_mapping(tokenizer, text: str):
     input_ids = encoding["input_ids"]
     offset_mapping = []
     pos = 0
-    pending_ids = [] # type: ignore
+    pending_ids = []  # type: ignore
     max_pending = 8
 
     def _flush_pending(start, end):
