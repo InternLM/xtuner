@@ -1,10 +1,12 @@
 import asyncio
+import hashlib
 import importlib
 import socket
 from asyncio import AbstractEventLoop, Task
 from typing import TYPE_CHECKING, Callable, Coroutine, List, Optional, cast
 
 import ray
+from ray import ObjectRef
 
 
 if TYPE_CHECKING:
@@ -70,7 +72,9 @@ def _is_port_available(check_socket: socket.socket, port: int) -> bool:
 
 
 @ray.remote
-def find_master_addr_and_port(nums=1, start_port=None, end_port=None):
+def find_master_addr_and_port(
+    nums: int = 1, start_port: Optional[int] = None, end_port: Optional[int] = None
+) -> tuple[str, int] | tuple[str, list[int]]:
     """Finds an available master address and a specified number of ports.
 
     This remote function gets the node's IP address and binds to one or more
@@ -208,3 +212,28 @@ def create_task(
     for callback in done_callbacks:
         task.add_done_callback(callback)
     return task
+
+
+def free_object_refs(refs: List[ObjectRef]) -> None:
+    valid_refs = [ref for ref in refs if isinstance(ref, ObjectRef)]
+    if not valid_refs:
+        return
+    try:
+        ray._private.internal_api.free(valid_refs, local_only=False)
+    except Exception:
+        ray.internal.free(valid_refs, local_only=False)
+
+
+def deterministic_item_sort_key(sample) -> tuple[int, int, int, int]:
+    return (
+        sample.uid.root_id,
+        sample.uid.action_id,
+        sample.uid.observation_id,
+        sample.uid.version,
+    )
+
+
+def build_deterministic_session_id(environment: str, sample) -> int:
+    session_key = f"{environment}|{sample.uid.root_id}|{sample.uid.action_id}|{sample.uid.observation_id}"
+    session_id = int.from_bytes(hashlib.sha256(session_key.encode("utf-8")).digest()[:8], "big")
+    return session_id or 1

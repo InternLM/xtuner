@@ -7,24 +7,24 @@ ray stop --force
 # bash examples/v1/scripts/run_rl.sh  examples/v1/config/rl_qwen25_7B_dapo.py "sglang" $MODEL_PATH $DATA_PATH $EVAL_DATA_PATH
 
 CONFIG_PATH=$1
-INFER_BACKEND=$2
-MODEL_PATH=$3
-DATA_PATH=$4
-EVAL_DATA_PATH=${5:-""}
-ACCELERATOR=${6:-"gpu"} # "gpu" or "npu"
-ACCELERATOR=$(echo "$ACCELERATOR" | tr '[:lower:]' '[:upper:]')
-if [ $ACCELERATOR != "GPU" ] && [ $ACCELERATOR != "NPU" ]; then
-  echo "Error: ACCELERATOR must be either 'gpu' or 'npu'!"
-  exit 1
-fi
-if [ "$ACCELERATOR" = "NPU" ]; then
-  ACCELERATOR_PER_NODE=${7:-16}
-else
-  ACCELERATOR_PER_NODE=${7:-8}
-fi
+MODEL_PATH=$2
+DATA_PATH=$3
+EVAL_DATA_PATH=${4:-""}
 
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
+# deterministic 环境变量
+# NOTE: you should use sglang==0.5.9 to reproduce our results deterministic results.
+export XTUNER_USE_SGLANG=1
+export XTUNER_USE_LMDEPLOY=0
+export XTUNER_USE_VLLM=0
+export TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
+export XTUNER_DETERMINISTIC=true
+export XTUNER_USE_FA3=0
+# sglang 环境变量
+unset PYTORCH_CUDA_ALLOC_CONF
+export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
+export SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=False
 # ray 环境变量
 export MASTER_PORT=6000
 export WORLD_SIZE=${NODE_COUNT:-"1"}
@@ -36,37 +36,20 @@ export RAY_CLIENT_PORT=${RAY_CLIENT_PORT:-"10001"}
 export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-"8265"}
 # TODO: 提供非环境变量方式配置 ray_max_concurrency
 export RAY_MAX_CONCURRENCY=${RAY_MAX_CONCURRENCY:-1024} # dataflow_max_concurrency * prompt_repeat_k
+export ACCELERATOR=${ACCELERATOR:-"GPU"}
 
 # xtuner 环境变量
 export MODEL_PATH=$MODEL_PATH
 export DATA_PATH=$DATA_PATH
 export EVAL_DATA_PATH=$EVAL_DATA_PATH
-export XTUNER_USE_FA3=${XTUNER_USE_FA3:-1}
 export XTUNER_LOG_LEVEL=${XTUNER_LOG_LEVEL:-"INFO"}
 export PYTHONUNBUFFERED=1
-
-infer_backend_lower=$(echo "$INFER_BACKEND" | tr '[:upper:]' '[:lower:]')
-if [ "$infer_backend_lower" = "sglang" ]; then
-  export XTUNER_USE_SGLANG=1
-  unset PYTORCH_CUDA_ALLOC_CONF
-  export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
-  export SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION=False
-elif [ "$infer_backend_lower" = "lmdeploy" ]; then
-  export XTUNER_USE_LMDEPLOY=1
-  export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
-  export PYTHONPATH=$LMDEPLOY_PATH:$PYTHONPATH
-elif [ "$infer_backend_lower" = "vllm" ]; then
-  export XTUNER_USE_VLLM=1
-  export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
-else
-  echo "Error: INFER_BACKEND '$INFER_BACKEND' is not supported or not specified!"
-  exit 1
-fi 
 
 current_time=$(date "+%m%d%H")
 # 取模型路径的最后一级作为model_name，取数据路径的倒数第二级作为data_name
 model_dir_name=$(basename "$MODEL_PATH")
 data_dir_name=$(basename "$(dirname "$DATA_PATH")")
+infer_backend_lower="sglang"
 
 if [ "x$WORK_DIR" = "x" ]; then
   DIR=$(pwd)
@@ -80,19 +63,13 @@ if [ ! -d "$WORK_DIR" ]; then
 fi
 
 export LMDEPLOY_LOG_FILE="${WORK_DIR}/lmdeploy_log_${current_time}.txt"
-if [ "$ACCELERATOR" = "GPU" ]; then
-    # TODO: support NPU RL Memory Monitor
-    export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
-fi
+export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
+
 
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
-if [ "$ACCELERATOR" = "GPU" ]; then
-  total_cpus=$((node_count * 128))
-elif [ "$ACCELERATOR" = "NPU" ]; then
-  total_cpus=$((node_count * 256))
-fi
+total_cpus=$((node_count * 128))
 
 WORK_DIR=$(realpath "$WORK_DIR")
 if [ "$RAY_RANK" -eq 0 ]; then
@@ -124,7 +101,12 @@ fi
 
 while true; do
   result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
-  expected_accelerator_count=$((node_count * ${ACCELERATOR_PER_NODE}))
+  accelerator_per_node=${ACCELERATOR_PER_NODE:-8}
+  if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+    IFS=',' read -ra visible_devices <<< "${CUDA_VISIBLE_DEVICES}"
+    accelerator_per_node=${#visible_devices[@]}
+  fi
+  expected_accelerator_count=$((node_count * accelerator_per_node))
   if [ "$result" = "$expected_accelerator_count.0" ]; then
     break
   else
