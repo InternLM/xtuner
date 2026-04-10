@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto import RolloutState, Status
-from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController, continue_generation, pause_generation
 from xtuner.v1.rl.utils import asyncio_run
@@ -149,7 +148,6 @@ class AgentLoopManagerConfig(BaseModel):
     def build(
         self,
         rollout_controller: RolloutController,
-        judger: Judger,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
         replay_buffer: ReplayBuffer,
         logger=None,
@@ -167,7 +165,6 @@ class AgentLoopManagerConfig(BaseModel):
 
             agent_loop = task_cfg.agent_loop_config.build(
                 rollout_controller=rollout_controller,
-                judger=judger,
                 logger=logger,
             )
             produce_strategy = task_cfg.produce_strategy_config.build()

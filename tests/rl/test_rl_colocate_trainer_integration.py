@@ -159,6 +159,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         agent_loop_config = SingleTurnAgentLoopConfig(
             hf_checkpoint=model_path,
             sample_params=training_sample_params,
+            judger_config=judger_config,
         )
         produce_strategy_config = SyncProduceStrategyConfig()
         agent_loop_manager_cfg = AgentLoopManagerConfig(
@@ -180,6 +181,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         eval_agent_loop_config = SingleTurnAgentLoopConfig(
             hf_checkpoint=model_path,
             sample_params=SampleParams(max_tokens=512, top_k=1, temperature=0.0),
+            judger_config=judger_config,
         )
         eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
             tasks=[
@@ -198,7 +200,6 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
             resources=resources,
             train_worker_cfg=train_worker_cfg,
             rollout_config=rollout_config,
-            judger_config=judger_config,
             tokenizer_path=model_path,
             replay_buffer_config=SyncReplayBufferConfig(),
             agent_loop_manager_cfg=agent_loop_manager_cfg,

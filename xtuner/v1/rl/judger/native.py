@@ -72,7 +72,9 @@ class NativeJudger(Judger):
             else:
                 judger_response = self.reward_handler(**input_kwargs)
         assert judger_response is not None, "Reward handler did not return a response."
-        # native postprocess
+        assert isinstance(judger_response, dict), (
+            f"Reward handler must return a dict, but got {type(judger_response)}."
+        )
         rollout_state.reward = judger_response
         return rollout_state
 
