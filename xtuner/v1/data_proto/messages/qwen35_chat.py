@@ -12,21 +12,36 @@ from xtuner.v1.data_proto.templates import HybridChatTemplate
 def get_offset_mapping(tokenizer, text: str):
     encoding = tokenizer(text, add_special_tokens=False)
     input_ids = encoding["input_ids"]
-    tokens = tokenizer.convert_ids_to_tokens(input_ids)
     offset_mapping = []
     pos = 0
-    for token_id, token in zip(input_ids, tokens):
-        decoded = tokenizer.decode([token_id], skip_special_tokens=False)
+    pending_ids = [] # type: ignore
+    max_pending = 8
+
+    def _flush_pending(start, end):
+        nonlocal pending_ids, pos
+        offset_mapping.extend([(start, end)] * len(pending_ids))
+        pos = end
+        pending_ids = []
+
+    def _flush_pending_as_empty():
+        nonlocal pending_ids
+        offset_mapping.extend([(pos, pos)] * len(pending_ids))
+        pending_ids = []
+
+    for token_id in input_ids:
+        pending_ids.append(token_id)
+        decoded = tokenizer.decode(pending_ids, skip_special_tokens=False)
         if not decoded:
-            offset_mapping.append((pos, pos))
             continue
         idx = text.find(decoded, pos)
-        if idx == -1:
-            offset_mapping.append((pos, pos))
-        else:
+        if idx != -1:
             end = idx + len(decoded)
-            offset_mapping.append((idx, end))
-            pos = end
+            _flush_pending(idx, end)
+        elif "\ufffd" not in decoded or len(pending_ids) >= max_pending:
+            _flush_pending_as_empty()
+
+    if pending_ids:
+        _flush_pending_as_empty()
     return input_ids, offset_mapping
 
 
