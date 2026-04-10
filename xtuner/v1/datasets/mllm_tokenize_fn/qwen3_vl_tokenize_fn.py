@@ -908,7 +908,7 @@ class Qwen3VLTokenizeFnConfig(BaseMLLMTokenizeFnConfig):
     add_vision_id: bool = True
 
     trim_memory_interval: int = 1
-    chat_template: Literal["qwen3-vl", "qwen3-vl-rl"] = "qwen3-vl"
+    chat_template: Literal["qwen3-vl", "qwen3-vl-rl", "qwen3.5-vl"] = "qwen3-vl"
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
