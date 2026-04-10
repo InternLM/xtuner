@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Union
 
 import ray
 import requests
+import torch
 from ray.util.placement_group import placement_group_table
 
 from transformers import AutoTokenizer
@@ -207,6 +208,14 @@ class LMDeployWorker(RolloutWorker):
     def reset_prefix_cache(self):
         """It will implemented for LMDeploy worker in the future."""
         pass
+
+    def _decode_routed_experts(self, routed_experts: Any):
+        if isinstance(routed_experts, str):
+            import base64
+
+            data = base64.b64decode(routed_experts)
+            return ray.cloudpickle.loads(data)
+        return torch.tensor(routed_experts)
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         """Transform the RolloutConfig into a Namespace suitable for the

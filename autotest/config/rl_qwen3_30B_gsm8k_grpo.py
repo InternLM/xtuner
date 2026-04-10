@@ -27,11 +27,12 @@ work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
+enable_return_routed_experts = True
 enable_evaluate = True if eval_data_path != "" else False
 
 # basic settings
 experimental_name = "grpo_gsm8k_tiny"
-total_epochs = 3
+total_epochs = 2
 global_batch_size = 64
 prompt_repeat_k = 5
 rollout_tp_size = 1
@@ -40,7 +41,9 @@ max_prompt_length = 512
 max_response_length = 1024
 pack_max_length = 32768
 train_optimizer_steps = 1
-evaluate_step = 15
+hf_interval = 100
+enable_initial_evaluate = True
+evaluate_step = 10
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
@@ -58,9 +61,10 @@ rollout_config = RolloutConfig(
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.75,
-    context_length=max_prompt_length + max_response_length,
-    rollout_max_batch_size_per_instance=1024,
+    gpu_memory_utilization=0.85,
+    context_length=max_response_length + max_prompt_length,
+    rollout_max_batch_size_per_instance=2048,
+    enable_return_routed_experts=enable_return_routed_experts,
 )
 
 # sampling params
@@ -93,13 +97,12 @@ dataflow_config = DataFlowConfig(
     prompt_repeat_k=prompt_repeat_k,
     global_batch_size=global_batch_size,
     sample_params=training_sample_params,
-    max_concurrent=512,
 )
 
 evaluator_cfg = (
     EvaluatorConfig(
         enable_evaluate=enable_evaluate,
-        enable_initial_evaluate=True,
+        enable_initial_evaluate=enable_initial_evaluate,
         dataset_cfg=eval_dataset_cfg,
         tokenizer=tokenizer,
         evaluate_step=evaluate_step,
@@ -116,6 +119,7 @@ replay_buffer_cfg = ReplayBufferConfig(
 )
 
 # 5. Train worker
+# NOTE: modify model_cfg
 model_cfg = get_model_config_from_hf(Path(model_path))
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False)
 loss_cfg = GRPOLossConfig(
@@ -158,5 +162,6 @@ trainer = RLTrainerConfig(
     tokenizer_path=model_path,
     work_dir=work_dir,
     total_epochs=total_epochs,
+    hf_interval=hf_interval,
     exp_tracker="jsonl",
 )
