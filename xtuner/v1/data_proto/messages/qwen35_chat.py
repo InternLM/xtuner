@@ -76,7 +76,7 @@ def render_content(content, do_vision_count, image_count, video_count, add_visio
                 num_frames = video_content["num_frames"]
                 for _ in range(len(num_frames)):
                     result += "<|vision_start|><|video_pad|><|vision_end|>"
-            conversation_timestamp = video_content.get("conversation_timestamp", [])
+            conversation_timestamp = video_content.get("conversation_timestamps", [])
             if len(conversation_timestamp) > 0:
                 start_time = conversation_timestamp[0]
                 end_time = conversation_timestamp[1]

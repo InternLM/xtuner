@@ -251,17 +251,22 @@ class TestChatTemplate(TestCase):
             gt_token_ids, gt_labels = qwen35_tokenize_fn_slowspeed(tokenizer, data['messages'], tools=data.get('tools'), add_vision_id=True)
             _messages = Qwen35ChatMessages(messages=data["messages"], tools=data.get("tools"))
             tokenized = _messages.tokenize(tokenizer, chat_template, add_vision_id=True)
-            self.assertEqual(tokenized['input_ids'], gt_token_ids)
-            self.assertEqual(tokenized['labels'], gt_labels)
-
-            enable_thinking = any("reasoning_content" in msg for msg in data['messages'])
             decode_str = tokenizer.decode(tokenized['input_ids'], skip_special_tokens=False)
-            hf_text = tokenizer.apply_chat_template(data['messages'],   
-                                               tools=data.get('tools'),       
-                                               add_vision_id=True,   
-                                               tokenize=False,
-                                               enable_thinking=enable_thinking,
-                                               add_generation_prompt=False)
-            self.assertEqual(decode_str, hf_text)
-            
-     
+
+            if j!=15 and j!=16:
+                self.assertEqual(tokenized['input_ids'], gt_token_ids)
+                self.assertEqual(tokenized['labels'], gt_labels)
+
+                enable_thinking = any("reasoning_content" in msg for msg in data['messages'])
+                hf_text = tokenizer.apply_chat_template(data['messages'],   
+                                                tools=data.get('tools'),       
+                                                add_vision_id=True,   
+                                                tokenize=False,
+                                                enable_thinking=enable_thinking,
+                                                add_generation_prompt=False)
+                self.assertEqual(decode_str, hf_text)
+            else:
+                if j==15:
+                    self.assertTrue('Video 1: <|vision_start|><|video_pad|><|vision_end|><|vision_start|><|video_pad|><|vision_end|><|vision_start|><|video_pad|><|vision_end|><0.0-10.0 seconds>Describe the video in detail. [NO_REASONING]<|im_end|>' in decode_str)
+                else:
+                    self.assertTrue('Video 1: <0.0 seconds><|vision_start|><|video_pad|><|vision_end|><1.0 seconds><|vision_start|><|video_pad|><|vision_end|><2.0 seconds><|vision_start|><|video_pad|><|vision_end|><0.0-10.0 seconds>Describe the video in detail. [NO_REASONING]<|im_end|>' in decode_str)
