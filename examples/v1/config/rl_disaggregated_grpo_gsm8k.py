@@ -1,3 +1,15 @@
+"""RL Disaggregated Trainer example config (GRPO + GSM8K).
+
+This config uses a mocked Disaggregated weight-sync hook until the real cross-device weight update module lands.
+
+Required env vars: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH
+Common optional env vars:
+  TRAIN_NUM_WORKERS=4, ROLLOUT_NUM_WORKERS=4, TRAIN_BATCH_SIZE=64,
+  TOTAL_TRAIN_STEPS=45, TRIGGER_PARAMETER_SYNC_STEP=1,
+  STALENESS_THRESHOLD=0.0, PARTIAL_ROLLOUT=0,
+  TAIL_BATCH_STALE_THRESHOLD=0, ENABLE_EVALUATE=0
+"""
+
 import os
 from pathlib import Path
 
@@ -6,75 +18,87 @@ from xtuner.v1.data_proto import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig
-from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.judger import DapoMathJudgerConfig
-from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
-from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, TaskSpecConfig, SingleTurnAgentLoopConfig, AsyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import (
+    AgentLoopManagerConfig,
+    AsyncProduceStrategyConfig,
+    SamplerConfig,
+    SingleTurnAgentLoopConfig,
+    SyncProduceStrategyConfig,
+    TaskSpecConfig,
+)
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
-from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
+from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig
+from xtuner.v1.train.rl_disaggregated_trainer import (
+    DisaggregatedExecutionConfig,
+    RLDisaggregatedTrainerConfig,
+)
 
+
+# env
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0")
-NNODE = int(os.environ.get("WORLD_SIZE", "1"))
+
 
 # basic settings
-experimental_name = "dapo_math"
-total_epochs = 1
-global_batch_size = 512
-prompt_repeat_k = 16
-rollout_tp_size = 1
-rollout_ep_size = 1
-max_prompt_length = 2048
-max_response_length = 8192
-pack_max_length = 32768
-train_optimizer_steps = 16
-hf_interval = 50
-enable_initial_evaluate = True
-evaluate_step = 5
+experimental_name = "disaggregated_grpo_gsm8k"
+total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "45"))
+evaluate_step = int(os.environ.get("EVALUATE_STEP", str(total_train_steps)))
+train_optimizer_steps = int(os.environ.get("TRAIN_OPTIMIZER_STEPS", "1"))
+train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", str(64 * train_optimizer_steps)))
+trigger_parameter_sync_step = int(os.environ.get("TRIGGER_PARAMETER_SYNC_STEP", "1"))
+staleness_threshold = float(os.environ.get("STALENESS_THRESHOLD", "0.0"))
+partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
+tail_batch_stale_threshold = int(os.environ.get("TAIL_BATCH_STALE_THRESHOLD", "0"))
+prompt_repeat_k = int(os.environ.get("PROMPT_REPEAT_K", "5"))
+rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "1"))
+rollout_ep_size = int(os.environ.get("ROLLOUT_EP_SIZE", "1"))
+max_prompt_length = int(os.environ.get("MAX_PROMPT_LENGTH", "512"))
+max_response_length = int(os.environ.get("MAX_RESPONSE_LENGTH", "1024"))
+pack_max_length = int(os.environ.get("PACK_MAX_LENGTH", str(32 * 1024)))
+enable_evaluate = os.environ.get("ENABLE_EVALUATE", "0") == "1"
 
-# 1. resources
-resources = AcceleratorResourcesConfig(
-    accelerator="GPU",
-    num_workers=8 * NNODE,
-    num_cpus_per_worker=12,
-    cpu_memory_per_worker=16 * 1024**3,  # 16 GB
+
+# 1. resources: default 4 GPUs for training and 4 GPUs for rollout.
+train_resources = AcceleratorResourcesConfig(
+    accelerator=os.environ.get("ACCELERATOR", "GPU"),
+    num_workers=int(os.environ.get("TRAIN_NUM_WORKERS", "4")),
+    num_cpus_per_worker=float(os.environ.get("TRAIN_CPUS_PER_WORKER", "12")),
+    cpu_memory_per_worker=int(os.environ.get("TRAIN_CPU_MEMORY_PER_WORKER", str(16 * 1024**3))),
 )
+
+rollout_resources = AcceleratorResourcesConfig(
+    accelerator=os.environ.get("ACCELERATOR", "GPU"),
+    num_workers=int(os.environ.get("ROLLOUT_NUM_WORKERS", "4")),
+    num_cpus_per_worker=float(os.environ.get("ROLLOUT_CPUS_PER_WORKER", "12")),
+    cpu_memory_per_worker=int(os.environ.get("ROLLOUT_CPU_MEMORY_PER_WORKER", str(16 * 1024**3))),
+)
+
 
 # 2. rollout
 rollout_config = RolloutConfig(
     env=experimental_name,
-    device=resources.accelerator,
+    device=rollout_resources.accelerator,
     model_path=model_path,
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=float(os.environ.get("ROLLOUT_GPU_MEMORY_UTILIZATION", "0.8")),
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=(enable_return_routed_experts == "1"),
-    rollout_max_batch_size_per_instance=1024
 )
 
+
 # 3. judger
-from xtuner.v1.rl.utils import get_eos_token
-from transformers import AutoTokenizer
-eos_token_id = get_eos_token(model_path)
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
-dapomath_judger_config = DapoMathJudgerConfig(
-    judger_name="dapo_math", 
-    eos_token=eos_token_str,
-    enable_overlong_buffer = True, 
-    max_response_len =max_response_length, 
-    overlong_buffer_len=4096, 
-    overlong_penalty_factor=1.0, 
-    tokenizer=tokenizer)
-judger_config = DapoMathJudgerConfig(judger_name="dapo_math", judger_type="router")
+judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
+
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
@@ -84,6 +108,7 @@ if hasattr(model_cfg, "balancing_loss_cfg"):
     model_cfg.balancing_loss_cfg = None
 if hasattr(model_cfg, "z_loss_cfg"):
     model_cfg.z_loss_cfg = None
+
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False, weight_decay=0.1)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
@@ -113,6 +138,7 @@ train_worker_cfg = WorkerConfig(
     pack_max_length=pack_max_length,
 )
 
+
 # 5. train agent loop manager
 train_dataset = DatasetConfig(name=experimental_name, anno_path=data_path)
 tokenizer_config = RLTextTokenizeFnConfig(max_length=max_prompt_length)
@@ -138,25 +164,14 @@ agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
 )
-def group_samples_filter_func(rollout_states):
-    valid_responses = []
-    for state in rollout_states:
-        if state.response_ids is not None:
-            valid_responses.append(state)
-        
-    rewards = [res.reward["score"] for res in valid_responses]
-    if len(set(rewards)) == 1:
-        return False
-    else:
-        return True
-    
-produce_strategy_config = AsyncProduceStrategyConfig(
-    over_sample_threshold=0.2,
-    produce_batch_enable_partial_rollout=True,
-    tail_batch_stale_threshold=1,
-    tail_batch_trigger_size=256,
-    is_valid_sample_fn=group_samples_filter_func
-)
+if staleness_threshold > 0 or partial_rollout:
+    produce_strategy_config = AsyncProduceStrategyConfig(
+        over_sample_threshold=0.0,
+        produce_batch_enable_partial_rollout=False,
+        tail_batch_stale_threshold=tail_batch_stale_threshold,
+    )
+else:
+    produce_strategy_config = SyncProduceStrategyConfig()
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
@@ -166,10 +181,9 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
     ),
 )
 
+
 # 6. eval agent loop manager
-eval_dataset = DatasetConfig(
-    name=experimental_name, anno_path=eval_data_path, sample_ratio=1.0
-)
+eval_dataset = DatasetConfig(name=experimental_name, anno_path=eval_data_path, sample_ratio=1.0)
 eval_dataset_cfg = [{"dataset": eval_dataset, "tokenize_fn": tokenizer_config}]
 eval_dataloader_cfg = DataloaderConfig(
     dataset_config_list=eval_dataset_cfg,
@@ -184,7 +198,7 @@ eval_sampler_config = SamplerConfig(
 evaluation_sample_params = SampleParams(
     max_tokens=max_response_length,
     top_k=1,
-    top_p=0.7,
+    top_p=1.0,
     temperature=0.0,
     min_tokens=0,
 )
@@ -200,27 +214,37 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
     ),
 )
 
-def dapo_compute_metric(samples):
-    return {"accuracy": sum(s.reward["acc"] > 0 for s in samples) / len(samples)}
 
-evaluator_config = EvaluatorConfig(compute_metric_func=dapo_compute_metric)
+# 7. evaluator
+evaluator_config = EvaluatorConfig(compute_metric_func=None)
+execution_config = DisaggregatedExecutionConfig(
+    train_batch_size=train_batch_size,
+    total_train_steps=total_train_steps,
+    trigger_parameter_sync_step=trigger_parameter_sync_step,
+    staleness_threshold=staleness_threshold,
+    partial_rollout=partial_rollout,
+    tail_batch_stale_threshold=tail_batch_stale_threshold,
+)
 
-trainer = RLColocateTrainerConfig(
-    resources=resources,
-    train_worker_cfg=train_worker_cfg,  # TODO: uniform naming of cfg and config
+
+# 8. RL Disaggregated Trainer Config
+trainer = RLDisaggregatedTrainerConfig(
+    train_resources=train_resources,
+    rollout_resources=rollout_resources,
+    train_worker_cfg=train_worker_cfg,
     rollout_config=rollout_config,
     judger_config=judger_config,
     tokenizer_path=model_path,
-    replay_buffer_config=AsyncReplayBufferConfig(),
+    replay_buffer_config=SyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,
     load_from=model_path,
-    global_batch_size=global_batch_size,
-    enable_evaluate=True,
+    execution_config=execution_config,
+    enable_evaluate=enable_evaluate,
     enable_initial_evaluate=False,
     evaluate_step=evaluate_step,
     work_dir=work_dir,
-    seed=123,
-    debug_rollout=False,
+    seed=int(os.environ.get("SEED", "123")),
+    debug_rollout=os.environ.get("DEBUG_ROLLOUT", "0") == "1",
 )

@@ -131,6 +131,52 @@ async def _produce_single_task_batch(
     return result
 
 
+async def _produce_single_task_window_to_replay_buffer(
+    task_runner: _TaskRunner,
+    replay_buffer: ReplayBuffer,
+    required_batch_size: int,
+    target_batch_size: int | None,
+    rollout_step: int,
+    enable_partial_rollout: bool,
+    tail_batch_stale_threshold: int | None,
+    logger,
+    manager_name: str,
+) -> ProduceBatchResult:
+    start = time.perf_counter()
+    logger.info(
+        f"[{manager_name}][{task_runner.task_name}] produce_window_to_replay_buffer start "
+        f"required={required_batch_size}, target={target_batch_size}, "
+        f"partial_rollout={enable_partial_rollout}"
+    )
+    stats: ProducerTimings = await task_runner.produce_strategy.produce_window(
+        agent_loop=task_runner.agent_loop,
+        sampler=task_runner.sampler,
+        replay_buffer=replay_buffer,
+        required_batch_size=required_batch_size,
+        target_batch_size=target_batch_size,
+        task_name=task_runner.task_name,
+        rollout_step=rollout_step,
+        enable_partial_rollout=enable_partial_rollout,
+        tail_batch_stale_threshold=tail_batch_stale_threshold,
+    )
+    logger.info(
+        f"[{manager_name}][{task_runner.task_name}] produce_window_to_replay_buffer done "
+        f"elapsed={time.perf_counter() - start:.3f}"
+    )
+
+    result = ProduceBatchResult(rollout_states=[])
+    _fill_produce_timing_stats(result, stats)
+    completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
+        replay_buffer.count(task_name=task_runner.task_name, group_status=Status.COMPLETED),
+        replay_buffer.count(task_name=task_runner.task_name, group_status=Status.ABORTED),
+        replay_buffer.count(task_name=task_runner.task_name, group_status=Status.EXPIRED),
+    )
+    result.leftover_completed = completed_sample_count
+    result.leftover_aborted = aborted_sample_count
+    result.leftover_expired = expired_sample_count
+    return result
+
+
 class TaskSpecConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -217,24 +263,24 @@ class AgentLoopManager:
         else:
             self.logger = logger
 
-    def get_task_batch_sizes(self, global_batch_size: int, rollout_step: int) -> dict[str, int]:
+    def get_task_batch_sizes(self, train_batch_size: int, rollout_step: int) -> dict[str, int]:
         """Return the per-task batch sizes for the current rollout step.
 
         Subclasses may override this method to implement custom dynamic batch allocation policies. Returning 0 for a
         task effectively disables that task for the current produce_batch call.
         """
-        if global_batch_size < 0:
-            raise ValueError(f"global_batch_size must be non-negative, got {global_batch_size}")
+        if train_batch_size < 0:
+            raise ValueError(f"train_batch_size must be non-negative, got {train_batch_size}")
 
         total_weight = sum(task.weight for task in self.task_runners)
         if total_weight <= 0:
             raise ValueError("Sum of task weights must be positive.")
-        if global_batch_size == 0:
+        if train_batch_size == 0:
             return {task.task_name: 0 for task in self.task_runners}
 
-        raw_allocations = [global_batch_size * task.weight / total_weight for task in self.task_runners]
+        raw_allocations = [train_batch_size * task.weight / total_weight for task in self.task_runners]
         floor_allocations = [math.floor(raw) for raw in raw_allocations]
-        remaining = global_batch_size - sum(floor_allocations)
+        remaining = train_batch_size - sum(floor_allocations)
 
         task_batch_sizes = {task.task_name: floor_allocations[idx] for idx, task in enumerate(self.task_runners)}
         if remaining <= 0:
@@ -251,31 +297,61 @@ class AgentLoopManager:
             task_batch_sizes[task.task_name] += 1
         return task_batch_sizes
 
-    def _validate_task_batch_sizes(self, task_batch_sizes: dict[str, int], global_batch_size: int) -> None:
+    def _validate_task_batch_sizes(self, task_batch_sizes: dict[str, int], train_batch_size: int) -> None:
+        self._validate_task_counts(task_batch_sizes)
+
+        total_batch_size = sum(task_batch_sizes.values())
+        if total_batch_size != train_batch_size:
+            raise ValueError(
+                "Task batch sizes must sum to the requested train batch size, "
+                f"got total={total_batch_size}, expected={train_batch_size}"
+            )
+
+    def _validate_task_counts(self, task_counts: dict[str, int]) -> None:
         expected_task_names = {task.task_name for task in self.task_runners}
-        actual_task_names = set(task_batch_sizes.keys())
+        actual_task_names = set(task_counts.keys())
         if actual_task_names != expected_task_names:
             missing_task_names = expected_task_names - actual_task_names
             extra_task_names = actual_task_names - expected_task_names
             raise ValueError(
-                "Invalid task batch sizes returned by get_task_batch_sizes: "
+                "Invalid task counts: "
                 f"missing={sorted(missing_task_names)}, extra={sorted(extra_task_names)}"
             )
 
-        negative_batch_sizes = {
-            task_name: task_batch_size
-            for task_name, task_batch_size in task_batch_sizes.items()
-            if task_batch_size < 0
+        negative_counts = {
+            task_name: task_count for task_name, task_count in task_counts.items() if task_count < 0
         }
-        if negative_batch_sizes:
-            raise ValueError(f"Task batch sizes must be non-negative, got {negative_batch_sizes}")
+        if negative_counts:
+            raise ValueError(f"Task counts must be non-negative, got {negative_counts}")
 
-        total_batch_size = sum(task_batch_sizes.values())
-        if total_batch_size != global_batch_size:
+    @staticmethod
+    def _validate_target_task_counts(
+        required_task_counts: dict[str, int],
+        target_task_counts: dict[str, int],
+    ) -> None:
+        undersized_targets = {
+            task_name: {"required": required_task_count, "target": target_task_counts[task_name]}
+            for task_name, required_task_count in required_task_counts.items()
+            if target_task_counts[task_name] < required_task_count
+        }
+        if undersized_targets:
             raise ValueError(
-                "Task batch sizes must sum to the requested global batch size, "
-                f"got total={total_batch_size}, expected={global_batch_size}"
+                "target_task_batch_sizes must be greater than or equal to required_task_batch_sizes, "
+                f"got {undersized_targets}"
             )
+
+    def _get_shared_rollout_ctl(self, active_tasks: list[_TaskRunner]):
+        if not active_tasks:
+            return None
+        rollout_ctl = active_tasks[0].agent_loop.rollout_ctl
+        for task in active_tasks[1:]:
+            if task.agent_loop.rollout_ctl is not rollout_ctl:
+                raise RuntimeError(
+                    "AgentLoopManager currently requires all active tasks in one produce call to share the same "
+                    "rollout_ctl because continue_generation/pause_generation are issued once per produce call. "
+                    f"Found a different rollout_ctl on task {task.task_name}."
+                )
+        return rollout_ctl
 
     @staticmethod
     def _aggregate_task_results(
@@ -348,7 +424,7 @@ class AgentLoopManager:
 
         results: list[ProduceBatchResult] = []
         if active_tasks:
-            rollout_ctl = active_tasks[0].agent_loop.rollout_ctl
+            rollout_ctl = self._get_shared_rollout_ctl(active_tasks)
             await continue_generation(rollout_ctl)
             try:
                 results = await asyncio.gather(
@@ -379,6 +455,139 @@ class AgentLoopManager:
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done elapsed={time.perf_counter() - start:.3f}, completed_groups={len(aggregated.rollout_states)}"
         )
+        return aggregated
+
+    def get_window_task_batch_sizes(
+        self, train_batch_size: int, start_rollout_step: int, train_steps: int
+    ) -> dict[str, int]:
+        if train_steps <= 0:
+            raise ValueError(f"train_steps must be positive, got {train_steps}")
+
+        window_task_batch_sizes = {task.task_name: 0 for task in self.task_runners}
+        for offset in range(train_steps):
+            step_task_batch_sizes = self.get_task_batch_sizes(train_batch_size, start_rollout_step + offset)
+            self._validate_task_batch_sizes(step_task_batch_sizes, train_batch_size)
+            for task_name, task_batch_size in step_task_batch_sizes.items():
+                window_task_batch_sizes[task_name] += task_batch_size
+        return window_task_batch_sizes
+
+    async def produce_window_to_replay_buffer(
+        self,
+        required_task_batch_sizes: dict[str, int] | None = None,
+        target_task_batch_sizes: dict[str, int] | None = None,
+        rollout_step: int = 0,
+        enable_partial_rollout: bool = False,
+        tail_batch_stale_threshold: int | None = None,
+    ) -> ProduceBatchResult:
+        start = time.perf_counter()
+        self.logger.info(f"[AgentLoopManager][{self.name}] produce_window_to_replay_buffer start")
+
+        if required_task_batch_sizes is None:
+            raise ValueError("required_task_batch_sizes must be provided for produce_window_to_replay_buffer.")
+        self._validate_task_counts(required_task_batch_sizes)
+        if target_task_batch_sizes is None:
+            target_task_batch_sizes = required_task_batch_sizes
+        self._validate_task_counts(target_task_batch_sizes)
+        self._validate_target_task_counts(required_task_batch_sizes, target_task_batch_sizes)
+        active_tasks = [
+            task
+            for task in self.task_runners
+            if (
+                required_task_batch_sizes[task.task_name] > 0
+                or target_task_batch_sizes[task.task_name] > 0
+            )
+        ]
+
+        results: list[ProduceBatchResult] = []
+        if active_tasks:
+            rollout_ctl = self._get_shared_rollout_ctl(active_tasks)
+            await continue_generation(rollout_ctl)
+            try:
+                results = await asyncio.gather(
+                    *[
+                        _produce_single_task_window_to_replay_buffer(
+                            task_runner=task,
+                            replay_buffer=self.replay_buffer,
+                            required_batch_size=required_task_batch_sizes[task.task_name],
+                            target_batch_size=target_task_batch_sizes[task.task_name],
+                            rollout_step=rollout_step,
+                            enable_partial_rollout=enable_partial_rollout,
+                            tail_batch_stale_threshold=tail_batch_stale_threshold,
+                            logger=self.logger,
+                            manager_name="AgentLoopManager",
+                        )
+                        for task in active_tasks
+                    ]
+                )
+            finally:
+                await pause_generation(rollout_ctl)
+
+        task_results = {task.task_name: result for task, result in zip(active_tasks, results)}
+        for task in self.task_runners:
+            if task.task_name not in task_results:
+                task_results[task.task_name] = ProduceBatchResult(rollout_states=[])
+
+        ordered_tasks = sorted(self.task_runners, key=lambda task: (task.task_name, task.order))
+        aggregated = self._aggregate_task_results(ordered_tasks, task_results)
+        aggregated.task_batch_sizes = {
+            task.task_name: required_task_batch_sizes[task.task_name] for task in ordered_tasks
+        }
+
+        self.logger.info(
+            f"[AgentLoopManager][{self.name}] produce_window_to_replay_buffer done "
+            f"elapsed={time.perf_counter() - start:.3f}, completed_leftover={aggregated.leftover_completed}"
+        )
+        return aggregated
+
+    async def get_completed_batch(
+        self,
+        batch_size: int,
+        rollout_step: int = 0,
+        task_batch_sizes: dict[str, int] | None = None,
+        poll_interval_s: float = 1.0,
+    ) -> ProduceBatchResult:
+        if task_batch_sizes is None:
+            task_batch_sizes = self.get_task_batch_sizes(batch_size, rollout_step)
+        self._validate_task_batch_sizes(task_batch_sizes, batch_size)
+
+        while True:
+            completed_counts = await asyncio.gather(
+                *[
+                    self.replay_buffer.count(task_name=task.task_name, group_status=Status.COMPLETED)
+                    for task in self.task_runners
+                ]
+            )
+            completed_count_by_task = {
+                task.task_name: completed_count for task, completed_count in zip(self.task_runners, completed_counts)
+            }
+            if all(
+                completed_count_by_task[task_name] >= task_batch_size
+                for task_name, task_batch_size in task_batch_sizes.items()
+            ):
+                break
+            await asyncio.sleep(poll_interval_s)
+
+        ordered_tasks = sorted(self.task_runners, key=lambda task: (task.task_name, task.order))
+        task_results: dict[str, ProduceBatchResult] = {}
+        for task in ordered_tasks:
+            task_batch_size = task_batch_sizes[task.task_name]
+            if task_batch_size == 0:
+                task_results[task.task_name] = ProduceBatchResult(rollout_states=[])
+                continue
+            batch_rollout_states = await self.replay_buffer.get(task_batch_size, task.task_name, Status.COMPLETED)
+            result = ProduceBatchResult(rollout_states=batch_rollout_states)
+            completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
+                self.replay_buffer.count(task_name=task.task_name, group_status=Status.COMPLETED),
+                self.replay_buffer.count(task_name=task.task_name, group_status=Status.ABORTED),
+                self.replay_buffer.count(task_name=task.task_name, group_status=Status.EXPIRED),
+            )
+            result.leftover_completed = completed_sample_count
+            result.leftover_aborted = aborted_sample_count
+            result.leftover_expired = expired_sample_count
+            task_results[task.task_name] = result
+
+        aggregated = self._aggregate_task_results(ordered_tasks, task_results)
+        aggregated.task_batch_sizes = {task.task_name: task_batch_sizes[task.task_name] for task in ordered_tasks}
         return aggregated
 
     def _task_checkpoint_path(self, checkpoint_path: Path | str, task_name: str) -> Path:

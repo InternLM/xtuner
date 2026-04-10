@@ -164,6 +164,7 @@ class WorkerConfig(BaseModel):
     log_dir: str | Path | None = None
     update_weight_bucket_size_in_gb: float = 0.5  # 512MB
     seed: None | int = None  # if None, use RLTrainer seed
+    use_rollout_logprobs_as_old_logprobs: bool = False
 
     # sft config
     sft_dataloader_cfg: DataloaderConfig | None = None
@@ -576,8 +577,14 @@ class TrainingWorker(SingleAcceleratorWorker):
         shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]
         rollout_logprobs_list = [loss_ctx.loss_kwargs.rollout_logprobs for loss_ctx in loss_ctx_list]
 
-        # compute old logprobs
-        old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
+        if self.config.use_rollout_logprobs_as_old_logprobs:
+            if any(rollout_logprobs is None for rollout_logprobs in rollout_logprobs_list):
+                raise RuntimeError(
+                    "use_rollout_logprobs_as_old_logprobs=True requires rollout_logprobs in every training batch."
+                )
+            old_logprobs_list = cast(list[torch.Tensor], rollout_logprobs_list)
+        else:
+            old_logprobs_list = self.compute_actor_logprobs(seq_ctx_list, shifted_labels_list)
         for old_logprobs, loss_ctx in zip(old_logprobs_list, loss_ctx_list):
             loss_ctx.loss_kwargs.old_logprobs = old_logprobs
 
