@@ -7,7 +7,7 @@ import torch
 from transformers import AutoTokenizer
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig, AgentLoopManagerConfig, SyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig, AgentLoopManagerConfig, TaskSpecConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
@@ -137,10 +137,14 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             prompt_repeat_k=2,
         )
         agent_loop_manager_cfg = AgentLoopManagerConfig(
-            task_name="test_gsm8k",
-            agent_loop_config=agent_loop_cfg,
-            produce_strategy_config=SyncProduceStrategyConfig(),
-            sampler_config=sampler_config,
+            tasks=[
+                TaskSpecConfig(
+                    task_name="test_gsm8k",
+                    agent_loop_config=agent_loop_cfg,
+                    produce_strategy_config=SyncProduceStrategyConfig(),
+                    sampler_config=sampler_config,
+                )
+            ],
         )
         # 2. 创建 rollout_controller, judger
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)

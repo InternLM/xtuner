@@ -21,6 +21,7 @@ from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.agent_loop import (
     AgentLoopManagerConfig,
+    TaskSpecConfig,
     SingleTurnAgentLoopConfig,
     SyncProduceStrategyConfig,
     SamplerConfig,
@@ -161,10 +162,14 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         )
         produce_strategy_config = SyncProduceStrategyConfig()
         agent_loop_manager_cfg = AgentLoopManagerConfig(
-            task_name="train_task",
-            agent_loop_config=agent_loop_config,
-            produce_strategy_config=produce_strategy_config,
-            sampler_config=sampler_config,
+            tasks=[
+                TaskSpecConfig(
+                    task_name="train_task",
+                    agent_loop_config=agent_loop_config,
+                    produce_strategy_config=produce_strategy_config,
+                    sampler_config=sampler_config,
+                )
+            ],
         )
 
         # Eval agent loop manager (minimal)
@@ -177,9 +182,13 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
             sample_params=SampleParams(max_tokens=512, top_k=1, temperature=0.0),
         )
         eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
-            task_name="eval_task",
-            agent_loop_config=eval_agent_loop_config,
-            sampler_config=eval_sampler_config,
+            tasks=[
+                TaskSpecConfig(
+                    task_name="eval_task",
+                    agent_loop_config=eval_agent_loop_config,
+                    sampler_config=eval_sampler_config,
+                )
+            ],
         )
 
         # Evaluator
