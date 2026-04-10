@@ -1092,7 +1092,14 @@ class MoE(BaseModel):
                     # `_flatten()` collapses all Replicate dims into a 1D mesh whose
                     # process group covers every rank across those dimensions, allowing
                     # a single all_reduce regardless of how many Replicate dims exist.
-                    flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
+                    if len(replicate_dim_names) > 1:
+                        flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
+                    else:
+                        # In the case that only one replicate dim, in pt2.8 _flatten is worked due to a bug.
+                        # in pt2.9.1 this bug is fixed and _flatten will raise error when the mesh is already 1D,
+                        # which means replicate_dim_names represents an existing single mesh dimension
+                        # so we directly get the submesh without flatten in this case.
+                        flat_mesh = param.device_mesh[replicate_dim_names[0]]
                     grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
                     dist.all_reduce(
                         grad.div_(flat_mesh.size()),  # type: ignore
