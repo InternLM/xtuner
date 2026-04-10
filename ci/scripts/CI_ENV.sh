@@ -33,6 +33,6 @@ export PYTEST_ADDOPTS='-o cache_dir=/tmp/.pytest_cache'
 export DISTRIBUTED_TESTS_DEFAULT_TIMEOUT=600
 
 proxy_off
-pip install -e .[all]
+#pip install -e .[all]
 
-export PYTHONPATH=${LM_DEPLOY}:$PYTHONPATH
+export PYTHONPATH=${LM_DEPLOY}:${PWD}:$PYTHONPATH
