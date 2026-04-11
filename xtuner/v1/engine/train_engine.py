@@ -8,6 +8,7 @@ from typing import Any, Dict, List, cast
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+from pydantic import ConfigDict
 from safetensors import safe_open
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -20,6 +21,8 @@ from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
 )
+from typing_extensions import NotRequired, TypedDict
+from xtuner.v1.model.utils import ModelForwardExtraLogInfo
 
 from xtuner.v1.config import FSDPConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
@@ -47,6 +50,20 @@ DEVICE_MODULE = get_torch_device_module()
 
 threading_lock = threading.Lock()
 
+class LossLog(TypedDict):
+    __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
+    local_loss: float
+    reduced_llm_loss: float
+    reduced_balancing_loss: NotRequired[float]
+    reduced_z_loss: NotRequired[float]
+
+class OtherLog(TypedDict):
+    __pydantic_config__ = ConfigDict(arbitrary_types_allowed=True)  # type: ignore[misc]
+    maxvio: NotRequired[float]
+    step_consumed_tokens: int
+    step_consumed_img_tokens: NotRequired[float]
+    extra_info: ModelForwardExtraLogInfo
+    efficient_attn_ratio: float
 
 class CPUThreadTaskCoordinator:
     def __init__(self, futures, callback):
@@ -171,8 +188,8 @@ class TrainEngine:
         return self.fsdp_cfg.tp_size
 
     @torch.no_grad()
-    def forward_only(self, seq_ctx: SequenceContext, loss_ctx: LogProbContext):
-        output = self.model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})  # type: ignore[call-overload]
+    def forward_only(self, seq_ctx: SequenceContext, loss_ctx: LogProbContext | None = None):
+        output = self.model(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
         return output
 
     def grad_accumulation_steps(self, data_batches_len: int):
@@ -217,7 +234,7 @@ class TrainEngine:
                 # Here we assume that the model can handle a list of seq_ctx and loss_ctx.
                 output = self.model(
                     seq_ctx=seq_ctx_list,
-                    loss_ctx=loss_ctx_list,  # type: ignore[arg-type]
+                    loss_ctx=loss_ctx_list,
                 )
             output.free_nongrad_feature()
 
