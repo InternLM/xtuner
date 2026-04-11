@@ -31,10 +31,11 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
             content = msg["content"]
             if isinstance(content, list):
                 for c in content:
-                    if c["type"] == "image_url":
-                        image_paths.append(c["image_url"]["url"])
-                        if "image_wh" in c["image_url"]:
-                            image_wh = c["image_url"]["image_wh"]
+                    if c["type"] in ("image_url", "image"):
+                        key = "image_url" if "image_url" in c else "image"
+                        image_paths.append(c[key]["url"])
+                        if "image_wh" in c[key]:
+                            image_wh = c[key]["image_wh"]
                             if isinstance(image_wh[0], (list, tuple)):
                                 assert len(image_wh) == 1, (
                                     f"Only one image size is supported for each image. but got {image_wh}"
@@ -42,10 +43,10 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                                 image_wh = image_wh[0]
                             image_wh_list.append(image_wh)
                             assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
-                    if c["type"] == "video_url":
-                        video_paths.append(c["video_url"]["url"])
-
-                        video_wh = c["video_url"].get("image_wh")
+                    if c["type"] in ("video_url", "video"):
+                        key = "video_url" if "video_url" in c else "video"
+                        video_paths.append(c[key]["url"])
+                        video_wh = c[key].get("image_wh")
                         if video_wh is not None:
                             if isinstance(video_wh[0], (list, tuple)):
                                 assert len(video_wh) == 1, (
@@ -56,16 +57,17 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                             assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
 
                         video_extra_dict = {}
-                        if "origin_video_length" in c["video_url"]:
-                            video_extra_dict["origin_video_length"] = c["video_url"]["origin_video_length"]
-                        if "origin_fps" in c["video_url"]:
-                            video_extra_dict["origin_fps"] = c["video_url"]["origin_fps"]
-                        if "processed_video_length" in c["video_url"]:
-                            video_extra_dict["processed_video_length"] = c["video_url"]["processed_video_length"]
-                        if "processed_fps" in c["video_url"]:
-                            video_extra_dict["processed_fps"] = c["video_url"]["processed_fps"]
-                        if "frames_timestamp" in c["video_url"]:
-                            video_extra_dict["frames_timestamp"] = c["video_url"]["frames_timestamp"]
+
+                        if "origin_video_length" in c[key]:
+                            video_extra_dict["origin_video_length"] = c[key]["origin_video_length"]
+                        if "origin_fps" in c[key]:
+                            video_extra_dict["origin_fps"] = c[key]["origin_fps"]
+                        if "processed_video_length" in c[key]:
+                            video_extra_dict["processed_video_length"] = c[key]["processed_video_length"]
+                        if "processed_fps" in c[key]:
+                            video_extra_dict["processed_fps"] = c[key]["processed_fps"]
+                        if "frames_timestamp" in c[key]:
+                            video_extra_dict["frames_timestamp"] = c[key]["frames_timestamp"]
                         if len(video_extra_dict) > 0:
                             video_extra_info_list.append(video_extra_dict)
 
