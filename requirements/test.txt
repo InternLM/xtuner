@@ -1,0 +1,1 @@
+pytest-error-for-skips
