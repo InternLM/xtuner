@@ -34,6 +34,7 @@ from xtuner.v1.engine import TrainEngine
 from xtuner.v1.engine.train_engine import TrainStepInfo
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model.base import ModelItem, XTunerBaseModelConfig
+from xtuner.v1.model.compose.base import BaseComposeConfig
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.patch import patch_dcp_save_state_dict, patch_dcp_save_with_cache_storage, patch_default_save_plan
 from xtuner.v1.profiler import profiling_memory, profiling_time
@@ -594,10 +595,16 @@ class Trainer:
 
         self._resolve_config_conflicts(self.tokenizer, model_cfg, dataloader_cfg, fsdp_cfg)
 
-        if intra_layer_micro_batch > 1 and isinstance(model_cfg, MoEConfig) and model_cfg.mtp_config is not None:
+        mtp_config = None
+        if isinstance(model_cfg, BaseComposeConfig):
+            mtp_config = getattr(model_cfg.text_config, "mtp_config", None)
+        else:
+            mtp_config = getattr(model_cfg, "mtp_config", None)
+
+        if intra_layer_micro_batch > 1 and mtp_config is not None:
             raise ValueError(
                 "MTP (Multi-Token Prediction) is not supported with intra_layer_micro_batch > 1. "
-                f"Got intra_layer_micro_batch={intra_layer_micro_batch} and mtp_config={model_cfg.mtp_config}."
+                f"Got intra_layer_micro_batch={intra_layer_micro_batch} and mtp_config={mtp_config}."
             )
 
         if dataset_cfg is not None:  # TODO: Removed in version 1.1.0

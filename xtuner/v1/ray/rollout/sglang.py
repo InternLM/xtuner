@@ -155,16 +155,34 @@ class SGLangWorker(RolloutWorker):
         )  # for intern-s1 series models, have to set the grammar_backend to "none"
         log_level = sglang_config_kwargs.get("log_level", "error")
         log_level_http = sglang_config_kwargs.get("log_level_http", "error")
-        sglang_server_args = ServerArgs(model_path=self.config.model_path, trust_remote_code=True)
-
-        if 'speculative_algorithm' in sglang_config_kwargs:
-            sglang_server_args.speculative_algorithm = sglang_config_kwargs['speculative_algorithm']
-        if 'speculative_num_steps' in sglang_config_kwargs:
-            sglang_server_args.speculative_num_steps = sglang_config_kwargs['speculative_num_steps']
-        if 'speculative_eagle_topk' in sglang_config_kwargs:
-            sglang_server_args.speculative_eagle_topk = sglang_config_kwargs['speculative_eagle_topk']
-        if 'speculative_num_draft_tokens' in sglang_config_kwargs:
-            sglang_server_args.speculative_num_draft_tokens = sglang_config_kwargs['speculative_num_draft_tokens']
+        speculative_enabled = "speculative_algorithm" in sglang_config_kwargs
+        server_args_kwargs = dict(
+            model_path=self.config.model_path,
+            trust_remote_code=True,
+            log_level=log_level,
+            log_level_http=log_level_http,
+        )
+        if grammar_backend is not None:
+            server_args_kwargs["grammar_backend"] = grammar_backend
+        if self.config.context_length is not None:
+            server_args_kwargs["context_length"] = self.config.context_length
+        if speculative_enabled:
+            server_args_kwargs["speculative_algorithm"] = sglang_config_kwargs["speculative_algorithm"]
+            if "speculative_num_steps" in sglang_config_kwargs:
+                server_args_kwargs["speculative_num_steps"] = sglang_config_kwargs["speculative_num_steps"]
+            if "speculative_eagle_topk" in sglang_config_kwargs:
+                server_args_kwargs["speculative_eagle_topk"] = sglang_config_kwargs["speculative_eagle_topk"]
+            if "speculative_num_draft_tokens" in sglang_config_kwargs:
+                server_args_kwargs["speculative_num_draft_tokens"] = sglang_config_kwargs[
+                    "speculative_num_draft_tokens"
+                ]
+            # Let sglang keep its own safe speculative default unless the caller
+            # explicitly asks for a smaller bound.
+            if self.config.rollout_max_batch_size_per_instance <= 48:
+                server_args_kwargs["max_running_requests"] = self.config.rollout_max_batch_size_per_instance
+        else:
+            server_args_kwargs["max_running_requests"] = self.config.rollout_max_batch_size_per_instance
+        sglang_server_args = ServerArgs(**server_args_kwargs)
 
         num_gpus_per_engine = (
             self.config.expert_parallel_size
@@ -186,9 +204,6 @@ class SGLangWorker(RolloutWorker):
         if self.enable_return_routed_experts:
             sglang_server_args.enable_return_routed_experts = True
 
-        sglang_server_args.max_running_requests = self.config.rollout_max_batch_size_per_instance
-        sglang_server_args.log_level = log_level
-        sglang_server_args.log_level_http = log_level_http
         if XTUNER_DETERMINISTIC:
             sglang_server_args.enable_deterministic_inference = True
             sglang_server_args.rl_on_policy_target = True
@@ -198,12 +213,6 @@ class SGLangWorker(RolloutWorker):
         else:
             sglang_server_args.tp_size = self.config.tensor_parallel_size
             sglang_server_args.ep_size = self.config.expert_parallel_size
-
-        if grammar_backend is not None:
-            sglang_server_args.grammar_backend = grammar_backend
-
-        if self.config.context_length is not None:
-            sglang_server_args.context_length = self.config.context_length
 
         if sglang_server_args.nnodes > 1:
             sglang_server_args.node_rank = self.rank // self.config.gpus_per_node
@@ -242,4 +251,6 @@ class SGLangWorker(RolloutWorker):
             "no_stop_trim": extra_params.get("no_stop_trim", False),
             "spaces_between_special_tokens": extra_params.get("spaces_between_special_tokens", False),
         }
+        if "top_logprobs" in extra_params:
+            sglang_extra_params["top_logprobs_num"] = extra_params["top_logprobs"]
         return sglang_extra_params

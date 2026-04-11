@@ -256,8 +256,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         
         self.mtp_config = None
         if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
-            if hasattr(worker_cfg.model_cfg.text_config, 'mtp_config'):
-                self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
+            self.mtp_config = getattr(worker_cfg.model_cfg.text_config, "mtp_config", None)
+        else:
+            self.mtp_config = getattr(worker_cfg.model_cfg, "mtp_config", None)
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -492,7 +493,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         # Init loss_ctx: shifted_labels, advantages, rollout_logprobs
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[BaseRLLossContext] = []
-        mtp_loss_ctx_list: list[MTPLossContext] = []
+        mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         
         for data in data_batches:
             # update seq_ctx
@@ -534,11 +535,19 @@ class TrainingWorker(SingleAcceleratorWorker):
             loss_ctx_list.append(loss_ctx)
             
             if self.mtp_config is not None:
-                mtp_loss_cfg = MTPLossConfig(
-                    mode='chunk',
-                    mtp_depth=1, # TODO: 写死
-                )
-                mtp_loss_ctx_list.append(mtp_loss_cfg.build(data={"shifted_labels": shifted_labels, 'seq_ctx': seq_ctx}, sp_mesh=self.sp_mesh))
+                sample_mtp_loss_ctx_list = []
+                for mtp_idx in range(self.mtp_config.num_layers):
+                    mtp_loss_cfg = MTPLossConfig(
+                        mode="chunk",
+                        mtp_depth=mtp_idx + 1,
+                    )
+                    mtp_loss_ctx = mtp_loss_cfg.build(
+                        data={"shifted_labels": shifted_labels, "seq_ctx": seq_ctx},
+                        sp_mesh=self.sp_mesh,
+                    )
+                    assert mtp_loss_ctx is not None
+                    sample_mtp_loss_ctx_list.append(mtp_loss_ctx)
+                mtp_loss_ctx_list.append(sample_mtp_loss_ctx_list)
 
         del data_batches
 
@@ -626,7 +635,7 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         # compute batched loss context
         batched_loss_ctx_list: list[BaseRLLossContext] = []
-        batched_mtp_loss_ctx_list: list[MTPLossContext] = []
+        batched_mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         LossContext = loss_cfg.loss_ctx_cls
         for i in range(0, len(loss_ctx_list), iters_per_step):
             batches_loss_ctx = loss_ctx_list[i : i + iters_per_step]
@@ -638,13 +647,19 @@ class TrainingWorker(SingleAcceleratorWorker):
                 batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
                 batches_mtp_loss_ctx = mtp_loss_ctx_list[i : i + iters_per_step]
                 cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in batches_seq_ctx]
-                batched_mtp_loss_ctx_list.extend(
-                    MTPLossContext.build_batches(  # type: ignore[assignment]
-                        cast(list[MTPLossContext], batches_mtp_loss_ctx),  # type: ignore[arg-type]
+                sample_batched_mtp_loss_ctx_list: list[list[MTPLossContext]] = [
+                    [] for _ in range(len(batches_mtp_loss_ctx))
+                ]
+                for mtp_idx in range(self.mtp_config.num_layers):
+                    depth_mtp_loss_ctx = [sample_ctx[mtp_idx] for sample_ctx in batches_mtp_loss_ctx]
+                    depth_mtp_loss_ctx = MTPLossContext.build_batches(
+                        cast(list[MTPLossContext], depth_mtp_loss_ctx),
                         cu_seq_lens_list=cu_seq_lens_list,
                         sp_mesh=self.sp_mesh,
                     )
-                )
+                    for sample_idx, mtp_loss_ctx in enumerate(depth_mtp_loss_ctx):
+                        sample_batched_mtp_loss_ctx_list[sample_idx].append(mtp_loss_ctx)
+                batched_mtp_loss_ctx_list.extend(sample_batched_mtp_loss_ctx_list)
             
 
         # train optimizer steps
@@ -659,8 +674,8 @@ class TrainingWorker(SingleAcceleratorWorker):
 
             if self.mtp_config is not None:
                 batches_mtp_loss_ctx = batched_mtp_loss_ctx_list[i : i + iters_per_step]
-                engine_input= [
-                    ModelItem(seq_ctx=seq_ctx, loss_ctx={"mtp": [mtp_loss_ctx], "lm": loss_ctx}) # 这个 [ ] 写法是临时代码
+                engine_input = [
+                    ModelItem(seq_ctx=seq_ctx, loss_ctx={"mtp": mtp_loss_ctx, "lm": loss_ctx})
                     for seq_ctx, loss_ctx, mtp_loss_ctx in zip(batches_seq_ctx, batches_loss_ctx, batches_mtp_loss_ctx)
                 ]
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from transformers import AutoConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
@@ -19,6 +20,7 @@ from .compose.qwen3_vl import (
     Qwen3VLMoE235BA22Config,
 )
 from .dense.dense import Dense
+from .dense.mimo import MiMoDense7BConfig, MiMoDenseConfig
 from .dense.qwen2 import Qwen2Dense7BConfig, Qwen2DenseConfig
 from .dense.qwen3 import Qwen3Dense0P6BConfig, Qwen3Dense4BConfig, Qwen3Dense8BConfig, Qwen3DenseConfig
 from .moe.deepseek_v3 import DeepSeekV3Config
@@ -38,6 +40,8 @@ model_mapping = {
     "internvl-3.5-8b-hf": InternVL3P5Dense8BConfig(),
     "internvl-3.5-1b-hf": InternVL3P5Dense1BConfig(),
     "internvl-3.5-30b-a3b-hf": InternVL3P5MoE30BA3Config(),
+    "mimo-7b": MiMoDense7BConfig(),
+    "mimo-7b-rl": MiMoDense7BConfig(),
 }
 
 
@@ -48,6 +52,14 @@ def get_model_config(model_alias: str):
 
 def get_model_config_from_hf(model_path: Path):
     """Convert HuggingFace config to XTuner."""
+    model_type = None
+    config_path = Path(model_path) / "config.json"
+    if config_path.exists():
+        model_type = json.loads(config_path.read_text()).get("model_type")
+
+    if model_type == "mimo":
+        return MiMoDenseConfig.from_hf(model_path)
+
     cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
     if cfg.model_type == "qwen3_moe":
@@ -62,6 +74,8 @@ def get_model_config_from_hf(model_path: Path):
         return GptOssConfig.from_hf(model_path)
     elif cfg.model_type == "deepseek_v3":
         return DeepSeekV3Config.from_hf(model_path)
+    elif cfg.model_type == "mimo":
+        return MiMoDenseConfig.from_hf(model_path)
     else:
         raise ValueError(f"Unsupported model type: {cfg.model_type}")
 
@@ -72,6 +86,8 @@ __all__ = [
     "Qwen3DenseConfig",
     "Qwen3Dense0P6BConfig",
     "Qwen3Dense8BConfig",
+    "MiMoDenseConfig",
+    "MiMoDense7BConfig",
     "Qwen3MoEConfig",
     "Qwen3MoE30BA3Config",
     "InternS1Config",
