@@ -48,11 +48,11 @@ def main(
         else:
             ray.init(num_cpus=128)
 
-    if os.getenv("XTUNER_RL_MEM_DIR"):
-        print("Start to monitor actor memory")
-        track_thread = threading.Thread(target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"),))
-        track_thread.daemon = True
-        track_thread.start()
+    # if os.getenv("XTUNER_RL_MEM_DIR"):
+    #     print("Start to monitor actor memory")
+    #     track_thread = threading.Thread(target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"),))
+    #     track_thread.daemon = True
+    #     track_thread.start()
 
     trainer_cfg = Config.fromfile(config)["trainer"]
     # trainer = RLTrainer.from_config(trainer_cfg)

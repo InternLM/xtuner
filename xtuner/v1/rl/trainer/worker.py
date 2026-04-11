@@ -41,6 +41,7 @@ from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
+from xtuner.v1.rl.rollout_is import merge_rollout_is_metrics
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import SingleAcceleratorWorker, gather_logprobs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -54,9 +55,6 @@ from xtuner.v1.utils import (
     ray_method,
 )
 from xtuner.v1.utils.load_spec import LoadEnum
-
-from .rollout_is import merge_rollout_is_metrics
-
 
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
 ServiceUrlMap: TypeAlias = Dict[int, str]  # A dictionary mapping service names to their URLs

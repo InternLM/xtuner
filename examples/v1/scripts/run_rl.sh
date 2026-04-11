@@ -1,4 +1,6 @@
 set -ex
+# 统一由 run_rl.sh 负责在启动前清理上一轮 Ray 进程；
+# 外层用户脚本不需要再额外执行一次 ray stop --force。
 ray stop --force
 # examples of usage:
 # qwen3_8B_grpo_gsm8k training: 
@@ -25,6 +27,8 @@ fi
 
 ulimit -n 65536  # OSError: [Errno 24] Too many open files
 
+# 统一由 run_rl.sh 负责把 repo 根目录注入 PYTHONPATH；
+# 外层用户脚本不需要重复 export PYTHONPATH="$(pwd)"。
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
 # ray 环境变量

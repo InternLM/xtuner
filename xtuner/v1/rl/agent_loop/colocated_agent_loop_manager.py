@@ -2,7 +2,7 @@
 
 This module only keeps the produce_batch orchestration path that is used by
 shared-card training/evaluation. Disaggregated replay-buffer windowing lives in
-disaggregated_agent_loop_manager.py.
+disaggregated_multi_task_agent_loop_manager.py.
 """
 
 import time
@@ -85,6 +85,7 @@ class ColocatedAgentLoopManager(BaseAgentLoopManager):
 
         task_batch_sizes = self.get_task_batch_sizes(batch_size, rollout_step)
         self._validate_task_batch_sizes(task_batch_sizes, batch_size)
+        # colocated 模式下 batch_size 为 0 的 task 不参与本轮 produce。
         active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
 
         results: list[ProduceBatchResult] = []
@@ -92,6 +93,7 @@ class ColocatedAgentLoopManager(BaseAgentLoopManager):
             rollout_ctl = self._get_shared_rollout_ctl(active_tasks)
             await continue_generation(rollout_ctl)
             try:
+                # 多 task 共享一次 continue/pause 生命周期，但每个 task 的 produce 仍是并发执行。
                 results = await self._gather_fail_fast(
                     *[
                         _produce_single_task_batch(

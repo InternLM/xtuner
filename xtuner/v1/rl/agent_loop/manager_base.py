@@ -22,7 +22,14 @@ from .sampler import Sampler, SamplerConfig
 
 @dataclass
 class ProduceBatchResult:
-    """Result of a single produce call."""
+    """一次 produce 调用的统一返回结构。
+
+    这里同时服务于 colocated / disaggregated 两条路径，所以会同时携带：
+    1. 真正取出来用于训练/评估的 rollout_states
+    2. 本轮生成的 timing 统计
+    3. replay buffer 中剩余样本的计数
+    4. 多 task 时每个 task 的子结果
+    """
 
     rollout_states: list[list[RolloutState]]
     group_gen_count: int | None = None
@@ -61,6 +68,8 @@ class _TaskSamplerView:
 def _fill_produce_timing_stats(result: ProduceBatchResult, stats: ProducerTimings) -> None:
     if not stats.generate_times_s:
         return
+    # 这里保留原始 group 级耗时列表，后续多 task 聚合时会重新算全局分位数，
+    # 避免“先算每个 task 的 p99，再做加权平均”这种统计失真。
     sorted_times = sorted(stats.generate_times_s)
     n = len(sorted_times)
     mean_s = sum(sorted_times) / n
@@ -84,6 +93,8 @@ async def _produce_single_task_batch(
     logger,
     manager_name: str,
 ) -> ProduceBatchResult:
+    # 单 task helper 只负责“调 strategy + 从 replay buffer 取结果 + 统计 leftovers”，
+    # 不处理多 task 聚合。这样 colocated manager 和后续其他 manager 都能复用。
     start = time.perf_counter()
     logger.info(f"[{manager_name}][{task_runner.task_name}] produce_batch start batch={batch_size}")
     stats: ProducerTimings = await task_runner.produce_strategy.produce_batch(
@@ -131,6 +142,9 @@ async def _produce_single_task_window_to_replay_buffer(
     logger,
     manager_name: str,
 ) -> ProduceBatchResult:
+    # disaggregated 的 window 路径和 colocated 的 batch 路径不同：
+    # 这里不会立即从 replay buffer 取出训练 batch，只把样本生产到 buffer，
+    # 并把此时 buffer 的剩余状态统计出来。
     start = time.perf_counter()
     logger.info(
         f"[{manager_name}][{task_runner.task_name}] produce_window_to_replay_buffer start "
@@ -146,10 +160,6 @@ async def _produce_single_task_window_to_replay_buffer(
         task_name=task_runner.task_name,
         rollout_step=rollout_step,
         enable_partial_rollout=enable_partial_rollout,
-    )
-    logger.info(
-        f"[{manager_name}][{task_runner.task_name}] produce_window_to_replay_buffer done "
-        f"elapsed={time.perf_counter() - start:.3f}"
     )
 
     result = ProduceBatchResult(rollout_states=[])
@@ -184,6 +194,8 @@ def build_task_runners(
     replay_buffer: ReplayBuffer,
     logger=None,
 ) -> list[_TaskRunner]:
+    # 这里是 manager 层最底下的共享构建逻辑：
+    # 每个 task 最终都会展开成 agent_loop + produce_strategy + sampler 三件套。
     tasks = tasks if isinstance(tasks, list) else [tasks]
     if not tasks:
         raise ValueError("At least one task config is required.")
@@ -213,6 +225,27 @@ def build_task_runners(
             )
         )
     return task_runners
+
+
+def build_task_runner(
+    task: TaskSpecConfig,
+    *,
+    rollout_controller: RolloutController,
+    judger: Judger,
+    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
+    replay_buffer: ReplayBuffer,
+    logger=None,
+) -> _TaskRunner:
+    # single-task manager 直接复用多 task 的底层构建逻辑，只是这里显式返回唯一 task runner，
+    # 让上层代码不必再处理 list / enumerate / duplicate-name 这些多 task 细节。
+    return build_task_runners(
+        [task],
+        rollout_controller=rollout_controller,
+        judger=judger,
+        tokenizer=tokenizer,
+        replay_buffer=replay_buffer,
+        logger=logger,
+    )[0]
 
 
 class BaseAgentLoopManager:
@@ -249,6 +282,8 @@ class BaseAgentLoopManager:
         if train_batch_size == 0:
             return {task.task_name: 0 for task in self.task_runners}
 
+        # 使用 largest remainder method 做整数分配：
+        # 先按权重取 floor，再把剩余名额按小数部分从大到小补回去。
         raw_allocations = [train_batch_size * task.weight / total_weight for task in self.task_runners]
         floor_allocations = [math.floor(raw) for raw in raw_allocations]
         remaining = train_batch_size - sum(floor_allocations)
@@ -313,6 +348,8 @@ class BaseAgentLoopManager:
     def _get_shared_rollout_ctl(self, active_tasks: list[_TaskRunner]):
         if not active_tasks:
             return None
+        # 当前 manager 设计假设：同一次 produce 调用里的所有 active task
+        # 共用一个 rollout controller。因为 continue/pause 只会发一次。
         rollout_ctl = active_tasks[0].agent_loop.rollout_ctl
         for task in active_tasks[1:]:
             if task.agent_loop.rollout_ctl is not rollout_ctl:
@@ -325,10 +362,14 @@ class BaseAgentLoopManager:
 
     @staticmethod
     def _copy_task_result(result: ProduceBatchResult) -> ProduceBatchResult:
+        # 单 task 快路径会把子结果再挂到 task_results 上。
+        # 这里显式断开 task_results，避免 result -> task_results -> result 的循环引用。
         return replace(result, task_results=None)
 
     @staticmethod
     async def _gather_fail_fast(*coroutines) -> list:
+        # asyncio.gather 默认不会自动取消兄弟任务。
+        # 这里显式做 fail-fast：任一子任务失败或被取消，其他兄弟任务一并取消并回收。
         tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
         try:
             return await asyncio.gather(*tasks)
@@ -343,6 +384,10 @@ class BaseAgentLoopManager:
     def _aggregate_task_results(
         ordered_tasks: list[_TaskRunner], task_results: dict[str, ProduceBatchResult]
     ) -> ProduceBatchResult:
+        # manager 层的聚合只做三件事：
+        # 1. 拼接 rollout_states
+        # 2. 汇总 leftovers
+        # 3. 基于所有 task 的原始 group 耗时重新计算全局 timing 统计
         rollout_states: list[list[RolloutState]] = []
         group_gen_times_s: list[float] = []
         leftover_completed = 0

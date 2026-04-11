@@ -129,6 +129,8 @@ class ProduceStrategy(ABC):
         self.max_finished_groups_multiplier = max_finished_groups_multiplier
 
     def _get_max_finished_groups(self, target_count: int) -> int:
+        # 这是一个“保险丝”：
+        # 如果样本一直过不了 is_valid_sample_fn，producer 不能无限跑下去。
         return max(math.ceil(max(target_count, 1) * self.max_finished_groups_multiplier), target_count)
 
     def _raise_if_exceeded_finished_group_budget(
@@ -157,6 +159,8 @@ class ProduceStrategy(ABC):
         source_group_status: Status | None = None,
         enable_partial_rollout: bool = False,
     ) -> asyncio.Task:
+        # sampler.sample 负责决定“从 fresh prompt / aborted / expired 哪种存储里取组”，
+        # 真正的 generate_group 则作为 asyncio task 并发跑起来。
         rollout_state = await sampler.sample(task_name=task_name, group_status=source_group_status)
         return create_task(
             _timed_generate_group(
@@ -175,6 +179,10 @@ class ProduceStrategy(ABC):
         task_name: str,
         tail_batch_stale_threshold: int = 0,
     ) -> tuple[list[float], float]:
+        # cleanup 的职责不是“丢弃” pending 任务，而是：
+        # 1. 先 pause rollout，阻止继续往前生成
+        # 2. 等已经在飞的 group 收尾
+        # 3. 把它们以当前状态写回 replay buffer
         pause_start = time.perf_counter()
         rollout_ctl = agent_loop.rollout_ctl
         generate_times: list[float] = []
@@ -197,6 +205,7 @@ class ProduceStrategy(ABC):
                         f"(uid: {item.uid}, status: {item.status}, length: {len(item.response_ids or [])})."
                     )
                 await replay_buffer.put(paused_items, task_name)
+            # 只有这轮 wait 超时、没有任何任务完成时，才需要额外 sleep，避免空转。
             if pending_tasks and not done_tasks:
                 await pause_generation(rollout_ctl)
                 await asyncio.sleep(1)
@@ -214,6 +223,10 @@ class ProduceStrategy(ABC):
         tail_batch_stale_threshold: int,
         source_group_status: Status = Status.ABORTED,
     ) -> "ProducerTimings":
+        # partial window 的目标不是把 target 全部跑完，而是：
+        # 1. 只要 required 已满足，就允许训练先开始
+        # 2. 多 launch 出来的在途任务会在 finally 里 pause 成 aborted leftovers，
+        #    为下一轮 window 预热
         initial_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         completed_count = initial_completed_count
         target_completed_count = max(required_batch_size, initial_completed_count)
@@ -223,8 +236,8 @@ class ProduceStrategy(ABC):
         finished_group_count = 0
         pause_time_s = 0.0
 
-        # A partial window may launch work even after required samples are already available. The launched
-        # tasks will be paused into aborted leftovers, keeping the next window warm without delaying training.
+        # 即使 required 已满足，这里仍可能继续 launch。
+        # 这些任务不是浪费掉，而是会在 cleanup 阶段转成下一轮可继续的 leftovers。
         for _ in range(launch_batch_size):
             pending_tasks.add(
                 await self._launch_group(
@@ -269,6 +282,8 @@ class ProduceStrategy(ABC):
                     finished_group_count=finished_group_count,
                 )
 
+                # partial window 里维持的是“至少能达到 target_completed_count 所需的在途水位”，
+                # 不是固定并发池。
                 while completed_count + len(pending_tasks) < target_completed_count:
                     pending_tasks.add(
                         await self._launch_group(
@@ -305,6 +320,7 @@ class ProduceStrategy(ABC):
         source_group_status: Status | None,
         tail_batch_stale_threshold: int = 0,
     ) -> "ProducerTimings":
+        # full window 语义更直接：必须等 replay buffer 中的 COMPLETED 总量达到 target 才返回。
         initial_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         completed_count = initial_completed_count
         target_completed_count = max(required_batch_size, target_batch_size)
@@ -356,6 +372,8 @@ class ProduceStrategy(ABC):
                     finished_group_count=finished_group_count,
                 )
 
+                # full window 和 partial window 一样，补的是“目标总量缺口”，
+                # 不是固定池大小。
                 while completed_count + len(pending_tasks) < target_completed_count:
                     pending_tasks.add(
                         await self._launch_group(
@@ -416,6 +434,8 @@ class SyncProduceStrategy(ProduceStrategy):
         rollout_step: int = 0,
         enable_partial_rollout: bool = False,
     ) -> ProducerTimings:
+        # Sync strategy 的 window 模式只允许最简单的 exact full-window：
+        # 不消费 leftovers，不支持 partial，不支持 over-target。
         target_batch_size = required_batch_size if target_batch_size is None else target_batch_size
         unsupported_window = enable_partial_rollout or target_batch_size != required_batch_size
         if unsupported_window:
@@ -499,6 +519,9 @@ class AsyncProduceStrategy(ProduceStrategy):
         rollout_step: int,
         tail_batch_stale_threshold: int,
     ):
+        # 这一步会把 buffer 中现有的 COMPLETED leftovers 先取出来，
+        # 刷新 staleness / 必要时转成 EXPIRED，再写回去。
+        # 这样下一轮采样时，sampler 看到的是“最新 staleness 语义”的 buffer 状态。
         previously_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         if previously_completed_count <= 0:
             return
@@ -518,6 +541,8 @@ class AsyncProduceStrategy(ProduceStrategy):
                 await replay_buffer.put(group, task_name)
                 processed_group_count += 1
         except Exception:
+            # 这里不是强事务，只能做 best-effort recovery：
+            # 尽量把还没写回的 group 放回去，然后把原异常继续抛出。
             remaining_groups = pending_requeue_groups[processed_group_count:]
             logger.exception(
                 "[%s] Task %s failed while refreshing leftover samples. Attempting best-effort requeue for %d groups.",
@@ -549,12 +574,15 @@ class AsyncProduceStrategy(ProduceStrategy):
         expired_sample_count: int,
         sample_from_expired_storage: bool,
     ) -> ProducerTimings:
+        # fixed-concurrency pool 只用于 produce_batch 路径。
+        # 它和 window 模式的关键区别是：这里维持的是“并发池大小”，不是“buffer 绝对目标量”。
         pending_tasks = set()
         generate_times: list[float] = []
         finished_group_count = 0
         pause_time_s = 0.0
 
         for _ in range(data_concurrency):
+            # tail-batch 模式优先从 EXPIRED leftovers 继续；否则默认从 ABORTED leftovers 继续。
             if sample_from_expired_storage and expired_sample_count > 0:
                 source_group_status = Status.EXPIRED
                 expired_sample_count -= 1
@@ -646,9 +674,8 @@ class AsyncProduceStrategy(ProduceStrategy):
         rollout_step: int = 0,
         enable_partial_rollout: bool = False,
     ) -> ProducerTimings:
-        # Window mode is driven by absolute replay-buffer targets so disaggregated training can request
-        # a required train batch plus optional extra pressure for stale/partial rollouts. produce_batch
-        # intentionally keeps the fixed-concurrency pool semantics for colocated/eval call sites.
+        # window 模式由 trainer 传入绝对的 required/target 来驱动。
+        # 也就是说，trainer 决定这一轮“至少要多少”“最多想多跑多少”，strategy 只负责执行。
         await self._process_leftover_samples(
             replay_buffer,
             task_name,
@@ -656,8 +683,8 @@ class AsyncProduceStrategy(ProduceStrategy):
             self.tail_batch_stale_threshold,
         )
         expired_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
-        # Window mode samples from replay-buffer leftovers instead of fresh prompts. Normal windows continue
-        # aborted groups; tail-batch windows preferentially continue expired groups.
+        # disaggregated window 不从 fresh prompt 开始，而是继续 replay buffer 里的 leftovers：
+        # 正常情况续跑 ABORTED；tail-batch 情况优先续跑 EXPIRED。
         source_group_status = Status.ABORTED
         target_batch_size = required_batch_size if target_batch_size is None else target_batch_size
         if self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size:
@@ -669,6 +696,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             target_batch_size = required_batch_size
 
         if enable_partial_rollout:
+            # partial window：允许训练先拿到 required，然后把多余在途任务留到下一轮。
             return await self._produce_partial_window(
                 agent_loop=agent_loop,
                 sampler=sampler,
@@ -680,6 +708,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                 tail_batch_stale_threshold=self.tail_batch_stale_threshold,
                 source_group_status=source_group_status,
             )
+        # full window：必须等到目标总量满足才返回。
         return await self._produce_full_window(
             agent_loop=agent_loop,
             sampler=sampler,
@@ -701,7 +730,8 @@ class AsyncProduceStrategy(ProduceStrategy):
         task_name: str,
         rollout_step: int = 0,
     ) -> ProducerTimings:
-        # 1. 处理上一轮遗留的 completed 样本
+        # produce_batch 是 colocated/eval 路径使用的旧语义：
+        # 先刷新 leftovers，再按固定并发池持续补任务，直到拿够 batch_size。
         await self._process_leftover_samples(
             replay_buffer,
             task_name,
@@ -709,7 +739,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             self.tail_batch_stale_threshold,
         )
 
-        # 2. 计算当前并发需求
+        # 已经在 buffer 里的 COMPLETED 样本会直接抵扣本轮还需要 launch 的并发量。
         previously_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         data_concurrency = max(
             math.ceil((1 + self.produce_batch_over_sample_threshold) * batch_size) - previously_completed_count,

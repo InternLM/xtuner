@@ -3,9 +3,13 @@ from .colocated_agent_loop_manager import (
     ColocatedAgentLoopManager,
     ColocatedAgentLoopManagerConfig,
 )
-from .disaggregated_agent_loop_manager import (
-    DisaggregatedAgentLoopManager,
-    DisaggregatedAgentLoopManagerConfig,
+from .disaggregated_multi_task_agent_loop_manager import (
+    DisaggregatedMultiTaskAgentLoopManager,
+    DisaggregatedMultiTaskAgentLoopManagerConfig,
+)
+from .disaggregated_single_task_agent_loop_manager import (
+    DisaggregatedSingleTaskAgentLoopManager,
+    DisaggregatedSingleTaskAgentLoopManagerConfig,
 )
 from .manager_base import ProduceBatchResult, TaskSpecConfig
 from .producer import (
@@ -27,8 +31,10 @@ __all__ = [
     "SingleTurnAgentLoop",
     "ColocatedAgentLoopManagerConfig",
     "ColocatedAgentLoopManager",
-    "DisaggregatedAgentLoopManagerConfig",
-    "DisaggregatedAgentLoopManager",
+    "DisaggregatedMultiTaskAgentLoopManagerConfig",
+    "DisaggregatedMultiTaskAgentLoopManager",
+    "DisaggregatedSingleTaskAgentLoopManagerConfig",
+    "DisaggregatedSingleTaskAgentLoopManager",
     "TaskSpecConfig",
     "ProduceBatchResult",
     "ProduceStrategyConfig",

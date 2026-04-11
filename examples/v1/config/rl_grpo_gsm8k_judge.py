@@ -32,11 +32,11 @@ NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
 experimental_name = "grpo_gsm8k"
-rollout_steps = 45
+rollout_steps = 3
 evaluate_step = 45
 train_optimizer_steps = 1
-global_batch_size = 64 * train_optimizer_steps
-prompt_repeat_k = 5
+global_batch_size = 32 * train_optimizer_steps
+prompt_repeat_k = 4
 rollout_tp_size = 1
 rollout_ep_size = 1
 max_prompt_length = 512

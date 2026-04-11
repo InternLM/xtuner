@@ -16,7 +16,8 @@ from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.data_proto import RolloutState, refresh_seq_staleness
 from xtuner.v1.rl.agent_loop import (
     ColocatedAgentLoopManagerConfig,
-    DisaggregatedAgentLoopManagerConfig,
+    DisaggregatedMultiTaskAgentLoopManagerConfig,
+    DisaggregatedSingleTaskAgentLoopManagerConfig,
     ProduceBatchResult,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
@@ -44,6 +45,7 @@ class DisaggregatedExecutionConfig(BaseModel):
     staleness_threshold: float = 0.0
     partial_rollout: bool = False
     completed_batch_timeout_s: float | None = 1800.0
+    # 这几个字段决定的是 trainer 的“窗口节奏”，不是 producer 的 buffer policy。
 
     def model_post_init(self, __context) -> None:
         if self.train_batch_size <= 0:
@@ -74,7 +76,7 @@ class RLDisaggregatedTrainerConfig(BaseModel):
     judger_config: JudgerConfig
     tokenizer_path: Union[str, Path]
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
-    agent_loop_manager_cfg: DisaggregatedAgentLoopManagerConfig
+    agent_loop_manager_cfg: DisaggregatedMultiTaskAgentLoopManagerConfig | DisaggregatedSingleTaskAgentLoopManagerConfig
     eval_agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
     load_from: Union[str, Path]
@@ -143,7 +145,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         judger_config: JudgerConfig,
         tokenizer_path: str | Path,
         replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig,
-        agent_loop_manager_cfg: DisaggregatedAgentLoopManagerConfig,
+        agent_loop_manager_cfg: DisaggregatedMultiTaskAgentLoopManagerConfig | DisaggregatedSingleTaskAgentLoopManagerConfig,
         eval_agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig,
         evaluator_config: EvaluatorConfig,
         enable_evaluate: bool = True,
@@ -188,7 +190,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         log_dir = self.exp_dir / "logs"
         self.logger = self._build_logger(log_dir)
 
-        force_set_tokenize_workers(self.logger)
+        # force_set_tokenize_workers(self.logger)
         self.logger.warning(
             "Disaggregated weight sync is currently mocked. The real cross-device weight update path is expected "
             "to be provided by the follow-up weight sync module."
@@ -198,7 +200,12 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             patch_default_save_plan()
 
         self._execution_config = execution_config
+        # 这里的 total_train_steps 指的是训练步，不是 rollout launch 次数。
         self._total_train_steps = execution_config.total_train_steps
+        # 共享的 RLColocateTrainer 日志/保存逻辑仍然读取 _rollout_steps。
+        # 对 disaggregated 来说两者语义都是“总训练步数”，这里保留一个兼容别名，
+        # 避免在共享逻辑里继续散落一批 if hasattr(...) 分支。
+        self._rollout_steps = self._total_train_steps
         self._cur_step = 0
         self._global_train_step = 0
         self._seed = seed
@@ -207,6 +214,8 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         self.train_batch_size = execution_config.train_batch_size
 
         pg_name_prefix = f"disaggregated_{self.exp_dir.name}"
+        # 训练和 rollout 明确分成两套 placement group，
+        # 这是 disaggregated 和 colocated 在资源层面最本质的区别。
         self._train_pg = AutoAcceleratorWorkers.build_placement_group(
             train_resources, name=f"{pg_name_prefix}_train"
         )
@@ -329,13 +338,16 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
                 self._execution_config.trigger_parameter_sync_step,
                 remaining_train_steps,
             )
+            # 当前版本仍然是“按 window 同步推进”：
+            # 一个 window 内先产数据，再按步取 batch 训练，最后统一做一次权重同步。
             await self._run_sync_window(start_train_step, window_train_steps)
 
     async def _run_sync_window(self, start_train_step: int, window_train_steps: int):
         end_train_step = start_train_step + window_train_steps - 1
         base_window_batch_size = self.train_batch_size * window_train_steps
-        window_task_batch_sizes = self.agent_loop_manager.get_window_task_batch_sizes(
-            train_batch_size=self.train_batch_size,
+        # required 是这个 window 真正训练要消耗的样本数；
+        # target 则可能因为 staleness_threshold 被放大，用来给 replay buffer 留冗余。
+        window_task_batch_sizes = self._get_window_required_batch_sizes(
             start_rollout_step=start_train_step,
             train_steps=window_train_steps,
         )
@@ -350,11 +362,11 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         )
 
         produce_task = asyncio.create_task(
-            self.agent_loop_manager.produce_window_to_replay_buffer(
+            # produce_task 会在整个 window 生命周期里后台持续往 replay buffer 里灌数据。
+            self._produce_window_to_replay_buffer(
                 required_task_batch_sizes=window_task_batch_sizes,
                 target_task_batch_sizes=target_task_batch_sizes,
                 rollout_step=start_train_step,
-                enable_partial_rollout=self._execution_config.partial_rollout,
             )
         )
 
@@ -366,6 +378,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 with timer("wait_rollout", step_timer_dict):
+                    # 每个 train_step 只从 replay buffer 取当前步所需的一个 train_batch。
                     produce_result = await self._get_completed_batch_or_raise(
                         produce_task=produce_task,
                         train_step=train_step,
@@ -412,6 +425,8 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             last_step_timer_dict = step_timer_dict
 
         with timer("rollout_window_drain", last_step_timer_dict):
+            # 训练步都跑完后，再等待本 window 的 produce_task 收尾，
+            # 确保 finally / cleanup 里的 leftovers 已经稳定写回 buffer。
             window_produce_result = await produce_task
         with timer("sync_and_save", last_step_timer_dict):
             self._sync_weights_and_save(end_train_step, last_step_timer_dict)
@@ -440,12 +455,35 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         )
 
     def _get_window_target_task_batch_sizes(self, window_task_batch_sizes: dict[str, int]) -> dict[str, int]:
+        # staleness_threshold 的唯一职责就是把 required 放大成 target。
+        # 这里不再叠加 strategy 侧的 over-sample 旋钮。
         return {
             task_name: math.ceil(task_batch_size * (1 + self._execution_config.staleness_threshold))
             for task_name, task_batch_size in window_task_batch_sizes.items()
         }
 
+    def _get_window_required_batch_sizes(self, start_rollout_step: int, train_steps: int) -> dict[str, int]:
+        return self.agent_loop_manager.get_window_task_batch_sizes(
+            train_batch_size=self.train_batch_size,
+            start_rollout_step=start_rollout_step,
+            train_steps=train_steps,
+        )
+
+    async def _produce_window_to_replay_buffer(
+        self,
+        required_task_batch_sizes: dict[str, int],
+        target_task_batch_sizes: dict[str, int],
+        rollout_step: int,
+    ) -> ProduceBatchResult:
+        return await self.agent_loop_manager.produce_window_to_replay_buffer(
+            required_task_batch_sizes=required_task_batch_sizes,
+            target_task_batch_sizes=target_task_batch_sizes,
+            rollout_step=rollout_step,
+            enable_partial_rollout=self._execution_config.partial_rollout,
+        )
+
     def _refresh_train_batch_staleness(self, train_batch: list[list[RolloutState]], train_step: int) -> None:
+        # 训练前再刷新一次，是为了让真正进入训练的 batch 带上“本训练步视角”的 staleness。
         for group in train_batch:
             for item in group:
                 refresh_seq_staleness(item, train_step)
@@ -471,20 +509,21 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         train_step: int,
     ) -> ProduceBatchResult:
         poll_interval_s = 1.0
+        # 当 producer 已经自然结束时，只允许一个很短的 drain 窗口，
+        # 看 replay buffer 里能不能把下一步训练所需 batch 凑齐。
         drain_timeout_s = 2 * poll_interval_s + 0.5
         pending: set[asyncio.Task] = set()
         if produce_task.done():
+            # 早检查：避免 producer 早就失败了，但 trainer 还静默继续吃旧缓存很多步。
             await produce_task
-            return await self.agent_loop_manager.get_completed_batch(
-                self.train_batch_size,
-                rollout_step=train_step,
+            return await self._get_completed_batch(
+                train_step=train_step,
                 poll_interval_s=poll_interval_s,
                 max_wait_s=drain_timeout_s,
             )
         get_batch_task = asyncio.create_task(
-            self.agent_loop_manager.get_completed_batch(
-                self.train_batch_size,
-                rollout_step=train_step,
+            self._get_completed_batch(
+                train_step=train_step,
                 poll_interval_s=poll_interval_s,
                 max_wait_s=self._execution_config.completed_batch_timeout_s,
             )
@@ -496,6 +535,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             )
             if produce_task in done:
                 try:
+                    # 这里先传播 producer 自己的异常/取消，再决定要不要 drain get_batch_task。
                     await produce_task
                 except BaseException:
                     if not get_batch_task.done():
@@ -503,8 +543,10 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
                         await asyncio.gather(get_batch_task, return_exceptions=True)
                     raise
                 if get_batch_task.done():
+                    # 最理想情况：producer 收尾时，这一步训练所需 batch 也已经准备好了。
                     return await get_batch_task
                 try:
+                    # producer 已经结束，但 get_batch_task 还差一点点；给一个很短的补齐窗口。
                     return await asyncio.wait_for(get_batch_task, timeout=drain_timeout_s)
                 except (TimeoutError, asyncio.TimeoutError):
                     get_batch_task.cancel()
@@ -520,3 +562,16 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             if get_batch_task in pending and not get_batch_task.done():
                 get_batch_task.cancel()
                 await asyncio.gather(get_batch_task, return_exceptions=True)
+
+    async def _get_completed_batch(
+        self,
+        train_step: int,
+        poll_interval_s: float,
+        max_wait_s: float | None,
+    ) -> ProduceBatchResult:
+        return await self.agent_loop_manager.get_completed_batch(
+            self.train_batch_size,
+            rollout_step=train_step,
+            poll_interval_s=poll_interval_s,
+            max_wait_s=max_wait_s,
+        )

@@ -17,7 +17,10 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.rl.agent_loop import ColocatedAgentLoopManagerConfig, ProduceBatchResult
+from xtuner.v1.rl.agent_loop import (
+    ColocatedAgentLoopManagerConfig,
+    ProduceBatchResult,
+)
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import JudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
@@ -296,7 +299,7 @@ class RLColocateTrainer:
         log_dir = self.exp_dir / "logs"
         self.logger = get_logger(log_dir=log_dir, tag="RLTrainer")
 
-        force_set_tokenize_workers(self.logger)
+        # force_set_tokenize_workers(self.logger)
 
         if skip_checkpoint_validation:
             patch_default_save_plan()

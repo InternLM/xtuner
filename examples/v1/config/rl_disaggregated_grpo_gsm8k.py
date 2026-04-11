@@ -45,7 +45,7 @@ from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.agent_loop import (
     AsyncProduceStrategyConfig,
     ColocatedAgentLoopManagerConfig,
-    DisaggregatedAgentLoopManagerConfig,
+    DisaggregatedSingleTaskAgentLoopManagerConfig,
     SamplerConfig,
     SingleTurnAgentLoopConfig,
     SyncProduceStrategyConfig,
@@ -74,10 +74,10 @@ enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0
 
 # basic settings
 experimental_name = "disaggregated_grpo_gsm8k"
-total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "45"))
+total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "4"))
 evaluate_step = int(os.environ.get("EVALUATE_STEP", str(total_train_steps)))
 train_optimizer_steps = int(os.environ.get("TRAIN_OPTIMIZER_STEPS", "1"))
-train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", str(64 * train_optimizer_steps)))
+train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", str(32 * train_optimizer_steps)))
 trigger_parameter_sync_step = int(os.environ.get("TRIGGER_PARAMETER_SYNC_STEP", "1"))
 staleness_threshold = float(os.environ.get("STALENESS_THRESHOLD", "0.0"))
 partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
@@ -87,7 +87,7 @@ completed_batch_timeout_s_env = os.environ.get("COMPLETED_BATCH_TIMEOUT_S", "180
 completed_batch_timeout_s = None if completed_batch_timeout_s_env.lower() == "none" else float(
     completed_batch_timeout_s_env
 )
-prompt_repeat_k = int(os.environ.get("PROMPT_REPEAT_K", "5"))
+prompt_repeat_k = int(os.environ.get("PROMPT_REPEAT_K", "4"))
 rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "1"))
 rollout_ep_size = int(os.environ.get("ROLLOUT_EP_SIZE", "1"))
 max_prompt_length = int(os.environ.get("MAX_PROMPT_LENGTH", "512"))
@@ -209,8 +209,8 @@ if staleness_threshold > 0 or partial_rollout:
     )
 else:
     produce_strategy_config = SyncProduceStrategyConfig()
-agent_loop_manager_cfg = DisaggregatedAgentLoopManagerConfig(
-    tasks=TaskSpecConfig(
+agent_loop_manager_cfg = DisaggregatedSingleTaskAgentLoopManagerConfig(
+    task=TaskSpecConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
         produce_strategy_config=produce_strategy_config,
