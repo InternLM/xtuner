@@ -2,12 +2,13 @@ import re
 from pathlib import Path
 
 import torch
+from pydantic import Field
 from typing_extensions import Self
 
 from transformers.models.deepseek_v3 import DeepseekV3Config as HFDeepseekV3Config
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import MLAConfig
-from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.noaux_router import NoAuxRouterConfig
 from xtuner.v1.utils import get_logger
 
@@ -61,15 +62,17 @@ class DeepSeekV3Config(MoEConfig):
     hidden_size: int = 7168
     intermediate_size: int = 18432
     rms_norm_eps: float = 1e-6
-    rope_theta: float = 10000.0
-    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(
-        type="yarn",
-        beta_fast=32,
-        beta_slow=1,
-        factor=40,
-        mscale=1.0,
-        mscale_all_dim=1.0,
-        original_max_position_embeddings=4096,
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(
+            rope_theta=10000.0,
+            rope_type="yarn",
+            beta_fast=32,
+            beta_slow=1,
+            factor=40,
+            mscale=1.0,
+            mscale_all_dim=1.0,
+            original_max_position_embeddings=4096,
+        )
     )
     hidden_act: str = "silu"
     attention: MLAConfig = MLAConfig(
@@ -108,6 +111,10 @@ class DeepSeekV3Config(MoEConfig):
 
         assert isinstance(cfg, HFDeepseekV3Config)
 
+        default_rope_params = (
+            cls.model_fields["rope_parameters_cfg"].get_default(call_default_factory=True).model_dump()
+        )
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(cfg, default_rope_params)
         config = cls(
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
@@ -119,18 +126,7 @@ class DeepSeekV3Config(MoEConfig):
             hidden_size=cfg.hidden_size,
             intermediate_size=cfg.intermediate_size,
             rms_norm_eps=cfg.rms_norm_eps,
-            rope_theta=cfg.rope_theta,
-            rope_scaling_cfg=RopeScalingConfig(
-                type=cfg.rope_scaling.get("type", "yarn"),
-                beta_fast=cfg.rope_scaling.get("beta_fast", 32),
-                beta_slow=cfg.rope_scaling.get("beta_slow", 1),
-                factor=cfg.rope_scaling.get("factor", 40.0),
-                mscale=cfg.rope_scaling.get("mscale", 1.0),
-                mscale_all_dim=cfg.rope_scaling.get("mscale_all_dim", 1.0),
-                original_max_position_embeddings=cfg.rope_scaling.get("original_max_position_embeddings", 4096),
-            )
-            if cfg.rope_scaling is not None
-            else None,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=cfg.hidden_act,
             attention=MLAConfig(
                 kv_lora_rank=cfg.kv_lora_rank,

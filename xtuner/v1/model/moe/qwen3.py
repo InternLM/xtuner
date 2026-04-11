@@ -2,14 +2,15 @@ import re
 from pathlib import Path
 
 import torch
+from pydantic import Field
 from typing_extensions import Self
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.auto import AutoConfig
 from transformers.models.qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
-from xtuner.v1.model.base import RopeScalingConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import MHAConfig
+from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .moe import MoE
@@ -61,10 +62,11 @@ class Qwen3MoEConfig(MoEConfig):
 
         assert isinstance(hf_config, HFQwen3MoeConfig)
 
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(hf_config)
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
-            pad_token_id=getattr(hf_config, "pad_token_id"),
+            pad_token_id=getattr(hf_config, "pad_token_id", None),
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
@@ -73,7 +75,7 @@ class Qwen3MoEConfig(MoEConfig):
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
             model_type=hf_config.model_type,
-            rope_theta=hf_config.rope_theta,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
@@ -146,7 +148,9 @@ class Qwen3MoE30BA3Config(Qwen3MoEConfig):
     hidden_size: int = 2048
     intermediate_size: int = 6144
     rms_norm_eps: float = 1e-6
-    rope_theta: float = 1000000.0
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0)
+    )
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         num_attention_heads=32, num_key_value_heads=4, head_dim=128, qk_norm=True, sliding_window=1024
@@ -178,7 +182,9 @@ class Qwen3MoE235BA22Config(Qwen3MoEConfig):
     hidden_size: int = 4096
     intermediate_size: int = 12288
     rms_norm_eps: float = 1e-6
-    rope_theta: float = 1000000.0
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(rope_theta=1000000.0)
+    )
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         num_attention_heads=64, num_key_value_heads=4, head_dim=128, qk_norm=True, sliding_window=1024
@@ -206,10 +212,11 @@ class Qwen3MoEFoPEConfig(Qwen3MoEConfig):
 
         assert isinstance(hf_config, PretrainedConfig) and hf_config.model_type == "qwen3_moe_fope"
 
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(hf_config)
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
-            pad_token_id=getattr(hf_config, "pad_token_id"),
+            pad_token_id=getattr(hf_config, "pad_token_id", None),
             bos_token_id=hf_config.bos_token_id,
             eos_token_id=hf_config.eos_token_id,
             num_hidden_layers=hf_config.num_hidden_layers,
@@ -218,16 +225,7 @@ class Qwen3MoEFoPEConfig(Qwen3MoEConfig):
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
             model_type=hf_config.model_type,
-            rope_theta=hf_config.rope_theta,
-            rope_scaling_cfg=RopeScalingConfig(
-                type=hf_config.rope_scaling.get("type", "default"),
-                # fope specific parameters
-                fope_init_factor=hf_config.rope_scaling.get("fope_init_factor"),
-                fope_sep_head=hf_config.rope_scaling.get("fope_sep_head"),
-                num_inv_freq=hf_config.rope_scaling.get("num_inv_freq"),
-            )
-            if hf_config.rope_scaling is not None
-            else None,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,

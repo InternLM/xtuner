@@ -3,14 +3,14 @@ from pathlib import Path
 from typing import Literal
 
 import torch
-from pydantic import computed_field
+from pydantic import Field, computed_field
 from typing_extensions import Self
 
 from transformers.models.gpt_oss import GptOssConfig as HFGptOssConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.decoder_layer.moe_decoder_layer import MoEActFnConfig
-from xtuner.v1.module.rope import RopeScalingConfig
+from xtuner.v1.module.rope import RopeParametersConfig
 from xtuner.v1.module.router.greedy import GreedyRouterConfig
 
 from .moe import MoE
@@ -124,8 +124,16 @@ class GptOssConfig(MoEConfig):
     tie_word_embeddings: bool = False
     n_shared_experts: int = 0
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig(act_type="clipped_swiglu", clip_alpha=1.702, clip_limit=7)
-    rope_scaling_cfg: RopeScalingConfig = RopeScalingConfig(
-        type="yarn", beta_fast=32.0, beta_slow=1.0, factor=32.0, original_max_position_embeddings=4096, truncate=False
+    rope_parameters_cfg: RopeParametersConfig = Field(
+        default_factory=lambda: RopeParametersConfig(
+            rope_theta=150000.0,
+            rope_type="yarn",
+            beta_fast=32.0,
+            beta_slow=1.0,
+            factor=32.0,
+            original_max_position_embeddings=4096,
+            truncate=False,
+        )
     )
 
     @computed_field
@@ -141,6 +149,7 @@ class GptOssConfig(MoEConfig):
 
         assert isinstance(cfg, HFGptOssConfig)
 
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(cfg)
         config = cls(
             vocab_size=cfg.vocab_size,
             max_position_embeddings=cfg.max_position_embeddings,
@@ -151,7 +160,7 @@ class GptOssConfig(MoEConfig):
             intermediate_size=cfg.intermediate_size,
             moe_intermediate_size=cfg.intermediate_size,
             rms_norm_eps=cfg.rms_norm_eps,
-            rope_theta=cfg.rope_theta,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=cfg.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=cfg.num_attention_heads,
@@ -171,16 +180,6 @@ class GptOssConfig(MoEConfig):
                 norm_topk_prob=True,
                 router_scaling_factor=1.0,
             ),
-            rope_scaling_cfg=RopeScalingConfig(
-                type=cfg.rope_scaling.get("rope_type", "yarn"),
-                beta_fast=cfg.rope_scaling.get("beta_fast", 32.0),
-                beta_slow=cfg.rope_scaling.get("beta_slow", 1.0),
-                factor=cfg.rope_scaling.get("factor", 32.0),
-                original_max_position_embeddings=cfg.rope_scaling.get("original_max_position_embeddings", 4096),
-                truncate=cfg.rope_scaling.get("truncate", False),
-            )
-            if cfg.rope_scaling is not None
-            else None,
         )
         return config
 
@@ -235,7 +234,6 @@ class GptOss21BA3P6Config(GptOssConfig):
     hidden_size: int = 2880
     intermediate_size: int = 2880
     rms_norm_eps: float = 1e-5
-    rope_theta: float = 150000
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         with_sink=True,
@@ -268,7 +266,6 @@ class GptOss117BA5P8Config(GptOssConfig):
     hidden_size: int = 2880
     intermediate_size: int = 2880
     rms_norm_eps: float = 1e-5
-    rope_theta: float = 150000
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         with_sink=True,

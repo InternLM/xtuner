@@ -144,6 +144,7 @@ class MoEConfig(TransformerConfig):
     z_loss_cfg: ZLossConfig | None = None
     return_router_results: bool = False
     gate_bias: bool = False
+    router_compute_dtype: Literal["float32", "native"] = "float32"
     moe_bias: bool = False
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
     mtp_config: MTPConfig | None = None
@@ -814,6 +815,7 @@ class MoE(BaseModel):
                     rope_scaling_cfg=config.rope_scaling_cfg,
                     generate_config=config.generate_config,
                     router_config=config.router,
+                    router_compute_dtype=config.router_compute_dtype,
                     moe_act_fn_cfg=config.moe_act_fn_cfg,
                     float8_cfg=config.float8_cfg,
                     layer_idx=layer_idx,
@@ -877,6 +879,7 @@ class MoE(BaseModel):
                 rope_scaling_cfg=config.rope_scaling_cfg,
                 generate_config=config.generate_config,
                 router_config=config.router,
+                router_compute_dtype=config.router_compute_dtype,
                 moe_act_fn_cfg=config.moe_act_fn_cfg,
                 float8_cfg=config.float8_cfg,
                 layer_idx=config.num_hidden_layers + i,
