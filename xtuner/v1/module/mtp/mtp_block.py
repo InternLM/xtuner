@@ -109,13 +109,13 @@ class MTPBlock(nn.Module):
                 future_embeddings = current_seq_ctx.inputs_embeds
 
             # Forward through MTP layer
-            current_hidden_states = layer(
+            current_hidden_states, router_results, router_weights = layer(
                 hidden_states=current_hidden_states,
                 future_embeddings=future_embeddings,
                 position_embeddings=position_embeddings,
                 seq_ctx=current_seq_ctx,
             )
             # Save output for this depth
-            mtp_outputs.append(current_hidden_states)
+            mtp_outputs.append((current_hidden_states, router_results, router_weights))
 
         return mtp_outputs
