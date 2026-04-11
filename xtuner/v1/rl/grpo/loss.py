@@ -4,7 +4,9 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.distributed.device_mesh import DeviceMesh
 
+from xtuner.v1.loss.utils import sp_gather
 from xtuner.v1.utils import get_logger
 
 from ..base import (
@@ -75,15 +77,32 @@ class GRPOLossContext(BaseRLLossContext):
         self.policy_loss_fn = get_policy_loss_fn(self.loss_cfg.policy_loss_cfg.get("loss_type", "vanilla"))
 
     @staticmethod
-    def build_batches(loss_ctx_list: list["GRPOLossContext"]) -> list["GRPOLossContext"]:  # type: ignore[override]
+    def build_batches(  # type: ignore[override]
+        loss_ctx_list: list["GRPOLossContext"],
+        *args: Any,
+        **kwargs: Any,
+    ) -> list["GRPOLossContext"]:
+        sp_mesh = cast(DeviceMesh | None, kwargs.get("sp_mesh"))
+        if sp_mesh is None and len(args) >= 2:
+            sp_mesh = cast(DeviceMesh | None, args[1])
+
         assert len(loss_ctx_list) > 0, "loss_ctx_list can not be empty"
 
         loss_cfg = loss_ctx_list[0].loss_cfg
 
         shifted_labels_list = [loss_ctx.loss_kwargs.shifted_labels for loss_ctx in loss_ctx_list]
+        rank_grad_tokens: torch.Tensor | None = None
+        for shifted_labels in shifted_labels_list:
+            if sp_mesh is not None:
+                # gather shifted_labels from different sp ranks to compute the correct loss weight
+                shifted_labels = sp_gather(shifted_labels, sp_mesh=sp_mesh, dim=1)
+            rank_grad_tokens = (
+                (shifted_labels != loss_cfg.ignore_idx).sum()
+                if rank_grad_tokens is None
+                else rank_grad_tokens + (shifted_labels != loss_cfg.ignore_idx).sum()
+            )
 
         # Compute the denominator used in the global calibration of the loss
-        rank_grad_tokens = sum((labels != loss_cfg.ignore_idx).sum() for labels in shifted_labels_list)
         rank_grad_tokens = cast(torch.Tensor, rank_grad_tokens)
         global_grad_tokens = rank_grad_tokens
         if dist.is_initialized():
