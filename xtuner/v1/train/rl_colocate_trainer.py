@@ -17,7 +17,10 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, ProduceBatchResult
+from xtuner.v1.rl.agent_loop import (
+    ColocatedAgentLoopManagerConfig,
+    ProduceBatchResult,
+)
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import JudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
@@ -159,8 +162,8 @@ class RLColocateTrainerConfig(BaseModel):
     judger_config: JudgerConfig
     tokenizer_path: Union[str, Path]
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
-    agent_loop_manager_cfg: AgentLoopManagerConfig
-    eval_agent_loop_manager_cfg: AgentLoopManagerConfig
+    agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig
+    eval_agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
     load_from: Union[str, Path]
     rollout_steps: int
@@ -240,9 +243,9 @@ class RLColocateTrainer:
         # agent_loop_config: AgentLoopConfig,
         # agent loop manager config
         # produce_strategy_config: ProduceStrategyConfig,
-        agent_loop_manager_cfg: AgentLoopManagerConfig,
+        agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig,
         # eval configs
-        eval_agent_loop_manager_cfg: AgentLoopManagerConfig,
+        eval_agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig,
         evaluator_config: EvaluatorConfig,
         enable_evaluate: bool = True,
         enable_initial_evaluate: bool = False,
@@ -296,7 +299,7 @@ class RLColocateTrainer:
         log_dir = self.exp_dir / "logs"
         self.logger = get_logger(log_dir=log_dir, tag="RLTrainer")
 
-        force_set_tokenize_workers(self.logger)
+        # force_set_tokenize_workers(self.logger)
 
         if skip_checkpoint_validation:
             patch_default_save_plan()
