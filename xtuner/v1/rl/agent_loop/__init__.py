@@ -1,10 +1,13 @@
 from .agent_loop import AgentLoop, AgentLoopConfig
-from .agent_loop_manager import (
-    AgentLoopManager,
-    AgentLoopManagerConfig,
-    ProduceBatchResult,
-    TaskSpecConfig,
+from .colocated_agent_loop_manager import (
+    ColocatedAgentLoopManager,
+    ColocatedAgentLoopManagerConfig,
 )
+from .disaggregated_agent_loop_manager import (
+    DisaggregatedAgentLoopManager,
+    DisaggregatedAgentLoopManagerConfig,
+)
+from .manager_base import ProduceBatchResult, TaskSpecConfig
 from .producer import (
     AsyncProduceStrategy,
     AsyncProduceStrategyConfig,
@@ -22,8 +25,10 @@ __all__ = [
     "SingleTurnAgentLoopConfig",
     "AgentLoop",
     "SingleTurnAgentLoop",
-    "AgentLoopManagerConfig",
-    "AgentLoopManager",
+    "ColocatedAgentLoopManagerConfig",
+    "ColocatedAgentLoopManager",
+    "DisaggregatedAgentLoopManagerConfig",
+    "DisaggregatedAgentLoopManager",
     "TaskSpecConfig",
     "ProduceBatchResult",
     "ProduceStrategyConfig",

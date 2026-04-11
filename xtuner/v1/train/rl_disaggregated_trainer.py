@@ -13,8 +13,12 @@ from typing_extensions import Literal
 from transformers import AutoTokenizer
 from xtuner.v1._writer import get_writer
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.data_proto import RolloutState
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, ProduceBatchResult
+from xtuner.v1.data_proto import RolloutState, refresh_seq_staleness
+from xtuner.v1.rl.agent_loop import (
+    ColocatedAgentLoopManagerConfig,
+    DisaggregatedAgentLoopManagerConfig,
+    ProduceBatchResult,
+)
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import JudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
@@ -39,7 +43,7 @@ class DisaggregatedExecutionConfig(BaseModel):
     trigger_parameter_sync_step: int = 1
     staleness_threshold: float = 0.0
     partial_rollout: bool = False
-    tail_batch_stale_threshold: int = 0
+    completed_batch_timeout_s: float | None = 1800.0
 
     def model_post_init(self, __context) -> None:
         if self.train_batch_size <= 0:
@@ -53,10 +57,10 @@ class DisaggregatedExecutionConfig(BaseModel):
             )
         if self.staleness_threshold < 0:
             raise ValueError(f"staleness_threshold must be non-negative, got {self.staleness_threshold}")
-        if self.tail_batch_stale_threshold < 0:
+        if self.completed_batch_timeout_s is not None and self.completed_batch_timeout_s <= 0:
             raise ValueError(
-                "tail_batch_stale_threshold must be non-negative, "
-                f"got {self.tail_batch_stale_threshold}"
+                "completed_batch_timeout_s must be positive when provided, "
+                f"got {self.completed_batch_timeout_s}"
             )
 
 
@@ -70,8 +74,8 @@ class RLDisaggregatedTrainerConfig(BaseModel):
     judger_config: JudgerConfig
     tokenizer_path: Union[str, Path]
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
-    agent_loop_manager_cfg: AgentLoopManagerConfig
-    eval_agent_loop_manager_cfg: AgentLoopManagerConfig
+    agent_loop_manager_cfg: DisaggregatedAgentLoopManagerConfig
+    eval_agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
     load_from: Union[str, Path]
     execution_config: DisaggregatedExecutionConfig
@@ -139,8 +143,8 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         judger_config: JudgerConfig,
         tokenizer_path: str | Path,
         replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig,
-        agent_loop_manager_cfg: AgentLoopManagerConfig,
-        eval_agent_loop_manager_cfg: AgentLoopManagerConfig,
+        agent_loop_manager_cfg: DisaggregatedAgentLoopManagerConfig,
+        eval_agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig,
         evaluator_config: EvaluatorConfig,
         enable_evaluate: bool = True,
         enable_initial_evaluate: bool = False,
@@ -246,6 +250,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             replay_buffer=replay_buffer,
             logger=self.logger,
         )
+        self._log_disaggregated_replay_policy_interactions()
 
         self.eval_agent_loop_manager = eval_agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
@@ -276,6 +281,26 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         from xtuner.v1.utils import get_logger
 
         return get_logger(log_dir=log_dir, tag="RLDisaggregatedTrainer")
+
+    def _log_disaggregated_replay_policy_interactions(self) -> None:
+        if self._execution_config.staleness_threshold <= 0:
+            return
+
+        for task in self.agent_loop_manager.task_runners:
+            produce_strategy = task.produce_strategy
+            tail_batch_stale_threshold = getattr(produce_strategy, "tail_batch_stale_threshold", 0)
+            tail_batch_trigger_size = getattr(produce_strategy, "tail_batch_trigger_size", 0)
+            if tail_batch_stale_threshold > 0 or tail_batch_trigger_size > 0:
+                self.logger.warning(
+                    "Disaggregated task %s uses staleness_threshold=%s together with "
+                    "tail_batch_stale_threshold=%s and tail_batch_trigger_size=%s. "
+                    "These knobs are coupled: aggressive tail-batch expiration can discard most window over-production, "
+                    "while large expiration thresholds keep older leftovers eligible for training longer.",
+                    task.task_name,
+                    self._execution_config.staleness_threshold,
+                    tail_batch_stale_threshold,
+                    tail_batch_trigger_size,
+                )
 
     def fit(self):
         asyncio_run(self._fit_async())
@@ -330,7 +355,6 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
                 target_task_batch_sizes=target_task_batch_sizes,
                 rollout_step=start_train_step,
                 enable_partial_rollout=self._execution_config.partial_rollout,
-                tail_batch_stale_threshold=self._execution_config.tail_batch_stale_threshold,
             )
         )
 
@@ -424,9 +448,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
     def _refresh_train_batch_staleness(self, train_batch: list[list[RolloutState]], train_step: int) -> None:
         for group in train_batch:
             for item in group:
-                response_rollout_steps = item.response_rollout_steps or []
-                if response_rollout_steps:
-                    item.seq_staleness = max(train_step - min(response_rollout_steps), 0)
+                refresh_seq_staleness(item, train_step)
 
     def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):
         with timer("save_ckpt", step_timer_dict):
@@ -448,27 +470,53 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         produce_task: asyncio.Task,
         train_step: int,
     ) -> ProduceBatchResult:
+        poll_interval_s = 1.0
+        drain_timeout_s = 2 * poll_interval_s + 0.5
+        pending: set[asyncio.Task] = set()
+        if produce_task.done():
+            await produce_task
+            return await self.agent_loop_manager.get_completed_batch(
+                self.train_batch_size,
+                rollout_step=train_step,
+                poll_interval_s=poll_interval_s,
+                max_wait_s=drain_timeout_s,
+            )
         get_batch_task = asyncio.create_task(
             self.agent_loop_manager.get_completed_batch(
                 self.train_batch_size,
                 rollout_step=train_step,
+                poll_interval_s=poll_interval_s,
+                max_wait_s=self._execution_config.completed_batch_timeout_s,
             )
         )
-        done, pending = await asyncio.wait(
-            {get_batch_task, produce_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if produce_task in done and not get_batch_task.done():
-            await produce_task
-            try:
-                return await asyncio.wait_for(get_batch_task, timeout=2.0)
-            except TimeoutError:
+        try:
+            done, pending = await asyncio.wait(
+                {get_batch_task, produce_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if produce_task in done:
+                try:
+                    await produce_task
+                except BaseException:
+                    if not get_batch_task.done():
+                        get_batch_task.cancel()
+                        await asyncio.gather(get_batch_task, return_exceptions=True)
+                    raise
+                if get_batch_task.done():
+                    return await get_batch_task
+                try:
+                    return await asyncio.wait_for(get_batch_task, timeout=drain_timeout_s)
+                except (TimeoutError, asyncio.TimeoutError):
+                    get_batch_task.cancel()
+                    await asyncio.gather(get_batch_task, return_exceptions=True)
+                    raise RuntimeError(
+                        "Rollout producer finished before the next training batch became available. "
+                        f"train_step={train_step}, train_batch_size={self.train_batch_size}, "
+                        f"drain_timeout_s={drain_timeout_s}"
+                    )
+
+            return await get_batch_task
+        finally:
+            if get_batch_task in pending and not get_batch_task.done():
                 get_batch_task.cancel()
-                raise RuntimeError(
-                    "Rollout producer finished before the next training batch became available. "
-                    f"train_step={train_step}, train_batch_size={self.train_batch_size}"
-                )
-        for task in pending:
-            if task is not produce_task:
-                task.cancel()
-        return await get_batch_task
+                await asyncio.gather(get_batch_task, return_exceptions=True)

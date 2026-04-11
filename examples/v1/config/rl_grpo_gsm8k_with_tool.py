@@ -17,7 +17,7 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, TaskSpecConfig, SyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import ColocatedAgentLoopManagerConfig, TaskSpecConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
@@ -151,7 +151,7 @@ agent_loop_config = GSM8KToolAgentLoopConfig(
     sample_params=training_sample_params,
 )
 produce_strategy_config = SyncProduceStrategyConfig()
-agent_loop_manager_cfg = AgentLoopManagerConfig(
+agent_loop_manager_cfg = ColocatedAgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
@@ -187,7 +187,7 @@ eval_agent_loop_config = GSM8KToolAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
 )
-eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+eval_agent_loop_manager_cfg = ColocatedAgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="eval_task",
         agent_loop_config=eval_agent_loop_config,

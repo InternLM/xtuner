@@ -7,7 +7,31 @@ Common optional env vars:
   TRAIN_NUM_WORKERS=4, ROLLOUT_NUM_WORKERS=4, TRAIN_BATCH_SIZE=64,
   TOTAL_TRAIN_STEPS=45, TRIGGER_PARAMETER_SYNC_STEP=1,
   STALENESS_THRESHOLD=0.0, PARTIAL_ROLLOUT=0,
-  TAIL_BATCH_STALE_THRESHOLD=0, ENABLE_EVALUATE=0
+  TAIL_BATCH_TRIGGER_SIZE=0, TAIL_BATCH_STALE_THRESHOLD=0,
+  COMPLETED_BATCH_TIMEOUT_S=1800, ENABLE_EVALUATE=0
+
+Mode mapping in the current design:
+  Mode 1 (On-Policy):
+    TRIGGER_PARAMETER_SYNC_STEP=1
+    STALENESS_THRESHOLD=0.0
+    PARTIAL_ROLLOUT=0
+  Mode 2 (Stream Off-Policy):
+    TRIGGER_PARAMETER_SYNC_STEP>1
+    STALENESS_THRESHOLD=0.0
+    PARTIAL_ROLLOUT=0
+  Mode 3 (Async Stale):
+    STALENESS_THRESHOLD>0.0
+    PARTIAL_ROLLOUT=0
+  Mode 4 (Async Partial Rollout):
+    STALENESS_THRESHOLD>0.0
+    PARTIAL_ROLLOUT=1
+
+Responsibility split:
+  - trainer / window scheduling:
+      TRAIN_BATCH_SIZE, TOTAL_TRAIN_STEPS, TRIGGER_PARAMETER_SYNC_STEP,
+      STALENESS_THRESHOLD, PARTIAL_ROLLOUT, COMPLETED_BATCH_TIMEOUT_S
+  - producer / replay-buffer policy:
+      TAIL_BATCH_TRIGGER_SIZE, TAIL_BATCH_STALE_THRESHOLD
 """
 
 import os
@@ -19,8 +43,9 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.agent_loop import (
-    AgentLoopManagerConfig,
     AsyncProduceStrategyConfig,
+    ColocatedAgentLoopManagerConfig,
+    DisaggregatedAgentLoopManagerConfig,
     SamplerConfig,
     SingleTurnAgentLoopConfig,
     SyncProduceStrategyConfig,
@@ -56,7 +81,12 @@ train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", str(64 * train_optimiz
 trigger_parameter_sync_step = int(os.environ.get("TRIGGER_PARAMETER_SYNC_STEP", "1"))
 staleness_threshold = float(os.environ.get("STALENESS_THRESHOLD", "0.0"))
 partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
+tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "0"))
 tail_batch_stale_threshold = int(os.environ.get("TAIL_BATCH_STALE_THRESHOLD", "0"))
+completed_batch_timeout_s_env = os.environ.get("COMPLETED_BATCH_TIMEOUT_S", "1800")
+completed_batch_timeout_s = None if completed_batch_timeout_s_env.lower() == "none" else float(
+    completed_batch_timeout_s_env
+)
 prompt_repeat_k = int(os.environ.get("PROMPT_REPEAT_K", "5"))
 rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "1"))
 rollout_ep_size = int(os.environ.get("ROLLOUT_EP_SIZE", "1"))
@@ -64,6 +94,12 @@ max_prompt_length = int(os.environ.get("MAX_PROMPT_LENGTH", "512"))
 max_response_length = int(os.environ.get("MAX_RESPONSE_LENGTH", "1024"))
 pack_max_length = int(os.environ.get("PACK_MAX_LENGTH", str(32 * 1024)))
 enable_evaluate = os.environ.get("ENABLE_EVALUATE", "0") == "1"
+
+# execution knobs:
+# - trigger_parameter_sync_step controls how many train steps share one rollout window
+# - staleness_threshold controls window target expansion in disaggregated mode
+# - partial_rollout enables partial-window warm-up
+# - tail_batch_* controls replay-buffer recycling policy inside AsyncProduceStrategy
 
 
 # 1. resources: default 4 GPUs for training and 4 GPUs for rollout.
@@ -166,13 +202,14 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 )
 if staleness_threshold > 0 or partial_rollout:
     produce_strategy_config = AsyncProduceStrategyConfig(
-        over_sample_threshold=0.0,
+        produce_batch_over_sample_threshold=0.0,
         produce_batch_enable_partial_rollout=False,
+        tail_batch_trigger_size=tail_batch_trigger_size,
         tail_batch_stale_threshold=tail_batch_stale_threshold,
     )
 else:
     produce_strategy_config = SyncProduceStrategyConfig()
-agent_loop_manager_cfg = AgentLoopManagerConfig(
+agent_loop_manager_cfg = DisaggregatedAgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
@@ -206,7 +243,7 @@ eval_agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
 )
-eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+eval_agent_loop_manager_cfg = ColocatedAgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="eval_task",
         agent_loop_config=eval_agent_loop_config,
@@ -223,7 +260,7 @@ execution_config = DisaggregatedExecutionConfig(
     trigger_parameter_sync_step=trigger_parameter_sync_step,
     staleness_threshold=staleness_threshold,
     partial_rollout=partial_rollout,
-    tail_batch_stale_threshold=tail_batch_stale_threshold,
+    completed_batch_timeout_s=completed_batch_timeout_s,
 )
 
 

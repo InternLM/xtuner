@@ -223,6 +223,16 @@ def update_seq_staleness(rollout_state: RolloutState, rollout_step: int) -> Roll
     return rollout_state
 
 
+def refresh_seq_staleness(rollout_state: RolloutState, rollout_step: int) -> RolloutState:
+    """Recompute seq_staleness from existing response_rollout_steps."""
+    response_rollout_steps = rollout_state.response_rollout_steps or []
+    if response_rollout_steps:
+        rollout_state.seq_staleness = max(rollout_step - min(response_rollout_steps), 0)
+    else:
+        rollout_state.seq_staleness = 0
+    return rollout_state
+
+
 def update_expired_status(samples: list[RolloutState], tail_batch_stale_threshold: int = 0) -> list[RolloutState]:
     if tail_batch_stale_threshold <= 0:
         return samples
