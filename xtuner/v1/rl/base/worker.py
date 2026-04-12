@@ -179,6 +179,9 @@ class WorkerTrainLogItem(TypedDict, total=False):
     step_consumed_tokens: int
     efficient_attn_ratio: float
     grad_norm: float
+    mtp_grad_norm: float
+    mtp_param_l2_from_init: float
+    mtp_param_delta_norm: float
 
 
 class WorkerLogItem(TypedDict):
@@ -259,6 +262,9 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.mtp_config = getattr(worker_cfg.model_cfg.text_config, "mtp_config", None)
         else:
             self.mtp_config = getattr(worker_cfg.model_cfg, "mtp_config", None)
+        self._mtp_init_param_shards: dict[str, torch.Tensor] = {}
+        self._mtp_prev_param_shards: dict[str, torch.Tensor] = {}
+        self._init_mtp_monitor()
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -351,6 +357,90 @@ class TrainingWorker(SingleAcceleratorWorker):
         model.to_device("cpu")  # type: ignore
         DEVICE_MODULE.empty_cache()
         return model
+
+    def _get_local_tensor(self, tensor: torch.Tensor | DTensor | None) -> torch.Tensor | None:
+        if tensor is None:
+            return None
+        if isinstance(tensor, DTensor):
+            return tensor.to_local()
+        return tensor
+
+    def _iter_mtp_named_params(self):
+        for name, param in self._engine.model.named_parameters():
+            clean_name = self._engine.clean_param_name(name)
+            if "mtp_block" in clean_name and param.requires_grad:
+                yield clean_name, param
+
+    def _init_mtp_monitor(self):
+        if self.mtp_config is None:
+            return
+        for name, param in self._iter_mtp_named_params():
+            local_param = self._get_local_tensor(param)
+            assert local_param is not None
+            shard = local_param.detach().clone()
+            self._mtp_init_param_shards[name] = shard
+            self._mtp_prev_param_shards[name] = shard.clone()
+
+    def _reduce_sum(self, value: torch.Tensor) -> torch.Tensor:
+        if dist.is_initialized():
+            dist.all_reduce(value, op=dist.ReduceOp.SUM)
+        return value
+
+    def _collect_mtp_grad_norm(self) -> dict[str, float]:
+        if self.mtp_config is None or not self._mtp_init_param_shards:
+            return {}
+
+        sq_sum = torch.zeros((), device=DEVICE, dtype=torch.float64)
+        for _, param in self._iter_mtp_named_params():
+            grad = self._get_local_tensor(param.grad)
+            if grad is None:
+                continue
+            sq_sum += grad.detach().float().pow(2).sum().to(dtype=torch.float64, device=DEVICE)
+
+        sq_sum = self._reduce_sum(sq_sum)
+        return {"mtp_grad_norm": sq_sum.sqrt().item()}
+
+    def _collect_mtp_param_update_metrics(self) -> dict[str, float]:
+        if self.mtp_config is None or not self._mtp_init_param_shards:
+            return {}
+
+        init_sq_sum = torch.zeros((), device=DEVICE, dtype=torch.float64)
+        delta_sq_sum = torch.zeros((), device=DEVICE, dtype=torch.float64)
+
+        for name, param in self._iter_mtp_named_params():
+            current = self._get_local_tensor(param)
+            assert current is not None
+            current_detached = current.detach()
+            init_shard = self._mtp_init_param_shards[name]
+            prev_shard = self._mtp_prev_param_shards[name]
+
+            init_sq_sum += (
+                (current_detached.float() - init_shard.float()).pow(2).sum().to(dtype=torch.float64, device=DEVICE)
+            )
+            delta_sq_sum += (
+                (current_detached.float() - prev_shard.float()).pow(2).sum().to(dtype=torch.float64, device=DEVICE)
+            )
+
+            self._mtp_prev_param_shards[name] = current_detached.clone()
+
+        init_sq_sum = self._reduce_sum(init_sq_sum)
+        delta_sq_sum = self._reduce_sum(delta_sq_sum)
+        return {
+            "mtp_param_l2_from_init": init_sq_sum.sqrt().item(),
+            "mtp_param_delta_norm": delta_sq_sum.sqrt().item(),
+        }
+
+    def _log_update_weight_payload(self, state_dict: dict):
+        if self.mtp_config is None:
+            return
+        total_keys = len(state_dict)
+        mtp_keys = sorted(key for key in state_dict if "model.mtp_layers." in key)
+        sample_keys = mtp_keys[:5]
+        self.logger.info(
+            "update_weights payload summary: "
+            f"total_keys={total_keys}, mtp_keys={len(mtp_keys)}, "
+            f"sample_mtp_keys={sample_keys}"
+        )
 
     def _init_data_mesh(
         self,
@@ -683,7 +773,9 @@ class TrainingWorker(SingleAcceleratorWorker):
                 data_batches=engine_input,
             )
             grad_norm = self._engine.clip_grad_norm()
+            mtp_step_metrics = self._collect_mtp_grad_norm()
             self._engine.step_optimizer(grad_norm)
+            mtp_step_metrics.update(self._collect_mtp_param_update_metrics())
 
             engine_logs_info = cast(dict[str, float], train_step_info.pop("logs_info"))  # type: ignore[misc]
             engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
@@ -700,6 +792,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 **engine_logs_info,  # type: ignore[typeddict-item]
                 **train_step_info,
                 **extra_info_dict,
+                **mtp_step_metrics,
                 grad_norm=grad_norm.item(),
             )
             worker_log_item["train_metrics"].append(train_log_item)
@@ -794,7 +887,9 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         train_step_info = self._engine.train_step(engine_input)
         grad_norm = self._engine.clip_grad_norm()
+        train_step_info["logs_info"].update(self._collect_mtp_grad_norm())
         self._engine.step_optimizer(grad_norm)
+        train_step_info["logs_info"].update(self._collect_mtp_param_update_metrics())
         return train_step_info, grad_norm
 
     def _sft_log_step(
@@ -1296,6 +1391,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rollout_url is None:
             self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
             return
+        if isinstance(state_dict, dict) and dist.get_rank() == head_rank:
+            self._log_update_weight_payload(state_dict)
         if self.rollout_cfg_info["backend"] == "pytorch":
             # TODO(chenchiyu): remove lmdeploy related code
             from lmdeploy.utils import serialize_state_dict

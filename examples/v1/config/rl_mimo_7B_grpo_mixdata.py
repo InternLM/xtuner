@@ -130,7 +130,7 @@ replay_buffer_cfg = ReplayBufferConfig(
 # 5. Train worker
 model_cfg = get_model_config_from_hf(Path(model_path))
 if getattr(model_cfg, "mtp_config", None) is not None:
-    model_cfg.mtp_config.loss_scaling_factor = 0.2
+    model_cfg.mtp_config.loss_scaling_factor = 1
 
 optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
 loss_cfg = GRPOLossConfig(
@@ -142,6 +142,7 @@ loss_cfg = GRPOLossConfig(
         log_prob_diff_min=-20.0,
         log_prob_diff_max=20.0,
     ),
+    policy_loss_coef=0.0,
     ignore_idx=-100,
     use_kl_loss=False,
     kl_loss_coef=0.0,

@@ -136,13 +136,14 @@ class GRPOLossContext(BaseRLLossContext):
         policy_loss_weight = loss_kwargs.policy_loss_weight
 
         logprobs = gather_logprobs(logits, shifted_labels)
-        loss = self.policy_loss_fn(
+        policy_loss = self.policy_loss_fn(
             logprobs,
             old_logprobs,
             advantages,
             policy_loss_weight,
             self.loss_cfg.policy_loss_cfg,
         )
+        loss = policy_loss * self.loss_cfg.policy_loss_coef
 
         assert old_logprobs is not None
         ratio = (logprobs - old_logprobs.detach()).exp()

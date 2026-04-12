@@ -80,6 +80,7 @@ class BaseRLLossConfig(CELossConfig):
     """
 
     policy_loss_cfg: dict[str, Any]
+    policy_loss_coef: float = 1.0
     use_kl_loss: bool = False
     kl_loss_coef: float = 0.001
     kl_loss_type: Literal["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"] | None = None
