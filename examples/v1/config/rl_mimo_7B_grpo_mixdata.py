@@ -11,7 +11,7 @@ from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.ray.base import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.judger.controller import JudgerConfig
+from xtuner.v1.ray.judger import DeepScalerJudgerConfig, JudgerConfig
 from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.base.rollout_is import RolloutImportanceSampling
@@ -29,7 +29,7 @@ total_epochs = 15
 global_batch_size = 32
 prompt_repeat_k = 8
 rollout_tp_size = 1
-rollout_ep_size = 1
+rollout_ep_size = 1 
 max_prompt_length = 4096
 max_response_length = 8192
 pack_max_length = 32768
@@ -100,16 +100,18 @@ from xtuner.v1.utils.rl_test_utils import get_eos_token
 
 eos_token_id = get_eos_token(model_path)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
-dapomath_judger_config = DapoMathJudgerConfig(
-    judger_name="dapo_math",
-    eos_token=eos_token_str,
-    enable_overlong_buffer=True,
-    max_response_len=max_response_length,
-    overlong_buffer_len=4096,
-    overlong_penalty_factor=1.0,
-    tokenizer=tokenizer,
-)
-judger_cfg = JudgerConfig(reward_judger_configs=[dapomath_judger_config])
+# Keep the previous DAPO math judge here for quick A/B comparison.
+# dapomath_judger_config = DapoMathJudgerConfig(
+#     judger_name="dapo_math",
+#     eos_token=eos_token_str,
+#     enable_overlong_buffer=True,
+#     max_response_len=max_response_length,
+#     overlong_buffer_len=4096,
+#     overlong_penalty_factor=1.0,
+#     tokenizer=tokenizer,
+# )
+deepscaler_judger_config = DeepScalerJudgerConfig(judger_name="deepscaler")
+judger_cfg = JudgerConfig(reward_judger_configs=[deepscaler_judger_config])
 
 # 4. dataflow
 dataflow_config = DataFlowConfig(

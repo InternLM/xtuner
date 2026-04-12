@@ -193,6 +193,8 @@ class SequenceContext:
                     split_for_sequence_parallel(pad_position_ids, dim=-1, sp_mesh=sequence_parallel_mesh),
                 )
                 self.position_ids = position_ids
+            else:
+                pad_position_ids = None
 
             if self.rollout_routed_experts is not None:
                 assert isinstance(self.rollout_routed_experts, torch.Tensor), (
@@ -373,15 +375,6 @@ class SequenceContext:
         )
         self._raw_inputs_embeds = cast(torch.FloatTensor, gathered)
         return self._raw_inputs_embeds
-
-    @property
-    def raw_position_ids(self) -> torch.LongTensor | None:
-        """Full (un-split) position_ids across all SP ranks.
-
-        Returns:
-            torch.LongTensor | None: The full position_ids tensor.
-        """
-        raise NotImplementedError("raw_position_ids is not yet implemented")
 
     @property
     def raw_rollout_routed_experts(self) -> torch.Tensor | None:

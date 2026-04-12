@@ -1,6 +1,6 @@
 """Multi-Token Prediction (MTP) Block implementation."""
 
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
@@ -82,7 +82,7 @@ class MTPBlock(nn.Module):
                 and returns embeddings. Should have signature:
                     embed_tokens_fn(token_ids: Tensor) -> Tensor
             position_embeddings (tuple[torch.Tensor, torch.Tensor]): Rotary position
-                embeddings (cos, sin).
+                embeddings shared with the main decoder stack.
             seq_ctx (SequenceContext): Sequence context containing input_ids, position_ids,
                 attention mask, etc.
 
