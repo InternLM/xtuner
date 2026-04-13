@@ -15,6 +15,10 @@ from xtuner.v1.ray.config import RolloutConfig
 from .worker import RolloutWorker
 
 
+SHARED_STORE = "shared_store"
+SHARED_STORE_NAMESPACE = "lmdeploy"
+
+
 def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
     """Wrapper function to run the LMDeploy API server.
 
@@ -75,6 +79,7 @@ class LMDeployWorker(RolloutWorker):
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
+        self.lmdeploy_actor = None
 
     async def _create_request(
         self,
@@ -211,10 +216,11 @@ class LMDeployWorker(RolloutWorker):
 
     def _decode_routed_experts(self, routed_experts: Any):
         if isinstance(routed_experts, str):
-            import base64
-
-            data = base64.b64decode(routed_experts)
-            return ray.cloudpickle.loads(data)
+            if self.lmdeploy_actor is None:
+                self.lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
+            assert self.lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
+            routed_experts_ref = self.lmdeploy_actor.get.remote(routed_experts)
+            return routed_experts_ref
         return torch.tensor(routed_experts)
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
