@@ -14,7 +14,7 @@ from xtuner.v1.rl.rollout import RolloutController, continue_generation, pause_g
 from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
-from .agent_loop import AgentLoopConfig, AgentLoopSpec
+from .agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_ctl
 from .producer import ProducerTimings, ProduceStrategy, ProduceStrategyConfig, SyncProduceStrategyConfig
 from .sampler import Sampler, SamplerConfig
 
@@ -335,7 +335,7 @@ class AgentLoopManager:
 
         if len(self.task_runners) == 1:
             task = self.task_runners[0]
-            rollout_ctl = task.agent_loop.rollout_ctl
+            rollout_ctl = await get_agent_loop_rollout_ctl(task.agent_loop)
             await continue_generation(rollout_ctl)
             try:
                 return await _produce_single_task_batch(
@@ -355,7 +355,7 @@ class AgentLoopManager:
 
         results: list[ProduceBatchResult] = []
         if active_tasks:
-            rollout_ctl = active_tasks[0].agent_loop.rollout_ctl
+            rollout_ctl = await get_agent_loop_rollout_ctl(active_tasks[0].agent_loop)
             await continue_generation(rollout_ctl)
             try:
                 results = await asyncio.gather(

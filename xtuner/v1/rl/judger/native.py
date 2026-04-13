@@ -205,18 +205,9 @@ class JudgerConfig(BaseModel):
     ) -> list[RayJudgerProxy]:
         return self._build_ray_actor_list(pg=pg, start_bundle_idx=start_bundle_idx)
 
-    def _build_router(self, pg: PlacementGroup | None = None, start_bundle_idx: int = 0) -> RayJudgerProxy:
+    def _build_router(self, pg: PlacementGroup | None = None, start_bundle_idx: int = 0) -> RouterJudger:
         workers_list = self._build_router_workers(pg=pg, start_bundle_idx=start_bundle_idx)
-        return cast(
-            RayJudgerProxy,
-            CPUActorLauncher.build_actor(
-                RouterJudger,
-                workers_list,
-                self.judger_name,
-                actor_num_cpus=0,
-                actor_memory=0,
-            ),
-        )
+        return RouterJudger(workers=workers_list, judger_name=self.judger_name)
 
     def build(
         self,
@@ -247,5 +238,4 @@ class JudgerActor:
 # 1. https://docs.ray.io/en/latest/ray-core/actors.html#type-hints-and-static-typing-for-actors
 # 2. https://github.com/InternLM/xtuner/pull/1349
 RayJudger = cast(ActorClass[JudgerActor], CPUActorLauncher.to_actor_class(JudgerActor))
-RayRouterJudger = cast(ActorClass[RouterJudger], CPUActorLauncher.to_actor_class(RouterJudger))
-RayJudgerProxy: TypeAlias = ActorProxy[JudgerActor] | ActorProxy[RouterJudger]
+RayJudgerProxy: TypeAlias = ActorProxy[JudgerActor]

@@ -152,22 +152,6 @@ class AgentLoopConfig(ABC, BaseModel):
             logger=logger,
         )
 
-    def build_actor_list(
-        self,
-        rollout_controller,
-        num_actors: int,
-        judger: JudgerSpec = None,
-        logger=None,
-        pg: PlacementGroup | None = None,
-    ) -> list[RayAgentLoopProxy]:
-        return self.build_ray_actor_list(
-            rollout_controller=rollout_controller,
-            num_actors=num_actors,
-            judger=judger,
-            logger=logger,
-            pg=pg,
-        )
-
 
 class AgentLoop(ABC):
     def __init__(
@@ -267,6 +251,17 @@ class RouterAgentLoop:
 
     def get_worker_status(self) -> dict[str, int]:
         return {str(worker): load for worker, load in self._worker_loads.items()}
+
+
+async def get_agent_loop_rollout_ctl(agent_loop: AgentLoopSpec) -> RolloutController:
+    rollout_ctl = getattr(agent_loop, "rollout_ctl", None)
+    if rollout_ctl is not None:
+        return rollout_ctl
+
+    get_rollout_ctl = getattr(agent_loop, "get_rollout_ctl", None)
+    if get_rollout_ctl is None or not hasattr(get_rollout_ctl, "remote"):
+        raise AttributeError(f"Agent loop {type(agent_loop)} does not expose rollout_ctl or get_rollout_ctl().")
+    return await get_rollout_ctl.remote()
 
 
 class AgentLoopActor:

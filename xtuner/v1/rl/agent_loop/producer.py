@@ -13,7 +13,7 @@ from xtuner.v1.rl.rollout.utils import pause_generation
 from xtuner.v1.rl.utils import create_task
 from xtuner.v1.utils import get_logger
 
-from .agent_loop import AgentLoopSpec
+from .agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from .sampler import Sampler
 
 
@@ -201,7 +201,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         self, pending_tasks: set, agent_loop: AgentLoopSpec, replay_buffer: ReplayBuffer, task_name: str
     ) -> float:
         pause_start = time.perf_counter()
-        rollout_ctl = agent_loop.rollout_ctl
+        rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
         await pause_generation(rollout_ctl)
         while len(pending_tasks) > 0:
             done_task, pending_tasks = await asyncio.wait(

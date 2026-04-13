@@ -662,19 +662,18 @@ class CPUActorLauncher:
         bundle_idx: int = 0,
         actor_num_cpus: int | float | None = None,
         actor_memory: int | None = None,
-        pg_pack_strategy: str = "SPREAD",
         capture_child_tasks: bool = False,
         **init_kwargs,
     ):
         """Build a single CPU actor from a plain class or Ray actor class."""
         resolved_num_cpus = 1 if actor_num_cpus is None else actor_num_cpus
-        resolved_memory = 1024**3 if actor_memory is None else actor_memory
+        resolved_memory = actor_memory
 
         actor_cls = cls.to_actor_class(worker_cls)
         actor_options = {
             "num_cpus": resolved_num_cpus,
         }
-        if resolved_memory > 0:
+        if resolved_memory is not None and resolved_memory > 0:
             actor_options["memory"] = resolved_memory
 
         if pg is None:
@@ -706,7 +705,6 @@ class CPUActorLauncher:
         num_workers: int = 1,
         actor_num_cpus_per_worker: int | float | None = None,
         actor_memory_per_worker: int | None = None,
-        pg_pack_strategy: str = "SPREAD",
         capture_child_tasks: bool = False,
         **init_kwargs,
     ):
