@@ -234,23 +234,14 @@ class BaseEnvironment(ABC):
         return self._call_rollout_func("get_rollout_stats", block)
 
     @ray_method
-    async def abort_judger(self, judger_names: list[str] | None = None):
-        """Abort in-flight judger requests.
-
-        Args:
-            judger_names: If provided, only abort the specified judger groups.
-                If ``None``, abort all judger groups.
-        """
+    async def abort_judger(self):
+        """Abort in-flight judger requests for judgers with
+        ``abort_on_pause=True``."""
         if self.judger_controller:
-            await self.judger_controller.abort.remote(judger_names=judger_names)
+            await self.judger_controller.abort.remote()
 
     @ray_method
-    async def restart_judger(self, judger_names: list[str] | None = None):
-        """Clear judger abort state.
-
-        Args:
-            judger_names: If provided, only restart the specified judger groups.
-                If ``None``, restart all judger groups.
-        """
+    async def restart_judger(self):
+        """Clear abort state on judgers with ``abort_on_pause=True``."""
         if self.judger_controller:
-            await self.judger_controller.restart_judger.remote(judger_names=judger_names)
+            await self.judger_controller.restart_judger.remote()

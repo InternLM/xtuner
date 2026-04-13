@@ -43,6 +43,7 @@ class NativeJudgerConfig(BaseModel):
     postprocess_func: Optional[Callable] = Field(default=None, exclude=True)
     request_timeout: float = 30.0
     extra_info: dict = Field(default={}, exclude=True)
+    abort_on_pause: bool = False
 
     def build_actor(self, pg: PlacementGroup, start_bundle_idx: int) -> List[ray.actor.ActorClass]:
         """Create and launch Ray actor instances for the GSM8K judger.
