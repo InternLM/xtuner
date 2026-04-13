@@ -1,9 +1,11 @@
 import os
+import unittest
+from packaging.version import Version
 
 import parametrize
 import torch
 from xtuner._testing import patch_hf_rms_norm, DeterministicDDPTestCase
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, __version__ as transformers_version
 import torch.distributed as dist
 import tempfile
 from pathlib import Path
@@ -24,6 +26,11 @@ from xtuner.v1.utils.test_utils import init_data_mesh, preprocess_intern_s1
 INTERNS1_DENSE_PATH = os.environ["INTERNS1_DENSE_PATH"]
 
 
+@unittest.skipIf(
+    Version(transformers_version) >= Version("5.0.0"),
+    "intern-s1 model is break for transformers 5.x, "
+    f"skip until model is updated. Current transformers version: {transformers_version}"
+)
 class TestInternS1(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,tol",
