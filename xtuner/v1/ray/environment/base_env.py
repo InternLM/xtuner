@@ -232,3 +232,25 @@ class BaseEnvironment(ABC):
             block (bool): Whether to block until the operation completes.
         """
         return self._call_rollout_func("get_rollout_stats", block)
+
+    @ray_method
+    async def abort_judger(self, judger_names: list[str] | None = None):
+        """Abort in-flight judger requests.
+
+        Args:
+            judger_names: If provided, only abort the specified judger groups.
+                If ``None``, abort all judger groups.
+        """
+        if self.judger_controller:
+            await self.judger_controller.abort.remote(judger_names=judger_names)
+
+    @ray_method
+    async def restart_judger(self, judger_names: list[str] | None = None):
+        """Clear judger abort state.
+
+        Args:
+            judger_names: If provided, only restart the specified judger groups.
+                If ``None``, restart all judger groups.
+        """
+        if self.judger_controller:
+            await self.judger_controller.restart_judger.remote(judger_names=judger_names)

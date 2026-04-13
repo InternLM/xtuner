@@ -264,3 +264,11 @@ class NativeJudger:
             str: The name of the judger.
         """
         return self.judger_name
+
+    async def abort(self):
+        """No-op abort for judgers that don't support cancellation."""
+        pass
+
+    def restart(self):
+        """No-op restart for judgers that don't support cancellation."""
+        pass

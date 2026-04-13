@@ -268,3 +268,39 @@ class JudgerController:
         if input_type_is_list is False:
             return judger_response_item[0]
         return judger_response_item
+
+    async def abort(self, judger_names: list[str] | None = None):
+        """Abort running judger requests.
+
+        Args:
+            judger_names: If provided, only abort judger groups whose name is
+                in this list. If ``None``, no judger groups are aborted.
+        """
+        if judger_names is None:
+            return
+        tasks = []
+        for idx, judger_group in enumerate(self.reward_judger):
+            if self.reward_judger_names[idx] not in judger_names:
+                continue
+            for actor in judger_group:
+                tasks.append(actor.abort.remote())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def restart_judger(self, judger_names: list[str] | None = None):
+        """Clear abort state on judger actors.
+
+        Args:
+            judger_names: If provided, only restart judger groups whose name is
+                in this list. If ``None``, no judger groups are restarted.
+        """
+        if judger_names is None:
+            return
+        tasks = []
+        for idx, judger_group in enumerate(self.reward_judger):
+            if self.reward_judger_names[idx] not in judger_names:
+                continue
+            for actor in judger_group:
+                tasks.append(actor.restart.remote())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)

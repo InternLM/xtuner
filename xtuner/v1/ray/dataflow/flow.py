@@ -103,6 +103,13 @@ class DataFlowConfig(BaseModel):
         ),
     ] = None
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
+    abort_judger_names: Annotated[
+        list[str] | None,
+        Parameter(
+            help="If provided, only abort the specified judger groups by name when pausing. "
+            "If None, no judger groups are aborted on pause."
+        ),
+    ] = None
 
     def model_post_init(self, __context: Any) -> None:
         self.worker_log_dir.mkdir(parents=True, exist_ok=True)
@@ -156,6 +163,7 @@ class RawDataFlow:
         self._raw_reward_count = 0
         self.tb_metrics: Dict[str, Any] = {}
         self.target_batch_size = self.config.global_batch_size
+        self.abort_judger_names: list[str] | None = self.config.abort_judger_names
         rollout_info = ray.get(self.env_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
         self.worker_url_list = list(rollout_info["server_url_dict"].values())
         self.logger.info(f"DataFlow connected to active rollout workers url: {self.worker_url_list}")
@@ -207,6 +215,11 @@ class RawDataFlow:
 
         self.sample_from_expired_storage, self.finished_samples_count = self.replay_buffer.get_prerun_state()
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
+        # Restart judger abort state for next round
+        try:
+            ray.get(self.env_controller.restart_judger.remote(judger_names=self.abort_judger_names))  # type: ignore[attr-defined]
+        except Exception as e:
+            self.logger.error(f"Failed to restart judger (next round may be affected): {e}")
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
         logger_msg = (
@@ -386,7 +399,7 @@ class RawDataFlow:
 
         if len(waiting_tasks) > 0:
             self.logger.info(f"Start pausing env controller for remaining worker tasks {len(waiting_tasks)}.")
-            await self.pause()
+            await self.pause(abort_judger_names=self.abort_judger_names)
             cleanup_start_time = time.perf_counter()
             while len(waiting_tasks) > 0:
                 elapsed_time = time.perf_counter() - cleanup_start_time
@@ -404,7 +417,7 @@ class RawDataFlow:
                 # When a waiting request starts running, it still needs another pause request to be marked as aborted.
                 _, pending_tasks = await asyncio.wait(waiting_tasks, timeout=0.1, return_when=asyncio.FIRST_COMPLETED)
                 if len(pending_tasks) > 0:
-                    await self.pause()
+                    await self.pause(abort_judger_names=self.abort_judger_names)
                     await asyncio.sleep(1)
                     self.logger.debug(
                         f"Waiting for {len(pending_tasks)} remaining worker tasks to complete after pausing env controller."
@@ -425,8 +438,14 @@ class RawDataFlow:
             self.tb_metrics[f"task_time/{k}"] = v
 
     @ray_method
-    async def pause(self, timeout: float = 60.0):
-        """Asynchronously sends abort requests to all rollout workers."""
+    async def pause(self, timeout: float = 60.0, abort_judger_names: list[str] | None = None):
+        """Asynchronously sends abort requests to all rollout workers.
+
+        Args:
+            timeout: HTTP request timeout in seconds.
+            abort_judger_names: If provided, only abort the specified judger
+                groups by name. If ``None``, abort all judger groups.
+        """
         if not self.worker_url_list:
             self.logger.info("No active rollout workers to pause.")
             return
@@ -446,6 +465,14 @@ class RawDataFlow:
         else:
             self.logger.info(f"All {succeeded_count} abort requests sent successfully.")
 
+        # Abort judger actors (only when specific names are provided)
+        if abort_judger_names is not None:
+            try:
+                await self.env_controller.abort_judger.remote(judger_names=abort_judger_names)  # type: ignore[attr-defined]
+                self.logger.info(f"Judger abort signal sent successfully (targets: {abort_judger_names}).")
+            except Exception as e:
+                self.logger.warning(f"Failed to send judger abort signal: {e}")
+
     @ray_method
     async def run(
         self,
@@ -453,6 +480,7 @@ class RawDataFlow:
         sample_params: Optional[SampleParams] = None,
         extra_params: Optional[Dict] = None,
         staleness_threshold: Optional[float] = None,
+        abort_judger_names: list[str] | None = None,
     ) -> DataFlowResult:
         """Starts the data generation process.
 
@@ -466,12 +494,14 @@ class RawDataFlow:
                 Overrides the existing sample_params in DataFlowConfig if provided.
             extra_params (Optional[Dict]): Additional parameters for rollout.
                 Overrides the existing extra_params in DataFlowConfig if provided.
-            enable_partial_rollout (Optional[bool]): Whether to enable partial rollout mode.
-                This is primarily intended for unit testing, allowing the dataflow to pause
-                and resume partway through a rollout for checkpointing and recovery tests.Returns:
+            staleness_threshold (Optional[float]): Override for staleness threshold.
+            abort_judger_names (list[str] | None): If provided, overrides the
+                config-level ``abort_judger_names`` for this run.
         Returns:
-            List[RLDataFlowItem]: A list of collected training samples.
+            DataFlowResult: The collected training samples and metadata.
         """
+        if abort_judger_names is not None:
+            self.abort_judger_names = abort_judger_names
         self._reset_internal_states(
             global_batch_size=num,
             sample_params=sample_params,
