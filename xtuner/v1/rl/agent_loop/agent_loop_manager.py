@@ -4,17 +4,17 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto import RolloutState, Status
-from xtuner.v1.rl.judger import Judger
+from xtuner.v1.rl.judger import JudgerCallable, JudgerConfig, JudgerConfigLike, JudgerSpecConfig
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController, continue_generation, pause_generation
 from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
-from .agent_loop import AgentLoop, AgentLoopConfig
+from .agent_loop import AgentLoopConfig, AgentLoopSpec
 from .producer import ProducerTimings, ProduceStrategy, ProduceStrategyConfig, SyncProduceStrategyConfig
 from .sampler import Sampler, SamplerConfig
 
@@ -55,7 +55,7 @@ class ProduceBatchResult:
 @dataclass(frozen=True)
 class _TaskRunner:
     task_name: str
-    agent_loop: AgentLoop
+    agent_loop: AgentLoopSpec
     produce_strategy: ProduceStrategy
     sampler: Sampler
     weight: float = 1.0
@@ -137,8 +137,16 @@ class TaskSpecConfig(BaseModel):
     task_name: str
     weight: float = Field(default=1.0, ge=0.0)
     agent_loop_config: AgentLoopConfig
+    judger_config: JudgerConfig | dict[str, JudgerConfigLike] | JudgerCallable | JudgerSpecConfig | None = None
     produce_strategy_config: ProduceStrategyConfig = SyncProduceStrategyConfig()
     sampler_config: SamplerConfig
+
+    @field_validator("judger_config", mode="after")
+    @classmethod
+    def _normalize_judger_config(cls, value):
+        if value is None or isinstance(value, JudgerSpecConfig):
+            return value
+        return JudgerSpecConfig.from_value(value)
 
 
 class AgentLoopManagerConfig(BaseModel):
@@ -149,7 +157,6 @@ class AgentLoopManagerConfig(BaseModel):
     def build(
         self,
         rollout_controller: RolloutController,
-        judger: Judger,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
         replay_buffer: ReplayBuffer,
         logger=None,
@@ -167,7 +174,7 @@ class AgentLoopManagerConfig(BaseModel):
 
             agent_loop = task_cfg.agent_loop_config.build(
                 rollout_controller=rollout_controller,
-                judger=judger,
+                judger=task_cfg.judger_config.build() if task_cfg.judger_config is not None else None,
                 logger=logger,
             )
             produce_strategy = task_cfg.produce_strategy_config.build()
