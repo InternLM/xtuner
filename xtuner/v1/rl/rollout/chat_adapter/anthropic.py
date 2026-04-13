@@ -98,11 +98,14 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         generate_handler,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str | None,
         default_model_name: str | None = None,
+        context_length: int | None = None,
+        capture_path: str | None = None,
     ):
         if isinstance(tokenizer, str):
             tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
-        super().__init__(generate_handler, tokenizer=tokenizer)
+        super().__init__(generate_handler, tokenizer=tokenizer, capture_path=capture_path)
         self._default_model_name = default_model_name
+        self._context_length = context_length
 
     async def messages(self, request: AnthropicMessagesRequest) -> AnthropicMessagesResponse:
         return await self.handle_request(request)
@@ -142,6 +145,7 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
                 add_generation_prompt=True,
             )
             prompt_ids = raw_prompt_ids.get("input_ids") if hasattr(raw_prompt_ids, "get") else list(raw_prompt_ids)
+        max_tokens = self._fit_max_tokens_to_context(prompt_ids=prompt_ids, requested_max_tokens=request.max_tokens)
         return RolloutState(
             uid=uuid4().int,
             message=internal_messages,
@@ -150,7 +154,7 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
             session_uid=request.session_uid,
             tools=tokenizer_tools,
             tool_choice=normalized_tool_choice,
-            sample_params=self._build_sample_params(request),
+            sample_params=self._build_sample_params(request, max_tokens=max_tokens),
         )
 
     def raise_for_failed_response(self, response: RolloutState, request_id: str) -> None:
@@ -232,7 +236,10 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         for block in blocks:
             block_type = block.get("type")
             if block_type == "text":
-                text_chunks.append(str(block.get("text", "")))
+                text_value = str(block.get("text", ""))
+                if role == "assistant":
+                    text_value = self._sanitize_assistant_text(text_value)
+                text_chunks.append(text_value)
             elif block_type == "tool_use":
                 tool_calls.append(
                     {
@@ -326,16 +333,17 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         return normalize_trace_payload(tool_choice)
 
     def _build_response_content_blocks(self, rollout_state: RolloutState) -> list[dict[str, Any]]:
+        raw_response = rollout_state.response or ""
         tool_calls = rollout_state.extra_fields.get("tool_calls")
         if not tool_calls:
-            text_blocks, parsed_tool_calls = self._parse_textual_tool_calls(rollout_state.response or "")
+            text_blocks, parsed_tool_calls = self._parse_textual_tool_calls(raw_response)
             if parsed_tool_calls:
                 tool_calls = parsed_tool_calls
                 rollout_state.extra_fields["tool_calls"] = parsed_tool_calls
-                if text_blocks:
-                    rollout_state.response = "".join(block["text"] for block in text_blocks if block["type"] == "text")
-                else:
-                    rollout_state.response = ""
+                response_text = "".join(block["text"] for block in text_blocks if block["type"] == "text")
+                rollout_state.response = self._sanitize_assistant_text(response_text)
+            else:
+                rollout_state.response = self._sanitize_assistant_text(raw_response)
 
         if not tool_calls:
             return [{"type": "text", "text": rollout_state.response or ""}]
@@ -415,12 +423,18 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
                 return {"raw": arguments}
         return arguments
 
-    def _build_sample_params(self, request: AnthropicMessagesRequest) -> SampleParams:
+    def _sanitize_assistant_text(self, text: str) -> str:
+        cleaned = text.replace("<|im_end|>", "")
+        cleaned = cleaned.replace("<think>", "")
+        cleaned = cleaned.replace("</think>", "")
+        return cleaned.strip()
+
+    def _build_sample_params(self, request: AnthropicMessagesRequest, max_tokens: int | None = None) -> SampleParams:
         kwargs = {
             "return_token_ids": True,
             "return_logprob": False,
             "stream": request.stream,
-            "max_tokens": request.max_tokens,
+            "max_tokens": max_tokens if max_tokens is not None else request.max_tokens,
             "stops": request.stop_sequences or [],
         }
         if request.temperature is not None:
@@ -428,6 +442,21 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         if request.top_p is not None:
             kwargs["top_p"] = request.top_p
         return SampleParams(**kwargs)
+
+    def _fit_max_tokens_to_context(self, prompt_ids: list[int] | None, requested_max_tokens: int) -> int:
+        if self._context_length is None or prompt_ids is None:
+            return requested_max_tokens
+        prompt_tokens = len(prompt_ids)
+        available_completion_tokens = self._context_length - prompt_tokens
+        if available_completion_tokens <= 0:
+            raise AnthropicChatAdapterError(
+                (
+                    f"Input is too long for this model deployment: prompt_tokens={prompt_tokens}, "
+                    f"context_length={self._context_length}."
+                ),
+                "invalid_request_error",
+            )
+        return min(requested_max_tokens, available_completion_tokens)
 
     def _count_prompt_tokens(self, rollout_state: RolloutState) -> int:
         if rollout_state.tokens is not None:
@@ -468,6 +497,8 @@ def bind_anthropic_chat_interface(
             rollout_controller.generate,
             default_model_name=default_model_name,
             tokenizer=tokenizer,
+            context_length=getattr(rollout_controller.config, "context_length", None),
+            capture_path=str(getattr(rollout_controller.config, "worker_log_dir", ".")) + "/gateway_capture.jsonl",
         )
     rollout_controller.anthropic_messages = rollout_controller.anthropic_chat_adapter.messages
     rollout_controller.anthropic_count_tokens = rollout_controller.anthropic_chat_adapter.count_tokens
