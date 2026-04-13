@@ -74,7 +74,7 @@ enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0
 
 # basic settings
 experimental_name = "disaggregated_grpo_gsm8k"
-total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "4"))
+total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "16"))
 evaluate_step = int(os.environ.get("EVALUATE_STEP", str(total_train_steps)))
 train_optimizer_steps = int(os.environ.get("TRAIN_OPTIMIZER_STEPS", "1"))
 train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", str(32 * train_optimizer_steps)))

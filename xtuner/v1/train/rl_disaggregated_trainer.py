@@ -370,8 +370,14 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         # 再根据 staleness_threshold 放大成 target_task_batch_sizes， target = ceil(required * (1 + staleness_threshold))
         # target = 实际希望 producer 往 replay buffer 里攒到的总量
         target_task_batch_sizes = self._get_window_target_task_batch_sizes(window_task_batch_sizes)
+        if window_train_steps == 1:
+            window_label = f"Train step-window {start_train_step}/{self._total_train_steps} start"
+        else:
+            window_label = (
+                f"Train window {start_train_step}-{end_train_step}/{self._total_train_steps} start"
+            )
         self.logger.info(
-            f"Train window {start_train_step}-{end_train_step}/{self._total_train_steps} start, "
+            f"{window_label}, "
             f"train_batch_size={self.train_batch_size}, base_window_batch_size={base_window_batch_size}, "
             f"target_batch_size={sum(target_task_batch_sizes.values())}, "
             f"trigger_parameter_sync_step={self._execution_config.trigger_parameter_sync_step}, "
