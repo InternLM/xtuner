@@ -855,7 +855,8 @@ class MoE(BaseModel):
         else:
             raise ValueError(f"Unsupported layer type {layers_type_list[last_layer_idx]}")
 
-        for i in range(mtp_config.num_layers):
+        num_physical_layer = 1 if mtp_config.share_weights else mtp_config.num_layers
+        for i in range(num_physical_layer):
             # Build MoE decoder layer for MTP
             decoder_layer = MoEDecoderLayer(
                 hidden_size=config.hidden_size,
@@ -894,7 +895,7 @@ class MoE(BaseModel):
             )
             mtp_layers.append(mtp_layer)
 
-        return MTPBlock(mtp_layers=mtp_layers)
+        return MTPBlock(mtp_config=mtp_config, mtp_layers=mtp_layers)
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
@@ -1234,7 +1235,10 @@ class MoE(BaseModel):
                 * Global 9 (MTP 2, last layer): no recompute (forced)
         """
         num_layers = self.config.num_hidden_layers
-        mtp_layers = self.config.mtp_config.num_layers if self.config.mtp_config is not None else 0
+        if self.config.mtp_config is not None:
+            mtp_layers = 1 if self.config.mtp_config.share_weights else self.config.mtp_config.num_layers
+        else:
+            mtp_layers = 0
         recompute_ratio = self.fsdp_config.recompute_ratio if self.fsdp_config is not None else 0.0
 
         total_layers = num_layers + mtp_layers
