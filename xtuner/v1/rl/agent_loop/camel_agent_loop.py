@@ -3,6 +3,9 @@ import os
 from typing import Any, Literal
 
 import ray
+from camel.agents import ChatAgent
+from camel.models import OpenAICompatibleModel
+from camel.utils import BaseTokenCounter
 from openai import AsyncOpenAI
 from pydantic import ConfigDict
 
@@ -12,10 +15,6 @@ from xtuner.v1.rl.rollout.chat_adapter.collector import reset_current_trace_coll
 from xtuner.v1.rl.rollout.utils import ROLLOUT_RAY_GET_TIMEOUT
 
 from .agent_loop import AgentLoop, AgentLoopConfig
-
-from camel.agents import ChatAgent
-from camel.models import OpenAICompatibleModel
-from camel.utils import BaseTokenCounter
 
 
 class XTunerCamelTokenCounter(BaseTokenCounter):
@@ -146,10 +145,14 @@ class CamelAgentLoop(AgentLoop):
                 normalized_rollout_states.append(normalized_turn_state)
                 trace_records.append(
                     {
-                        "request_id": str(normalized_turn_state.uid) if normalized_turn_state.uid is not None else None,
+                        "request_id": str(normalized_turn_state.uid)
+                        if normalized_turn_state.uid is not None
+                        else None,
                         "prompt_ids": list(normalized_turn_state.prompt_ids),
                         "response_ids": list(normalized_turn_state.response_ids),
-                        "logprobs": None if normalized_turn_state.logprobs is None else list(normalized_turn_state.logprobs),
+                        "logprobs": None
+                        if normalized_turn_state.logprobs is None
+                        else list(normalized_turn_state.logprobs),
                         "routed_experts": normalized_turn_state.routed_experts,
                         "finish_reason": normalized_turn_state.finish_reason,
                         "status": normalized_turn_state.status,
