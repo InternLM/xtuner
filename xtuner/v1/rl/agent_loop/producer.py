@@ -87,6 +87,24 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
 
 class AsyncProduceStrategyConfig(ProduceStrategyConfig):
     produce_batch_over_sample_threshold: float = 0.0
+    # 注意：这里的 produce_batch_enable_partial_rollout 和
+    # RLDisaggregatedTrainer.execution_config.partial_rollout 不是同一个概念。
+    #
+    # 1) 这里是 colocated / produce_batch 路径的“样本级续跑”开关：
+    #    - 作用层级：producer 内部固定并发池
+    #    - 关注点：单个 group 在被中断后，后续是否允许从 ABORTED/EXPIRED 状态继续生成
+    #    - 不改变 trainer 的主循环节奏，也不引入 required/target 这组 window 语义
+    #
+    # 2) RLDisaggregatedTrainer.execution_config.partial_rollout 是 disaggregated window 的“窗口级提前开训”开关：
+    #    - 作用层级：trainer orchestration
+    #    - 关注点：一个 window 内是否允许先满足 required 就开始训练，同时把多余在途任务/leftovers 留给后续 step
+    #    - 它依赖 required/target 分离，以及 replay buffer leftovers 的持续复用
+    #
+    # 之所以拆成两层，是因为 colocated 和 disaggregated 控制的对象不同：
+    # - colocated 没有 window 编排，只有单次 produce_batch 的 producer policy
+    # - disaggregated 需要 trainer 决定 window 节奏，所以 partial_rollout 必须放在 trainer 层
+    #
+    # 因此两边都叫“partial rollout”，但它们不是同一个旋钮，不能强行合并成同一层配置。
     produce_batch_enable_partial_rollout: bool = False
     tail_batch_stale_threshold: int = 0
     tail_batch_trigger_size: int = 0
