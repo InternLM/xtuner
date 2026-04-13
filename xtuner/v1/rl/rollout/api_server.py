@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 
 from .chat_adapter import (
     AnthropicChatAdapterError,
+    AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     ChatCompletionRequest,
@@ -104,11 +108,19 @@ def create_rollout_api_app(
                 },
             )
 
-    @app.post("/v1/messages")
+    @app.post("/v1/messages", response_model=None)
     async def anthropic_messages(
         request: AnthropicMessagesRequest, http_request: Request
-    ) -> AnthropicMessagesResponse:
+    ):
         try:
+            if request.stream:
+                non_stream_request = request.model_copy(update={"stream": False})
+                response = await rollout_controller.anthropic_messages(non_stream_request)
+                return StreamingResponse(
+                    _iter_anthropic_sse_events(response),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                )
             return await rollout_controller.anthropic_messages(request)
         except AnthropicChatAdapterError as exc:
             status_code = 400 if exc.error_type == "invalid_request_error" else 500
@@ -119,6 +131,10 @@ def create_rollout_api_app(
                 request_id=exc.request_id,
                 protocol="anthropic",
             )
+
+    @app.post("/v1/messages/count_tokens")
+    async def anthropic_count_tokens(request: AnthropicCountTokensRequest) -> AnthropicCountTokensResponse:
+        return await rollout_controller.anthropic_count_tokens(request)
 
     @app.get("/healthz")
     async def healthz():
@@ -157,3 +173,86 @@ def create_rollout_api_app(
         return {"status": "ok", "action": "shutdown"}
 
     return app
+
+
+def _iter_anthropic_sse_events(response: AnthropicMessagesResponse) -> Iterator[str]:
+    output_tokens = response.usage.output_tokens
+    message_start = {
+        "type": "message_start",
+        "message": {
+            "id": response.id,
+            "type": response.type,
+            "role": response.role,
+            "content": [],
+            "model": response.model,
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": response.usage.input_tokens,
+                "output_tokens": 1 if output_tokens > 0 else 0,
+            },
+        },
+    }
+    yield _format_sse("message_start", message_start)
+
+    chunk_size = 64
+    for index, block in enumerate(response.content):
+        block_type = block.get("type")
+        if block_type == "text":
+            yield _format_sse(
+                "content_block_start",
+                {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}},
+            )
+            text = str(block.get("text", ""))
+            for offset in range(0, len(text), chunk_size):
+                chunk = text[offset : offset + chunk_size]
+                yield _format_sse(
+                    "content_block_delta",
+                    {"type": "content_block_delta", "index": index, "delta": {"type": "text_delta", "text": chunk}},
+                )
+            yield _format_sse("content_block_stop", {"type": "content_block_stop", "index": index})
+        elif block_type == "tool_use":
+            yield _format_sse(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": block["id"],
+                        "name": block["name"],
+                        "input": {},
+                    },
+                },
+            )
+            input_json = json.dumps(block.get("input", {}), ensure_ascii=False)
+            for offset in range(0, len(input_json), chunk_size):
+                chunk = input_json[offset : offset + chunk_size]
+                yield _format_sse(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {"type": "input_json_delta", "partial_json": chunk},
+                    },
+                )
+            yield _format_sse("content_block_stop", {"type": "content_block_stop", "index": index})
+
+    yield _format_sse(
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": response.stop_reason,
+                "stop_sequence": response.stop_sequence,
+            },
+            "usage": {
+                "output_tokens": response.usage.output_tokens,
+            },
+        },
+    )
+    yield _format_sse("message_stop", {"type": "message_stop"})
+
+
+def _format_sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

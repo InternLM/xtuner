@@ -1,6 +1,8 @@
 from .anthropic import (
     AnthropicChatAdapter,
     AnthropicChatAdapterError,
+    AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     bind_anthropic_chat_interface,
@@ -19,6 +21,8 @@ from .trace import ChatTraceRecord, ChatTraceStore
 __all__ = [
     "AnthropicChatAdapter",
     "AnthropicChatAdapterError",
+    "AnthropicCountTokensRequest",
+    "AnthropicCountTokensResponse",
     "AnthropicMessagesRequest",
     "AnthropicMessagesResponse",
     "ChatCompletionRequest",

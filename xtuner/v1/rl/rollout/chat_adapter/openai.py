@@ -61,21 +61,25 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
             )
 
     def request_to_rollout_state(self, request: ChatCompletionRequest) -> RolloutState:
+        normalized_messages = normalize_trace_payload(request.messages)
         tokenizer_tools = self._normalize_tools_for_tokenizer(request.tools)
         normalized_tool_choice = normalize_trace_payload(request.tool_choice)
         prompt_ids = None
         if self._tokenizer:
             raw_prompt_ids = self._tokenizer.apply_chat_template(
-                request.messages,
+                normalized_messages,
                 tools=tokenizer_tools,
                 tokenize=True,
                 add_generation_prompt=True,
             )
-            prompt_ids = raw_prompt_ids["input_ids"] if isinstance(raw_prompt_ids, dict) else list(raw_prompt_ids)
+            if hasattr(raw_prompt_ids, "get"):
+                prompt_ids = raw_prompt_ids.get("input_ids")
+            else:
+                prompt_ids = list(raw_prompt_ids)
 
         return RolloutState(
             uid=uuid4().int,
-            message=request.messages,
+            message=normalized_messages,
             prompt_ids=prompt_ids,
             tokens=prompt_ids,
             session_uid=getattr(request, "session_uid", getattr(request, "session_id", None)),
