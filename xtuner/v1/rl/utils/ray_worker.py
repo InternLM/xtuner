@@ -13,6 +13,7 @@ from ray.util.placement_group import (
     placement_group,
     placement_group_table,
 )
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from typing_extensions import Annotated
 
 from .ray_utils import find_master_addr_and_port, get_accelerator_ids
@@ -98,7 +99,7 @@ class CPUResourcesConfig(BaseModel):
         Returns:
             PlacementGroup: The created Ray PlacementGroup.
         """
-        return AutoCPUWorkers.build_placement_group(self)
+        return CPUActorLauncher.build_placement_group(self)
 
 
 class AcceleratorResourcesConfig(BaseModel):
@@ -562,9 +563,16 @@ class BaseCPUWorker:
         self.num_cpus = num_cpus
 
 
-class AutoCPUWorkers:
-    """A utility class for automatically creating and managing cpu actors
-    within a Ray PlacementGroup."""
+class CPUActorLauncher:
+    """Infrastructure for launching CPU Ray actors from plain Python classes.
+
+    This class owns the generic actorization flow for CPU-only components:
+    building homogeneous CPU placement groups, converting plain classes into
+    Ray actor classes, validating bundle resources, and launching one or more
+    actors on specific bundles.
+    """
+
+    _ACTOR_CLASS_CACHE: dict[type, ActorClass] = {}
 
     @staticmethod
     def build_placement_group(resources_config: CPUResourcesConfig):
@@ -609,6 +617,127 @@ class AutoCPUWorkers:
         return {"num_cpus": num_cpus if num_cpus >= 0 else default_cpu}
 
     @classmethod
+    def to_actor_class(cls, worker_cls):
+        """Convert a plain Python class into a Ray actor class.
+
+        If ``worker_cls`` is already a Ray actor class, it is returned as-is.
+        """
+        if hasattr(worker_cls, "remote") and hasattr(worker_cls, "options"):
+            return worker_cls
+
+        if worker_cls not in cls._ACTOR_CLASS_CACHE:
+            cls._ACTOR_CLASS_CACHE[worker_cls] = ray.remote(worker_cls)
+        return cls._ACTOR_CLASS_CACHE[worker_cls]
+
+    @staticmethod
+    def _get_bundle_resources(pg: PlacementGroup, bundle_idx: int) -> dict[str, float | int]:
+        assert len(pg.bundle_specs) > bundle_idx, f"Placement group does not have bundle index {bundle_idx}."
+        return pg.bundle_specs[bundle_idx]
+
+    @classmethod
+    def _resolve_actor_resources(
+        cls,
+        pg: PlacementGroup,
+        bundle_idx: int,
+        actor_num_cpus: int | float | None = None,
+        actor_memory: int | None = None,
+    ) -> tuple[float | int, int]:
+        bundle = cls._get_bundle_resources(pg, bundle_idx)
+        resolved_num_cpus = actor_num_cpus if actor_num_cpus is not None else bundle.get("CPU", 1)
+        resolved_memory = actor_memory if actor_memory is not None else int(bundle.get("memory", 0))
+        assert bundle.get("CPU", 1) >= resolved_num_cpus, (
+            f"Placement group bundle {bundle_idx} does not have enough CPU resources."
+        )
+        assert bundle.get("memory", 0) >= resolved_memory, (
+            f"Placement group bundle {bundle_idx} does not have enough memory resources."
+        )
+        return resolved_num_cpus, resolved_memory
+
+    @classmethod
+    def build_actor(
+        cls,
+        worker_cls,
+        *init_args,
+        pg: PlacementGroup | None = None,
+        bundle_idx: int = 0,
+        actor_num_cpus: int | float | None = None,
+        actor_memory: int | None = None,
+        pg_pack_strategy: str = "SPREAD",
+        capture_child_tasks: bool = False,
+        **init_kwargs,
+    ):
+        """Build a single CPU actor from a plain class or Ray actor class."""
+        resolved_num_cpus = 1 if actor_num_cpus is None else actor_num_cpus
+        resolved_memory = 1024**3 if actor_memory is None else actor_memory
+
+        actor_cls = cls.to_actor_class(worker_cls)
+        actor_options = {
+            "num_cpus": resolved_num_cpus,
+        }
+        if resolved_memory > 0:
+            actor_options["memory"] = resolved_memory
+
+        if pg is None:
+            return actor_cls.options(**actor_options).remote(*init_args, **init_kwargs)
+
+        resolved_num_cpus, resolved_memory = cls._resolve_actor_resources(
+            pg=pg,
+            bundle_idx=bundle_idx,
+            actor_num_cpus=actor_num_cpus,
+            actor_memory=actor_memory,
+        )
+        actor_options["num_cpus"] = resolved_num_cpus
+        if resolved_memory > 0:
+            actor_options["memory"] = resolved_memory
+        actor_options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_bundle_index=bundle_idx,
+            placement_group_capture_child_tasks=capture_child_tasks,
+        )
+        return actor_cls.options(**actor_options).remote(*init_args, **init_kwargs)
+
+    @classmethod
+    def build_actors(
+        cls,
+        worker_cls,
+        *init_args,
+        pg: PlacementGroup | None = None,
+        start_bundle_idx: int = 0,
+        num_workers: int = 1,
+        actor_num_cpus_per_worker: int | float | None = None,
+        actor_memory_per_worker: int | None = None,
+        pg_pack_strategy: str = "SPREAD",
+        capture_child_tasks: bool = False,
+        **init_kwargs,
+    ):
+        """Build multiple homogeneous CPU actors from a plain class or Ray
+        actor class."""
+        workers_list = []
+        for idx in range(num_workers):
+            workers_list.append(
+                cls.build_actor(
+                    worker_cls,
+                    *init_args,
+                    pg=pg,
+                    bundle_idx=start_bundle_idx + idx,
+                    actor_num_cpus=actor_num_cpus_per_worker,
+                    actor_memory=actor_memory_per_worker,
+                    capture_child_tasks=capture_child_tasks,
+                    **init_kwargs,
+                )
+            )
+        return workers_list
+
+
+class AutoCPUWorkers(CPUActorLauncher):
+    """Convenience wrapper for BaseCPUWorker-style homogeneous worker pools.
+
+    `CPUActorLauncher` is the generic actorization layer. `AutoCPUWorkers`
+    keeps the legacy worker-centric API that instantiates one worker per bundle
+    using the conventional `(worker_config, num_cpus=...)` constructor shape.
+    """
+
+    @classmethod
     def from_config(cls, worker_cls, worker_config, cpu_config: CPUResourcesConfig):
         """Create workers and a placement group from configuration objects.
 
@@ -621,13 +750,20 @@ class AutoCPUWorkers:
         Returns:
             List[T]: List of created worker instances.
         """
-        pg = AutoCPUWorkers.build_placement_group(cpu_config)
+        pg = cls.build_placement_group(cpu_config)
         workers_list = cls.from_placement_group(worker_cls, worker_config, pg)
 
         return workers_list, pg
 
     @classmethod
-    def from_placement_group(cls, worker_cls, worker_config, pg: PlacementGroup, num_workers: int = -1):
+    def from_placement_group(
+        cls,
+        worker_cls,
+        worker_config,
+        pg: PlacementGroup,
+        num_workers: int = -1,
+        start_bundle_idx: int = 0,
+    ):
         """Create workers from an existing placement group.
 
         Args:
@@ -640,14 +776,15 @@ class AutoCPUWorkers:
         Returns:
             List[T]: List of created worker instances.
         """
-        pg_options = cls.get_pg_options(pg)
-
-        num_workers = num_workers if num_workers > 0 else pg.bundle_count
-        workers_list = []
-        for _ in range(num_workers):
-            worker = worker_cls.options(placement_group=pg, **pg_options).remote(
-                worker_config, num_cpus=pg_options.get("num_cpus", 1)
-            )  # type: ignore[attr-defined]
-            workers_list.append(worker)
-
-        return workers_list
+        num_workers = num_workers if num_workers > 0 else pg.bundle_count - start_bundle_idx
+        default_cpu = cls._get_bundle_resources(pg, start_bundle_idx).get("CPU", 1)
+        return cls.build_actors(
+            worker_cls,
+            worker_config,
+            num_cpus=default_cpu,
+            pg=pg,
+            start_bundle_idx=start_bundle_idx,
+            num_workers=num_workers,
+            actor_num_cpus_per_worker=default_cpu,
+            actor_memory_per_worker=None,
+        )
