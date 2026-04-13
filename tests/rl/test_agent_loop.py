@@ -1,14 +1,20 @@
 import os
 import unittest
-import asyncio
+import copy
 import ray
 import tempfile
 import torch
 from transformers import AutoTokenizer
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig, AgentLoopManagerConfig, TaskSpecConfig, SyncProduceStrategyConfig, SamplerConfig
-from xtuner.v1.data_proto import RolloutState, Status, SampleParams 
+from xtuner.v1.rl.agent_loop import (
+    SingleTurnAgentLoopConfig,
+    AgentLoopManagerConfig,
+    TaskSpecConfig,
+    SyncProduceStrategyConfig,
+    SamplerConfig,
+)
+from xtuner.v1.data_proto import RolloutState, Status, SampleParams
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
@@ -79,14 +85,16 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
-            sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)
+            sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
         )
-        # 2. 创建 rollout_controller, judger
+        # 2. 创建 rollout_controller
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
-        gsm8k_judger = judger_config.build()
         # 3. 创建 AgentLoop
-        agent_loop = agent_loop_cfg.build(rollout_controller=rollout_controller, judger=gsm8k_judger)
+        agent_loop = agent_loop_cfg.build(
+            rollout_controller=rollout_controller,
+            judger=judger_config.build(),
+        )
         # 4. 构造输入数据
         prompt_repeat_k = 4
         rollout_state = FAKE_INPUT_ITEM
@@ -100,6 +108,51 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state.status, Status.COMPLETED)
             self.assertGreater(len(state.response_ids), 0)
             self.assertEqual(single_rollout_state.reward["score"], 1)  
+        self.assertEqual(single_rollout_state.status, Status.COMPLETED)
+        self.assertGreater(len(single_rollout_state.response_ids), 0)
+        self.assertEqual(single_rollout_state.reward["score"], 1)  
+
+    async def test_gsm8k_agent_loop_with_ray_actor_judger(self):
+        self.init_config()
+        rollout_config = RolloutConfig(
+            env="test_agent_loop_ray_actor",
+            model_path=self.model_path,
+            model_name=os.path.basename(self.model_path).lower(),
+            tokenizer_path=self.model_path,
+            context_length=self.context_length,
+            worker_log_dir=self.worker_log_dir,
+        )
+        judger_config = GSM8KJudgerConfig(
+            judger_name="openai/gsm8k",
+            judger_type="ray.actor",
+            num_cpus_per_actor=1,
+        )
+        agent_loop_cfg = SingleTurnAgentLoopConfig(
+            hf_checkpoint=self.model_path,
+            sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
+            type="ray.actor",
+            num_cpus=1,
+        )
+
+        pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
+        rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
+        agent_loop = agent_loop_cfg.build(
+            rollout_controller=rollout_controller,
+            judger=judger_config.build(),
+        )
+
+        prompt_repeat_k = 2
+        rollout_state = copy.deepcopy(FAKE_INPUT_ITEM)
+        group_in_rollout_state = [copy.deepcopy(FAKE_INPUT_ITEM) for _ in range(prompt_repeat_k)]
+
+        group_rollout_state = await agent_loop.generate_group.remote(group_in_rollout_state)
+        single_rollout_state = await agent_loop.generate_sample.remote(rollout_state)
+
+        self.assertEqual(len(group_rollout_state), prompt_repeat_k)
+        for state in group_rollout_state:
+            self.assertEqual(state.status, Status.COMPLETED)
+            self.assertGreater(len(state.response_ids), 0)
+            self.assertEqual(state.reward["score"], 1)
         self.assertEqual(single_rollout_state.status, Status.COMPLETED)
         self.assertGreater(len(single_rollout_state.response_ids), 0)
         self.assertEqual(single_rollout_state.reward["score"], 1)  
@@ -118,7 +171,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
-            sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0)
+            sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
         )
         sampler_config = SamplerConfig(
             dataloader_cfg=DataloaderConfig(

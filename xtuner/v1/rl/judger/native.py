@@ -1,15 +1,17 @@
+from __future__ import annotations
+
 import asyncio
 import inspect
 from abc import ABC, abstractmethod
-from typing import Callable, List, Literal, TypeAlias, cast
+from typing import Callable, Literal, TypeAlias, cast
 
 import httpx
-import ray
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState
+from xtuner.v1.rl.utils import CPUActorLauncher
 from xtuner.v1.utils.logger import get_logger
 from xtuner.v1.utils.type_helper import ray_method
 
@@ -72,7 +74,9 @@ class NativeJudger(Judger):
             else:
                 judger_response = self.reward_handler(**input_kwargs)
         assert judger_response is not None, "Reward handler did not return a response."
-        # native postprocess
+        assert isinstance(judger_response, dict), (
+            f"Reward handler must return a dict, but got {type(judger_response)}."
+        )
         rollout_state.reward = judger_response
         return rollout_state
 
@@ -85,13 +89,6 @@ class NativeJudger(Judger):
         return self._judger_name
 
 
-# For type hint and IDE support. For more info, please refer to:
-# 1. https://docs.ray.io/en/latest/ray-core/actors.html#type-hints-and-static-typing-for-actors
-# 2. https://github.com/InternLM/xtuner/pull/1349
-RayJudger = cast(ActorClass[NativeJudger], ray.remote(NativeJudger))
-RayJudgerProxy: TypeAlias = ActorProxy[NativeJudger]
-
-
 class RouterJudger(Judger):
     """NativeJudger 路由管理器。
 
@@ -100,14 +97,15 @@ class RouterJudger(Judger):
     2. 当负载相同时，通过轮询（Round-robin）分配任务。
     """
 
-    def __init__(self, workers: List[RayJudgerProxy], judger_name: str):
+    def __init__(self, workers: list[RayJudgerProxy], judger_name: str):
         self.workers = workers
         self._worker_loads = dict.fromkeys(workers, 0)
         self._rr_index = 0
         self._lock = asyncio.Lock()
         self._judger_name = judger_name
 
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:
+    @ray_method
+    async def judge(self, rollout_state: RolloutState) -> RolloutState:  # type: ignore[override]
         async with self._lock:
             min_load = min(self._worker_loads.values())
             candidates: list[RayJudgerProxy] = [w for w in self.workers if self._worker_loads[w] == min_load]
@@ -147,10 +145,7 @@ class JudgerConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_ray_actor_config(self) -> "JudgerConfig":
-        if self.judger_type == "ray.actor" and self.num_ray_actors > 1:
-            logger.warning("num_ray_actors will be set to 1 when judger_type is 'ray.actor'.")
-            self.num_ray_actors = 1
+    def _validate_ray_actor_config(self) -> JudgerConfig:
         if self.judger_type == "native":
             if self.num_ray_actors > 1 or self.num_cpus_per_actor > 1 or self.cpu_memory_per_actor != 1024**3:
                 logger.warning(
@@ -158,89 +153,99 @@ class JudgerConfig(BaseModel):
                 )
         return self
 
-    def _build_worker(self, pg: PlacementGroup | None = None, bundle_idx: int = 0) -> RayJudgerProxy:
-        pg_options = {"num_cpus": self.num_cpus_per_actor, "memory": self.cpu_memory_per_actor}
-        if pg is None:
-            # NOTE: 保持与 router 构建逻辑一致，默认创建 PlacementGroup。
-            from xtuner.v1.rl.utils.ray_worker import CPUResourcesConfig
+    def get_num_placement_group_bundles(self) -> int:
+        if self.judger_type == "native":
+            return 0
+        return self.num_ray_actors
 
-            cpu_resource_cfg = CPUResourcesConfig(
-                num_workers=self.num_ray_actors,
-                num_cpus_per_worker=self.num_cpus_per_actor,
-                cpu_memory_per_worker=self.cpu_memory_per_actor,
-            )
-            pg = cpu_resource_cfg.build_placement_group()
-            ray.get(pg.ready())
-            bundle_idx = 0
+    def get_cpu_bundles(self) -> list[dict[str, float | int]]:
+        return [
+            {
+                "CPU": self.num_cpus_per_actor,
+                "memory": self.cpu_memory_per_actor,
+            }
+            for _ in range(self.get_num_placement_group_bundles())
+        ]
 
-        assert len(pg.bundle_specs) > bundle_idx, "Placement group does not have enough bundles for ray actor."
-        assert pg.bundle_specs[bundle_idx].get("CPU", 1) >= self.num_cpus_per_actor, (
-            f"Placement group bundle {bundle_idx} does not have enough CPU resources."
-        )
-        assert pg.bundle_specs[bundle_idx].get("memory", 0) >= self.cpu_memory_per_actor, (
-            f"Placement group bundle {bundle_idx} does not have enough memory resources."
-        )
-        return RayJudger.options(
-            placement_group=pg,
-            placement_group_bundle_index=bundle_idx,
-            **pg_options,
-        ).remote(
+    def build_local(self) -> Judger:
+        return NativeJudger(
             judger_name=self.judger_name,
             reward_handler=self.reward_handler,
             request_timeout=self.request_timeout,
             extra_info=self.extra_info,
         )
 
-    def _build_workers(self, pg: PlacementGroup | None = None, start_bundle_idx: int = 0) -> list[RayJudgerProxy]:
-        """Create and launch Ray actor instances for router workers.
-
-        This method instantiates multiple NativeJudger Ray actors according to `num_ray_actors`,
-        assigning each to a specific bundle in the provided placement group for resource isolation.
-        Each actor is initialized with the judger's configuration and reward function.
-
-        Args:
-            pg: The Ray PlacementGroup used to allocate resources for the actors.
-            start_bundle_idx: The starting bundle index in the placement group for actor placement.
-
-        Returns:
-            List[ActorClass]: A list of Ray actor handles representing the launched judger workers.
-        """
-        if pg is None:
-            # NOTE: 这里直接在build_workers里创建PlacementGroup是为了简化用户使用，用户不需要关心PlacementGroup的细节。
-            from xtuner.v1.rl.utils.ray_worker import CPUResourcesConfig
-
-            cpu_resource_cfg = CPUResourcesConfig(
-                num_workers=self.num_ray_actors,
-                num_cpus_per_worker=self.num_cpus_per_actor,
-                cpu_memory_per_worker=self.cpu_memory_per_actor,
-            )
-            pg = cpu_resource_cfg.build_placement_group()
-            ray.get(pg.ready())
-            start_bundle_idx = 0
-
-        workers_list = []
-        assert len(pg.bundle_specs) >= self.num_ray_actors, (
-            "Placement group does not have enough bundles for the number of ray actors."
+    def _build_ray_actor(self, pg: PlacementGroup | None = None, bundle_idx: int = 0) -> RayJudgerProxy:
+        return CPUActorLauncher.build_actor(
+            JudgerActor,
+            self,
+            pg=pg,
+            bundle_idx=bundle_idx,
+            actor_num_cpus=self.num_cpus_per_actor,
+            actor_memory=self.cpu_memory_per_actor,
         )
-        for idx in range(self.num_ray_actors):
-            workers_list.append(self._build_worker(pg=pg, bundle_idx=start_bundle_idx + idx))
-        return workers_list
+
+    def _build_ray_actor_list(
+        self,
+        pg: PlacementGroup | None = None,
+        start_bundle_idx: int = 0,
+    ) -> list[RayJudgerProxy]:
+        return CPUActorLauncher.build_actors(
+            JudgerActor,
+            self,
+            pg=pg,
+            start_bundle_idx=start_bundle_idx,
+            num_workers=self.num_ray_actors,
+            actor_num_cpus_per_worker=self.num_cpus_per_actor,
+            actor_memory_per_worker=self.cpu_memory_per_actor,
+        )
+
+    def _build_router_workers(
+        self, pg: PlacementGroup | None = None, start_bundle_idx: int = 0
+    ) -> list[RayJudgerProxy]:
+        return self._build_ray_actor_list(pg=pg, start_bundle_idx=start_bundle_idx)
+
+    def _build_router(self, pg: PlacementGroup | None = None, start_bundle_idx: int = 0) -> RayJudgerProxy:
+        workers_list = self._build_router_workers(pg=pg, start_bundle_idx=start_bundle_idx)
+        return cast(
+            RayJudgerProxy,
+            CPUActorLauncher.build_actor(
+                RouterJudger,
+                workers_list,
+                self.judger_name,
+                actor_num_cpus=0,
+                actor_memory=0,
+            ),
+        )
 
     def build(
         self,
         pg: PlacementGroup | None = None,
         start_bundle_idx: int = 0,
-    ) -> NativeJudger | RayJudgerProxy | RouterJudger:
+    ) -> Judger | RayJudgerProxy:
         if self.judger_type == "native":
-            return NativeJudger(
-                judger_name=self.judger_name,
-                reward_handler=self.reward_handler,
-                request_timeout=self.request_timeout,
-                extra_info=self.extra_info,
-            )
+            return self.build_local()
 
         if self.judger_type == "ray.actor":
-            return self._build_worker(pg=pg, bundle_idx=start_bundle_idx)
+            if self.num_ray_actors > 1:
+                return self._build_router(pg=pg, start_bundle_idx=start_bundle_idx)
+            return self._build_ray_actor(pg=pg, bundle_idx=start_bundle_idx)
 
-        workers_list = self._build_workers(pg=pg, start_bundle_idx=start_bundle_idx)
-        return RouterJudger(workers=workers_list, judger_name=self.judger_name)
+        return self._build_router(pg=pg, start_bundle_idx=start_bundle_idx)
+
+
+class JudgerActor:
+    def __init__(self, judger_config: JudgerConfig):
+        self.judger = judger_config.build_local()
+
+    @ray_method
+    async def judge(self, rollout_state: RolloutState) -> RolloutState:
+        return await self.judger.judge(rollout_state)
+
+
+# For type hint and IDE support. For more info, please refer to:
+# 1. https://docs.ray.io/en/latest/ray-core/actors.html#type-hints-and-static-typing-for-actors
+# 2. https://github.com/InternLM/xtuner/pull/1349
+RayJudger = cast(ActorClass[JudgerActor], CPUActorLauncher.to_actor_class(JudgerActor))
+RayRouterJudger = cast(ActorClass[RouterJudger], CPUActorLauncher.to_actor_class(RouterJudger))
+RayJudgerProxy: TypeAlias = ActorProxy[JudgerActor] | ActorProxy[RouterJudger]
