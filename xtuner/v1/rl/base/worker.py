@@ -35,9 +35,7 @@ from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
-from xtuner.v1.ray.utils import free_object_refs
 from xtuner.v1.rl.base.loss import BaseRLLossContext
-from xtuner.v1.rl.utils import gather_logprobs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -391,9 +389,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         ref_logprobs_list: list[torch.Tensor] = []
         for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
             with torch.no_grad():
-                ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
-            ref_logprobs = gather_logprobs(ref_output["logits"], shifted_labels)
-            ref_logprobs_list.append(ref_logprobs)
+                loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
+                assert loss_ctx is not None
+                ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+                ref_logprobs_list.append(ref_output["loss"])
         self._ref_model.to_device("cpu")
         return ref_logprobs_list
 
@@ -432,7 +431,11 @@ class TrainingWorker(SingleAcceleratorWorker):
                         if self.sp_mesh.get_local_rank() == 0:
                             # only free once of sp mesh
                             to_free_routed_expert_refs.append(rollout_routed_expert_refs)
-                    out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
+                    rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
+                    rollout_routed_expert = rollout_routed_expert.reshape(
+                        -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
+                    )
+                    out_rollout_routed_expert.append(rollout_routed_expert)
 
             seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
         else:
@@ -485,11 +488,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                         f"pixel_values should be list of tensor, got {type(pixel_values)}"
                     )
                     pixel_value_refs = list(pixel_values)
-                    try:
-                        pixel_values = torch.cat(ray.get(pixel_value_refs), dim=0)
-                    finally:
-                        free_object_refs(pixel_value_refs)
-
+                    pixel_values = torch.cat(ray.get(pixel_value_refs), dim=0)
                     seq_ctx.pixel_values = pixel_values
 
             rollout_routed_experts = seq_ctx.rollout_routed_experts

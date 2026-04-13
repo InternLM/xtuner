@@ -5,7 +5,6 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from itertools import cycle
 from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
@@ -52,7 +51,6 @@ class SessionRouter:
 
         # OrderedDict: key=session_id -> value=(worker, last_used_ts)
         self._map: OrderedDict[int, tuple[Any, float]] = OrderedDict()
-        self._worker_cycler = cycle(self._workers)
         self._lock = asyncio.Lock()
         self.logger = get_logger()
 
@@ -80,7 +78,16 @@ class SessionRouter:
     def update_active_workers(self, worker_status: Dict[Any, bool]):
         self._workers = list(worker_status.items())
         self.logger.debug(f"SessionRouter update active workers: {self._workers}")
-        self._worker_cycler = cycle(self._workers)
+
+    def _get_healthy_workers(self) -> List[tuple[Any, bool]]:
+        return [worker for worker in self._workers if worker[1]]
+
+    def _select_worker_for_session(self, session_id: int) -> tuple[Any, bool]:
+        healthy_workers = self._get_healthy_workers()
+        if not healthy_workers:
+            raise RuntimeError("No healthy rollout workers available for SessionRouter.")
+        worker_idx = session_id % len(healthy_workers)
+        return healthy_workers[worker_idx]
 
     async def get_worker(self, session_id: int) -> Any:
         async with self._lock:
@@ -92,9 +99,7 @@ class SessionRouter:
                 if worker[1]:  # worker is healthy
                     return worker[0]
 
-            worker = next(self._worker_cycler)
-            while worker[1] is False:
-                worker = next(self._worker_cycler)
+            worker = self._select_worker_for_session(session_id)
             self._map[session_id] = (worker, self._now())
 
             self._evict_lru_to_capacity()
