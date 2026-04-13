@@ -11,6 +11,7 @@ from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
     RLJudgerResponseItem,
     RLRolloutResponseItem,
+    RolloutState,
     is_valid_for_training,
     update_dataflow_item,
     update_rollout_item,
@@ -184,6 +185,11 @@ class RawSingleTurnEnvironment(BaseEnvironment):
                     for _ in group_data_items
                 ]
             group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_responses)
+            # Mark items whose judger was aborted so they are treated as ABORTED
+            # rather than COMPLETED in downstream state determination.
+            for item, judger_resp in zip(group_data_items, judger_responses):
+                if isinstance(judger_resp.extra_info, dict) and judger_resp.extra_info.get("state") == "aborted":
+                    item.env.rollout.state = RolloutState.ABORTED
         return group_data_items
 
 

@@ -207,6 +207,11 @@ class RawDataFlow:
 
         self.sample_from_expired_storage, self.finished_samples_count = self.replay_buffer.get_prerun_state()
         ray.get(self.env_controller.restart.remote())  # type: ignore[attr-defined]
+        # Restart judger abort state for next round
+        try:
+            ray.get(self.env_controller.restart_judger.remote())  # type: ignore[attr-defined]
+        except Exception as e:
+            self.logger.error(f"Failed to restart judger (next round may be affected): {e}")
         self.sample_params = sample_params if sample_params else self.config.sample_params
         self.extra_params = extra_params if extra_params else self.config.extra_params
         logger_msg = (
@@ -426,7 +431,12 @@ class RawDataFlow:
 
     @ray_method
     async def pause(self, timeout: float = 60.0):
-        """Asynchronously sends abort requests to all rollout workers."""
+        """Asynchronously sends abort requests to all rollout workers and
+        judgers.
+
+        Args:
+            timeout: HTTP request timeout in seconds.
+        """
         if not self.worker_url_list:
             self.logger.info("No active rollout workers to pause.")
             return
@@ -445,6 +455,13 @@ class RawDataFlow:
             )
         else:
             self.logger.info(f"All {succeeded_count} abort requests sent successfully.")
+
+        # Abort judger actors whose config has abort_on_pause=True
+        try:
+            await self.env_controller.abort_judger.remote()  # type: ignore[attr-defined]
+            self.logger.info("Judger abort signal sent successfully.")
+        except Exception as e:
+            self.logger.warning(f"Failed to send judger abort signal: {e}")
 
     @ray_method
     async def run(
@@ -466,11 +483,10 @@ class RawDataFlow:
                 Overrides the existing sample_params in DataFlowConfig if provided.
             extra_params (Optional[Dict]): Additional parameters for rollout.
                 Overrides the existing extra_params in DataFlowConfig if provided.
-            enable_partial_rollout (Optional[bool]): Whether to enable partial rollout mode.
-                This is primarily intended for unit testing, allowing the dataflow to pause
-                and resume partway through a rollout for checkpointing and recovery tests.Returns:
+            staleness_threshold (Optional[float]): Override for staleness threshold.
+
         Returns:
-            List[RLDataFlowItem]: A list of collected training samples.
+            DataFlowResult: The collected training samples and metadata.
         """
         self._reset_internal_states(
             global_batch_size=num,
