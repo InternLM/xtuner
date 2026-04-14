@@ -67,9 +67,10 @@ class MTPBlock(nn.Module):
 
         if mtp_config.share_weights and len(mtp_layers) != 1:
             raise ValueError(f"share_weights mode requires exactly 1 MTP layer, got {len(mtp_layers)}")
+        if not mtp_config.share_weights and len(mtp_layers) != mtp_config.num_layers:
+            raise ValueError(f"Expected {mtp_config.num_layers} MTP layers, but got {len(mtp_layers)}")
         self.mtp_config = mtp_config
         self.layers = nn.ModuleList(mtp_layers)
-        self.num_layers = len(mtp_layers)
 
     def forward(
         self,

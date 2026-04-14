@@ -1016,8 +1016,8 @@ class MoE(BaseModel):
         # Shard MTP block if it exists
         if self.mtp_block is not None:
             for mtp_idx, mtp_layer in enumerate(self.mtp_block.layers):
-                if (
-                    self._should_recompute(None, mtp_idx=mtp_idx) or self.config.mtp_config.share_weights  # type: ignore
+                if self._should_recompute(None, mtp_idx=mtp_idx) or (
+                    self.config.mtp_config is not None and self.config.mtp_config.share_weights
                 ):  # share mtp head must recompute
                     mtp_layer = checkpoint_wrapper(mtp_layer, checkpoint_impl=CheckpointImpl.REENTRANT)
                 self.mtp_block.layers[mtp_idx] = mtp_layer
