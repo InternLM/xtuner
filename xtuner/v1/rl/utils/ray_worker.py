@@ -1,4 +1,5 @@
 import os
+import threading
 from typing import Any, Dict, List, Literal, Tuple, TypeVar
 
 import ray
@@ -735,6 +736,45 @@ class AutoCPUWorkers(CPUActorLauncher):
     using the conventional `(worker_config, num_cpus=...)` constructor shape.
     """
 
+    _PG_NEXT_BUNDLE_INDEX: dict[str, int] = {}
+    _PG_NEXT_BUNDLE_INDEX_LOCK = threading.Lock()
+
+    @staticmethod
+    def _get_pg_key(pg: PlacementGroup) -> str:
+        """Build a stable placement-group identifier for local bundle
+        tracking."""
+        return str(pg.id)
+
+    @classmethod
+    def _reserve_bundle_range(
+        cls,
+        pg: PlacementGroup,
+        num_workers: int,
+        start_bundle_idx: int | None,
+    ) -> tuple[int, int]:
+        """Reserve a contiguous bundle range for worker creation.
+
+        When ``start_bundle_idx`` is omitted, the next unconsumed bundle range
+        in this process is used. Explicit bundle reservations still advance the
+        local cursor so later auto-allocation does not reuse the same bundles.
+        """
+        pg_key = cls._get_pg_key(pg)
+
+        with cls._PG_NEXT_BUNDLE_INDEX_LOCK:
+            current_cursor = cls._PG_NEXT_BUNDLE_INDEX.get(pg_key, 0)
+            resolved_start_bundle_idx = current_cursor if start_bundle_idx is None else start_bundle_idx
+            resolved_num_workers = num_workers if num_workers > 0 else pg.bundle_count - resolved_start_bundle_idx
+
+            assert resolved_num_workers > 0, "At least one worker must be created from the placement group."
+            assert resolved_start_bundle_idx >= 0, "start_bundle_idx must be non-negative."
+            assert resolved_start_bundle_idx + resolved_num_workers <= pg.bundle_count, (
+                "Placement group does not have enough remaining bundles for the requested CPU workers."
+            )
+
+            cls._PG_NEXT_BUNDLE_INDEX[pg_key] = max(current_cursor, resolved_start_bundle_idx + resolved_num_workers)
+
+        return resolved_start_bundle_idx, resolved_num_workers
+
     @classmethod
     def from_config(cls, worker_cls, worker_config, cpu_config: CPUResourcesConfig):
         """Create workers and a placement group from configuration objects.
@@ -760,7 +800,7 @@ class AutoCPUWorkers(CPUActorLauncher):
         worker_config,
         pg: PlacementGroup,
         num_workers: int = -1,
-        start_bundle_idx: int = 0,
+        start_bundle_idx: int | None = None,
     ):
         """Create workers from an existing placement group.
 
@@ -769,12 +809,17 @@ class AutoCPUWorkers(CPUActorLauncher):
             worker_config: The configuration for each worker instance.
             pg (PlacementGroup): The existing placement group to use.
             num_workers (int): The number of workers to create. Defaults to -1,
-                the number of bundles in the placement group will be used.
+                the remaining bundles in the placement group will be used.
+            start_bundle_idx (int | None): Bundle index to start from. If
+                omitted, the next unconsumed local bundle range for this
+                placement group will be used.
 
         Returns:
             List[T]: List of created worker instances.
         """
-        num_workers = num_workers if num_workers > 0 else pg.bundle_count - start_bundle_idx
+        start_bundle_idx, num_workers = cls._reserve_bundle_range(
+            pg=pg, num_workers=num_workers, start_bundle_idx=start_bundle_idx
+        )
         default_cpu = cls._get_bundle_resources(pg, start_bundle_idx).get("CPU", 1)
         return cls.build_actors(
             worker_cls,
