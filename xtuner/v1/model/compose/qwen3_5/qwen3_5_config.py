@@ -34,4 +34,4 @@ class Qwen3_5_VLMoE35BA3Config(Qwen3_5_BaseConfig):
 
 class Qwen3_5TimeSeriesMoE35BA3Config(Qwen3_5_VLMoE35BA3Config):
     time_series_encoder_path: str | None = None
-    ts_token_id: int = 151685
+    ts_token_id: int = 248093
