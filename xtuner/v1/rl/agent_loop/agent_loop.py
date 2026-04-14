@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from abc import ABC, abstractmethod
-from typing import Literal, TypeAlias, cast
+from typing import TypeAlias, cast
 
-import ray
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto import RolloutState, SampleParams
-from xtuner.v1.rl.judger import Judger, JudgerSpec
+from xtuner.v1.rl.judger import JudgerSpec
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import CPUActorLauncher, create_task
 from xtuner.v1.utils import get_logger, ray_method
@@ -22,38 +20,39 @@ class AgentLoopConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     hf_checkpoint: str
     sample_params: SampleParams
-    type: Literal["local", "ray.actor"] = "local"
-    num_ray_actors: int = Field(default=1, ge=1, description="Number of AgentLoop Ray actor instances.")
+    num_ray_actors: int = Field(
+        default=0,
+        ge=0,
+        description="Number of AgentLoop Ray actor instances. 0 means local mode.",
+    )
     num_cpus: float = Field(default=1, gt=0, description="CPU cores required by the AgentLoop actor itself.")
     cpu_memory: int = Field(default=1024**3, gt=0, description="CPU memory in bytes required by AgentLoop.")
 
     @model_validator(mode="after")
     def _validate_ray_actor_config(self) -> AgentLoopConfig:
-        if self.type == "local" and self.num_ray_actors != 1:
+        if self.num_ray_actors == 0 and (self.num_cpus != 1 or self.cpu_memory != 1024**3):
             logger = get_logger()
-            logger.warning("num_ray_actors will be ignored when AgentLoop type is 'local'.")
+            logger.warning("num_cpus and cpu_memory are ignored when AgentLoop runs in local mode.")
         return self
 
     def build(self, rollout_controller, judger: JudgerSpec = None, logger=None) -> AgentLoopSpec:
-        if self.type == "local":
+        if self.num_ray_actors == 0:
             return self.build_local(
                 rollout_controller=rollout_controller,
                 judger=judger,
                 logger=logger,
             )
-        if self.type == "ray.actor":
-            if self.num_ray_actors > 1:
-                return self._build_router(
-                    rollout_controller=rollout_controller,
-                    judger=judger,
-                    logger=logger,
-                )
-            return self._build_ray_actor(
+        if self.num_ray_actors > 1:
+            return self._build_router(
                 rollout_controller=rollout_controller,
                 judger=judger,
                 logger=logger,
             )
-        raise ValueError(f"Invalid agent loop type: {self.type}")
+        return self._build_ray_actor(
+            rollout_controller=rollout_controller,
+            judger=judger,
+            logger=logger,
+        )
 
     @abstractmethod
     def build_local(
@@ -132,26 +131,6 @@ class AgentLoopConfig(ABC, BaseModel):
             rollout_ctl=rollout_controller,
         )
 
-    def build_ray_actor_list(
-        self,
-        rollout_controller,
-        num_actors: int,
-        judger: JudgerSpec = None,
-        logger=None,
-        pg: PlacementGroup | None = None,
-    ) -> list[RayAgentLoopProxy]:
-        if self.type != "ray.actor":
-            raise ValueError(f"build_ray_actor_list requires type='ray.actor', got {self.type}")
-        if num_actors <= 0:
-            raise ValueError(f"num_actors must be positive, got {num_actors}")
-        return self._build_ray_actors(
-            rollout_controller=rollout_controller,
-            pg=pg,
-            num_actors=num_actors,
-            judger=judger,
-            logger=logger,
-        )
-
 
 class AgentLoop(ABC):
     def __init__(
@@ -185,33 +164,6 @@ class AgentLoop(ABC):
         generated_samples = asyncio.gather(*pending_tasks)
         group_samples = await generated_samples
         return group_samples
-
-    async def judge_sample(self, rollout_state: RolloutState) -> RolloutState:
-        if self.judger is None:
-            return rollout_state
-
-        judger = self.judger
-        if isinstance(judger, dict):
-            if len(judger) > 1:
-                raise NotImplementedError("Multiple judgers require a custom AgentLoop.judge_sample implementation.")
-            judger = next(iter(judger.values()))
-
-        if isinstance(judger, Judger):
-            rollout_state = await judger.judge(rollout_state)
-        elif isinstance(judger, ray.actor.ActorHandle):
-            rollout_state = await judger.judge.remote(rollout_state)
-        elif callable(judger):
-            judger_result = judger(rollout_state)
-            if inspect.isawaitable(judger_result):
-                rollout_state = await judger_result
-            else:
-                rollout_state = judger_result
-        else:
-            raise ValueError(f"Invalid judger type: {type(judger)}")
-
-        if not isinstance(rollout_state, RolloutState):
-            raise TypeError(f"Judger must return RolloutState, but got {type(rollout_state)}")
-        return rollout_state
 
 
 class RouterAgentLoop:

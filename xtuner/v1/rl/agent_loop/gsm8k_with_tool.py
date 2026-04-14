@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto import RolloutState, SampleParams
 from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig, JudgerSpec
+from xtuner.v1.rl.judger import judge_sample
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
 
@@ -151,5 +152,5 @@ class GSM8KToolAgentLoop(AgentLoop):
         assert len(rollout_state.response_ids) == len(rollout_state.response_mask) == len(rollout_state.logprobs), (
             f"{len(rollout_state.response_ids)} vs {len(rollout_state.response_mask)} vs {len(rollout_state.logprobs)}"
         )
-        rollout_state = await self.judge_sample(rollout_state)
+        rollout_state = await judge_sample(self.judger, rollout_state)
         return rollout_state

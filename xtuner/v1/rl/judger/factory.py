@@ -1,4 +1,7 @@
+import inspect
 from typing import Awaitable, Callable, TypeAlias
+
+import ray
 
 from xtuner.v1.data_proto import RolloutState
 
@@ -55,3 +58,62 @@ class JudgerSpecConfig:
             return judger_config
 
         raise ValueError(f"Invalid judger config type: {type(judger_config)}")
+
+
+def _resolve_judger_from_dict(judger_dict: dict[str, JudgerLike], rollout_state: RolloutState) -> JudgerLike:
+    if not judger_dict:
+        raise ValueError("judger dict must not be empty.")
+
+    candidate_keys: list[str] = []
+    if rollout_state.task_name:
+        candidate_keys.append(rollout_state.task_name)
+
+    data_source = rollout_state.data_source
+    if isinstance(data_source, str):
+        candidate_keys.append(data_source)
+    elif isinstance(data_source, dict):
+        for field in ("name", "id", "type", "data_source"):
+            value = data_source.get(field)
+            if isinstance(value, str):
+                candidate_keys.append(value)
+
+    for key in candidate_keys:
+        if key in judger_dict:
+            return judger_dict[key]
+
+    if "default" in judger_dict:
+        return judger_dict["default"]
+
+    if len(judger_dict) == 1:
+        return next(iter(judger_dict.values()))
+
+    raise KeyError(
+        "Unable to resolve judger from dict with "
+        f"task_name={rollout_state.task_name!r}, data_source={rollout_state.data_source!r}, "
+        f"available_keys={sorted(judger_dict)}"
+    )
+
+
+async def judge_sample(judger: JudgerSpec, rollout_state: RolloutState) -> RolloutState:
+    if judger is None:
+        return rollout_state
+
+    if isinstance(judger, dict):
+        judger = _resolve_judger_from_dict(judger, rollout_state)
+
+    if isinstance(judger, Judger):
+        rollout_state = await judger.judge(rollout_state)
+    elif isinstance(judger, ray.actor.ActorHandle):
+        rollout_state = await judger.judge.remote(rollout_state)
+    elif callable(judger):
+        judger_result = judger(rollout_state)
+        if inspect.isawaitable(judger_result):
+            rollout_state = await judger_result
+        else:
+            rollout_state = judger_result
+    else:
+        raise ValueError(f"Invalid judger type: {type(judger)}")
+
+    if not isinstance(rollout_state, RolloutState):
+        raise TypeError(f"Judger must return RolloutState, but got {type(rollout_state)}")
+    return rollout_state

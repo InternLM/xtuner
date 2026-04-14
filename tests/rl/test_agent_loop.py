@@ -130,7 +130,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
-            type="ray.actor",
+            num_ray_actors=1,
             num_cpus=1,
         )
 

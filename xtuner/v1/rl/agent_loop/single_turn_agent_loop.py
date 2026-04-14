@@ -1,4 +1,5 @@
 from xtuner.v1.data_proto import RolloutState, SampleParams, Status
+from xtuner.v1.rl.judger import judge_sample
 from xtuner.v1.rl.rollout import RolloutController
 
 from .agent_loop import AgentLoop, AgentLoopConfig, JudgerSpec
@@ -45,5 +46,5 @@ class SingleTurnAgentLoop(AgentLoop):
         # 非 COMPLETED 状态（如被截断、放弃等）直接早退，不触发打分
         if rollout_state.status != Status.COMPLETED:
             return rollout_state
-        rollout_state = await self.judge_sample(rollout_state)
+        rollout_state = await judge_sample(self.judger, rollout_state)
         return rollout_state
