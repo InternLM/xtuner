@@ -247,6 +247,8 @@ class ModelOutputs(PydanticBaseModel):
 
     @classmethod
     def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Automatically register every subclass as a pytree node so that
+        # FSDP can traverse the output tensors and insert pre_backward_hooks.
         super().__init_subclass__(**kwargs)
         cls._register_pytree_node()
 
@@ -258,6 +260,8 @@ class ModelOutputs(PydanticBaseModel):
     def _flatten_pydantic_model(
         model: PydanticBaseModel,
     ) -> tuple[list[Any], tuple[type[PydanticBaseModel], list[str]]]:
+        # Flatten the model into a list of field values (the "leaves") plus a
+        # context tuple that carries enough information to reconstruct it.
         field_names = ModelOutputs._model_field_names(type(model))
         children = [getattr(model, field_name) for field_name in field_names]
         return children, (type(model), field_names)
@@ -267,6 +271,9 @@ class ModelOutputs(PydanticBaseModel):
         children: Iterable[Any],
         context: tuple[type[PydanticBaseModel], list[str]],
     ) -> PydanticBaseModel:
+        # Reconstruct the model from the (possibly transformed) leaf values.
+        # model_construct is used to bypass Pydantic validation, which is safe
+        # here because the values were produced by the flatten step above.
         model_type, field_names = context
         values = dict(zip(field_names, children, strict=True))
         return model_type.model_construct(**values)
@@ -275,15 +282,19 @@ class ModelOutputs(PydanticBaseModel):
     def _flatten_pydantic_model_with_keys(
         model: PydanticBaseModel,
     ) -> tuple[list[tuple[_pytree.KeyEntry, Any]], tuple[type[PydanticBaseModel], list[str]]]:
+        # Same as _flatten_pydantic_model but pairs each leaf with a KeyEntry
+        # so that pytree-aware tools (e.g. torch.export) can emit human-readable
+        # paths like "logits" instead of bare integer indices.
         field_names = ModelOutputs._model_field_names(type(model))
-        key_children = [
-            (_pytree.GetAttrKey(field_name), getattr(model, field_name))
-            for field_name in field_names
+        key_children: list[tuple[_pytree.KeyEntry, Any]] = [
+            (_pytree.GetAttrKey(field_name), getattr(model, field_name)) for field_name in field_names
         ]
         return key_children, (type(model), field_names)
 
     @staticmethod
     def _to_dumpable_context(context: tuple[type[PydanticBaseModel], list[str]]) -> dict[str, Any]:
+        # Serialize the context to a JSON-compatible dict so that the pytree
+        # structure can be saved (e.g. for torch.export / torch.compile cache).
         model_type, field_names = context
         return {
             "module": model_type.__module__,
@@ -293,6 +304,8 @@ class ModelOutputs(PydanticBaseModel):
 
     @staticmethod
     def _from_dumpable_context(context: dict[str, Any]) -> tuple[type[PydanticBaseModel], list[str]]:
+        # Deserialize the context produced by _to_dumpable_context by
+        # dynamically importing the model class from its module + qualname.
         module = importlib.import_module(context["module"])
         model_type: Any = module
         for attr in context["qualname"].split("."):
@@ -301,6 +314,7 @@ class ModelOutputs(PydanticBaseModel):
 
     @classmethod
     def _register_pytree_node(cls) -> None:
+        # Guard against double-registration (e.g. when the module is reloaded).
         if cls in _pytree.SUPPORTED_NODES:
             return
 
@@ -315,6 +329,7 @@ class ModelOutputs(PydanticBaseModel):
         )
 
 
+# Register the base class itself; subclasses are handled by __init_subclass__.
 ModelOutputs._register_pytree_node()
 
 
@@ -521,11 +536,7 @@ class BaseModel(nn.Module):
                 dim=self.FSDP_SHARD_DIM, index=torch.arange(start, end, dtype=torch.int64, device=loaded_tensor.device)
             )
             non_pad_len = end - start
-            try:
-                local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
-            except:
-                torch.distributed.breakpoint()
-                print(f"Error copy tensor: {param_name}")
+            local_tensor[:non_pad_len].copy_(loaded_tensor_slice)
 
             if non_pad_len < local_tensor.shape[self.FSDP_SHARD_DIM]:
                 assert self.config.float8_cfg is not None
