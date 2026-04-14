@@ -18,6 +18,8 @@ from .chat_adapter import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     OpenAIChatAdapterError,
+    ResponsesRequest,
+    ResponsesResponse,
 )
 from .utils import ensure_rollout_request_id
 
@@ -94,6 +96,32 @@ def create_rollout_api_app(
     async def chat_completions(request: ChatCompletionRequest, http_request: Request) -> ChatCompletionResponse:
         try:
             return await rollout_controller.chat(request)
+        except OpenAIChatAdapterError as exc:
+            status_code = 400 if exc.error_type == "invalid_request_error" else 500
+            raise HTTPException(
+                status_code=status_code,
+                detail={
+                    "error": {
+                        "message": exc.message,
+                        "type": exc.error_type,
+                        "code": exc.code,
+                        "request_id": exc.request_id,
+                    }
+                },
+            )
+
+    @app.post("/v1/responses", response_model=None)
+    async def responses(request: ResponsesRequest, http_request: Request):
+        try:
+            if request.stream:
+                non_stream_request = request.model_copy(update={"stream": False})
+                response = await rollout_controller.responses(non_stream_request)
+                return StreamingResponse(
+                    _iter_openai_responses_sse_events(response),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                )
+            return await rollout_controller.responses(request)
         except OpenAIChatAdapterError as exc:
             status_code = 400 if exc.error_type == "invalid_request_error" else 500
             raise HTTPException(
@@ -256,3 +284,136 @@ def _iter_anthropic_sse_events(response: AnthropicMessagesResponse) -> Iterator[
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _iter_openai_responses_sse_events(response: ResponsesResponse) -> Iterator[str]:
+    sequence_number = 0
+    response_snapshot = response.model_dump(mode="python")
+    in_progress_response = {**response_snapshot, "status": "in_progress"}
+    yield _format_openai_response_sse({"type": "response.created", "sequence_number": sequence_number, "response": in_progress_response})
+    sequence_number += 1
+
+    for output_index, item in enumerate(response.output):
+        item_type = item.get("type")
+        if item_type == "message":
+            yield _format_openai_response_sse(
+                {
+                    "type": "response.output_item.added",
+                    "sequence_number": sequence_number,
+                    "output_index": output_index,
+                    "item": item,
+                }
+            )
+            sequence_number += 1
+            for content_index, part in enumerate(item.get("content", [])):
+                if part.get("type") != "output_text":
+                    continue
+                yield _format_openai_response_sse(
+                    {
+                        "type": "response.content_part.added",
+                        "sequence_number": sequence_number,
+                        "output_index": output_index,
+                        "item_id": item["id"],
+                        "content_index": content_index,
+                        "part": {"type": "output_text", "text": "", "annotations": []},
+                    }
+                )
+                sequence_number += 1
+                text = str(part.get("text", ""))
+                chunk_size = 64
+                for offset in range(0, len(text), chunk_size):
+                    yield _format_openai_response_sse(
+                        {
+                            "type": "response.output_text.delta",
+                            "sequence_number": sequence_number,
+                            "output_index": output_index,
+                            "item_id": item["id"],
+                            "content_index": content_index,
+                            "delta": text[offset : offset + chunk_size],
+                        }
+                    )
+                    sequence_number += 1
+                yield _format_openai_response_sse(
+                    {
+                        "type": "response.output_text.done",
+                        "sequence_number": sequence_number,
+                        "output_index": output_index,
+                        "item_id": item["id"],
+                        "content_index": content_index,
+                        "text": text,
+                    }
+                )
+                sequence_number += 1
+                yield _format_openai_response_sse(
+                    {
+                        "type": "response.content_part.done",
+                        "sequence_number": sequence_number,
+                        "output_index": output_index,
+                        "item_id": item["id"],
+                        "content_index": content_index,
+                        "part": {"type": "output_text", "text": text, "annotations": part.get("annotations", [])},
+                    }
+                )
+                sequence_number += 1
+            yield _format_openai_response_sse(
+                {
+                    "type": "response.output_item.done",
+                    "sequence_number": sequence_number,
+                    "output_index": output_index,
+                    "item": item,
+                }
+            )
+            sequence_number += 1
+        elif item_type == "function_call":
+            added_item = {**item, "arguments": "", "status": "in_progress"}
+            yield _format_openai_response_sse(
+                {
+                    "type": "response.output_item.added",
+                    "sequence_number": sequence_number,
+                    "output_index": output_index,
+                    "item": added_item,
+                }
+            )
+            sequence_number += 1
+            arguments = str(item.get("arguments", ""))
+            chunk_size = 64
+            for offset in range(0, len(arguments), chunk_size):
+                yield _format_openai_response_sse(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "sequence_number": sequence_number,
+                        "output_index": output_index,
+                        "item_id": item["id"],
+                        "delta": arguments[offset : offset + chunk_size],
+                    }
+                )
+                sequence_number += 1
+            yield _format_openai_response_sse(
+                {
+                    "type": "response.function_call_arguments.done",
+                    "sequence_number": sequence_number,
+                    "output_index": output_index,
+                    "item_id": item["id"],
+                    "arguments": arguments,
+                    "name": item.get("name"),
+                }
+            )
+            sequence_number += 1
+            yield _format_openai_response_sse(
+                {
+                    "type": "response.output_item.done",
+                    "sequence_number": sequence_number,
+                    "output_index": output_index,
+                    "item": item,
+                }
+            )
+            sequence_number += 1
+
+    yield _format_openai_response_sse(
+        {"type": "response.completed", "sequence_number": sequence_number, "response": response_snapshot}
+    )
+    yield "data: [DONE]\n\n"
+
+
+def _format_openai_response_sse(data: dict[str, Any]) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"

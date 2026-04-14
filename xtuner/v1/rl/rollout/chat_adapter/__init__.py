@@ -15,6 +15,7 @@ from .openai import (
     OpenAIChatAdapterError,
     bind_openai_chat_interface,
 )
+from .responses import ResponsesRequest, ResponsesResponse, bind_openai_responses_interface
 from .trace import ChatTraceRecord, ChatTraceStore
 
 
@@ -29,9 +30,12 @@ __all__ = [
     "ChatCompletionResponse",
     "OpenAIChatAdapter",
     "OpenAIChatAdapterError",
+    "ResponsesRequest",
+    "ResponsesResponse",
     "BaseChatAPIAdapter",
     "ChatTraceRecord",
     "ChatTraceStore",
     "bind_anthropic_chat_interface",
     "bind_openai_chat_interface",
+    "bind_openai_responses_interface",
 ]

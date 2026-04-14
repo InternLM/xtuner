@@ -16,7 +16,7 @@ from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import get_logger
 
 from .api_server import create_rollout_api_app
-from .chat_adapter import bind_anthropic_chat_interface, bind_openai_chat_interface
+from .chat_adapter import bind_anthropic_chat_interface, bind_openai_chat_interface, bind_openai_responses_interface
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
 from .worker import RolloutConfig, RolloutWorker
 
@@ -92,6 +92,9 @@ class RolloutController:
         self.num_active_workers = len(self.rank2info)
         self.worker_info_lock = threading.RLock()
         bind_openai_chat_interface(
+            self, default_model_name=self.config.model_name, tokenizer=self.config.tokenizer_path
+        )
+        bind_openai_responses_interface(
             self, default_model_name=self.config.model_name, tokenizer=self.config.tokenizer_path
         )
         bind_anthropic_chat_interface(

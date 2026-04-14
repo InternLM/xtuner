@@ -405,7 +405,7 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         for parameter_match in self._qwen_parameter_pattern.finditer(function_body):
             param_name = parameter_match.group(1).strip()
             param_value = parameter_match.group(2).strip()
-            arguments[param_name] = param_value
+            arguments[param_name] = self._coerce_parameter_value(param_value)
         return {
             "id": f"call_{uuid4().hex}",
             "type": "function",
@@ -422,6 +422,15 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
             except Exception:
                 return {"raw": arguments}
         return arguments
+
+    def _coerce_parameter_value(self, value: str) -> Any:
+        stripped = value.strip()
+        if not stripped:
+            return ""
+        try:
+            return json.loads(stripped)
+        except Exception:
+            return stripped
 
     def _sanitize_assistant_text(self, text: str) -> str:
         cleaned = text.replace("<|im_end|>", "")
