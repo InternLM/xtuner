@@ -166,6 +166,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
                 TaskSpecConfig(
                     task_name="train_task",
                     agent_loop_config=agent_loop_config,
+                    judger_config=judger_config,
                     produce_strategy_config=produce_strategy_config,
                     sampler_config=sampler_config,
                 )
@@ -186,6 +187,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
                 TaskSpecConfig(
                     task_name="eval_task",
                     agent_loop_config=eval_agent_loop_config,
+                    judger_config=judger_config,
                     sampler_config=eval_sampler_config,
                 )
             ],
@@ -198,7 +200,6 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
             resources=resources,
             train_worker_cfg=train_worker_cfg,
             rollout_config=rollout_config,
-            judger_config=judger_config,
             tokenizer_path=model_path,
             replay_buffer_config=SyncReplayBufferConfig(),
             agent_loop_manager_cfg=agent_loop_manager_cfg,

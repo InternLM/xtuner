@@ -29,6 +29,7 @@ from .ray_worker import (
     AutoAcceleratorWorkers,
     AutoCPUWorkers,
     BaseCPUWorker,
+    CPUActorLauncher,
     CPUResourcesConfig,
     SingleAcceleratorWorker,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "SingleAcceleratorWorker",
     "AutoAcceleratorWorkers",
     "CPUResourcesConfig",
+    "CPUActorLauncher",
     "BaseCPUWorker",
     "AutoCPUWorkers",
     "get_ray_accelerator",

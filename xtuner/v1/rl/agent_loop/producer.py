@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+import ray
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_expired_status
@@ -12,7 +13,7 @@ from xtuner.v1.rl.rollout.utils import pause_generation
 from xtuner.v1.rl.utils import create_task
 from xtuner.v1.utils import get_logger
 
-from .agent_loop import AgentLoop
+from .agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from .sampler import Sampler
 
 
@@ -33,10 +34,13 @@ logger = get_logger()
 
 
 async def _timed_generate_group(
-    agent_loop: AgentLoop, rollout_state: list[RolloutState], **kwargs
+    agent_loop: AgentLoopSpec, rollout_state: list[RolloutState], **kwargs
 ) -> tuple[list[RolloutState], float]:
     start = time.perf_counter()
-    result = await agent_loop.generate_group(rollout_state, **kwargs)
+    if isinstance(agent_loop, ray.actor.ActorHandle):
+        result = await agent_loop.generate_group.remote(rollout_state, **kwargs)
+    else:
+        result = await agent_loop.generate_group(rollout_state, **kwargs)
     return result, time.perf_counter() - start
 
 
@@ -103,7 +107,7 @@ class ProduceStrategy(ABC):
     @abstractmethod
     async def produce_batch(
         self,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         sampler: Sampler,
         replay_buffer: ReplayBuffer,
         batch_size: int,
@@ -115,7 +119,7 @@ class ProduceStrategy(ABC):
 class SyncProduceStrategy(ProduceStrategy):
     async def produce_batch(
         self,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         sampler: Sampler,
         replay_buffer: ReplayBuffer,
         batch_size: int,
@@ -194,10 +198,10 @@ class AsyncProduceStrategy(ProduceStrategy):
                 await replay_buffer.put(group, task_name)
 
     async def _cleanup_pending_tasks(
-        self, pending_tasks: set, agent_loop: AgentLoop, replay_buffer: ReplayBuffer, task_name: str
+        self, pending_tasks: set, agent_loop: AgentLoopSpec, replay_buffer: ReplayBuffer, task_name: str
     ) -> float:
         pause_start = time.perf_counter()
-        rollout_ctl = agent_loop.rollout_ctl
+        rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
         await pause_generation(rollout_ctl)
         while len(pending_tasks) > 0:
             done_task, pending_tasks = await asyncio.wait(
@@ -221,7 +225,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
     async def produce_batch(
         self,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         sampler: Sampler,
         replay_buffer: ReplayBuffer,
         batch_size: int,

@@ -200,6 +200,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
             task_name="train_task:dapo_math",
             weight=dapo_task_weight,
             agent_loop_config=dapo_train_agent_loop_config,
+            judger_config=judger_config,
             produce_strategy_config=SyncProduceStrategyConfig(),
             sampler_config=dapo_train_sampler_config,
         ),
@@ -269,6 +270,7 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
             task_name="eval_task:dapo_math",
             weight=dapo_task_weight,
             agent_loop_config=dapo_eval_agent_loop_config,
+            judger_config=judger_config,
             sampler_config=dapo_eval_sampler_config,
         ),
         TaskSpecConfig(
@@ -291,7 +293,6 @@ trainer = RLColocateTrainerConfig(
     resources=resources,
     train_worker_cfg=train_worker_cfg,
     rollout_config=rollout_config,
-    judger_config=judger_config,
     tokenizer_path=model_path,
     replay_buffer_config=SyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
