@@ -31,3 +31,7 @@ class Qwen3_5_VLMoE35BA3Config(Qwen3_5_BaseConfig):
     vision_config: Qwen3_5_VisionConfig = Qwen3_5_VisionConfig()
     projector_config: Qwen3_5_ProjectorConfig = Qwen3_5_ProjectorConfig()
     text_config: MoEConfig = Qwen3_5_VLTextMoE35BA3BConfig()
+
+class Qwen3_5TimeSeriesMoE35BA3Config(Qwen3_5_VLMoE35BA3Config):
+    time_series_encoder_path: str | None = None
+    ts_token_id: int = 151685

@@ -483,6 +483,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         # sampling_rate = ts_out["sampling_rate"]
 
         transform = self._get_ts_transform()
+        self._time_series_path = [os.path.join(media_root, i) for i in self._time_series_path]
         ts_values, ts_len, sampling_rate = transform(self._time_series_path, self._time_series_sampling_rate)
 
         stride = torch.floor(160 / ((1 + torch.exp(-sampling_rate / 100)) ** 6))

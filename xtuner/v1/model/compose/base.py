@@ -106,7 +106,8 @@ class BaseComposeModel(BaseModel):
         self.vision_tower.fully_shard(self.fsdp_config)
         self.multi_modal_projector.fully_shard(self.fsdp_config)
 
-        # TODO: 判断其余模块是否已经被 fsdp 切分了
+        if self.time_series is not None:
+            self.time_series.fully_shard(self.fsdp_config)
 
         mp_policy = MixedPrecisionPolicy(param_dtype=fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype)
 
