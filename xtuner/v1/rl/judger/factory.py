@@ -1,119 +1,39 @@
-import inspect
-from typing import Awaitable, Callable, TypeAlias
+from ray.util.placement_group import PlacementGroup
 
-import ray
-
-from xtuner.v1.data_proto import RolloutState
-
-from .native import Judger, JudgerConfig, RayJudgerProxy
+from .dispatch import DispatchJudger, JudgerConfigLike, MultiJudgerConfig, default_merge_fn
+from .native import Judger, JudgerConfig, JudgerPool
 
 
-JudgerCallable: TypeAlias = Callable[[RolloutState], RolloutState | Awaitable[RolloutState]]
-JudgerLike: TypeAlias = Judger | RayJudgerProxy | JudgerCallable
-JudgerSpec: TypeAlias = JudgerLike | dict[str, JudgerLike] | None
-JudgerConfigLike: TypeAlias = JudgerConfig | JudgerCallable
-JudgerConfigSpec: TypeAlias = JudgerConfigLike | dict[str, JudgerConfigLike] | None
+def build_judger(config: JudgerConfigLike, pg: PlacementGroup | None = None, start_bundle_idx: int = 0) -> Judger:
+    if isinstance(config, MultiJudgerConfig):
+        return _build_composite_judger(config, pg=pg, start_bundle_idx=start_bundle_idx)
+    return _build_replicated_judger(config, pg=pg, start_bundle_idx=start_bundle_idx)
 
 
-class JudgerSpecConfig:
-    def __init__(self, judger_config: JudgerConfigSpec):
-        self.judger_config = judger_config
-
-    @classmethod
-    def from_judger_config(cls, judger_config: JudgerConfig) -> "JudgerSpecConfig":
-        return cls(judger_config)
-
-    @classmethod
-    def from_judger_config_dict(cls, judger_config: dict[str, JudgerConfigLike]) -> "JudgerSpecConfig":
-        return cls(judger_config)
-
-    @classmethod
-    def from_judger_callable(cls, judger_callable: JudgerCallable) -> "JudgerSpecConfig":
-        return cls(judger_callable)
-
-    @classmethod
-    def from_value(cls, judger_config: JudgerConfigSpec) -> "JudgerSpecConfig":
-        return cls(judger_config)
-
-    def build(self) -> JudgerSpec:
-        judger_config = self.judger_config
-        if judger_config is None:
-            return None
-
-        if isinstance(judger_config, dict):
-            judger_dict = {}
-            for key, config in judger_config.items():
-                if isinstance(config, JudgerConfig):
-                    judger_dict[key] = config.build()
-                elif callable(config):
-                    judger_dict[key] = config
-                else:
-                    raise ValueError(f"Invalid judger config type: {type(config)} for key {key}")
-            return judger_dict
-
-        if isinstance(judger_config, JudgerConfig):
-            return judger_config.build()
-
-        if callable(judger_config):
-            return judger_config
-
-        raise ValueError(f"Invalid judger config type: {type(judger_config)}")
-
-
-def _resolve_judger_from_dict(judger_dict: dict[str, JudgerLike], rollout_state: RolloutState) -> JudgerLike:
-    if not judger_dict:
-        raise ValueError("judger dict must not be empty.")
-
-    candidate_keys: list[str] = []
-    if rollout_state.task_name:
-        candidate_keys.append(rollout_state.task_name)
-
-    data_source = rollout_state.data_source
-    if isinstance(data_source, str):
-        candidate_keys.append(data_source)
-    elif isinstance(data_source, dict):
-        for field in ("name", "id", "type", "data_source"):
-            value = data_source.get(field)
-            if isinstance(value, str):
-                candidate_keys.append(value)
-
-    for key in candidate_keys:
-        if key in judger_dict:
-            return judger_dict[key]
-
-    if "default" in judger_dict:
-        return judger_dict["default"]
-
-    if len(judger_dict) == 1:
-        return next(iter(judger_dict.values()))
-
-    raise KeyError(
-        "Unable to resolve judger from dict with "
-        f"task_name={rollout_state.task_name!r}, data_source={rollout_state.data_source!r}, "
-        f"available_keys={sorted(judger_dict)}"
+def _build_replicated_judger(config: JudgerConfig, pg: PlacementGroup | None, start_bundle_idx: int) -> Judger:
+    if config.num_ray_actors == 0:
+        return config.build_local()
+    if config.num_ray_actors == 1:
+        return config._build_remote_judger(pg=pg, bundle_idx=start_bundle_idx)
+    return JudgerPool(
+        replicas=config._build_remote_judgers(pg=pg, start_bundle_idx=start_bundle_idx),
+        judger_name=config.judger_name,
     )
 
 
-async def judge_sample(judger: JudgerSpec, rollout_state: RolloutState) -> RolloutState:
-    if judger is None:
-        return rollout_state
-
-    if isinstance(judger, dict):
-        judger = _resolve_judger_from_dict(judger, rollout_state)
-
-    if isinstance(judger, Judger):
-        rollout_state = await judger.judge(rollout_state)
-    elif isinstance(judger, ray.actor.ActorHandle):
-        rollout_state = await judger.judge.remote(rollout_state)
-    elif callable(judger):
-        judger_result = judger(rollout_state)
-        if inspect.isawaitable(judger_result):
-            rollout_state = await judger_result
-        else:
-            rollout_state = judger_result
-    else:
-        raise ValueError(f"Invalid judger type: {type(judger)}")
-
-    if not isinstance(rollout_state, RolloutState):
-        raise TypeError(f"Judger must return RolloutState, but got {type(rollout_state)}")
-    return rollout_state
+def _build_composite_judger(
+    config: MultiJudgerConfig,
+    pg: PlacementGroup | None,
+    start_bundle_idx: int,
+) -> Judger:
+    branches: dict[str, Judger] = {}
+    bundle_idx = start_bundle_idx
+    for key, branch_config in config.branches.items():
+        branches[key] = build_judger(branch_config, pg=pg, start_bundle_idx=bundle_idx)
+        bundle_idx += branch_config.get_num_placement_group_bundles()
+    return DispatchJudger(
+        branches=branches,
+        select_fn=config.select_fn,
+        merge_fn=config.merge_fn or default_merge_fn,
+        default_key=config.default_key,
+    )

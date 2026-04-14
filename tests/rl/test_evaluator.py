@@ -57,7 +57,7 @@ class TestEvaluator(unittest.TestCase):
             worker_log_dir=self.worker_log_dir
         )
         from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
-        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
+        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
         self.judger_cfg = JudgerConfig(
             reward_judger_configs=[gsm8k_judger_config],
             worker_log_dir=self.worker_log_dir

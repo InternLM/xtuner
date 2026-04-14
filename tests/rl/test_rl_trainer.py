@@ -158,7 +158,7 @@ class TestRLTrainer(unittest.TestCase):
     def init_judger_config(self):
         from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 
-        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
+        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
         judger_cfg = JudgerConfig(reward_judger_configs=[gsm8k_judger_config], worker_log_dir=self.worker_log_dir)
         return judger_cfg
 
@@ -166,8 +166,8 @@ class TestRLTrainer(unittest.TestCase):
         from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 
         # 支持一个GSM8KJudgerConfig创建多个实例
-        gsm8k_judger_config_1 = GSM8KJudgerConfig(judger_name="openai/gsm8k-1", judger_type="router")
-        gsm8k_judger_config_2 = GSM8KJudgerConfig(judger_name="openai/gsm8k-2", judger_type="router")
+        gsm8k_judger_config_1 = GSM8KJudgerConfig(judger_name="openai/gsm8k-1", num_ray_actors=1)
+        gsm8k_judger_config_2 = GSM8KJudgerConfig(judger_name="openai/gsm8k-2", num_ray_actors=1)
         judger_cfg = JudgerConfig(
             reward_judger_configs=[gsm8k_judger_config_1, gsm8k_judger_config_2],
             worker_log_dir=self.worker_log_dir,

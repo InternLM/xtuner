@@ -81,13 +81,13 @@ class TestJudgerController(unittest.TestCase):
     def test_gsm8k_judger(self):
         from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 
-        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
+        gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
         # Test Case 1: NativeJudger
-        native_judger = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="native").build()
+        native_judger = GSM8KJudgerConfig(judger_name="openai/gsm8k").build()
         res1 = asyncio.run(native_judger.judge(FAKE_JUDGER_INPUT_ITEM))
         self.assertEqual(res1.reward["score"], 1.0)
 
-        # Test Case 2: RouterJudger with given pg
+        # Test Case 2: remote judger with given pg
         cpu_cfg = CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1)
         pg = AutoCPUWorkers.build_placement_group(cpu_cfg)
         ray.get(pg.ready())
@@ -96,7 +96,7 @@ class TestJudgerController(unittest.TestCase):
         self.assertEqual(res2.reward["score"], 1.0)
         del native_judger_actors
 
-        # Test Case 3: RouterJudger + 一批数据的分数是否正确
+        # Test Case 3: JudgerPool + 一批数据的分数是否正确
         judger_router = gsm8k_judger_config.build(pg)
         states, history_reward = construct_gsm8k_judger_data(VERL_ROLLOUT_DATA_PATH)
         rollout_states = asyncio.run(self._judger_batch(judger_router, states))
@@ -105,7 +105,7 @@ class TestJudgerController(unittest.TestCase):
         self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
         
     def test_dapo_batch_judge_score(self):
-        # 测试dapo judger + 1个实例 + RouterJudger的评判分数是否正确
+        # 测试 dapo judger + 1 个实例池 的评判分数是否正确
         from xtuner.v1.rl.judger.dapo_math import DapoMathJudgerConfig
         from xtuner.v1.utils.rl_test_utils import get_eos_token
         from transformers import AutoTokenizer
@@ -116,8 +116,8 @@ class TestJudgerController(unittest.TestCase):
         eos_token_str = tokenizer.convert_ids_to_tokens(eos_token)
         # 定义 Judger Config
         config = DapoMathJudgerConfig(
-            judger_type="router",
             judger_name="dapo_math",
+            num_ray_actors=1,
             eos_token=eos_token_str,
             enable_overlong_buffer=True,
             max_response_len=32768,
@@ -132,9 +132,9 @@ class TestJudgerController(unittest.TestCase):
         self.assertEqual(round(np.mean(rewards), 4), round(expected_avg_score, 4))
 
     def test_geo_batch_judge_score(self):
-        # 测试geo judger + 4个实例 + RouterJudger的评判分数是否正确
+        # 测试 geo judger + 4 个实例池的评判分数是否正确
         from xtuner.v1.rl.judger.geo3k import GEO3KJudgerConfig
-        config = GEO3KJudgerConfig(judger_name="geo3k", judger_type="router", num_ray_actors=4)
+        config = GEO3KJudgerConfig(judger_name="geo3k", num_ray_actors=4)
         states, history_reward = construct_geo3k_dapo_judger_data(GEO_ROLLOUT_DATA_PATH)
         router = config.build()
         rollout_states = asyncio.run(self._judger_batch(router, states))
@@ -148,8 +148,16 @@ class TestJudgerController(unittest.TestCase):
         import time
         from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 
-        gsm8k_config_1 = GSM8KJudgerConfig(judger_name="openai/gsm8k_1", judger_type="router", num_ray_actors=2, num_cpus_per_actor=1)
-        gsm8k_config_2 = GSM8KJudgerConfig(judger_name="openai/gsm8k_2", judger_type="router", num_ray_actors=8, num_cpus_per_actor=2)
+        gsm8k_config_1 = GSM8KJudgerConfig(
+            judger_name="openai/gsm8k_1",
+            num_ray_actors=2,
+            num_cpus_per_actor=1,
+        )
+        gsm8k_config_2 = GSM8KJudgerConfig(
+            judger_name="openai/gsm8k_2",
+            num_ray_actors=8,
+            num_cpus_per_actor=2,
+        )
 
         gsm8k_router_1 = gsm8k_config_1.build()
         gsm8k_router_2 = gsm8k_config_2.build() 
@@ -180,6 +188,29 @@ class TestJudgerController(unittest.TestCase):
             self.assertEqual(res.reward["score"], 1.0)
         finally:
             server.stop()
+
+    def test_multi_judger_config(self):
+        from xtuner.v1.rl.judger import JudgerConfig, MultiJudgerConfig
+
+        def reward_a(response, label, extra_info):
+            return {"score": 1.0, "source": "a"}
+
+        def reward_b(response, label, extra_info):
+            return {"score": 0.25, "source": "b"}
+
+        judger_config = MultiJudgerConfig(
+            branches={
+                "correctness": JudgerConfig(judger_name="correctness", reward_handler=reward_a),
+                "format": JudgerConfig(judger_name="format", reward_handler=reward_b),
+            },
+            select_fn=lambda state, branches: ["correctness", "format"],
+        )
+
+        judger = judger_config.build()
+        rollout_state = asyncio.run(judger.judge(FAKE_JUDGER_INPUT_ITEM.model_copy(deep=True)))
+
+        self.assertEqual(rollout_state.reward["correctness"], 1.0)
+        self.assertEqual(rollout_state.reward["format"], 0.25)
 
 if __name__ == "__main__":
     unittest.main()
