@@ -1,11 +1,19 @@
 from ray.util.placement_group import PlacementGroup
 
-from .dispatch import DispatchJudger, JudgerConfigLike, MultiJudgerConfig, default_merge_fn
+from .composed import ComposedJudger, ComposedJudgerConfig, JudgerConfigLike, default_merge_fn
 from .native import Judger, JudgerConfig, JudgerPool
 
 
+#
+# Use ``JudgerConfig`` when one sample only needs one concrete judger implementation:
+# one reward handler, one judger_name, and one execution mode (local or Ray actors).
+#
+# Use ``ComposedJudgerConfig`` when one sample may need to be routed to different child
+# judgers by ``select_fn``, or when you want to run multiple child judgers and merge their
+# outputs with ``merge_fn``.
+#
 def build_judger(config: JudgerConfigLike, pg: PlacementGroup | None = None, start_bundle_idx: int = 0) -> Judger:
-    if isinstance(config, MultiJudgerConfig):
+    if isinstance(config, ComposedJudgerConfig):
         return _build_composite_judger(config, pg=pg, start_bundle_idx=start_bundle_idx)
     return _build_replicated_judger(config, pg=pg, start_bundle_idx=start_bundle_idx)
 
@@ -22,7 +30,7 @@ def _build_replicated_judger(config: JudgerConfig, pg: PlacementGroup | None, st
 
 
 def _build_composite_judger(
-    config: MultiJudgerConfig,
+    config: ComposedJudgerConfig,
     pg: PlacementGroup | None,
     start_bundle_idx: int,
 ) -> Judger:
@@ -31,7 +39,7 @@ def _build_composite_judger(
     for key, branch_config in config.branches.items():
         branches[key] = build_judger(branch_config, pg=pg, start_bundle_idx=bundle_idx)
         bundle_idx += branch_config.get_num_placement_group_bundles()
-    return DispatchJudger(
+    return ComposedJudger(
         branches=branches,
         select_fn=config.select_fn,
         merge_fn=config.merge_fn or default_merge_fn,

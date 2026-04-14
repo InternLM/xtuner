@@ -189,8 +189,8 @@ class TestJudgerController(unittest.TestCase):
         finally:
             server.stop()
 
-    def test_multi_judger_config(self):
-        from xtuner.v1.rl.judger import JudgerConfig, MultiJudgerConfig
+    def test_composed_judger_config(self):
+        from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig
 
         def reward_a(response, label, extra_info):
             return {"score": 1.0, "source": "a"}
@@ -198,7 +198,7 @@ class TestJudgerController(unittest.TestCase):
         def reward_b(response, label, extra_info):
             return {"score": 0.25, "source": "b"}
 
-        judger_config = MultiJudgerConfig(
+        judger_config = ComposedJudgerConfig(
             branches={
                 "correctness": JudgerConfig(judger_name="correctness", reward_handler=reward_a),
                 "format": JudgerConfig(judger_name="format", reward_handler=reward_b),

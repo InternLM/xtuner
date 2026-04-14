@@ -1,10 +1,10 @@
-from .dapo_math import DapoMathJudgerConfig
-from .dispatch import (
-    DispatchJudger,
-    MultiJudgerConfig,
+from .composed import (
+    ComposedJudger,
+    ComposedJudgerConfig,
     default_merge_fn,
     default_select_fn,
 )
+from .dapo_math import DapoMathJudgerConfig
 from .factory import (
     build_judger,
 )

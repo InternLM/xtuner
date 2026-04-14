@@ -16,7 +16,7 @@ JudgerMergeFn: TypeAlias = Callable[[RolloutState, dict[str, RolloutState]], Rol
 
 
 def default_select_fn(rollout_state: RolloutState, branches: dict[str, Judger]) -> SelectedJudgerKeys:
-    """Default branch selector for ``MultiJudgerConfig``.
+    """Default branch selector for ``ComposedJudgerConfig``.
 
     Selection order is intentionally simple:
     1. If ``rollout_state.data_source`` is a string and matches a branch key, use it.
@@ -33,11 +33,11 @@ def default_select_fn(rollout_state: RolloutState, branches: dict[str, Judger]) 
 
 
 def default_merge_fn(original: RolloutState, judged: dict[str, RolloutState]) -> RolloutState:
-    """Default merger for ``MultiJudgerConfig``.
+    """Default merger for ``ComposedJudgerConfig``.
 
     This merger intentionally does not combine multiple judger scores into a single aggregated value.
     It writes the merged reward as ``{branch_name: score}``, where ``branch_name`` is the selected
-    key from ``MultiJudgerConfig.branches`` and ``score`` is taken from each child judger's
+    key from ``ComposedJudgerConfig.branches`` and ``score`` is taken from each child judger's
     ``reward["score"]``.
 
     Users who need weighted sums, richer reward payloads, or custom post-processing should provide
@@ -54,7 +54,7 @@ def default_merge_fn(original: RolloutState, judged: dict[str, RolloutState]) ->
     return merged
 
 
-class DispatchJudger(Judger):
+class ComposedJudger(Judger):
     def __init__(
         self,
         branches: dict[str, Judger],
@@ -63,7 +63,7 @@ class DispatchJudger(Judger):
         default_key: str | None = "default",
     ):
         if not branches:
-            raise ValueError("DispatchJudger requires at least one branch.")
+            raise ValueError("ComposedJudger requires at least one branch.")
         self.branches = branches
         self.select_fn = select_fn
         self.merge_fn = merge_fn
@@ -85,7 +85,7 @@ class DispatchJudger(Judger):
             if len(self.branches) == 1:
                 return [next(iter(self.branches))]
             raise KeyError(
-                f"DispatchJudger could not select a branch for task_name={rollout_state.task_name!r}, "
+                f"ComposedJudger could not select a branch for task_name={rollout_state.task_name!r}, "
                 f"data_source={rollout_state.data_source!r}, available={sorted(self.branches)}"
             )
         return selected_keys
@@ -101,7 +101,7 @@ class DispatchJudger(Judger):
         return self.merge_fn(rollout_state, judged)
 
 
-class MultiJudgerConfig(BaseModel):
+class ComposedJudgerConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     branches: dict[str, JudgerConfigLike]
@@ -123,7 +123,6 @@ class MultiJudgerConfig(BaseModel):
         return build_judger(self, pg=pg, start_bundle_idx=start_bundle_idx)
 
 
-JudgerConfigLike: TypeAlias = JudgerConfig | MultiJudgerConfig
+JudgerConfigLike: TypeAlias = JudgerConfig | ComposedJudgerConfig
 
-
-MultiJudgerConfig.model_rebuild()
+ComposedJudgerConfig.model_rebuild()

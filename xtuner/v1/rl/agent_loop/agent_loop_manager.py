@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto import RolloutState, Status
-from xtuner.v1.rl.judger import JudgerConfig, MultiJudgerConfig, build_judger
+from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController, continue_generation, pause_generation
 from xtuner.v1.rl.utils import asyncio_run
@@ -137,7 +137,7 @@ class TaskSpecConfig(BaseModel):
     task_name: str
     weight: float = Field(default=1.0, ge=0.0)
     agent_loop_config: AgentLoopConfig
-    judger_config: JudgerConfig | MultiJudgerConfig | None = None
+    judger_config: JudgerConfig | ComposedJudgerConfig | None = None
     produce_strategy_config: ProduceStrategyConfig = SyncProduceStrategyConfig()
     sampler_config: SamplerConfig
 
