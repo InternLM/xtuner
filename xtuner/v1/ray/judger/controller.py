@@ -138,6 +138,9 @@ class JudgerController:
             self.reward_judger.append(judger)
             self.reward_judger_names.append(config.judger_name)
             self.judger_instance_count += len(judger)
+        self._abort_on_pause_mask: list[bool] = [
+            cfg.abort_on_pause for cfg in self.judger_config.reward_judger_configs
+        ]
         self.enable_weighted_judgers = (
             False if len(self.reward_judger) == 1 else self.judger_config.enable_weighted_judgers
         )
@@ -268,3 +271,27 @@ class JudgerController:
         if input_type_is_list is False:
             return judger_response_item[0]
         return judger_response_item
+
+    async def abort(self):
+        """Abort running judger requests whose config has
+        ``abort_on_pause=True``."""
+        tasks = []
+        for idx, judger_group in enumerate(self.reward_judger):
+            if not self._abort_on_pause_mask[idx]:
+                continue
+            for actor in judger_group:
+                tasks.append(actor.abort.remote())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def restart_judger(self):
+        """Clear abort state on judger actors whose config has
+        ``abort_on_pause=True``."""
+        tasks = []
+        for idx, judger_group in enumerate(self.reward_judger):
+            if not self._abort_on_pause_mask[idx]:
+                continue
+            for actor in judger_group:
+                tasks.append(actor.restart.remote())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)

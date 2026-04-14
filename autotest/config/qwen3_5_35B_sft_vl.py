@@ -18,7 +18,7 @@ moe_cfg = Qwen3_5_VLMoE35BA3Config()
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
-    torch_compile=True,
+    torch_compile=False,
     cpu_offload=False,
 )
 

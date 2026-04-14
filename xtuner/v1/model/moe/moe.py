@@ -480,7 +480,7 @@ class MoE(BaseModel):
                         h2d_stream=self.offload_stream,
                         d2h_stream=self.offload_stream,
                         block_idx=layer_idx - self.config.first_k_dense_replace,
-                        depth=len(self.layers) - self.config.first_k_dense_replace,
+                        group="text",
                         custom_check_fn=lambda x: x.data_ptr()
                         in [hidden_states.data_ptr() for hidden_states in hidden_states_list],
                         prefetch=True,
@@ -648,7 +648,7 @@ class MoE(BaseModel):
                         h2d_stream=self.offload_stream,
                         d2h_stream=self.offload_stream,
                         block_idx=int(idx),
-                        depth=len(self.layers),
+                        group="text",
                         custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
                     ):
                         layer_results = decoder_layer(
