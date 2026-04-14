@@ -38,6 +38,8 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         generate_handler,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str,
         default_model_name: str | None = None,
+        context_length: int | None = None,
+        capture_path: str | None = None,
         trace_store_max_entries: int = 10000,
     ):
         if isinstance(tokenizer, str):
@@ -45,9 +47,11 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         super().__init__(
             generate_handler,
             tokenizer=tokenizer,
+            capture_path=capture_path,
             trace_store_max_entries=trace_store_max_entries,
         )
         self._default_model_name = default_model_name
+        self._context_length = context_length
 
     async def chat(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         return await self.handle_request(request)
@@ -61,27 +65,32 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
             )
 
     def request_to_rollout_state(self, request: ChatCompletionRequest) -> RolloutState:
+        normalized_messages = normalize_trace_payload(request.messages)
         tokenizer_tools = self._normalize_tools_for_tokenizer(request.tools)
         normalized_tool_choice = normalize_trace_payload(request.tool_choice)
         prompt_ids = None
         if self._tokenizer:
             raw_prompt_ids = self._tokenizer.apply_chat_template(
-                request.messages,
+                normalized_messages,
                 tools=tokenizer_tools,
                 tokenize=True,
                 add_generation_prompt=True,
             )
-            prompt_ids = raw_prompt_ids["input_ids"] if isinstance(raw_prompt_ids, dict) else list(raw_prompt_ids)
+            if hasattr(raw_prompt_ids, "get"):
+                prompt_ids = raw_prompt_ids.get("input_ids")
+            else:
+                prompt_ids = list(raw_prompt_ids)
+        max_tokens = self._fit_max_tokens_to_context(prompt_ids=prompt_ids, requested_max_tokens=request.max_tokens)
 
         return RolloutState(
             uid=uuid4().int,
-            message=request.messages,
+            message=normalized_messages,
             prompt_ids=prompt_ids,
             tokens=prompt_ids,
             session_uid=getattr(request, "session_uid", getattr(request, "session_id", None)),
             tools=tokenizer_tools,
             tool_choice=normalized_tool_choice,
-            sample_params=self._build_sample_params(request),
+            sample_params=self._build_sample_params(request, max_tokens=max_tokens),
         )
 
     def raise_for_failed_response(self, response: RolloutState, request_id: str) -> None:
@@ -165,7 +174,7 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
             return None
         return normalize_trace_payload(tools)
 
-    def _build_sample_params(self, request: ChatCompletionRequest) -> SampleParams:
+    def _build_sample_params(self, request: ChatCompletionRequest, max_tokens: int | None = None) -> SampleParams:
         stops = [] if request.stop is None else [request.stop] if isinstance(request.stop, str) else request.stop
         kwargs = {
             "stops": stops,
@@ -175,7 +184,7 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
                     "temperature": request.temperature,
                     "top_p": request.top_p,
                     "n": request.n,
-                    "max_tokens": request.max_tokens,
+                    "max_tokens": max_tokens if max_tokens is not None else request.max_tokens,
                     "presence_penalty": request.presence_penalty,
                     "frequency_penalty": request.frequency_penalty,
                 }.items()
@@ -183,6 +192,22 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
             },
         }
         return SampleParams(**kwargs)
+
+    def _fit_max_tokens_to_context(self, prompt_ids: list[int] | None, requested_max_tokens: int | None) -> int | None:
+        if self._context_length is None or prompt_ids is None or requested_max_tokens is None:
+            return requested_max_tokens
+        prompt_tokens = len(prompt_ids)
+        available_completion_tokens = self._context_length - prompt_tokens
+        if available_completion_tokens <= 0:
+            raise OpenAIChatAdapterError(
+                (
+                    f"Input is too long for this model deployment: prompt_tokens={prompt_tokens}, "
+                    f"context_length={self._context_length}."
+                ),
+                "invalid_request_error",
+                "context_length_exceeded",
+            )
+        return min(requested_max_tokens, available_completion_tokens)
 
 
 def bind_openai_chat_interface(
@@ -195,6 +220,8 @@ def bind_openai_chat_interface(
             rollout_controller.generate,
             tokenizer=tokenizer,
             default_model_name=default_model_name,
+            context_length=getattr(rollout_controller.config, "context_length", None),
+            capture_path=str(getattr(rollout_controller.config, "worker_log_dir", ".")) + "/gateway_capture.jsonl",
         )
     rollout_controller.chat = rollout_controller.openai_chat_adapter.chat
     return rollout_controller
