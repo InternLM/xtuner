@@ -253,8 +253,9 @@ RUN \
    pyproject_hooks==1.2.0 \
    huggingface_hub==0.36.2 \
    torch_memory_saver==0.0.9 \
+   diskcache==5.6.3 distro==1.9.0 jiter==0.13.0 \
    llguidance==0.7.11 blobfile==3.0.0 \
-   pybase64 orjson uvloop setproctitle msgspec \
+   pybase64 orjson uvloop setproctitle msgspec partial_json_parser \
    compressed_tensors python-multipart \
    hf_transfer interegular --no-cache-dir --no-deps -i ${DEFAULT_PYPI_URL}
 
