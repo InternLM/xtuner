@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from xtuner.v1.data_proto import SequenceContext
 
+from .config import MTPConfig
 from .mtp_layer import MTPLayer
 from .utils import roll_sequence_context
 
@@ -25,6 +26,7 @@ class MTPBlock(nn.Module):
     the predictions of shallower layers.
 
     Args:
+        mtp_config (MTPConfig): MTP configuration.
         mtp_layers (list[MTPLayer]): List of MTP layers. Each layer should be a
             fully constructed MTPLayer instance. The number of layers determines
             the prediction depth (D).
@@ -43,7 +45,7 @@ class MTPBlock(nn.Module):
         ...     mtp_layers.append(mtp_layer)
         >>>
         >>> # Create MTP block
-        >>> mtp_block = MTPBlock(mtp_layers=mtp_layers)
+        >>> mtp_block = MTPBlock(mtp_config=config, mtp_layers=mtp_layers)
         >>>
         >>> # Forward pass
         >>> outputs = mtp_block(
@@ -58,13 +60,17 @@ class MTPBlock(nn.Module):
         >>> # outputs[1]: predictions for i+2
     """
 
-    def __init__(self, *, mtp_layers: list[MTPLayer]):
+    def __init__(self, *, mtp_config: MTPConfig, mtp_layers: list[MTPLayer]):
         super().__init__()
         if not mtp_layers:
             raise ValueError("mtp_layers cannot be empty")
 
+        if mtp_config.share_weights and len(mtp_layers) != 1:
+            raise ValueError(f"share_weights mode requires exactly 1 MTP layer, got {len(mtp_layers)}")
+        if not mtp_config.share_weights and len(mtp_layers) != mtp_config.num_layers:
+            raise ValueError(f"Expected {mtp_config.num_layers} MTP layers, but got {len(mtp_layers)}")
+        self.mtp_config = mtp_config
         self.layers = nn.ModuleList(mtp_layers)
-        self.num_layers = len(mtp_layers)
 
     def forward(
         self,
@@ -97,7 +103,9 @@ class MTPBlock(nn.Module):
         current_hidden_states = hidden_states
         current_seq_ctx = seq_ctx
 
-        for layer in self.layers:
+        num_steps = self.mtp_config.num_layers
+        for step in range(num_steps):
+            layer = self.layers[0] if self.mtp_config.share_weights else self.layers[step]
             # Roll sequence context to get future tokens
             # This shifts each packed sequence independently, respecting boundaries
             current_seq_ctx = roll_sequence_context(current_seq_ctx, shifts=-1)

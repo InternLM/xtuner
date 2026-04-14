@@ -20,6 +20,9 @@ class MTPConfig(BaseModel):
     Args:
         num_layers (int): Number of MTP layers (prediction depths). Each layer
             predicts tokens at increasing future positions (i+1, i+2, ..., i+D).
+        share_weights (bool): Whether to share the weights of the MTP layers.
+            If True, the weights of the MTP layers are shared across all layers.
+            Default: False.
         loss_scaling_factor (float): Scaling factor for MTP loss. The total MTP loss
             is computed as the average of losses across all depths, multiplied by
             this factor. Default: 0.1.
@@ -30,6 +33,7 @@ class MTPConfig(BaseModel):
         ...     ...,
         ...     mtp_config=MTPConfig(
         ...         num_layers=2,
+        ...         share_weights=True,
         ...         loss_scaling_factor=0.1,
         ...     ),
         ... )
@@ -38,4 +42,5 @@ class MTPConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     num_layers: Annotated[int, Parameter(group="model")]
+    share_weights: Annotated[bool, Parameter(group="model")] = False
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1
