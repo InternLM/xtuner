@@ -14,7 +14,7 @@ on:
 env:
   WORKSPACE_PREFIX: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-5)
   WORKSPACE_PREFIX_SHORT: $(echo $GITHUB_WORKSPACE |cut -d '/' -f 1-3)
-  IMAGE: ailab-llmrazor/xtuner_tmp:pt29_20260413_5acdbdb
+  IMAGE: ailab-llmrazor/xtuner_tmp:pt29_20260414_c8f6fa1
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
