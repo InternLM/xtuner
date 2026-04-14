@@ -118,7 +118,6 @@ def _build_agent_loop_manager(
     )
     manager = manager_cfg.build(
         rollout_controller=rollout_ctl,
-        judger=None,
         tokenizer=tokenizer,
         replay_buffer=replay_buffer,
         logger=None,

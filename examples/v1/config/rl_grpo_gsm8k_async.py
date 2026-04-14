@@ -139,6 +139,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
+        judger_config=judger_config,
         produce_strategy_config=produce_strategy_config,
         sampler_config=sampler_config,
     ),
@@ -174,6 +175,7 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="eval_task",
         agent_loop_config=eval_agent_loop_config,
+        judger_config=judger_config,
         sampler_config=eval_sampler_config,
     ),
 )
@@ -186,7 +188,6 @@ trainer = RLColocateTrainerConfig(
     resources=resources,
     train_worker_cfg=train_worker_cfg,  # TODO: uniform naming of cfg and config
     rollout_config=rollout_config,
-    judger_config=judger_config,
     tokenizer_path=model_path,
     replay_buffer_config=AsyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,

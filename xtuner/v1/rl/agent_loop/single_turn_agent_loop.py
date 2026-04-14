@@ -1,12 +1,13 @@
 from xtuner.v1.data_proto import RolloutState, SampleParams, Status
+from xtuner.v1.rl.judger import judge_sample
 from xtuner.v1.rl.rollout import RolloutController
 
-from .agent_loop import AgentLoop, AgentLoopConfig
+from .agent_loop import AgentLoop, AgentLoopConfig, JudgerSpec
 from .utils import PartialRolloutHandler
 
 
 class SingleTurnAgentLoopConfig(AgentLoopConfig):
-    def build(self, rollout_controller, judger=None, logger=None) -> "SingleTurnAgentLoop":
+    def build_local(self, rollout_controller, judger: JudgerSpec = None, logger=None) -> "SingleTurnAgentLoop":
         return SingleTurnAgentLoop(
             rollout_ctl=rollout_controller,
             sample_params=self.sample_params,
@@ -18,7 +19,12 @@ class SingleTurnAgentLoopConfig(AgentLoopConfig):
 
 class SingleTurnAgentLoop(AgentLoop):
     def __init__(
-        self, rollout_ctl: RolloutController, sample_params: SampleParams, hf_checkpoint: str, judger=None, logger=None
+        self,
+        rollout_ctl: RolloutController,
+        sample_params: SampleParams,
+        hf_checkpoint: str,
+        judger: JudgerSpec = None,
+        logger=None,
     ):
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
         self.max_tokens = self.sample_params.max_tokens
@@ -40,5 +46,5 @@ class SingleTurnAgentLoop(AgentLoop):
         # 非 COMPLETED 状态（如被截断、放弃等）直接早退，不触发打分
         if rollout_state.status != Status.COMPLETED:
             return rollout_state
-        rollout_state = await self.judge_sample(rollout_state)
+        rollout_state = await judge_sample(self.judger, rollout_state)
         return rollout_state
