@@ -298,6 +298,23 @@ def qwen3_vl_sft_collator(
             assert position_ids.shape[-1] == seq_ctx.input_ids.shape[-1], (
                 f"position_ids length {position_ids.shape[-1]} != input_ids length {seq_ctx.input_ids.shape[-1]}"
             )
+
+        ts_values = [i["time_series_signals"] for i in instance if "time_series_signals" in i]
+        ts_lens = [i["ts_len"] for i in instance if "ts_len" in i]
+        ts_sr = [i["ts_sr"] for i in instance if "ts_sr" in i]
+        if ts_values:
+            ts_lens = torch.tensor(ts_lens)
+            sr = torch.tensor(ts_sr)
+            time_series_signals = ts_values
+        else:
+            time_series_signals = None
+            ts_lens = None
+            sr = None
+
+        seq_ctx.ts_lens = ts_lens
+        seq_ctx.ts_sr = sr
+        seq_ctx.time_series_signals = time_series_signals
+
         ret.append(
             {
                 "seq_ctx": seq_ctx,

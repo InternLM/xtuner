@@ -55,6 +55,10 @@ class SequenceContext:
     _raw_inputs_embeds: torch.FloatTensor | None
     _shard_start: int
     _shard_size: int
+    # time series
+    time_series_signals: list[torch.FloatTensor] | torch.FloatTensor | None = None
+    ts_lens: torch.Tensor | None = None
+    ts_sr: torch.Tensor | None = None
 
     def __init__(
         self,
@@ -82,9 +86,17 @@ class SequenceContext:
         raw_inputs_embeds: torch.FloatTensor | None = None,
         shard_start: int = 0,
         shard_size: int = 0,
+        # time series
+        time_series_signals: torch.FloatTensor | None = None,
+        ts_lens: torch.Tensor | None = None,
+        ts_sr: torch.Tensor | None = None,
     ):
         # Only to distinguish parameters accepted by the constructor from attributes. For example, for `max_length_q`,
         # the argument can be an int, but as an attribute it can only be a tensor
+        self.time_series_signals = time_series_signals
+        self.ts_lens = ts_lens
+        self.ts_sr = ts_sr
+
         self.input_ids = input_ids
         self.cu_seq_lens_q = cu_seq_lens_q
         self.cu_seq_lens_k = cu_seq_lens_k
@@ -498,6 +510,16 @@ class SequenceContext:
 
         if self.rollout_routed_experts is not None and hasattr(self.rollout_routed_experts, "to"):
             self.rollout_routed_experts = self.rollout_routed_experts.to(device)  # type: ignore
+
+        if self.time_series_signals is not None:
+            if isinstance(self.time_series_signals, list):
+                self.time_series_signals = [ts.to(device) for ts in self.time_series_signals]  # type: ignore
+            else:
+                self.time_series_signals = self.time_series_signals.to(device)  # type: ignore
+        if self.ts_lens is not None and hasattr(self.ts_lens, "to"):
+            self.ts_lens = self.ts_lens.to(device)  # type: ignore
+        if self.ts_sr is not None and hasattr(self.ts_sr, "to"):
+            self.ts_sr = self.ts_sr.to(device)  # type: ignore
 
         self.device = device
 
