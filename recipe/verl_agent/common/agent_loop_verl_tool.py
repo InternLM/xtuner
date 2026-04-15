@@ -1,4 +1,4 @@
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from omegaconf import DictConfig
 from verl.experimental.agent_loop.agent_loop import AgentLoopOutput, DictConfigWrap
@@ -7,7 +7,7 @@ from verl.utils.dataset.rl_dataset import get_dataset_class
 from verl.workers.rollout.replica import TokenOutput
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
-from xtuner.v1.rl.judger import NativeJudger, RouterJudger
+from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
 
@@ -18,7 +18,7 @@ class VerlToolAgentLoopConfig(AgentLoopConfig):
     def build(
         self,
         rollout_controller: RolloutControllerProxy,
-        judger: Callable | NativeJudger | RouterJudger | None = None,
+        judger: Judger | None = None,
         logger=None,
     ) -> "VerlToolAgentLoop":
         verl_tool_agent_loop = VerlToolAgentLoop(
@@ -85,7 +85,7 @@ class VerlToolAgentLoop(AgentLoop):
         sample_params: SampleParams,
         hf_checkpoint: str,
         config: DictConfig,
-        judger: Callable | NativeJudger | RouterJudger | None = None,
+        judger: Judger | None = None,
         logger=None,
     ):
         super().__init__(rollout_controller, sample_params, hf_checkpoint, judger, logger)
@@ -148,6 +148,7 @@ class VerlToolAgentLoop(AgentLoop):
         rollout_state.extra_fields["raw_prompt"] = self.tokenizer.decode(rollout_state.prompt_ids)
 
         # judge rollout_state
-        rollout_state = await self.judge_sample(rollout_state)
+        if self.judger is not None:
+            rollout_state = await self.judger.judge(rollout_state)
 
         return rollout_state

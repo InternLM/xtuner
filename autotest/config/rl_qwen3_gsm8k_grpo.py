@@ -19,7 +19,7 @@ from xtuner.v1.rl.agent_loop import (
     SyncProduceStrategyConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
+from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
@@ -70,7 +70,7 @@ rollout_config = RolloutConfig(
 )
 
 # 3. judger
-judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
+judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)

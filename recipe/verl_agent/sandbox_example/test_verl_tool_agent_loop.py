@@ -20,7 +20,7 @@ from recipe.verl_agent.common.agent_loop_verl_tool import VerlToolAgentLoopConfi
 from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams
 from xtuner.v1.rl.rollout import RolloutController
-from xtuner.v1.rl.judger.gsm8k import GSM8KRouterJudgerConfig
+from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.utils import create_task
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -250,7 +250,7 @@ class TestVerlToolAgentLoop(unittest.IsolatedAsyncioTestCase):
             context_length=self.context_length,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
+        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
 
         training_sample_params = SampleParams(
             max_tokens=self.max_response_length,
@@ -323,7 +323,7 @@ class TestVerlToolAgentLoop(unittest.IsolatedAsyncioTestCase):
             context_length=self.context_length,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
+        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
 
         training_sample_params = SampleParams(
             max_tokens=self.max_response_length,

@@ -9,7 +9,7 @@ from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto import RolloutState, SampleParams
-from xtuner.v1.rl.judger import JudgerSpec
+from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import CPUActorLauncher, create_task
 from xtuner.v1.utils import get_logger, ray_method
@@ -35,7 +35,7 @@ class AgentLoopConfig(ABC, BaseModel):
             logger.warning("num_cpus and cpu_memory are ignored when AgentLoop runs in local mode.")
         return self
 
-    def build(self, rollout_controller, judger: JudgerSpec = None, logger=None) -> AgentLoopSpec:
+    def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
         if self.num_ray_actors == 0:
             return self.build_local(
                 rollout_controller=rollout_controller,
@@ -58,7 +58,7 @@ class AgentLoopConfig(ABC, BaseModel):
     def build_local(
         self,
         rollout_controller,
-        judger: JudgerSpec = None,
+        judger: Judger | None = None,
         logger=None,
     ) -> AgentLoop: ...
 
@@ -66,7 +66,7 @@ class AgentLoopConfig(ABC, BaseModel):
         self,
         rollout_controller: RolloutController,
         pg: PlacementGroup | None = None,
-        judger: JudgerSpec = None,
+        judger: Judger | None = None,
         logger=None,
     ) -> RayAgentLoopProxy:
         return cast(
@@ -90,7 +90,7 @@ class AgentLoopConfig(ABC, BaseModel):
         rollout_controller: RolloutController,
         num_actors: int,
         pg: PlacementGroup | None = None,
-        judger: JudgerSpec = None,
+        judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
     ) -> list[RayAgentLoopProxy]:
@@ -115,7 +115,7 @@ class AgentLoopConfig(ABC, BaseModel):
         self,
         rollout_controller: RolloutController,
         pg: PlacementGroup | None = None,
-        judger: JudgerSpec = None,
+        judger: Judger | None = None,
         logger=None,
         start_bundle_idx: int = 0,
     ) -> RouterAgentLoop:
@@ -138,7 +138,7 @@ class AgentLoop(ABC):
         rollout_ctl: RolloutController,
         sample_params: SampleParams,
         hf_checkpoint: str,
-        judger: JudgerSpec = None,
+        judger: Judger | None = None,
         logger=None,
     ) -> None:
         self.rollout_ctl = rollout_ctl
@@ -221,7 +221,7 @@ class AgentLoopActor:
         self,
         agent_loop_config: AgentLoopConfig,
         rollout_controller: RolloutController,
-        judger: JudgerSpec = None,
+        judger: Judger | None = None,
         logger=None,
     ):
         self.agent_loop = agent_loop_config.build_local(

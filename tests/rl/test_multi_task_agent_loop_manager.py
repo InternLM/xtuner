@@ -55,7 +55,6 @@ class _FakeReplayBuffer:
     async def count(self, task_name: str, group_status: Status):
         return self._leftover_counts.get((task_name, group_status), 0)
 
-
 def _fake_agent_loop():
     rollout_ctl = MagicMock()
     rollout_ctl.continue_generation.remote = AsyncMock()

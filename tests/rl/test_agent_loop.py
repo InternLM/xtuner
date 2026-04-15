@@ -82,7 +82,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             context_length=self.context_length,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
+        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
@@ -124,7 +124,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
         judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            judger_type="ray.actor",
+            num_ray_actors=1,
             num_cpus_per_actor=1,
         )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
@@ -168,7 +168,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             context_length=self.context_length,
             worker_log_dir=self.worker_log_dir,
         )
-        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
+        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
