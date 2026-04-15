@@ -67,12 +67,13 @@ eos_token_id = get_eos_token(model_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
 judger_config = DapoMathJudgerConfig(
-    judger_name="dapo_math", 
+    judger_name="dapo_math",
+    num_ray_actors=1,
     eos_token=eos_token_str,
-    enable_overlong_buffer = True, 
-    max_response_len=max_response_length, 
-    overlong_buffer_len=4096, 
-    overlong_penalty_factor=1.0, 
+    enable_overlong_buffer = True,
+    max_response_len=max_response_length,
+    overlong_buffer_len=4096,
+    overlong_penalty_factor=1.0,
     tokenizer=tokenizer)
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
