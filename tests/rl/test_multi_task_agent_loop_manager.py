@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto import Status
-from xtuner.v1.rl.agent_loop import AgentLoopManager, AgentLoopManagerConfig
+from xtuner.v1.rl.agent_loop import AgentLoopManager, AgentLoopManagerConfig, TaskSpecConfig
 from xtuner.v1.rl.agent_loop.manager_base import _TaskRunner
 from xtuner.v1.rl.agent_loop.producer import ProducerTimings
 
@@ -78,14 +78,29 @@ class _FakeReplayBuffer:
             return len(self._rollout_states_by_task.get(task_name, []))
         return self._leftover_counts.get((task_name, group_status), 0)
 
-
 def _fake_agent_loop(rollout_ctl=None):
-    return SimpleNamespace(rollout_ctl=rollout_ctl or SimpleNamespace())
+    if rollout_ctl is None:
+        rollout_ctl = MagicMock()
+        rollout_ctl.continue_generation.remote = AsyncMock()
+        rollout_ctl.pause_generation.remote = AsyncMock()
+        rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+    return SimpleNamespace(rollout_ctl=rollout_ctl)
 
 
 class TestManagerCompatibility(unittest.TestCase):
     def test_agent_loop_manager_config_is_public(self):
         self.assertIsNotNone(AgentLoopManagerConfig)
+
+    def test_manager_config_accepts_single_task_spec(self):
+        task = TaskSpecConfig.model_construct(
+            task_name="single_task",
+            agent_loop_config=MagicMock(),
+            produce_strategy_config=MagicMock(),
+            sampler_config=MagicMock(),
+            weight=1.0,
+        )
+        manager_config = AgentLoopManagerConfig(tasks=task)
+        self.assertEqual(manager_config.tasks.task_name, "single_task")
 
 
 class TestSingleTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
@@ -145,6 +160,72 @@ class TestSingleTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
 
 class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
+    async def test_produce_batch_allocates_by_weight_and_returns_task_sorted_results(self):
+        rollout_ctl = MagicMock()
+        rollout_ctl.continue_generation.remote = AsyncMock()
+        rollout_ctl.pause_generation.remote = AsyncMock()
+        rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+        strategy_a = _FakeProduceStrategy(generate_times_s=[2.0, 2.0])
+        strategy_b = _FakeProduceStrategy(generate_times_s=[1.0, 1.0, 1.0])
+        strategy_c = _FakeProduceStrategy(generate_times_s=[])
+        replay_buffer = _FakeReplayBuffer(
+            rollout_states_by_task={
+                "task_a": [["a-0"], ["a-1"]],
+                "task_b": [["b-0"], ["b-1"], ["b-2"]],
+                "task_c": [],
+            },
+            leftover_counts={
+                ("task_a", Status.COMPLETED): 1,
+                ("task_b", Status.ABORTED): 2,
+            },
+        )
+
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_b",
+                    agent_loop=_fake_agent_loop(rollout_ctl),
+                    produce_strategy=strategy_b,
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(rollout_ctl),
+                    produce_strategy=strategy_a,
+                    sampler=_FakeSampler(),
+                    weight=2.0,
+                    order=1,
+                ),
+                _TaskRunner(
+                    task_name="task_c",
+                    agent_loop=_fake_agent_loop(rollout_ctl),
+                    produce_strategy=strategy_c,
+                    sampler=_FakeSampler(),
+                    weight=0.0,
+                    order=2,
+                ),
+            ],
+            replay_buffer=replay_buffer,
+        )
+
+        result = await manager.produce_batch(batch_size=7, rollout_step=3)
+
+        self.assertEqual(result.task_batch_sizes, {"task_b": 2, "task_a": 5, "task_c": 0})
+        self.assertEqual(strategy_a.calls[0]["batch_size"], 5)
+        self.assertEqual(strategy_b.calls[0]["batch_size"], 2)
+        self.assertEqual(strategy_c.calls, [])
+        self.assertEqual(result.rollout_states, [["b-0"], ["b-1"], ["a-0"], ["a-1"]])
+        self.assertEqual(result.leftover_completed, 1)
+        self.assertEqual(result.leftover_aborted, 2)
+        self.assertEqual(result.leftover_expired, 0)
+        self.assertEqual(result.group_gen_count, 5)
+        self.assertAlmostEqual(result.group_gen_mean_s, 1.4)
+        self.assertIn("task_a", result.task_results)
+        self.assertIn("task_b", result.task_results)
+        self.assertIn("task_c", result.task_results)
+
     async def test_fullasync_produce_batch_allocates_by_weight_and_aggregates_results(self):
         rollout_ctl = SimpleNamespace()
         strategy_b = _FakeProduceStrategy(generate_times_s=[1.0, 1.0, 1.0])

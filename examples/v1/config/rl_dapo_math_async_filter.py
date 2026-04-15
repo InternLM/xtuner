@@ -74,7 +74,7 @@ dapomath_judger_config = DapoMathJudgerConfig(
     overlong_buffer_len=4096, 
     overlong_penalty_factor=1.0, 
     tokenizer=tokenizer)
-judger_config = DapoMathJudgerConfig(judger_name="dapo_math", judger_type="router")
+judger_config = DapoMathJudgerConfig(judger_name="dapo_math", num_ray_actors=1)
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)

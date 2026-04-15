@@ -93,4 +93,4 @@ class JudgerServer:
 class GSM8KRemoteJudgerConfig(JudgerConfig):
     judger_name: str
     reward_handler: str
-    extra_info: dict = {"score": 1, "format_score": 0}
+    extra_info: dict = Field(default_factory=lambda: {"score": 1, "format_score": 0})

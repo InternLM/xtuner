@@ -5,7 +5,6 @@ import time
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict
-
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController, continue_generation

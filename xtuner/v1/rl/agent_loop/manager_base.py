@@ -5,11 +5,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from statistics import median
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto import RolloutState, Status
-from xtuner.v1.rl.judger import JudgerCallable, JudgerConfig, JudgerConfigLike, JudgerSpecConfig
+from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import asyncio_run
@@ -176,18 +176,9 @@ class TaskSpecConfig(BaseModel):
     task_name: str
     weight: float = Field(default=1.0, ge=0.0)
     agent_loop_config: AgentLoopConfig
-    judger_config: JudgerConfig | dict[str, JudgerConfigLike] | JudgerCallable | JudgerSpecConfig | None = None
+    judger_config: JudgerConfig | ComposedJudgerConfig | None = None
     produce_strategy_config: ProduceStrategyConfig = SyncProduceStrategyConfig()
     sampler_config: SamplerConfig
-
-    @field_validator("judger_config", mode="after")
-    @classmethod
-    def _normalize_judger_config(
-        cls, value: JudgerConfig | dict[str, JudgerConfigLike] | JudgerCallable | JudgerSpecConfig | None
-    ) -> JudgerSpecConfig | None:
-        if value is None or isinstance(value, JudgerSpecConfig):
-            return value
-        return JudgerSpecConfig.from_value(value)
 
 
 def build_task_runners(
@@ -213,7 +204,7 @@ def build_task_runners(
 
         agent_loop = task_cfg.agent_loop_config.build(
             rollout_controller=rollout_controller,
-            judger=task_cfg.judger_config.build() if task_cfg.judger_config is not None else None,
+            judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
             logger=logger,
         )
         produce_strategy = task_cfg.produce_strategy_config.build()

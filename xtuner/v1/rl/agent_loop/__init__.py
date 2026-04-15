@@ -1,4 +1,4 @@
-from xtuner.v1.rl.judger import JudgerConfigSpec, JudgerLike, JudgerSpec, JudgerSpecConfig
+from xtuner.v1.rl.judger import ComposedJudgerConfig, Judger, JudgerConfig
 
 from .agent_loop import (
     AgentLoop,
@@ -33,10 +33,9 @@ __all__ = [
     "RayAgentLoop",
     "RayAgentLoopProxy",
     "SingleTurnAgentLoop",
-    "JudgerLike",
-    "JudgerSpec",
-    "JudgerConfigSpec",
-    "JudgerSpecConfig",
+    "Judger",
+    "JudgerConfig",
+    "ComposedJudgerConfig",
     "AgentLoopManagerConfig",
     "AgentLoopManager",
     "TaskSpecConfig",

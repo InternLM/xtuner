@@ -97,6 +97,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
 judger_config = DapoMathJudgerConfig(
     judger_name="dapo_math",
+    num_ray_actors=1,
     eos_token=eos_token_str,
     enable_overlong_buffer=True,
     max_response_len=max_response_length,
