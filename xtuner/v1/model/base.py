@@ -1,3 +1,4 @@
+import importlib
 import json
 import math
 import pydoc
@@ -28,6 +29,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import DTensor, Placement, Replicate, Shard, distribute_tensor
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+from torch.utils import _pytree
 from typing_extensions import NotRequired, Self, TypedDict, overload
 
 from transformers.configuration_utils import PretrainedConfig
@@ -242,6 +244,93 @@ class ModelOutputs(PydanticBaseModel):
     # TODO: Only for avoid BC. Should be removed later.
     def __contains__(self, key):
         return key in self.model_fields_set
+
+    @classmethod
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Automatically register every subclass as a pytree node so that
+        # FSDP can traverse the output tensors and insert pre_backward_hooks.
+        super().__init_subclass__(**kwargs)
+        cls._register_pytree_node()
+
+    @staticmethod
+    def _model_field_names(model_type: type[PydanticBaseModel]) -> list[str]:
+        return list(model_type.model_fields)
+
+    @staticmethod
+    def _flatten_pydantic_model(
+        model: PydanticBaseModel,
+    ) -> tuple[list[Any], tuple[type[PydanticBaseModel], list[str]]]:
+        # Flatten the model into a list of field values (the "leaves") plus a
+        # context tuple that carries enough information to reconstruct it.
+        field_names = ModelOutputs._model_field_names(type(model))
+        children = [getattr(model, field_name) for field_name in field_names]
+        return children, (type(model), field_names)
+
+    @staticmethod
+    def _unflatten_pydantic_model(
+        children: Iterable[Any],
+        context: tuple[type[PydanticBaseModel], list[str]],
+    ) -> PydanticBaseModel:
+        # Reconstruct the model from the (possibly transformed) leaf values.
+        # model_construct is used to bypass Pydantic validation, which is safe
+        # here because the values were produced by the flatten step above.
+        model_type, field_names = context
+        values = dict(zip(field_names, children, strict=True))
+        return model_type.model_construct(**values)
+
+    @staticmethod
+    def _flatten_pydantic_model_with_keys(
+        model: PydanticBaseModel,
+    ) -> tuple[list[tuple[_pytree.KeyEntry, Any]], tuple[type[PydanticBaseModel], list[str]]]:
+        # Same as _flatten_pydantic_model but pairs each leaf with a KeyEntry
+        # so that pytree-aware tools (e.g. torch.export) can emit human-readable
+        # paths like "logits" instead of bare integer indices.
+        field_names = ModelOutputs._model_field_names(type(model))
+        key_children: list[tuple[_pytree.KeyEntry, Any]] = [
+            (_pytree.GetAttrKey(field_name), getattr(model, field_name)) for field_name in field_names
+        ]
+        return key_children, (type(model), field_names)
+
+    @staticmethod
+    def _to_dumpable_context(context: tuple[type[PydanticBaseModel], list[str]]) -> dict[str, Any]:
+        # Serialize the context to a JSON-compatible dict so that the pytree
+        # structure can be saved (e.g. for torch.export / torch.compile cache).
+        model_type, field_names = context
+        return {
+            "module": model_type.__module__,
+            "qualname": model_type.__qualname__,
+            "field_names": field_names,
+        }
+
+    @staticmethod
+    def _from_dumpable_context(context: dict[str, Any]) -> tuple[type[PydanticBaseModel], list[str]]:
+        # Deserialize the context produced by _to_dumpable_context by
+        # dynamically importing the model class from its module + qualname.
+        module = importlib.import_module(context["module"])
+        model_type: Any = module
+        for attr in context["qualname"].split("."):
+            model_type = getattr(model_type, attr)
+        return model_type, list(context["field_names"])
+
+    @classmethod
+    def _register_pytree_node(cls) -> None:
+        # Guard against double-registration (e.g. when the module is reloaded).
+        if cls in _pytree.SUPPORTED_NODES:
+            return
+
+        _pytree.register_pytree_node(
+            cls,
+            cls._flatten_pydantic_model,
+            cls._unflatten_pydantic_model,
+            serialized_type_name=f"{cls.__module__}.{cls.__qualname__}",
+            to_dumpable_context=cls._to_dumpable_context,
+            from_dumpable_context=cls._from_dumpable_context,
+            flatten_with_keys_fn=cls._flatten_pydantic_model_with_keys,
+        )
+
+
+# Register the base class itself; subclasses are handled by __init_subclass__.
+ModelOutputs._register_pytree_node()
 
 
 def _is_float8_available():
