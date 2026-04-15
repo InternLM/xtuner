@@ -74,7 +74,7 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
         )
 
         # Judger
-        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
+        judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
 
         # Train worker
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)

@@ -65,7 +65,7 @@ rollout_config = RolloutConfig(
 )
 
 # 3. judger
-judger_config = GEO3KJudgerConfig(judger_type="router")
+judger_config = GEO3KJudgerConfig(num_ray_actors=1)
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)

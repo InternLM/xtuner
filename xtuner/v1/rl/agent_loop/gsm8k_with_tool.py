@@ -6,8 +6,8 @@ from typing import cast
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto import RolloutState, SampleParams
-from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig, JudgerSpec
-from xtuner.v1.rl.judger import judge_sample
+from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
+from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.utils import get_logger
 
@@ -18,7 +18,7 @@ logger = get_logger()
 class GSM8KToolAgentLoopConfig(AgentLoopConfig):
     max_turns: int
 
-    def build_local(self, rollout_controller, judger: JudgerSpec = None, logger=None) -> "GSM8KToolAgentLoop":
+    def build_local(self, rollout_controller, judger: Judger | None = None, logger=None) -> "GSM8KToolAgentLoop":
         return GSM8KToolAgentLoop(
             max_turns=self.max_turns,
             rollout_ctl=rollout_controller,
@@ -42,7 +42,7 @@ class GSM8KToolAgentLoop(AgentLoop):
         rollout_ctl: RolloutController,
         hf_checkpoint: str,
         sample_params: SampleParams,
-        judger: JudgerSpec = None,
+        judger: Judger | None = None,
     ):
         super().__init__(
             rollout_ctl=rollout_ctl, hf_checkpoint=hf_checkpoint, sample_params=sample_params, judger=judger
@@ -152,5 +152,6 @@ class GSM8KToolAgentLoop(AgentLoop):
         assert len(rollout_state.response_ids) == len(rollout_state.response_mask) == len(rollout_state.logprobs), (
             f"{len(rollout_state.response_ids)} vs {len(rollout_state.response_mask)} vs {len(rollout_state.logprobs)}"
         )
-        rollout_state = await judge_sample(self.judger, rollout_state)
+        if self.judger is not None:
+            rollout_state = await self.judger.judge(rollout_state)
         return rollout_state
