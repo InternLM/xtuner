@@ -589,7 +589,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         ray.shutdown()
 
-    async def test_3_1_staleness_threshold_1_marks_expired(self):
+    async def test_3_1_tail_batch_stale_threshold_1_marks_expired(self):
         """3.1a: tail_batch_stale_threshold=1 — 需要 3 轮才能在 buffer 中观察到 EXPIRED。
 
         staleness 积累路径（enable_partial_rollout=True）：

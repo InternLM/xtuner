@@ -14,7 +14,7 @@ Common optional env vars:
     TRAIN_BATCH_SIZE=64
     TOTAL_TRAIN_STEPS=4
     TRIGGER_PARAMETER_SYNC_STEP=1
-    STALENESS_THRESHOLD=0.0
+    OVER_SAMPLE_THRESHOLD=0.0
     PARTIAL_ROLLOUT=0
     GSM8K_TASK_WEIGHT=3.0
     DAPO_TASK_WEIGHT=1.0
@@ -32,9 +32,8 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.agent_loop import (
+    AgentLoopManagerConfig,
     AsyncProduceStrategyConfig,
-    ColocatedAgentLoopManagerConfig,
-    DisaggregatedMultiTaskAgentLoopManagerConfig,
     SamplerConfig,
     SingleTurnAgentLoopConfig,
     SyncProduceStrategyConfig,
@@ -48,7 +47,6 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, get_eos_token
 from xtuner.v1.train.rl_disaggregated_trainer import (
-    DisaggregatedExecutionConfig,
     RLDisaggregatedTrainerConfig,
 )
 
@@ -68,14 +66,10 @@ evaluate_step = int(os.environ.get("EVALUATE_STEP", str(total_train_steps)))
 train_optimizer_steps = int(os.environ.get("TRAIN_OPTIMIZER_STEPS", "4"))
 train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", "64"))
 trigger_parameter_sync_step = int(os.environ.get("TRIGGER_PARAMETER_SYNC_STEP", "1"))
-staleness_threshold = float(os.environ.get("STALENESS_THRESHOLD", "0.0"))
+over_sample_threshold = float(os.environ.get("OVER_SAMPLE_THRESHOLD", "0.0"))
 partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
 tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "0"))
 tail_batch_stale_threshold = int(os.environ.get("TAIL_BATCH_STALE_THRESHOLD", "0"))
-completed_batch_timeout_s_env = os.environ.get("COMPLETED_BATCH_TIMEOUT_S", "1800")
-completed_batch_timeout_s = None if completed_batch_timeout_s_env.lower() == "none" else float(
-    completed_batch_timeout_s_env
-)
 enable_evaluate = os.environ.get("ENABLE_EVALUATE", "0") == "1"
 gsm8k_task_weight = float(os.environ.get("GSM8K_TASK_WEIGHT", "3.0"))
 dapo_task_weight = float(os.environ.get("DAPO_TASK_WEIGHT", "1.0"))
@@ -226,17 +220,17 @@ dapo_train_agent_loop_config = SingleTurnAgentLoopConfig(
     ),
 )
 
-if staleness_threshold > 0 or partial_rollout:
+if over_sample_threshold > 0 or partial_rollout:
     produce_strategy_config = AsyncProduceStrategyConfig(
-        produce_batch_over_sample_threshold=0.0,
-        produce_batch_enable_partial_rollout=False,
+        over_sample_threshold=over_sample_threshold,
+        enable_partial_rollout=partial_rollout,
         tail_batch_trigger_size=tail_batch_trigger_size,
         tail_batch_stale_threshold=tail_batch_stale_threshold,
     )
 else:
     produce_strategy_config = SyncProduceStrategyConfig()
 
-agent_loop_manager_cfg = DisaggregatedMultiTaskAgentLoopManagerConfig(
+agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=[
         TaskSpecConfig(
             task_name="train_task:dapo_math",
@@ -306,7 +300,7 @@ dapo_eval_agent_loop_config = SingleTurnAgentLoopConfig(
     ),
 )
 
-eval_agent_loop_manager_cfg = ColocatedAgentLoopManagerConfig(
+eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=[
         TaskSpecConfig(
             task_name="eval_task:dapo_math",
@@ -329,14 +323,6 @@ def compute_metric(samples):
 
 
 evaluator_config = EvaluatorConfig(compute_metric_func=compute_metric)
-execution_config = DisaggregatedExecutionConfig(
-    train_batch_size=train_batch_size,
-    total_train_steps=total_train_steps,
-    trigger_parameter_sync_step=trigger_parameter_sync_step,
-    staleness_threshold=staleness_threshold,
-    partial_rollout=partial_rollout,
-    completed_batch_timeout_s=completed_batch_timeout_s,
-)
 
 trainer = RLDisaggregatedTrainerConfig(
     train_resources=train_resources,
@@ -350,7 +336,9 @@ trainer = RLDisaggregatedTrainerConfig(
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,
     load_from=model_path,
-    execution_config=execution_config,
+    train_batch_size=train_batch_size,
+    total_train_steps=total_train_steps,
+    trigger_parameter_sync_step=trigger_parameter_sync_step,
     enable_evaluate=enable_evaluate,
     enable_initial_evaluate=False,
     evaluate_step=evaluate_step,

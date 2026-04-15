@@ -18,7 +18,7 @@ from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.agent_loop import (
-    ColocatedAgentLoopManagerConfig,
+    AgentLoopManagerConfig,
     ProduceBatchResult,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
@@ -162,8 +162,8 @@ class RLColocateTrainerConfig(BaseModel):
     judger_config: JudgerConfig
     tokenizer_path: Union[str, Path]
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
-    agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig
-    eval_agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig
+    agent_loop_manager_cfg: AgentLoopManagerConfig
+    eval_agent_loop_manager_cfg: AgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
     load_from: Union[str, Path]
     rollout_steps: int
@@ -243,9 +243,9 @@ class RLColocateTrainer:
         # agent_loop_config: AgentLoopConfig,
         # agent loop manager config
         # produce_strategy_config: ProduceStrategyConfig,
-        agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig,
+        agent_loop_manager_cfg: AgentLoopManagerConfig,
         # eval configs
-        eval_agent_loop_manager_cfg: ColocatedAgentLoopManagerConfig,
+        eval_agent_loop_manager_cfg: AgentLoopManagerConfig,
         evaluator_config: EvaluatorConfig,
         enable_evaluate: bool = True,
         enable_initial_evaluate: bool = False,
@@ -522,11 +522,7 @@ class RLColocateTrainer:
                 )
                 train_batch = produce_result.rollout_states
                 self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
-                train_trajectory_dir = self.exp_dir / "train_rollout"
-                train_trajectory_dir.mkdir(parents=True, exist_ok=True)
-                train_trajectory_path = train_trajectory_dir / f"train_rollout_{rollout_idx}.jsonl"
-                self._save_trajectories(train_batch, train_trajectory_path)
-                self.logger.info(f"Rollout {rollout_idx} train trajectories saved to {train_trajectory_path}")
+                self._save_rollout_batch_trajectories(train_batch, rollout_idx, stage="train", step_label="Rollout")
                 if not self._debug_rollout:
                     ray.get(self.rollout_controller.offload.remote())
 
@@ -538,11 +534,7 @@ class RLColocateTrainer:
                     # 2. Train on the generated experience
                     # TODO: simplify with Packer.pack_pad_dispatch()
                     # train_batch = Packer.pack_pad_dispatch(train_batch)
-                    with timer("prepare_data", step_timer_dict):
-                        data_batches, data_info = self._prepare_train_data(
-                            train_batch, self._train_worker_cfg.pack_max_length
-                        )
-                    self.logger.info(f"Prepared {len(data_batches)} training data batches")
+                    data_batches, data_info = self._prepare_train_batch(train_batch, step_timer_dict)
 
                     with timer("training", step_timer_dict):
                         workers_log_item: list[WorkerLogItem] = ray.get(
@@ -561,30 +553,50 @@ class RLColocateTrainer:
                     self._sync_weights_and_save(rollout_idx, step_timer_dict)
 
                     # 4. Evaluate model performance
-                    eval_log_info = {}
-                    if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
-                        with timer("evaluation", step_timer_dict):
-                            eval_produce_result = asyncio_run(
-                                self.eval_agent_loop_manager.produce_batch(
-                                    self.evaluator.eval_batch_size, rollout_step=rollout_idx
-                                )
-                            )
-                            eval_batch = eval_produce_result.rollout_states
-                            eval_metrics = self.evaluator.run(eval_batch)
-                            eval_trajectory_dir = self.exp_dir / "eval_rollout"
-                            eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
-                            eval_trajectory_path = eval_trajectory_dir / f"eval_rollout_{rollout_idx}.jsonl"
-                            self._save_trajectories(eval_batch, eval_trajectory_path)
-                            self.logger.info(
-                                f"Rollout {rollout_idx} eval trajectories saved to {eval_trajectory_path}"
-                            )
-                            eval_log_info.update(eval_metrics)
+                    eval_log_info = self._evaluate_step_sync(rollout_idx, step_timer_dict, step_label="Rollout")
                 else:
                     train_log_info = {}
                     eval_log_info = {}
 
             self._log_step(rollout_idx, step_timer_dict, produce_result, train_log_info, eval_log_info)
             self._cur_step = rollout_idx
+
+    def _save_rollout_batch_trajectories(
+        self,
+        batch: list[list[RolloutState]],
+        step_idx: int,
+        *,
+        stage: str,
+        step_label: str,
+    ) -> Path:
+        trajectory_dir = self.exp_dir / f"{stage}_rollout"
+        trajectory_dir.mkdir(parents=True, exist_ok=True)
+        trajectory_path = trajectory_dir / f"{stage}_rollout_{step_idx}.jsonl"
+        self._save_trajectories(batch, trajectory_path)
+        self.logger.info(f"{step_label} {step_idx} {stage} trajectories saved to {trajectory_path}")
+        return trajectory_path
+
+    def _prepare_train_batch(self, train_batch: list[list[RolloutState]], step_timer_dict: dict):
+        with timer("prepare_data", step_timer_dict):
+            data_batches, data_info = self._prepare_train_data(train_batch, self._train_worker_cfg.pack_max_length)
+        self.logger.info(f"Prepared {len(data_batches)} training data batches")
+        return data_batches, data_info
+
+    async def _evaluate_step_async(self, step_idx: int, step_timer_dict: dict, *, step_label: str) -> dict[str, float]:
+        eval_log_info: dict[str, float] = {}
+        if self._enable_evaluate and step_idx % self._evaluate_step == 0:
+            with timer("evaluation", step_timer_dict):
+                eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
+                    self.evaluator.eval_batch_size, rollout_step=step_idx
+                )
+                eval_batch = eval_produce_result.rollout_states
+                eval_metrics = self.evaluator.run(eval_batch)
+                self._save_rollout_batch_trajectories(eval_batch, step_idx, stage="eval", step_label=step_label)
+                eval_log_info.update(eval_metrics)
+        return eval_log_info
+
+    def _evaluate_step_sync(self, step_idx: int, step_timer_dict: dict, *, step_label: str) -> dict[str, float]:
+        return asyncio_run(self._evaluate_step_async(step_idx, step_timer_dict, step_label=step_label))
 
     # TODO: simplify with Packer.pack_pad_dispatch()
     def _prepare_train_data(self, data_groups: list[list[RolloutState]], pack_max_length: int):

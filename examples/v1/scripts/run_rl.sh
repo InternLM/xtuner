@@ -128,7 +128,7 @@ else
 fi
 
 while true; do
-  result=$(ray status | grep ${ACCELERATOR} | cut -d ' ' -f2 | cut -d '/' -f2)
+  result=$(ray status --address="${RAY_MASTER_ADDR}:${RAY_HEAD_PORT}" 2>/dev/null | grep "${ACCELERATOR}" | cut -d ' ' -f2 | cut -d '/' -f2)
   expected_accelerator_count=$((node_count * ${ACCELERATOR_PER_NODE}))
   if [ "$result" = "$expected_accelerator_count.0" ]; then
     break

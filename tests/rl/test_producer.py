@@ -8,8 +8,10 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 class MockRolloutState:
     def __init__(self, id, seq_staleness=1, status=Status.COMPLETED):
         self.id = id
+        self.uid = id
         self.status = status
         self.seq_staleness = seq_staleness
+        self.response_ids = []
 
 class TestProducer(unittest.IsolatedAsyncioTestCase):
 
@@ -115,3 +117,78 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final_data[1][0].id, 2)
         self.assertEqual(final_data[2][0].id, 1)
         self.assertEqual(final_data[3][0].id, 0)
+
+    async def test_produce_batch_keeps_extra_completed_leftovers(self):
+        task_name = "test_task"
+        mock_agent_loop = MagicMock()
+        mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
+        mock_agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
+        mock_agent_loop.rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+
+        async def mock_gen(rs, **kwargs):
+            await asyncio.sleep(0.01 * rs[0].id)
+            for r in rs:
+                r.status = Status.COMPLETED
+            return rs
+
+        mock_agent_loop.generate_group = mock_gen
+
+        sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg)
+        produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=1)
+        sampler = sampler_cfg.build(self.mock_tokenizer, self.replay_buffer)
+        strategy = produce_strategy_cfg.build()
+
+        await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=2,
+            task_name=task_name,
+        )
+
+        completed_groups = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
+        self.assertGreaterEqual(len(completed_groups), 4)
+        self.assertEqual(sorted(group[0].id for group in completed_groups), list(range(len(completed_groups))))
+
+    async def test_produce_batch_passes_partial_rollout_flag(self):
+        task_name = "test_task"
+        mock_agent_loop = MagicMock()
+        mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
+        mock_agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
+        mock_agent_loop.rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+
+        seen_flags = []
+
+        async def mock_gen(rs, **kwargs):
+            seen_flags.append(kwargs.get("enable_partial_rollout"))
+            for r in rs:
+                r.status = Status.COMPLETED
+            return rs
+
+        mock_agent_loop.generate_group = mock_gen
+
+        sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg)
+        produce_strategy_cfg = AsyncProduceStrategyConfig(enable_partial_rollout=True)
+        sampler = sampler_cfg.build(self.mock_tokenizer, self.replay_buffer)
+        strategy = produce_strategy_cfg.build()
+
+        await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=1,
+            task_name=task_name,
+        )
+
+        self.assertTrue(seen_flags)
+        self.assertTrue(all(flag is True for flag in seen_flags))
+
+    async def test_async_produce_strategy_config_uses_produce_side_fields(self):
+        produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=1.5, enable_partial_rollout=True)
+
+        self.assertEqual(produce_strategy_cfg.over_sample_threshold, 1.5)
+        self.assertTrue(produce_strategy_cfg.enable_partial_rollout)
+
+        strategy = produce_strategy_cfg.build()
+        self.assertEqual(strategy.over_sample_threshold, 1.5)
+        self.assertTrue(strategy.enable_partial_rollout)

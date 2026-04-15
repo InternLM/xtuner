@@ -17,7 +17,7 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import ColocatedAgentLoopManagerConfig, TaskSpecConfig, SingleTurnAgentLoopConfig, AsyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, TaskSpecConfig, SingleTurnAgentLoopConfig, AsyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
@@ -130,12 +130,12 @@ agent_loop_config = SingleTurnAgentLoopConfig(
     sample_params=training_sample_params,
 )
 produce_strategy_config = AsyncProduceStrategyConfig(
-    produce_batch_over_sample_threshold = 0.8,
-    produce_batch_enable_partial_rollout = True,
+    over_sample_threshold = 0.8,
+    enable_partial_rollout = True,
     tail_batch_stale_threshold=1,
     tail_batch_trigger_size=64
 )
-agent_loop_manager_cfg = ColocatedAgentLoopManagerConfig(
+agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="train_task",
         agent_loop_config=agent_loop_config,
@@ -170,7 +170,7 @@ eval_agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
 )
-eval_agent_loop_manager_cfg = ColocatedAgentLoopManagerConfig(
+eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
         task_name="eval_task",
         agent_loop_config=eval_agent_loop_config,

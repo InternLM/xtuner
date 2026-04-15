@@ -29,7 +29,7 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.agent_loop import (
-    ColocatedAgentLoopManagerConfig,
+    AgentLoopManagerConfig,
     SamplerConfig,
     SingleTurnAgentLoopConfig,
     SyncProduceStrategyConfig,
@@ -194,7 +194,7 @@ dapo_train_agent_loop_config = SingleTurnAgentLoopConfig(
     ),
 )
 
-agent_loop_manager_cfg = ColocatedAgentLoopManagerConfig(
+agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=[
         TaskSpecConfig(
             task_name="train_task:dapo_math",
@@ -263,7 +263,7 @@ dapo_eval_agent_loop_config = SingleTurnAgentLoopConfig(
     ),
 )
 
-eval_agent_loop_manager_cfg = ColocatedAgentLoopManagerConfig(
+eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=[
         TaskSpecConfig(
             task_name="eval_task:dapo_math",

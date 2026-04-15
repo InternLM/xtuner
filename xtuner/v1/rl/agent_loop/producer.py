@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import math
 import time
 from abc import ABC, abstractmethod
@@ -37,7 +38,18 @@ async def _timed_generate_group(
     agent_loop: AgentLoop, rollout_state: list[RolloutState], **kwargs
 ) -> tuple[list[RolloutState], float]:
     start = time.perf_counter()
-    result = await agent_loop.generate_group(rollout_state, **kwargs)
+    generate_group = agent_loop.generate_group
+    if kwargs:
+        try:
+            signature = inspect.signature(generate_group)
+            supports_var_kwargs = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
+            )
+            if not supports_var_kwargs:
+                kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+        except (TypeError, ValueError):
+            pass
+    result = await generate_group(rollout_state, **kwargs)
     return result, time.perf_counter() - start
 
 
@@ -86,35 +98,19 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
 
 
 class AsyncProduceStrategyConfig(ProduceStrategyConfig):
-    produce_batch_over_sample_threshold: float = 0.0
-    # 注意：这里的 produce_batch_enable_partial_rollout 和
-    # RLDisaggregatedTrainer.execution_config.partial_rollout 不是同一个概念。
-    #
-    # 1) 这里是 colocated / produce_batch 路径的“样本级续跑”开关：
-    #    - 作用层级：producer 内部固定并发池
-    #    - 关注点：单个 group 在被中断后，后续是否允许从 ABORTED/EXPIRED 状态继续生成
-    #    - 不改变 trainer 的主循环节奏，也不引入 required/target 这组 window 语义
-    #
-    # 2) RLDisaggregatedTrainer.execution_config.partial_rollout 是 disaggregated window 的“窗口级提前开训”开关：
-    #    - 作用层级：trainer orchestration
-    #    - 关注点：一个 window 内是否允许先满足 required 就开始训练，同时把多余在途任务/leftovers 留给后续 step
-    #    - 它依赖 required/target 分离，以及 replay buffer leftovers 的持续复用
-    #
-    # 之所以拆成两层，是因为 colocated 和 disaggregated 控制的对象不同：
-    # - colocated 没有 window 编排，只有单次 produce_batch 的 producer policy
-    # - disaggregated 需要 trainer 决定 window 节奏，所以 partial_rollout 必须放在 trainer 层
-    #
-    # 因此两边都叫“partial rollout”，但它们不是同一个旋钮，不能强行合并成同一层配置。
-    produce_batch_enable_partial_rollout: bool = False
+    over_sample_threshold: float = 0.0
+    # 样本级 continuation 开关。`produce_batch` 和 `fullasync_produce_batch`
+    # 读取的是同一语义，并最终复用同一个 PartialRolloutHandler。
+    enable_partial_rollout: bool = False
     tail_batch_stale_threshold: int = 0
     tail_batch_trigger_size: int = 0
 
     def model_post_init(self, __context) -> None:
         super().model_post_init(__context)
-        if self.produce_batch_over_sample_threshold < 0:
+        if self.over_sample_threshold < 0:
             raise ValueError(
-                "produce_batch_over_sample_threshold must be non-negative, "
-                f"got {self.produce_batch_over_sample_threshold}"
+                "over_sample_threshold must be non-negative, "
+                f"got {self.over_sample_threshold}"
             )
         if self.tail_batch_stale_threshold < 0:
             raise ValueError(
@@ -125,8 +121,8 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
 
     def build(self) -> "AsyncProduceStrategy":
         return AsyncProduceStrategy(
-            produce_batch_over_sample_threshold=self.produce_batch_over_sample_threshold,
-            produce_batch_enable_partial_rollout=self.produce_batch_enable_partial_rollout,
+            over_sample_threshold=self.over_sample_threshold,
+            enable_partial_rollout=self.enable_partial_rollout,
             tail_batch_stale_threshold=self.tail_batch_stale_threshold,
             tail_batch_trigger_size=self.tail_batch_trigger_size,
             is_valid_sample_fn=self.is_valid_sample_fn,
@@ -229,104 +225,7 @@ class ProduceStrategy(ABC):
                 await asyncio.sleep(1)
         return generate_times, time.perf_counter() - pause_start
 
-    async def _produce_partial_window(
-        self,
-        agent_loop: AgentLoop,
-        sampler: Sampler,
-        replay_buffer: ReplayBuffer,
-        required_batch_size: int,
-        target_batch_size: int,
-        task_name: str,
-        rollout_step: int,
-        tail_batch_stale_threshold: int,
-        source_group_status: Status = Status.ABORTED,
-    ) -> "ProducerTimings":
-        # partial window 的目标不是把 target 全部跑完，而是：
-        # 1. 只要 required 已满足，就允许训练先开始
-        # 2. 多 launch 出来的在途任务会在 finally 里 pause 成 aborted leftovers，
-        #    为下一轮 window 预热
-        initial_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
-        completed_count = initial_completed_count
-        target_completed_count = max(required_batch_size, initial_completed_count)
-        launch_batch_size = max(target_batch_size - initial_completed_count, 0)
-        pending_tasks = set()
-        generate_times: list[float] = []
-        finished_group_count = 0
-        pause_time_s = 0.0
-
-        # 即使 required 已满足，这里仍可能继续 launch。
-        # 这些任务不是浪费掉，而是会在 cleanup 阶段转成下一轮可继续的 leftovers。
-        for _ in range(launch_batch_size):
-            pending_tasks.add(
-                await self._launch_group(
-                    agent_loop,
-                    sampler,
-                    task_name,
-                    rollout_step,
-                    source_group_status=source_group_status,
-                    enable_partial_rollout=True,
-                )
-            )
-
-        logger.info(
-            f"[{self.__class__.__name__}] Task {task_name} | Starting partial window: "
-            f"required={required_batch_size}, existing_completed={initial_completed_count}, "
-            f"launch={launch_batch_size}, target={target_batch_size}, "
-            f"target_completed={target_completed_count}, rollout_step={rollout_step}"
-        )
-
-        try:
-            while self.should_continue_fn(completed_count, target_completed_count):
-                if not pending_tasks:
-                    logger.warning(
-                        f"[{self.__class__.__name__}] Task {task_name} | No pending tasks before enough samples: "
-                        f"completed={completed_count}, target={target_completed_count}."
-                    )
-                    break
-                done_tasks, pending_tasks = await asyncio.wait(
-                    pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in done_tasks:
-                    items, elapsed = task.result()
-                    finished_group_count += 1
-                    generate_times.append(elapsed)
-                    if self.is_valid_sample_fn(items):
-                        completed_count += 1
-                    await replay_buffer.put(items, task_name)
-                self._raise_if_exceeded_finished_group_budget(
-                    task_name=task_name,
-                    target_count=target_completed_count,
-                    completed_count=completed_count,
-                    finished_group_count=finished_group_count,
-                )
-
-                # partial window 里维持的是“至少能达到 target_completed_count 所需的在途水位”，
-                # 不是固定并发池。
-                while completed_count + len(pending_tasks) < target_completed_count:
-                    pending_tasks.add(
-                        await self._launch_group(
-                            agent_loop,
-                            sampler,
-                            task_name,
-                            rollout_step,
-                            source_group_status=source_group_status,
-                            enable_partial_rollout=True,
-                        )
-                    )
-        finally:
-            if pending_tasks:
-                cleanup_generate_times, pause_time_s = await self._cleanup_pending_tasks(
-                    pending_tasks,
-                    agent_loop,
-                    replay_buffer,
-                    task_name,
-                    tail_batch_stale_threshold=tail_batch_stale_threshold,
-                )
-                generate_times.extend(cleanup_generate_times)
-
-        return ProducerTimings(generate_times_s=generate_times, pause_time_s=pause_time_s)
-
-    async def _produce_full_window(
+    async def _produce_until_target_count(
         self,
         agent_loop: AgentLoop,
         sampler: Sampler,
@@ -338,7 +237,7 @@ class ProduceStrategy(ABC):
         source_group_status: Status | None,
         tail_batch_stale_threshold: int = 0,
     ) -> "ProducerTimings":
-        # full window 语义更直接：必须等 replay buffer 中的 COMPLETED 总量达到 target 才返回。
+        # 这里走的是 exact-target produce：必须等 replay buffer 中的 COMPLETED 总量达到 target 才返回。
         initial_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         completed_count = initial_completed_count
         target_completed_count = max(required_batch_size, target_batch_size)
@@ -360,7 +259,7 @@ class ProduceStrategy(ABC):
             )
 
         logger.info(
-            f"[{self.__class__.__name__}] Task {task_name} | Starting full window: "
+            f"[{self.__class__.__name__}] Task {task_name} | Starting exact-target produce: "
             f"existing_completed={initial_completed_count}, launch={launch_batch_size}, "
             f"target_completed={target_completed_count}, rollout_step={rollout_step}"
         )
@@ -390,8 +289,7 @@ class ProduceStrategy(ABC):
                     finished_group_count=finished_group_count,
                 )
 
-                # full window 和 partial window 一样，补的是“目标总量缺口”，
-                # 不是固定池大小。
+                # 这里补的是“目标总量缺口”，不是固定并发池大小。
                 while completed_count + len(pending_tasks) < target_completed_count:
                     pending_tasks.add(
                         await self._launch_group(
@@ -416,19 +314,6 @@ class ProduceStrategy(ABC):
         return ProducerTimings(generate_times_s=generate_times, pause_time_s=pause_time_s)
 
     @abstractmethod
-    async def produce_window(
-        self,
-        agent_loop: AgentLoop,
-        sampler: Sampler,
-        replay_buffer: ReplayBuffer,
-        required_batch_size: int,
-        task_name: str,
-        target_batch_size: int | None = None,
-        rollout_step: int = 0,
-        enable_partial_rollout: bool = False,
-    ) -> "ProducerTimings": ...
-
-    @abstractmethod
     async def produce_batch(
         self,
         agent_loop: AgentLoop,
@@ -441,44 +326,6 @@ class ProduceStrategy(ABC):
 
 
 class SyncProduceStrategy(ProduceStrategy):
-    async def produce_window(
-        self,
-        agent_loop: AgentLoop,
-        sampler: Sampler,
-        replay_buffer: ReplayBuffer,
-        required_batch_size: int,
-        task_name: str,
-        target_batch_size: int | None = None,
-        rollout_step: int = 0,
-        enable_partial_rollout: bool = False,
-    ) -> ProducerTimings:
-        # Sync strategy 的 window 模式只允许最简单的 exact full-window：
-        # 不消费 leftovers，不支持 partial，不支持 over-target。
-        target_batch_size = required_batch_size if target_batch_size is None else target_batch_size
-        unsupported_window = enable_partial_rollout or target_batch_size != required_batch_size
-        if unsupported_window:
-            raise RuntimeError(
-                "SyncProduceStrategy only supports exact full-window production. "
-                "Use AsyncProduceStrategyConfig for staleness, over-sampling, tail-batch, or partial-rollout windows."
-            )
-        completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
-        if completed_sample_count > 0:
-            raise RuntimeError(
-                "SyncProduceStrategy does not consume leftover completed samples in window mode. "
-                f"Found {completed_sample_count} completed samples for task {task_name}; use AsyncProduceStrategyConfig "
-                "or drain the replay buffer before starting the next sync window."
-            )
-        return await self._produce_full_window(
-            agent_loop=agent_loop,
-            sampler=sampler,
-            replay_buffer=replay_buffer,
-            required_batch_size=required_batch_size,
-            target_batch_size=target_batch_size,
-            task_name=task_name,
-            rollout_step=rollout_step,
-            source_group_status=None,
-        )
-
     async def produce_batch(
         self,
         agent_loop: AgentLoop,
@@ -496,7 +343,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 completed_sample_count,
                 task_name,
             )
-        return await self._produce_full_window(
+        return await self._produce_until_target_count(
             agent_loop=agent_loop,
             sampler=sampler,
             replay_buffer=replay_buffer,
@@ -507,12 +354,11 @@ class SyncProduceStrategy(ProduceStrategy):
             source_group_status=None,
         )
 
-
 class AsyncProduceStrategy(ProduceStrategy):
     def __init__(
         self,
-        produce_batch_over_sample_threshold: float,
-        produce_batch_enable_partial_rollout: bool,
+        over_sample_threshold: float,
+        enable_partial_rollout: bool,
         tail_batch_trigger_size: int,
         tail_batch_stale_threshold: int,
         is_valid_sample_fn: IsValidSampleFn,
@@ -520,8 +366,8 @@ class AsyncProduceStrategy(ProduceStrategy):
         max_finished_groups_multiplier: float,
     ):
         super().__init__(is_valid_sample_fn, should_continue_fn, max_finished_groups_multiplier)
-        self.produce_batch_over_sample_threshold = produce_batch_over_sample_threshold
-        self.produce_batch_enable_partial_rollout = produce_batch_enable_partial_rollout
+        self.over_sample_threshold = over_sample_threshold
+        self.enable_partial_rollout = enable_partial_rollout
         self.tail_batch_stale_threshold = tail_batch_stale_threshold
         self.tail_batch_trigger_size = tail_batch_trigger_size
 
@@ -593,7 +439,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         sample_from_expired_storage: bool,
     ) -> ProducerTimings:
         # fixed-concurrency pool 只用于 produce_batch 路径。
-        # 它和 window 模式的关键区别是：这里维持的是“并发池大小”，不是“buffer 绝对目标量”。
+        # 它和 exact-target produce 的关键区别是：这里维持的是“并发池大小”，不是“buffer 绝对目标量”。
         pending_tasks = set()
         generate_times: list[float] = []
         finished_group_count = 0
@@ -613,7 +459,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                     task_name,
                     rollout_step,
                     source_group_status=source_group_status,
-                    enable_partial_rollout=self.produce_batch_enable_partial_rollout,
+                    enable_partial_rollout=self.enable_partial_rollout,
                 )
             )
 
@@ -665,7 +511,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                             task_name,
                             rollout_step,
                             source_group_status=source_group_status,
-                            enable_partial_rollout=self.produce_batch_enable_partial_rollout,
+                            enable_partial_rollout=self.enable_partial_rollout,
                         )
                     )
         finally:
@@ -680,64 +526,6 @@ class AsyncProduceStrategy(ProduceStrategy):
                 generate_times.extend(cleanup_generate_times)
 
         return ProducerTimings(generate_times_s=generate_times, pause_time_s=pause_time_s)
-
-    async def produce_window(
-        self,
-        agent_loop: AgentLoop,
-        sampler: Sampler,
-        replay_buffer: ReplayBuffer,
-        required_batch_size: int,
-        task_name: str,
-        target_batch_size: int | None = None,
-        rollout_step: int = 0,
-        enable_partial_rollout: bool = False,
-    ) -> ProducerTimings:
-        # window 模式由 trainer 传入绝对的 required/target 来驱动。
-        # 也就是说，trainer 决定这一轮“至少要多少”“最多想多跑多少”，strategy 只负责执行。
-        await self._process_leftover_samples(
-            replay_buffer,
-            task_name,
-            rollout_step,
-            self.tail_batch_stale_threshold,
-        )
-        expired_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
-        # disaggregated window 不从 fresh prompt 开始，而是继续 replay buffer 里的 leftovers：
-        # 正常情况续跑 ABORTED；tail-batch 情况优先续跑 EXPIRED。
-        source_group_status = Status.ABORTED
-        target_batch_size = required_batch_size if target_batch_size is None else target_batch_size
-        if self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size:
-            logger.info(
-                f"Tail batch trigger condition met in window mode: {expired_count} expired samples "
-                f"(threshold: {self.tail_batch_trigger_size})."
-            )
-            source_group_status = Status.EXPIRED
-            target_batch_size = required_batch_size
-
-        if enable_partial_rollout:
-            # partial window：允许训练先拿到 required，然后把多余在途任务留到下一轮。
-            return await self._produce_partial_window(
-                agent_loop=agent_loop,
-                sampler=sampler,
-                replay_buffer=replay_buffer,
-                required_batch_size=required_batch_size,
-                target_batch_size=target_batch_size,
-                task_name=task_name,
-                rollout_step=rollout_step,
-                tail_batch_stale_threshold=self.tail_batch_stale_threshold,
-                source_group_status=source_group_status,
-            )
-        # full window：必须等到目标总量满足才返回。
-        return await self._produce_full_window(
-            agent_loop=agent_loop,
-            sampler=sampler,
-            replay_buffer=replay_buffer,
-            required_batch_size=required_batch_size,
-            target_batch_size=target_batch_size,
-            task_name=task_name,
-            rollout_step=rollout_step,
-            source_group_status=source_group_status,
-            tail_batch_stale_threshold=self.tail_batch_stale_threshold,
-        )
 
     async def produce_batch(
         self,
@@ -760,7 +548,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         # 已经在 buffer 里的 COMPLETED 样本会直接抵扣本轮还需要 launch 的并发量。
         previously_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         data_concurrency = max(
-            math.ceil((1 + self.produce_batch_over_sample_threshold) * batch_size) - previously_completed_count,
+            math.ceil((1 + self.over_sample_threshold) * batch_size) - previously_completed_count,
             0,
         )
         expired_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)

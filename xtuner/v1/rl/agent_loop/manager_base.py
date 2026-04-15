@@ -132,38 +132,33 @@ async def _produce_single_task_batch(
     return result
 
 
-async def _produce_single_task_window_to_replay_buffer(
+async def _get_single_task_completed_batch(
     task_runner: _TaskRunner,
     replay_buffer: ReplayBuffer,
-    required_batch_size: int,
-    target_batch_size: int | None,
-    rollout_step: int,
-    enable_partial_rollout: bool,
+    batch_size: int,
     logger,
     manager_name: str,
+    *,
+    stats: ProducerTimings | None = None,
 ) -> ProduceBatchResult:
-    # disaggregated 的 window 路径和 colocated 的 batch 路径不同：
-    # 这里不会立即从 replay buffer 取出训练 batch，只把样本生产到 buffer，
-    # 并把此时 buffer 的剩余状态统计出来。
     start = time.perf_counter()
     logger.info(
-        f"[{manager_name}][{task_runner.task_name}] produce_window_to_replay_buffer start "
-        f"required={required_batch_size}, target={target_batch_size}, "
-        f"partial_rollout={enable_partial_rollout}"
-    )
-    stats: ProducerTimings = await task_runner.produce_strategy.produce_window(
-        agent_loop=task_runner.agent_loop,
-        sampler=task_runner.sampler,
-        replay_buffer=replay_buffer,
-        required_batch_size=required_batch_size,
-        target_batch_size=target_batch_size,
-        task_name=task_runner.task_name,
-        rollout_step=rollout_step,
-        enable_partial_rollout=enable_partial_rollout,
+        f"[{manager_name}][{task_runner.task_name}] get_completed_batch start batch={batch_size}"
     )
 
     result = ProduceBatchResult(rollout_states=[])
-    _fill_produce_timing_stats(result, stats)
+    if stats is not None:
+        _fill_produce_timing_stats(result, stats)
+
+    batch_rollout_states: list[list[RolloutState]] = await replay_buffer.get(
+        batch_size, task_runner.task_name, Status.COMPLETED
+    )
+    logger.info(
+        f"[{manager_name}][{task_runner.task_name}] get_completed_batch done completed_groups={len(batch_rollout_states)} "
+        f"elapsed={time.perf_counter() - start:.3f}"
+    )
+    result.rollout_states = batch_rollout_states
+    result.task_batch_sizes = {task_runner.task_name: batch_size}
     completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
         replay_buffer.count(task_name=task_runner.task_name, group_status=Status.COMPLETED),
         replay_buffer.count(task_name=task_runner.task_name, group_status=Status.ABORTED),
