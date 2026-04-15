@@ -491,7 +491,7 @@ class RLColocateTrainer:
 
         if self._enable_initial_evaluate and not self._debug_rollout:
             eval_produce_result = asyncio_run(
-                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size, rollout_step=0)
+                self._produce_batch_with_manager(self.eval_agent_loop_manager, self.evaluator.eval_batch_size, 0)
             )
             eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
             self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
@@ -509,7 +509,7 @@ class RLColocateTrainer:
                 # 1. Rollout to generate experience
                 self.logger.info("start to generate rollout experience for training")
                 produce_result: ProduceBatchResult = asyncio_run(
-                    self.agent_loop_manager.produce_batch(self.global_batch_size, rollout_step=rollout_idx)
+                    self._produce_batch_with_manager(self.agent_loop_manager, self.global_batch_size, rollout_idx)
                 )
                 train_batch = produce_result.rollout_states
                 self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
@@ -573,12 +573,29 @@ class RLColocateTrainer:
         self.logger.info(f"Prepared {len(data_batches)} training data batches")
         return data_batches, data_info
 
+    async def _produce_batch_with_manager(
+        self,
+        agent_loop_manager,
+        batch_size: int,
+        rollout_step: int,
+    ) -> ProduceBatchResult:
+        task_batch_sizes = agent_loop_manager.get_step_task_batch_sizes(batch_size, rollout_step)
+        producer_tasks = await agent_loop_manager.start_producer_tasks(task_batch_sizes, rollout_step)
+        return await agent_loop_manager.consume_completed_batch(
+            task_batch_sizes,
+            producer_tasks=producer_tasks,
+            await_producer_tasks=True,
+            manager_name=self.__class__.__name__,
+        )
+
     async def _evaluate_step_async(self, step_idx: int, step_timer_dict: dict, *, step_label: str) -> dict[str, float]:
         eval_log_info: dict[str, float] = {}
         if self._enable_evaluate and step_idx % self._evaluate_step == 0:
             with timer("evaluation", step_timer_dict):
-                eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-                    self.evaluator.eval_batch_size, rollout_step=step_idx
+                eval_produce_result = await self._produce_batch_with_manager(
+                    self.eval_agent_loop_manager,
+                    self.evaluator.eval_batch_size,
+                    step_idx,
                 )
                 eval_batch = eval_produce_result.rollout_states
                 eval_metrics = self.evaluator.run(eval_batch)
