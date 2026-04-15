@@ -1,0 +1,77 @@
+[
+  {
+    "category": "modify",
+    "description": "Refactor AsyncProduceStrategy in xtuner/v1/rl/agent_loop/producer.py so non-colocated rollout can keep pending work across calls, stop on update/expiry signals, and only produce into the replay buffer.",
+    "steps": [
+      "Step 1: change AsyncProduceStrategy.produce_batch() to return a ProduceBatchStatus and only schedule/recycle rollout groups into the replay buffer instead of returning training batches directly",
+      "Step 2: move pending rollout tasks from a per-call local variable to self._pending_tasks so unfinished work survives across multiple produce_batch() calls",
+      "Step 3: expose cleanup_pending_tasks() as a public strategy API and remove the current automatic cleanup from the end of produce_batch()",
+      "Step 4: preserve oversample, tail-batch, partial-rollout, and stale-sample behavior under the new status-based flow, including immediate EXPIRED_BATCH stop semantics",
+      "Step 5: write per-group generation timing onto RolloutState.extra_fields and return pause_time_s separately so timing can be reconstructed when trainer batches are consumed",
+      "Step 6: add or update producer tests that cover NORMAL, UPDATE_ABORT, EXPIRED_BATCH, cross-call pending-task retention, and explicit cleanup behavior"
+    ],
+    "passes": false
+  },
+  {
+    "category": "modify",
+    "description": "Refactor AgentLoopManager in xtuner/v1/rl/agent_loop/agent_loop_manager.py into a split producer/consumer state machine that supports both colocated produce_batch() and background disaggregated production.",
+    "steps": [
+      "Step 1: add ProduceBatchStatus support to ProduceBatchResult and add manager runtime state for _status, _update_event, _finish_event, _model_rollout_step, and _pause_time_s",
+      "Step 2: implement _produce_batch_to_buffer() for single-task and multi-task cases, including task batch allocation and status aggregation priority UPDATE_ABORT > EXPIRED_BATCH > NORMAL",
+      "Step 3: implement _get_batch_from_buffer() so trainer consumption reconstructs leftover counts and generation timing stats from replay-buffer contents and cached pause_time_s",
+      "Step 4: add cleanup_pending_tasks(for_weight_update=False), reset(model_rollout_step), produce_loop(batch_size, start_rollout_step), and get_batch(batch_size, rollout_step) with the state transitions defined in design/disagg_design.md",
+      "Step 5: adapt the existing colocated produce_batch() path to reuse continue_generation -> _produce_batch_to_buffer() -> cleanup_pending_tasks(for_weight_update=False) -> _get_batch_from_buffer() -> pause_generation",
+      "Step 6: add or update manager tests for single-task and multi-task behavior, EXPIRED_BATCH empty-batch returns, cleanup event ordering, and producer-loop stop/reset semantics"
+    ],
+    "passes": false
+  },
+  {
+    "category": "modify",
+    "description": "Update rollout-step and staleness plumbing in xtuner/v1/rl/agent_loop/single_turn_agent_loop.py and xtuner/v1/rl/agent_loop/utils.py so samples record rollout model version, not producer loop iteration.",
+    "steps": [
+      "Step 1: thread model_rollout_step through the producer and manager call chain into SingleTurnAgentLoop.generate_sample() and PartialRolloutHandler.postprocess()",
+      "Step 2: change partial-rollout postprocessing so response_rollout_steps and seq_staleness are derived from model_rollout_step semantics instead of per-call rollout_step semantics",
+      "Step 3: add a lightweight refresh_seq_staleness(group, current_rollout_step) helper for re-checking buffered samples at consume time",
+      "Step 4: keep partial-rollout continuation and EXPIRED reset behavior correct for COMPLETED, ABORTED, and EXPIRED groups under the new step semantics",
+      "Step 5: add or update focused tests for model_rollout_step recording, staleness refresh, and partial-rollout postprocess behavior"
+    ],
+    "passes": false
+  },
+  {
+    "category": "add",
+    "description": "Add xtuner/v1/train/rl_disaggregated_trainer.py with RLDisaggregatedTrainerConfig and RLDisaggregatedTrainer that run a background producer loop and a foreground trainer loop without changing the current CLI contract.",
+    "steps": [
+      "Step 1: add RLDisaggregatedTrainerConfig and RLDisaggregatedTrainer with a synchronous fit() wrapper over an async _fit() implementation that matches the existing example config shape",
+      "Step 2: start a background producer_task with agent_loop_manager.produce_loop() and make the foreground loop consume batches only through agent_loop_manager.get_batch()",
+      "Step 3: skip _prepare_train_data() and train_controller.fit() whenever get_batch() returns EXPIRED_BATCH, and go straight into the weight-sync path",
+      "Step 4: implement _sync_weights_and_save() so it calls cleanup_pending_tasks(for_weight_update=True), then checkpoint/save logic, then bind_train_rollout plus a fake_update_weights() placeholder",
+      "Step 5: keep evaluation higher priority than background rollout by running eval before agent_loop_manager.reset(model_rollout_step=rollout_step)",
+      "Step 6: add minimal trainer tests for EXPIRED_BATCH skip-train behavior, FINISH shutdown of the producer task, and eval-before-reset ordering"
+    ],
+    "passes": false
+  },
+  {
+    "category": "modify",
+    "description": "Extend checkpoint and resume behavior for the disaggregated path so saves only happen from a paused static point and resume rebuilds manager state safely before producer restart.",
+    "steps": [
+      "Step 1: save checkpoints only after cleanup_pending_tasks(for_weight_update=True) has finished and before reset(model_rollout_step=rollout_step) runs",
+      "Step 2: extend AgentLoopManager.save() to persist agent_loop_manager_state.json with status and a model_rollout_step_override value, in addition to sampler state and replay buffer contents",
+      "Step 3: reject save or force cleanup if any AsyncProduceStrategy still has non-empty self._pending_tasks at checkpoint time",
+      "Step 4: extend AgentLoopManager.resume() to restore sampler state, replay buffer, and manager state into UPDATE_ABORT with reconstructed runtime events and cleared pause_time_s",
+      "Step 5: implement trainer-side resume flow so train state is restored first, rollout weights are re-synced from train, reset(model_rollout_step=saved_model_rollout_step) is called, and a fresh producer_task is created instead of restoring old tasks",
+      "Step 6: add checkpoint tests for save-before-reset semantics, paused resume state, pending-task safety checks, and one-time post-resume weight sync before producer restart"
+    ],
+    "passes": false
+  },
+  {
+    "category": "modify",
+    "description": "Wire the new disaggregated path through the existing draft configs and regression coverage so both single-task and multi-task examples build and run under the new trainer contract.",
+    "steps": [
+      "Step 1: keep examples/v1/config/rl_disagg_single.py and examples/v1/config/rl_disagg_multi.py working with the new trainer/config implementation without changing their public config shape",
+      "Step 2: add the smallest useful automated coverage for the disaggregated single-task and multi-task paths, reusing existing RL test patterns and extending run_test.sh if needed",
+      "Step 3: verify multi-task task_batch_sizes and replay-buffer consumption remain correct under the disaggregated manager flow",
+      "Step 4: pass minimal end-to-end no-crash coverage for the two draft disaggregated example configs"
+    ],
+    "passes": false
+  }
+]

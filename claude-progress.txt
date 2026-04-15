@@ -1,0 +1,37 @@
+Session role: initializer / planning only.
+
+What I accomplished:
+- Read `zdev/zcoding/Agents.md` for the branch layout and current RL implementation anchors.
+- Read `design/disagg_design.md` end to end and checked the draft pseudocode in `design/disagg_draft.py`.
+- Inspected the current runtime files:
+  - `xtuner/v1/rl/agent_loop/producer.py`
+  - `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+  - `xtuner/v1/rl/agent_loop/single_turn_agent_loop.py`
+  - `xtuner/v1/rl/agent_loop/utils.py`
+  - `examples/v1/config/rl_disagg_single.py`
+  - `examples/v1/config/rl_disagg_multi.py`
+- Confirmed that `xtuner/v1/train/rl_disaggregated_trainer.py` does not exist yet in this checkout, even though the draft configs already import it.
+- Created `feature_list.json` as the source of truth for the implementation order and testing scope.
+
+Key findings for the next agent:
+- The design is intended as a minimal refactor, not a rewrite: reuse `AgentLoopManager + AsyncProduceStrategy + ReplayBuffer`.
+- The core runtime split is:
+  - producer-only path: `_produce_batch_to_buffer(...)`
+  - explicit stop/reap path: `cleanup_pending_tasks(...)`
+  - consumer-only path: `_get_batch_from_buffer(...)`
+- The most important semantic change is that rollout freshness must track `model_rollout_step`, not the producer loop's local iteration count.
+- `EXPIRED_BATCH` is intentionally aggressive: once rollout weights are stale enough, skip training and prioritize weight sync immediately.
+- Checkpoints must be taken only after producer cleanup and before `reset()`, with the saved rollout step overridden to the post-sync target version.
+- Resume should restore the manager into a paused `UPDATE_ABORT` state, re-sync rollout weights from train, then call `reset()` and start a fresh producer task.
+
+Suggested implementation order:
+1. `xtuner/v1/rl/agent_loop/producer.py`
+2. `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+3. `xtuner/v1/rl/agent_loop/single_turn_agent_loop.py` and `xtuner/v1/rl/agent_loop/utils.py`
+4. `xtuner/v1/train/rl_disaggregated_trainer.py`
+5. checkpoint/resume details
+6. tests and example-config smoke coverage
+
+Notes about the worktree:
+- `git status --short` showed untracked `work_dirs/` and `zdev/` before this session.
+- I did not touch those paths.
