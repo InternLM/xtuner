@@ -2,7 +2,7 @@ import asyncio
 import os
 import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TypeAlias, TypedDict
+from typing import Any, Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
 
 import ray
@@ -111,6 +111,15 @@ class RolloutController:
             "worker_server_urls_status": worker_server_urls_status,
         }
         return rollout_metadata
+
+    def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
+        with self.worker_info_lock:
+            active_workers = sum(1 for info in self.rank2info.values() if info.is_active)
+            total_workers = len(self.rank2info)
+        return active_workers > 0, {
+            "active_workers": active_workers,
+            "total_workers": total_workers,
+        }
 
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         session_id = rollout_state.session_uid if rollout_state.session_uid else uuid4().int

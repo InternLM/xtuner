@@ -117,6 +117,10 @@ class RolloutConfig(BaseModel):
         int,
         Parameter(group=infer_group, help="Port number for the rollout API server. If not set, 8000 will be used."),
     ] = 8000
+    api_host: Annotated[
+        str,
+        Parameter(group=infer_group, help="Host for the rollout API server."),
+    ] = "0.0.0.0"
     gpus_per_node: Annotated[int, Parameter(group=infer_group, help="Number of GPUs allocated per node.")] = 8
     dtype: Annotated[
         str,
@@ -313,7 +317,7 @@ class RolloutConfig(BaseModel):
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 try:
-                    s.bind(("localhost", port))
+                    s.bind((self.api_host if self.api_host != "0.0.0.0" else "localhost", port))
                     break
                 except OSError:
                     port += 1

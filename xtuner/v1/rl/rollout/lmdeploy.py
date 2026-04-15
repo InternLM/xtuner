@@ -93,12 +93,14 @@ class LMDeployWorker(RolloutWorker):
         message = rollout_state.message
         input_tokens = rollout_state.tokens
 
+        optional_fields: dict[str, object] = {}
+        if tools is not None:
+            optional_fields["tools"] = tools
+        if tool_choice is not None:
+            optional_fields["tool_choice"] = tool_choice
+
         if sample_params.return_token_ids:
-            payload = {
-                "model": self.model_name,
-                "tools": tools,
-                "tool_choice": tool_choice,
-            }
+            payload = {"model": self.model_name, **optional_fields}
 
             if "image_data" in rollout_state.extra_fields:
                 assert input_tokens is not None, "input_tokens is required when image_data is provided."
@@ -112,19 +114,27 @@ class LMDeployWorker(RolloutWorker):
                 payload["input_ids"] = prompt_token_ids
             sample_params.return_routed_experts = True if self.enable_return_routed_experts else False
             lmdeploy_sample_params = self._transform_sample_params(sample_params)
-            payload.update(sample_params)
+            payload.update(lmdeploy_sample_params)
         else:
             payload = {
                 "model": self.model_name,
                 "messages": rollout_state.message,
-                "tools": tools,
-                "tool_choice": tool_choice,
+                **optional_fields,
             }
-            lmdeploy_sample_params = self._transform_sample_params(sample_params)
-            lmdeploy_sample_params.pop("no_stop_trim", None)
-            lmdeploy_sample_params.pop("return_logprob", None)
-            lmdeploy_sample_params.pop("stop_token_ids", None)
-            lmdeploy_sample_params["min_new_tokens"] = sample_params.min_tokens
+            lmdeploy_sample_params = {
+                "temperature": sample_params.temperature,
+                "top_p": sample_params.top_p,
+                "n": sample_params.n,
+                "stream": sample_params.stream,
+                "max_tokens": sample_params.max_tokens,
+                "repetition_penalty": sample_params.repetition_penalty,
+                "top_k": sample_params.top_k,
+                "skip_special_tokens": sample_params.skip_special_tokens,
+            }
+            if sample_params.stops:
+                lmdeploy_sample_params["stop"] = sample_params.stops
+            if sample_params.min_tokens > 0:
+                lmdeploy_sample_params["min_new_tokens"] = sample_params.min_tokens
             payload.update(lmdeploy_sample_params)
         return payload
 
