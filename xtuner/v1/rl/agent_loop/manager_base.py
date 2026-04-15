@@ -231,25 +231,6 @@ def build_task_runners(
     return task_runners
 
 
-def build_task_runner(
-    task: TaskSpecConfig,
-    *,
-    rollout_controller: RolloutController,
-    tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
-    replay_buffer: ReplayBuffer,
-    logger=None,
-) -> _TaskRunner:
-    # single-task manager 直接复用多 task 的底层构建逻辑，只是这里显式返回唯一 task runner，
-    # 让上层代码不必再处理 list / enumerate / duplicate-name 这些多 task 细节。
-    return build_task_runners(
-        [task],
-        rollout_controller=rollout_controller,
-        tokenizer=tokenizer,
-        replay_buffer=replay_buffer,
-        logger=logger,
-    )[0]
-
-
 class BaseAgentLoopManager:
     _TASK_CHECKPOINT_DIR = "tasks"
 

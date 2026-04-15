@@ -1,5 +1,4 @@
 import asyncio
-import inspect
 import math
 import time
 from abc import ABC, abstractmethod
@@ -42,18 +41,7 @@ async def _timed_generate_group(
     if isinstance(agent_loop, ray.actor.ActorHandle):
         result = await agent_loop.generate_group.remote(rollout_state, **kwargs)
     else:
-        generate_group = agent_loop.generate_group
-        if kwargs:
-            try:
-                signature = inspect.signature(generate_group)
-                supports_var_kwargs = any(
-                    param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
-                )
-                if not supports_var_kwargs:
-                    kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
-            except (TypeError, ValueError):
-                pass
-        result = await generate_group(rollout_state, **kwargs)
+        result = await agent_loop.generate_group(rollout_state, **kwargs)
     return result, time.perf_counter() - start
 
 
@@ -442,8 +430,10 @@ class AsyncProduceStrategy(ProduceStrategy):
         expired_sample_count: int,
         sample_from_expired_storage: bool,
     ) -> ProducerTimings:
-        # fixed-concurrency pool 只用于 produce_batch 路径。
-        # 它和 exact-target produce 的关键区别是：这里维持的是“并发池大小”，不是“buffer 绝对目标量”。
+        # 它和 _produce_until_target_count(...) 的区别不是“没有 target_count”，
+        # 而是这里以固定并发池滚动推进：
+        # 先启动 data_concurrency 个任务，之后完成一个补一个，
+        # 始终尽量维持池子大小，直到累计有效样本达到 target_count。
         pending_tasks = set()
         generate_times: list[float] = []
         finished_group_count = 0
