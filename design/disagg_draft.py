@@ -10,6 +10,10 @@ import asyncio
 
 
 class RLDisaggregatedTrainer:
+    # 复用 colocate trainer 的整体目录约定，便于后续接入现有 meta / auto_resume 逻辑。
+    _CHECKPOINT_DIR = "checkpoints"
+    _SAVE_TRAIN_STATE_PATH = "train_state.json"
+
     def fit(self):
         # 对外仍保留同步接口，兼容当前 CLI 的 `trainer.fit()` 调用方式。
         # 内部真实逻辑放到 async `_fit()`，这样才能同时管理后台 producer task。
@@ -81,10 +85,69 @@ class RLDisaggregatedTrainer:
         # 否则 rollout 侧可能仍在使用旧权重继续产生样本，导致 staleness 失控。
         pause_time_s = await self.agent_loop_manager.cleanup_pending_tasks(for_weight_update=True)
         self.agent_loop_manager._pause_time_s = pause_time_s
+
+        # checkpoint 的安全保存点放在这里：
+        # 1. producer 已经停下，pending rollout 已收尾；
+        # 2. replay buffer 不再被后台并发写入；
+        # 3. trainer 正准备进入权重同步。
+        #
+        # 这样保存出来的是一个“静止态”快照，恢复时不需要考虑未完成的 rollout task。
+        self._maybe_save_checkpoint(rollout_step)
+
         # 这里先用 fake 接口占位，后续再替换成真实的跨卡权重同步实现。
         self.fake_update_weights()
 
     def fake_update_weights(self):
+        pass
+
+    def _maybe_save_checkpoint(self, rollout_step: int):
+        # 设计目标：沿用 colocate trainer 的三层保存结构。
+        #
+        # 1. AgentLoopManager.save(...)
+        #    - 保存 task sampler 状态
+        #    - 保存 replay buffer
+        #    - 保存 manager 自身的控制状态
+        #    - 必须显式传入 `model_rollout_step_override=rollout_step`
+        #      作为 resume 后 rollout 应恢复到的目标权重版本
+        #    - 原因是 checkpoint 的保存时机在：
+        #      `cleanup_pending_tasks(for_weight_update=True)` 之后、
+        #      `reset(model_rollout_step=rollout_step)` 之前
+        #    - 也就是说，此时 manager 内部原有的 `self._model_rollout_step`
+        #      仍然还是“旧 rollout 权重版本”，还没被 reset 推进到新的 `rollout_step`
+        #    - 如果这里不显式 override，而是直接保存旧的
+        #      `self._model_rollout_step`，那么 resume 后 producer 会以旧模型版本
+        #      继续恢复流程，语义就和保存前预期不一致
+        #
+        # 2. train_controller.save(...)
+        #    - 保存 train model / optimizer 等训练态
+        #
+        # 3. trainer_state.json
+        #    - 保存 `cur_step`
+        #    - 可额外保存 `global_train_step`
+        #    - 可额外重复保存 `model_rollout_step` 便于诊断
+        #
+        # 注意：
+        # - save 时不保存 eval manager 状态，延续现有 colocate 语义；
+        # - save 前要求 producer 已 cleanup 完成，所有 strategy._pending_tasks 为空。
+        pass
+
+    def _resume_from_checkpoint(self, checkpoint_path: str):
+        # resume 的源头仍然是 train checkpoint + replay buffer + sampler 状态。
+        #
+        # 恢复顺序建议：
+        # 1. train_controller.resume(...)
+        # 2. saved_model_rollout_step = agent_loop_manager.resume(...)
+        # 3. 用 train 侧权重重新同步 rollout（当前先走 fake_update_weights）
+        # 4. agent_loop_manager.reset(model_rollout_step=saved_model_rollout_step)
+        #
+        # 这里的关键点是：
+        # - resume 取回的 `saved_model_rollout_step` 应该是 checkpoint 保存时
+        #   显式 override 进去的“新 rollout_step”
+        # - 而不是 save 那一刻 manager 内部还没来得及 reset 的旧
+        #   `self._model_rollout_step`
+        #
+        # 这里不会恢复 producer_task 本身；
+        # producer loop 会在 fit() 启动时重新 create_task。
         pass
 
 
@@ -236,6 +299,8 @@ class AsyncProduceStrategy:
 
 
 class AgentLoopManager:
+    _MANAGER_STATE_PATH = "agent_loop_manager_state.json"
+
     def __init__(self, ...):
         # 当 trainer 准备做权重更新时置位，用来通知 producer 停止继续补任务。
         self._update_event = asyncio.Event()
@@ -291,6 +356,57 @@ class AgentLoopManager:
         self._update_event.clear()
         self._status = AgentLoopManagerStatus.NORMAL
         self._model_rollout_step = model_rollout_step
+
+    def save(self, checkpoint_path: str, model_rollout_step_override: int | None = None) -> None:
+        # 与当前 colocate `AgentLoopManager.save()` 相比，这里除了 sampler / replay buffer，
+        # 还需要额外保存 manager 的控制状态。
+        #
+        # 推荐保存内容：
+        # - 各 task sampler 状态
+        # - replay_buffer 状态
+        # - manager_state:
+        #   - `model_rollout_step`
+        #   - `status`
+        #
+        # 设计约束：
+        # - `_update_event` / `_finish_event` 本身不序列化；
+        # - `status` 保存为 `UPDATE_ABORT`，表示这个 checkpoint 是在 producer 已暂停的安全点拍的；
+        # - `pause_time_s` 不必持久化，resume 后置 0 即可；
+        # - 不保存 strategy._pending_tasks，save 前必须已经 cleanup 完成。
+        #
+        # `model_rollout_step_override` 的作用：
+        # - 在非共卡主流程里，checkpoint 保存点位于 cleanup 之后、reset 之前；
+        # - 因而 save 发生时，`self._model_rollout_step` 还是旧值；
+        # - 但保存完成后，主流程马上会调用
+        #   `reset(model_rollout_step=rollout_step)`，把 rollout 使用的模型版本
+        #   推进到新的 `rollout_step`；
+        # - 所以这里不是“可选优化”，而是必须显式传入
+        #   `model_rollout_step_override=rollout_step`；
+        # - resume 时希望恢复的是“新的 rollout_step 对应的模型版本”，
+        #   而不是 save 瞬间那个还未更新的旧 `self._model_rollout_step`。
+        pass
+
+    def resume(self, checkpoint_path: str) -> int:
+        # 恢复内容：
+        # - 各 task sampler 状态
+        # - replay_buffer
+        # - manager_state
+        #
+        # 恢复后推荐状态：
+        # - `_model_rollout_step = saved_model_rollout_step`
+        # - `_status = UPDATE_ABORT`
+        # - `_update_event.set()`
+        # - `_finish_event.clear()`
+        # - `_pause_time_s = 0.0`
+        #
+        # 这样做的原因是：
+        # - checkpoint 恢复后的 manager 应先处于“暂停态”
+        # - 等 trainer 重新把 train 权重同步到 rollout 后，
+        #   再通过 `reset()` 恢复到 NORMAL
+        #
+        # 返回值：
+        # - `saved_model_rollout_step`，供 trainer resume 逻辑继续使用。
+        return 0
 
     async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
         # 共卡路径仍然保留这个接口，但内部改成三段式：

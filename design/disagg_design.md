@@ -511,8 +511,9 @@
 非共卡下，权重同步前的顺序必须是：
 
 1. `agent_loop_manager.cleanup_pending_tasks(for_weight_update=True)`
-2. `bind_train_rollout(...)`
-3. `fake_update_weights()`
+2. `_maybe_save_checkpoint(rollout_step)`
+3. `bind_train_rollout(...)`
+4. `fake_update_weights()`
 
 这里暂时不走真实的 `train_controller.update_weights()`，而是保留一个显式占位函数：
 
@@ -538,11 +539,231 @@
 
 ---
 
-## 13. 测试建议
+## 13. Checkpoint 保存与恢复
+
+### 13.1 为什么 checkpoint 需要专门细化
+
+共卡训练里，rollout 和 train 是串行切换的，checkpoint 保存点天然比较清晰。
+
+但非共卡训练里，多了一个持续运行的后台 producer：
+
+- replay buffer 可能正在被 producer 写入
+- strategy 内可能还挂着未收尾的 pending rollout
+- manager 还维护了 `_model_rollout_step` / `_status` / `_update_event` 这些运行时状态
+
+如果不把 save / resume 逻辑说清楚，恢复后很容易出现下面的问题：
+
+- producer 恢复得太早，在 rollout 权重同步前就继续生成
+- replay buffer 恢复了，但 manager 的 `model_rollout_step` 不对
+- checkpoint 拍下来时还有 pending rollout 没收尾，导致恢复语义不一致
+
+所以这里要求 checkpoint 必须在“静止态”拍摄。
+
+### 13.2 安全保存点
+
+checkpoint 的安全保存点固定放在 `_sync_weights_and_save(...)` 中，且必须满足：
+
+1. `agent_loop_manager.cleanup_pending_tasks(for_weight_update=True)` 已完成
+2. producer 不会继续补发新任务
+3. replay buffer 不再被后台并发写入
+4. `reset()` 尚未发生
+
+因此保存点的语义是：
+
+- trainer 当前步的训练结果已经稳定
+- producer 已暂停
+- rollout 仍需在 resume 后由 train 侧重新同步权重
+
+这里特意把 checkpoint 放在 `reset()` 之前，是为了避免 producer 恢复后台生成后，又把系统带回“动态变化态”。
+
+这里还要再强调一个容易误解的点：
+
+- `_maybe_save_checkpoint(rollout_step)` 中，必须显式传入
+  `model_rollout_step_override=rollout_step`
+- 不能偷懒直接把当时 manager 内部的 `self._model_rollout_step` 原样存盘
+
+原因是：
+
+- save 的时机在 `cleanup_pending_tasks(for_weight_update=True)` 之后
+- 但在 `reset(model_rollout_step=rollout_step)` 之前
+- 所以 save 那一刻，manager 里的 `self._model_rollout_step` 仍然还是旧的 rollout 权重版本
+- 而主流程的真实意图，是保存“本轮同步完成后，resume 应该继续使用的新 rollout_step”
+
+换句话说，这个 override 不是建议项，而是恢复语义正确性的必要条件。
+
+### 13.3 保存内容
+
+沿用当前 colocate trainer 的三层保存结构：
+
+#### 1. `AgentLoopManager.save(...)`
+
+除现有的 sampler / replay buffer 外，非共卡路径还要保存 manager 自身状态。
+
+建议保存：
+
+- 各 task sampler 状态
+- replay buffer
+- `agent_loop_manager_state.json`
+
+`agent_loop_manager_state.json` 至少包含：
+
+- `model_rollout_step`
+- `status`
+
+其中 `model_rollout_step` 的来源要特别注意：
+
+- 在 `_maybe_save_checkpoint(rollout_step)` 里，必须通过
+  `model_rollout_step_override=rollout_step` 显式写入
+- 不应直接落盘 save 瞬间那个尚未经过 `reset()` 推进的旧
+  `self._model_rollout_step`
+
+推荐语义：
+
+- `status` 保存为 `UPDATE_ABORT`
+- 表示这个 checkpoint 拍摄时，producer 已经被暂停
+
+不建议保存：
+
+- `_update_event`
+- `_finish_event`
+- `_pause_time_s`
+- `AsyncProduceStrategy._pending_tasks`
+
+原因：
+
+- event 是运行时同步原语，不适合直接持久化
+- `pause_time_s` 是一次性日志字段，resume 后清零即可
+- `pending_tasks` 是内存里的协程对象，checkpoint 前必须已经 cleanup 并清空
+
+#### 2. `train_controller.save(...)`
+
+和 colocate trainer 语义一致，保存训练态：
+
+- model
+- optimizer
+- 其他 DCP 状态
+
+#### 3. `trainer_state.json`
+
+建议至少保存：
+
+- `cur_step`
+
+建议额外保存：
+
+- `global_train_step`
+- `model_rollout_step`
+
+其中：
+
+- `cur_step` 决定训练主循环恢复到哪一步
+- `model_rollout_step` 主要用于恢复校验和排障
+
+### 13.4 `model_rollout_step` 为什么要单独保存
+
+`model_rollout_step` 不能只依赖 `cur_step` 间接推导。
+
+原因是：
+
+- checkpoint 是在 cleanup 后、reset 前拍摄的
+- 这个时间点的 manager 状态，不一定能直接由训练步数唯一还原
+- 后续如果 sync 策略变化，`cur_step` 与 rollout 实际使用的权重版本也不一定严格一一对应
+
+因此这里更准确的做法是：
+
+- 在 manager state 中显式保存“resume 目标版本”的 `model_rollout_step`
+- 这个值在 `_maybe_save_checkpoint(rollout_step)` 时通过
+  `model_rollout_step_override=rollout_step` 传入
+- resume 后直接按这个保存值恢复
+
+这里之所以不能直接依赖 `self._model_rollout_step`，不是因为它永远不可信，
+而是因为当前设计的 checkpoint 保存点刚好卡在：
+
+1. `cleanup_pending_tasks(...)` 已完成
+2. `reset(model_rollout_step=rollout_step)` 尚未执行
+
+所以 save 瞬间的 `self._model_rollout_step` 在语义上仍代表“旧 rollout 模型版本”，
+而 resume 后我们真正希望恢复的是“新的 rollout_step 对应版本”。
+
+### 13.5 `AgentLoopManager.save(...)` 的约束
+
+为了保证 checkpoint 可恢复，保存前应满足：
+
+- 所有 `AsyncProduceStrategy._pending_tasks` 为空
+- `AgentLoopManager._status == UPDATE_ABORT`
+- `_update_event` 已经置位
+- producer 当前不会继续写 replay buffer
+- 调用方显式以 `model_rollout_step_override=rollout_step` 传入
+  本次 checkpoint 对应的目标 rollout 版本
+
+如果这些条件不满足，建议：
+
+- 拒绝保存，或
+- 在 save 前先强制执行 cleanup
+
+### 13.6 Resume 顺序
+
+resume 的 source of truth 不是 rollout 的运行时内存，而是：
+
+- train checkpoint
+- replay buffer
+- sampler 状态
+- manager state
+
+推荐恢复顺序如下：
+
+1. `train_controller.resume(checkpoint_path)`
+2. `agent_loop_manager.resume(checkpoint_path)`
+3. `bind_train_rollout(...)`
+4. `fake_update_weights()` 或后续真实权重同步
+5. `agent_loop_manager.reset(model_rollout_step=saved_model_rollout_step)`
+6. `fit()` 启动新的 `producer_task = create_task(produce_loop(...))`
+
+这里有两个重要点：
+
+- 不恢复旧的 producer task
+  - producer task 是运行时协程，进程重启后必须重新创建
+- rollout 权重不作为 checkpoint source of truth
+  - resume 后总是从 train 侧重新同步一次 rollout
+- `saved_model_rollout_step` 应该对应新的 `rollout_step`
+  - 也就是 `_maybe_save_checkpoint(rollout_step)` 时显式 override 写进去的值
+  - 不能退回到 save 瞬间那个旧的 `self._model_rollout_step`
+
+### 13.7 `AgentLoopManager.resume(...)` 的目标状态
+
+`AgentLoopManager.resume(...)` 恢复 sampler / replay buffer 后，推荐把 manager 留在一个“暂停态”：
+
+- `_model_rollout_step = saved_model_rollout_step`
+- `_status = UPDATE_ABORT`
+- `_update_event.set()`
+- `_finish_event.clear()`
+- `_pause_time_s = 0.0`
+
+这样做的原因是：
+
+- resume 完成时 producer 还不应立即继续生成
+- 必须等 trainer 先重新把 train 权重同步到 rollout
+- 然后再由 `reset()` 切回 `NORMAL`
+
+### 13.8 eval manager 是否保存
+
+默认不保存 `eval_agent_loop_manager`，保持与当前 colocate trainer 一致的语义。
+
+原因：
+
+- eval 数据流不影响训练正确性
+- eval sampler 从头开始通常可接受
+- 这样能减少 checkpoint 内容和恢复复杂度
+
+如果后续需要“精确恢复 eval 进度”，再单独扩展即可。
+
+---
+
+## 14. 测试建议
 
 建议至少覆盖以下场景。
 
-### 13.1 Producer / Strategy
+### 14.1 Producer / Strategy
 
 - `AsyncProduceStrategy.produce_batch()` 能正确返回：
   - `NORMAL`
@@ -551,22 +772,26 @@
 - `self._pending_tasks` 能跨调用保留
 - `cleanup_pending_tasks()` 外提后，pending 回收逻辑仍正确
 
-### 13.2 Manager
+### 14.2 Manager
 
 - 单 task / 多 task 的 `_produce_batch_to_buffer()` 行为一致
 - 多 task 下 `task_batch_sizes` 仍正确分配
 - `get_batch()` 在 `EXPIRED_BATCH` 状态下直接返回空 batch + 状态
 - `cleanup_pending_tasks(for_weight_update=True)` 先置 `_update_event`
+- `save()` 前若仍有 pending tasks，会拒绝保存或先 cleanup
+- `resume()` 后 manager 先处于 `UPDATE_ABORT`，而不是直接 `NORMAL`
 
-### 13.3 Trainer
+### 14.3 Trainer
 
 - `EXPIRED_BATCH` 会跳过训练，直接进入同步
 - eval 步上 reset 发生在 eval 之后
 - `FINISH` 时 producer task 能正确退出
+- checkpoint 保存点发生在 cleanup 之后、reset 之前
+- resume 后会先做一次 rollout 权重同步，再启动新的 producer_task
 
 ---
 
-## 14. 当前明确的设计取舍
+## 15. 当前明确的设计取舍
 
 - `ExpiredBatch` 采用更激进的策略：
   - 只要当前 rollout model 过旧，就直接停
@@ -586,9 +811,14 @@
 - `fit()` 对外保持同步
   - 内部通过 async `_fit()` 实现非共卡调度
 
+- checkpoint 只在 producer 已暂停的静止态拍摄
+  - 不保存运行中的 pending rollout task
+  - resume 后始终重新创建 producer_task
+  - rollout 权重始终从 train 侧重新同步
+
 ---
 
-## 15. 对应实现锚点
+## 16. 对应实现锚点
 
 本设计主要落在这些模块：
 
