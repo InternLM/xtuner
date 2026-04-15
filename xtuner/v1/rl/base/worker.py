@@ -28,6 +28,7 @@ from xtuner.v1.engine.train_engine import TrainEngine, TrainStepInfo
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossConfig, LogProbConfig
 from xtuner.v1.loss.ce_loss import CELossContext
+from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
@@ -252,6 +253,10 @@ class TrainingWorker(SingleAcceleratorWorker):
         else:
             mode = "eager"
         self.logprob_cfg = LogProbConfig(chunk_size=worker_cfg.loss_cfg.chunk_size, mode=mode)
+        self.mtp_config = None
+        if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
+            if hasattr(worker_cfg.model_cfg.text_config, "mtp_config"):
+                self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -478,6 +483,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         # Init loss_ctx: shifted_labels, advantages, rollout_logprobs
         seq_ctx_list: list[SequenceContext] = []
         loss_ctx_list: list[BaseRLLossContext] = []
+        mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         for data in data_batches:
             # update seq_ctx
             seq_ctx = data["seq_ctx"]
@@ -516,6 +522,25 @@ class TrainingWorker(SingleAcceleratorWorker):
             seq_ctx_list.append(seq_ctx)
             assert loss_ctx is not None
             loss_ctx_list.append(loss_ctx)
+            if self.mtp_config is not None:
+                mtp_loss_ctxs_per_batch: list[MTPLossContext] = []
+                for mtp_idx in range(self.mtp_config.num_layers):
+                    mtp_loss_cfg = MTPLossConfig(
+                        **loss_cfg.model_dump(include={"mode", "chunk_size"}),
+                        mtp_depth=mtp_idx + 1,
+                        detach_mtp_lm_head_weight=self.mtp_config.detach_mtp_lm_head_weight,
+                    )
+                    mtp_ctx = mtp_loss_cfg.build(
+                        data={
+                            "shifted_labels": shifted_labels,
+                            "seq_ctx": seq_ctx,
+                            "logprobs": rollout_logprobs,
+                        },
+                        sp_mesh=self.sp_mesh,
+                    )
+                    if mtp_ctx is not None:
+                        mtp_loss_ctxs_per_batch.append(mtp_ctx)
+                mtp_loss_ctx_list.append(mtp_loss_ctxs_per_batch)
 
         del data_batches
 
@@ -603,12 +628,36 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         # compute batched loss context
         batched_loss_ctx_list: list[BaseRLLossContext] = []
+        batched_mtp_loss_ctx_list: list[list[MTPLossContext]] = []
         LossContext = loss_cfg.loss_ctx_cls
         for i in range(0, len(loss_ctx_list), iters_per_step):
             batches_loss_ctx = loss_ctx_list[i : i + iters_per_step]
             batched_loss_ctx_list.extend(
                 LossContext.build_batches(batches_loss_ctx)  # type: ignore[arg-type]
             )
+
+            if self.mtp_config is not None:
+                batches_seq_ctx = seq_ctx_list[i : i + iters_per_step]
+                cu_seq_lens_list = [seq_ctx.cu_seq_lens_q for seq_ctx in batches_seq_ctx]
+                # mtp_loss_ctx_list: list[list[MTPLossContext]], outer=batch, inner=mtp_depth
+                num_mtp_depths = len(mtp_loss_ctx_list[0]) if mtp_loss_ctx_list else 0
+                for mtp_idx in range(num_mtp_depths):
+                    batches_mtp_loss_ctx = [
+                        mtp_loss_ctx_list[j][mtp_idx]
+                        for j in range(i, min(i + iters_per_step, len(mtp_loss_ctx_list)))
+                    ]
+                    batched_mtp_depth_ctxs = MTPLossContext.build_batches(
+                        cast(list[MTPLossContext], batches_mtp_loss_ctx),
+                        cu_seq_lens_list=cu_seq_lens_list,
+                        sp_mesh=self.sp_mesh,
+                    )
+                    # Append each depth's batched ctx to the corresponding batch index
+                    for batch_offset, mtp_ctx in enumerate(batched_mtp_depth_ctxs):
+                        global_batch_idx = i + batch_offset
+                        if global_batch_idx >= len(batched_mtp_loss_ctx_list):
+                            batched_mtp_loss_ctx_list.append([mtp_ctx])
+                        else:
+                            batched_mtp_loss_ctx_list[global_batch_idx].append(mtp_ctx)
 
         # train optimizer steps
         for i in range(0, len(seq_ctx_list), iters_per_step):
@@ -619,6 +668,15 @@ class TrainingWorker(SingleAcceleratorWorker):
                 ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
                 for seq_ctx, loss_ctx in zip(batches_seq_ctx, batches_loss_ctx)
             ]
+
+            if self.mtp_config is not None:
+                batches_mtp_loss_ctx = batched_mtp_loss_ctx_list[i : i + iters_per_step]
+                engine_input = [
+                    ModelItem(seq_ctx=seq_ctx, loss_ctx={"mtp": mtp_loss_ctx_depths, "lm": loss_ctx})
+                    for seq_ctx, loss_ctx, mtp_loss_ctx_depths in zip(
+                        batches_seq_ctx, batches_loss_ctx, batches_mtp_loss_ctx
+                    )
+                ]
 
             train_step_info = self._engine.train_step(
                 data_batches=engine_input,
