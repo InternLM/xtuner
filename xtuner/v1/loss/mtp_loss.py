@@ -148,6 +148,9 @@ class MTPLossContext(LMHeadLossContext):
       computes KL divergence between MTP's log-probabilities and the
       rolled rollout log-probabilities.
 
+    Both modes support chunk mode for memory-efficient computation via the
+    base class's ``forward() → eager_mode()/chunk_mode() → loss_fn()`` dispatch.
+
     Args:
         loss_cfg (MTPLossConfig): The MTP loss configuration.
         loss_kwargs (MTPLossKwargs): Pre-rolled keyword arguments for loss
@@ -163,36 +166,57 @@ class MTPLossContext(LMHeadLossContext):
         if self.loss_cfg.detach_mtp_lm_head_weight:
             head_weight = head_weight.detach()
             head_bias = head_bias.detach() if head_bias is not None else None
-
-        logprobs = self.loss_kwargs.logprobs
-        if logprobs is not None:
-            return self._kl_forward(hidden_states, head_weight, head_bias, logprobs)
-
+        # Dispatch to eager_mode/chunk_mode via base class, which calls loss_fn per chunk
         return super().forward(hidden_states, head_weight, head_bias)
 
-    def _kl_forward(
+    def loss_fn(
         self,
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None,
-        logprobs: torch.Tensor,
+        loss_kwargs: MTPLossKwargs,  # type: ignore[override]
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
-        """Compute KL loss between MTP logprobs and rolled rollout logprobs."""
+        if loss_kwargs.logprobs is not None:
+            return self._kl_loss_fn(hidden_states, head_weight, head_bias, loss_kwargs)
+        return super().loss_fn(hidden_states, head_weight, head_bias, loss_kwargs)
+
+    def _kl_loss_fn(
+        self,
+        hidden_states: torch.Tensor,
+        head_weight: torch.Tensor,
+        head_bias: torch.Tensor | None,
+        loss_kwargs: MTPLossKwargs,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
+        """Compute KL loss between MTP logprobs and rolled rollout logprobs.
+
+        Called per-chunk in chunk mode, so tensors here may be a slice of the full sequence.
+        """
         from xtuner.v1.rl.loss_fn import kl_penalty
         from xtuner.v1.rl.utils import gather_logprobs
 
-        shifted_labels = self.loss_kwargs.shifted_labels
-
-        # Compute MTP logprobs
         logits = F.linear(hidden_states, head_weight, head_bias).float()
+
+        shifted_labels = loss_kwargs.shifted_labels
+        loss_weight = loss_kwargs.loss_weight
+        rollout_logprobs = loss_kwargs.logprobs
+
+        assert rollout_logprobs is not None
+
         mtp_logprobs = gather_logprobs(logits, shifted_labels)
 
-        # Build mask and loss weight
-        mask = (shifted_labels != -100).float()
-        num_valid = mask.sum().clamp(min=1)
-        loss_weight = mask / num_valid
+        # Use loss_weight from build_batches (globally calibrated) if available,
+        # otherwise fall back to local mask normalization.
+        if loss_weight is not None:
+            kl_weight = loss_weight.flatten()
+        else:
+            mask = (shifted_labels != -100).float()
+            kl_weight = (mask / mask.sum().clamp(min=1)).flatten()
 
-        # KL divergence: constrain MTP to not drift from rollout policy
-        kl_loss = kl_penalty(mtp_logprobs, logprobs, loss_weight, "low_var_kl")
+        kl_loss = kl_penalty(
+            mtp_logprobs.flatten(),
+            rollout_logprobs.flatten(),
+            kl_weight,
+            "low_var_kl",
+        )
 
         return kl_loss, (None, {})
