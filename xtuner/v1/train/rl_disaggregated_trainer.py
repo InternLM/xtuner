@@ -16,7 +16,6 @@ from xtuner.v1.rl.agent_loop import (
     AgentLoopManagerConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.judger import JudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer.worker import WorkerConfig
@@ -37,7 +36,6 @@ class RLDisaggregatedTrainerConfig(BaseModel):
     rollout_resources: AcceleratorResourcesConfig
     train_worker_cfg: WorkerConfig
     rollout_config: RolloutConfig
-    judger_config: JudgerConfig
     tokenizer_path: Union[str, Path]
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
     agent_loop_manager_cfg: AgentLoopManagerConfig
@@ -82,7 +80,6 @@ class RLDisaggregatedTrainerConfig(BaseModel):
             rollout_resources=self.rollout_resources,
             train_worker_cfg=self.train_worker_cfg,
             rollout_config=self.rollout_config,
-            judger_config=self.judger_config,
             tokenizer_path=self.tokenizer_path,
             replay_buffer_config=self.replay_buffer_config,
             agent_loop_manager_cfg=self.agent_loop_manager_cfg,
@@ -121,7 +118,6 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         rollout_resources: AcceleratorResourcesConfig,
         train_worker_cfg: WorkerConfig,
         rollout_config: RolloutConfig,
-        judger_config: JudgerConfig,
         tokenizer_path: str | Path,
         replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig,
         agent_loop_manager_cfg: AgentLoopManagerConfig,
@@ -229,13 +225,11 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
 
         self.rollout_controller = rollout_config.build(self._rollout_pg)
 
-        judger = judger_config.build()
         replay_buffer = replay_buffer_config.build()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
         self.agent_loop_manager = agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
-            judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
@@ -247,7 +241,6 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
 
         self.eval_agent_loop_manager = eval_agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
-            judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,

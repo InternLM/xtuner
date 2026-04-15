@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto import Status
-from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController, continue_generation
 from xtuner.v1.rl.utils import create_task
@@ -41,7 +39,6 @@ class AgentLoopManagerConfig(BaseModel):
     def build(
         self,
         rollout_controller: RolloutController,
-        judger: Judger,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
         replay_buffer: ReplayBuffer,
         logger=None,
@@ -49,7 +46,6 @@ class AgentLoopManagerConfig(BaseModel):
         task_runners = build_task_runners(
             self.tasks,
             rollout_controller=rollout_controller,
-            judger=judger,
             tokenizer=tokenizer,
             replay_buffer=replay_buffer,
             logger=logger,
@@ -68,11 +64,6 @@ class AgentLoopManager(BaseAgentLoopManager):
         self._sync_interval_total_train_steps: int | None = None
         self._fullasync_session: _FullAsyncIntervalSession | None = None
 
-    # -------------------------------------------------------------
-    # -------------------------------------------------------------
-    # colocated mode
-    # -------------------------------------------------------------
-    # -------------------------------------------------------------
     async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
         start = time.perf_counter()
         self.logger.info(f"[AgentLoopManager][{self.name}] produce_batch start batch={batch_size}")
@@ -119,13 +110,8 @@ class AgentLoopManager(BaseAgentLoopManager):
             f"[AgentLoopManager][{self.name}] produce_batch done elapsed={time.perf_counter() - start:.3f}, "
             f"completed_groups={len(aggregated.rollout_states)}"
         )
-        return aggregated    
-    
-    # -------------------------------------------------------------
-    # -------------------------------------------------------------
-    # disaggregated mode
-    # -------------------------------------------------------------
-    # -------------------------------------------------------------
+        return aggregated
+
     def set_sync_interval_context(
         self,
         *,
@@ -181,6 +167,8 @@ class AgentLoopManager(BaseAgentLoopManager):
                     raise RuntimeError(f"fullasync producer task failed for {task_name}") from exc
 
     async def _wait_until_completed_counts_ready(self, task_batch_sizes: dict[str, int]) -> None:
+        from xtuner.v1.data_proto import Status
+
         while True:
             self._raise_if_fullasync_producers_failed()
             counts = await asyncio.gather(

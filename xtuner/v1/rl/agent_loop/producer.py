@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+import ray
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, refresh_seq_staleness, update_expired_status
@@ -14,7 +15,7 @@ from xtuner.v1.rl.rollout.utils import pause_generation
 from xtuner.v1.rl.utils import create_task
 from xtuner.v1.utils import get_logger
 
-from .agent_loop import AgentLoop
+from .agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from .sampler import Sampler
 
 
@@ -35,21 +36,24 @@ logger = get_logger()
 
 
 async def _timed_generate_group(
-    agent_loop: AgentLoop, rollout_state: list[RolloutState], **kwargs
+    agent_loop: AgentLoopSpec, rollout_state: list[RolloutState], **kwargs
 ) -> tuple[list[RolloutState], float]:
     start = time.perf_counter()
-    generate_group = agent_loop.generate_group
-    if kwargs:
-        try:
-            signature = inspect.signature(generate_group)
-            supports_var_kwargs = any(
-                param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
-            )
-            if not supports_var_kwargs:
-                kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
-        except (TypeError, ValueError):
-            pass
-    result = await generate_group(rollout_state, **kwargs)
+    if isinstance(agent_loop, ray.actor.ActorHandle):
+        result = await agent_loop.generate_group.remote(rollout_state, **kwargs)
+    else:
+        generate_group = agent_loop.generate_group
+        if kwargs:
+            try:
+                signature = inspect.signature(generate_group)
+                supports_var_kwargs = any(
+                    param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
+                )
+                if not supports_var_kwargs:
+                    kwargs = {key: value for key, value in kwargs.items() if key in signature.parameters}
+            except (TypeError, ValueError):
+                pass
+        result = await generate_group(rollout_state, **kwargs)
     return result, time.perf_counter() - start
 
 
@@ -165,7 +169,7 @@ class ProduceStrategy(ABC):
 
     async def _launch_group(
         self,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         sampler: Sampler,
         task_name: str,
         rollout_step: int,
@@ -188,7 +192,7 @@ class ProduceStrategy(ABC):
     async def _cleanup_pending_tasks(
         self,
         pending_tasks: set,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         replay_buffer: ReplayBuffer,
         task_name: str,
         tail_batch_stale_threshold: int = 0,
@@ -198,7 +202,7 @@ class ProduceStrategy(ABC):
         # 2. 等已经在飞的 group 收尾
         # 3. 把它们以当前状态写回 replay buffer
         pause_start = time.perf_counter()
-        rollout_ctl = agent_loop.rollout_ctl
+        rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
         generate_times: list[float] = []
         await pause_generation(rollout_ctl)
         while pending_tasks:
@@ -227,7 +231,7 @@ class ProduceStrategy(ABC):
 
     async def _produce_until_target_count(
         self,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         sampler: Sampler,
         replay_buffer: ReplayBuffer,
         required_batch_size: int,
@@ -316,7 +320,7 @@ class ProduceStrategy(ABC):
     @abstractmethod
     async def produce_batch(
         self,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         sampler: Sampler,
         replay_buffer: ReplayBuffer,
         batch_size: int,
@@ -328,7 +332,7 @@ class ProduceStrategy(ABC):
 class SyncProduceStrategy(ProduceStrategy):
     async def produce_batch(
         self,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         sampler: Sampler,
         replay_buffer: ReplayBuffer,
         batch_size: int,
@@ -427,7 +431,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
     async def _produce_with_fixed_concurrency_pool(
         self,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         sampler: Sampler,
         replay_buffer: ReplayBuffer,
         task_name: str,
@@ -529,7 +533,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
     async def produce_batch(
         self,
-        agent_loop: AgentLoop,
+        agent_loop: AgentLoopSpec,
         sampler: Sampler,
         replay_buffer: ReplayBuffer,
         batch_size: int,

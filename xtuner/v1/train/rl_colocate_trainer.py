@@ -22,7 +22,6 @@ from xtuner.v1.rl.agent_loop import (
     ProduceBatchResult,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.judger import JudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
@@ -159,7 +158,6 @@ class RLColocateTrainerConfig(BaseModel):
     resources: AcceleratorResourcesConfig
     train_worker_cfg: WorkerConfig
     rollout_config: RolloutConfig
-    judger_config: JudgerConfig
     tokenizer_path: Union[str, Path]
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
     agent_loop_manager_cfg: AgentLoopManagerConfig
@@ -191,7 +189,6 @@ class RLColocateTrainerConfig(BaseModel):
             resources=self.resources,
             train_worker_cfg=self.train_worker_cfg,
             rollout_config=self.rollout_config,
-            judger_config=self.judger_config,
             tokenizer_path=self.tokenizer_path,
             replay_buffer_config=self.replay_buffer_config,
             agent_loop_manager_cfg=self.agent_loop_manager_cfg,
@@ -234,7 +231,6 @@ class RLColocateTrainer:
         resources: AcceleratorResourcesConfig,
         train_worker_cfg: WorkerConfig,
         rollout_config: RolloutConfig,
-        judger_config: JudgerConfig,
         # Sampler config
         # sampler_config: SamplerConfig,
         tokenizer_path: str | Path,
@@ -348,15 +344,11 @@ class RLColocateTrainer:
 
         self.rollout_controller = rollout_config.build(self._pg)
 
-        # build judger
-        judger = judger_config.build()
-
         replay_buffer = replay_buffer_config.build()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         # build agnet_loop_manager
         self.agent_loop_manager = agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
-            judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
@@ -365,7 +357,6 @@ class RLColocateTrainer:
         # build eval agent loop manager
         self.eval_agent_loop_manager = eval_agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
-            judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
