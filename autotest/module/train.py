@@ -26,9 +26,13 @@ class Train:
             )
             config["work_dir"] = work_dir
 
+            # this patch is for torch 2.9.1 Conv3d memory issue fix
+            cudnn_patch = """TORCH_VERSION=$(python -c "import torch;print(torch.__version__.split('+')[0])"); if [[ $TORCH_VERSION == "2.9.1" ]]; then pip install nvidia-cudnn-cu12==9.15.1.9; fi; """
+
             if train_type == "sft":
                 command = (
                     f"cd {current_dir}; pwd; pip install -e .[all]; pip install more-itertools; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
+                    + cudnn_patch
                     + f"torchrun --nproc-per-node {nproc_per_node} --master_addr=${{MASTER_ADDR}} --master_port=${{MASTER_PORT}} --nnodes=${{WORLD_SIZE}} --node_rank=${{RANK}} "
                     + f"xtuner/v1/train/cli/{train_type}.py"
                 )
@@ -52,6 +56,7 @@ class Train:
                 infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
                 command = (
                     f"cd {current_dir}; pwd; pip install -e .[all]; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
+                    + cudnn_patch
                     + f"bash -x examples/v1/scripts/run_rl.sh {config_path} {infer_type} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )
                 return command, config
@@ -64,11 +69,11 @@ class Train:
             config.get("base_path").get("base_baseline_path"), config.get("assert_info", {}).get("base_metric", None)
         )
         train_type = config.get("type")
-        if train_type == 'sft':
+        if train_type == "sft":
             cur_path = os.path.join(get_latest_subdir(work_dir), "logs/exp_tracking/rank0/tracker.jsonl")
             check_metrics = config.get("assert_info", {}).get("check_metrics", {})
             return check_result(config["case_name"], base_path, cur_path, check_metrics)
-        elif train_type == 'rl':
+        elif train_type == "rl":
             cur_path = os.path.join(get_latest_subdir(work_dir), "exp_tracking/tracker.jsonl")
             check_metrics = config.get("assert_info", {})
             return check_rl_result(config["case_name"], base_path, cur_path, check_metrics)
@@ -92,7 +97,9 @@ class Train:
 
 
 def get_latest_subdir(work_dir):
-    dirs = [d for d in os.listdir(work_dir) if os.path.isdir(os.path.join(work_dir, d)) and len(d) == 14 and d.isdigit()]
+    dirs = [
+        d for d in os.listdir(work_dir) if os.path.isdir(os.path.join(work_dir, d)) and len(d) == 14 and d.isdigit()
+    ]
 
     if not dirs:
         return None
