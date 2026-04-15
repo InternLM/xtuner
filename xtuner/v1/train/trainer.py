@@ -1554,6 +1554,8 @@ class Trainer:
             "runtime_info/approximate_total_consumed_tokens": training_metrics["approximate_total_consumed_tokens"],
             "runtime_info/tgs": training_metrics["tgs"],
             "runtime_info/exp_tgs": training_metrics["exp_tgs"],
+            "runtime_info/efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
+            "runtime_info/img_efficient_attn_ratio": train_step_info["img_efficient_attn_ratio"],
             "memory/max_memory_GB": round(max_memory / (1024**3), 3),
             "memory/reserved_memory_GB": round(reserved_memory / (1024**3), 3),
             "grad_norm": grad_norm,
