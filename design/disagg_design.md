@@ -47,6 +47,8 @@
 - 共卡路径仍然可以继续复用 `produce_batch()`，只是内部改成三段式
 - 非共卡路径可以单独复用“只生产”和“只取数”的步骤，形成后台 producer + 前台 consumer
 
+目前设计的伪代码见 `design/disagg_draft.py`
+
 ---
 
 ## 3. 关键状态与状态机
@@ -788,6 +790,10 @@ resume 的 source of truth 不是 rollout 的运行时内存，而是：
 - `FINISH` 时 producer task 能正确退出
 - checkpoint 保存点发生在 cleanup 之后、reset 之前
 - resume 后会先做一次 rollout 权重同步，再启动新的 producer_task
+
+### 14.4 端到端测试
+- 对于配置示例 examples/v1/config/rl_disagg_multi.py 和 examples/v1/config/rl_disagg_single.py 跑通基本训练流程不报错
+- 运行脚本参考 zdev/rl_design_disagg.sh
 
 ---
 

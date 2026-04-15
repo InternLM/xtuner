@@ -193,7 +193,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                 for sample in group:
                     if self.tail_batch_stale_threshold > 0 and sample.seq_staleness >= self.tail_batch_stale_threshold:
                         sample.status = Status.EXPIRED
-                    elif not self.enable_partial_rollout:
+                    elif not self.enable_partial_rollout:  # TODO: 为什么 COMPLETED 样本要 abort?
                         sample.status = Status.ABORTED
                 await replay_buffer.put(group, task_name)
 
