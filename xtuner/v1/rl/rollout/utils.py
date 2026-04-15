@@ -233,12 +233,7 @@ async def send_abort_request(client: httpx.AsyncClient, url: str, timeout: float
         return url, False
 
 
-async def pause_generation(
-    rollout_ctl: "RolloutControllerProxy",
-    pause_time_out: float = 60.0,
-    *,
-    log_success: bool = True,
-) -> None:
+async def pause_generation(rollout_ctl: "RolloutControllerProxy", pause_time_out: float = 60.0) -> None:
     await rollout_ctl.pause_generation.remote()  # type: ignore[attr-defined]
     rollout_ctl_metadata = await rollout_ctl.get_rollout_metadata.remote()  # type: ignore[attr-defined]
     infer_server_url = list(rollout_ctl_metadata["server_url_dict"].values())
@@ -254,7 +249,7 @@ async def pause_generation(
             f"Abort requests completed. Succeeded: {succeeded_count}, "
             f"Failed: {len(failed_workers)}. Failed workers: {failed_workers}"
         )
-    elif log_success:
+    else:
         logger.info(f"All {succeeded_count} abort requests sent successfully.")
 
 
