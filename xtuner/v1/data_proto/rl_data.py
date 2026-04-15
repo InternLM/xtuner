@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import base64
 from enum import Enum
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import numpy as np
 import torch
-from pydantic import BaseModel, ConfigDict, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from typing_extensions import NotRequired, TypedDict
 
 # ====================================
@@ -64,6 +65,37 @@ class MultimodalInfo(TypedDict):
     image_grid_thw: NotRequired[torch.Tensor]
 
 
+class RolloutFunctionCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    arguments: Any = Field(default_factory=dict)
+    raw_arguments_text: str | None = None
+
+
+class RolloutToolCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: Literal["function"] = "function"
+    function: RolloutFunctionCall
+    parsing_mode: Literal["native_structured", "json_envelope", "legacy_regex"] = "legacy_regex"
+
+
+class ParsedToolCallResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool_calls: list[RolloutToolCall] = Field(default_factory=list)
+    remaining_text: str = ""
+
+
+class ParsedReasoningResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reasoning_text: str | None = None
+    remaining_text: str | None = None
+
+
 class RolloutState(CacheObj, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -75,16 +107,17 @@ class RolloutState(CacheObj, BaseModel):
     mm_info: MultimodalInfo | None = None
     reward_model: dict[str, Any] | None = None
 
-    # --- InferEngine 输入 ---
+    # --- InferEngine 输入 ---å
     session_uid: int | None = None
     tokens: list[int] | None = None  # 每一次推理引擎的实际输入
     tools: list | None = None
-    tool_choice: str | None = None
+    tool_choice: str | dict[str, Any] | None = None
     sample_params: SampleParams = SampleParams()
 
     # --- InferEngine 输出 ---
     # 每一次推理引擎的实际输出, 在rollout worker中被覆盖写
     response: str | None = None
+    tool_calls: list[RolloutToolCall] | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
     routed_experts: list[int] | RayObjectRef | None = None
@@ -108,19 +141,43 @@ class RolloutState(CacheObj, BaseModel):
     extra_fields: dict[str, Any] = {}
 
     @field_serializer("routed_experts")
-    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list | None:
-        """Dump 时跳过 ray.ObjectRef，序列化为 None，避免 PydanticSerializationError。"""
+    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | str | None:
+        """序列化 routed_experts 字段：
+
+        - None -> None
+        - list[int] -> list[int]（原样保留）
+        - RayObjectRef -> base64 编码的字符串（通过 ray.cloudpickle 序列化）
+        """
+        import ray
+
         if value is None:
             return None
-        try:
-            import ray
+        if isinstance(value, ray.ObjectRef):
+            data = ray.cloudpickle.dumps(value)
+            return base64.b64encode(data).decode("utf-8")
+        return value
 
-            if isinstance(value, ray.ObjectRef):
-                return None
-        except ImportError:
-            pass
-        if type(value).__name__ == "ObjectRef" and "ray" in getattr(type(value), "__module__", ""):
+    @field_validator("routed_experts", mode="before")
+    @classmethod
+    def _deserialize_routed_experts(cls, value: Any) -> list[int] | RayObjectRef | None:
+        """反序列化 routed_experts 字段：
+
+        - None -> None
+        - list[int] -> list[int]（原样保留）
+        - str（base64 编码）-> RayObjectRef（通过 ray.cloudpickle 反序列化）
+        - RayObjectRef -> RayObjectRef（原样保留）
+        """
+        import ray
+
+        if value is None:
             return None
+        if isinstance(value, ray.ObjectRef):
+            return value
+        if isinstance(value, str):
+            data = base64.b64decode(value)
+            return ray.cloudpickle.loads(data)
+        if isinstance(value, list):
+            return value
         return value
 
     @field_serializer("mm_info")

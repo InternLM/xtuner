@@ -1,0 +1,303 @@
+import json
+import time
+from typing import Any
+from uuid import uuid4
+
+from lmdeploy.serve.openai.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatMessage,
+    UsageInfo,
+)
+
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+
+from ..core.models import (
+    CanonicalGenerateRequest,
+    CanonicalGenerateResponse,
+    CanonicalMessage,
+    CanonicalReasoningBlock,
+    CanonicalTextBlock,
+    CanonicalToolCall,
+    CanonicalToolCallBlock,
+    CanonicalToolChoice,
+    CanonicalToolDefinition,
+    CanonicalToolResult,
+    CanonicalToolResultBlock,
+)
+from .base import BaseChatAPIAdapter, coerce_content_to_text
+from .trace import normalize_trace_payload
+
+
+class OpenAIChatAdapterError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        error_type: str,
+        code: str,
+        request_id: str | None = None,
+    ):
+        super().__init__(message)
+        self.message = message
+        self.error_type = error_type
+        self.code = code
+        self.request_id = request_id
+
+
+class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletionResponse]):
+    def __init__(
+        self,
+        generate_handler,
+        tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str,
+        default_model_name: str | None = None,
+        context_length: int | None = None,
+        capture_path: str | None = None,
+        trace_store_max_entries: int = 10000,
+    ):
+        if isinstance(tokenizer, str):
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+        super().__init__(
+            generate_handler,
+            tokenizer=tokenizer,
+            capture_path=capture_path,
+            trace_store_max_entries=trace_store_max_entries,
+        )
+        self._default_model_name = default_model_name
+        self._context_length = context_length
+
+    async def chat(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        return await self.handle_request(request)
+
+    def validate_request(self, request: ChatCompletionRequest) -> None:
+        if request.stream:
+            raise OpenAIChatAdapterError(
+                "stream=true is not supported yet",
+                "invalid_request_error",
+                "stream_not_supported",
+            )
+        if request.n not in (None, 1):
+            raise OpenAIChatAdapterError(
+                "n>1 is not supported yet",
+                "invalid_request_error",
+                "n_not_supported",
+            )
+
+    def request_to_canonical_request(self, request: ChatCompletionRequest) -> CanonicalGenerateRequest:
+        normalized_messages = normalize_trace_payload(request.messages)
+        normalized_tools = normalize_trace_payload(request.tools)
+        normalized_tool_choice = normalize_trace_payload(request.tool_choice)
+        stop = [] if request.stop is None else [request.stop] if isinstance(request.stop, str) else list(request.stop)
+        return CanonicalGenerateRequest(
+            request_id=f"chatcmpl_req_{uuid4().hex}",
+            model=request.model or self._default_model_name or "rollout-controller",
+            messages=[self._openai_message_to_canonical_message(message) for message in normalized_messages],
+            tools=self._openai_tools_to_canonical(normalized_tools),
+            tool_choice=self._openai_tool_choice_to_canonical(normalized_tool_choice),
+            temperature=request.temperature,
+            top_p=request.top_p,
+            max_tokens=request.max_completion_tokens
+            if request.max_completion_tokens is not None
+            else request.max_tokens,
+            stop=stop,
+            stream=bool(request.stream),
+            metadata={
+                key: value
+                for key, value in {
+                    "source_protocol": "openai_chat_completions",
+                    "session_uid": getattr(request, "session_uid", getattr(request, "session_id", None)),
+                    "n": request.n,
+                    "presence_penalty": request.presence_penalty,
+                    "frequency_penalty": request.frequency_penalty,
+                }.items()
+                if value is not None
+            },
+        )
+
+    def canonical_response_to_chat_completion_response(
+        self,
+        response: CanonicalGenerateResponse,
+    ) -> ChatCompletionResponse:
+        message_content = self._render_openai_response_text(response)
+        reasoning_content = self._render_openai_reasoning_text(response)
+        tool_calls = self._canonical_tool_calls_to_openai(response)
+        finish_reason = response.finish_reason or ("tool_calls" if tool_calls else "stop")
+        return ChatCompletionResponse(
+            id=response.request_id,
+            created=int(time.time()),
+            model=response.model or self._default_model_name or "rollout-controller",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=None if tool_calls and not message_content else message_content,
+                        reasoning_content=reasoning_content,
+                        tool_calls=tool_calls or None,
+                    ),
+                    finish_reason=finish_reason,
+                )
+            ],
+            usage=UsageInfo(
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+                total_tokens=response.usage.total_tokens,
+            ),
+        )
+
+    def canonical_response_to_protocol_response(
+        self,
+        canonical_response: CanonicalGenerateResponse,
+        request: ChatCompletionRequest,
+    ) -> ChatCompletionResponse:
+        return self.canonical_response_to_chat_completion_response(canonical_response)
+
+    def normalize_request(self, request: ChatCompletionRequest) -> dict[str, Any]:
+        return normalize_trace_payload(
+            {
+                "messages": request.messages,
+                "tools": request.tools,
+                "tool_choice": request.tool_choice,
+            }
+        )
+
+    def normalize_response(self, response: ChatCompletionResponse) -> dict[str, Any]:
+        normalized_choices = []
+        for choice in response.choices:
+            normalized_choices.append(
+                {
+                    "message": getattr(choice.message, "model_dump", lambda **_: choice.message)(
+                        mode="python",
+                        exclude_none=True,
+                    )
+                    if choice.message is not None
+                    else None,
+                    "finish_reason": choice.finish_reason,
+                }
+            )
+        return normalize_trace_payload({"choices": normalized_choices})
+
+    def _openai_message_to_canonical_message(self, message: dict[str, Any]) -> CanonicalMessage:
+        role = str(message.get("role", "user"))
+        content_blocks: list[Any] = []
+        if role == "tool":
+            content_blocks.append(
+                CanonicalToolResultBlock(
+                    tool_result=CanonicalToolResult(
+                        tool_call_id=str(message.get("tool_call_id") or ""),
+                        name=message.get("name"),
+                        output=message.get("content"),
+                        output_text=coerce_content_to_text(message.get("content")),
+                        metadata={"source_protocol": "openai_chat_completions"},
+                    )
+                )
+            )
+        else:
+            content_text = coerce_content_to_text(message.get("content"))
+            if content_text:
+                content_blocks.append(CanonicalTextBlock(text=content_text))
+            for tool_call in message.get("tool_calls") or []:
+                content_blocks.append(CanonicalToolCallBlock(tool_call=self._openai_tool_call_to_canonical(tool_call)))
+        return CanonicalMessage(
+            role=role if role in {"system", "user", "assistant", "tool"} else "user",
+            content=content_blocks,
+            name=message.get("name"),
+            metadata={
+                key: value
+                for key, value in {
+                    "source_protocol": "openai_chat_completions",
+                    "tool_call_id": message.get("tool_call_id"),
+                }.items()
+                if value is not None
+            },
+        )
+
+    def _openai_tools_to_canonical(self, tools: list[dict[str, Any]] | None) -> list[CanonicalToolDefinition]:
+        if not tools:
+            return []
+        canonical_tools = []
+        for tool in tools:
+            function_spec = tool.get("function", tool)
+            canonical_tools.append(
+                CanonicalToolDefinition(
+                    name=str(function_spec.get("name", "")),
+                    description=function_spec.get("description"),
+                    parameters_json_schema=function_spec.get("parameters", {}),
+                    metadata={"source_protocol": "openai_chat_completions"},
+                )
+            )
+        return canonical_tools
+
+    def _openai_tool_choice_to_canonical(self, tool_choice: Any) -> CanonicalToolChoice | None:
+        if tool_choice is None:
+            return None
+        if isinstance(tool_choice, str):
+            return CanonicalToolChoice(type=tool_choice)
+        function_spec = tool_choice.get("function") or {}
+        return CanonicalToolChoice(
+            type="specific",
+            tool_name=function_spec.get("name"),
+            metadata={"source_protocol": "openai_chat_completions"},
+        )
+
+    def _openai_tool_call_to_canonical(self, tool_call: dict[str, Any]) -> CanonicalToolCall:
+        function_spec = tool_call.get("function") or {}
+        raw_arguments = function_spec.get("arguments")
+        parsed_arguments = self._parse_tool_arguments(raw_arguments)
+        metadata: dict[str, Any] = {"source_protocol": "openai_chat_completions"}
+        if isinstance(parsed_arguments, dict) and parsed_arguments.pop("__parse_error__", False):
+            metadata["arguments_parse_error"] = True
+        return CanonicalToolCall(
+            id=str(tool_call.get("id") or f"call_{uuid4().hex}"),
+            name=str(function_spec.get("name", "")),
+            arguments=parsed_arguments,
+            raw_arguments_text=raw_arguments if isinstance(raw_arguments, str) else None,
+            metadata=metadata,
+        )
+
+    def _canonical_tool_calls_to_openai(self, response: CanonicalGenerateResponse) -> list[dict[str, Any]]:
+        tool_calls = []
+        for block in response.output.content:
+            if isinstance(block, CanonicalToolCallBlock):
+                tool_calls.append(
+                    {
+                        "id": block.tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": block.tool_call.name,
+                            "arguments": self._stringify_tool_arguments(block.tool_call.arguments, block.tool_call),
+                        },
+                    }
+                )
+        return tool_calls
+
+    def _render_openai_response_text(self, response: CanonicalGenerateResponse) -> str | None:
+        text_chunks = []
+        for block in response.output.content:
+            if isinstance(block, CanonicalTextBlock):
+                text_chunks.append(block.text)
+        joined = "".join(text_chunks).strip()
+        return joined or None
+
+    def _render_openai_reasoning_text(self, response: CanonicalGenerateResponse) -> str | None:
+        reasoning_chunks: list[str] = []
+        for block in response.output.content:
+            if isinstance(block, CanonicalReasoningBlock):
+                reasoning_chunks.extend(step.text for step in block.reasoning.steps if step.text)
+        joined = "\n".join(chunk for chunk in reasoning_chunks if chunk).strip()
+        return joined or None
+
+    def _parse_tool_arguments(self, raw_arguments: Any) -> Any:
+        if not isinstance(raw_arguments, str):
+            return raw_arguments
+        try:
+            return json.loads(raw_arguments)
+        except Exception:
+            return {"__parse_error__": True, "raw": raw_arguments}
+
+    def _stringify_tool_arguments(self, arguments: Any, tool_call: CanonicalToolCall) -> str:
+        if tool_call.raw_arguments_text is not None:
+            return tool_call.raw_arguments_text
+        if isinstance(arguments, str):
+            return arguments
+        return json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)
