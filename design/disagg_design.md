@@ -66,9 +66,9 @@
   - 剩余 pending rollout 交给外层显式 cleanup
 
 - `EXPIRED_BATCH`
-  - 当前 rollout 使用的模型版本已经整体过期
-  - 继续 rollout 也无法满足 staleness 要求
-  - 必须先进行权重更新
+  - 当前 rollout 使用的模型版本已经过旧
+  - 在本设计里，这会被当成一个立即停止信号
+  - 不再优先尝试消费旧 completed leftovers，而是立刻进行权重更新，这样是为了尽早更新rollout权重避免其占卡空转
 
 ### 3.2 `AgentLoopManagerStatus`
 
@@ -83,8 +83,8 @@
   - 等待 trainer 完成 cleanup 和权重同步
 
 - `EXPIRED_BATCH`
-  - 以当前模型版本无法再产出有效 batch
-  - trainer 看到这个状态后会跳过训练，直接进入权重同步
+  - 当前 rollout model 已经过旧
+  - trainer 看到这个状态后会立刻跳过训练，直接进入权重同步
 
 - `FINISH`
   - 整个训练结束
@@ -100,7 +100,7 @@
 - `UPDATE_ABORT -> NORMAL`
   - 权重同步完成后调用 `reset()`
 - `NORMAL -> EXPIRED_BATCH`
-  - 当前模型版本已经无法产出满足 staleness 约束的 batch
+  - 当前 rollout model 已经过旧
 - `EXPIRED_BATCH -> UPDATE_ABORT`
   - trainer 检测到过期后，进入权重同步阶段
 - 任意状态 -> `FINISH`
@@ -124,7 +124,7 @@
 用途：
 
 - 共卡路径下，通常返回 `NORMAL`
-- 非共卡路径下，`get_batch()` 如果发现 manager 已经处于 `EXPIRED_BATCH`，可以直接返回一个空 batch，并通过 `status` 告诉 trainer “这轮不要训练，直接去做权重同步”
+- 非共卡路径下，`get_batch()` 如果发现 manager 已经处于 `EXPIRED_BATCH`，可以直接返回一个空 batch，并通过 `status` 告诉 trainer “当前 rollout model 已经过旧，这轮不要训练，直接去做权重同步”
 
 其余 timing / leftover 字段继续保留，用于训练日志与调试。
 
@@ -196,11 +196,9 @@
 调用开始时需要做这些事：
 
 1. 回收 `self._pending_tasks` 中已经完成的任务
-2. 处理旧的 `COMPLETED` leftovers
-3. 判断是否已经有足够可训练样本
-4. 判断当前模型版本是否已经整体过期
-5. 需要时继续补发 rollout
-6. 把新的结果写回 replay buffer
+2. 立即判断当前模型版本是否已经过旧
+3. 如果模型仍然新鲜，再判断 buffer / 是否需要继续补发 rollout
+4. 把新的结果写回 replay buffer
 
 返回结果是一个 `ProduceBatchStatus`：
 
@@ -257,40 +255,47 @@
 
 所以 `SingleTurnAgentLoop` / `PartialRolloutHandler` 需要改成接收 `model_rollout_step`。
 
-### 6.2 为什么旧 `COMPLETED` 样本要重算 staleness
+### 6.2 为什么仍然保留样本 staleness 重算能力
 
-非共卡场景下，buffer 中的 `COMPLETED` 样本可能停留更久。
+非共卡场景下，buffer 中的样本可能停留更久。
 
 如果只看样本写入时的 `seq_staleness`，有问题：
 
 - 它只是历史快照
 - 到了真正训练时，这个样本可能已经又老了很多
 
-因此设计里要增加一个轻量 helper，例如：
+因此设计里仍建议保留一个轻量 helper，例如：
 
 - `refresh_seq_staleness(group, current_rollout_step)`
 
 它的职责是：
 
-- 在复用旧 `COMPLETED` leftovers 前
+- 在需要检查旧样本新鲜度时
 - 根据 `response_rollout_steps` 和当前训练步
 - 重新计算 staleness
 
 ### 6.3 `ExpiredBatch` 的判定
 
-`ExpiredBatch` 不是简单地说“当前没有数据”。
+`ExpiredBatch` 不是简单地说“当前没有数据”，也不是“先尽量消化旧 completed leftovers 再决定要不要停”。
 
 它的真实含义是：
 
-- 旧的 leftovers 经重算后，已经不足以组成一个有效 batch
-- 并且当前 rollout 使用的模型版本继续生成，也不可能产出满足 staleness 要求的样本
+- 当前 rollout 使用的模型版本已经过旧
+- 为了让 rollout 侧尽快切到新权重，不再继续占卡等待
+- producer 应立即停止并要求外层尽快做权重同步
 
-只有在这两个条件同时成立时，才返回 `EXPIRED_BATCH`。
+因此这里采用的是“更激进的停机策略”：
 
-这也是为什么设计里不是“一刀切清空所有旧 completed”，而是：
+- 只要当前 rollout model 过旧，就直接返回 `EXPIRED_BATCH`
+- 不再优先尝试复用 buffer 里的旧 completed 数据
+- trainer 收到信号后，直接跳过训练并推进权重更新
 
-- 先重算 staleness
-- 只淘汰真正超阈值的那部分
+这样做的原因是：
+
+- 非共卡场景下，rollout 卡组本来就和 train 卡组解耦
+- 如果 rollout 明知已经过旧，还继续等待 trainer 去消化旧数据，
+  rollout 侧会白白占卡、拖慢权重切换
+- 所以这里优先保证 rollout 尽快更新，而不是优先榨取旧样本
 
 ---
 
@@ -317,7 +322,7 @@
 原因是：
 
 - 如果有任何 task 收到了权重更新信号，整个 producer 就应优先停下来
-- 其次才是某些 task 因整体过期而无法继续生产
+- 其次才是某些 task 因当前 rollout model 过旧而直接停机
 
 ### 7.2 `_get_batch_from_buffer(...)`
 
@@ -394,7 +399,8 @@
 
 - `EXPIRED_BATCH`
   - manager 进入 `EXPIRED_BATCH`
-  - producer 暂停继续工作
+  - producer 立即暂停继续工作
+  - 不再继续尝试消化旧 completed buffer
   - 等待 trainer 进行权重同步并 `reset()`
 
 - `UPDATE_ABORT`
@@ -482,9 +488,13 @@
 
 `EXPIRED_BATCH` 的语义不是“这一轮没有数据”，而是：
 
-- 当前 rollout 权重版本已经不适合继续生成训练样本
+- 当前 rollout 权重版本已经过旧
+- 应优先让 rollout 侧尽快更新权重，而不是继续等待 trainer 消化旧样本
 
-这时如果还勉强从 buffer 中拿旧数据训练，反而会让 stale 数据继续进入训练。
+这时如果还继续从 buffer 中拿旧数据训练，会带来两个问题：
+
+- rollout 侧还要继续等待，不能尽快切到新权重
+- stale 数据仍可能被继续消费
 
 因此策略是：
 
@@ -558,9 +568,10 @@
 
 ## 14. 当前明确的设计取舍
 
-- `ExpiredBatch` 不是一刀切丢弃所有旧 completed，而是：
-  - 先重算 staleness
-  - 再只淘汰真正超阈值的 leftovers
+- `ExpiredBatch` 采用更激进的策略：
+  - 只要当前 rollout model 过旧，就直接停
+  - 不再优先尝试消费旧 completed leftovers
+  - 优先让 rollout 侧尽快完成权重更新
 
 - `produce_loop` 的 batch size 采用显式传参：
   - `produce_loop(batch_size, start_rollout_step)`

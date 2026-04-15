@@ -37,10 +37,21 @@ class RLDisaggregatedTrainer:
                 )
 
                 # `EXPIRED_BATCH` 表示：
-                # 当前 rollout 使用的模型权重已经整体过期，无法再产出满足 staleness
-                # 约束的一整批训练样本。此时直接跳过训练，进入权重同步阶段。
+                # 当前 rollout 使用的模型权重已经过旧。
+                # 在这个设计里，一旦当前 rollout model 过旧，就立即停止本轮训练消费，
+                # 直接进入权重同步阶段，优先让 rollout 侧尽快切到新权重，
+                # 避免 rollout 占用的卡继续空等。
                 if produce_result.status != ProduceBatchStatus.EXPIRED_BATCH:
-                    # 正常路径：从 replay buffer 里取到可训练 batch，
+                    # 正常路径：只有在 producer 没有报告 `EXPIRED_BATCH` 时，
+                    # 才继续从 replay buffer 中取 batch 做训练。
+                    #
+                    # 一旦 producer 报告当前 rollout model 已经过旧，
+                    # 即使 buffer 里可能还残留旧 completed 数据，也不再优先消费，
+                    # 而是直接推进权重更新。
+                    #
+                    # 这样做的目的是尽快让 rollout 侧恢复工作，而不是为了多榨取一点旧数据。
+                    #
+                    # 从 replay buffer 里取到可训练 batch 后，
                     # 先做数据整理，再下发到 train controller。
                     train_data = self._prepare_train_data(produce_result.rollout_states, ...)
                     await self.train_controller.fit.remote(train_data, ...)
@@ -90,8 +101,10 @@ class ProduceBatchStatus(Enum):
         外部触发了权重更新，producer 应尽快停止继续补发新任务，
         并把剩余 pending rollout 留给外层显式 cleanup。
     - EXPIRED_BATCH:
-        以当前 rollout 模型版本继续生成，已经无法满足 staleness 约束，
-        因而不能再得到一个有效 batch，必须等待权重更新。
+        当前 rollout 模型版本已经过旧。
+        在本设计中，这不是“旧样本还够不够再拼一批”的问题，
+        而是一个更强的停止信号：只要当前 model 过旧，就立即停止，
+        优先触发权重更新，让 rollout 侧尽快恢复工作。
     """
 
     NORMAL = auto()
@@ -143,12 +156,12 @@ class ProduceBatchResult:
 
 
 def refresh_seq_staleness(group: list, current_rollout_step: int) -> list:
-    """在复用旧的 COMPLETED leftover 前，按当前训练步重新计算 staleness。
+    """按当前训练步重算已有样本的 staleness。
 
     设计动机：
     - 非共卡场景下，producer 和 trainer 解耦后，buffer 中的数据会“存活更久”；
     - 不能只看样本上一次写入时的 `seq_staleness`，因为那只是历史快照；
-    - 所以在真正复用前，需要结合当前训练步重新计算一次，决定是否仍然可用。
+    - 所以在需要检查样本新鲜度时，要结合当前训练步重新计算一次。
     """
     return group
 
@@ -208,16 +221,15 @@ class AsyncProduceStrategy:
         # 核心流程：
         # 1. 先检查上一轮遗留在 `self._pending_tasks` 中、已经完成的任务，
         #    回收到 replay buffer，避免这些结果丢失。
-        # 2. 对 buffer 中旧的 COMPLETED leftovers 按当前训练步重算 staleness，
-        #    真正过期的转成 EXPIRED。
-        # 3. 如果当前 buffer 中已经有足够多的 COMPLETED 样本，直接返回 NORMAL，
-        #    不必额外发新 rollout。
-        # 4. 如果当前模型版本已经老到不可能再产出满足要求的一整批数据，
-        #    则返回 EXPIRED_BATCH，交给外部触发权重更新。
-        # 5. 否则继续异步补发 rollout 任务，直到：
+        # 2. 立即检查当前 rollout model 是否已经过旧。
+        #    只要过旧，就直接返回 EXPIRED_BATCH，
+        #    不再优先尝试消费 buffer 中残留的旧 completed 样本。
+        #    设计目标是：让 rollout 权重尽快更新，避免 rollout 占卡等待。
+        # 3. 如果当前 model 仍然新鲜，再继续检查 buffer / 发新 rollout。
+        # 4. 必要时继续异步补发 rollout 任务，直到：
         #    - 收集到足够多的 completed groups，或
         #    - 外部设置了 `update_event`，此时返回 UPDATE_ABORT。
-        # 6. 每个 group 的生成耗时不再通过返回值上抛，
+        # 5. 每个 group 的生成耗时不再通过返回值上抛，
         #    而是写入 `rollout_state.extra_fields["group_generate_time_s"]`，
         #    后续由 manager 在 get_batch 阶段重新聚合统计。
         return ProduceBatchStatus.NORMAL
@@ -302,7 +314,9 @@ class AgentLoopManager:
                 break
 
             if status == ProduceBatchStatus.EXPIRED_BATCH:
-                # 当前权重版本整体过期，先挂起 producer，等待 trainer 做权重更新。
+                # 当前 rollout model 一旦过旧，就立刻进入 EXPIRED_BATCH，
+                # 不再试图继续“榨干”旧 buffer 中的 completed 数据。
+                # 这样 trainer 会尽快走权重同步，让 rollout 尽早恢复。
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
                 await asyncio.sleep(0.1)
                 continue
@@ -319,8 +333,8 @@ class AgentLoopManager:
     async def get_batch(self, batch_size: int, rollout_step: int) -> ProduceBatchResult:
         if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
             # 特殊语义：
-            # 当 manager 已进入 EXPIRED_BATCH，全局表示“当前权重下已无法拿到有效 batch”，
-            # 所以训练侧不再从 buffer 里强行取数，而是直接收到一个状态信号，
+            # 当 manager 已进入 EXPIRED_BATCH，全局表示“当前 rollout model 已经过旧”，
+            # 所以训练侧不再继续消费 buffer 里的旧数据，而是直接收到一个状态信号，
             # 然后跳去做权重更新。
             return ProduceBatchResult(
                 rollout_states=[],
