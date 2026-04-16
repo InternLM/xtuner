@@ -50,3 +50,45 @@ Suggested implementation order:
 Notes about the worktree:
 - `git status --short` showed untracked `work_dirs/` and `zdev/` before this session.
 - I did not touch those paths.
+
+---
+
+本次实现进展补充（保留以上原始 planning 内容）：
+
+本次完成内容：
+- 完成 `xtuner/v1/rl/agent_loop/producer.py` 的第一阶段重构，使 `AsyncProduceStrategy.produce_batch()` 改为返回 `ProduceBatchStatus`，并从“边生产边清理边取 batch”的旧逻辑，调整为“只负责向 replay buffer 生产数据”的新逻辑基础形态。
+- 将异步 producer 的 pending rollout 任务从单次调用内的局部变量，提升为 `AsyncProduceStrategy._pending_tasks`，让未完成任务可以跨多次 `produce_batch()` 调用保留。
+- 暴露公开接口 `cleanup_pending_tasks()`，把 pending rollout 的显式收尾从 `produce_batch()` 尾部自动 cleanup 中拆出来。
+- 增加 `ProduceBatchStatus` 导出，补齐 `ProduceStrategy` / `SyncProduceStrategy` 与新接口的共享签名，避免共卡路径和后续非共卡路径接口分叉。
+- 在 rollout group 上写入 `extra_fields["group_generate_time_s"]`，为后续 manager 消费阶段重建 timing 统计打基础。
+- 在 `xtuner/v1/rl/agent_loop/agent_loop_manager.py` 中加入一个最小兼容层，使当前 colocate `produce_batch()` 仍能兼容新的 async producer 返回值，并在取回 completed groups 后重建 timing 统计。
+- 扩展 `tests/rl/test_producer.py`，覆盖以下关键行为：
+  - `NORMAL` 状态下跨调用回收 pending 任务
+  - `cleanup_pending_tasks()` 的显式清理行为
+  - `UPDATE_ABORT`
+  - `EXPIRED_BATCH`
+  - group generate timing 落盘到 `extra_fields`
+
+本次涉及文件：
+- `code_agent.md`
+- `run_test.sh`
+- `xtuner/v1/rl/agent_loop/producer.py`
+- `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+- `xtuner/v1/rl/agent_loop/__init__.py`
+- `tests/rl/test_producer.py`
+
+验证结果：
+- 运行 `bash run_test.sh`
+- 当前脚本内容会进入 `py312-pt28-raw` 环境，并执行：
+  - `tests/rl/test_agent_loop.py`
+  - `tests/rl/test_multi_task_agent_loop_manager.py`
+  - `tests/rl/test_producer.py`
+- 结果：`13 passed`
+
+本次发现与说明：
+- `claude-progress.txt` 已按要求仅追加，不删除原有 planning 内容。
+- 当前工作区里未跟踪的 `work_dirs/` 与 `zdev/` 仍保持未纳入本次提交。
+
+建议下一步：
+1. 继续把 `AgentLoopManager` 按 `design/disagg_design.md` 拆成 `_produce_batch_to_buffer()` / `_get_batch_from_buffer()` / `produce_loop()` / `get_batch()` 的完整状态机实现。
+2. 然后再推进 `single_turn_agent_loop.py` 与 `utils.py` 中 `model_rollout_step` / staleness 语义改造。

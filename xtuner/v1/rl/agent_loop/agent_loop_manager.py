@@ -15,7 +15,14 @@ from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
 from .agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_ctl
-from .producer import ProducerTimings, ProduceStrategy, ProduceStrategyConfig, SyncProduceStrategyConfig
+from .producer import (
+    GROUP_GENERATE_TIME_KEY,
+    ProduceBatchStatus,
+    ProducerTimings,
+    ProduceStrategy,
+    ProduceStrategyConfig,
+    SyncProduceStrategyConfig,
+)
 from .sampler import Sampler, SamplerConfig
 
 
@@ -87,6 +94,23 @@ def _fill_produce_timing_stats(result: ProduceBatchResult, stats: ProducerTiming
     result.group_gen_pause_time_s = stats.pause_time_s
 
 
+def _fill_group_timing_stats(
+    result: ProduceBatchResult, rollout_states: list[list[RolloutState]], pause_time_s: float = 0.0
+) -> None:
+    generate_times: list[float] = []
+    for group in rollout_states:
+        if not group:
+            continue
+        group_time = getattr(group[0], "extra_fields", {}).get(GROUP_GENERATE_TIME_KEY)
+        if group_time is not None:
+            generate_times.append(group_time)
+
+    if generate_times:
+        _fill_produce_timing_stats(result, ProducerTimings(generate_times_s=generate_times, pause_time_s=pause_time_s))
+    elif pause_time_s > 0:
+        result.group_gen_pause_time_s = pause_time_s
+
+
 async def _produce_single_task_batch(
     task_runner: _TaskRunner,
     replay_buffer: ReplayBuffer,
@@ -97,7 +121,7 @@ async def _produce_single_task_batch(
 ) -> ProduceBatchResult:
     start = time.perf_counter()
     logger.info(f"[{manager_name}][{task_runner.task_name}] produce_batch start batch={batch_size}")
-    stats: ProducerTimings = await task_runner.produce_strategy.produce_batch(
+    produce_stats = await task_runner.produce_strategy.produce_batch(
         task_runner.agent_loop,
         task_runner.sampler,
         replay_buffer,
@@ -105,12 +129,18 @@ async def _produce_single_task_batch(
         task_runner.task_name,
         rollout_step,
     )
+    pause_time_s = 0.0
+    if isinstance(produce_stats, ProduceBatchStatus):
+        pause_time_s = await task_runner.produce_strategy.cleanup_pending_tasks(
+            task_runner.agent_loop, replay_buffer, task_runner.task_name
+        )
     logger.info(
         f"[{manager_name}][{task_runner.task_name}] produce scheduler done elapsed={time.perf_counter() - start:.3f}, and start replay_buffer.get"
     )
 
     result = ProduceBatchResult(rollout_states=[])
-    _fill_produce_timing_stats(result, stats)
+    if isinstance(produce_stats, ProducerTimings):
+        _fill_produce_timing_stats(result, produce_stats)
 
     start = time.perf_counter()
     batch_rollout_states: list[list[RolloutState]] = await replay_buffer.get(
@@ -120,6 +150,8 @@ async def _produce_single_task_batch(
         f"[{manager_name}][{task_runner.task_name}] replay_buffer.get done completed_groups={len(batch_rollout_states)} elapsed={time.perf_counter() - start:.3f}"
     )
     result.rollout_states = batch_rollout_states
+    if isinstance(produce_stats, ProduceBatchStatus):
+        _fill_group_timing_stats(result, batch_rollout_states, pause_time_s=pause_time_s)
     completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
         replay_buffer.count(task_name=task_runner.task_name, group_status=Status.COMPLETED),
         replay_buffer.count(task_name=task_runner.task_name, group_status=Status.ABORTED),

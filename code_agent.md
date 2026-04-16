@@ -114,6 +114,7 @@ to:
 ### STEP 7: UPDATE PROGRESS NOTES
 
 Update `claude-progress.txt` with:
+- Do not remove old content.
 - What you accomplished this session
 - Which tasks/features you completed
 - Any issues discovered or fixed
@@ -163,6 +164,9 @@ And commit all changes before context fills up.
 
 **You have unlimited time.** Take as long as needed to get it right. The most important thing is that you
 leave the code base in a clean state before terminating the session (Last Step).
+
+**Language:** Use Chinese to answer questions. Use Chinese to update claude-progress.txt.
+
 
 ---
 

@@ -18,6 +18,7 @@ from .agent_loop_manager import (
 from .producer import (
     AsyncProduceStrategy,
     AsyncProduceStrategyConfig,
+    ProduceBatchStatus,
     ProduceStrategy,
     ProduceStrategyConfig,
     SyncProduceStrategy,
@@ -47,6 +48,7 @@ __all__ = [
     "ProduceStrategyConfig",
     "SyncProduceStrategyConfig",
     "AsyncProduceStrategyConfig",
+    "ProduceBatchStatus",
     "ProduceStrategy",
     "SyncProduceStrategy",
     "AsyncProduceStrategy",
