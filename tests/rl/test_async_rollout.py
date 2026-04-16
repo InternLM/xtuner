@@ -124,6 +124,16 @@ def _build_agent_loop_manager(
     )
     return manager
 
+
+async def _produce_one_step(manager, batch_size: int, rollout_step: int):
+    task_batch_sizes = manager.get_step_task_batch_sizes(batch_size, rollout_step)
+    producer_tasks = await manager.start_producer_tasks(task_batch_sizes, rollout_step)
+    return await manager.consume_completed_batch(
+        task_batch_sizes,
+        producer_tasks=producer_tasks,
+        await_producer_tasks=True,
+    )
+
 class TestOversampling(unittest.IsolatedAsyncioTestCase):
     """Oversampling tests (mirrors debug_rollout=True: rollout only, no training).
 
@@ -161,7 +171,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
           2. As soon as BATCH_SIZE completions are collected, the while-loop
              exits; remaining pending tasks go through _cleanup_pending_tasks
              and are stored as ABORTED.
-          3. produce_batch() then calls replay_buffer.get(BATCH_SIZE, COMPLETED)
+          3. consume_completed_batch() then calls replay_buffer.get(BATCH_SIZE, COMPLETED)
              which consumes exactly BATCH_SIZE items.
           4. Any extras that completed during the abort window remain as
              COMPLETED in the buffer.
@@ -179,7 +189,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         )
         replay_buffer = manager.replay_buffer
 
-        await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=1)
+        await _produce_one_step(manager, batch_size=self.BATCH_SIZE, rollout_step=1)
 
         remain_completed = await replay_buffer.count(
             task_name="test_1_1", group_status=Status.COMPLETED
@@ -203,7 +213,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_1_2_second_rollout_samples_from_aborted_queue(self):
-        """1.2: Round 2's produce_batch re-samples exactly the oversampled items
+        """1.2: Round 2's one-step produce/consume re-samples exactly the oversampled items
         left over from round 1.
 
         Key mechanism (enable_partial_rollout=False):
@@ -246,9 +256,9 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         manager.data_sampler.sample = instrumented_sample
 
         # --- Round 1 ---
-        await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=1)
+        await _produce_one_step(manager, batch_size=self.BATCH_SIZE, rollout_step=1)
 
-        # After round 1: produce_batch consumed BATCH_SIZE completed items.
+        # After round 1: one-step consume consumed BATCH_SIZE completed items.
         # The leftover items (completed but not consumed) stay in the buffer.
         round1_remain_completed = await replay_buffer.count(
             task_name="test_1_2", group_status=Status.COMPLETED
@@ -272,7 +282,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
 
         # --- Round 2: reset counter then run ---
         sampled_from_aborted = 0
-        await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=2)
+        await _produce_one_step(manager, batch_size=self.BATCH_SIZE, rollout_step=2)
 
         self.assertEqual(
             sampled_from_aborted,
@@ -290,7 +300,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
     All tests inject pre-constructed ABORTED samples directly into the
     replay buffer so that Sampler.sample(group_status=ABORTED) picks them
-    up without any mocking.  The real AgentLoopManager.produce_batch() is
+    up without any mocking. The real manager producer/consumer path is
     used throughout.
 
     Key configuration:
@@ -388,7 +398,8 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         # before completing.  Search by uid across rounds.
         target_sample = None
         for rollout_step in range(1, 15):
-            completed_groups = await manager.produce_batch(
+            completed_groups = await _produce_one_step(
+                manager,
                 batch_size=self.BATCH_SIZE, rollout_step=rollout_step
             )
             for group in completed_groups.rollout_states:
@@ -448,7 +459,8 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         await replay_buffer.put([state], task_name)
 
         # EOS short-circuit completes with no LLM call → always wins the race.
-        completed_groups = await manager.produce_batch(
+        completed_groups = await _produce_one_step(
+            manager,
             batch_size=self.BATCH_SIZE, rollout_step=1
         )
         completed_groups = completed_groups.rollout_states
@@ -495,7 +507,8 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         await replay_buffer.put([state], task_name)
 
         # max_tokens short-circuit completes with no LLM call → always wins the race.
-        completed_groups = await manager.produce_batch(
+        completed_groups = await _produce_one_step(
+            manager,
             batch_size=self.BATCH_SIZE, rollout_step=1
         )
         completed_groups = completed_groups.rollout_states
@@ -543,7 +556,8 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
         target_sample = None
         for rollout_step in range(1, 15):
-            completed_groups = await manager.produce_batch(
+            completed_groups = await _produce_one_step(
+                manager,
                 batch_size=self.BATCH_SIZE, rollout_step=rollout_step
             )
             for group in completed_groups.rollout_states    :
@@ -624,7 +638,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
         #   round1 产生 ABORTED（step=1 tokens）→ round2 续写完成（COMPLETED, staleness=1）
         #   → round3 开头 _process_leftover_samples 标 EXPIRED（staleness=1 >= 1）
         for rollout_step in range(1, 5):
-            await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=rollout_step)
+            await _produce_one_step(manager, batch_size=self.BATCH_SIZE, rollout_step=rollout_step)
 
         expired_count = await replay_buffer.count(
             task_name=task_name, group_status=Status.EXPIRED
@@ -687,7 +701,8 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
                 task_name=task_name, group_status=Status.EXPIRED
             )
 
-            completed_groups = await manager.produce_batch(
+            completed_groups = await _produce_one_step(
+                manager,
                 batch_size=self.BATCH_SIZE, rollout_step=rollout_step
             )
             completed_groups = completed_groups.rollout_states

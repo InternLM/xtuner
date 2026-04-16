@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.data_proto import Status
 from xtuner.v1.rl.agent_loop import AgentLoopManager, AgentLoopManagerConfig, TaskSpecConfig
-from xtuner.v1.rl.agent_loop.manager_base import _TaskRunner
+from xtuner.v1.rl.agent_loop.agent_loop_manager import _TaskRunner
 from xtuner.v1.rl.agent_loop.producer import ProducerTimings
 
 
@@ -87,6 +87,16 @@ def _fake_agent_loop(rollout_ctl=None):
     return SimpleNamespace(rollout_ctl=rollout_ctl)
 
 
+async def _run_manager_step(manager: AgentLoopManager, batch_size: int, rollout_step: int):
+    task_batch_sizes = manager.get_step_task_batch_sizes(batch_size, rollout_step)
+    producer_tasks = await manager.start_producer_tasks(task_batch_sizes, rollout_step)
+    return await manager.consume_completed_batch(
+        task_batch_sizes,
+        producer_tasks=producer_tasks,
+        await_producer_tasks=True,
+    )
+
+
 class TestManagerCompatibility(unittest.TestCase):
     def test_agent_loop_manager_config_is_public(self):
         self.assertIsNotNone(AgentLoopManagerConfig)
@@ -104,7 +114,7 @@ class TestManagerCompatibility(unittest.TestCase):
 
 
 class TestSingleTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
-    async def test_fullasync_produce_batch_attaches_single_task_metadata(self):
+    async def test_start_producer_tasks_and_consume_completed_batch_attach_single_task_metadata(self):
         rollout_ctl = SimpleNamespace()
         strategy = _FakeProduceStrategy(
             generate_times_s=[1.0, 3.0],
@@ -135,8 +145,7 @@ class TestSingleTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             "xtuner.v1.rl.agent_loop.agent_loop_manager.continue_generation",
             new=AsyncMock(),
         ) as continue_mock:
-            await manager.fullasync_produce_batch(batch_size=2, rollout_step=7)
-            result = await manager.get_completed_batch(batch_size=2, rollout_step=7)
+            result = await _run_manager_step(manager, batch_size=2, rollout_step=7)
 
         self.assertEqual(len(strategy.calls), 1)
         self.assertEqual(strategy.calls[0]["batch_size"], 2)
@@ -160,7 +169,7 @@ class TestSingleTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
 
 class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
-    async def test_produce_batch_allocates_by_weight_and_returns_task_sorted_results(self):
+    async def test_step_produce_consume_allocates_by_weight_and_returns_task_sorted_results(self):
         rollout_ctl = MagicMock()
         rollout_ctl.continue_generation.remote = AsyncMock()
         rollout_ctl.pause_generation.remote = AsyncMock()
@@ -170,7 +179,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         strategy_c = _FakeProduceStrategy(generate_times_s=[])
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
-                "task_a": [["a-0"], ["a-1"]],
+                "task_a": [["a-0"], ["a-1"], ["a-2"], ["a-3"], ["a-4"]],
                 "task_b": [["b-0"], ["b-1"], ["b-2"]],
                 "task_c": [],
             },
@@ -210,13 +219,16 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=replay_buffer,
         )
 
-        result = await manager.produce_batch(batch_size=7, rollout_step=3)
+        result = await _run_manager_step(manager, batch_size=7, rollout_step=3)
 
         self.assertEqual(result.task_batch_sizes, {"task_b": 2, "task_a": 5, "task_c": 0})
         self.assertEqual(strategy_a.calls[0]["batch_size"], 5)
         self.assertEqual(strategy_b.calls[0]["batch_size"], 2)
         self.assertEqual(strategy_c.calls, [])
-        self.assertEqual(result.rollout_states, [["b-0"], ["b-1"], ["a-0"], ["a-1"]])
+        self.assertEqual(
+            result.rollout_states,
+            [["b-0"], ["b-1"], ["a-0"], ["a-1"], ["a-2"], ["a-3"], ["a-4"]],
+        )
         self.assertEqual(result.leftover_completed, 1)
         self.assertEqual(result.leftover_aborted, 2)
         self.assertEqual(result.leftover_expired, 0)
@@ -226,7 +238,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_b", result.task_results)
         self.assertIn("task_c", result.task_results)
 
-    async def test_fullasync_produce_batch_allocates_by_weight_and_aggregates_results(self):
+    async def test_step_produce_consume_aggregates_results(self):
         rollout_ctl = SimpleNamespace()
         strategy_b = _FakeProduceStrategy(generate_times_s=[1.0, 1.0, 1.0])
         strategy_a = _FakeProduceStrategy(
@@ -276,13 +288,11 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             logger=MagicMock(),
         )
 
-        manager.set_sync_interval_context(trigger_parameter_sync_step=1, total_train_steps=3)
         with patch(
             "xtuner.v1.rl.agent_loop.agent_loop_manager.continue_generation",
             new=AsyncMock(),
         ) as continue_mock:
-            await manager.fullasync_produce_batch(batch_size=7, rollout_step=3)
-            result = await manager.get_completed_batch(batch_size=7, rollout_step=3)
+            result = await _run_manager_step(manager, batch_size=7, rollout_step=3)
 
         self.assertEqual(strategy_a.calls[0]["batch_size"], 5)
         self.assertEqual(strategy_b.calls[0]["batch_size"], 2)
@@ -354,13 +364,11 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             logger=MagicMock(),
         )
 
-        manager.set_sync_interval_context(trigger_parameter_sync_step=1, total_train_steps=9)
         with patch(
             "xtuner.v1.rl.agent_loop.agent_loop_manager.continue_generation",
             new=AsyncMock(),
         ) as continue_mock:
-            await manager.fullasync_produce_batch(batch_size=2, rollout_step=9)
-            result = await manager.get_completed_batch(batch_size=2, rollout_step=9)
+            result = await _run_manager_step(manager, batch_size=2, rollout_step=9)
 
         self.assertEqual(manager.observed_rollout_step, 9)
         self.assertEqual(strategy_a.calls, [])

@@ -21,10 +21,15 @@ from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 
-MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
-MOE_MODEL_PATH = os.environ["QWEN3_MOE_PATH"]
-TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
-TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
+MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH")
+MOE_MODEL_PATH = os.environ.get("QWEN3_MOE_PATH")
+TRAIN_DATA_PATH = os.environ.get("ROLLOUT_DATA_PATH")
+TEST_DATA_PATH = os.environ.get("ROLLOUT_TEST_DATA_PATH")
+if not all([MODEL_PATH, MOE_MODEL_PATH, TRAIN_DATA_PATH, TEST_DATA_PATH]):
+    raise unittest.SkipTest(
+        "test_agent_loop requires ROLLOUT_MODEL_PATH, QWEN3_MOE_PATH, "
+        "ROLLOUT_DATA_PATH and ROLLOUT_TEST_DATA_PATH"
+    )
 FAKE_INPUT_ITEM = RolloutState(
     message=[{
         'role': 'user',
@@ -211,8 +216,14 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
         )
-        # 4. 执行 produce_batch
-        result = await agent_loop_manager.produce_batch(batch_size=4)
+        # 4. 启动 producer 并消费当前 step 的 completed batch
+        task_batch_sizes = agent_loop_manager.get_step_task_batch_sizes(batch_size=4, rollout_step=0)
+        producer_tasks = await agent_loop_manager.start_producer_tasks(task_batch_sizes, rollout_step=0)
+        result = await agent_loop_manager.consume_completed_batch(
+            task_batch_sizes,
+            producer_tasks=producer_tasks,
+            await_producer_tasks=True,
+        )
         batch_rollout_states = result.rollout_states
         # 5. 验证结果
         self.assertEqual(len(batch_rollout_states), 4)

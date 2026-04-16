@@ -36,7 +36,7 @@ from xtuner.v1.rl.agent_loop import (
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.judger import DapoMathJudgerConfig
+from xtuner.v1.rl.judger import DapoMathJudgerConfig, GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
@@ -95,7 +95,8 @@ rollout_config = RolloutConfig(
 eos_token_id = get_eos_token(model_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
-judger_config = DapoMathJudgerConfig(
+gsm8k_judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
+dapo_judger_config = DapoMathJudgerConfig(
     judger_name="dapo_math",
     num_ray_actors=1,
     eos_token=eos_token_str,
@@ -201,7 +202,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
             task_name="train_task:dapo_math",
             weight=dapo_task_weight,
             agent_loop_config=dapo_train_agent_loop_config,
-            judger_config=judger_config,
+            judger_config=dapo_judger_config,
             produce_strategy_config=SyncProduceStrategyConfig(),
             sampler_config=dapo_train_sampler_config,
         ),
@@ -209,6 +210,7 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
             task_name="train_task:gsm8k",
             weight=gsm8k_task_weight,
             agent_loop_config=gsm8k_train_agent_loop_config,
+            judger_config=gsm8k_judger_config,
             produce_strategy_config=SyncProduceStrategyConfig(),
             sampler_config=gsm8k_train_sampler_config,
         ),
@@ -271,13 +273,14 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
             task_name="eval_task:dapo_math",
             weight=dapo_task_weight,
             agent_loop_config=dapo_eval_agent_loop_config,
-            judger_config=judger_config,
+            judger_config=dapo_judger_config,
             sampler_config=dapo_eval_sampler_config,
         ),
         TaskSpecConfig(
             task_name="eval_task:gsm8k",
             weight=gsm8k_task_weight,
             agent_loop_config=gsm8k_eval_agent_loop_config,
+            judger_config=gsm8k_judger_config,
             sampler_config=gsm8k_eval_sampler_config,
         ),
     ],

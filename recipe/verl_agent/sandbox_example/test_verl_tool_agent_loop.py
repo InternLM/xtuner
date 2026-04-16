@@ -16,7 +16,6 @@ from transformers import AutoTokenizer
 
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from recipe.verl_agent.common.agent_loop_verl_tool import VerlToolAgentLoopConfig
 from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams
 from xtuner.v1.rl.rollout import RolloutController
@@ -26,9 +25,19 @@ from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 
-MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
-TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
-TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
+try:
+    from recipe.verl_agent.common.agent_loop_verl_tool import VerlToolAgentLoopConfig
+except ModuleNotFoundError as exc:
+    raise unittest.SkipTest(f"verl tool agent loop test requires optional dependency: {exc.name}") from exc
+
+MODEL_PATH = os.environ.get("ROLLOUT_MODEL_PATH")
+TRAIN_DATA_PATH = os.environ.get("ROLLOUT_DATA_PATH")
+TEST_DATA_PATH = os.environ.get("ROLLOUT_TEST_DATA_PATH")
+if not all([MODEL_PATH, TRAIN_DATA_PATH, TEST_DATA_PATH]):
+    raise unittest.SkipTest(
+        "verl tool agent loop test requires ROLLOUT_MODEL_PATH, "
+        "ROLLOUT_DATA_PATH and ROLLOUT_TEST_DATA_PATH"
+    )
 VERL_TRAIN_DATA_PATH = "/fake/path/to/train.parquet"
 VERL_TEST_DATA_PATH = "/fake/path/to/test.parquet"
 
@@ -383,8 +392,14 @@ class TestVerlToolAgentLoop(unittest.IsolatedAsyncioTestCase):
             replay_buffer=replay_buffer,
         )
 
-        # 4. 执行 produce_batch
-        results = await agent_loop_manager.produce_batch(batch_size=4)
+        # 4. 启动 producer 并消费当前 step 的 completed batch
+        task_batch_sizes = agent_loop_manager.get_step_task_batch_sizes(batch_size=4, rollout_step=0)
+        producer_tasks = await agent_loop_manager.start_producer_tasks(task_batch_sizes, rollout_step=0)
+        results = await agent_loop_manager.consume_completed_batch(
+            task_batch_sizes,
+            producer_tasks=producer_tasks,
+            await_producer_tasks=True,
+        )
         batch_rollout_states = results.rollout_states
         
         # 5. 验证结果

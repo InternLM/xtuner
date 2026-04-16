@@ -125,7 +125,7 @@ rollout_config = RolloutConfig(
 
 
 # 3. judger
-judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", judger_type="router")
+judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
 
 
 # 4. train worker
