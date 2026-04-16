@@ -12,7 +12,7 @@ from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
-from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.trainer.worker import WorkerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig

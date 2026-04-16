@@ -143,7 +143,7 @@ For more configuration parameters, please refer to the API documentation: {class
 :caption: Configure Training Strategy
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.model.dense.qwen3 import Qwen3Dense8BConfig
-from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.trainer.worker import WorkerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 
 model_path = "/path/to/qwen3-8B"        # Fill in your model path

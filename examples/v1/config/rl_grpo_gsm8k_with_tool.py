@@ -16,7 +16,7 @@ from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.trainer.worker import WorkerConfig
 from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, TaskSpecConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig

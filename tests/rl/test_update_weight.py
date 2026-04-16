@@ -12,7 +12,8 @@ from xtuner.v1.config import (
 )
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.trainer import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
+from xtuner.v1.rl.trainer.controller import TrainingController
+from xtuner.v1.rl.trainer.worker import TrainingWorker as BaseTrainingWorker, WorkerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense4BConfig
 
