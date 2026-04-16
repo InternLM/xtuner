@@ -9,6 +9,18 @@ from xtuner.v1.utils import get_logger
 logger = get_logger()
 
 
+def refresh_seq_staleness(group: list[RolloutState], current_rollout_step: int) -> list[RolloutState]:
+    for rollout_state in group:
+        if not hasattr(rollout_state, "seq_staleness"):
+            continue
+        response_rollout_steps = getattr(rollout_state, "response_rollout_steps", None) or []
+        if response_rollout_steps:
+            rollout_state.seq_staleness = current_rollout_step - min(response_rollout_steps)
+        else:
+            rollout_state.seq_staleness = 0
+    return group
+
+
 def _resolve_routed_experts(routed_experts: list[int] | ray.ObjectRef) -> list[int]:
     if isinstance(routed_experts, ray.ObjectRef):
         routed_experts = ray.get(routed_experts)
@@ -64,9 +76,17 @@ class PartialRolloutHandler:
         }
         return rollout_state
 
-    def postprocess(self, rollout_state: RolloutState, rollout_step: int) -> RolloutState:
-        # Update seq_staleness
-        rollout_state = update_seq_staleness(rollout_state, rollout_step)
+    def postprocess(
+        self, rollout_state: RolloutState, model_rollout_step: int, current_rollout_step: int
+    ) -> RolloutState:
+        # TODO: if not enable partial rollout, return directly?
+
+        # Record token source model version, then snapshot the current staleness.
+        rollout_state = update_seq_staleness(
+            rollout_state,
+            model_rollout_step=model_rollout_step,
+            current_rollout_step=current_rollout_step,
+        )
 
         # Concatenate history response fields
         history_dict = rollout_state.extra_fields.pop("history_response_dict", None)

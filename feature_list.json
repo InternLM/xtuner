@@ -34,7 +34,7 @@
       "Step 5: adapt the existing colocated produce_batch() path to reuse continue_generation -> _produce_batch_to_buffer() -> cleanup_pending_tasks(for_weight_update=False) -> _get_batch_from_buffer() -> pause_generation",
       "Step 6: add or update manager tests for single-task and multi-task behavior, EXPIRED_BATCH empty-batch returns, cleanup event ordering, and producer-loop stop/reset semantics"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "modify",
@@ -46,7 +46,7 @@
       "Step 4: keep partial-rollout continuation and EXPIRED reset behavior correct for COMPLETED, ABORTED, and EXPIRED groups under the new step semantics",
       "Step 5: add or update focused tests for model_rollout_step recording, staleness refresh, and partial-rollout postprocess behavior"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "modify",

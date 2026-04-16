@@ -211,15 +211,17 @@ def update_group_status(rollout_states: list[RolloutState]) -> Status:
         return Status.COMPLETED
 
 
-def update_seq_staleness(rollout_state: RolloutState, rollout_step: int) -> RolloutState:
-    """计算 response_rollout_steps 列表，表示 rollout_state.response_ids 中的每个 token
-    是在哪个 rollout_step 生成的。"""
+def update_seq_staleness(
+    rollout_state: RolloutState, model_rollout_step: int, current_rollout_step: int
+) -> RolloutState:
+    """Append token source model version and snapshot the current
+    seq_staleness."""
     response_len = len(rollout_state.response_ids or [])
-    response_rollout_steps = [rollout_step] * response_len
+    response_rollout_steps = [model_rollout_step] * response_len
     rollout_state.response_rollout_steps = (rollout_state.response_rollout_steps or []) + response_rollout_steps
 
-    cur_rollout_steps = min(rollout_state.response_rollout_steps, default=rollout_step)
-    rollout_state.seq_staleness = rollout_step - cur_rollout_steps
+    cur_model_rollout_step = min(rollout_state.response_rollout_steps, default=model_rollout_step)
+    rollout_state.seq_staleness = current_rollout_step - cur_model_rollout_step
     return rollout_state
 
 

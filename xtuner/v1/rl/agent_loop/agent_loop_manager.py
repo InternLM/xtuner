@@ -2,6 +2,7 @@ import asyncio
 import math
 import time
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +24,7 @@ from .producer import (
     SyncProduceStrategyConfig,
 )
 from .sampler import Sampler, SamplerConfig
+from .utils import refresh_seq_staleness
 
 
 @dataclass
@@ -43,6 +45,7 @@ class ProduceBatchResult:
     """
 
     rollout_states: list[list[RolloutState]]
+    status: ProduceBatchStatus = ProduceBatchStatus.NORMAL
     # per-group generation timing stats (all None if no generations occurred)
     group_gen_count: int | None = None
     group_gen_mean_s: float | None = None
@@ -74,6 +77,13 @@ class _TaskSamplerView:
 
     def __len__(self) -> int:
         return sum(len(sampler) for sampler in self._samplers)
+
+
+class AgentLoopManagerStatus(Enum):
+    NORMAL = auto()
+    UPDATE_ABORT = auto()
+    EXPIRED_BATCH = auto()
+    FINISH = auto()
 
 
 def _fill_produce_timing_stats(
@@ -111,55 +121,32 @@ def _fill_group_timing_stats(
     _fill_produce_timing_stats(result, generate_times, pause_time_s=pause_time_s)
 
 
-async def _produce_single_task_batch(
+def _aggregate_status(statuses: list[ProduceBatchStatus]) -> ProduceBatchStatus:
+    if any(status == ProduceBatchStatus.UPDATE_ABORT for status in statuses):
+        return ProduceBatchStatus.UPDATE_ABORT
+    if any(status == ProduceBatchStatus.EXPIRED_BATCH for status in statuses):
+        return ProduceBatchStatus.EXPIRED_BATCH
+    return ProduceBatchStatus.NORMAL
+
+
+async def _produce_single_task_to_buffer(
     task_runner: _TaskRunner,
     replay_buffer: ReplayBuffer,
     batch_size: int,
     rollout_step: int,
-    logger,
-    manager_name: str,
-) -> ProduceBatchResult:
-    start = time.perf_counter()
-    logger.info(f"[{manager_name}][{task_runner.task_name}] produce_batch start batch={batch_size}")
-    produce_status = await task_runner.produce_strategy.produce_batch(
+    model_rollout_step: int,
+    update_event: asyncio.Event | None,
+) -> ProduceBatchStatus:
+    return await task_runner.produce_strategy.produce_batch(
         task_runner.agent_loop,
         task_runner.sampler,
         replay_buffer,
         batch_size,
         task_runner.task_name,
         rollout_step=rollout_step,
-        model_rollout_step=rollout_step,
-        update_event=None,
+        model_rollout_step=model_rollout_step,
+        update_event=update_event,
     )
-    pause_time_s = 0.0
-    if produce_status != ProduceBatchStatus.UPDATE_ABORT:
-        pause_time_s = await task_runner.produce_strategy.cleanup_pending_tasks(
-            task_runner.agent_loop, replay_buffer, task_runner.task_name
-        )
-    logger.info(
-        f"[{manager_name}][{task_runner.task_name}] produce scheduler done elapsed={time.perf_counter() - start:.3f}, and start replay_buffer.get"
-    )
-
-    result = ProduceBatchResult(rollout_states=[])
-
-    start = time.perf_counter()
-    batch_rollout_states: list[list[RolloutState]] = await replay_buffer.get(
-        batch_size, task_runner.task_name, Status.COMPLETED
-    )
-    logger.info(
-        f"[{manager_name}][{task_runner.task_name}] replay_buffer.get done completed_groups={len(batch_rollout_states)} elapsed={time.perf_counter() - start:.3f}"
-    )
-    result.rollout_states = batch_rollout_states
-    _fill_group_timing_stats(result, batch_rollout_states, pause_time_s=pause_time_s)
-    completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
-        replay_buffer.count(task_name=task_runner.task_name, group_status=Status.COMPLETED),
-        replay_buffer.count(task_name=task_runner.task_name, group_status=Status.ABORTED),
-        replay_buffer.count(task_name=task_runner.task_name, group_status=Status.EXPIRED),
-    )
-    result.leftover_completed = completed_sample_count
-    result.leftover_aborted = aborted_sample_count
-    result.leftover_expired = expired_sample_count
-    return result
 
 
 class TaskSpecConfig(BaseModel):
@@ -223,6 +210,7 @@ class AgentLoopManagerConfig(BaseModel):
 
 class AgentLoopManager:
     _TASK_CHECKPOINT_DIR = "tasks"
+    _STATUS_POLL_INTERVAL_S = 0.05
 
     def __init__(
         self,
@@ -247,6 +235,11 @@ class AgentLoopManager:
             self.logger = get_logger()
         else:
             self.logger = logger
+        self._update_event = asyncio.Event()
+        self._finish_event = asyncio.Event()
+        self._model_rollout_step = 0
+        self._status = AgentLoopManagerStatus.NORMAL
+        self._pause_time_s = 0.0
 
     def get_task_batch_sizes(self, global_batch_size: int, rollout_step: int) -> dict[str, int]:
         """Return the per-task batch sizes for the current rollout step.
@@ -353,50 +346,103 @@ class AgentLoopManager:
             aggregated.group_gen_pause_time_s = total_pause_time_s
         return aggregated
 
-    async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
-        start = time.perf_counter()
-        self.logger.info(f"[AgentLoopManager][{self.name}] produce_batch start batch={batch_size}")
+    async def _produce_batch_to_buffer(
+        self,
+        batch_size: int,
+        rollout_step: int,
+        model_rollout_step: int | None = None,
+    ) -> ProduceBatchStatus:
+        if model_rollout_step is None:
+            model_rollout_step = self._model_rollout_step
 
         if len(self.task_runners) == 1:
             task = self.task_runners[0]
-            rollout_ctl = await get_agent_loop_rollout_ctl(task.agent_loop)
-            await continue_generation(rollout_ctl)
-            try:
-                return await _produce_single_task_batch(
-                    task_runner=task,
-                    replay_buffer=self.replay_buffer,
-                    batch_size=batch_size,
-                    rollout_step=rollout_step,
-                    logger=self.logger,
-                    manager_name="AgentLoopManager",
-                )
-            finally:
-                await pause_generation(rollout_ctl)
+            self.logger.info(f"[AgentLoopManager][{self.name}] produce_to_buffer start batch={batch_size}")
+            return await _produce_single_task_to_buffer(
+                task_runner=task,
+                replay_buffer=self.replay_buffer,
+                batch_size=batch_size,
+                rollout_step=rollout_step,
+                model_rollout_step=model_rollout_step,
+                update_event=self._update_event,
+            )
 
         task_batch_sizes = self.get_task_batch_sizes(batch_size, rollout_step)
         self._validate_task_batch_sizes(task_batch_sizes, batch_size)
         active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
+        assert active_tasks, "No active tasks found"
 
-        results: list[ProduceBatchResult] = []
-        if active_tasks:
-            rollout_ctl = await get_agent_loop_rollout_ctl(active_tasks[0].agent_loop)
-            await continue_generation(rollout_ctl)
-            try:
-                results = await asyncio.gather(
-                    *[
-                        _produce_single_task_batch(
-                            task_runner=task,
-                            replay_buffer=self.replay_buffer,
-                            batch_size=task_batch_sizes[task.task_name],
-                            rollout_step=rollout_step,
-                            logger=self.logger,
-                            manager_name="AgentLoopManager",
-                        )
-                        for task in active_tasks
-                    ]
+        statuses = await asyncio.gather(
+            *[
+                _produce_single_task_to_buffer(
+                    task_runner=task,
+                    replay_buffer=self.replay_buffer,
+                    batch_size=task_batch_sizes[task.task_name],
+                    rollout_step=rollout_step,
+                    model_rollout_step=model_rollout_step,
+                    update_event=self._update_event,
                 )
-            finally:
-                await pause_generation(rollout_ctl)
+                for task in active_tasks
+            ]
+        )
+        return _aggregate_status(statuses)
+
+    async def cleanup_pending_tasks(self, for_weight_update: bool = False) -> float:
+        if for_weight_update:
+            self._update_event.set()
+            self._status = AgentLoopManagerStatus.UPDATE_ABORT
+
+        pause_time_s = 0.0
+        for task in self.task_runners:
+            pause_time_s += await task.produce_strategy.cleanup_pending_tasks(
+                task.agent_loop, self.replay_buffer, task.task_name
+            )
+        self._pause_time_s = pause_time_s
+        return pause_time_s
+
+    async def _get_single_task_batch_from_buffer(
+        self, task_runner: _TaskRunner, batch_size: int, rollout_step: int
+    ) -> ProduceBatchResult:
+        result = ProduceBatchResult(rollout_states=[])
+        batch_rollout_states: list[list[RolloutState]] = await self.replay_buffer.get(
+            batch_size, task_runner.task_name, Status.COMPLETED
+        )
+        for group in batch_rollout_states:
+            refresh_seq_staleness(group, rollout_step)
+        result.rollout_states = batch_rollout_states
+        completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
+            self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.COMPLETED),
+            self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.ABORTED),
+            self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.EXPIRED),
+        )
+        result.leftover_completed = completed_sample_count
+        result.leftover_aborted = aborted_sample_count
+        result.leftover_expired = expired_sample_count
+        return result
+
+    async def _get_batch_from_buffer(self, batch_size: int, rollout_step: int) -> ProduceBatchResult:
+        pause_time_s = self._pause_time_s
+        self._pause_time_s = 0.0
+
+        if len(self.task_runners) == 1:
+            task = self.task_runners[0]
+            result = await self._get_single_task_batch_from_buffer(task, batch_size, rollout_step)
+            _fill_group_timing_stats(result, result.rollout_states, pause_time_s=pause_time_s)
+            return result
+
+        task_batch_sizes = self.get_task_batch_sizes(batch_size, rollout_step)
+        self._validate_task_batch_sizes(task_batch_sizes, batch_size)
+        active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
+        results = (
+            await asyncio.gather(
+                *[
+                    self._get_single_task_batch_from_buffer(task, task_batch_sizes[task.task_name], rollout_step)
+                    for task in active_tasks
+                ]
+            )
+            if active_tasks
+            else []
+        )
 
         task_results = {task.task_name: result for task, result in zip(active_tasks, results)}
         for task in self.task_runners:
@@ -406,11 +452,84 @@ class AgentLoopManager:
         ordered_tasks = sorted(self.task_runners, key=lambda task: (task.task_name, task.order))
         aggregated = self._aggregate_task_results(ordered_tasks, task_results)
         aggregated.task_batch_sizes = {task.task_name: task_batch_sizes[task.task_name] for task in ordered_tasks}
+        _fill_group_timing_stats(aggregated, aggregated.rollout_states, pause_time_s=pause_time_s)
+        return aggregated
+
+    def reset(self, model_rollout_step: int) -> None:
+        self._update_event.clear()
+        self._status = AgentLoopManagerStatus.NORMAL
+        self._model_rollout_step = model_rollout_step
+
+    async def _wait_for_status_exit(self, blocked_status: AgentLoopManagerStatus) -> None:
+        while not self._finish_event.is_set() and self._status == blocked_status:
+            await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
+
+    async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
+        start = time.perf_counter()
+        self.logger.info(f"[AgentLoopManager][{self.name}] produce_batch start batch={batch_size}")
+        active_tasks = (
+            self.task_runners
+            if len(self.task_runners) == 1
+            else [
+                task
+                for task in self.task_runners
+                if self.get_task_batch_sizes(batch_size, rollout_step)[task.task_name] > 0
+            ]
+        )
+        if not active_tasks:
+            return ProduceBatchResult(rollout_states=[])
+
+        rollout_ctl = await get_agent_loop_rollout_ctl(active_tasks[0].agent_loop)
+        await continue_generation(rollout_ctl)
+        try:
+            status = await self._produce_batch_to_buffer(
+                batch_size=batch_size,
+                rollout_step=rollout_step,
+                model_rollout_step=rollout_step,
+            )
+            await self.cleanup_pending_tasks(for_weight_update=False)
+            result = await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
+            result.status = status
+        finally:
+            await pause_generation(rollout_ctl)
 
         self.logger.info(
-            f"[AgentLoopManager][{self.name}] produce_batch done elapsed={time.perf_counter() - start:.3f}, completed_groups={len(aggregated.rollout_states)}"
+            f"[AgentLoopManager][{self.name}] produce_batch done elapsed={time.perf_counter() - start:.3f}, completed_groups={len(result.rollout_states)}"
         )
-        return aggregated
+        return result
+
+    async def produce_loop(self, batch_size: int, start_rollout_step: int = 0) -> None:
+        rollout_step = start_rollout_step
+        while not self._finish_event.is_set():
+            if self._status == AgentLoopManagerStatus.FINISH:
+                break
+            if self._status == AgentLoopManagerStatus.UPDATE_ABORT:
+                await self._wait_for_status_exit(AgentLoopManagerStatus.UPDATE_ABORT)
+                continue
+            if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+                await self._wait_for_status_exit(AgentLoopManagerStatus.EXPIRED_BATCH)
+                continue
+
+            rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
+            await continue_generation(rollout_ctl)
+            status = await self._produce_batch_to_buffer(batch_size=batch_size, rollout_step=rollout_step)
+
+            if status == ProduceBatchStatus.EXPIRED_BATCH:
+                # 注意只有 self._status = EXPRIED_BATCH 由这里返回的 status 设置
+                # UPDATE_ABORT 由 cleanup_pending_tasks 设置
+                self._status = AgentLoopManagerStatus.EXPIRED_BATCH
+            elif status == ProduceBatchStatus.NORMAL:
+                rollout_step += 1
+
+            await asyncio.sleep(0)
+
+    async def get_batch(self, batch_size: int, rollout_step: int) -> ProduceBatchResult:
+        if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+            return ProduceBatchResult(
+                rollout_states=[],
+                status=ProduceBatchStatus.EXPIRED_BATCH,
+            )
+        return await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
 
     def _task_checkpoint_path(self, checkpoint_path: Path | str, task_name: str) -> Path:
         checkpoint_path = Path(checkpoint_path)

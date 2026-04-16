@@ -131,3 +131,115 @@ Notes about the worktree:
 建议下一步：
 1. 继续做 `AgentLoopManager` 的完整 producer/consumer 状态机拆分，把当前兼容层推进为真正的 `_produce_batch_to_buffer()` / `_get_batch_from_buffer()` / `cleanup_pending_tasks()` / `produce_loop()` / `get_batch()`。
 2. 然后推进 `single_turn_agent_loop.py` 与 `utils.py` 的 `model_rollout_step` / staleness 语义改造。
+
+---
+
+本次实现进展补充（`AgentLoopManager` producer/consumer 状态机）：
+
+本次完成内容：
+- 将 `xtuner/v1/rl/agent_loop/agent_loop_manager.py` 继续推进为显式的 producer/consumer 拆分：
+  - `_produce_batch_to_buffer()`
+  - `_get_batch_from_buffer()`
+  - `cleanup_pending_tasks(for_weight_update=False)`
+  - `reset(model_rollout_step=...)`
+  - `produce_loop(batch_size, start_rollout_step)`
+  - `get_batch(batch_size, rollout_step)`
+- 给 `ProduceBatchResult` 加入统一的 `status: ProduceBatchStatus` 字段，manager 的 colocate / disagg 两条路径都走同一套状态返回语义。
+- 引入 `AgentLoopManagerStatus`，把 manager 运行态收敛为：
+  - `NORMAL`
+  - `UPDATE_ABORT`
+  - `EXPIRED_BATCH`
+  - `FINISH`
+- `cleanup_pending_tasks(for_weight_update=True)` 已按设计文档中的顺序执行：
+  - 先置 `_update_event`
+  - 再切 `_status = UPDATE_ABORT`
+  - 最后串行调用各 task strategy 的 `cleanup_pending_tasks()`
+- `produce_loop()` 补上了真正的等待语义：
+  - 收到 `EXPIRED_BATCH` 后进入等待 `reset()`
+  - 收到 `UPDATE_ABORT` 后等待外部同步完成
+  - 成功 produce 一轮后显式 `await asyncio.sleep(0)`，避免 fake strategy / 极快路径把事件循环饿死
+- `get_batch()` 现在在 manager 处于 `EXPIRED_BATCH` 时会直接返回空 batch + `status=EXPIRED_BATCH`，符合设计里的“跳过训练，优先同步权重”语义。
+- 补强 `tests/rl/test_multi_task_agent_loop_manager.py`，新增覆盖：
+  - `cleanup_pending_tasks(for_weight_update=True)` 的事件与状态顺序
+  - `get_batch()` 在 `EXPIRED_BATCH` 下直接返回空 batch
+  - 多 task `_produce_batch_to_buffer()` 的状态聚合优先级 `UPDATE_ABORT > EXPIRED_BATCH > NORMAL`
+  - `produce_loop()` 在 `EXPIRED_BATCH` 下等待 `reset()`，并在 `FINISH` 后正常退出
+
+本次涉及文件：
+- `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+- `tests/rl/test_multi_task_agent_loop_manager.py`
+- `feature_list.json`
+
+验证结果：
+- `pytest -q tests/rl/test_multi_task_agent_loop_manager.py::TestMultiTaskAgentLoopManager::test_produce_loop_waits_for_reset_and_stops_on_finish -q`
+  - 结果：通过
+- `pytest -q tests/rl/test_multi_task_agent_loop_manager.py -q`
+  - 结果：`8 passed`
+- `bash run_test.sh`
+  - 结果：`16 passed`
+
+本次发现与说明：
+- 之前挂住的根因不是业务状态判断错了，而是 `produce_loop()` 在 fake strategy 这种“同步秒回”路径上可能持续空转，导致测试协程拿不到调度机会。
+- 这次通过“阻塞态显式等待 + 正常态主动让出事件循环”的方式，把状态机行为和测试稳定性一起收住了。
+- `work_dirs/` 和 `zdev/` 仍保持未跟踪状态，没有纳入本次修改。
+
+建议下一步：
+1. 继续做 `single_turn_agent_loop.py` / `utils.py` 的 `model_rollout_step` 与 staleness 语义改造，把样本版本号从 producer 调度步彻底切到 rollout 模型版本。
+2. 然后再推进 `RLColocateTrainer` 和后续 `RLDisaggregatedTrainer` 的接线，让 trainer 侧开始真正消费新的 manager 状态机接口。
+
+---
+
+本次实现进展补充（`model_rollout_step` / staleness 语义改造）：
+
+本次完成内容：
+- 完成 `xtuner/v1/rl/agent_loop/single_turn_agent_loop.py` 的 rollout-step 语义切换：
+  - `generate_sample()` 现在优先使用 `model_rollout_step`
+  - 不再把 producer 自己的循环步数当成 token 来源版本
+- 完成 `xtuner/v1/rl/agent_loop/utils.py` 的 staleness plumbing：
+  - `PartialRolloutHandler.postprocess()` 改为按 `model_rollout_step` 记录 `response_rollout_steps`
+  - 新增轻量 helper `refresh_seq_staleness(group, current_rollout_step)`，用于消费端重算样本新鲜度
+- 完成 `xtuner/v1/rl/agent_loop/producer.py` 的 stale-sample 路径改造：
+  - leftover COMPLETED 样本在再次进入过期判断前会先按当前训练步重算 `seq_staleness`
+  - cleanup 回收 pending rollout 时也会先刷新 `seq_staleness`，再走 `update_expired_status()`
+- 完成 `xtuner/v1/rl/agent_loop/agent_loop_manager.py` 的消费端改造：
+  - `_get_batch_from_buffer()` / `_get_single_task_batch_from_buffer()` 在 trainer 取 batch 时会根据 `response_rollout_steps` 重算 `seq_staleness`
+  - 这样 buffer 中停留更久的样本不会只依赖生成当时的历史快照
+- 完成 `xtuner/v1/data_proto/rl_data.py` 的命名与注释收口：
+  - `update_seq_staleness()` 现在明确以“当前比较步数”语义工作
+- 新增并接入最小测试：
+  - 新文件 `tests/rl/test_agent_loop_utils.py`
+  - 覆盖 `refresh_seq_staleness()` 与 `PartialRolloutHandler.postprocess()` 的 `model_rollout_step` 语义
+  - `tests/rl/test_producer.py` 新增 leftover COMPLETED 样本重算 staleness 后再触发 EXPIRED 的用例
+  - `tests/rl/test_multi_task_agent_loop_manager.py` 新增 manager 消费 batch 时重算 `seq_staleness` 的用例
+  - `run_test.sh` 已加入 `tests/rl/test_agent_loop_utils.py`
+
+本次涉及文件：
+- `xtuner/v1/data_proto/rl_data.py`
+- `xtuner/v1/rl/agent_loop/utils.py`
+- `xtuner/v1/rl/agent_loop/single_turn_agent_loop.py`
+- `xtuner/v1/rl/agent_loop/producer.py`
+- `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+- `tests/rl/test_agent_loop_utils.py`
+- `tests/rl/test_producer.py`
+- `tests/rl/test_multi_task_agent_loop_manager.py`
+- `run_test.sh`
+- `feature_list.json`
+
+验证结果：
+- `pytest -q tests/rl/test_agent_loop_utils.py tests/rl/test_producer.py tests/rl/test_multi_task_agent_loop_manager.py`
+  - 结果：`19 passed`
+- `bash run_test.sh`
+  - 结果：`20 passed`
+- 额外真实路径检查：
+  - `tests/rl/test_async_rollout.py::TestPartialRollout::test_2_1_partial_rollout_response_ids_are_concatenated`
+  - 已明确看到 `PASSED`
+
+本次发现与说明：
+- `run_test.sh` 这条主线快回归现在可以稳定完整结束。
+- 某些真实 `async_rollout` 组合用例在当前机器上会出现 Ray/pytest 清理阶段长尾，表现为断言已推进、但进程在 teardown 阶段长时间不退出；这次没有发现新的业务断言失败信号。
+- 基于新的 focused tests、主线快回归、以及真实 partial-rollout 路径通过结果，feature 4 已标记为通过。
+- 当前没有 commit；`work_dirs/` 与 `zdev/` 仍保持未跟踪状态，不纳入本次改动。
+
+建议下一步：
+1. 继续做 `xtuner/v1/train/rl_colocate_trainer.py` 的兼容接线，确保现有 colocate trainer 完整适配新的 producer/manager/shared rollout-step 语义。
+2. 然后再推进 `rl_disaggregated_trainer.py` 主流程，把后台 producer loop 与前台 trainer loop 真正接起来。

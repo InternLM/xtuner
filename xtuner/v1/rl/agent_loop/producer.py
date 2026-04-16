@@ -15,6 +15,7 @@ from xtuner.v1.utils import get_logger
 
 from .agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from .sampler import Sampler
+from .utils import refresh_seq_staleness
 
 
 logger = get_logger()
@@ -28,13 +29,29 @@ class ProduceBatchStatus(Enum):
 
 
 async def _timed_generate_group(
-    agent_loop: AgentLoopSpec, rollout_state: list[RolloutState], **kwargs
+    agent_loop: AgentLoopSpec,
+    rollout_state: list[RolloutState],
+    enable_partial_rollout: bool = False,
+    rollout_step: int = 0,
+    model_rollout_step: int | None = None,
 ) -> list[RolloutState]:
     start = time.perf_counter()
+    if model_rollout_step is None:
+        model_rollout_step = rollout_step
     if isinstance(agent_loop, ray.actor.ActorHandle):
-        result = await agent_loop.generate_group.remote(rollout_state, **kwargs)
+        result = await agent_loop.generate_group.remote(
+            rollout_state,
+            enable_partial_rollout=enable_partial_rollout,
+            rollout_step=rollout_step,
+            model_rollout_step=model_rollout_step,
+        )
     else:
-        result = await agent_loop.generate_group(rollout_state, **kwargs)
+        result = await agent_loop.generate_group(
+            rollout_state,
+            enable_partial_rollout=enable_partial_rollout,
+            rollout_step=rollout_step,
+            model_rollout_step=model_rollout_step,
+        )
     elapsed = time.perf_counter() - start
     for item in result:
         extra_fields = getattr(item, "extra_fields", None)
@@ -136,13 +153,22 @@ class SyncProduceStrategy(ProduceStrategy):
         model_rollout_step: int | None = None,
         update_event: asyncio.Event | None = None,
     ) -> ProduceBatchStatus:
+        if model_rollout_step is None:
+            model_rollout_step = rollout_step
         pending_tasks = set()
         completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         assert completed_sample_count == 0, "SyncProduceStrategy assumes no completed samples at the start."
 
         for _ in range(batch_size):
             rollout_state = await sampler.sample(task_name=task_name)
-            task = create_task(_timed_generate_group(agent_loop, rollout_state))
+            task = create_task(
+                _timed_generate_group(
+                    agent_loop,
+                    rollout_state,
+                    rollout_step=rollout_step,
+                    model_rollout_step=model_rollout_step,
+                )
+            )
             pending_tasks.add(task)
 
         logger.info(f"Started {len(pending_tasks)} initial tasks for SyncProduceStrategy.")
@@ -167,7 +193,14 @@ class SyncProduceStrategy(ProduceStrategy):
                 completed_sample_count, batch_size
             ):
                 rollout_state = await sampler.sample(task_name=task_name)
-                task = create_task(_timed_generate_group(agent_loop, rollout_state))
+                task = create_task(
+                    _timed_generate_group(
+                        agent_loop,
+                        rollout_state,
+                        rollout_step=rollout_step,
+                        model_rollout_step=model_rollout_step,
+                    )
+                )
                 pending_tasks.add(task)
 
         return ProduceBatchStatus.NORMAL
@@ -189,6 +222,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         self.tail_batch_stale_threshold = tail_batch_stale_threshold
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks: set[asyncio.Task] = set()
+        self._current_rollout_step = 0
 
     def _is_model_expired(self, rollout_step: int, model_rollout_step: int) -> bool:
         if self.tail_batch_stale_threshold <= 0:
@@ -248,7 +282,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             self._pending_tasks.add(task)
         return expired_sample_count
 
-    async def _process_leftover_samples(self, replay_buffer: ReplayBuffer, task_name: str):
+    async def _process_leftover_samples(self, replay_buffer: ReplayBuffer, task_name: str, rollout_step: int):
         previously_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         if (not self.enable_partial_rollout or self.tail_batch_stale_threshold > 0) and previously_completed_count > 0:
             previously_completed = await replay_buffer.get(
@@ -257,6 +291,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                 group_status=Status.COMPLETED,
             )
             for group in previously_completed:
+                refresh_seq_staleness(group, rollout_step)
                 for sample in group:
                     if self.tail_batch_stale_threshold > 0 and sample.seq_staleness >= self.tail_batch_stale_threshold:
                         sample.status = Status.EXPIRED
@@ -281,6 +316,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
             for task in done_task:
                 paused_items = task.result()
+                refresh_seq_staleness(paused_items, self._current_rollout_step)
                 paused_items = update_expired_status(
                     paused_items, tail_batch_stale_threshold=self.tail_batch_stale_threshold
                 )
@@ -306,6 +342,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         update_event: asyncio.Event | None = None,
     ) -> ProduceBatchStatus:
         # TODO: 兼容共卡使用方式
+        self._current_rollout_step = rollout_step
         if model_rollout_step is None:
             model_rollout_step = rollout_step
         if update_event is None:
@@ -320,7 +357,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             return ProduceBatchStatus.UPDATE_ABORT
 
         # 2. 处理上一轮遗留的 completed 样本
-        await self._process_leftover_samples(replay_buffer, task_name)
+        await self._process_leftover_samples(replay_buffer, task_name, rollout_step)
 
         # 3. 计算当前并发需求
         previously_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)

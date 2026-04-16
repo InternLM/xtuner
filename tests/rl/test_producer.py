@@ -236,3 +236,32 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, ProduceBatchStatus.EXPIRED_BATCH)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 0)
+
+    async def test_leftover_completed_samples_refresh_staleness_before_expire_check(self):
+        task_name = "test_refresh_leftover"
+        strategy = AsyncProduceStrategyConfig(
+            enable_partial_rollout=True,
+            tail_batch_stale_threshold=2,
+        ).build()
+        mock_agent_loop = self._build_agent_loop()
+        sampler = self._build_sampler()
+
+        stale_item = MockRolloutState(1000, seq_staleness=0, status=Status.COMPLETED)
+        stale_item.response_rollout_steps = [3]
+        await self.replay_buffer.put([stale_item], task_name)
+
+        status = await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=0,
+            task_name=task_name,
+            rollout_step=5,
+            model_rollout_step=5,
+        )
+
+        expired_groups = await self.replay_buffer.get(10, task_name, Status.EXPIRED)
+
+        self.assertEqual(status, ProduceBatchStatus.NORMAL)
+        self.assertEqual(len(expired_groups), 1)
+        self.assertEqual(expired_groups[0][0].seq_staleness, 2)
