@@ -73,10 +73,14 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.fake_update_weights = MagicMock()
         trainer.train_controller = SimpleNamespace(
             fit=SimpleNamespace(remote=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}])),
+            onload=SimpleNamespace(remote=MagicMock(return_value="onload")),
             offload=SimpleNamespace(remote=MagicMock(return_value="offload")),
+            update_weights=SimpleNamespace(remote=MagicMock(return_value="update")),
         )
         trainer.rollout_controller = SimpleNamespace(
             recover_failed_workers=SimpleNamespace(remote=MagicMock(return_value="recover")),
+            onload_weights=SimpleNamespace(remote=MagicMock(return_value="onload_weights")),
+            onload_kvcache=SimpleNamespace(remote=MagicMock(return_value="onload_kvcache")),
         )
         return trainer
 
@@ -98,6 +102,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             asyncio.run(trainer._sync_weights_and_save(rollout_idx=3, step_timer_dict={}))
 
         self.assertEqual(events, ["save:3", "hf:3", "bind", "fake_update"])
+        trainer.train_controller.offload.remote.assert_not_called()
 
     def test_fit_skips_train_when_batch_is_expired(self):
         manager = _FakeManager(
@@ -143,9 +148,24 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
         trainer._prepare_train_data.assert_called_once()
         trainer.train_controller.fit.remote.assert_called_once()
+        trainer.train_controller.onload.remote.assert_not_called()
         self.assertEqual(events, ["sync", "eval", "continue_product"])
         self.assertTrue(manager._finish_event.is_set())
         self.assertIn("produce_loop_exit", manager.calls)
+
+    def test_fake_update_weights_does_not_onload_rollout(self):
+        manager = _FakeManager([])
+        trainer = self._make_trainer(manager)
+
+        with patch("xtuner.v1.train.rl_disaggregated_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
+            trainer.fake_update_weights = RLDisaggregatedTrainer.fake_update_weights.__get__(
+                trainer, RLDisaggregatedTrainer
+            )
+            trainer.fake_update_weights()
+
+        trainer.train_controller.update_weights.remote.assert_called_once_with()
+        trainer.rollout_controller.onload_weights.remote.assert_not_called()
+        trainer.rollout_controller.onload_kvcache.remote.assert_not_called()
 
     def test_resume_from_checkpoint_syncs_weights_then_resets_manager(self):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
@@ -197,6 +217,53 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
     def test_validate_sync_schedule_rejects_non_multiple_hf_interval(self):
         with self.assertRaisesRegex(ValueError, "hf_interval=5.*sync_weights_interval=2"):
             _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=4, hf_interval=5)
+
+    def test_build_disaggregated_placement_groups_uses_distinct_names(self):
+        trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
+        trainer.logger = MagicMock()
+        trainer._meta = SimpleNamespace(
+            latest_exp=SimpleNamespace(exp_dir=str(Path(self.temp_dir.name) / "20260416130000")),
+        )
+        train_pg = SimpleNamespace(id="train-pg-id")
+        rollout_pg = SimpleNamespace(id="rollout-pg-id")
+
+        with patch(
+            "xtuner.v1.train.rl_disaggregated_trainer.AutoAcceleratorWorkers.build_placement_group",
+            side_effect=[train_pg, rollout_pg],
+        ) as build_pg:
+            built_train_pg, built_rollout_pg = trainer._build_disaggregated_placement_groups(
+                train_resources=object(),
+                rollout_resources=object(),
+            )
+
+        self.assertIs(built_train_pg, train_pg)
+        self.assertIs(built_rollout_pg, rollout_pg)
+        self.assertEqual(
+            build_pg.call_args_list[0].kwargs["name"],
+            "xtuner_rl_disagg_20260416130000_train",
+        )
+        self.assertEqual(
+            build_pg.call_args_list[1].kwargs["name"],
+            "xtuner_rl_disagg_20260416130000_rollout",
+        )
+
+    def test_build_disaggregated_placement_groups_rejects_reused_pg(self):
+        trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
+        trainer.logger = MagicMock()
+        trainer._meta = SimpleNamespace(
+            latest_exp=SimpleNamespace(exp_dir=str(Path(self.temp_dir.name) / "20260416130000")),
+        )
+        shared_pg = SimpleNamespace(id="shared-pg-id")
+
+        with patch(
+            "xtuner.v1.train.rl_disaggregated_trainer.AutoAcceleratorWorkers.build_placement_group",
+            side_effect=[shared_pg, shared_pg],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "distinct placement groups"):
+                trainer._build_disaggregated_placement_groups(
+                    train_resources=object(),
+                    rollout_resources=object(),
+                )
 
 
 if __name__ == "__main__":

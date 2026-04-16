@@ -135,6 +135,31 @@ class RLDisaggregatedTrainerConfig(BaseModel):
 class RLDisaggregatedTrainer(RLColocateTrainer):
     _META_PATH = ".xtuner_rl_disaggregated_trainer"
 
+    def _build_disaggregated_placement_groups(
+        self,
+        train_resources: AcceleratorResourcesConfig,
+        rollout_resources: AcceleratorResourcesConfig,
+    ):
+        pg_name_prefix = f"xtuner_rl_disagg_{self.exp_dir.name}"
+        train_pg_name = f"{pg_name_prefix}_train"
+        rollout_pg_name = f"{pg_name_prefix}_rollout"
+
+        train_pg = AutoAcceleratorWorkers.build_placement_group(train_resources, name=train_pg_name)
+        rollout_pg = AutoAcceleratorWorkers.build_placement_group(rollout_resources, name=rollout_pg_name)
+        if train_pg.id == rollout_pg.id:
+            raise RuntimeError(
+                "RLDisaggregatedTrainer requires distinct placement groups for train and rollout, "
+                f"but both resolved to the same placement group id={train_pg.id}. "
+                "Please check placement-group naming and stale Ray cluster state."
+            )
+
+        self.logger.info(
+            "Created disaggregated placement groups: "
+            f"train={train_pg_name}(id={train_pg.id}), "
+            f"rollout={rollout_pg_name}(id={rollout_pg.id})"
+        )
+        return train_pg, rollout_pg
+
     def __init__(
         self,
         *,
@@ -215,8 +240,10 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
 
         # 非共卡的核心前提是 train 和 rollout 不再共用同一套 placement group。
         # 这样 rollout 可以在后台持续生成，而 train 侧前台做自己的优化步骤。
-        self._train_pg = AutoAcceleratorWorkers.build_placement_group(train_resources)
-        self._rollout_pg = AutoAcceleratorWorkers.build_placement_group(rollout_resources)
+        self._train_pg, self._rollout_pg = self._build_disaggregated_placement_groups(
+            train_resources=train_resources,
+            rollout_resources=rollout_resources,
+        )
 
         if train_worker_cfg.seed is None:
             self.logger.warning(f"RLTrainer seed {seed} is used as train worker seed.")
@@ -260,7 +287,9 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
 
         if debug_rollout:
-            self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
+            self.logger.warning(
+                "Debug rollout mode is enabled. Disaggregated training keeps rollout workers resident."
+            )
         self._debug_rollout = debug_rollout
         self._exp_tracker = get_writer(writer_type=exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
@@ -413,7 +442,6 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         # producer 的停止动作已经在 _fit() 里提前完成，
         # 这样调用顺序更直观：cleanup -> save -> bind -> fake_update_weights。
         with timer("save_ckpt", step_timer_dict):
-            ray.get(self.train_controller.offload.remote(target="optimizer"))
             self._maybe_save_checkpoint(rollout_idx)
             self._maybe_save_hf(rollout_idx)
 
@@ -426,10 +454,8 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         # 这里保留 fake 接口，是为了把“trainer 主流程”和“真实跨卡同步实现”解耦。
         # 当前分支先复用现有 controller 的 update_weights 链路把流程打通；
         # 后续如果接入真正的 disaggregated 权重同步模块，只需要替换这个函数即可。
-        ray.get(self.rollout_controller.onload_weights.remote())
         ray.get(self.train_controller.update_weights.remote(), timeout=TRAINER_RAY_GET_TIMEOUT)
         self.logger.info("Rollout workers updated weights through fake disaggregated sync.")
-        ray.get(self.rollout_controller.onload_kvcache.remote())
 
     def _maybe_save_checkpoint(self, cur_step: int) -> None:
         ckp_interval = self._checkpoint_interval

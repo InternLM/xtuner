@@ -35,7 +35,7 @@ class TestAgentLoopUtils(unittest.TestCase):
 
         refresh_seq_staleness(group, current_rollout_step=8)
 
-        self.assertEqual(group[0].seq_staleness, 5)
+        self.assertEqual(group[0].seq_staleness, 4)
 
     def test_partial_rollout_postprocess_uses_model_rollout_step(self):
         handler = PartialRolloutHandler(max_tokens=8)
@@ -58,7 +58,7 @@ class TestAgentLoopUtils(unittest.TestCase):
 
         self.assertEqual(result.response_ids, [10, 11, 30, 31])
         self.assertEqual(result.response_rollout_steps, [2, 2, 5, 5])
-        self.assertEqual(result.seq_staleness, 7)
+        self.assertEqual(result.seq_staleness, 6)
 
 
 class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
@@ -100,4 +100,19 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result.response_rollout_steps, [5, 5])
-        self.assertEqual(result.seq_staleness, 4)
+        self.assertEqual(result.seq_staleness, 3)
+
+    async def test_generate_sample_accepts_zero_model_rollout_step_when_explicitly_provided(self):
+        agent_loop = self._build_agent_loop()
+        rollout_state = _make_rollout_state(response_ids=[], status=Status.ABORTED)
+        generated_state = _make_rollout_state(response_ids=[30, 31], status=Status.ABORTED)
+        agent_loop.rollout_ctl.generate.remote.return_value = generated_state
+
+        result = await agent_loop.generate_sample(
+            rollout_state,
+            model_rollout_step=0,
+            rollout_step=1,
+        )
+
+        self.assertEqual(result.response_rollout_steps, [0, 0])
+        self.assertEqual(result.seq_staleness, 0)

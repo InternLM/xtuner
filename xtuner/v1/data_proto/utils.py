@@ -11,6 +11,12 @@ T = TypeVar("T", bound=torch.Tensor)
 # TODO: (yehaochen) Missing typehint here
 
 
+def calculate_seq_staleness(model_rollout_step: int, current_rollout_step: int) -> int:
+    # model_rollout_step 是指哪个 rollout_step 训练后的模型，如果完全没有滞后(即同步状态)，current_rollout_step 领先
+    # model_rollout_step 1 步，此时 seq_staleness 为 current_rollout_step - model_rollout_step - 1 = 0。
+    return current_rollout_step - model_rollout_step - 1
+
+
 def pad_to_multiple_of(sequence, padding_value, multiple_of, dim=-1):
     length = sequence.shape[dim]
     if length % multiple_of == 0:

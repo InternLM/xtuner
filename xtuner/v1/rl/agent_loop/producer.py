@@ -8,6 +8,7 @@ import ray
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_expired_status
+from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout.utils import pause_generation
 from xtuner.v1.rl.utils import create_task
@@ -155,7 +156,8 @@ class SyncProduceStrategy(ProduceStrategy):
             model_rollout_step = rollout_step
         pending_tasks = set()
         completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
-        assert completed_sample_count == 0, "SyncProduceStrategy assumes no completed samples at the start."
+        # TODO: 是否支持 SyncProduceStrategy 在非共卡时使用？如果支持，下面这行注释掉？
+        # assert completed_sample_count == 0, "SyncProduceStrategy assumes no completed samples at the start."
 
         for _ in range(batch_size):
             rollout_state = await sampler.sample(task_name=task_name)
@@ -225,7 +227,9 @@ class AsyncProduceStrategy(ProduceStrategy):
     def _is_model_expired(self, rollout_step: int, model_rollout_step: int) -> bool:
         if self.tail_batch_stale_threshold <= 0:
             return False
-        return rollout_step - model_rollout_step >= self.tail_batch_stale_threshold
+
+        staleness = calculate_seq_staleness(model_rollout_step, rollout_step)
+        return staleness >= self.tail_batch_stale_threshold
 
     async def _store_generated_group(
         self,

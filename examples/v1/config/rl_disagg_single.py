@@ -79,14 +79,14 @@ sync_weights_interval = int(os.environ.get("SYNC_WEIGHTS_INTERVAL", "1"))
 over_sample_threshold = float(os.environ.get("OVER_SAMPLE_THRESHOLD", "0.0"))
 partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
 tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "0"))
-tail_batch_stale_threshold = int(os.environ.get("TAIL_BATCH_STALE_THRESHOLD", "0"))
+tail_batch_stale_threshold = int(os.environ.get("TAIL_BATCH_STALE_THRESHOLD", "5"))
 prompt_repeat_k = int(os.environ.get("PROMPT_REPEAT_K", "4"))
 rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "1"))
 rollout_ep_size = int(os.environ.get("ROLLOUT_EP_SIZE", "1"))
 max_prompt_length = int(os.environ.get("MAX_PROMPT_LENGTH", "512"))
 max_response_length = int(os.environ.get("MAX_RESPONSE_LENGTH", "1024"))
 pack_max_length = int(os.environ.get("PACK_MAX_LENGTH", str(32 * 1024)))
-enable_evaluate = os.environ.get("ENABLE_EVALUATE", "0") == "1"
+enable_evaluate = os.environ.get("ENABLE_EVALUATE", "1") == "1"
 
 # execution knobs:
 # - sync_weights_interval controls how many train steps share one weight-sync interval
@@ -266,7 +266,7 @@ trainer = RLDisaggregatedTrainerConfig(
     total_train_steps=total_train_steps,
     sync_weights_interval=sync_weights_interval,
     enable_evaluate=enable_evaluate,
-    enable_initial_evaluate=False,
+    enable_initial_evaluate=True,
     evaluate_step=evaluate_step,
     work_dir=work_dir,
     seed=int(os.environ.get("SEED", "123")),

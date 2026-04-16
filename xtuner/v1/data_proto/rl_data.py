@@ -14,6 +14,8 @@ from typing_extensions import NotRequired, TypedDict
 from xtuner.v1.utils.cache import CacheObj
 from xtuner.v1.utils.logger import get_logger
 
+from .utils import calculate_seq_staleness
+
 
 if TYPE_CHECKING:
     from ray import ObjectRef as RayObjectRef
@@ -221,7 +223,7 @@ def update_seq_staleness(
     rollout_state.response_rollout_steps = (rollout_state.response_rollout_steps or []) + response_rollout_steps
 
     cur_model_rollout_step = min(rollout_state.response_rollout_steps, default=model_rollout_step)
-    rollout_state.seq_staleness = current_rollout_step - cur_model_rollout_step
+    rollout_state.seq_staleness = calculate_seq_staleness(cur_model_rollout_step, current_rollout_step)
     return rollout_state
 
 

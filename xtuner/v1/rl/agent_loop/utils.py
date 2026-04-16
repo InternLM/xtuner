@@ -2,7 +2,8 @@ import time
 
 import ray
 
-from xtuner.v1.data_proto import RolloutState, Status, update_seq_staleness
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_seq_staleness
+from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.utils import get_logger
 
 
@@ -15,7 +16,7 @@ def refresh_seq_staleness(group: list[RolloutState], current_rollout_step: int) 
             continue
         response_rollout_steps = getattr(rollout_state, "response_rollout_steps", None) or []
         if response_rollout_steps:
-            rollout_state.seq_staleness = current_rollout_step - min(response_rollout_steps)
+            rollout_state.seq_staleness = calculate_seq_staleness(min(response_rollout_steps), current_rollout_step)
         else:
             rollout_state.seq_staleness = 0
     return group

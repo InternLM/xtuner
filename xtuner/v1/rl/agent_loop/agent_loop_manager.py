@@ -212,7 +212,7 @@ class AgentLoopManagerConfig(BaseModel):
 class AgentLoopManager:
     _TASK_CHECKPOINT_DIR = "tasks"
     _MANAGER_STATE_PATH = "agent_loop_manager_state.json"
-    _STATUS_POLL_INTERVAL_S = 0.05
+    _STATUS_POLL_INTERVAL_S = 1.0
 
     def __init__(
         self,
@@ -468,6 +468,29 @@ class AgentLoopManager:
         _fill_group_timing_stats(aggregated, aggregated.rollout_states, pause_time_s=pause_time_s)
         return aggregated
 
+    async def _is_batch_ready(self, batch_size: int, rollout_step: int) -> bool:
+        if len(self.task_runners) == 1:
+            task = self.task_runners[0]
+            completed_count = await self.replay_buffer.count(task_name=task.task_name, group_status=Status.COMPLETED)
+            return completed_count >= batch_size
+
+        task_batch_sizes = self.get_task_batch_sizes(batch_size, rollout_step)
+        self._validate_task_batch_sizes(task_batch_sizes, batch_size)
+        active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
+        if not active_tasks:
+            return True
+
+        completed_counts = await asyncio.gather(
+            *[
+                self.replay_buffer.count(task_name=task.task_name, group_status=Status.COMPLETED)
+                for task in active_tasks
+            ]
+        )
+        return all(
+            completed_count >= task_batch_sizes[task.task_name]
+            for task, completed_count in zip(active_tasks, completed_counts)
+        )
+
     def continue_product(self, model_rollout_step: int) -> None:
         # continue_product 的语义是“producer 可以恢复工作了”。
         #
@@ -520,7 +543,7 @@ class AgentLoopManager:
             #
             # 共卡路径下，每次 produce_batch() 都对应当前 trainer 轮次的新权重版本，
             # 所以这里直接复用 continue_product() 同步恢复状态并更新 rollout model version。
-            self.continue_product(model_rollout_step=rollout_step)
+            self.continue_product(model_rollout_step=rollout_step - 1)
             status = await self._produce_batch_to_buffer(
                 batch_size=batch_size,
                 rollout_step=rollout_step,
@@ -586,17 +609,24 @@ class AgentLoopManager:
         #
         # 设计上它和 `produce_batch()` 明确分工：
         # - `produce_batch()`：colocate，一次调用内完成“生产+收尾+取数”
-        # - `get_batch()`：disagg，只负责从 replay buffer 取数
+        # - `get_batch()`：disagg，等待 replay buffer 准备好当前训练步所需 batch 后再取数
         #
-        # 因而这里允许返回空 batch：
+        # 因而这里允许返回空 batch 的唯一合法场景仍然只有：
         # - 当 manager 已进入 EXPIRED_BATCH，返回空 batch + 状态信号
         # - trainer 看到后应跳过训练，优先去做权重同步
-        if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
-            return ProduceBatchResult(
-                rollout_states=[],
-                status=ProduceBatchStatus.EXPIRED_BATCH,
-            )
-        return await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
+        while not self._finish_event.is_set():
+            if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+                return ProduceBatchResult(
+                    rollout_states=[],
+                    status=ProduceBatchStatus.EXPIRED_BATCH,
+                )
+            if await self._is_batch_ready(batch_size=batch_size, rollout_step=rollout_step):
+                result = await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
+                if result.rollout_states:
+                    return result
+            await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
+
+        return ProduceBatchResult(rollout_states=[])
 
     def _task_checkpoint_path(self, checkpoint_path: Path | str, task_name: str) -> Path:
         checkpoint_path = Path(checkpoint_path)

@@ -153,6 +153,25 @@ class _FakeReplayBuffer:
         self.resumed_paths.append(Path(checkpoint_path))
 
 
+class _SequencedCompletedReplayBuffer(_FakeReplayBuffer):
+    def __init__(self, completed_counts: list[int], rollout_states_by_task: dict[str, list[list[str]]]):
+        super().__init__(rollout_states_by_task=rollout_states_by_task, leftover_counts={})
+        self._completed_counts = list(completed_counts)
+        self.get_calls: list[tuple[int, str, Status]] = []
+        self.completed_count_call_count = 0
+
+    async def get(self, batch_size: int, task_name: str, group_status: Status):
+        self.get_calls.append((batch_size, task_name, group_status))
+        return await super().get(batch_size, task_name, group_status)
+
+    async def count(self, task_name: str, group_status: Status):
+        if group_status == Status.COMPLETED:
+            self.completed_count_call_count += 1
+            if self._completed_counts:
+                return self._completed_counts.pop(0)
+        return await super().count(task_name, group_status)
+
+
 def _fake_agent_loop():
     rollout_ctl = MagicMock()
     rollout_ctl.continue_generation.remote = AsyncMock()
@@ -237,14 +256,14 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.task_batch_sizes, {"task_a": 5, "task_b": 2, "task_c": 0})
         self.assertEqual(multi_task_manager._status, AgentLoopManagerStatus.NORMAL)
-        self.assertEqual(multi_task_manager._model_rollout_step, 3)
+        self.assertEqual(multi_task_manager._model_rollout_step, 2)
         self.assertEqual(strategy_a.called_batch_sizes, [5])
         self.assertEqual(strategy_b.called_batch_sizes, [2])
         self.assertEqual(strategy_c.called_batch_sizes, [])
         self.assertEqual(strategy_a.called_rollout_steps, [3])
         self.assertEqual(strategy_b.called_rollout_steps, [3])
-        self.assertEqual(strategy_a.called_model_rollout_steps, [3])
-        self.assertEqual(strategy_b.called_model_rollout_steps, [3])
+        self.assertEqual(strategy_a.called_model_rollout_steps, [2])
+        self.assertEqual(strategy_b.called_model_rollout_steps, [2])
         self.assertEqual(len(strategy_a.called_update_events), 1)
         self.assertFalse(strategy_a.called_update_events[0].is_set())
         self.assertEqual(len(strategy_b.called_update_events), 1)
@@ -398,9 +417,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.produce_batch(batch_size=2, rollout_step=7)
 
         self.assertEqual(strategy.cleanup_call_count, 1)
-        self.assertEqual(manager._model_rollout_step, 7)
+        self.assertEqual(manager._model_rollout_step, 6)
         self.assertEqual(strategy.called_rollout_steps, [7])
-        self.assertEqual(strategy.called_model_rollout_steps, [7])
+        self.assertEqual(strategy.called_model_rollout_steps, [6])
         self.assertEqual(len(strategy.called_update_events), 1)
         self.assertFalse(strategy.called_update_events[0].is_set())
         self.assertEqual(result.group_gen_count, 2)
@@ -488,13 +507,44 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 rollout_states_by_task={
                     "task_a": [[_FakeStalenessRolloutState("a-0", 0.2, response_rollout_steps=[4], seq_staleness=0)]],
                 },
-                leftover_counts={},
+                leftover_counts={("task_a", Status.COMPLETED): 1},
             ),
         )
 
         result = await manager.get_batch(batch_size=1, rollout_step=9)
 
-        self.assertEqual(result.rollout_states[0][0].seq_staleness, 5)
+        self.assertEqual(result.rollout_states[0][0].seq_staleness, 4)
+
+    async def test_get_batch_waits_until_requested_batch_size_is_ready(self):
+        replay_buffer = _SequencedCompletedReplayBuffer(
+            completed_counts=[0, 1, 2],
+            rollout_states_by_task={
+                "task_a": [
+                    [_FakeStalenessRolloutState("a-0", 0.2, response_rollout_steps=[4], seq_staleness=0)],
+                    [_FakeStalenessRolloutState("a-1", 0.3, response_rollout_steps=[4], seq_staleness=0)],
+                ],
+            },
+        )
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+            ],
+            replay_buffer=replay_buffer,
+        )
+        manager._STATUS_POLL_INTERVAL_S = 0.01
+
+        result = await asyncio.wait_for(manager.get_batch(batch_size=2, rollout_step=9), timeout=1.0)
+
+        self.assertEqual([group[0].uid for group in result.rollout_states], ["a-0", "a-1"])
+        self.assertEqual(replay_buffer.get_calls, [(2, "task_a", Status.COMPLETED)])
+        self.assertGreaterEqual(replay_buffer.completed_count_call_count, 3)
 
     async def test_produce_batch_to_buffer_aggregates_status_with_update_abort_priority(self):
         manager = AgentLoopManager(

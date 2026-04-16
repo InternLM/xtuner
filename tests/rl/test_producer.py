@@ -229,7 +229,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=1,
             task_name=task_name,
-            rollout_step=2,
+            rollout_step=3,
             model_rollout_step=1,
         )
 
@@ -256,8 +256,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=0,
             task_name=task_name,
-            rollout_step=5,
-            model_rollout_step=5,
+            rollout_step=6,
+            model_rollout_step=6,
         )
 
         expired_groups = await self.replay_buffer.get(10, task_name, Status.EXPIRED)
