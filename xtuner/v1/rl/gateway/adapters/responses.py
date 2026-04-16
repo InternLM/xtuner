@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 from uuid import uuid4
 
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -27,6 +29,7 @@ from ..core.models import (
 )
 from .base import BaseChatAPIAdapter
 from .openai import OpenAIChatAdapterError
+from .streaming import build_sse_response, encode_sse_event
 from .trace import normalize_trace_payload
 
 
@@ -95,16 +98,14 @@ class OpenAIResponsesAdapter(BaseChatAPIAdapter[ResponsesRequest, ResponsesRespo
         self._default_model_name = default_model_name
         self._context_length = context_length
 
-    async def responses(self, request: ResponsesRequest) -> ResponsesResponse:
+    async def responses(self, request: ResponsesRequest) -> ResponsesResponse | StreamingResponse:
+        if request.stream:
+            response = await self.handle_request(request)
+            return build_sse_response(self.iter_stream_events(response))
         return await self.handle_request(request)
 
     def validate_request(self, request: ResponsesRequest) -> None:
-        if request.stream:
-            raise OpenAIChatAdapterError(
-                "stream=true is not supported yet",
-                "invalid_request_error",
-                "stream_not_supported",
-            )
+        return None
 
     def request_to_canonical_request(self, request: ResponsesRequest) -> CanonicalGenerateRequest:
         return CanonicalGenerateRequest(
@@ -117,11 +118,12 @@ class OpenAIResponsesAdapter(BaseChatAPIAdapter[ResponsesRequest, ResponsesRespo
             temperature=request.temperature,
             top_p=request.top_p,
             max_tokens=request.max_output_tokens,
-            stream=bool(request.stream),
+            stream=False,
             metadata={
                 key: value
                 for key, value in {
                     "source_protocol": "openai_responses",
+                    "client_stream": bool(request.stream),
                     "session_uid": request.session_uid,
                     "store": request.store,
                     "include": request.include,
@@ -136,6 +138,119 @@ class OpenAIResponsesAdapter(BaseChatAPIAdapter[ResponsesRequest, ResponsesRespo
 
     def normalize_response(self, response: ResponsesResponse) -> dict[str, Any]:
         return normalize_trace_payload(response.model_dump(mode="python", exclude_none=True))
+
+    async def iter_stream_events(
+        self,
+        response: ResponsesResponse,
+    ) -> AsyncIterator[str]:
+        created_response = response.model_dump(mode="json", exclude_none=True)
+        created_response["status"] = "in_progress"
+
+        yield encode_sse_event(
+            {
+                "type": "response.created",
+                "response": created_response,
+            },
+            event="response.created",
+        )
+        yield encode_sse_event(
+            {
+                "type": "response.in_progress",
+                "response": created_response,
+            },
+            event="response.in_progress",
+        )
+
+        for output_index, item in enumerate(response.output):
+            yield encode_sse_event(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": item,
+                },
+                event="response.output_item.added",
+            )
+
+            if item.get("type") == "message":
+                for content_index, part in enumerate(item.get("content", [])):
+                    yield encode_sse_event(
+                        {
+                            "type": "response.content_part.added",
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "item_id": item.get("id"),
+                            "part": part,
+                        },
+                        event="response.content_part.added",
+                    )
+                    if part.get("type") == "output_text":
+                        yield encode_sse_event(
+                            {
+                                "type": "response.output_text.delta",
+                                "output_index": output_index,
+                                "content_index": content_index,
+                                "item_id": item.get("id"),
+                                "delta": part.get("text", ""),
+                            },
+                            event="response.output_text.delta",
+                        )
+                        yield encode_sse_event(
+                            {
+                                "type": "response.output_text.done",
+                                "output_index": output_index,
+                                "content_index": content_index,
+                                "item_id": item.get("id"),
+                                "text": part.get("text", ""),
+                            },
+                            event="response.output_text.done",
+                        )
+                    yield encode_sse_event(
+                        {
+                            "type": "response.content_part.done",
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "item_id": item.get("id"),
+                            "part": part,
+                        },
+                        event="response.content_part.done",
+                    )
+
+            if item.get("type") == "function_call":
+                yield encode_sse_event(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "output_index": output_index,
+                        "item_id": item.get("id"),
+                        "delta": item.get("arguments", ""),
+                    },
+                    event="response.function_call_arguments.delta",
+                )
+                yield encode_sse_event(
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "output_index": output_index,
+                        "item_id": item.get("id"),
+                        "arguments": item.get("arguments", ""),
+                    },
+                    event="response.function_call_arguments.done",
+                )
+
+            yield encode_sse_event(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item,
+                },
+                event="response.output_item.done",
+            )
+
+        yield encode_sse_event(
+            {
+                "type": "response.completed",
+                "response": response.model_dump(mode="json", exclude_none=True),
+            },
+            event="response.completed",
+        )
 
     def canonical_response_to_protocol_response(
         self,

@@ -429,7 +429,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
             self.assertEqual(capabilities_body["model"], self.controller.config.model_name)
             self.assertEqual(capabilities_body["backend"], self.controller.config.rollout_backend)
             self.assertEqual(capabilities_body["context_length"], self.controller.config.context_length)
-            self.assertFalse(capabilities_body["supports_stream"])
+            self.assertTrue(capabilities_body["supports_stream"])
             self.assertTrue(capabilities_body["supports_tools"])
             self.assertFalse(capabilities_body["supports_cancel"])
             self.assertTrue(capabilities_body["supports_parallel_tool_calls"])
@@ -585,6 +585,19 @@ class TestGatewayProtocolChain(unittest.TestCase):
             **responses_payload,
             "stream": True,
         }
+        anthropic_stream_payload = {
+            "model": self.controller.config.model_name,
+            "system": "You are a helpful assistant.",
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "Say hello briefly."}]},
+            ],
+            "max_tokens": 32,
+            "stream": True,
+        }
+        openai_stream_payload = {
+            **openai_payload,
+            "stream": True,
+        }
 
         with TestClient(app) as client:
             openai_response = client.post("/v1/chat/completions", json=openai_payload)
@@ -603,6 +616,17 @@ class TestGatewayProtocolChain(unittest.TestCase):
             self.assertEqual(anthropic_error_body["error"]["type"], "invalid_request_error")
             self.assertIn("Unsupported Anthropic content block type(s) in system: image", anthropic_error_body["error"]["message"])
 
+            openai_stream_response = client.post("/v1/chat/completions", json=openai_stream_payload)
+            self.assertEqual(openai_stream_response.status_code, 200, openai_stream_response.text)
+            self.assertIn("text/event-stream", openai_stream_response.headers["content-type"])
+            self.assertIn("data: [DONE]", openai_stream_response.text)
+
+            anthropic_stream_response = client.post("/v1/messages", json=anthropic_stream_payload)
+            self.assertEqual(anthropic_stream_response.status_code, 200, anthropic_stream_response.text)
+            self.assertIn("text/event-stream", anthropic_stream_response.headers["content-type"])
+            self.assertIn("event: message_start", anthropic_stream_response.text)
+            self.assertIn("event: message_stop", anthropic_stream_response.text)
+
             responses_response = client.post("/v1/responses", json=responses_payload)
             self.assertEqual(responses_response.status_code, 200, responses_response.text)
 
@@ -613,10 +637,10 @@ class TestGatewayProtocolChain(unittest.TestCase):
             self.assertEqual(responses_invalid_content_body["error"]["code"], "unsupported_content_block")
 
             responses_stream_response = client.post("/v1/responses", json=responses_stream_payload)
-            self.assertEqual(responses_stream_response.status_code, 400, responses_stream_response.text)
-            responses_stream_body = responses_stream_response.json()
-            self.assertEqual(responses_stream_body["error"]["type"], "invalid_request_error")
-            self.assertEqual(responses_stream_body["error"]["code"], "stream_not_supported")
+            self.assertEqual(responses_stream_response.status_code, 200, responses_stream_response.text)
+            self.assertIn("text/event-stream", responses_stream_response.headers["content-type"])
+            self.assertIn("event: response.created", responses_stream_response.text)
+            self.assertIn("event: response.completed", responses_stream_response.text)
 
         capture_records = self._read_new_capture_records()
         protocol_records = self._capture_records_by_protocol(capture_records)

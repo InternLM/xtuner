@@ -1,13 +1,18 @@
 import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
+from fastapi.responses import StreamingResponse
 from lmdeploy.serve.openai.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse,
     ChatMessage,
+    DeltaMessage,
     UsageInfo,
 )
 
@@ -27,6 +32,7 @@ from ..core.models import (
     CanonicalToolResultBlock,
 )
 from .base import BaseChatAPIAdapter, coerce_content_to_text
+from .streaming import build_sse_response, encode_sse_event
 from .trace import normalize_trace_payload
 
 
@@ -66,16 +72,13 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         self._default_model_name = default_model_name
         self._context_length = context_length
 
-    async def chat(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+    async def chat(self, request: ChatCompletionRequest) -> ChatCompletionResponse | StreamingResponse:
+        if request.stream:
+            response = await self.handle_request(request)
+            return build_sse_response(self.iter_stream_events(response, request))
         return await self.handle_request(request)
 
     def validate_request(self, request: ChatCompletionRequest) -> None:
-        if request.stream:
-            raise OpenAIChatAdapterError(
-                "stream=true is not supported yet",
-                "invalid_request_error",
-                "stream_not_supported",
-            )
         if request.n not in (None, 1):
             raise OpenAIChatAdapterError(
                 "n>1 is not supported yet",
@@ -100,11 +103,12 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
             if request.max_completion_tokens is not None
             else request.max_tokens,
             stop=stop,
-            stream=bool(request.stream),
+            stream=False,
             metadata={
                 key: value
                 for key, value in {
                     "source_protocol": "openai_chat_completions",
+                    "client_stream": bool(request.stream),
                     "session_uid": getattr(request, "session_uid", getattr(request, "session_id", None)),
                     "n": request.n,
                     "presence_penalty": request.presence_penalty,
@@ -176,6 +180,103 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
                 }
             )
         return normalize_trace_payload({"choices": normalized_choices})
+
+    async def iter_stream_events(
+        self,
+        response: ChatCompletionResponse,
+        request: ChatCompletionRequest,
+    ) -> AsyncIterator[str]:
+        choice = response.choices[0]
+        include_usage = bool(getattr(request.stream_options, "include_usage", False))
+
+        initial_chunk = ChatCompletionStreamResponse(
+            id=response.id,
+            created=response.created,
+            model=response.model,
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=0,
+                    delta=DeltaMessage(role="assistant"),
+                )
+            ],
+        )
+        yield encode_sse_event(initial_chunk.model_dump(mode="json", exclude_none=True))
+
+        if choice.message.reasoning_content:
+            reasoning_chunk = ChatCompletionStreamResponse(
+                id=response.id,
+                created=response.created,
+                model=response.model,
+                choices=[
+                    ChatCompletionResponseStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(reasoning_content=choice.message.reasoning_content),
+                    )
+                ],
+            )
+            yield encode_sse_event(reasoning_chunk.model_dump(mode="json", exclude_none=True))
+
+        if choice.message.content:
+            content_chunk = ChatCompletionStreamResponse(
+                id=response.id,
+                created=response.created,
+                model=response.model,
+                choices=[
+                    ChatCompletionResponseStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(content=choice.message.content),
+                    )
+                ],
+            )
+            yield encode_sse_event(content_chunk.model_dump(mode="json", exclude_none=True))
+
+        for index, tool_call in enumerate(choice.message.tool_calls or []):
+            tool_call_id = tool_call.get("id") if isinstance(tool_call, dict) else getattr(tool_call, "id", None)
+            tool_call_type = (
+                tool_call.get("type", "function") if isinstance(tool_call, dict) else getattr(tool_call, "type", "function")
+            )
+            function_payload = (
+                tool_call.get("function") if isinstance(tool_call, dict) else getattr(tool_call, "function", None)
+            )
+            if hasattr(function_payload, "model_dump"):
+                function_payload = function_payload.model_dump(mode="json", exclude_none=True)
+            tool_call_chunk = ChatCompletionStreamResponse(
+                id=response.id,
+                created=response.created,
+                model=response.model,
+                choices=[
+                    ChatCompletionResponseStreamChoice(
+                        index=0,
+                        delta=DeltaMessage(
+                            tool_calls=[
+                                {
+                                    "index": index,
+                                    "id": tool_call_id,
+                                    "type": tool_call_type,
+                                    "function": function_payload,
+                                }
+                            ]
+                        ),
+                    )
+                ],
+            )
+            yield encode_sse_event(tool_call_chunk.model_dump(mode="json", exclude_none=True))
+
+        final_chunk = ChatCompletionStreamResponse(
+            id=response.id,
+            created=response.created,
+            model=response.model,
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=0,
+                    delta=DeltaMessage(),
+                    finish_reason=choice.finish_reason,
+                )
+            ],
+            usage=response.usage if include_usage else None,
+        )
+        yield encode_sse_event(final_chunk.model_dump(mode="json", exclude_none=True))
+        yield encode_sse_event("[DONE]")
 
     def _openai_message_to_canonical_message(self, message: dict[str, Any]) -> CanonicalMessage:
         role = str(message.get("role", "user"))

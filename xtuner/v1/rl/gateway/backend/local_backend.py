@@ -78,7 +78,7 @@ class LocalRolloutBackend:
             model=self._model_name,
             backend=self._controller.config.rollout_backend,
             context_length=self._controller.config.context_length,
-            supports_stream=False,
+            supports_stream=True,
             supports_tools=True,
             supports_cancel=False,
             supports_parallel_tool_calls=True,
@@ -203,7 +203,7 @@ class LocalRolloutBackend:
                             "type": "function",
                             "function": {
                                 "name": block.tool_call.name,
-                                "arguments": self._stringify_tool_arguments(block.tool_call),
+                                "arguments": self._render_tool_arguments_for_template(block.tool_call),
                             },
                         }
                     )
@@ -345,6 +345,30 @@ class LocalRolloutBackend:
         if isinstance(tool_call.arguments, str):
             return tool_call.arguments
         return json.dumps(tool_call.arguments if tool_call.arguments is not None else {}, ensure_ascii=False)
+
+    def _render_tool_arguments_for_template(self, tool_call: CanonicalToolCall) -> dict[str, Any]:
+        arguments = tool_call.arguments
+        if isinstance(arguments, dict):
+            return arguments
+        if tool_call.raw_arguments_text is not None:
+            try:
+                decoded = json.loads(tool_call.raw_arguments_text)
+            except Exception:
+                return {"raw": tool_call.raw_arguments_text}
+            if isinstance(decoded, dict):
+                return decoded
+            return {"value": decoded}
+        if arguments is None:
+            return {}
+        if isinstance(arguments, str):
+            try:
+                decoded = json.loads(arguments)
+            except Exception:
+                return {"raw": arguments}
+            if isinstance(decoded, dict):
+                return decoded
+            return {"value": decoded}
+        return {"value": arguments}
 
     def _normalize_backend_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Normalize a backend message dict: remove None values and sort keys."""

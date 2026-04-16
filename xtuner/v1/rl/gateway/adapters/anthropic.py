@@ -1,7 +1,9 @@
 import json
+from collections.abc import AsyncIterator
 from typing import Any, Literal
 from uuid import uuid4
 
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -22,6 +24,7 @@ from ..core.models import (
     CanonicalToolResultBlock,
 )
 from .base import BaseChatAPIAdapter
+from .streaming import build_sse_response, encode_sse_event
 from .trace import normalize_trace_payload
 
 
@@ -116,7 +119,10 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         self._default_model_name = default_model_name
         self._context_length = context_length
 
-    async def messages(self, request: AnthropicMessagesRequest) -> AnthropicMessagesResponse:
+    async def messages(self, request: AnthropicMessagesRequest) -> AnthropicMessagesResponse | StreamingResponse:
+        if request.stream:
+            response = await self.handle_request(request)
+            return build_sse_response(self.iter_stream_events(response))
         return await self.handle_request(request)
 
     async def count_tokens(self, request: AnthropicCountTokensRequest) -> AnthropicCountTokensResponse:
@@ -134,11 +140,7 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         return AnthropicCountTokensResponse(input_tokens=len(prompt_ids))
 
     def validate_request(self, request: AnthropicMessagesRequest) -> None:
-        if request.stream:
-            raise AnthropicChatAdapterError(
-                "stream=true is not supported yet",
-                "invalid_request_error",
-            )
+        return None
 
     def request_to_canonical_request(self, request: AnthropicMessagesRequest) -> CanonicalGenerateRequest:
         messages: list[CanonicalMessage] = []
@@ -155,11 +157,12 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
             top_p=request.top_p,
             max_tokens=request.max_tokens,
             stop=list(request.stop_sequences or []),
-            stream=bool(request.stream),
+            stream=False,
             metadata={
                 key: value
                 for key, value in {
                     "source_protocol": "anthropic_messages",
+                    "client_stream": bool(request.stream),
                     "session_uid": request.session_uid,
                 }.items()
                 if value is not None
@@ -171,6 +174,89 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
 
     def normalize_response(self, response: AnthropicMessagesResponse) -> dict[str, Any]:
         return normalize_trace_payload(response.model_dump(mode="python", exclude_none=True))
+
+    async def iter_stream_events(
+        self,
+        response: AnthropicMessagesResponse,
+    ) -> AsyncIterator[str]:
+        yield encode_sse_event(
+            {
+                "type": "message_start",
+                "message": {
+                    "id": response.id,
+                    "type": response.type,
+                    "role": response.role,
+                    "content": [],
+                    "model": response.model,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {
+                        "input_tokens": response.usage.input_tokens,
+                        "output_tokens": 0,
+                    },
+                },
+            },
+            event="message_start",
+        )
+
+        for index, block in enumerate(response.content):
+            block_type = block.get("type")
+            if block_type == "reasoning":
+                start_block = {"type": "thinking", "thinking": ""}
+                delta = {"type": "thinking_delta", "thinking": str(block.get("text", ""))}
+            elif block_type == "tool_use":
+                start_block = {
+                    "type": "tool_use",
+                    "id": block.get("id"),
+                    "name": block.get("name"),
+                    "input": {},
+                }
+                delta = {
+                    "type": "input_json_delta",
+                    "partial_json": json.dumps(block.get("input", {}), ensure_ascii=False),
+                }
+            else:
+                start_block = {"type": "text", "text": ""}
+                delta = {"type": "text_delta", "text": str(block.get("text", ""))}
+
+            yield encode_sse_event(
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": start_block,
+                },
+                event="content_block_start",
+            )
+            yield encode_sse_event(
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": delta,
+                },
+                event="content_block_delta",
+            )
+            yield encode_sse_event(
+                {
+                    "type": "content_block_stop",
+                    "index": index,
+                },
+                event="content_block_stop",
+            )
+
+        yield encode_sse_event(
+            {
+                "type": "message_delta",
+                "delta": {
+                    "stop_reason": self._stream_stop_reason(response.stop_reason),
+                    "stop_sequence": response.stop_sequence,
+                },
+                "usage": {
+                    "output_tokens": response.usage.output_tokens,
+                },
+            },
+            event="message_delta",
+        )
+        yield encode_sse_event({"type": "message_stop"}, event="message_stop")
 
     def canonical_response_to_protocol_response(
         self,
@@ -495,3 +581,10 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
 
     def _reasoning_to_text(self, reasoning: CanonicalReasoning) -> str:
         return "\n".join(step.text for step in reasoning.steps if step.text).strip()
+
+    def _stream_stop_reason(self, stop_reason: str | None) -> str | None:
+        if stop_reason == "stop":
+            return "end_turn"
+        if stop_reason == "length":
+            return "max_tokens"
+        return stop_reason
