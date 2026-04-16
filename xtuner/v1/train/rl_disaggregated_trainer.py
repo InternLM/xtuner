@@ -1,4 +1,6 @@
+import asyncio
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
 
@@ -10,10 +12,11 @@ from typing_extensions import Literal
 
 from transformers import AutoTokenizer
 from xtuner.v1._writer import get_writer
-from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.data_proto import RolloutState, refresh_seq_staleness
+from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.agent_loop import (
     AgentLoopManagerConfig,
+    ProduceBatchResult,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
@@ -27,6 +30,14 @@ from xtuner.v1.train.rl_colocate_trainer import (
 )
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import is_hf_model_path, set_deterministic, timer
+
+
+@dataclass
+class RolloutIntervalSession:
+    start_step: int
+    end_step: int
+    batch_size: int
+    producer_tasks: dict[str, asyncio.Task]
 
 
 class RLDisaggregatedTrainerConfig(BaseModel):
@@ -69,10 +80,7 @@ class RLDisaggregatedTrainerConfig(BaseModel):
         if self.total_train_steps <= 0:
             raise ValueError(f"total_train_steps must be positive, got {self.total_train_steps}")
         if self.trigger_parameter_sync_step <= 0:
-            raise ValueError(
-                "trigger_parameter_sync_step must be positive, "
-                f"got {self.trigger_parameter_sync_step}"
-            )
+            raise ValueError(f"trigger_parameter_sync_step must be positive, got {self.trigger_parameter_sync_step}")
 
     def build(self) -> "RLDisaggregatedTrainer":
         return RLDisaggregatedTrainer(
@@ -193,9 +201,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         pg_name_prefix = f"disaggregated_{self.exp_dir.name}"
         # 训练和 rollout 明确分成两套 placement group，
         # 这是 disaggregated 和 colocated 在资源层面最本质的区别。
-        self._train_pg = AutoAcceleratorWorkers.build_placement_group(
-            train_resources, name=f"{pg_name_prefix}_train"
-        )
+        self._train_pg = AutoAcceleratorWorkers.build_placement_group(train_resources, name=f"{pg_name_prefix}_train")
         self._rollout_pg = AutoAcceleratorWorkers.build_placement_group(
             rollout_resources, name=f"{pg_name_prefix}_rollout"
         )
@@ -234,10 +240,6 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             replay_buffer=replay_buffer,
             logger=self.logger,
         )
-        self.agent_loop_manager.set_sync_interval_context(
-            trigger_parameter_sync_step=self._trigger_parameter_sync_step,
-            total_train_steps=self._total_train_steps,
-        )
 
         self.eval_agent_loop_manager = eval_agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
@@ -260,6 +262,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         if debug_rollout:
             self.logger.warning("Debug rollout mode is enabled, training and weight sync will be skipped.")
         self._debug_rollout = debug_rollout
+        self._rollout_session: RolloutIntervalSession | None = None
         self._exp_tracker = get_writer(writer_type=exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
 
@@ -278,8 +281,10 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             return
 
         if self._enable_initial_evaluate and not self._debug_rollout:
-            eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-                self.evaluator.eval_batch_size, rollout_step=0
+            eval_produce_result = await self._produce_batch_with_manager(
+                self.eval_agent_loop_manager,
+                self.evaluator.eval_batch_size,
+                0,
             )
             eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
             self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
@@ -292,24 +297,15 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
             self.logger.info(f"Train step {train_step}/{self._total_train_steps} start")
             step_timer_dict = {}
             with timer("step", step_timer_dict):
-                if self._should_start_fullasync_interval(train_step):
-                    with timer("schedule_rollout", step_timer_dict):
-                        await self.agent_loop_manager.fullasync_produce_batch(
-                            self.train_batch_size,
-                            rollout_step=train_step,
-                        )
+                with timer("schedule_rollout", step_timer_dict):
+                    await self._start_rollout_session_if_needed(train_step)
                 with timer("wait_rollout", step_timer_dict):
-                    produce_result = await self.agent_loop_manager.get_completed_batch(
-                        self.train_batch_size,
-                        rollout_step=train_step,
-                    )
+                    produce_result = await self._get_rollout_batch_for_current_step(train_step)
                 train_batch = produce_result.rollout_states
                 self._refresh_train_batch_staleness(train_batch, train_step)
                 if train_batch:
                     self.logger.info(f"Get {len(train_batch) * len(train_batch[0])} samples for training")
-                self._save_rollout_batch_trajectories(
-                    train_batch, train_step, stage="train", step_label="Train step"
-                )
+                self._save_rollout_batch_trajectories(train_batch, train_step, stage="train", step_label="Train step")
 
                 if not self._debug_rollout:
                     data_batches, data_info = self._prepare_train_batch(train_batch, step_timer_dict)
@@ -345,6 +341,75 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
 
     def _should_start_fullasync_interval(self, train_step: int) -> bool:
         return (train_step - 1) % self._trigger_parameter_sync_step == 0
+
+    def _get_rollout_interval_end_step(self, train_step: int) -> int:
+        return min(train_step + self._trigger_parameter_sync_step - 1, self._total_train_steps)
+
+    async def _start_rollout_session_if_needed(self, train_step: int) -> None:
+        session = self._rollout_session
+        if session is not None:
+            if session.start_step <= train_step <= session.end_step:
+                return
+            raise RuntimeError(
+                f"Active rollout session [{session.start_step}, {session.end_step}] does not cover train_step={train_step}."
+            )
+        if not self._should_start_fullasync_interval(train_step):
+            raise RuntimeError(f"No active rollout session for non-interval-start train_step={train_step}.")
+
+        interval_end_step = self._get_rollout_interval_end_step(train_step)
+        interval_task_batch_sizes = self.agent_loop_manager.get_interval_task_batch_sizes(
+            self.train_batch_size,
+            train_step,
+            interval_end_step,
+        )
+        producer_tasks = await self.agent_loop_manager.start_producer_tasks(interval_task_batch_sizes, train_step)
+
+        self._rollout_session = RolloutIntervalSession(
+            start_step=train_step,
+            end_step=interval_end_step,
+            batch_size=self.train_batch_size,
+            producer_tasks=producer_tasks,
+        )
+        self.logger.info(
+            f"[RLDisaggregatedTrainer] rollout interval started start_step={train_step}, "
+            f"end_step={interval_end_step}, interval_task_batch_sizes={interval_task_batch_sizes}"
+        )
+
+    async def _finish_rollout_session_if_needed(
+        self,
+        train_step: int,
+    ) -> None:
+        session = self._rollout_session
+        if session is None:
+            raise RuntimeError("No active rollout session to finish.")
+        if train_step != session.end_step:
+            return
+
+        self.logger.info(
+            f"[RLDisaggregatedTrainer] rollout interval finished start_step={session.start_step}, "
+            f"end_step={session.end_step}"
+        )
+        self._rollout_session = None
+
+    async def _get_rollout_batch_for_current_step(self, train_step: int) -> ProduceBatchResult:
+        session = self._rollout_session
+        if session is None:
+            raise RuntimeError("No active rollout session. Call _start_rollout_session_if_needed() first.")
+        if not (session.start_step <= train_step <= session.end_step):
+            raise RuntimeError(
+                f"train_step={train_step} does not belong to active rollout interval "
+                f"[{session.start_step}, {session.end_step}]"
+            )
+
+        task_batch_sizes = self.agent_loop_manager.get_step_task_batch_sizes(session.batch_size, train_step)
+        produce_result = await self.agent_loop_manager.consume_completed_batch(
+            task_batch_sizes,
+            producer_tasks=session.producer_tasks,
+            await_producer_tasks=train_step == session.end_step,
+            manager_name="RLDisaggregatedTrainer",
+        )
+        await self._finish_rollout_session_if_needed(train_step)
+        return produce_result
 
     def _refresh_train_batch_staleness(self, train_batch: list[list[RolloutState]], train_step: int) -> None:
         # 训练前再刷新一次，是为了让真正进入训练的 batch 带上“本训练步视角”的 staleness。

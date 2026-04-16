@@ -9,8 +9,7 @@ from .agent_loop import (
     RayAgentLoopProxy,
     RouterAgentLoop,
 )
-from .agent_loop_manager import AgentLoopManager, AgentLoopManagerConfig
-from .manager_base import ProduceBatchResult, TaskSpecConfig
+from .agent_loop_manager import AgentLoopManager, AgentLoopManagerConfig, ProduceBatchResult, TaskSpecConfig
 from .producer import (
     AsyncProduceStrategy,
     AsyncProduceStrategyConfig,
