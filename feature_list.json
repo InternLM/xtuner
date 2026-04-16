@@ -72,7 +72,7 @@
       "Step 5: keep evaluation higher priority than background rollout by running eval before agent_loop_manager.reset(model_rollout_step=rollout_step)",
       "Step 6: add minimal trainer tests for EXPIRED_BATCH skip-train behavior, FINISH shutdown of the producer task, and eval-before-reset ordering"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "modify",

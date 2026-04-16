@@ -340,7 +340,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(AssertionError, "must return non-empty rollout_states"):
             await manager.produce_batch(batch_size=1, rollout_step=3)
 
-    async def test_cleanup_pending_tasks_for_weight_update_sets_status_and_pause_time(self):
+    async def test_cleanup_pending_tasks_for_pause_product_for_update_sets_status_and_pause_time(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
         manager = AgentLoopManager(
             task_runners=[
@@ -356,7 +356,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
 
-        pause_time_s = await manager.cleanup_pending_tasks(for_weight_update=True)
+        pause_time_s = await manager.cleanup_pending_tasks(pause_product_for_update=True)
 
         self.assertEqual(pause_time_s, 2.5)
         self.assertEqual(strategy.cleanup_call_count, 1)
@@ -444,7 +444,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
 
-    async def test_produce_loop_waits_for_reset_and_stops_on_finish(self):
+    async def test_produce_loop_waits_for_continue_product_and_stops_on_finish(self):
         strategy = _SequencedProduceStrategy(
             statuses=[ProduceBatchStatus.NORMAL, ProduceBatchStatus.EXPIRED_BATCH, ProduceBatchStatus.NORMAL],
         )
@@ -467,7 +467,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._status, AgentLoopManagerStatus.EXPIRED_BATCH)
         self.assertEqual(strategy.called_rollout_steps[:2], [3, 4])
 
-        manager.reset(model_rollout_step=9)
+        manager.continue_product(model_rollout_step=9)
         await self._wait_until(lambda: len(strategy.called_rollout_steps) >= 3)
         self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
         self.assertEqual(strategy.called_rollout_steps[:3], [3, 4, 4])

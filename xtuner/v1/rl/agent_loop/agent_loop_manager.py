@@ -387,8 +387,21 @@ class AgentLoopManager:
         )
         return _aggregate_status(statuses)
 
-    async def cleanup_pending_tasks(self, for_weight_update: bool = False) -> float:
-        if for_weight_update:
+    async def cleanup_pending_tasks(self, pause_product_for_update: bool = False) -> float:
+        # 这是 producer 的“显式刹车”接口。
+        #
+        # 设计动机：
+        # - 旧 colocate 语义里，一次 produce_batch() 结束后就自然收尾；
+        # - 非共卡后，producer 可能在后台持续运行，何时停下来必须交给 trainer 明确控制。
+        #
+        # 因此：
+        # - `pause_product_for_update=True` 表示 trainer 准备进入权重同步点，
+        #   这里先置 `_update_event`，再把 manager 状态切到 UPDATE_ABORT；
+        # - 后续各 task 的 strategy 会回收 pending rollout，并把结果写回 replay buffer；
+        # - 返回值 `pause_time_s` 不是业务语义，而是日志/诊断信息，
+        #   供训练侧在下一次消费 batch 时上报。
+        if pause_product_for_update:
+            # 用于非共卡训练中，在权重同步点前，先让 producer 停下来
             self._update_event.set()
             self._status = AgentLoopManagerStatus.UPDATE_ABORT
 
@@ -455,7 +468,17 @@ class AgentLoopManager:
         _fill_group_timing_stats(aggregated, aggregated.rollout_states, pause_time_s=pause_time_s)
         return aggregated
 
-    def reset(self, model_rollout_step: int) -> None:
+    def continue_product(self, model_rollout_step: int) -> None:
+        # 只用于非共卡训练中。
+        # continue_product 的语义不是“清空 buffer 并重新开始”，
+        # 而是“producer 可以恢复工作了”。
+        #
+        # 它和 cleanup_pending_tasks(pause_product_for_update=True) 是一对：
+        # - cleanup_pending_tasks(...) 负责让 producer 停下来；
+        # - continue_product(...) 负责在同步/评测完成后解除暂停。
+        #
+        # 这里同步更新 `_model_rollout_step`，表示 rollout 侧接下来生成样本时，
+        # 应把“当前正在使用的是哪一版权重”记录成这个版本号。
         self._update_event.clear()
         self._status = AgentLoopManagerStatus.NORMAL
         self._model_rollout_step = model_rollout_step
@@ -465,6 +488,16 @@ class AgentLoopManager:
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
 
     async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
+        # `produce_batch()` 是保留给 colocate 路径的同步入口。
+        #
+        # 它虽然名字没变，但内部已经改成三段式：
+        # 1. `_produce_batch_to_buffer()` 只负责生产，把结果写入 replay buffer
+        # 2. `cleanup_pending_tasks()` 显式收尾 pending rollout
+        # 3. `_get_batch_from_buffer()` 再把训练 batch 取出来
+        #
+        # 这也是为什么这里要求返回非空 batch：
+        # - colocate 语义下，调用它就是为了拿一批可训练 completed groups
+        # - 如果需要合法返回空 batch + 特殊状态，那应该走 disagg 的 `get_batch()`
         if batch_size <= 0:
             raise ValueError(f"produce_batch expects batch_size > 0, got {batch_size}")
         start = time.perf_counter()
@@ -488,7 +521,7 @@ class AgentLoopManager:
                 rollout_step=rollout_step,
                 model_rollout_step=rollout_step,
             )
-            await self.cleanup_pending_tasks(for_weight_update=False)
+            await self.cleanup_pending_tasks(pause_product_for_update=False)
             result = await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
             result.status = status
             assert result.rollout_states, (
@@ -504,14 +537,27 @@ class AgentLoopManager:
         return result
 
     async def produce_loop(self, batch_size: int, start_rollout_step: int = 0) -> None:
+        # `produce_loop()` 是非共卡新增的后台生产循环。
+        #
+        # 和 colocate 最大的区别是：
+        # - 它不直接把 batch 返回给 trainer
+        # - 它只是持续把样本“喂”进 replay buffer
+        # - trainer 前台通过 `get_batch()` 异步消费
+        #
+        # 因此这里的核心职责不是“凑出一批训练数据”，而是根据 manager 的全局状态机
+        # 决定什么时候继续生产、什么时候暂停等待、什么时候彻底退出。
         rollout_step = start_rollout_step
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.FINISH:
                 break
             if self._status == AgentLoopManagerStatus.UPDATE_ABORT:
+                # trainer 已经发出了“准备同步权重”的信号。
+                # producer 在这里阻塞等待 continue_product()，而不是自己擅自恢复。
                 await self._wait_for_status_exit(AgentLoopManagerStatus.UPDATE_ABORT)
                 continue
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+                # 当前 rollout 权重已经过旧。
+                # 这里继续等待 trainer 完成同步，再通过 continue_product() 恢复。
                 await self._wait_for_status_exit(AgentLoopManagerStatus.EXPIRED_BATCH)
                 continue
 
@@ -520,15 +566,27 @@ class AgentLoopManager:
             status = await self._produce_batch_to_buffer(batch_size=batch_size, rollout_step=rollout_step)
 
             if status == ProduceBatchStatus.EXPIRED_BATCH:
-                # 注意只有 self._status = EXPRIED_BATCH 由这里返回的 status 设置
-                # UPDATE_ABORT 由 cleanup_pending_tasks 设置
+                # 注意：
+                # - EXPIRED_BATCH 是 producer 在生产过程中自己检测出来的“立即停下”信号
+                # - UPDATE_ABORT 则是 trainer 在同步前通过 cleanup_pending_tasks() 主动设置的
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
             elif status == ProduceBatchStatus.NORMAL:
+                # 只有正常完成一轮生产时，producer 自己维护的 rollout_step 才前进一步。
                 rollout_step += 1
 
+            # 主动让出事件循环，避免 fake strategy / 极快路径在测试里造成忙等空转。
             await asyncio.sleep(0)
 
     async def get_batch(self, batch_size: int, rollout_step: int) -> ProduceBatchResult:
+        # `get_batch()` 是非共卡路径给 trainer 的消费接口。
+        #
+        # 设计上它和 `produce_batch()` 明确分工：
+        # - `produce_batch()`：colocate，一次调用内完成“生产+收尾+取数”
+        # - `get_batch()`：disagg，只负责从 replay buffer 取数
+        #
+        # 因而这里允许返回空 batch：
+        # - 当 manager 已进入 EXPIRED_BATCH，返回空 batch + 状态信号
+        # - trainer 看到后应跳过训练，优先去做权重同步
         if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
             return ProduceBatchResult(
                 rollout_states=[],

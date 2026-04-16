@@ -317,3 +317,52 @@ Notes about the worktree:
   - `produce_batch()` = 必须返回一批可训练 completed groups
   - `get_batch()` = 可以合法返回空 batch + 特殊状态
 - 当前完成状态仍为：`5/9 features passing`
+
+---
+
+本次实现进展补充（新增 `RLDisaggregatedTrainer` 主流程）：
+
+本次完成内容：
+- 新增 `xtuner/v1/train/rl_disaggregated_trainer.py`，提供：
+  - `RLDisaggregatedTrainerConfig`
+  - `RLDisaggregatedTrainer`
+  - 对外仍保留同步 `fit()`，内部通过 async `_fit()` 驱动后台 producer + 前台 trainer 主循环
+- 主流程按当前设计实现为：
+  - 后台：`agent_loop_manager.produce_loop(...)`
+  - 前台：`agent_loop_manager.get_batch(...)`
+  - 当 `get_batch()` 返回 `EXPIRED_BATCH` 时，跳过 `_prepare_train_data()` 和 `train_controller.fit()`
+  - 到同步点后执行 `_sync_weights_and_save(...)`
+  - 若当前轮需要 eval，则先 eval，再 `agent_loop_manager.reset(model_rollout_step=rollout_step)`
+- `_sync_weights_and_save(...)` 已按本阶段约定接线：
+  - `cleanup_pending_tasks(for_weight_update=True)`
+  - `_maybe_save_checkpoint(...)`
+  - `_maybe_save_hf(...)`
+  - `bind_train_rollout(...)`
+  - `fake_update_weights()`
+- 当前 `fake_update_weights()` 作为显式占位函数保留，但内部先复用现有 controller 的同步链路，保证当前分支可以继续跑通，不把 trainer 主流程绑定死到后续真正的跨卡同步实现上
+- 为兼容现有 draft config 的 public shape，trainer 初始化时会把外层 `judger_config` 补到 train / eval `AgentLoopManagerConfig` 中缺失 judger 的 task 上
+- 更新 `run_test.sh`，把 `tests/rl/test_rl_disaggregated_trainer.py` 接入主线快测
+
+本次涉及文件：
+- `xtuner/v1/train/rl_disaggregated_trainer.py`
+- `tests/rl/test_rl_disaggregated_trainer.py`
+- `run_test.sh`
+- `feature_list.json`
+
+验证结果：
+- `pytest -q tests/rl/test_rl_disaggregated_trainer.py`
+  - 结果：`3 passed`
+- `python -m py_compile xtuner/v1/train/rl_disaggregated_trainer.py tests/rl/test_rl_disaggregated_trainer.py`
+  - 结果：通过
+- `bash run_test.sh`
+  - 结果：`28 passed`
+
+本次发现与说明：
+- 当前没有实现 checkpoint / resume，这部分仍留给下一个 feature；如果传入 checkpoint resume 路径，会显式报 `NotImplementedError`
+- `examples/v1/config/rl_disagg_single.py` / `rl_disagg_multi.py` 的运行时完整导入检查被现有 `xtuner.v1.rl.loss` 路径中的循环导入问题拦住，这个问题出现在现有模块初始化链上，不是这次新 trainer 文件直接引入的新报错
+- 基于新增 trainer 主流程、focused tests 和主线快测通过，feature 6 已标记为通过
+- 当前完成状态：`6/9 features passing`
+
+建议下一步：
+1. 继续做 checkpoint / resume，把 `AgentLoopManager.save()/resume()` 的 paused-save 语义和 trainer 恢复流程补齐
+2. 然后补 colocate integration regression coverage，把两个主 config 的共享路径回归测试接上

@@ -66,14 +66,14 @@ class RLDisaggregatedTrainer:
 
                 if self._need_eval(rollout_step):
                     # 设计上让 eval 优先级高于 background producer：
-                    # 先 eval，再 reset producer，避免评测和后台生成竞争 rollout 资源。
+                    # 先 eval，再 continue_product，避免评测和后台生成竞争 rollout 资源。
                     await self._run_eval(rollout_step)
 
-                # reset 的语义不是“清空一切”，而是：
+                # continue_product 的语义不是“清空一切”，而是：
                 # 1. 清除 update_event；
                 # 2. 状态回到 NORMAL；
                 # 3. 记录 rollout 侧刚刚切换到的最新模型版本步数。
-                self.agent_loop_manager.reset(model_rollout_step=rollout_step)
+                self.agent_loop_manager.continue_product(model_rollout_step=rollout_step)
         finally:
             # 训练结束时，显式通知后台 producer 退出，避免留下悬空协程。
             self.agent_loop_manager._status = AgentLoopManagerStatus.FINISH
@@ -83,7 +83,9 @@ class RLDisaggregatedTrainer:
     async def _sync_weights_and_save(self, rollout_step: int):
         # 权重同步前必须先停止 rollout 生成：
         # 否则 rollout 侧可能仍在使用旧权重继续产生样本，导致 staleness 失控。
-        pause_time_s = await self.agent_loop_manager.cleanup_pending_tasks(for_weight_update=True)
+        pause_time_s = await self.agent_loop_manager.cleanup_pending_tasks(
+            pause_product_for_update=True
+        )
         self.agent_loop_manager._pause_time_s = pause_time_s
 
         # checkpoint 的安全保存点放在这里：
@@ -110,10 +112,11 @@ class RLDisaggregatedTrainer:
         #    - 必须显式传入 `model_rollout_step_override=rollout_step`
         #      作为 resume 后 rollout 应恢复到的目标权重版本
         #    - 原因是 checkpoint 的保存时机在：
-        #      `cleanup_pending_tasks(for_weight_update=True)` 之后、
-        #      `reset(model_rollout_step=rollout_step)` 之前
+        #      `cleanup_pending_tasks(pause_product_for_update=True)` 之后、
+        #      `continue_product(model_rollout_step=rollout_step)` 之前
         #    - 也就是说，此时 manager 内部原有的 `self._model_rollout_step`
-        #      仍然还是“旧 rollout 权重版本”，还没被 reset 推进到新的 `rollout_step`
+        #      仍然还是“旧 rollout 权重版本”，还没被 continue_product
+        #      推进到新的 `rollout_step`
         #    - 如果这里不显式 override，而是直接保存旧的
         #      `self._model_rollout_step`，那么 resume 后 producer 会以旧模型版本
         #      继续恢复流程，语义就和保存前预期不一致
@@ -138,12 +141,14 @@ class RLDisaggregatedTrainer:
         # 1. train_controller.resume(...)
         # 2. saved_model_rollout_step = agent_loop_manager.resume(...)
         # 3. 用 train 侧权重重新同步 rollout（当前先走 fake_update_weights）
-        # 4. agent_loop_manager.reset(model_rollout_step=saved_model_rollout_step)
+        # 4. agent_loop_manager.continue_product(
+        #        model_rollout_step=saved_model_rollout_step
+        #    )
         #
         # 这里的关键点是：
         # - resume 取回的 `saved_model_rollout_step` 应该是 checkpoint 保存时
         #   显式 override 进去的“新 rollout_step”
-        # - 而不是 save 那一刻 manager 内部还没来得及 reset 的旧
+        # - 而不是 save 那一刻 manager 内部还没来得及 continue_product 的旧
         #   `self._model_rollout_step`
         #
         # 这里不会恢复 producer_task 本身；
@@ -181,7 +186,7 @@ class AgentLoopManagerStatus(Enum):
     可以把它理解为 producer 主循环的状态机：
     - 初始为 NORMAL
     - NORMAL --(开始权重更新/cleanup)--> UPDATE_ABORT
-    - UPDATE_ABORT --(reset 后)--> NORMAL
+    - UPDATE_ABORT --(continue_product 后)--> NORMAL
     - NORMAL --(整体过期，无法再 produce)--> EXPIRED_BATCH
     - EXPIRED_BATCH --(开始权重更新/cleanup)--> UPDATE_ABORT
     - 任意状态 --(训练结束)--> FINISH
@@ -329,8 +334,10 @@ class AgentLoopManager:
         # - 最后聚合出一个总的 ProduceBatchStatus
         return ProduceBatchStatus.NORMAL
 
-    async def cleanup_pending_tasks(self, for_weight_update: bool = False) -> float:
-        if for_weight_update:
+    async def cleanup_pending_tasks(
+        self, pause_product_for_update: bool = False
+    ) -> float:
+        if pause_product_for_update:
             # 权重更新场景下，先发停止信号，再切 manager 全局状态。
             # 后续 producer loop 看到这个信号，会停止继续补任务。
             self._update_event.set()
@@ -350,8 +357,8 @@ class AgentLoopManager:
         # 4. 返回给 trainer 训练侧消费。
         return ProduceBatchResult(rollout_states=[])
 
-    def reset(self, model_rollout_step: int) -> None:
-        # reset 表示“权重已经同步完成，producer 可以恢复工作了”。
+    def continue_product(self, model_rollout_step: int) -> None:
+        # continue_product 表示“权重已经同步完成，producer 可以恢复工作了”。
         # 这里不重置 replay buffer，只重置控制状态。
         self._update_event.clear()
         self._status = AgentLoopManagerStatus.NORMAL
@@ -375,10 +382,12 @@ class AgentLoopManager:
         # - 不保存 strategy._pending_tasks，save 前必须已经 cleanup 完成。
         #
         # `model_rollout_step_override` 的作用：
-        # - 在非共卡主流程里，checkpoint 保存点位于 cleanup 之后、reset 之前；
+        # - 在非共卡主流程里，checkpoint 保存点位于 cleanup 之后、
+        #   continue_product 之前；
         # - 因而 save 发生时，`self._model_rollout_step` 还是旧值；
         # - 但保存完成后，主流程马上会调用
-        #   `reset(model_rollout_step=rollout_step)`，把 rollout 使用的模型版本
+        #   `continue_product(model_rollout_step=rollout_step)`，
+        #   把 rollout 使用的模型版本
         #   推进到新的 `rollout_step`；
         # - 所以这里不是“可选优化”，而是必须显式传入
         #   `model_rollout_step_override=rollout_step`；
@@ -402,7 +411,7 @@ class AgentLoopManager:
         # 这样做的原因是：
         # - checkpoint 恢复后的 manager 应先处于“暂停态”
         # - 等 trainer 重新把 train 权重同步到 rollout 后，
-        #   再通过 `reset()` 恢复到 NORMAL
+        #   再通过 `continue_product()` 恢复到 NORMAL
         #
         # 返回值：
         # - `saved_model_rollout_step`，供 trainer resume 逻辑继续使用。
@@ -439,7 +448,7 @@ class AgentLoopManager:
 
             if status == ProduceBatchStatus.UPDATE_ABORT:
                 # 这里不自己 cleanup，避免和 trainer 的同步流程重复收尾。
-                # producer 只需要停下来，等待外部 reset 即可。
+                # producer 只需要停下来，等待外部 continue_product 即可。
                 await asyncio.sleep(0.1)
                 continue
 
