@@ -465,6 +465,8 @@ class AgentLoopManager:
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
 
     async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
+        if batch_size <= 0:
+            raise ValueError(f"produce_batch expects batch_size > 0, got {batch_size}")
         start = time.perf_counter()
         self.logger.info(f"[AgentLoopManager][{self.name}] produce_batch start batch={batch_size}")
         active_tasks = (
@@ -476,8 +478,7 @@ class AgentLoopManager:
                 if self.get_task_batch_sizes(batch_size, rollout_step)[task.task_name] > 0
             ]
         )
-        if not active_tasks:
-            return ProduceBatchResult(rollout_states=[])
+        assert active_tasks, "No active tasks found"
 
         rollout_ctl = await get_agent_loop_rollout_ctl(active_tasks[0].agent_loop)
         await continue_generation(rollout_ctl)
@@ -490,6 +491,10 @@ class AgentLoopManager:
             await self.cleanup_pending_tasks(for_weight_update=False)
             result = await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
             result.status = status
+            assert result.rollout_states, (
+                "AgentLoopManager.produce_batch() must return non-empty rollout_states for colocated training. "
+                "Use get_batch() for disaggregated empty/expired reads."
+            )
         finally:
             await pause_generation(rollout_ctl)
 

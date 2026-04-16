@@ -509,7 +509,11 @@ class RLColocateTrainer:
                     self.agent_loop_manager.produce_batch(self.global_batch_size, rollout_step=rollout_idx)
                 )
                 train_batch = produce_result.rollout_states
-                self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
+                assert train_batch, (
+                    "RLColocateTrainer expects agent_loop_manager.produce_batch() to return non-empty rollout_states."
+                )
+                train_sample_count = sum(len(group) for group in train_batch)
+                self.logger.info(f"generate {train_sample_count} samples for training")
                 train_trajectory_dir = self.exp_dir / "train_rollout"
                 train_trajectory_dir.mkdir(parents=True, exist_ok=True)
                 train_trajectory_path = train_trajectory_dir / f"train_rollout_{rollout_idx}.jsonl"

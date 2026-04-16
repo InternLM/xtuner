@@ -243,3 +243,77 @@ Notes about the worktree:
 建议下一步：
 1. 继续做 `xtuner/v1/train/rl_colocate_trainer.py` 的兼容接线，确保现有 colocate trainer 完整适配新的 producer/manager/shared rollout-step 语义。
 2. 然后再推进 `rl_disaggregated_trainer.py` 主流程，把后台 producer loop 与前台 trainer loop 真正接起来。
+
+---
+
+本次实现进展补充（`RLColocateTrainer` 共卡兼容收口）：
+
+本次完成内容：
+- 对 `xtuner/v1/train/rl_colocate_trainer.py` 做了一处最小稳健性补强：
+  - `fit()` 不再假设 `produce_batch()` 一定返回非空 group
+  - 当某一轮 rollout 没有产出可训练 completed group 时，不再因为 `train_batch[0]` 触发下标异常
+  - 该轮会记录 warning，并跳过 train/eval/sync，保证共卡 trainer 在新 producer/manager 契约下保持 no-crash
+- 新增轻量回归测试 `tests/rl/test_rl_colocate_trainer.py`，覆盖两类关键场景：
+  - 使用真实 `AgentLoopManager + AsyncProduceStrategyConfig` 的共卡 trainer smoke path，确认 trainer 仍能完成 produce -> prepare -> train -> sync 主流程
+  - `produce_batch()` 返回空 batch 时，trainer 会安全跳过训练相关调用，不会误触发 onload / fit / sync
+- 更新 `run_test.sh`，把 `tests/rl/test_rl_colocate_trainer.py` 纳入主线快测，避免后续共享 producer/manager 改动再次把 colocate trainer 兼容性打坏
+
+本次涉及文件：
+- `xtuner/v1/train/rl_colocate_trainer.py`
+- `tests/rl/test_rl_colocate_trainer.py`
+- `run_test.sh`
+- `feature_list.json`
+
+验证结果：
+- `pytest -q tests/rl/test_rl_colocate_trainer.py`
+  - 结果：`2 passed`
+- `pytest -q tests/rl/test_producer.py tests/rl/test_multi_task_agent_loop_manager.py tests/rl/test_rl_colocate_trainer.py`
+  - 结果：`19 passed`
+- `bash run_test.sh`
+  - 结果：`24 passed`
+
+本次发现与说明：
+- 这次没有再改 shared producer/manager 主逻辑，重点是把 colocate trainer 对“新接口 + AsyncProduceStrategy + 空 batch”这几个边界收口。
+- 现有 `RLColocateTrainer.fit()` 的主流程在正常非空 batch 下保持原语义不变。
+- 基于新增 focused tests 和主线快测通过，feature 5 已标记为通过。
+- 当前完成状态：`5/9 features passing`
+
+建议下一步：
+1. 开始实现 `xtuner/v1/train/rl_disaggregated_trainer.py`，先把 `produce_loop()` + `get_batch()` 的 trainer 主循环接起来。
+2. 然后补 checkpoint / resume 的 paused-save 语义，把 save-before-reset 和 resume-into-UPDATE_ABORT 路径补齐。
+
+---
+
+本次实现进展补充（`produce_batch()` 非空 contract 收紧）：
+
+本次完成内容：
+- 按最新约定收紧 `xtuner/v1/rl/agent_loop/agent_loop_manager.py` 的 colocate contract：
+  - `produce_batch(batch_size <= 0)` 现在直接报错
+  - `produce_batch(batch_size > 0)` 现在要求必须返回非空 `rollout_states`
+  - 如果只需要合法读取空 batch / EXPIRED 状态，调用方应改走 `get_batch()`
+- 同步收紧 `xtuner/v1/train/rl_colocate_trainer.py`：
+  - 删除上一版“空 batch 兼容并跳过训练”的逻辑
+  - 改为直接断言 `agent_loop_manager.produce_batch()` 返回非空 batch
+  - 让 colocate trainer 与 manager contract 保持一致，出现空结果时第一时间 fail fast
+- 更新 focused tests：
+  - `tests/rl/test_multi_task_agent_loop_manager.py` 新增用例，验证 `produce_batch()` 在拿不到 completed groups 时会直接报错
+  - `tests/rl/test_rl_colocate_trainer.py` 把原先“空 batch 跳过”用例改成“空 batch 直接报错”
+
+本次涉及文件：
+- `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+- `xtuner/v1/train/rl_colocate_trainer.py`
+- `tests/rl/test_multi_task_agent_loop_manager.py`
+- `tests/rl/test_rl_colocate_trainer.py`
+
+验证结果：
+- `pytest -q tests/rl/test_multi_task_agent_loop_manager.py tests/rl/test_rl_colocate_trainer.py`
+  - 结果：`12 passed`
+- `bash run_test.sh`
+  - 结果：`25 passed`
+
+本次发现与说明：
+- 这个约束只收紧在 colocate 路径的 `produce_batch()`，没有扩散到 disagg 用的 `get_batch()`。
+- 现在语义更明确：
+  - `produce_batch()` = 必须返回一批可训练 completed groups
+  - `get_batch()` = 可以合法返回空 batch + 特殊状态
+- 当前完成状态仍为：`5/9 features passing`

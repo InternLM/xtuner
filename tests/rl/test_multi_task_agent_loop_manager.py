@@ -322,6 +322,24 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(result.group_gen_p99_s, 1.0)
         self.assertAlmostEqual(result.group_gen_pause_time_s, 1.25)
 
+    async def test_produce_batch_requires_non_empty_rollout_states(self):
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeStatusProduceStrategy(status=ProduceBatchStatus.NORMAL, pause_time_s=0.0),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+            ],
+            replay_buffer=_FakeReplayBuffer(rollout_states_by_task={}, leftover_counts={}),
+        )
+
+        with self.assertRaisesRegex(AssertionError, "must return non-empty rollout_states"):
+            await manager.produce_batch(batch_size=1, rollout_step=3)
+
     async def test_cleanup_pending_tasks_for_weight_update_sets_status_and_pause_time(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
         manager = AgentLoopManager(

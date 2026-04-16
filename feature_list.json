@@ -59,7 +59,7 @@
       "Step 5: keep RLColocateTrainer compatible with the latest rollout-step and staleness semantics introduced for shared rollout-state handling",
       "Step 6: add or update focused tests that confirm RLColocateTrainer still runs correctly against the refactored shared interfaces, including AsyncProduceStrategy coverage on the colocated path"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "add",
