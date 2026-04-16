@@ -53,4 +53,6 @@ trainer = TrainerConfig(
     work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
     resume_cfg=ResumeConfig(auto_resume=True),
+    checkpoint_interval=10,
+    checkpoint_maxkeep=2,
 )
