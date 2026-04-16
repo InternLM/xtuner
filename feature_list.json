@@ -10,6 +10,17 @@
       "Step 5: write per-group generation timing onto RolloutState.extra_fields and return pause_time_s separately so timing can be reconstructed when trainer batches are consumed",
       "Step 6: add or update producer tests that cover NORMAL, UPDATE_ABORT, EXPIRED_BATCH, cross-call pending-task retention, and explicit cleanup behavior"
     ],
+    "passes": true
+  },
+  {
+    "category": "modify",
+    "description": "Align ProduceStrategy base class plus SyncProduceStrategy and other strategy subclasses with the new producer/consumer interface split so colocated and disaggregated paths share compatible strategy contracts.",
+    "steps": [
+      "Step 1: update the ProduceStrategy base class interface so strategy implementations can participate in the split produce-to-buffer, explicit-cleanup, and status-driven manager flow",
+      "Step 2: adjust SyncProduceStrategy to match the new strategy contract while preserving the current colocated semantics and batch production behavior",
+      "Step 3: update any remaining ProduceStrategy subclasses or helper call sites to use the same method signatures, return conventions, and cleanup expectations",
+      "Step 4: add or update focused tests that confirm the shared strategy interface still works for both colocated and disaggregated manager paths"
+    ],
     "passes": false
   },
   {
@@ -38,6 +49,19 @@
     "passes": false
   },
   {
+    "category": "modify",
+    "description": "Update RLColocateTrainer in xtuner/v1/train/rl_colocate_trainer.py so the existing colocated RL training path stays compatible with the latest producer, manager, rollout-step changes, while still supporting AsyncProduceStrategy through coordinated trainer and strategy adaptation.",
+    "steps": [
+      "Step 1: adapt RLColocateTrainer to the latest AgentLoopManager and ProduceStrategy contracts without changing the current colocated trainer entry semantics",
+      "Step 2: make sure RLColocateTrainer can still run with AsyncProduceStrategy on the colocated path, and update the trainer-side flow as needed to match the refactored producer and manager behavior",
+      "Step 3: add the corresponding strategy-side compatibility work needed so AsyncProduceStrategy remains usable by the colocated trainer instead of becoming disaggregated-only",
+      "Step 4: make sure the colocated training flow still handles batch production, training, evaluation, and weight-sync sequencing correctly after the shared producer and manager refactor",
+      "Step 5: keep RLColocateTrainer compatible with the latest rollout-step and staleness semantics introduced for shared rollout-state handling",
+      "Step 6: add or update focused tests that confirm RLColocateTrainer still runs correctly against the refactored shared interfaces, including AsyncProduceStrategy coverage on the colocated path"
+    ],
+    "passes": false
+  },
+  {
     "category": "add",
     "description": "Add xtuner/v1/train/rl_disaggregated_trainer.py with RLDisaggregatedTrainerConfig and RLDisaggregatedTrainer that run a background producer loop and a foreground trainer loop without changing the current CLI contract.",
     "steps": [
@@ -60,6 +84,17 @@
       "Step 4: extend AgentLoopManager.resume() to restore sampler state, replay buffer, and manager state into UPDATE_ABORT with reconstructed runtime events and cleared pause_time_s",
       "Step 5: implement trainer-side resume flow so train state is restored first, rollout weights are re-synced from train, reset(model_rollout_step=saved_model_rollout_step) is called, and a fresh producer_task is created instead of restoring old tasks",
       "Step 6: add checkpoint tests for save-before-reset semantics, paused resume state, pending-task safety checks, and one-time post-resume weight sync before producer restart"
+    ],
+    "passes": false
+  },
+  {
+    "category": "modify",
+    "description": "Add colocate trainer integration regression coverage for the shared producer/manager refactor so the existing colocated RL path stays correct while disaggregated support lands, with primary coverage focused on examples/v1/config/rl_grpo_gsm8k_judge.py and examples/v1/config/rl_multi_task_gsm8k_dapo_math.py.",
+    "steps": [
+      "Step 1: extend the colocate trainer integration coverage to exercise the refactored AgentLoopManager and ProduceStrategy shared path under the existing rl_colocate_trainer flow",
+      "Step 2: focus the colocate integration coverage on examples/v1/config/rl_grpo_gsm8k_judge.py and examples/v1/config/rl_multi_task_gsm8k_dapo_math.py as the primary regression configs",
+      "Step 3: use zdev/rl_design_colocate.sh as the reference entry flow when deciding how the colocate integration test or smoke path should launch and wire environment variables",
+      "Step 4: verify the colocated training loop still produces batches, trains, syncs weights, and completes without regressions after the producer/manager interface split while keeping the test minimal but stable enough to catch regressions introduced by the new shared strategy and manager behavior"
     ],
     "passes": false
   },

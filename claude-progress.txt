@@ -11,26 +11,41 @@ What I accomplished:
   - `examples/v1/config/rl_disagg_single.py`
   - `examples/v1/config/rl_disagg_multi.py`
 - Confirmed that `xtuner/v1/train/rl_disaggregated_trainer.py` does not exist yet in this checkout, even though the draft configs already import it.
-- Created `feature_list.json` as the source of truth for the implementation order and testing scope.
+- Created and then updated `feature_list.json` as the source of truth for the implementation order and testing scope.
+- The current planning state in `feature_list.json` has 9 features total, and the first producer feature is already marked `passes: true`.
+- The plan now explicitly includes:
+  - shared `ProduceStrategy` / `SyncProduceStrategy` interface alignment
+  - `RLColocateTrainer` compatibility work in `xtuner/v1/train/rl_colocate_trainer.py`
+  - colocate trainer integration regression coverage focused on `examples/v1/config/rl_grpo_gsm8k_judge.py` and `examples/v1/config/rl_multi_task_gsm8k_dapo_math.py`
+  - `zdev/rl_design_colocate.sh` as the reference colocate launch flow for integration or smoke coverage design
 
 Key findings for the next agent:
 - The design is intended as a minimal refactor, not a rewrite: reuse `AgentLoopManager + AsyncProduceStrategy + ReplayBuffer`.
+- The shared strategy interface matters now, not just the async strategy: `ProduceStrategy` base class and `SyncProduceStrategy` must stay aligned with the manager refactor so colocate and disaggregated paths do not diverge.
 - The core runtime split is:
   - producer-only path: `_produce_batch_to_buffer(...)`
   - explicit stop/reap path: `cleanup_pending_tasks(...)`
   - consumer-only path: `_get_batch_from_buffer(...)`
 - The most important semantic change is that rollout freshness must track `model_rollout_step`, not the producer loop's local iteration count.
+- `RLColocateTrainer` is now an explicit compatibility target, not just something indirectly covered by shared tests.
 - `EXPIRED_BATCH` is intentionally aggressive: once rollout weights are stale enough, skip training and prioritize weight sync immediately.
 - Checkpoints must be taken only after producer cleanup and before `reset()`, with the saved rollout step overridden to the post-sync target version.
 - Resume should restore the manager into a paused `UPDATE_ABORT` state, re-sync rollout weights from train, then call `reset()` and start a fresh producer task.
+- Colocate regression coverage should focus first on:
+  - `examples/v1/config/rl_grpo_gsm8k_judge.py`
+  - `examples/v1/config/rl_multi_task_gsm8k_dapo_math.py`
+  - launch wiring modeled after `zdev/rl_design_colocate.sh`
 
 Suggested implementation order:
 1. `xtuner/v1/rl/agent_loop/producer.py`
-2. `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
-3. `xtuner/v1/rl/agent_loop/single_turn_agent_loop.py` and `xtuner/v1/rl/agent_loop/utils.py`
-4. `xtuner/v1/train/rl_disaggregated_trainer.py`
-5. checkpoint/resume details
-6. tests and example-config smoke coverage
+2. shared `ProduceStrategy` / `SyncProduceStrategy` contract alignment and affected producer call sites
+3. `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+4. `xtuner/v1/rl/agent_loop/single_turn_agent_loop.py` and `xtuner/v1/rl/agent_loop/utils.py`
+5. `xtuner/v1/train/rl_colocate_trainer.py`
+6. `xtuner/v1/train/rl_disaggregated_trainer.py`
+7. checkpoint/resume details
+8. colocate integration coverage centered on the two colocate configs above
+9. disaggregated tests and example-config smoke coverage
 
 Notes about the worktree:
 - `git status --short` showed untracked `work_dirs/` and `zdev/` before this session.
