@@ -201,6 +201,8 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
 
         for index, block in enumerate(response.content):
             block_type = block.get("type")
+            start_block: dict[str, Any]
+            delta: dict[str, Any]
             if block_type == "reasoning":
                 start_block = {"type": "thinking", "thinking": ""}
                 delta = {"type": "thinking_delta", "thinking": str(block.get("text", ""))}

@@ -15,6 +15,7 @@ from lmdeploy.serve.openai.protocol import (
     DeltaMessage,
     UsageInfo,
 )
+from pydantic import BaseModel
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -233,12 +234,14 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         for index, tool_call in enumerate(choice.message.tool_calls or []):
             tool_call_id = tool_call.get("id") if isinstance(tool_call, dict) else getattr(tool_call, "id", None)
             tool_call_type = (
-                tool_call.get("type", "function") if isinstance(tool_call, dict) else getattr(tool_call, "type", "function")
+                tool_call.get("type", "function")
+                if isinstance(tool_call, dict)
+                else getattr(tool_call, "type", "function")
             )
             function_payload = (
                 tool_call.get("function") if isinstance(tool_call, dict) else getattr(tool_call, "function", None)
             )
-            if hasattr(function_payload, "model_dump"):
+            if isinstance(function_payload, BaseModel):
                 function_payload = function_payload.model_dump(mode="json", exclude_none=True)
             tool_call_chunk = ChatCompletionStreamResponse(
                 id=response.id,

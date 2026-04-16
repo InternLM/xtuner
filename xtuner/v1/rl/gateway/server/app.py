@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import socket
 import threading
 from typing import Union
 
+import ray
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from ray.actor import ActorHandle
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.rl.rollout.controller import RolloutController
 from xtuner.v1.rl.rollout.reasoning_parser import ThinkTagReasoningParser
 from xtuner.v1.rl.rollout.tool_call_parser import CompositeToolCallParser, JsonToolCallParser, RegexToolCallParser
+from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 from ..adapters import AnthropicChatAdapter, OpenAIChatAdapter
 from ..adapters.responses import OpenAIResponsesAdapter
@@ -130,26 +133,14 @@ def build_gateway_app(
 
 
 def build_local_gateway_app(
-    controller: RolloutController,
+    controller: ActorHandle,
     config: GatewayConfig | None = None,
 ) -> FastAPI:
-    """Build a gateway app backed by a local :class:`RolloutController`.
-
-    Loads the tokenizer from ``controller.config.tokenizer_path``, configures
-    output parsers on the controller, and wires a
-    :class:`~xtuner.v1.rl.gateway.backend.local_backend.LocalRolloutBackend`
-    into the full OpenAI / Anthropic / Responses endpoint stack.
-
-    Args:
-        controller: The local :class:`~xtuner.v1.rl.rollout.controller.RolloutController` instance.
-        config: Gateway configuration.  ``port`` is not used during app
-            construction (only needed for :func:`serve_gateway`).
-
-    Returns:
-        A fully-configured :class:`fastapi.FastAPI` instance.
-    """
+    """Build a gateway app backed by a Ray-actor RolloutController."""
     cfg = config or GatewayConfig(port=8080)
-    tokenizer = AutoTokenizer.from_pretrained(controller.config.tokenizer_path, trust_remote_code=True)
+    rollout_metadata = ray.get(controller.get_rollout_metadata.remote())
+    rollout_config: RolloutConfig = rollout_metadata["rollout_config"]
+    tokenizer = AutoTokenizer.from_pretrained(rollout_config.tokenizer_path, trust_remote_code=True)
 
     strip_tokens: list[str] = []
     if tokenizer.eos_token:
@@ -158,15 +149,17 @@ def build_local_gateway_app(
         if any(marker in tok.lower() for marker in ("im_end", "eot", "end_of_turn", "turn_end")):
             strip_tokens.append(tok)
 
-    controller.configure_output_parsers(
-        tool_call_parser=CompositeToolCallParser(parsers=[JsonToolCallParser(), RegexToolCallParser()]),
-        reasoning_parser=ThinkTagReasoningParser(strip_tokens=strip_tokens),
+    ray.get(
+        controller.configure_output_parsers.remote(
+            tool_call_parser=CompositeToolCallParser(parsers=[JsonToolCallParser(), RegexToolCallParser()]),
+            reasoning_parser=ThinkTagReasoningParser(strip_tokens=strip_tokens),
+        )
     )
 
-    model_name = controller.config.model_name
+    model_name = rollout_config.model_name
     if model_name is None:
         raise ValueError("controller.config.model_name must be set when building a local gateway app")
-    context_length = controller.config.context_length
+    context_length = rollout_config.context_length
     if context_length is None:
         raise ValueError("controller.config.context_length must be set when building a local gateway app")
 
@@ -220,6 +213,7 @@ def serve_gateway(app: FastAPI, config: GatewayConfig) -> None:
         config: Gateway configuration supplying ``host``, ``port``, and
             ``log_level``.
     """
+    _ensure_gateway_port_available(config)
     uvicorn.run(app, host=config.host, port=config.port, log_level=config.log_level)
 
 
@@ -239,6 +233,7 @@ def serve_gateway_in_thread(app: FastAPI, config: GatewayConfig) -> threading.Th
     Returns:
         The started daemon thread.
     """
+    _ensure_gateway_port_available(config)
     thread = threading.Thread(
         target=serve_gateway,
         args=(app, config),
@@ -247,3 +242,14 @@ def serve_gateway_in_thread(app: FastAPI, config: GatewayConfig) -> threading.Th
     )
     thread.start()
     return thread
+
+
+def _ensure_gateway_port_available(config: GatewayConfig) -> None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((config.host, config.port))
+            return
+    except OSError:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((config.host, 0))
+            config.port = int(sock.getsockname()[1])

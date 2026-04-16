@@ -124,7 +124,7 @@ class RolloutController:
         """
         from xtuner.v1.rl.gateway import build_local_gateway_app, serve_gateway_in_thread
 
-        app = build_local_gateway_app(self, config=config)
+        app = build_local_gateway_app(ray.get_runtime_context().current_actor, config=config)
         serve_gateway_in_thread(app, config)
         node_ip = ray.util.get_node_ip_address()
         url = f"http://{node_ip}:{config.port}"

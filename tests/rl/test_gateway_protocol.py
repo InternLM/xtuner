@@ -1,13 +1,17 @@
 import json
 import os
+import socket
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from typing import Any
 
+import httpx
 import ray
 import torch
-from fastapi.testclient import TestClient
 
 from xtuner.v1.rl.gateway.adapters import (
     AnthropicMessagesRequest,
@@ -17,8 +21,8 @@ from xtuner.v1.rl.gateway.adapters import (
     ResponsesRequest,
     ResponsesResponse,
 )
-from xtuner.v1.rl.gateway import build_local_gateway_app
 from xtuner.v1.rl.gateway.config import GatewayConfig
+from xtuner.v1.rl.gateway.server import build_local_gateway_app, serve_gateway
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
@@ -57,7 +61,14 @@ class TestGatewayProtocolChain(unittest.TestCase):
 
     def tearDown(self):
         if self.controller is not None:
-            self.controller.shutdown()
+            try:
+                ray.get(self.controller.shutdown.remote(), timeout=300)
+            except Exception:
+                pass
+            try:
+                ray.kill(self.controller, no_restart=True)
+            except Exception:
+                pass
         if self.placement_group is not None:
             ray.util.remove_placement_group(self.placement_group)
         ray.shutdown()
@@ -76,7 +87,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
         except Exception:
             return
 
-    def _build_controller(self) -> RolloutController:
+    def _build_controller(self):
         resource_config = AcceleratorResourcesConfig(
             accelerator=RESOURCE_MAP[torch.accelerator.current_accelerator().type],
             num_workers=4,
@@ -97,7 +108,11 @@ class TestGatewayProtocolChain(unittest.TestCase):
             api_host="127.0.0.1",
             api_port=30080,
         )
-        return RolloutController(rollout_config, self.placement_group)
+        return ray.remote(RolloutController).remote(rollout_config, self.placement_group)
+
+    def _get_rollout_config(self) -> RolloutConfig:
+        rollout_metadata = ray.get(self.controller.get_rollout_metadata.remote())
+        return rollout_metadata["rollout_config"]
 
     def _read_capture_records_count(self) -> int:
         if not self.capture_output_path.exists():
@@ -141,15 +156,115 @@ class TestGatewayProtocolChain(unittest.TestCase):
             self.assertEqual(trace_record.request_snapshot[expected_request_field][0]["role"], expected_request_role)
         self.assertIn(expected_response_field, trace_record.response_snapshot)
 
+    def _find_free_port(self) -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+
+    def _occupy_port(self) -> tuple[socket.socket, int]:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("0.0.0.0", 0))
+        sock.listen(1)
+        return sock, int(sock.getsockname()[1])
+
+    def _wait_for_gateway_ready(self, base_url: str, *, timeout_seconds: float = 120.0) -> None:
+        deadline = time.time() + timeout_seconds
+        last_error = None
+        while time.time() < deadline:
+            try:
+                response = httpx.get(f"{base_url}/livez", timeout=5.0)
+                if response.status_code == 200:
+                    return
+            except Exception as exc:
+                last_error = exc
+            time.sleep(1.0)
+        if last_error is not None:
+            raise AssertionError(f"Gateway did not become ready at {base_url}: {last_error}") from last_error
+        raise AssertionError(f"Gateway did not become ready at {base_url}")
+
+    def _serve_gateway_blocking_in_background(self, app, config: GatewayConfig) -> tuple[str, threading.Thread]:
+        thread = threading.Thread(
+            target=serve_gateway,
+            args=(app, config),
+            daemon=True,
+            name=f"gateway-blocking-{config.port}",
+        )
+        thread.start()
+        base_url = self._wait_for_gateway_ready_from_config(config)
+        return base_url, thread
+
+    def _wait_for_gateway_ready_from_config(self, config: GatewayConfig, *, timeout_seconds: float = 120.0) -> str:
+        deadline = time.time() + timeout_seconds
+        last_error = None
+        while time.time() < deadline:
+            base_url = f"http://127.0.0.1:{config.port}"
+            try:
+                response = httpx.get(f"{base_url}/livez", timeout=5.0)
+                if response.status_code == 200:
+                    return base_url
+            except Exception as exc:
+                last_error = exc
+            time.sleep(1.0)
+        if last_error is not None:
+            raise AssertionError(f"Gateway did not become ready for config port {config.port}: {last_error}") from last_error
+        raise AssertionError(f"Gateway did not become ready for config port {config.port}")
+
+    def _post_json(self, base_url: str, path: str, payload: dict) -> httpx.Response:
+        return httpx.post(f"{base_url}{path}", json=payload, timeout=120.0)
+
+    def _get_json(self, base_url: str, path: str) -> httpx.Response:
+        return httpx.get(f"{base_url}{path}", timeout=30.0)
+
+    def test_gateway_runtime_endpoints_with_real_rollout_controller(self):
+        self.controller = self._build_controller()
+        rollout_config = self._get_rollout_config()
+        occupied_socket, requested_port = self._occupy_port()
+        self.addCleanup(occupied_socket.close)
+        gateway_config = GatewayConfig(port=requested_port, capture_path=str(self.capture_output_path))
+
+        base_url = ray.get(self.controller.start_gateway.remote(gateway_config))
+        actual_port = int(base_url.rsplit(":", 1)[1])
+        self.assertNotEqual(actual_port, requested_port)
+        self._wait_for_gateway_ready(base_url)
+
+        metadata = ray.get(self.controller.get_rollout_metadata.remote())
+        self.assertEqual(metadata["api_server_url"], base_url)
+
+        livez_response = self._get_json(base_url, "/livez")
+        self.assertEqual(livez_response.status_code, 200, livez_response.text)
+        self.assertEqual(livez_response.json(), {"status": "ok"})
+
+        readyz_response = self._get_json(base_url, "/readyz")
+        self.assertEqual(readyz_response.status_code, 200, readyz_response.text)
+        readyz_body = readyz_response.json()
+        self.assertTrue(readyz_body["ready"])
+        self.assertEqual(readyz_body["status"], "ready")
+        self.assertIsInstance(readyz_body["details"], dict)
+
+        capabilities_response = self._get_json(base_url, "/capabilities")
+        self.assertEqual(capabilities_response.status_code, 200, capabilities_response.text)
+        capabilities_body = capabilities_response.json()
+        self.assertEqual(capabilities_body["model"], rollout_config.model_name)
+        self.assertEqual(capabilities_body["backend"], rollout_config.rollout_backend)
+        self.assertEqual(capabilities_body["context_length"], rollout_config.context_length)
+        self.assertFalse(capabilities_body["supports_stream"])
+        self.assertTrue(capabilities_body["supports_tools"])
+        self.assertFalse(capabilities_body["supports_cancel"])
+        self.assertTrue(capabilities_body["supports_parallel_tool_calls"])
+        self.assertTrue(capabilities_body["supports_reasoning"])
+
     def test_gateway_routes_with_real_rollout_controller_capture_protocol_traces(self):
         self.controller = self._build_controller()
-        app = build_local_gateway_app(
-            self.controller,
-            config=GatewayConfig(port=8080, capture_path=str(self.capture_output_path)),
-        )
+        rollout_config = self._get_rollout_config()
+        occupied_socket, requested_port = self._occupy_port()
+        self.addCleanup(occupied_socket.close)
+        gateway_config = GatewayConfig(port=requested_port, capture_path=str(self.capture_output_path))
+        app = build_local_gateway_app(self.controller, config=gateway_config)
+        base_url, _ = self._serve_gateway_blocking_in_background(app, gateway_config)
+        self.assertNotEqual(gateway_config.port, requested_port)
 
         openai_payload = {
-            "model": self.controller.config.model_name,
+            "model": rollout_config.model_name,
             "messages": [
                 {"role": "system", "content": "You are a helpful assistant. Think before answering."},
                 {"role": "user", "content": "Use the search tool and then summarize the weather."},
@@ -194,7 +309,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
             "max_tokens": 64,
         }
         anthropic_payload = {
-            "model": self.controller.config.model_name,
+            "model": rollout_config.model_name,
             "system": "You are a helpful assistant.",
             "messages": [
                 {"role": "user", "content": [{"type": "text", "text": "Please reason and call the weather tool."}]},
@@ -238,7 +353,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
             "top_p": 1.0,
         }
         responses_payload = {
-            "model": self.controller.config.model_name,
+            "model": rollout_config.model_name,
             "instructions": "You are a helpful assistant. Reason before you answer.",
             "input": [
                 {
@@ -287,64 +402,60 @@ class TestGatewayProtocolChain(unittest.TestCase):
             "max_output_tokens": 64,
         }
 
-        with TestClient(app) as client:
-            openai_adapter = app.state.gateway_openai_adapter
-            anthropic_adapter = app.state.gateway_anthropic_adapter
-            responses_adapter = app.state.gateway_responses_adapter
+        openai_adapter = app.state.gateway_openai_adapter
+        anthropic_adapter = app.state.gateway_anthropic_adapter
+        responses_adapter = app.state.gateway_responses_adapter
 
-            openai_response = client.post("/v1/chat/completions", json=openai_payload)
-            self.assertEqual(openai_response.status_code, 200, openai_response.text)
-            openai_body = openai_response.json()
-            self._write_json_output(self.openai_body_output_path, openai_body)
-            print("openai_body:", json.dumps(openai_body, ensure_ascii=False, indent=2))
-            self.assertEqual(openai_body["model"], self.controller.config.model_name)
-            self.assertEqual(openai_body["choices"][0]["message"]["role"], "assistant")
-            self.assertIn(openai_body["choices"][0]["finish_reason"], {"stop", "length", "tool_calls"})
-            self.assertGreater(openai_body["usage"]["prompt_tokens"], 0)
-            self.assertNotIn("<think>", openai_body["choices"][0]["message"].get("content") or "")
-            self.assertTrue(openai_body["choices"][0]["message"].get("reasoning_content"))
+        openai_response = self._post_json(base_url, "/v1/chat/completions", openai_payload)
+        self.assertEqual(openai_response.status_code, 200, openai_response.text)
+        openai_body = openai_response.json()
+        self._write_json_output(self.openai_body_output_path, openai_body)
+        self.assertEqual(openai_body["model"], rollout_config.model_name)
+        self.assertEqual(openai_body["choices"][0]["message"]["role"], "assistant")
+        self.assertIn(openai_body["choices"][0]["finish_reason"], {"stop", "length", "tool_calls"})
+        self.assertGreater(openai_body["usage"]["prompt_tokens"], 0)
+        self.assertNotIn("<think>", openai_body["choices"][0]["message"].get("content") or "")
+        self.assertTrue(openai_body["choices"][0]["message"].get("reasoning_content"))
 
-            anthropic_response = client.post("/v1/messages", json=anthropic_payload)
-            self.assertEqual(anthropic_response.status_code, 200, anthropic_response.text)
-            anthropic_body = anthropic_response.json()
-            self._write_json_output(self.anthropic_body_output_path, anthropic_body)
-            print("anthropic_body:", json.dumps(anthropic_body, ensure_ascii=False, indent=2))
-            self.assertEqual(anthropic_body["type"], "message")
-            self.assertEqual(anthropic_body["role"], "assistant")
-            self.assertEqual(anthropic_body["model"], self.controller.config.model_name)
-            self.assertGreater(anthropic_body["usage"]["input_tokens"], 0)
-            self.assertTrue(anthropic_body["content"])
+        anthropic_response = self._post_json(base_url, "/v1/messages", anthropic_payload)
+        self.assertEqual(anthropic_response.status_code, 200, anthropic_response.text)
+        anthropic_body = anthropic_response.json()
+        self._write_json_output(self.anthropic_body_output_path, anthropic_body)
+        self.assertEqual(anthropic_body["type"], "message")
+        self.assertEqual(anthropic_body["role"], "assistant")
+        self.assertEqual(anthropic_body["model"], rollout_config.model_name)
+        self.assertGreater(anthropic_body["usage"]["input_tokens"], 0)
+        self.assertTrue(anthropic_body["content"])
 
-            responses_response = client.post("/v1/responses", json=responses_payload)
-            self.assertEqual(responses_response.status_code, 200, responses_response.text)
-            responses_body = responses_response.json()
-            self._write_json_output(self.responses_body_output_path, responses_body)
-            print("responses_body:", json.dumps(responses_body, ensure_ascii=False, indent=2))
-            self.assertEqual(responses_body["object"], "response")
-            self.assertEqual(responses_body["model"], self.controller.config.model_name)
-            self.assertGreater(responses_body["usage"]["input_tokens"], 0)
-            self.assertTrue(responses_body["output"])
+        responses_response = self._post_json(base_url, "/v1/responses", responses_payload)
+        self.assertEqual(responses_response.status_code, 200, responses_response.text)
+        responses_body = responses_response.json()
+        self._write_json_output(self.responses_body_output_path, responses_body)
+        self.assertEqual(responses_body["object"], "response")
+        self.assertEqual(responses_body["model"], rollout_config.model_name)
+        self.assertGreater(responses_body["usage"]["input_tokens"], 0)
+        self.assertTrue(responses_body["output"])
 
-            openai_trace = openai_adapter.get_trace_by_request_response(
-                ChatCompletionRequest.model_validate(openai_payload),
-                ChatCompletionResponse.model_validate(openai_body),
-            )
-            self.assertIsNotNone(openai_trace)
-            self.assertIsNotNone(openai_adapter.get_trace_by_response_hash(openai_trace.response_hash))
+        openai_trace = openai_adapter.get_trace_by_request_response(
+            ChatCompletionRequest.model_validate(openai_payload),
+            ChatCompletionResponse.model_validate(openai_body),
+        )
+        self.assertIsNotNone(openai_trace)
+        self.assertIsNotNone(openai_adapter.get_trace_by_response_hash(openai_trace.response_hash))
 
-            anthropic_trace = anthropic_adapter.get_trace_by_request_response(
-                AnthropicMessagesRequest.model_validate(anthropic_payload),
-                AnthropicMessagesResponse.model_validate(anthropic_body),
-            )
-            self.assertIsNotNone(anthropic_trace)
-            self.assertIsNotNone(anthropic_adapter.get_trace_by_response_hash(anthropic_trace.response_hash))
+        anthropic_trace = anthropic_adapter.get_trace_by_request_response(
+            AnthropicMessagesRequest.model_validate(anthropic_payload),
+            AnthropicMessagesResponse.model_validate(anthropic_body),
+        )
+        self.assertIsNotNone(anthropic_trace)
+        self.assertIsNotNone(anthropic_adapter.get_trace_by_response_hash(anthropic_trace.response_hash))
 
-            responses_trace = responses_adapter.get_trace_by_request_response(
-                ResponsesRequest.model_validate(responses_payload),
-                ResponsesResponse.model_validate(responses_body),
-            )
-            self.assertIsNotNone(responses_trace)
-            self.assertIsNotNone(responses_adapter.get_trace_by_response_hash(responses_trace.response_hash))
+        responses_trace = responses_adapter.get_trace_by_request_response(
+            ResponsesRequest.model_validate(responses_payload),
+            ResponsesResponse.model_validate(responses_body),
+        )
+        self.assertIsNotNone(responses_trace)
+        self.assertIsNotNone(responses_adapter.get_trace_by_response_hash(responses_trace.response_hash))
 
         capture_records = self._read_new_capture_records()
         self.assertGreaterEqual(len(capture_records), 3)
@@ -404,46 +515,15 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertEqual(responses_trace.request_snapshot["input"][2]["type"], "function_call")
         self.assertEqual(responses_trace.response_snapshot["status"], "completed")
 
-    def test_gateway_runtime_endpoints_with_real_rollout_controller(self):
-        self.controller = self._build_controller()
-        app = build_local_gateway_app(
-            self.controller,
-            config=GatewayConfig(port=8080, capture_path=str(self.capture_output_path)),
-        )
-
-        with TestClient(app) as client:
-            livez_response = client.get("/livez")
-            self.assertEqual(livez_response.status_code, 200, livez_response.text)
-            self.assertEqual(livez_response.json(), {"status": "ok"})
-
-            readyz_response = client.get("/readyz")
-            self.assertEqual(readyz_response.status_code, 200, readyz_response.text)
-            readyz_body = readyz_response.json()
-            self.assertTrue(readyz_body["ready"])
-            self.assertEqual(readyz_body["status"], "ready")
-            self.assertIsInstance(readyz_body["details"], dict)
-
-            capabilities_response = client.get("/capabilities")
-            self.assertEqual(capabilities_response.status_code, 200, capabilities_response.text)
-            capabilities_body = capabilities_response.json()
-            self.assertEqual(capabilities_body["model"], self.controller.config.model_name)
-            self.assertEqual(capabilities_body["backend"], self.controller.config.rollout_backend)
-            self.assertEqual(capabilities_body["context_length"], self.controller.config.context_length)
-            self.assertTrue(capabilities_body["supports_stream"])
-            self.assertTrue(capabilities_body["supports_tools"])
-            self.assertFalse(capabilities_body["supports_cancel"])
-            self.assertTrue(capabilities_body["supports_parallel_tool_calls"])
-            self.assertTrue(capabilities_body["supports_reasoning"])
-
     def test_gateway_routes_with_real_rollout_controller_capture_ir_fallback_behavior(self):
         self.controller = self._build_controller()
-        app = build_local_gateway_app(
-            self.controller,
-            config=GatewayConfig(port=8080, capture_path=str(self.capture_output_path)),
-        )
+        rollout_config = self._get_rollout_config()
+        gateway_config = GatewayConfig(port=self._find_free_port(), capture_path=str(self.capture_output_path))
+        app = build_local_gateway_app(self.controller, config=gateway_config)
+        base_url, _ = self._serve_gateway_blocking_in_background(app, gateway_config)
 
         openai_payload = {
-            "model": self.controller.config.model_name,
+            "model": rollout_config.model_name,
             "messages": [
                 {"role": "user", "content": "Call the search tool if you need it."},
                 {
@@ -497,7 +577,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
             "n": 2,
         }
         anthropic_payload = {
-            "model": self.controller.config.model_name,
+            "model": rollout_config.model_name,
             "system": [
                 {
                     "type": "image",
@@ -514,7 +594,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
             "max_tokens": 32,
         }
         responses_payload = {
-            "model": self.controller.config.model_name,
+            "model": rollout_config.model_name,
             "instructions": "Follow the system rule.",
             "input": [
                 {
@@ -599,48 +679,36 @@ class TestGatewayProtocolChain(unittest.TestCase):
             "stream": True,
         }
 
-        with TestClient(app) as client:
-            openai_response = client.post("/v1/chat/completions", json=openai_payload)
-            self.assertEqual(openai_response.status_code, 200, openai_response.text)
+        openai_response = self._post_json(base_url, "/v1/chat/completions", openai_payload)
+        self.assertEqual(openai_response.status_code, 200, openai_response.text)
 
-            openai_invalid_n_response = client.post("/v1/chat/completions", json=openai_invalid_n_payload)
-            self.assertEqual(openai_invalid_n_response.status_code, 400, openai_invalid_n_response.text)
-            openai_invalid_n_body = openai_invalid_n_response.json()
-            self.assertEqual(openai_invalid_n_body["error"]["type"], "invalid_request_error")
-            self.assertEqual(openai_invalid_n_body["error"]["code"], "n_not_supported")
+        openai_invalid_n_response = self._post_json(base_url, "/v1/chat/completions", openai_invalid_n_payload)
+        self.assertEqual(openai_invalid_n_response.status_code, 400, openai_invalid_n_response.text)
+        openai_invalid_n_body = openai_invalid_n_response.json()
+        self.assertEqual(openai_invalid_n_body["error"]["type"], "invalid_request_error")
+        self.assertEqual(openai_invalid_n_body["error"]["code"], "n_not_supported")
 
-            anthropic_response = client.post("/v1/messages", json=anthropic_payload)
-            self.assertEqual(anthropic_response.status_code, 400, anthropic_response.text)
-            anthropic_error_body = anthropic_response.json()
-            self.assertEqual(anthropic_error_body["type"], "error")
-            self.assertEqual(anthropic_error_body["error"]["type"], "invalid_request_error")
-            self.assertIn("Unsupported Anthropic content block type(s) in system: image", anthropic_error_body["error"]["message"])
+        anthropic_response = self._post_json(base_url, "/v1/messages", anthropic_payload)
+        self.assertEqual(anthropic_response.status_code, 400, anthropic_response.text)
+        anthropic_error_body = anthropic_response.json()
+        self.assertEqual(anthropic_error_body["type"], "error")
+        self.assertEqual(anthropic_error_body["error"]["type"], "invalid_request_error")
+        self.assertIn("Unsupported Anthropic content block type(s) in system: image", anthropic_error_body["error"]["message"])
 
-            openai_stream_response = client.post("/v1/chat/completions", json=openai_stream_payload)
-            self.assertEqual(openai_stream_response.status_code, 200, openai_stream_response.text)
-            self.assertIn("text/event-stream", openai_stream_response.headers["content-type"])
-            self.assertIn("data: [DONE]", openai_stream_response.text)
+        responses_response = self._post_json(base_url, "/v1/responses", responses_payload)
+        self.assertEqual(responses_response.status_code, 200, responses_response.text)
 
-            anthropic_stream_response = client.post("/v1/messages", json=anthropic_stream_payload)
-            self.assertEqual(anthropic_stream_response.status_code, 200, anthropic_stream_response.text)
-            self.assertIn("text/event-stream", anthropic_stream_response.headers["content-type"])
-            self.assertIn("event: message_start", anthropic_stream_response.text)
-            self.assertIn("event: message_stop", anthropic_stream_response.text)
+        responses_invalid_content_response = self._post_json(base_url, "/v1/responses", responses_invalid_content_payload)
+        self.assertEqual(responses_invalid_content_response.status_code, 400, responses_invalid_content_response.text)
+        responses_invalid_content_body = responses_invalid_content_response.json()
+        self.assertEqual(responses_invalid_content_body["error"]["type"], "invalid_request_error")
+        self.assertEqual(responses_invalid_content_body["error"]["code"], "unsupported_content_block")
 
-            responses_response = client.post("/v1/responses", json=responses_payload)
-            self.assertEqual(responses_response.status_code, 200, responses_response.text)
-
-            responses_invalid_content_response = client.post("/v1/responses", json=responses_invalid_content_payload)
-            self.assertEqual(responses_invalid_content_response.status_code, 400, responses_invalid_content_response.text)
-            responses_invalid_content_body = responses_invalid_content_response.json()
-            self.assertEqual(responses_invalid_content_body["error"]["type"], "invalid_request_error")
-            self.assertEqual(responses_invalid_content_body["error"]["code"], "unsupported_content_block")
-
-            responses_stream_response = client.post("/v1/responses", json=responses_stream_payload)
-            self.assertEqual(responses_stream_response.status_code, 200, responses_stream_response.text)
-            self.assertIn("text/event-stream", responses_stream_response.headers["content-type"])
-            self.assertIn("event: response.created", responses_stream_response.text)
-            self.assertIn("event: response.completed", responses_stream_response.text)
+        responses_stream_response = self._post_json(base_url, "/v1/responses", responses_stream_payload)
+        self.assertEqual(responses_stream_response.status_code, 400, responses_stream_response.text)
+        responses_stream_body = responses_stream_response.json()
+        self.assertEqual(responses_stream_body["error"]["type"], "invalid_request_error")
+        self.assertEqual(responses_stream_body["error"]["code"], "stream_not_supported")
 
         capture_records = self._read_new_capture_records()
         protocol_records = self._capture_records_by_protocol(capture_records)
@@ -682,13 +750,14 @@ class TestGatewayProtocolChain(unittest.TestCase):
 
     def test_gateway_routes_with_real_rollout_controller_return_context_length_error_on_context_overflow(self):
         self.controller = self._build_controller()
-        app = build_local_gateway_app(
-            self.controller,
-            config=GatewayConfig(port=8080, capture_path=str(self.capture_output_path)),
-        )
-        overflow_prompt = "Beijing weather " * max(self.controller.config.context_length, 1)
+        rollout_config = self._get_rollout_config()
+        gateway_config = GatewayConfig(port=self._find_free_port(), capture_path=str(self.capture_output_path))
+        app = build_local_gateway_app(self.controller, config=gateway_config)
+        base_url, _ = self._serve_gateway_blocking_in_background(app, gateway_config)
+
+        overflow_prompt = "Beijing weather " * max(rollout_config.context_length or 1, 1)
         openai_payload = {
-            "model": self.controller.config.model_name,
+            "model": rollout_config.model_name,
             "messages": [
                 {"role": "system", "content": "You are a concise assistant."},
                 {"role": "user", "content": overflow_prompt},
@@ -698,9 +767,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
             "max_tokens": 64,
         }
 
-        with TestClient(app, raise_server_exceptions=False) as client:
-            response = client.post("/v1/chat/completions", json=openai_payload)
-
+        response = self._post_json(base_url, "/v1/chat/completions", openai_payload)
         self.assertEqual(response.status_code, 400, response.text)
         response_body = response.json()
         self.assertEqual(response_body["error"]["type"], "context_length_exceeded")

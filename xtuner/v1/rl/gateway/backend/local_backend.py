@@ -4,9 +4,12 @@ import json
 from typing import Any
 from uuid import uuid4
 
+import ray
+from ray.actor import ActorHandle
+
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto import RolloutState, RolloutToolCall, SampleParams, Status
-from xtuner.v1.rl.rollout.controller import RolloutController
+from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 from ..adapters.base import coerce_content_to_text
 from ..adapters.collector import append_current_trace_rollout_state
@@ -35,29 +38,30 @@ from ..core.models import (
 class LocalRolloutBackend:
     def __init__(
         self,
-        controller: RolloutController,
+        controller: ActorHandle,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str | None = None,
     ):
         self._controller = controller
+        self._config = self._resolve_rollout_config(controller)
         if isinstance(tokenizer, str):
             tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
         resolved_tokenizer = tokenizer
         if resolved_tokenizer is None:
             resolved_tokenizer = AutoTokenizer.from_pretrained(
-                controller.config.tokenizer_path,
+                self._config.tokenizer_path,
                 trust_remote_code=True,
             )
         self._tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast = resolved_tokenizer
 
     async def generate(self, request: CanonicalGenerateRequest) -> CanonicalGenerateResponse:
         rollout_state = self._canonical_request_to_rollout_state(request)
-        rollout_state = await self._controller.generate(rollout_state)
+        rollout_state = await self._controller.generate.remote(rollout_state)
         append_current_trace_rollout_state(rollout_state)
         self._raise_for_failed_rollout(rollout_state, request_id=str(rollout_state.uid))
         return self._rollout_state_to_canonical_response(rollout_state, request)
 
     async def health(self) -> BackendHealth:
-        ready, details = self._controller.get_ready_status()
+        ready, details = await self._controller.get_ready_status.remote()
         return BackendHealth(
             ready=ready,
             status="ready" if ready else "unavailable",
@@ -68,16 +72,16 @@ class LocalRolloutBackend:
         return [
             ModelCard(
                 id=self._model_name,
-                backend=self._controller.config.rollout_backend,
-                context_length=self._controller.config.context_length,
+                backend=self._config.rollout_backend,
+                context_length=self._config.context_length,
             )
         ]
 
     async def get_capabilities(self) -> ModelCapabilities:
         return ModelCapabilities(
             model=self._model_name,
-            backend=self._controller.config.rollout_backend,
-            context_length=self._controller.config.context_length,
+            backend=self._config.rollout_backend,
+            context_length=self._config.context_length,
             supports_stream=True,
             supports_tools=True,
             supports_cancel=False,
@@ -94,7 +98,11 @@ class LocalRolloutBackend:
 
     @property
     def _model_name(self) -> str:
-        return self._controller.config.model_name or "rollout-controller"
+        return self._config.model_name or "rollout-controller"
+
+    def _resolve_rollout_config(self, controller: ActorHandle) -> RolloutConfig:
+        rollout_metadata = ray.get(controller.get_rollout_metadata.remote())
+        return rollout_metadata["rollout_config"]
 
     def _canonical_request_to_rollout_state(self, canonical_request: CanonicalGenerateRequest) -> RolloutState:
         internal_messages = self._canonical_messages_to_backend_messages(canonical_request.messages)
