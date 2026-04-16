@@ -92,3 +92,42 @@ Notes about the worktree:
 建议下一步：
 1. 继续把 `AgentLoopManager` 按 `design/disagg_design.md` 拆成 `_produce_batch_to_buffer()` / `_get_batch_from_buffer()` / `produce_loop()` / `get_batch()` 的完整状态机实现。
 2. 然后再推进 `single_turn_agent_loop.py` 与 `utils.py` 中 `model_rollout_step` / staleness 语义改造。
+
+---
+
+本次实现进展补充（共享 strategy 契约继续收口）：
+
+本次完成内容：
+- 按最新约定把 `ProduceStrategy.produce_batch()` 统一为只返回 `ProduceBatchStatus`，不再保留 `ProducerTimings` 这一条并行返回路径。
+- 将 group generate timing 的落盘逻辑从 `_record_group_generate_time(...)` 内联到 `_timed_generate_group(...)`，保证样本一生成完成就带上 `extra_fields["group_generate_time_s"]`。
+- 调整 `SyncProduceStrategy.produce_batch()`，使其在接受共享新签名 `rollout_step / model_rollout_step / update_event` 的同时，继续保持当前 colocate 语义。
+- 调整 `AgentLoopManager` 的 strategy 调用点，显式按共享新签名传参，并统一按 replay buffer 中的 rollout group 重建 timing 统计。
+- 去掉 manager 中对 `ProducerTimings | ProduceBatchStatus` 双轨返回的兼容分支，收敛为单一路径。
+- 更新 `tests/rl/test_multi_task_agent_loop_manager.py`：
+  - fake strategy 改为匹配统一的新签名
+  - 新增 status-returning strategy 用例，验证 manager 会走 cleanup 并从 group 上重建 timing
+- 更新 `tests/rl/test_producer.py`：
+  - `SyncProduceStrategy` 测试改为显式通过共享新签名调用
+  - 验证 sync / async `produce_batch()` 都返回 `ProduceBatchStatus.NORMAL`
+
+本次涉及文件：
+- `xtuner/v1/rl/agent_loop/producer.py`
+- `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+- `tests/rl/test_multi_task_agent_loop_manager.py`
+- `tests/rl/test_producer.py`
+- `feature_list.json`
+
+验证结果：
+- 运行 `bash run_test.sh`
+  - 结果：`11 passed`
+- 额外运行：
+  - `pytest -q tests/rl/test_multi_task_agent_loop_manager.py tests/rl/test_producer.py tests/rl/test_agent_loop.py::TestAgentLoop::test_gsm8k_agent_loop_manager`
+  - 结果：`12 passed`
+
+本次发现与说明：
+- 共享 strategy 契约现在已经从 base class、sync strategy、manager 调用点，到测试 fake strategy 一起收敛到了同一套接口。
+- 目前 `run_test.sh` 仍保持你精简后的快测形态，没有把 `tests/rl/test_agent_loop.py` 整体加回去；我只在本次验证里额外单独跑了其中一个关键共卡 manager 用例。
+
+建议下一步：
+1. 继续做 `AgentLoopManager` 的完整 producer/consumer 状态机拆分，把当前兼容层推进为真正的 `_produce_batch_to_buffer()` / `_get_batch_from_buffer()` / `cleanup_pending_tasks()` / `produce_loop()` / `get_batch()`。
+2. 然后推进 `single_turn_agent_loop.py` 与 `utils.py` 的 `model_rollout_step` / staleness 语义改造。

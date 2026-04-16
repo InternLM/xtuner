@@ -21,7 +21,7 @@
       "Step 3: update any remaining ProduceStrategy subclasses or helper call sites to use the same method signatures, return conventions, and cleanup expectations",
       "Step 4: add or update focused tests that confirm the shared strategy interface still works for both colocated and disaggregated manager paths"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "modify",

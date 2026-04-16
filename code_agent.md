@@ -68,6 +68,7 @@ Implement the chosen feature thoroughly:
 2. Add the necessary unit tests and pass it (add less unit tests as possible)
 3. Fix any issues discovered
 4. Verify the feature works
+5. Add related old and new test cases to `run_test.sh`
 
 **YOU CAN ONLY MODIFY ONE FIELD: "passes"**
 

@@ -83,7 +83,15 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         strategy = produce_strategy_cfg.build()
 
         # 执行：生产 batch_size 为 2 的数据
-        await strategy.produce_batch(mock_agent_loop, sampler, self.replay_buffer, batch_size=2, task_name=task_name)
+        status = await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=2,
+            task_name=task_name,
+            rollout_step=4,
+        )
+        self.assertEqual(status, ProduceBatchStatus.NORMAL)
 
         # 验证：ReplayBuffer 中应该有 2 条 COMPLETED 数据
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
@@ -123,7 +131,10 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         aborted_item = MockRolloutState(999, status=Status.ABORTED)
         await self.replay_buffer.put([aborted_item], task_name)
         # 执行
-        await strategy.produce_batch(mock_agent_loop, sampler, self.replay_buffer, batch_size=2, task_name=task_name)
+        status = await strategy.produce_batch(
+            mock_agent_loop, sampler, self.replay_buffer, batch_size=2, task_name=task_name
+        )
+        self.assertEqual(status, ProduceBatchStatus.NORMAL)
 
         # 验证：ReplayBuffer 中应该有 4 条 COMPLETED 数据，
         # NOTE(@duanyanhui): 目前还没实现暂停功能，所以4条都会推理完成,4条数据按照新鲜度顺序排列，999 是最旧的，0 是最新的

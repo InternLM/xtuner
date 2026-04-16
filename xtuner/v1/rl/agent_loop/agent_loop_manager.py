@@ -18,7 +18,6 @@ from .agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_c
 from .producer import (
     GROUP_GENERATE_TIME_KEY,
     ProduceBatchStatus,
-    ProducerTimings,
     ProduceStrategy,
     ProduceStrategyConfig,
     SyncProduceStrategyConfig,
@@ -77,10 +76,14 @@ class _TaskSamplerView:
         return sum(len(sampler) for sampler in self._samplers)
 
 
-def _fill_produce_timing_stats(result: ProduceBatchResult, stats: ProducerTimings) -> None:
-    if not stats.generate_times_s:
+def _fill_produce_timing_stats(
+    result: ProduceBatchResult, generate_times_s: list[float], pause_time_s: float = 0.0
+) -> None:
+    if not generate_times_s:
+        if pause_time_s > 0:
+            result.group_gen_pause_time_s = pause_time_s
         return
-    sorted_times = sorted(stats.generate_times_s)
+    sorted_times = sorted(generate_times_s)
     n = len(sorted_times)
     mean_s = sum(sorted_times) / n
     p50_s = sorted_times[n // 2]
@@ -91,7 +94,7 @@ def _fill_produce_timing_stats(result: ProduceBatchResult, stats: ProducerTiming
     result.group_gen_p50_s = p50_s
     result.group_gen_p99_s = p99_s
     result.group_gen_p99_p50_ratio = ratio
-    result.group_gen_pause_time_s = stats.pause_time_s
+    result.group_gen_pause_time_s = pause_time_s
 
 
 def _fill_group_timing_stats(
@@ -105,10 +108,7 @@ def _fill_group_timing_stats(
         if group_time is not None:
             generate_times.append(group_time)
 
-    if generate_times:
-        _fill_produce_timing_stats(result, ProducerTimings(generate_times_s=generate_times, pause_time_s=pause_time_s))
-    elif pause_time_s > 0:
-        result.group_gen_pause_time_s = pause_time_s
+    _fill_produce_timing_stats(result, generate_times, pause_time_s=pause_time_s)
 
 
 async def _produce_single_task_batch(
@@ -121,16 +121,18 @@ async def _produce_single_task_batch(
 ) -> ProduceBatchResult:
     start = time.perf_counter()
     logger.info(f"[{manager_name}][{task_runner.task_name}] produce_batch start batch={batch_size}")
-    produce_stats = await task_runner.produce_strategy.produce_batch(
+    produce_status = await task_runner.produce_strategy.produce_batch(
         task_runner.agent_loop,
         task_runner.sampler,
         replay_buffer,
         batch_size,
         task_runner.task_name,
-        rollout_step,
+        rollout_step=rollout_step,
+        model_rollout_step=rollout_step,
+        update_event=None,
     )
     pause_time_s = 0.0
-    if isinstance(produce_stats, ProduceBatchStatus):
+    if produce_status != ProduceBatchStatus.UPDATE_ABORT:
         pause_time_s = await task_runner.produce_strategy.cleanup_pending_tasks(
             task_runner.agent_loop, replay_buffer, task_runner.task_name
         )
@@ -139,8 +141,6 @@ async def _produce_single_task_batch(
     )
 
     result = ProduceBatchResult(rollout_states=[])
-    if isinstance(produce_stats, ProducerTimings):
-        _fill_produce_timing_stats(result, produce_stats)
 
     start = time.perf_counter()
     batch_rollout_states: list[list[RolloutState]] = await replay_buffer.get(
@@ -150,8 +150,7 @@ async def _produce_single_task_batch(
         f"[{manager_name}][{task_runner.task_name}] replay_buffer.get done completed_groups={len(batch_rollout_states)} elapsed={time.perf_counter() - start:.3f}"
     )
     result.rollout_states = batch_rollout_states
-    if isinstance(produce_stats, ProduceBatchStatus):
-        _fill_group_timing_stats(result, batch_rollout_states, pause_time_s=pause_time_s)
+    _fill_group_timing_stats(result, batch_rollout_states, pause_time_s=pause_time_s)
     completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
         replay_buffer.count(task_name=task_runner.task_name, group_status=Status.COMPLETED),
         replay_buffer.count(task_name=task_runner.task_name, group_status=Status.ABORTED),
