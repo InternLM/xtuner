@@ -62,6 +62,7 @@ class RLDisaggregatedTrainer:
 
                 # 无论这一轮是否真正训练，只要到了同步点，都执行一次权重更新流程。
                 # 这样在 `EXPIRED_BATCH` 情况下，producer 才能尽快拿到更新后的权重继续工作。
+                await self.agent_loop_manager.pause_product(for_weight_update=True)
                 await self._sync_weights_and_save(rollout_step)
 
                 if self._need_eval(rollout_step):
@@ -81,13 +82,9 @@ class RLDisaggregatedTrainer:
             await producer_task
 
     async def _sync_weights_and_save(self, rollout_step: int):
-        # 权重同步前必须先停止 rollout 生成：
-        # 否则 rollout 侧可能仍在使用旧权重继续产生样本，导致 staleness 失控。
-        pause_time_s = await self.agent_loop_manager.cleanup_pending_tasks(
-            pause_product_for_update=True
-        )
-        self.agent_loop_manager._pause_time_s = pause_time_s
-
+        # 这里默认外层已经先调用过 `pause_product(for_weight_update=True)`，
+        # 所以进入这个函数时，producer 已经停下，系统处于静止态。
+        #
         # checkpoint 的安全保存点放在这里：
         # 1. producer 已经停下，pending rollout 已收尾；
         # 2. replay buffer 不再被后台并发写入；
@@ -112,7 +109,7 @@ class RLDisaggregatedTrainer:
         #    - 必须显式传入 `model_rollout_step_override=rollout_step`
         #      作为 resume 后 rollout 应恢复到的目标权重版本
         #    - 原因是 checkpoint 的保存时机在：
-        #      `cleanup_pending_tasks(pause_product_for_update=True)` 之后、
+        #      `pause_product(for_weight_update=True)` 之后、
         #      `continue_product(model_rollout_step=rollout_step)` 之前
         #    - 也就是说，此时 manager 内部原有的 `self._model_rollout_step`
         #      仍然还是“旧 rollout 权重版本”，还没被 continue_product
@@ -131,7 +128,7 @@ class RLDisaggregatedTrainer:
         #
         # 注意：
         # - save 时不保存 eval manager 状态，延续现有 colocate 语义；
-        # - save 前要求 producer 已 cleanup 完成，所有 strategy._pending_tasks 为空。
+        # - save 前要求 producer 已 pause 完成，所有 strategy._pending_tasks 为空。
         pass
 
     def _resume_from_checkpoint(self, checkpoint_path: str):
@@ -167,7 +164,7 @@ class ProduceBatchStatus(Enum):
         或者发现 buffer 中已有足够可用样本。
     - UPDATE_ABORT:
         外部触发了权重更新，producer 应尽快停止继续补发新任务，
-        并把剩余 pending rollout 留给外层显式 cleanup。
+        并把剩余 pending rollout 留给外层显式 pause。
     - EXPIRED_BATCH:
         当前 rollout 模型版本已经过旧。
         在本设计中，这不是“旧样本还够不够再拼一批”的问题，
@@ -185,10 +182,10 @@ class AgentLoopManagerStatus(Enum):
 
     可以把它理解为 producer 主循环的状态机：
     - 初始为 NORMAL
-    - NORMAL --(开始权重更新/cleanup)--> UPDATE_ABORT
+    - NORMAL --(开始权重更新/pause)--> UPDATE_ABORT
     - UPDATE_ABORT --(continue_product 后)--> NORMAL
     - NORMAL --(整体过期，无法再 produce)--> EXPIRED_BATCH
-    - EXPIRED_BATCH --(开始权重更新/cleanup)--> UPDATE_ABORT
+    - EXPIRED_BATCH --(开始权重更新/pause)--> UPDATE_ABORT
     - 任意状态 --(训练结束)--> FINISH
     """
 
@@ -257,15 +254,15 @@ class AsyncProduceStrategy:
         # 改动点：
         # pending tasks 不再是局部变量，而是 strategy 的持久状态。
         # 因为非共卡下 `produce_batch()` 会被反复调用，
-        # 调用之间未收尾的 rollout 任务需要跨轮保存并显式 cleanup。
+        # 调用之间未收尾的 rollout 任务需要跨轮保存并显式 pause。
         self._pending_tasks: set[asyncio.Task] = set()
 
-    async def cleanup_pending_tasks(self, agent_loop, replay_buffer, task_name: str) -> float:
-        """公开的 pending 清理接口。
+    async def pause_product(self, agent_loop, replay_buffer, task_name: str) -> float:
+        """公开的 producer 暂停接口。
 
         设计动机：
         - 旧逻辑由 `AsyncProduceStrategy.produce_batch()` 在内部自动 cleanup；
-        - 新逻辑把 cleanup 提升为外层显式调用；
+        - 新逻辑把暂停和 pending 回收提升为外层显式调用；
         - 这样 trainer 就可以在权重同步前主动打断 rollout，并等待尾部任务收尾。
 
         返回值：
@@ -319,11 +316,14 @@ class AgentLoopManager:
         # AgentLoopManager 的全局运行状态，见 `AgentLoopManagerStatus` 注释。
         self._status = AgentLoopManagerStatus.NORMAL
 
-        # 最近一次 cleanup_pending_tasks 的耗时，下一次 get_batch 时带给上层并清零。
+        # 最近一次 pause_product 的耗时，下一次 get_batch 时带给上层并清零。
         self._pause_time_s = 0.0
 
     async def _produce_batch_to_buffer(self, batch_size: int, rollout_step: int) -> ProduceBatchStatus:
         # 这是新的“只生产、不取数”的内部工具函数。
+        #
+        # `model_rollout_step` 不再作为这个函数的显式参数传入，
+        # 而是统一从 `self._model_rollout_step` 读取。
         #
         # 单 task：
         # - 直接调用该 task 对应的 AsyncProduceStrategy.produce_batch()
@@ -334,17 +334,17 @@ class AgentLoopManager:
         # - 最后聚合出一个总的 ProduceBatchStatus
         return ProduceBatchStatus.NORMAL
 
-    async def cleanup_pending_tasks(
-        self, pause_product_for_update: bool = False
+    async def pause_product(
+        self, for_weight_update: bool = False
     ) -> float:
-        if pause_product_for_update:
+        if for_weight_update:
             # 权重更新场景下，先发停止信号，再切 manager 全局状态。
             # 后续 producer loop 看到这个信号，会停止继续补任务。
             self._update_event.set()
             self._status = AgentLoopManagerStatus.UPDATE_ABORT
 
         # 单 task / 多 task 两种情况下，都统一下沉到各 task strategy 的
-        # `cleanup_pending_tasks()`，由具体 strategy 去回收 pending rollout。
+        # `pause_product()`，由具体 strategy 去回收 pending rollout。
         return 0.0
 
     async def _get_batch_from_buffer(self, batch_size: int, rollout_step: int) -> ProduceBatchResult:
@@ -353,7 +353,7 @@ class AgentLoopManager:
         # 核心职责：
         # 1. 从 replay buffer 中按 task_name / COMPLETED 取出训练 batch；
         # 2. 从每个 group 的 extra_fields 中重建 timing 统计；
-        # 3. 把上一轮 cleanup 产生的 `self._pause_time_s` 挂到结果里；
+        # 3. 把上一轮 pause 产生的 `self._pause_time_s` 挂到结果里；
         # 4. 返回给 trainer 训练侧消费。
         return ProduceBatchResult(rollout_states=[])
 
@@ -379,10 +379,10 @@ class AgentLoopManager:
         # - `_update_event` / `_finish_event` 本身不序列化；
         # - `status` 保存为 `UPDATE_ABORT`，表示这个 checkpoint 是在 producer 已暂停的安全点拍的；
         # - `pause_time_s` 不必持久化，resume 后置 0 即可；
-        # - 不保存 strategy._pending_tasks，save 前必须已经 cleanup 完成。
+        # - 不保存 strategy._pending_tasks，save 前必须已经 pause 完成。
         #
         # `model_rollout_step_override` 的作用：
-        # - 在非共卡主流程里，checkpoint 保存点位于 cleanup 之后、
+        # - 在非共卡主流程里，checkpoint 保存点位于 pause 之后、
         #   continue_product 之前；
         # - 因而 save 发生时，`self._model_rollout_step` 还是旧值；
         # - 但保存完成后，主流程马上会调用
@@ -419,9 +419,10 @@ class AgentLoopManager:
 
     async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
         # 共卡路径仍然保留这个接口，但内部改成三段式：
-        # 1. `_produce_batch_to_buffer()`：调度 rollout，把数据写入 buffer
-        # 2. `cleanup_pending_tasks()`：显式收尾 pending rollout
-        # 3. `_get_batch_from_buffer()`：再从 buffer 中把 batch 取出来
+        # 1. `continue_product(model_rollout_step=rollout_step)`：恢复到干净状态并对齐当前权重版本
+        # 2. `_produce_batch_to_buffer()`：调度 rollout，把数据写入 buffer
+        # 3. `pause_product(for_weight_update=False)`：显式收尾 pending rollout
+        # 4. `_get_batch_from_buffer()`：再从 buffer 中把 batch 取出来
         #
         # 这样共卡和非共卡都会复用同一组底层工具函数。
         return ProduceBatchResult(rollout_states=[])
@@ -447,7 +448,7 @@ class AgentLoopManager:
                 continue
 
             if status == ProduceBatchStatus.UPDATE_ABORT:
-                # 这里不自己 cleanup，避免和 trainer 的同步流程重复收尾。
+                # 这里不自己 pause，避免和 trainer 的同步流程重复收尾。
                 # producer 只需要停下来，等待外部 continue_product 即可。
                 await asyncio.sleep(0.1)
                 continue

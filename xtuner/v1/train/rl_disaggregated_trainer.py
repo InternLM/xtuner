@@ -1,10 +1,12 @@
+import json
 from pathlib import Path
+from shutil import rmtree
 from typing import cast
 
 import ray
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from transformers import AutoTokenizer
 from xtuner.v1._writer import get_writer
@@ -30,6 +32,29 @@ from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import get_logger, is_hf_model_path, set_deterministic, timer
 
 
+def _validate_disagg_sync_schedule(
+    sync_weights_interval: int,
+    checkpoint_interval: int | None,
+    hf_interval: int | None,
+) -> None:
+    if sync_weights_interval <= 0:
+        raise ValueError(f"sync_weights_interval must be positive, got {sync_weights_interval}.")
+
+    for name, interval in (
+        ("checkpoint_interval", checkpoint_interval),
+        ("hf_interval", hf_interval),
+    ):
+        if interval is None or interval == -1:
+            continue
+        if interval <= 0:
+            raise ValueError(f"{name} must be positive or -1/None to disable it, got {interval}.")
+        if interval % sync_weights_interval != 0:
+            raise ValueError(
+                f"{name}={interval} must be a multiple of sync_weights_interval={sync_weights_interval}, "
+                "because disaggregated checkpoint/HF saves only run on sync steps."
+            )
+
+
 class RLDisaggregatedTrainerConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
@@ -45,7 +70,7 @@ class RLDisaggregatedTrainerConfig(BaseModel):
     load_from: str | Path
     total_train_steps: int
     train_batch_size: int
-    trigger_parameter_sync_step: int = 1
+    sync_weights_interval: int = 1
 
     enable_evaluate: bool = True
     enable_initial_evaluate: bool = False
@@ -63,6 +88,15 @@ class RLDisaggregatedTrainerConfig(BaseModel):
     debug_rollout: bool = False
     skip_checkpoint_validation: bool = False
     exp_tracker: str = "tensorboard"
+
+    @model_validator(mode="after")
+    def _validate_sync_intervals(self):
+        _validate_disagg_sync_schedule(
+            sync_weights_interval=self.sync_weights_interval,
+            checkpoint_interval=self.checkpoint_interval,
+            hf_interval=self.hf_interval,
+        )
+        return self
 
     def build(self) -> "RLDisaggregatedTrainer":
         return RLDisaggregatedTrainer(
@@ -93,7 +127,7 @@ class RLDisaggregatedTrainerConfig(BaseModel):
             skip_checkpoint_validation=self.skip_checkpoint_validation,
             total_train_steps=self.total_train_steps,
             train_batch_size=self.train_batch_size,
-            trigger_parameter_sync_step=self.trigger_parameter_sync_step,
+            sync_weights_interval=self.sync_weights_interval,
             exp_tracker=cast(str, self.exp_tracker),
         )
 
@@ -131,7 +165,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         skip_checkpoint_validation: bool = False,
         total_train_steps: int,
         train_batch_size: int,
-        trigger_parameter_sync_step: int,
+        sync_weights_interval: int,
         exp_tracker: str = "tensorboard",
     ):
         # 设计目标：
@@ -157,9 +191,12 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
         self._checkpoint_no_save_optimizer = checkpoint_no_save_optimizer
+        _validate_disagg_sync_schedule(
+            sync_weights_interval=sync_weights_interval,
+            checkpoint_interval=checkpoint_interval,
+            hf_interval=hf_interval,
+        )
         self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(auto_resume, load_checkpoint_cfg)
-        if self._load_checkpoint_cfg.checkpoint_path is not None:
-            raise NotImplementedError("Checkpoint resume for RLDisaggregatedTrainer will land in the next feature.")
 
         log_dir = self.exp_dir / "logs"
         self.logger = get_logger(log_dir=log_dir, tag="RLDisaggTrainer")
@@ -172,10 +209,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         self._global_train_step = 0
         self._seed = seed
         self.train_batch_size = train_batch_size
-        # 内部统一把“每隔多少步做一次权重同步”叫做 sync interval，
-        # 避免和外部 config 字段名耦合得太紧。
-        # 这里先只改内部命名，不改对外配置形状。
-        self._sync_weights_interval = trigger_parameter_sync_step
+        self._sync_weights_interval = sync_weights_interval
         set_deterministic()
         set_random_seed(seed)
 
@@ -192,6 +226,12 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         self._train_worker_cfg = train_worker_cfg
 
         rollout_config.worker_log_dir = log_dir
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            rollout_config.skip_load_weights = True
+            self.logger.info(
+                f"Skip load rollout weights due to resume from checkpoint {self._load_checkpoint_cfg.checkpoint_path}"
+            )
+
         self.train_controller = train_worker_cfg.build(self._train_pg)
         self.rollout_controller = rollout_config.build(self._rollout_pg)
 
@@ -216,11 +256,31 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
         self.evaluator = evaluator_config.build(total_eval_samples=total_eval_samples)
 
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
+
         if debug_rollout:
             self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
         self._debug_rollout = debug_rollout
         self._exp_tracker = get_writer(writer_type=exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
+
+    def _resume_from_checkpoint(self, checkpoint_path: Path | str) -> None:
+        checkpoint_path = Path(checkpoint_path)
+        ray.get(self.train_controller.resume.remote(self._load_checkpoint_cfg))
+
+        train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+        with train_state_path.open("r") as f:
+            train_state = json.load(f)
+        self._cur_step = train_state["cur_step"]
+
+        self.logger.info(f"Resume sampler from {checkpoint_path}")
+        saved_model_rollout_step = self.agent_loop_manager.resume(checkpoint_path)
+
+        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+        self.logger.info("Rollout workers skip load weights, update weights from train workers.")
+        self.fake_update_weights()
+        self.agent_loop_manager.continue_product(model_rollout_step=saved_model_rollout_step)
 
     def fit(self):
         # 对外仍保留同步接口，和现有 CLI / config 调用方式保持一致。
@@ -313,15 +373,15 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
                         # - 不再继续补发新的 rollout
                         # - pending rollout 都在同步前被收尾
                         # - 后面的 save / sync 发生在相对静止的状态
-                        with timer("cleanup_pending_tasks", step_timer_dict):
-                            await self.agent_loop_manager.cleanup_pending_tasks(pause_product_for_update=True)
+                        with timer("pause_product", step_timer_dict):
+                            await self.agent_loop_manager.pause_product(for_weight_update=True)
 
                         await self._sync_weights_and_save(rollout_idx, step_timer_dict)
 
                         if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
-                            # 这里刻意把 eval 放在 reset 前面。
+                            # 这里刻意把 eval 放在恢复 producer 前面。
                             # 设计上希望 eval 优先于 background producer，
-                            # 避免 reset 后 producer 立刻恢复生成，与 eval 竞争 rollout 资源。
+                            # 避免 continue_product 后 producer 立刻恢复生成，与 eval 竞争 rollout 资源。
                             with timer("evaluation", step_timer_dict):
                                 eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
                                     self.evaluator.eval_batch_size, rollout_step=rollout_idx
@@ -334,7 +394,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
                                 self._save_trajectories(eval_batch, eval_trajectory_path)
                                 eval_log_info.update(eval_metrics)
 
-                        # cleanup_pending_tasks(pause_product_for_update=True) 和 continue_product() 是一对：
+                        # pause_product(for_weight_update=True) 和 continue_product() 是一对：
                         # - 前者让 producer 停下
                         # - 后者在同步和评测结束后恢复 producer
                         self.agent_loop_manager.continue_product(model_rollout_step=rollout_idx)
@@ -370,3 +430,38 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         ray.get(self.train_controller.update_weights.remote(), timeout=TRAINER_RAY_GET_TIMEOUT)
         self.logger.info("Rollout workers updated weights through fake disaggregated sync.")
         ray.get(self.rollout_controller.onload_kvcache.remote())
+
+    def _maybe_save_checkpoint(self, cur_step: int) -> None:
+        ckp_interval = self._checkpoint_interval
+        if ckp_interval is None or ckp_interval == -1:
+            return
+        if cur_step % ckp_interval != 0:
+            return
+
+        checkpoint_path = self.exp_dir / self._CHECKPOINT_DIR / f"ckpt-step-{cur_step}"
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+        self.logger.info(f"Saving sampler state to {checkpoint_path}")
+        self.agent_loop_manager.save(checkpoint_path, model_rollout_step_override=cur_step)
+
+        self.logger.info(f"Saving DCP checkpoint to {checkpoint_path}")
+        ray.get(self.train_controller.save.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer))
+
+        train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+        with train_state_path.open("w") as f:
+            json.dump({"cur_step": cur_step}, f)
+
+        current_exp = self._meta.latest_exp
+        current_exp.checkpoint_list.append(str(checkpoint_path))
+
+        ckp_maxkeep = self._checkpoint_maxkeep
+        ckp_list = current_exp.checkpoint_list
+        if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
+            for deleted in ckp_list[:-ckp_maxkeep]:
+                if Path(deleted).exists():
+                    rmtree(deleted, ignore_errors=True)
+            current_exp.checkpoint_list = ckp_list[-ckp_maxkeep:]
+
+        meta_path = self.exp_dir.parent / self._META_PATH
+        with meta_path.open("w") as f:
+            f.write(self._meta.model_dump_json(indent=2))

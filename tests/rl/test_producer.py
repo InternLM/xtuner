@@ -173,7 +173,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.assertIn("group_generate_time_s", group[0].extra_fields)
             self.assertGreater(group[0].extra_fields["group_generate_time_s"], 0.0)
 
-    async def test_async_produce_strategy_cleanup_pending_tasks_is_explicit(self):
+    async def test_async_produce_strategy_pause_product_is_explicit(self):
         task_name = "test_cleanup"
         mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.2, 2: 0.2})
         produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
@@ -183,7 +183,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         await strategy.produce_batch(mock_agent_loop, sampler, self.replay_buffer, batch_size=1, task_name=task_name)
         self.assertGreater(len(strategy._pending_tasks), 0)
 
-        pause_time_s = await strategy.cleanup_pending_tasks(mock_agent_loop, self.replay_buffer, task_name)
+        pause_time_s = await strategy.pause_product(mock_agent_loop, self.replay_buffer, task_name)
 
         self.assertGreaterEqual(pause_time_s, 0.0)
         self.assertEqual(len(strategy._pending_tasks), 0)

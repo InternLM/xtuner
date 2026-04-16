@@ -85,7 +85,7 @@
       "Step 5: implement trainer-side resume flow so train state is restored first, rollout weights are re-synced from train, reset(model_rollout_step=saved_model_rollout_step) is called, and a fresh producer_task is created instead of restoring old tasks",
       "Step 6: add checkpoint tests for save-before-reset semantics, paused resume state, pending-task safety checks, and one-time post-resume weight sync before producer restart"
     ],
-    "passes": false
+    "passes": true
   },
   {
     "category": "modify",

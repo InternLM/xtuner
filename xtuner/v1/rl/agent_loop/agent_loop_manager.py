@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import time
 from dataclasses import dataclass
@@ -210,6 +211,7 @@ class AgentLoopManagerConfig(BaseModel):
 
 class AgentLoopManager:
     _TASK_CHECKPOINT_DIR = "tasks"
+    _MANAGER_STATE_PATH = "agent_loop_manager_state.json"
     _STATUS_POLL_INTERVAL_S = 0.05
 
     def __init__(
@@ -350,10 +352,8 @@ class AgentLoopManager:
         self,
         batch_size: int,
         rollout_step: int,
-        model_rollout_step: int | None = None,
     ) -> ProduceBatchStatus:
-        if model_rollout_step is None:
-            model_rollout_step = self._model_rollout_step
+        model_rollout_step = self._model_rollout_step
 
         if len(self.task_runners) == 1:
             task = self.task_runners[0]
@@ -387,7 +387,7 @@ class AgentLoopManager:
         )
         return _aggregate_status(statuses)
 
-    async def cleanup_pending_tasks(self, pause_product_for_update: bool = False) -> float:
+    async def pause_product(self, for_weight_update: bool = False) -> float:
         # 这是 producer 的“显式刹车”接口。
         #
         # 设计动机：
@@ -395,19 +395,19 @@ class AgentLoopManager:
         # - 非共卡后，producer 可能在后台持续运行，何时停下来必须交给 trainer 明确控制。
         #
         # 因此：
-        # - `pause_product_for_update=True` 表示 trainer 准备进入权重同步点，
+        # - `for_weight_update=True` 表示 trainer 准备进入权重同步点，
         #   这里先置 `_update_event`，再把 manager 状态切到 UPDATE_ABORT；
         # - 后续各 task 的 strategy 会回收 pending rollout，并把结果写回 replay buffer；
         # - 返回值 `pause_time_s` 不是业务语义，而是日志/诊断信息，
         #   供训练侧在下一次消费 batch 时上报。
-        if pause_product_for_update:
+        if for_weight_update:
             # 用于非共卡训练中，在权重同步点前，先让 producer 停下来
             self._update_event.set()
             self._status = AgentLoopManagerStatus.UPDATE_ABORT
 
         pause_time_s = 0.0
         for task in self.task_runners:
-            pause_time_s += await task.produce_strategy.cleanup_pending_tasks(
+            pause_time_s += await task.produce_strategy.pause_product(
                 task.agent_loop, self.replay_buffer, task.task_name
             )
         self._pause_time_s = pause_time_s
@@ -469,12 +469,10 @@ class AgentLoopManager:
         return aggregated
 
     def continue_product(self, model_rollout_step: int) -> None:
-        # 只用于非共卡训练中。
-        # continue_product 的语义不是“清空 buffer 并重新开始”，
-        # 而是“producer 可以恢复工作了”。
+        # continue_product 的语义是“producer 可以恢复工作了”。
         #
-        # 它和 cleanup_pending_tasks(pause_product_for_update=True) 是一对：
-        # - cleanup_pending_tasks(...) 负责让 producer 停下来；
+        # 它和 pause_product(for_weight_update=True) 是一对：
+        # - pause_product(...) 负责让 producer 停下来；
         # - continue_product(...) 负责在同步/评测完成后解除暂停。
         #
         # 这里同步更新 `_model_rollout_step`，表示 rollout 侧接下来生成样本时，
@@ -492,7 +490,7 @@ class AgentLoopManager:
         #
         # 它虽然名字没变，但内部已经改成三段式：
         # 1. `_produce_batch_to_buffer()` 只负责生产，把结果写入 replay buffer
-        # 2. `cleanup_pending_tasks()` 显式收尾 pending rollout
+        # 2. `pause_product()` 显式收尾 pending rollout
         # 3. `_get_batch_from_buffer()` 再把训练 batch 取出来
         #
         # 这也是为什么这里要求返回非空 batch：
@@ -516,12 +514,18 @@ class AgentLoopManager:
         rollout_ctl = await get_agent_loop_rollout_ctl(active_tasks[0].agent_loop)
         await continue_generation(rollout_ctl)
         try:
+            # 共卡路径不复用非共卡的 paused producer 状态机。
+            # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_ABORT，
+            # produce_batch() 也应视作一次独立的同步生产过程，从干净状态开始。
+            #
+            # 共卡路径下，每次 produce_batch() 都对应当前 trainer 轮次的新权重版本，
+            # 所以这里直接复用 continue_product() 同步恢复状态并更新 rollout model version。
+            self.continue_product(model_rollout_step=rollout_step)
             status = await self._produce_batch_to_buffer(
                 batch_size=batch_size,
                 rollout_step=rollout_step,
-                model_rollout_step=rollout_step,
             )
-            await self.cleanup_pending_tasks(pause_product_for_update=False)
+            await self.pause_product(for_weight_update=False)
             result = await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
             result.status = status
             assert result.rollout_states, (
@@ -568,7 +572,7 @@ class AgentLoopManager:
             if status == ProduceBatchStatus.EXPIRED_BATCH:
                 # 注意：
                 # - EXPIRED_BATCH 是 producer 在生产过程中自己检测出来的“立即停下”信号
-                # - UPDATE_ABORT 则是 trainer 在同步前通过 cleanup_pending_tasks() 主动设置的
+                # - UPDATE_ABORT 则是 trainer 在同步前通过 pause_product() 主动设置的
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
             elif status == ProduceBatchStatus.NORMAL:
                 # 只有正常完成一轮生产时，producer 自己维护的 rollout_step 才前进一步。
@@ -598,16 +602,65 @@ class AgentLoopManager:
         checkpoint_path = Path(checkpoint_path)
         return checkpoint_path / self._TASK_CHECKPOINT_DIR / task_name
 
-    def save(self, checkpoint_path: Path | str) -> None:
+    def _manager_state_path(self, checkpoint_path: Path | str) -> Path:
+        checkpoint_path = Path(checkpoint_path)
+        return checkpoint_path / self._MANAGER_STATE_PATH
+
+    def _get_pending_task_counts(self) -> dict[str, int]:
+        pending_task_counts: dict[str, int] = {}
+        for task in self.task_runners:
+            pending_tasks = getattr(task.produce_strategy, "_pending_tasks", None)
+            if pending_tasks:
+                pending_task_counts[task.task_name] = len(pending_tasks)
+        return pending_task_counts
+
+    def save(self, checkpoint_path: Path | str, model_rollout_step_override: int | None = None) -> None:
         """Save all task sampler states and the shared replay buffer."""
+        checkpoint_path = Path(checkpoint_path)
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        pending_task_counts = self._get_pending_task_counts()
+        if pending_task_counts:
+            raise RuntimeError(
+                "Cannot save AgentLoopManager while pending rollout tasks still exist: "
+                f"{pending_task_counts}. Call pause_product() first."
+            )
         for task in self.task_runners:
             task_checkpoint_path = self._task_checkpoint_path(checkpoint_path, task.task_name)
             task_checkpoint_path.mkdir(parents=True, exist_ok=True)
             task.sampler.save(task_checkpoint_path)
         asyncio_run(self.replay_buffer.save(checkpoint_path))
+        manager_state_path = self._manager_state_path(checkpoint_path)
+        with manager_state_path.open("w") as f:
+            json.dump(
+                {
+                    "status": self._status.name,
+                    "model_rollout_step": self._model_rollout_step,
+                    "model_rollout_step_override": model_rollout_step_override,
+                },
+                f,
+            )
 
-    def resume(self, checkpoint_path: Path | str) -> None:
+    def resume(self, checkpoint_path: Path | str) -> int:
         """Resume all task sampler states and the shared replay buffer."""
+        checkpoint_path = Path(checkpoint_path)
         for task in self.task_runners:
             task.sampler.resume(self._task_checkpoint_path(checkpoint_path, task.task_name))
         asyncio_run(self.replay_buffer.resume(checkpoint_path))
+
+        manager_state_path = self._manager_state_path(checkpoint_path)
+        saved_model_rollout_step = self._model_rollout_step
+        if manager_state_path.exists():
+            with manager_state_path.open("r") as f:
+                manager_state = json.load(f)
+            saved_model_rollout_step = manager_state.get("model_rollout_step", saved_model_rollout_step)
+            model_rollout_step_override = manager_state.get("model_rollout_step_override")
+            if model_rollout_step_override is not None:
+                saved_model_rollout_step = model_rollout_step_override
+
+        self._update_event = asyncio.Event()
+        self._finish_event = asyncio.Event()
+        self._update_event.set()
+        self._status = AgentLoopManagerStatus.UPDATE_ABORT
+        self._pause_time_s = 0.0
+        self._model_rollout_step = saved_model_rollout_step
+        return saved_model_rollout_step

@@ -366,3 +366,136 @@ Notes about the worktree:
 建议下一步：
 1. 继续做 checkpoint / resume，把 `AgentLoopManager.save()/resume()` 的 paused-save 语义和 trainer 恢复流程补齐
 2. 然后补 colocate integration regression coverage，把两个主 config 的共享路径回归测试接上
+
+---
+
+本次实现进展补充（非共卡 checkpoint / resume 收口）：
+
+本次完成内容：
+- 完成 `xtuner/v1/rl/agent_loop/agent_loop_manager.py` 的 checkpoint state 落盘与恢复：
+  - `save()` 现在除了 sampler / replay buffer，还会写入 `agent_loop_manager_state.json`
+  - 状态文件中记录：
+    - `status`
+    - `model_rollout_step`
+    - `model_rollout_step_override`
+  - `resume()` 现在会把 manager 恢复到暂停态：
+    - `_status = UPDATE_ABORT`
+    - `_update_event` 置位
+    - `_pause_time_s` 清零
+    - `_model_rollout_step` 优先使用保存时的 override
+- 加入 checkpoint 安全检查：
+  - 如果任一 strategy 仍有未清理的 `_pending_tasks`，`AgentLoopManager.save()` 会直接报错
+  - 强制 checkpoint 只能发生在显式 cleanup 之后的静止点
+- 在 `AgentLoopManager` 中补了 `reset(model_rollout_step=...)`，并保留 `continue_product()` 作为兼容别名：
+  - 这样 resume 后可以先维持 paused 状态
+  - 等 trainer 完成权重重绑后，再显式恢复 producer
+- 完成 `xtuner/v1/train/rl_disaggregated_trainer.py` 的 resume 接线：
+  - 去掉原先的 `NotImplementedError`
+  - resume 时先 `train_controller.resume(...)`
+  - 再读取 `train_state.json` 恢复 `cur_step`
+  - 然后 `agent_loop_manager.resume(...)`
+  - 再执行 `bind_train_rollout(...)` + `fake_update_weights()`
+  - 最后 `agent_loop_manager.reset(model_rollout_step=saved_model_rollout_step)`
+- 为了保证 save-before-reset 语义，覆盖了 `RLDisaggregatedTrainer._maybe_save_checkpoint()`：
+  - checkpoint 保存时会把 `model_rollout_step_override=cur_step` 传给 manager
+  - 这样恢复后 rollout 直接按“同步后的目标权重版本”继续，而不是退回到 cleanup 前的旧版本
+- 顺手补了 `xtuner/v1/train/rl_colocate_trainer.py` 的一个兼容点：
+  - colocate resume 完成后也会显式 `reset(...)`
+  - 避免 manager 恢复成 paused 态后影响后续正常 `produce_batch()`
+
+本次涉及文件：
+- `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+- `xtuner/v1/train/rl_disaggregated_trainer.py`
+- `xtuner/v1/train/rl_colocate_trainer.py`
+- `tests/rl/test_multi_task_agent_loop_manager.py`
+- `tests/rl/test_rl_disaggregated_trainer.py`
+- `feature_list.json`
+
+验证结果：
+- 先做 mandatory verification：
+  - `pytest -q tests/rl/test_multi_task_agent_loop_manager.py tests/rl/test_rl_disaggregated_trainer.py`
+  - 结果：`13 passed`
+- 本次改动后的 focused tests：
+  - `pytest -q tests/rl/test_multi_task_agent_loop_manager.py tests/rl/test_rl_disaggregated_trainer.py tests/rl/test_rl_colocate_trainer.py`
+  - 结果：`18 passed`
+- 主线快测：
+  - `bash run_test.sh`
+  - 结果：`31 passed`
+
+本次发现与说明：
+- 现在 checkpoint 保存点已经被收紧到“cleanup 完成后、reset 恢复 producer 前”的静止态。
+- manager 的状态文件即使缺失，也仍可回退到旧 checkpoint 的最小兼容恢复路径；但新 checkpoint 会额外带上 rollout step override。
+- 这次没有改 `run_test.sh`，现有主线快测已经覆盖到了新增 manager / disagg trainer 回归。
+- 基于 focused tests 和 `run_test.sh` 全绿，feature 7 已标记为通过。
+- 当前完成状态：`7/9 features passing`
+
+建议下一步：
+1. 继续做 colocate trainer integration regression coverage，优先围绕两个主 config 把共享 producer/manager 路径的回归补齐。
+2. 然后补 disaggregated draft config 的最小 smoke coverage，把 single-task / multi-task 两条草案配置接进自动测试。
+
+---
+
+本次更正说明（命名收口）：
+
+- 上一轮 checkpoint / resume 实现里，我误把已经统一好的 `continue_product(...)` 命名又引回成了 `reset(...)`。
+- 现已全部改回以 `continue_product(...)` 为唯一恢复 producer 的接口：
+  - `AgentLoopManager` 中不再新增 `reset(...)`
+  - `RLDisaggregatedTrainer` / `RLColocateTrainer` 恢复 producer 时统一调用 `continue_product(...)`
+  - 对应测试也已同步改回 `continue_product(...)`
+
+验证结果：
+- `pytest -q tests/rl/test_rl_disaggregated_trainer.py tests/rl/test_multi_task_agent_loop_manager.py tests/rl/test_rl_colocate_trainer.py`
+  - 结果：`18 passed`
+
+---
+
+本次实现进展补充（命名统一与文档同步收口）：
+
+本次完成内容：
+- 继续收口 `AgentLoopManager` / trainer / strategy 的共享接口命名：
+  - 共卡 `produce_batch()` 入口现在直接复用 `continue_product(model_rollout_step=rollout_step)` 恢复到干净状态并对齐当前权重版本
+  - `cleanup_pending_tasks(...)` 已统一改名为 `pause_product(...)`
+  - `AsyncProduceStrategy` / `AgentLoopManager` / `RLDisaggregatedTrainer` / 对应测试全部切到 `pause_product`
+- 调整共卡 resume 行为：
+  - 去掉 `RLColocateTrainer` 初始化阶段额外的 `self.agent_loop_manager.continue_product(...)`
+  - 改为让共卡 `produce_batch()` 自己在入口清理 paused 状态并设置 `_model_rollout_step`
+- 收口 `_produce_batch_to_buffer()` 的参数语义：
+  - 不再显式接收 `model_rollout_step`
+  - 统一从 `self._model_rollout_step` 读取
+  - 共卡路径在 `produce_batch()` 入口维护这个状态，非共卡路径由 `continue_product(...)` 在同步后维护
+- 同步更新设计文档：
+  - `design/disagg_design.md`
+  - `design/disagg_draft.py`
+  - 文档中的接口名、主流程顺序、checkpoint 保存点、共卡适配逻辑都已对齐当前实现
+- 将 `RLDisaggregatedTrainerConfig` 中的外部字段名从 `trigger_parameter_sync_step` 改为 `sync_weights_interval`
+  - 代码实现、示例配置、环境变量名都已同步切换
+  - `examples/v1/config/rl_disagg_single.py`
+  - `examples/v1/config/rl_disagg_multi.py`
+- 新增 disagg save cadence 校验：
+  - `checkpoint_interval` 和 `hf_interval` 现在要求必须是 `sync_weights_interval` 的倍数
+  - 否则会直接报错，避免“只在最小公倍数步才实际保存”的隐蔽行为
+
+本次涉及文件：
+- `xtuner/v1/rl/agent_loop/agent_loop_manager.py`
+- `xtuner/v1/rl/agent_loop/producer.py`
+- `xtuner/v1/train/rl_disaggregated_trainer.py`
+- `tests/rl/test_multi_task_agent_loop_manager.py`
+- `tests/rl/test_producer.py`
+- `tests/rl/test_rl_disaggregated_trainer.py`
+- `examples/v1/config/rl_disagg_single.py`
+- `examples/v1/config/rl_disagg_multi.py`
+- `design/disagg_design.md`
+- `design/disagg_draft.py`
+
+验证结果：
+- `pytest -q tests/rl/test_rl_disaggregated_trainer.py tests/rl/test_rl_colocate_trainer.py tests/rl/test_multi_task_agent_loop_manager.py tests/rl/test_producer.py`
+  - 结果：`29 passed`
+- `bash run_test.sh`
+  - 结果：`34 passed`
+
+本次发现与说明：
+- 现在共卡 / 非共卡对 `continue_product(...)` 和 `pause_product(...)` 的职责边界更清晰：
+  - `pause_product(...)` 负责显式停 producer 并回收 pending
+  - `continue_product(...)` 负责恢复 producer 控制状态并推进 rollout 权重版本
+- disagg 配置中的 `sync_weights_interval` 现在和保存节奏有明确约束，避免配置值之间出现隐式不一致。
+- `work_dirs/` 和 `zdev/` 仍保持未跟踪状态，不纳入本次提交。

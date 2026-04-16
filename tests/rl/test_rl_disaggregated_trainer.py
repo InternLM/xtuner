@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.rl.agent_loop import ProduceBatchResult, ProduceBatchStatus
 from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerStatus
-from xtuner.v1.train.rl_disaggregated_trainer import RLDisaggregatedTrainer
+from xtuner.v1.train.rl_disaggregated_trainer import RLDisaggregatedTrainer, _validate_disagg_sync_schedule
 
 
 class _FakeManager:
@@ -26,8 +26,8 @@ class _FakeManager:
         self.calls.append(("get_batch", batch_size, rollout_step))
         return self._results.pop(0)
 
-    async def cleanup_pending_tasks(self, pause_product_for_update: bool = False):
-        self.calls.append(("cleanup_pending_tasks", pause_product_for_update))
+    async def pause_product(self, for_weight_update: bool = False):
+        self.calls.append(("pause_product", for_weight_update))
         return 0.25
 
     def continue_product(self, model_rollout_step: int):
@@ -146,6 +146,57 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertEqual(events, ["sync", "eval", "continue_product"])
         self.assertTrue(manager._finish_event.is_set())
         self.assertIn("produce_loop_exit", manager.calls)
+
+    def test_resume_from_checkpoint_syncs_weights_then_resets_manager(self):
+        trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
+        trainer.logger = MagicMock()
+        trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=Path(self.temp_dir.name))
+        trainer.train_controller = SimpleNamespace(resume=SimpleNamespace(remote=MagicMock(return_value="resume")))
+        trainer.rollout_controller = SimpleNamespace()
+        events: list[str] = []
+
+        def manager_resume(checkpoint_path):
+            events.append(f"manager_resume:{Path(checkpoint_path).name}")
+            return 5
+
+        def manager_continue_product(model_rollout_step: int):
+            events.append(f"continue_product:{model_rollout_step}")
+
+        trainer.agent_loop_manager = SimpleNamespace(
+            resume=MagicMock(side_effect=manager_resume),
+            continue_product=MagicMock(side_effect=manager_continue_product),
+        )
+        trainer.fake_update_weights = MagicMock(side_effect=lambda: events.append("fake_update"))
+
+        train_state_path = Path(self.temp_dir.name) / trainer._SAVE_TRAIN_STATE_PATH
+        train_state_path.write_text('{"cur_step": 3}')
+
+        with (
+            patch("xtuner.v1.train.rl_disaggregated_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+            patch(
+                "xtuner.v1.train.rl_disaggregated_trainer.bind_train_rollout",
+                side_effect=lambda train_controller, rollout_controller: events.append("bind"),
+            ),
+        ):
+            trainer._resume_from_checkpoint(self.temp_dir.name)
+
+        trainer.train_controller.resume.remote.assert_called_once_with(trainer._load_checkpoint_cfg)
+        self.assertEqual(trainer._cur_step, 3)
+        trainer.agent_loop_manager.resume.assert_called_once_with(Path(self.temp_dir.name))
+        self.assertTrue(events[0].startswith("manager_resume:"))
+        self.assertEqual(events[1:], ["bind", "fake_update", "continue_product:5"])
+
+    def test_validate_sync_schedule_accepts_multiples(self):
+        _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=4, hf_interval=6)
+        _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=-1, hf_interval=None)
+
+    def test_validate_sync_schedule_rejects_non_multiple_checkpoint_interval(self):
+        with self.assertRaisesRegex(ValueError, "checkpoint_interval=5.*sync_weights_interval=2"):
+            _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=5, hf_interval=-1)
+
+    def test_validate_sync_schedule_rejects_non_multiple_hf_interval(self):
+        with self.assertRaisesRegex(ValueError, "hf_interval=5.*sync_weights_interval=2"):
+            _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=4, hf_interval=5)
 
 
 if __name__ == "__main__":

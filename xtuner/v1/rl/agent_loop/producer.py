@@ -135,9 +135,7 @@ class ProduceStrategy(ABC):
         update_event: asyncio.Event | None = None,
     ) -> ProduceBatchStatus: ...
 
-    async def cleanup_pending_tasks(
-        self, agent_loop: AgentLoopSpec, replay_buffer: ReplayBuffer, task_name: str
-    ) -> float:
+    async def pause_product(self, agent_loop: AgentLoopSpec, replay_buffer: ReplayBuffer, task_name: str) -> float:
         return 0.0
 
 
@@ -299,9 +297,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                         sample.status = Status.ABORTED
                 await replay_buffer.put(group, task_name)
 
-    async def cleanup_pending_tasks(
-        self, agent_loop: AgentLoopSpec, replay_buffer: ReplayBuffer, task_name: str
-    ) -> float:
+    async def pause_product(self, agent_loop: AgentLoopSpec, replay_buffer: ReplayBuffer, task_name: str) -> float:
         pause_start = time.perf_counter()
         if not self._pending_tasks:
             return 0.0

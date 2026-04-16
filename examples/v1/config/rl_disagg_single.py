@@ -5,17 +5,17 @@ This config uses a mocked Disaggregated weight-sync hook until the real cross-de
 Required env vars: WORK_DIR, MODEL_PATH, DATA_PATH, EVAL_DATA_PATH
 Common optional env vars:
   TRAIN_NUM_WORKERS=4, ROLLOUT_NUM_WORKERS=4, TRAIN_BATCH_SIZE=64,
-  TOTAL_TRAIN_STEPS=45, TRIGGER_PARAMETER_SYNC_STEP=1,
+  TOTAL_TRAIN_STEPS=45, SYNC_WEIGHTS_INTERVAL=1,
   OVER_SAMPLE_THRESHOLD=0.0, PARTIAL_ROLLOUT=0,
   TAIL_BATCH_TRIGGER_SIZE=0, TAIL_BATCH_STALE_THRESHOLD=0, ENABLE_EVALUATE=0
 
 Mode mapping in the current design:
   Mode 1 (On-Policy):
-    TRIGGER_PARAMETER_SYNC_STEP=1
+    SYNC_WEIGHTS_INTERVAL=1
     OVER_SAMPLE_THRESHOLD=0.0
     PARTIAL_ROLLOUT=0
   Mode 2 (Stream Off-Policy):
-    TRIGGER_PARAMETER_SYNC_STEP>1
+    SYNC_WEIGHTS_INTERVAL>1
     OVER_SAMPLE_THRESHOLD=0.0
     PARTIAL_ROLLOUT=0
   Mode 3 (Async Stale):
@@ -27,7 +27,7 @@ Mode mapping in the current design:
 
 Responsibility split:
   - trainer / step scheduling:
-      TRAIN_BATCH_SIZE, TOTAL_TRAIN_STEPS, TRIGGER_PARAMETER_SYNC_STEP
+      TRAIN_BATCH_SIZE, TOTAL_TRAIN_STEPS, SYNC_WEIGHTS_INTERVAL
   - producer / replay-buffer policy:
       OVER_SAMPLE_THRESHOLD, PARTIAL_ROLLOUT,
       TAIL_BATCH_TRIGGER_SIZE, TAIL_BATCH_STALE_THRESHOLD
@@ -75,7 +75,7 @@ total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "16"))
 evaluate_step = int(os.environ.get("EVALUATE_STEP", str(total_train_steps)))
 train_optimizer_steps = int(os.environ.get("TRAIN_OPTIMIZER_STEPS", "1"))
 train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", str(32 * train_optimizer_steps)))
-trigger_parameter_sync_step = int(os.environ.get("TRIGGER_PARAMETER_SYNC_STEP", "1"))
+sync_weights_interval = int(os.environ.get("SYNC_WEIGHTS_INTERVAL", "1"))
 over_sample_threshold = float(os.environ.get("OVER_SAMPLE_THRESHOLD", "0.0"))
 partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
 tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "0"))
@@ -89,7 +89,7 @@ pack_max_length = int(os.environ.get("PACK_MAX_LENGTH", str(32 * 1024)))
 enable_evaluate = os.environ.get("ENABLE_EVALUATE", "0") == "1"
 
 # execution knobs:
-# - trigger_parameter_sync_step controls how many train steps share one weight-sync interval
+# - sync_weights_interval controls how many train steps share one weight-sync interval
 # - over_sample_threshold / partial_rollout feed the train-task produce strategy
 # - tail_batch_* controls replay-buffer recycling policy inside AsyncProduceStrategy
 
@@ -264,7 +264,7 @@ trainer = RLDisaggregatedTrainerConfig(
     load_from=model_path,
     train_batch_size=train_batch_size,
     total_train_steps=total_train_steps,
-    trigger_parameter_sync_step=trigger_parameter_sync_step,
+    sync_weights_interval=sync_weights_interval,
     enable_evaluate=enable_evaluate,
     enable_initial_evaluate=False,
     evaluate_step=evaluate_step,

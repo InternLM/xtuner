@@ -1,5 +1,8 @@
 import asyncio
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from xtuner.v1.rl.agent_loop.agent_loop_manager import (
@@ -16,14 +19,18 @@ from xtuner.v1.data_proto import Status
 class _FakeSampler:
     def __init__(self, size: int = 1):
         self._size = size
+        self.saved_paths: list[Path] = []
+        self.resumed_paths: list[Path] = []
 
     def __len__(self) -> int:
         return self._size
 
     def save(self, checkpoint_path):
+        self.saved_paths.append(Path(checkpoint_path))
         return None
 
     def resume(self, checkpoint_path):
+        self.resumed_paths.append(Path(checkpoint_path))
         return None
 
 
@@ -54,7 +61,7 @@ class _FakeProduceStrategy:
         self.called_update_events.append(update_event)
         return self.status
 
-    async def cleanup_pending_tasks(self, agent_loop, replay_buffer, task_name: str) -> float:
+    async def pause_product(self, agent_loop, replay_buffer, task_name: str) -> float:
         self.cleanup_call_count += 1
         return self.cleanup_pause_time_s
 
@@ -84,7 +91,7 @@ class _FakeStatusProduceStrategy:
         self.called_update_events.append(update_event)
         return self.status
 
-    async def cleanup_pending_tasks(self, agent_loop, replay_buffer, task_name: str) -> float:
+    async def pause_product(self, agent_loop, replay_buffer, task_name: str) -> float:
         self.cleanup_call_count += 1
         return self.pause_time_s
 
@@ -129,6 +136,8 @@ class _FakeReplayBuffer:
     def __init__(self, rollout_states_by_task: dict[str, list[list[str]]], leftover_counts: dict[tuple[str, Status], int]):
         self._rollout_states_by_task = rollout_states_by_task
         self._leftover_counts = leftover_counts
+        self.saved_paths: list[Path] = []
+        self.resumed_paths: list[Path] = []
 
     async def get(self, batch_size: int, task_name: str, group_status: Status):
         assert group_status == Status.COMPLETED
@@ -136,6 +145,13 @@ class _FakeReplayBuffer:
 
     async def count(self, task_name: str, group_status: Status):
         return self._leftover_counts.get((task_name, group_status), 0)
+
+    async def save(self, checkpoint_path: Path | str):
+        self.saved_paths.append(Path(checkpoint_path))
+
+    async def resume(self, checkpoint_path: Path | str):
+        self.resumed_paths.append(Path(checkpoint_path))
+
 
 def _fake_agent_loop():
     rollout_ctl = MagicMock()
@@ -214,10 +230,14 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             ],
             replay_buffer=replay_buffer,
         )
+        multi_task_manager._status = AgentLoopManagerStatus.UPDATE_ABORT
+        multi_task_manager._update_event.set()
 
         result = await multi_task_manager.produce_batch(batch_size=7, rollout_step=3)
 
         self.assertEqual(result.task_batch_sizes, {"task_a": 5, "task_b": 2, "task_c": 0})
+        self.assertEqual(multi_task_manager._status, AgentLoopManagerStatus.NORMAL)
+        self.assertEqual(multi_task_manager._model_rollout_step, 3)
         self.assertEqual(strategy_a.called_batch_sizes, [5])
         self.assertEqual(strategy_b.called_batch_sizes, [2])
         self.assertEqual(strategy_c.called_batch_sizes, [])
@@ -236,6 +256,72 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertIn("task_a", result.task_results)
         self.assertIn("task_b", result.task_results)
         self.assertIn("task_c", result.task_results)
+
+    def test_save_and_resume_roundtrip_restores_paused_manager_state(self):
+        sampler = _FakeSampler()
+        replay_buffer = _FakeReplayBuffer({}, {})
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=sampler,
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=replay_buffer,
+        )
+        manager._status = AgentLoopManagerStatus.EXPIRED_BATCH
+        manager._model_rollout_step = 2
+        manager._pause_time_s = 1.5
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            checkpoint_path = Path(tmp_dir)
+            manager.save(checkpoint_path, model_rollout_step_override=7)
+
+            state_path = checkpoint_path / manager._MANAGER_STATE_PATH
+            with state_path.open("r") as f:
+                state = json.load(f)
+
+            self.assertEqual(state["status"], "EXPIRED_BATCH")
+            self.assertEqual(state["model_rollout_step"], 2)
+            self.assertEqual(state["model_rollout_step_override"], 7)
+
+            restored_step = manager.resume(checkpoint_path)
+
+        self.assertEqual(restored_step, 7)
+        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
+        self.assertTrue(manager._update_event.is_set())
+        self.assertFalse(manager._finish_event.is_set())
+        self.assertEqual(manager._pause_time_s, 0.0)
+        self.assertEqual(manager._model_rollout_step, 7)
+        self.assertEqual(sampler.saved_paths, [Path(tmp_dir) / manager._TASK_CHECKPOINT_DIR / "task_a"])
+        self.assertEqual(sampler.resumed_paths, [Path(tmp_dir) / manager._TASK_CHECKPOINT_DIR / "task_a"])
+        self.assertEqual(replay_buffer.saved_paths, [Path(tmp_dir)])
+        self.assertEqual(replay_buffer.resumed_paths, [Path(tmp_dir)])
+
+    def test_save_rejects_pending_async_tasks(self):
+        strategy = _FakeProduceStrategy()
+        strategy._pending_tasks = {object()}
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                )
+            ],
+            replay_buffer=_FakeReplayBuffer({}, {}),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaisesRegex(RuntimeError, "pending rollout tasks"):
+                manager.save(tmp_dir)
 
     async def test_custom_get_task_batch_sizes_can_disable_tasks(self):
         strategy_a = _FakeProduceStrategy()
@@ -312,6 +398,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.produce_batch(batch_size=2, rollout_step=7)
 
         self.assertEqual(strategy.cleanup_call_count, 1)
+        self.assertEqual(manager._model_rollout_step, 7)
         self.assertEqual(strategy.called_rollout_steps, [7])
         self.assertEqual(strategy.called_model_rollout_steps, [7])
         self.assertEqual(len(strategy.called_update_events), 1)
@@ -340,7 +427,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(AssertionError, "must return non-empty rollout_states"):
             await manager.produce_batch(batch_size=1, rollout_step=3)
 
-    async def test_cleanup_pending_tasks_for_pause_product_for_update_sets_status_and_pause_time(self):
+    async def test_pause_product_for_weight_update_sets_status_and_pause_time(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
         manager = AgentLoopManager(
             task_runners=[
@@ -356,7 +443,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
 
-        pause_time_s = await manager.cleanup_pending_tasks(pause_product_for_update=True)
+        pause_time_s = await manager.pause_product(for_weight_update=True)
 
         self.assertEqual(pause_time_s, 2.5)
         self.assertEqual(strategy.cleanup_call_count, 1)
@@ -440,7 +527,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
 
-        status = await manager._produce_batch_to_buffer(batch_size=3, rollout_step=5, model_rollout_step=5)
+        manager._model_rollout_step = 5
+        status = await manager._produce_batch_to_buffer(batch_size=3, rollout_step=5)
 
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
 

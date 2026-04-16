@@ -13,7 +13,7 @@ Common optional env vars:
     ROLLOUT_NUM_WORKERS=4
     TRAIN_BATCH_SIZE=64
     TOTAL_TRAIN_STEPS=4
-    TRIGGER_PARAMETER_SYNC_STEP=1
+    SYNC_WEIGHTS_INTERVAL=1
     OVER_SAMPLE_THRESHOLD=0.0
     PARTIAL_ROLLOUT=0
     GSM8K_TASK_WEIGHT=3.0
@@ -65,7 +65,7 @@ total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "4"))
 evaluate_step = int(os.environ.get("EVALUATE_STEP", str(total_train_steps)))
 train_optimizer_steps = int(os.environ.get("TRAIN_OPTIMIZER_STEPS", "4"))
 train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", "64"))
-trigger_parameter_sync_step = int(os.environ.get("TRIGGER_PARAMETER_SYNC_STEP", "1"))
+sync_weights_interval = int(os.environ.get("SYNC_WEIGHTS_INTERVAL", "1"))
 over_sample_threshold = float(os.environ.get("OVER_SAMPLE_THRESHOLD", "0.0"))
 partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
 tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "0"))
@@ -341,7 +341,7 @@ trainer = RLDisaggregatedTrainerConfig(
     load_from=model_path,
     train_batch_size=train_batch_size,
     total_train_steps=total_train_steps,
-    trigger_parameter_sync_step=trigger_parameter_sync_step,
+    sync_weights_interval=sync_weights_interval,
     enable_evaluate=enable_evaluate,
     enable_initial_evaluate=False,
     evaluate_step=evaluate_step,
