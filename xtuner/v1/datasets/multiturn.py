@@ -1,6 +1,10 @@
+import base64
 import os
 import re
 from typing import Dict, List
+
+import ray
+from ray import cloudpickle
 
 from xtuner.v1.utils import get_logger
 
@@ -80,14 +84,21 @@ def tokenize(
                 and msg[0]['extra_info']['routed_experts'] is not None
             ):
                 routed_experts_ref = msg[0]['extra_info']['routed_experts']
-                if routed_experts_ref.hex() in previous_routed_experts_tasks:
-                    logger.warning(
-                        '[tokenize_fn] Detected repeated routed_experts_ref, setting routed_experts to None to avoid errors.'
-                    )
-                    routed_experts = None
+                if isinstance(routed_experts_ref, ray.ObjectRef):
+                    if routed_experts_ref.hex() in previous_routed_experts_tasks:
+                        logger.warning(
+                            '[tokenize_fn] Detected repeated routed_experts_ref, setting routed_experts to None to avoid errors.'
+                        )
+                        routed_experts = None
+                    else:
+                        routed_experts = routed_experts_ref
+                        previous_routed_experts_tasks.add(routed_experts_ref.hex())
                 else:
-                    routed_experts = routed_experts_ref
-                    previous_routed_experts_tasks.add(routed_experts_ref.hex())
+                    assert isinstance(
+                        routed_experts_ref, str
+                    ), f'Expected routed_experts_ref to be a base64 string, but got {type(routed_experts_ref)}'
+                    ref_bytes = base64.b64decode(routed_experts_ref.encode('utf-8'))
+                    routed_experts = cloudpickle.loads(ref_bytes)
             else:
                 routed_experts = None
 
