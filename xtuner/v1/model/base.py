@@ -1237,6 +1237,95 @@ class BaseModel(nn.Module):
             + math.ceil(fused_size / bucket_size)
         )
 
+    def _iter_hf_save_chunks(
+        self,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+        device: torch.device | str = "cpu",
+    ) -> Generator[tuple[str, list[str], list[torch.Tensor]], None, None]:
+        assert save_dtype in [torch.float8_e4m3fn, torch.bfloat16], f"save_dtype {save_dtype} is not supported"
+
+        shard_gen = self._get_shard_hf_param(
+            self._group_param_by_load_spec(LoadEnum.SHARD),
+            dtype=save_dtype,
+            device=device,
+        )
+        same_gen = self._get_same_hf_param(
+            self._group_param_by_load_spec(LoadEnum.SAME),
+            dtype=save_dtype,
+            device=device,
+        )
+        fused_gen = self._get_fused_hf_param(
+            self._group_param_by_load_spec(LoadEnum.FUSED),
+            dtype=save_dtype,
+            device=device,
+        )
+
+        is_others_save_rank = not dist.is_initialized() or dist.get_rank() == 0
+        save_rank = dist.get_rank() if dist.is_initialized() else 0
+
+        saved_names: set[str] = set()
+        safetensor_index = 0
+
+        for name_list, hf_tensor_list in fused_gen:
+            if not name_list:
+                continue
+            safetensor_index += 1
+            safetensor_name = f"{safetensors_prefix}-{safetensor_index:04d}-fused-save_rank{save_rank}.safetensors"
+            saved_names.update(name_list)
+            yield safetensor_name, name_list, hf_tensor_list
+
+        safetensor_index = 0
+        for name_list, hf_tensor_list in chain(same_gen, shard_gen):
+            safetensor_index += 1
+            safetensor_name = f"{safetensors_prefix}-{safetensor_index:04d}-others-save_rank{save_rank}.safetensors"
+            if not is_others_save_rank:
+                continue
+
+            unique_name_list: list[str] = []
+            unique_hf_tensor_list: list[torch.Tensor] = []
+            for name, hf_tensor in zip(name_list, hf_tensor_list):
+                if name in saved_names:
+                    continue
+                saved_names.add(name)
+                unique_name_list.append(name)
+                unique_hf_tensor_list.append(hf_tensor)
+            if unique_name_list:
+                yield safetensor_name, unique_name_list, unique_hf_tensor_list
+
+    def _write_hf_save_plan(self, save_plan: Mapping[str, object]) -> list[str]:
+        hf_dir = cast(Path, save_plan["hf_dir"])
+        save_tasks = cast(list[tuple[str, dict[str, torch.Tensor]]], save_plan["save_tasks"])
+
+        written_files: list[str] = []
+        for safetensor_name, tensors in save_tasks:
+            _save_file(tensors, hf_dir / safetensor_name)
+            if tensors:
+                written_files.append(safetensor_name)
+        return written_files
+
+    def _write_hf_index_and_config(self, hf_dir: Path | str, weight_map: Mapping[str, str]) -> None:
+        if isinstance(hf_dir, str):
+            hf_dir = Path(hf_dir)
+
+        if self.config.hf_config is None and self._hf_path is None:
+            raise RuntimeError("Internal Error, both self.config.hf_config and self._hf_path are None")
+
+        if self.config.hf_config is not None:
+            self.config.save_hf(hf_dir)
+        else:
+            for file in cast(Path, self._hf_path).iterdir():
+                if file.suffix != ".safetensors":
+                    target_path = hf_dir / file.name
+                    if file.is_file():
+                        copy(file, target_path)
+                    else:
+                        copytree(file, target_path, ignore_dangling_symlinks=True, dirs_exist_ok=True)
+
+        with open(hf_dir / "model.safetensors.index.json", "w") as f:
+            index = {"weight_map": dict(weight_map), "metadata": {}}
+            json.dump(index, f, indent=2, ensure_ascii=False)
+
     def _save_hf(
         self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"
     ):
