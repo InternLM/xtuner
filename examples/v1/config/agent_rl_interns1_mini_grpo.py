@@ -1,3 +1,4 @@
+import json
 import os
 from copy import deepcopy
 
@@ -16,8 +17,9 @@ from xtuner.v1.data_proto.rl_data import (
     SampleParams,
     update_dataflow_item,
 )
-from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
+from xtuner.v1.datasets import DatasetConfig, Qwen3VLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig
+from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFnConfig
 from xtuner.v1.model import Qwen3VLMoE30BA3Config
 from xtuner.v1.module.rope.rope import RopeScalingConfig
 from xtuner.v1.ray.base import (
@@ -119,10 +121,6 @@ evaluation_sample_params = deepcopy(training_sample_params)
 evaluation_sample_params.temperature = 0.8
 
 # 2. dataset
-import json
-
-from xtuner.v1.datasets import DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFnConfig
 
 
 def parse_xpuyu_json_cfg(path, tokenize_fn_cfg, max_prompt_length, data_judger_mapping, ignore_multimodal_info=False):
