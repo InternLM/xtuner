@@ -216,35 +216,39 @@ ENV XTUNER_SGLANG_ENVS_DIR=/envs/sglang
 # RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 RUN \
    pip install --target ${XTUNER_SGLANG_ENVS_DIR} \
-   sglang==0.5.9 sgl-kernel==0.3.21 \
-   apache-tvm-ffi==0.1.9 \
-   anthropic==0.86.0 \
-   build==1.4.0 \
+   sglang==0.5.10 sglang-kernel==0.4.1 \
+   apache-tvm-ffi==0.1.10 \
+   anthropic==0.94.0 \
+   build==1.4.3 \
    cuda-python==12.9.0 \
    decord2==3.2.0 \
-   flashinfer_python==0.6.3 \
-   flashinfer_cubin==0.6.3 \
+   flashinfer_python==0.6.7.post2 \
+   flashinfer_cubin==0.6.7.post2 \
    gguf==0.18.0 \
-   modelscope==1.35.3 \
+   modelscope==1.35.4 \
    nvidia-cutlass-dsl==4.4.2 \
+   nvidia-cutlass-dsl-libs-base==4.4.2 \
    openai-harmony==0.0.4 \
    openai==2.6.1 \
    outlines==0.1.11 \
-   quack-kernels==0.2.4 \
+   quack-kernels==0.3.9 \
    timm==1.0.16 \
    torchao==0.9.0 \
    torchaudio==2.9.1 \
-   torchcodec==0.8.0 \
+   torchcodec==0.9.1 \
    xgrammar==0.1.32 \
-   smg-grpc-proto==0.4.5 \
-   grpcio==1.78.1 \
-   grpcio-reflection==1.78.1 \
+   smg-grpc-proto==0.4.6 \
+   smg-grpc-servicer==0.5.2 \
+   grpcio==1.80.0 \
+   grpcio-reflection==1.80.0 \
    grpcio-health-checking==1.80.0 \
    pycryptodomex==3.23.0 \
-   lxml==6.0.2 \
+   lxml==6.0.3 \
+   mistral_common==1.11.0 \
    cuda-bindings==12.9.6 \
-   cuda-pathfinder==1.5.0 \
-   nvidia-cudnn-frontend==1.21.0 \
+   cuda-pathfinder==1.5.3 \
+   cuda-tile==1.2.0 \
+   nvidia-cudnn-frontend==1.22.1 \
    lark==1.3.1 \
    pycountry==26.2.16 \
    airportsdata==20260315 \
@@ -253,11 +257,11 @@ RUN \
    pyproject_hooks==1.2.0 \
    huggingface_hub==0.36.2 \
    torch_memory_saver==0.0.9 \
-   diskcache==5.6.3 distro==1.9.0 jiter==0.13.0 \
-   llguidance==0.7.11 blobfile==3.0.0 \
+   diskcache==5.6.3 distro==1.9.0 jiter==0.14.0 \
+   llguidance==0.7.30 blobfile==3.0.0 watchfiles==1.1.1 \
    pybase64 orjson uvloop setproctitle msgspec partial_json_parser \
-   compressed_tensors python-multipart \
-   hf_transfer interegular --no-cache-dir --no-deps -i ${DEFAULT_PYPI_URL}
+   compressed_tensors python-multipart interegular \
+   --no-cache-dir --no-deps -i ${DEFAULT_PYPI_URL}
 
 # install lmdeploy and its missing runtime requirements
 ARG LMDEPLOY_VERSION
