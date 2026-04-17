@@ -158,7 +158,9 @@ data_judger_mapping = {
     'BrowseComp-ZH': {"compass_verifier_v2": 1.0},
     'HLE': {"compass_verifier_v2": 1.0},
 }
-tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path, enable_3d_rope=False, debug=True)
+tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(
+    processor_path=model_path, enable_3d_rope=False, debug=True, chat_template='qwen3-vl-rl'
+)
 train_dataset_cfg = parse_xpuyu_json_cfg(
     os.environ['TRAIN_DATA_PATH'], tokenize_fn_cfg, max_prompt_length, data_judger_mapping
 )
