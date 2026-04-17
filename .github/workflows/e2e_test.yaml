@@ -24,6 +24,8 @@ on:
         default: 'all'
   schedule:
     - cron:  '00 22 * * 0-4'
+env:
+  CI_GPU_IMAGE_REGISTRY: ${{ secrets.CI_GPU_IMAGE_REGISTRY }}
 
 jobs:
   ete_test:
