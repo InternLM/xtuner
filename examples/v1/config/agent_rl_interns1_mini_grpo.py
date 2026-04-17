@@ -9,7 +9,6 @@ from functools import partial
 
 import ray
 from lagent.actions.mcp_client import AsyncMCPClient
-from lagent.actions.web_visitor import WebVisitor
 from lagent.agents.fc_agent import FunctionCallAgent, get_tool_prompt
 from ray.util.placement_group import placement_group
 
@@ -31,13 +30,9 @@ from xtuner.v1.data_proto.rl_data import (
     update_dataflow_item,
 )
 from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
-from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn.xpuyu_dataset_vl import RLTokenizeFnConfig
-from xtuner.v1.float8 import Float8Config, ScalingGranularity
-from xtuner.v1.model import Qwen3VLMoE30BA3Config, Qwen3VLMoE235BA22Config
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config, Qwen3MoE235BA22Config
+from xtuner.v1.datasets.config import DataloaderConfig
+from xtuner.v1.model import Qwen3VLMoE30BA3Config
 from xtuner.v1.module.rope.rope import RopeScalingConfig
-from xtuner.v1.module.router.greedy import GreedyRouterConfig
 from xtuner.v1.ray.base import (
     AcceleratorResourcesConfig,
     AutoAcceleratorWorkers,
@@ -63,10 +58,10 @@ if not ray.is_initialized():
     ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG_POST_MORTEM": "0"}})
 
 experimental_name = os.path.basename(__file__).split(".py")[0]
-base_work_dir = "/mnt/shared-storage-user/llmit/user/wangziyi/projs/xtuner/work_dir"
+base_work_dir = os.environ["BASE_WORK_DIR"]
 work_dir = os.path.join(base_work_dir, experimental_name)
 
-model_path = "/mnt/shared-storage-user/llmit1/user/liujiangning/exp/s1_1_delivery_data_verification/sft/work_dirs/s1pro_mini_sft0121a/20260120183229/hf-1647"
+model_path = os.environ["MODEL_PATH"]
 stop_word = "<|im_end|>"
 
 # basic settings
@@ -141,16 +136,6 @@ evaluation_sample_params.temperature = 0.8
 # evaluation_sample_params.max_tokens = max_response_length
 
 data_judger_mapping = {
-    # 'math': {"compass_verifier_v2": 1.0},
-    # 'GPQA_diamond': {"compass_verifier_v2": 1.0},
-    # 'AIME2024': {"compass_verifier_v2": 1.0},
-    # 'AIME2025': {"compass_verifier_v2": 1.0},
-    # 'miroRL': {"compass_verifier_v2": 1.0},
-    # 'musique': {"compass_verifier_v2": 1.0},
-    # 'websailor': {"compass_verifier_v2": 1.0},
-    # 'webdancer': {"compass_verifier_v2": 1.0},
-    'MS003_DD003_AS004_WEWA003_NTKWS003_2_4': {"compass_verifier_v2": 1.0},
-    'MS003_DD003_AS004_WEWA003_NTKWS003_4_6': {"compass_verifier_v2": 1.0},
     'GAIA_sft_1229': {"compass_verifier_v2": 1.0},
     'gaia-level1': {"compass_verifier_v2": 1.0},
     'gaia-level2': {"compass_verifier_v2": 1.0},
@@ -179,169 +164,18 @@ tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(
 )
 
 # 2. dataset
-train_dataset_cfg = [
-    {
-        "dataset": DatasetConfig(
-            name='MS003_DD003_AS004_WEWA003_NTKWS003_2_4',
-            anno_path="/mnt/shared-storage-user/llmit1/user/liujiangning/data/s1_1_rl_delivery_agent/exp_rl/MS003_DD003_AS004_WEWA003_NTKWS003/jsonl_v2/rollout-glm47_avgpass_0.2_0.4.jsonl",
-            sample_ratio=1.0,
-            media_root=None,
-            class_name='VLMJsonlDataset',
-        ),
-        "tokenize_fn": RLTokenizeFnConfig(
-            tokenize_fn_cfg=tokenize_fn_cfg,
-            system_prompt=None,
-            max_length=max_prompt_length,
-            data_judger_mapping=data_judger_mapping,
-            ignore_multimodal_info=False,
-        ),
-    },
-    {
-        "dataset": DatasetConfig(
-            name='MS003_DD003_AS004_WEWA003_NTKWS003_4_6',
-            anno_path="/mnt/shared-storage-user/llmit1/user/liujiangning/data/s1_1_rl_delivery_agent/exp_rl/MS003_DD003_AS004_WEWA003_NTKWS003/jsonl_v2/rollout-glm47_avgpass_0.4_0.6.jsonl",
-            sample_ratio=1.0,
-            media_root=None,
-            class_name='VLMJsonlDataset',
-        ),
-        "tokenize_fn": RLTokenizeFnConfig(
-            tokenize_fn_cfg=tokenize_fn_cfg,
-            system_prompt=None,
-            max_length=max_prompt_length,
-            data_judger_mapping=data_judger_mapping,
-            ignore_multimodal_info=False,
-        ),
-    },
-    {
-        "dataset": DatasetConfig(
-            name='MS003_DD003_AS004_WEWA003_NTKWS003_6_8',
-            anno_path="/mnt/shared-storage-user/llmit1/user/liujiangning/data/s1_1_rl_delivery_agent/exp_rl/MS003_DD003_AS004_WEWA003_NTKWS003/jsonl_v2/rollout-glm47_avgpass_0.6_0.8.jsonl",
-            sample_ratio=0.5,
-            media_root=None,
-            class_name='VLMJsonlDataset',
-        ),
-        "tokenize_fn": RLTokenizeFnConfig(
-            tokenize_fn_cfg=tokenize_fn_cfg,
-            system_prompt=None,
-            max_length=max_prompt_length,
-            data_judger_mapping=data_judger_mapping,
-            ignore_multimodal_info=False,
-        ),
-    },
-    {
-        "dataset": DatasetConfig(
-            name='GAIA_sft_1229',
-            anno_path="/mnt/shared-storage-user/llmit1/user/liujiangning/data/s1_1_rl_delivery_agent/exp_rl/GAIA_sft_1229/jsonl_v2/GAIA_sft_1229.jsonl",
-            sample_ratio=1.0,
-            media_root=None,
-            class_name='VLMJsonlDataset',
-        ),
-        "tokenize_fn": RLTokenizeFnConfig(
-            tokenize_fn_cfg=tokenize_fn_cfg,
-            system_prompt=None,
-            max_length=max_prompt_length,
-            data_judger_mapping=data_judger_mapping,
-            ignore_multimodal_info=False,
-        ),
-    },
-]
-eval_dataset_cfg = (
-    [
-        # {
-        #     "dataset": DatasetConfig(
-        #         name="websearch",
-        #         anno_path=eval_data_path,
-        #         sample_ratio=1.0,
-        #         media_root=None,
-        #         class_name='VLMJsonlDataset'
-        #     ),
-        #     "tokenize_fn": RLTokenizeFnConfig(
-        #         tokenize_fn_cfg=tokenize_fn_cfg,
-        #         system_prompt=None,
-        #         max_length=max_prompt_length,
-        #         data_judger_mapping=data_judger_mapping,
-        #         ignore_multimodal_info=True,
-        #     ),
-        # },
-        {
-            "dataset": DatasetConfig(
-                name="gaia",
-                anno_path="/mnt/shared-storage-user/llmit/user/wangziyi/projs/crg_rl_projects/data/gaia_text_103.jsonl",
-                sample_ratio=1.0,
-                media_root=None,
-                class_name='VLMJsonlDataset',
-            ),
-            "tokenize_fn": RLTokenizeFnConfig(
-                tokenize_fn_cfg=tokenize_fn_cfg,
-                system_prompt=None,
-                max_length=max_prompt_length,
-                data_judger_mapping=data_judger_mapping,
-                ignore_multimodal_info=True,
-            ),
-        },
-        {
-            "dataset": DatasetConfig(
-                name="browsecomp-zh",
-                anno_path="/mnt/shared-storage-user/llmit/user/wangziyi/projs/crg_rl_projects/data/browsecomp-zh.jsonl",
-                sample_ratio=0.0,
-                media_root=None,
-                class_name='VLMJsonlDataset',
-            ),
-            "tokenize_fn": RLTokenizeFnConfig(
-                tokenize_fn_cfg=tokenize_fn_cfg,
-                system_prompt=None,
-                max_length=max_prompt_length,
-                data_judger_mapping=data_judger_mapping,
-                ignore_multimodal_info=True,
-            ),
-        },
-        {
-            "dataset": DatasetConfig(
-                name="hle",
-                anno_path="/mnt/shared-storage-user/llmit/user/wangziyi/projs/crg_rl_projects/data/hle.jsonl",
-                sample_ratio=0.0,
-                media_root=None,
-                class_name='VLMJsonlDataset',
-            ),
-            "tokenize_fn": RLTokenizeFnConfig(
-                tokenize_fn_cfg=tokenize_fn_cfg,
-                system_prompt=None,
-                max_length=max_prompt_length,
-                data_judger_mapping=data_judger_mapping,
-                ignore_multimodal_info=True,
-            ),
-        },
-    ]
-    if enable_evaluate
-    else []
+from xtuner.v1.datasets.rl_tokenize_fn.xpuyu_dataset_vl import parse_xpuyu_json_cfg
+
+train_dataset_cfg = parse_xpuyu_json_cfg(
+    os.environ['TRAIN_DATA_PATH'], tokenize_fn_cfg, max_prompt_length, data_judger_mapping
+)
+eval_dataset_cfg = parse_xpuyu_json_cfg(
+    os.environ['EVAL_DATA_PATH'], tokenize_fn_cfg, max_prompt_length, data_judger_mapping, ignore_multimodal_info=True
 )
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="fake_collator", pack_level="none")
 
 # 3. judger
-judger_cfg = JudgerConfig(
-    reward_judger_configs=[
-        CompassVerifierV2Config(
-            hosts=[
-                "10.102.252.178:23333",
-                "10.102.252.178:23334",
-                "10.102.252.178:23335",
-                "10.102.252.178:23336",
-                "10.102.252.178:23337",
-                "10.102.252.178:23338",
-                "10.102.252.178:23339",
-                "10.102.252.178:23340",
-                "10.102.239.45:23333",
-                "10.102.239.45:23334",
-                "10.102.239.45:23335",
-                "10.102.239.45:23336",
-                "10.102.239.45:23337",
-                "10.102.239.45:23338",
-                "10.102.239.45:23339",
-                "10.102.239.45:23340",
-            ]
-        )
-    ]
-)
+judger_cfg = JudgerConfig(reward_judger_configs=[CompassVerifierV2Config(hosts=[])])
 
 
 def prepare_agent_inputs(env, group_data_item: RLDataFlowItem, is_training=False):
@@ -392,16 +226,7 @@ actions = [
         server_type='http',
         rate_limit=100.0,
         max_concurrency=30,
-        url=[
-            'http://100.103.21.152:8095/mcp',
-            'http://100.103.21.100:8090/mcp',
-            'http://100.103.21.153:8097/mcp',
-            'http://100.103.21.154:8099/mcp',
-            'http://100.103.31.58:8101/mcp',
-            'http://100.103.33.20:8103/mcp',
-            'http://100.103.33.21:8105/mcp',
-            'http://100.103.33.22:8107/mcp',
-        ],
+        url=[],
     ),
     dict(
         type=AsyncMCPClient,
@@ -409,16 +234,7 @@ actions = [
         server_type='http',
         rate_limit=100.0,
         max_concurrency=40,
-        url=[
-            'http://100.103.21.152:8096/mcp',
-            'http://100.103.21.100:8091/mcp',
-            'http://100.103.21.153:8098/mcp',
-            'http://100.103.21.154:8100/mcp',
-            'http://100.103.31.58:8102/mcp',
-            'http://100.103.33.20:8104/mcp',
-            'http://100.103.33.21:8106/mcp',
-            'http://100.103.33.22:8108/mcp',
-        ],
+        url=[],
     ),
 ]
 tool_prompt = get_tool_prompt(actions)
