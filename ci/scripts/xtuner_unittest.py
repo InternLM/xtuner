@@ -55,7 +55,7 @@ def main():
 
     # 清理分支名中的非法字符，避免Kubernetes标签错误
     commit_branch = commit_branch.replace("/", "-").replace("\\", "-").replace("_", "-")
-    print(args.image)
+
     # Yidian特定的资源配置（基于test_clusterx_sft.py的成功经验）
     params = params_cls(
         job_name=f"xtuner-ci-{job_id}-{commit_id}",
