@@ -4,13 +4,16 @@ import ray
 from lagent.utils import create_object
 from ray.actor import ActorClass
 
-from xtuner.v1.data_proto.messages.agent import AgentMessage
 from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem, SampleParams
-from xtuner.v1.datasets.multiturn import tokenize
 from xtuner.v1.ray.config.worker import RolloutConfig
-
-from .controller import RolloutController
-from .parsers import FunctionCallParser, ResponseParser, TokenReasonParser
+from xtuner.v1.ray.environment.lagent.parsers import (
+    FunctionCallParser,
+    ResponseParser,
+    TokenReasonParser,
+)
+from xtuner.v1.ray.environment.lagent.schema import AgentMessage
+from xtuner.v1.ray.environment.lagent.tokenize import tokenize
+from xtuner.v1.ray.rollout.controller import RolloutController
 
 
 class ControllerWrapper:

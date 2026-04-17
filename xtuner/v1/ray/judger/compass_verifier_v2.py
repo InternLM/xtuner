@@ -135,16 +135,7 @@ class CompassVerifierV2:
 class CompassVerifierV2Config(NativeJudgerConfig):
     """Configuration for the CompassVerifierV2 judger."""
 
-    hosts: list = [
-        "10.103.12.31:12345",
-        "10.103.12.31:12346",
-        "10.103.12.31:12347",
-        "10.103.12.31:12348",
-        "10.103.12.31:12349",
-        "10.103.12.31:12350",
-        "10.103.12.31:12351",
-        "10.103.12.31:12352",
-    ]
+    hosts: list
     judger_name: str = "compass_verifier_v2"
 
     def build_actor(self, pg: PlacementGroup, start_bundle_idx: int) -> List[ray.actor.ActorClass]:

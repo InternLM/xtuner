@@ -3,7 +3,7 @@ import json
 import re
 from typing import Protocol
 
-from xtuner.v1.data_proto.messages.agent import AgentMessage
+from xtuner.v1.ray.environment.lagent.schema import AgentMessage
 
 
 class ResponseParser(Protocol):

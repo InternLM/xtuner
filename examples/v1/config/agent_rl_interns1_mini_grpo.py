@@ -12,14 +12,7 @@ from lagent.actions.mcp_client import AsyncMCPClient
 from lagent.agents.fc_agent import FunctionCallAgent, get_tool_prompt
 from ray.util.placement_group import placement_group
 
-from xtuner.v1.agents import (
-    AsyncTokenInOutAgent,
-    EnvAgent,
-    JudgerWrapper,
-    finish_condition_func,
-)
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
-from xtuner.v1.data_proto.messages.agent import AgentMessage
 from xtuner.v1.data_proto.rl_data import (
     RLAgentDataItem,
     RLDataFlowItem,
@@ -42,11 +35,18 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment.agent_env import AgentEnvironment
 from xtuner.v1.ray.environment.composed_env import ComposedEnvironment
+from xtuner.v1.ray.environment.lagent.agents import (
+    AsyncTokenInOutAgent,
+    EnvAgent,
+    JudgerWrapper,
+    finish_condition_func,
+)
+from xtuner.v1.ray.environment.lagent.llms.controller_wrapper import ControllerWrapper
+from xtuner.v1.ray.environment.lagent.schema import AgentMessage
 from xtuner.v1.ray.evaluator import EvaluatorConfig
 from xtuner.v1.ray.judger.compass_verifier_v2 import CompassVerifierV2Config
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.rollout import RolloutController
-from xtuner.v1.ray.rollout.lagent import ControllerWrapper
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.base.rollout_is import RolloutImportanceSampling
 from xtuner.v1.rl.grpo import GRPOLossConfig

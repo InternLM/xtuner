@@ -8,13 +8,13 @@ from typing import Callable, List, Self, Tuple
 import ray
 from lagent.utils import create_object
 
-from xtuner.v1.data_proto.messages.agent import AgentMessage
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
     RLJudgerResponseItem,
     RolloutState,
     update_dataflow_item,
 )
+from xtuner.v1.ray.environment.lagent.schema import AgentMessage
 from xtuner.v1.utils import get_logger
 
 from .base_env import BaseEnvironment

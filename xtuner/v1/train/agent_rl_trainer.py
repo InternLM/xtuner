@@ -17,10 +17,10 @@ from transformers import AutoTokenizer
 from typing_extensions import Self
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.datasets.multiturn import tokenize
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
+from xtuner.v1.ray.environment.lagent.tokenize import tokenize
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig

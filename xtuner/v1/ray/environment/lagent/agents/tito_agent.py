@@ -2,8 +2,8 @@ import copy
 
 from lagent.agents import Agent
 
-from xtuner.v1.data_proto.messages.agent import AgentMessage
 from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem
+from xtuner.v1.ray.environment.lagent.schema import AgentMessage
 
 
 class AsyncTokenInOutAgentMixin:

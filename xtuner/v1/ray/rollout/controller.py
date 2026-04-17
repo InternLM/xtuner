@@ -24,7 +24,6 @@ from xtuner.v1.ray.base import AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.utils import get_logger
 
-from .parsers import TokenReasonParser, XMLFunctionCallParser
 from .worker import RolloutWorker
 
 ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
@@ -163,9 +162,6 @@ class RolloutController:
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
-
-        self.reasoning_parser = TokenReasonParser(infer_config.tokenizer_path)
-        self.tool_call_parser = XMLFunctionCallParser()
 
     def _get_worker_status_for_router(self) -> Dict[RolloutWorker, bool]:
         """Helper to generate the status dict required by the SessionRouter."""
@@ -450,34 +446,15 @@ class RolloutController:
             self.logger.info(f"API server will use port {port} instead of the originally configured {original_port}.")
 
         @app.post("/v1/chat/completions")
-        async def chat_completions(request: RLRolloutRequestItem):
-            import base64
-
-            from ray import cloudpickle
-
-            from xtuner.v1.data_proto.messages.agent import AgentMessage
-            from xtuner.v1.datasets.multiturn import tokenize
-
-            inputs = tokenize(self.tokenizer, request.messages, request.tools)
-            response: RLRolloutResponseItem = await self.rollout(
+        async def chat_completions(request: RLRolloutRequestItem) -> RLRolloutResponseItem:
+            response = await self.rollout(
                 prompt=request.messages,
-                input_ids=inputs['input_ids'],
                 tools=request.tools,
                 tool_choice=request.tool_choice,
                 sample_params=request.sample_params,
                 extra_params=request.extra_params,
-                extra_info=(
-                    {'routed_experts': inputs['routed_experts']} if inputs['routed_experts'] is not None else {}
-                ),
             )
-            if isinstance(response.extra_info.get('routed_experts'), ray.ObjectRef):
-                response.extra_info['routed_experts'] = base64.b64encode(
-                    cloudpickle.dumps(response.extra_info['routed_experts'])
-                ).decode('utf-8')
-            message = AgentMessage.from_model_response(response, 'assistant')
-            message = self.reasoning_parser.parse_response(message)
-            message = self.tool_call_parser.parse_response(message)
-            return message.model_dump()
+            return response
 
         config = uvicorn.Config(app, host=host, port=port)
         server = uvicorn.Server(config)

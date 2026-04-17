@@ -4,7 +4,6 @@ from datetime import datetime
 from .chat import ChatTemplate
 from .hybrid import HybridChatTemplate
 
-
 current_date = datetime.now().strftime("%Y-%m-%d")
 
 CHAT_TEMPLATE_MAP = {
@@ -38,7 +37,7 @@ CHAT_TEMPLATE_MAP = {
         """<tool_call></tool_call> XML tags:\n<tool_call>\n{{"name": <function-name>, """
         """"arguments": <args-json-object>}}\n</tool_call>""",
         tool_extractor="<|im_start|>user\n<tool_response>\n{tool_extractor}\n</tool_response><|im_end|>\n<|im_start|>assistant\n",
-        user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n",
+        user="<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n<think>",
         stop_words=["<|im_end|>", "<|endoftext|>"],
         assistant="{assistant}<|im_end|>",
         image_start_token="<|vision_start|>",

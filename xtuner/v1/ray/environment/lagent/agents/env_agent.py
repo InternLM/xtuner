@@ -9,7 +9,7 @@ from lagent.hooks import Hook
 from lagent.schema import ActionStatusCode, ActionValidCode, AgentStatusCode
 from lagent.utils import create_object, truncate_text
 
-from xtuner.v1.data_proto.messages.agent import AgentMessage
+from xtuner.v1.ray.environment.lagent.schema import AgentMessage
 
 
 def finish_condition_func(selection_message, env_message):

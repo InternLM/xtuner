@@ -3,7 +3,6 @@ from typing import Callable
 
 from lagent.agents import AsyncAgent
 
-from xtuner.v1.data_proto.messages.agent import AgentMessage
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
     RLJudgerResponseItem,
@@ -11,6 +10,7 @@ from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     update_dataflow_item,
 )
+from xtuner.v1.ray.environment.lagent.schema import AgentMessage
 from xtuner.v1.ray.judger.controller import JudgerController
 
 
