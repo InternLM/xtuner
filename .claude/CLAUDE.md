@@ -1,4 +1,4 @@
-# CLAUDE.md — XTuner Programming Standards
+# XTuner Programming Standards
 
 ## Python
 
@@ -123,3 +123,9 @@ APPROVE / REQUEST_CHANGES / COMMENT
 3. **Suggest a fix** — provide a concrete code suggestion when possible.
 4. **Distinguish severity** — separate critical bugs from style nits.
 5. Do not flag issues in code that is **outside the scope** of the PR diff.
+
+
+
+## Rules
+
+Please refer to the docs in `./dev-rules` for the development guidelines.
