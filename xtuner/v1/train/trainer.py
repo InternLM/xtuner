@@ -1,7 +1,6 @@
 import contextlib
 import gc
 import inspect
-import io
 import json
 import os
 import pickle
@@ -336,11 +335,6 @@ class TrainerConfig(BaseModel):
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
     async_hf_export: bool = False
-    async_checkpoint: bool = False
-    async_checkpoint_verify_hash: bool = False
-    async_checkpoint_verify_hash_on_load: bool = False
-    async_checkpoint_verify_hash_on_load_global: bool = True
-    async_checkpoint_strict_topology_on_load: bool = True
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     patch_for_dcp_finish: bool = False
     snapshot_interval: int | None = None
@@ -439,7 +433,6 @@ class Trainer:
     _SAVE_DATALOADER_DIR = "dataloader"
     _SAVE_SCHEDULER_DIR = "lr_scheduler"
     _SAVE_TRAIN_STATE_PATH = "train_state.json"
-    _SAVE_ASYNC_METADATA_PATH = "async_checkpoint_meta.json"
     _DEFAULT_LOG_DIR = "logs"
 
     def __init__(
@@ -467,11 +460,6 @@ class Trainer:
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
         async_hf_export: bool = False,
-        async_checkpoint: bool = False,
-        async_checkpoint_verify_hash: bool = False,
-        async_checkpoint_verify_hash_on_load: bool = False,
-        async_checkpoint_verify_hash_on_load_global: bool = True,
-        async_checkpoint_strict_topology_on_load: bool = True,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         patch_for_dcp_finish: bool = False,
         snapshot_interval: int | None = None,
@@ -538,12 +526,6 @@ class Trainer:
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
         self._async_hf_export = async_hf_export
-        self._async_checkpoint = async_checkpoint
-        self._async_checkpoint_verify_hash = async_checkpoint_verify_hash
-        self._async_checkpoint_verify_hash_on_load = async_checkpoint_verify_hash_on_load
-        self._async_checkpoint_verify_hash_on_load_global = async_checkpoint_verify_hash_on_load_global
-        self._async_checkpoint_strict_topology_on_load = async_checkpoint_strict_topology_on_load
-        self._pending_async_ckpt = None
         self._pending_async_hf = None
         self._snapshot_interval = snapshot_interval
         self._check_health_interval = check_health_interval
@@ -716,11 +698,6 @@ class Trainer:
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
             async_hf_export=config.async_hf_export,
-            async_checkpoint=config.async_checkpoint,
-            async_checkpoint_verify_hash=config.async_checkpoint_verify_hash,
-            async_checkpoint_verify_hash_on_load=config.async_checkpoint_verify_hash_on_load,
-            async_checkpoint_verify_hash_on_load_global=config.async_checkpoint_verify_hash_on_load_global,
-            async_checkpoint_strict_topology_on_load=config.async_checkpoint_strict_topology_on_load,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             patch_for_dcp_finish=config.patch_for_dcp_finish,
             snapshot_interval=config.snapshot_interval,
@@ -815,22 +792,15 @@ class Trainer:
                 self._maybe_async_save_hf()
             else:
                 self._maybe_save_hf()
-            ckpt_saved = self._maybe_async_save(is_snapshot=False) if self._async_checkpoint else self._maybe_save(
-                is_snapshot=False
-            )
+            ckpt_saved = self._maybe_save(is_snapshot=False)
             if not ckpt_saved:
-                if self._async_checkpoint:
-                    _ = self._maybe_async_save(is_snapshot=True)
-                else:
-                    _ = self._maybe_save(is_snapshot=True)
+                _ = self._maybe_save(is_snapshot=True)
 
             time_before_get_data = time.time()
 
             if self.cur_step % 50 == 0:
                 gc.collect()
 
-        if self._async_checkpoint and self._pending_async_ckpt is not None:
-            self._wait_and_finalize_pending_async_checkpoint()
         if self._async_hf_export and self._pending_async_hf is not None:
             self._wait_and_finalize_pending_async_hf()
 
@@ -1249,294 +1219,6 @@ class Trainer:
             )
 
         return True
-
-    def _maybe_async_save(self, is_snapshot: bool = False) -> bool:
-        ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
-        if ckp_interval is None:
-            return False
-
-        if ckp_interval == -1:
-            if self._cur_step != self.total_step:
-                return False
-        else:
-            if self.cur_step % ckp_interval != 0 and (is_snapshot or self._cur_step != self.total_step):
-                return False
-
-        checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step, is_snapshot=is_snapshot)
-        checkpoint_path.mkdir(parents=True, exist_ok=True)
-
-        meta_path = self.work_dir / self._META_PATH
-        optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR
-        model_path = checkpoint_path / self._SAVE_MODEL_DIR
-        dataloader_path = checkpoint_path / self._SAVE_DATALOADER_DIR
-        scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
-        train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
-        async_metadata_path = checkpoint_path / self._SAVE_ASYNC_METADATA_PATH
-
-        if self._pending_async_ckpt is not None:
-            self._wait_and_finalize_pending_async_checkpoint()
-
-        if self.cur_step % ckp_interval == 0:
-            DEVICE_MODULE.empty_cache()
-
-        total_consumed_tokens = (
-            self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
-        )
-
-        payload = self._build_async_finalize_payload(
-            is_snapshot=is_snapshot,
-            checkpoint_path=checkpoint_path,
-            meta_path=meta_path,
-            model_path=model_path,
-            optimizer_path=optimizer_path,
-            dataloader_path=dataloader_path,
-            scheduler_path=scheduler_path,
-            train_state_path=train_state_path,
-            async_metadata_path=async_metadata_path,
-            total_consumed_tokens=total_consumed_tokens,
-        )
-
-        self._engine.prepare_async_dcp_snapshot(
-            model_dir=model_path,
-            optimizer_dir=optimizer_path,
-            verify_hash=self._async_checkpoint_verify_hash,
-        )
-
-        pid = os.fork()
-        if pid == 0:
-            try:
-                self._engine.write_async_dcp_snapshot()
-                os._exit(0)
-            except Exception as exc:
-                print(f"async checkpoint child failed: checkpoint={checkpoint_path}, error={exc}", flush=True)
-                os._exit(1)
-
-        payload["pid"] = pid
-        self._pending_async_ckpt = payload
-        return True
-
-    def _build_async_finalize_payload(
-        self,
-        *,
-        is_snapshot: bool,
-        checkpoint_path: Path,
-        meta_path: Path,
-        model_path: Path,
-        optimizer_path: Path,
-        dataloader_path: Path,
-        scheduler_path: Path,
-        train_state_path: Path,
-        async_metadata_path: Path,
-        total_consumed_tokens: int,
-    ) -> dict[str, Any]:
-        # `get_state_dict()` may include distributed coordination. Call it on every
-        # rank first, then only serialize on rank0.
-        dataloader_state = self._dataloader.get_state_dict()
-
-        payload: dict[str, Any] = {
-            "pid": None,
-            "is_snapshot": is_snapshot,
-            "checkpoint_path": checkpoint_path,
-            "meta_path": meta_path,
-            "model_path": model_path,
-            "optimizer_path": optimizer_path,
-            "dataloader_path": dataloader_path,
-            "scheduler_path": scheduler_path,
-            "train_state_path": train_state_path,
-            "async_metadata_path": async_metadata_path,
-            "async_writer_status_path": checkpoint_path
-            / self._engine._async_writer_status_filename(self.rank, self.world_size),
-            "step": self.cur_step,
-            "epoch": self._cur_epoch,
-            "total_consumed_tokens": total_consumed_tokens,
-            "train_time_offset": self._train_time + self._train_time_offset,
-            "dataloader_state_bytes": None,
-            "lr_scheduler_state_bytes": None,
-            "trainer_config_json": None,
-            "trainer_config_bin_bytes": None,
-        }
-
-        if self.rank == 0:
-            dataloader_buffer = io.BytesIO()
-            torch.save(dataloader_state, dataloader_buffer)
-            payload["dataloader_state_bytes"] = dataloader_buffer.getvalue()
-
-            lr_scheduler_buffer = io.BytesIO()
-            torch.save(self._lr_scheduler.state_dict(), lr_scheduler_buffer)
-            payload["lr_scheduler_state_bytes"] = lr_scheduler_buffer.getvalue()
-
-            if self._trainer_cfg is not None:
-                payload["trainer_config_json"] = self._trainer_cfg.model_dump_json(indent=2)
-                payload["trainer_config_bin_bytes"] = pickle.dumps(self._trainer_cfg)
-
-        return payload
-
-    def _wait_and_finalize_pending_async_checkpoint(self) -> None:
-        if self._pending_async_ckpt is None:
-            return
-
-        payload = self._pending_async_ckpt
-        pid = payload["pid"]
-        if pid is None:
-            raise RuntimeError("Pending async checkpoint is missing child pid")
-
-        local_ok = True
-        local_error = ""
-        local_hashes: dict[str, str] = {}
-
-        _, status = os.waitpid(pid, 0)
-        exit_code = os.waitstatus_to_exitcode(status)
-        status_path: Path = payload["async_writer_status_path"]
-        if exit_code != 0:
-            local_ok = False
-            local_error = f"child_exit_code={exit_code}"
-        elif not status_path.exists():
-            local_ok = False
-            local_error = f"missing_async_writer_status={status_path}"
-        else:
-            try:
-                with status_path.open("r") as f:
-                    writer_status = json.load(f)
-            except Exception as exc:
-                local_ok = False
-                local_error = f"invalid_async_writer_status={status_path}, error={exc}"
-            else:
-                local_ok = bool(writer_status.get("ok", False))
-                local_error = str(writer_status.get("error", ""))
-                hashes_obj = writer_status.get("hashes", {})
-                if isinstance(hashes_obj, dict):
-                    local_hashes = {str(k): str(v) for k, v in hashes_obj.items()}
-
-        local_status = {"rank": self.rank, "ok": local_ok, "error": local_error, "hashes": local_hashes}
-        all_status: list[dict[str, Any]] = [None for _ in range(self.world_size)]  # type: ignore[list-item]
-        dist.all_gather_object(all_status, local_status)
-        if not all(status["ok"] for status in all_status):
-            failed = ", ".join(
-                f"rank={status['rank']}({status['error']})" for status in all_status if not status["ok"]
-            )
-            self._pending_async_ckpt = None
-            raise RuntimeError(f"Async checkpoint global consistency check failed: {failed}")
-
-        if self._async_checkpoint_verify_hash:
-            shard_hashes: dict[str, str] = {}
-            for status in all_status:
-                for shard_key, shard_hash in status["hashes"].items():
-                    if not shard_hash:
-                        self._pending_async_ckpt = None
-                        raise RuntimeError(
-                            f"Async checkpoint hash is empty: rank={status['rank']}, shard={shard_key}"
-                        )
-                    shard_hashes[shard_key] = shard_hash
-            payload["shard_hashes"] = shard_hashes
-
-        self._finalize_pending_async_checkpoint(payload)
-        self._pending_async_ckpt = None
-
-    def _finalize_pending_async_checkpoint(self, payload: dict[str, Any]) -> None:
-        checkpoint_path = payload["checkpoint_path"]
-        meta_path = payload["meta_path"]
-        dataloader_path = payload["dataloader_path"]
-        scheduler_path = payload["scheduler_path"]
-        train_state_path = payload["train_state_path"]
-        async_metadata_path = payload["async_metadata_path"]
-        is_snapshot = payload["is_snapshot"]
-
-        if self.rank == 0 and payload["dataloader_state_bytes"] is not None:
-            with dataloader_path.open("wb") as f:
-                f.write(payload["dataloader_state_bytes"])
-
-        if self.rank == 0 and payload["lr_scheduler_state_bytes"] is not None:
-            with scheduler_path.open("wb") as f:
-                f.write(payload["lr_scheduler_state_bytes"])
-
-        if self.rank == 0:
-            if payload["trainer_config_json"] is not None:
-                config_path = checkpoint_path / "trainer_config.json"
-                config_bin = checkpoint_path / "trainer_config.bin"
-                with config_path.open("w") as f:
-                    f.write(payload["trainer_config_json"])
-                if payload["trainer_config_bin_bytes"] is not None:
-                    with config_bin.open("wb") as f:
-                        f.write(payload["trainer_config_bin_bytes"])
-
-            async_metadata = {
-                "format": "xtuner_async_local_v1",
-                "save_mode": "async_local",
-                "step": payload["step"],
-                "epoch": payload["epoch"],
-                "world_size": self.world_size,
-                "topology": {
-                    "world_size": self.world_size,
-                    "dp_size": self.data_mesh["dp"].size(),
-                    "sp_size": self.sp_mesh.size(),
-                    "tp_size": self.data_mesh["tp"].size(),
-                },
-                "model_dir": self._SAVE_MODEL_DIR,
-                "optimizer_dir": self._SAVE_OPTIMIZER_DIR,
-                "dataloader_path": self._SAVE_DATALOADER_DIR,
-                "scheduler_path": self._SAVE_SCHEDULER_DIR,
-                "train_state_path": self._SAVE_TRAIN_STATE_PATH,
-                "model_files": [
-                    self._engine._async_rank_filename(rank, self.world_size) for rank in range(self.world_size)
-                ],
-                "optimizer_files": [
-                    self._engine._async_rank_filename(rank, self.world_size) for rank in range(self.world_size)
-                ],
-            }
-            if self._async_checkpoint_verify_hash and "shard_hashes" in payload:
-                async_metadata["hash_algo"] = "sha256"
-                async_metadata["shard_hashes"] = payload["shard_hashes"]
-            with async_metadata_path.open("w") as f:
-                f.write(json.dumps(async_metadata, indent=2))
-
-        dist.barrier()
-
-        if self.rank == 0:
-            with train_state_path.open("w") as f:
-                f.write(
-                    json.dumps(
-                        {
-                            "cur_step": payload["step"],
-                            "cur_epoch": payload["epoch"],
-                            "total_consumed_tokens": payload["total_consumed_tokens"],
-                            "train_time_offset": payload["train_time_offset"],
-                        }
-                    )
-                )
-
-        current_exp = self.meta.latest_exp
-        ckp_list = current_exp.checkpoint_list if not is_snapshot else current_exp.snap_checkpoint_list
-        ckp_list.append(str(checkpoint_path))
-        current_exp.cur_step = payload["step"]
-        current_exp.cur_epoch = payload["epoch"]
-        current_exp.consumed_tokens = int(payload["total_consumed_tokens"])
-        current_exp.history[-1]["end"] = payload["step"]
-
-        ckp_maxkeep = self._checkpoint_maxkeep if not is_snapshot else 1
-        if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
-            ckp_pop_num = len(ckp_list) - ckp_maxkeep
-            for _ in range(ckp_pop_num):
-                deleted_ckp = ckp_list.pop(0)
-                if self.rank == 0 and Path(deleted_ckp).exists():
-                    rmtree(deleted_ckp)
-
-        if self.rank == 0:
-            with meta_path.open("w") as f:
-                f.write(self.meta.model_dump_json(indent=2))
-
-        dist.barrier()
-
-        hooks = self.hooks_config.get_hooks(
-            HookStage.AFTER_SAVE_SNAPSHOT if is_snapshot else HookStage.AFTER_SAVE_DCP
-        )
-        for hook in hooks:
-            hook(
-                checkpoint=checkpoint_path,
-                step=payload["step"],
-                epoch=payload["epoch"],
-                total_step=self.total_step,
-                total_epoch=self.total_epoch,
-            )
 
     def _save_dataloader(self, dataloader_path: Path | str):
         dataloader_state = self._dataloader.get_state_dict()
@@ -2262,37 +1944,12 @@ class Trainer:
             else None
         )
 
-        async_metadata_path = resume_from / self._SAVE_ASYNC_METADATA_PATH
-        if async_metadata_path.exists():
-            with async_metadata_path.open("r") as f:
-                async_metadata = cast(dict[str, Any], json.load(f))
-
-            self._engine.load_async_checkpoint(
-                model_dir=model_path,
-                optimizer_dir=optimizer_path,
-                load_states=load_checkpoint_cfg.load_optimizer_states,
-                load_args=load_checkpoint_cfg.load_optimizer_args,
-                verify_hash=self._async_checkpoint_verify_hash_on_load,
-                verify_hash_global=self._async_checkpoint_verify_hash_on_load_global,
-                hash_algo=cast(str | None, async_metadata.get("hash_algo")),
-                expected_shard_hashes=cast(dict[str, str] | None, async_metadata.get("shard_hashes")),
-                strict_topology=self._async_checkpoint_strict_topology_on_load,
-                expected_world_size=cast(int | None, async_metadata.get("world_size")),
-                expected_topology=cast(dict[str, int] | None, async_metadata.get("topology")),
-                runtime_topology={
-                    "world_size": self.world_size,
-                    "dp_size": self.data_mesh["dp"].size(),
-                    "sp_size": self.sp_mesh.size(),
-                    "tp_size": self.data_mesh["tp"].size(),
-                },
-            )
-        else:
-            self._engine.load_dcp(
-                model_dir=model_path,
-                optimizer_dir=optimizer_path,
-                load_states=load_checkpoint_cfg.load_optimizer_states,
-                load_args=load_checkpoint_cfg.load_optimizer_args,
-            )
+        self._engine.load_dcp(
+            model_dir=model_path,
+            optimizer_dir=optimizer_path,
+            load_states=load_checkpoint_cfg.load_optimizer_states,
+            load_args=load_checkpoint_cfg.load_optimizer_args,
+        )
 
         train_state_path = resume_from / self._SAVE_TRAIN_STATE_PATH
 

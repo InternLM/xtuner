@@ -17,7 +17,6 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     set_optimizer_state_dict,
 )
-from torch.distributed.tensor import DTensor
 from torch.nn.utils.clip_grad import _no_grad
 from torch.utils._foreach_utils import (
     _device_has_foreach_support,
@@ -145,10 +144,7 @@ class TrainEngine:
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
         self.has_freeze_params = self.__has_freeze_params()
-        self._async_model_tensor_cache = {}
-        self._async_optimizer_tensor_cache = {}
         self._async_hf_tensor_cache = {}
-        self._last_async_snapshot = None
         self._last_async_hf_snapshot = None
 
     def __has_freeze_params(self) -> bool:
@@ -306,14 +302,6 @@ class TrainEngine:
         return f"async-hf-writer-status-rank-{rank:05d}-of-{world_size:05d}.json"
 
     @staticmethod
-    def _async_rank_filename(rank: int, world_size: int) -> str:
-        return f"shard-rank-{rank:05d}-of-{world_size:05d}.pt"
-
-    @staticmethod
-    def _async_writer_status_filename(rank: int, world_size: int) -> str:
-        return f"async-writer-status-rank-{rank:05d}-of-{world_size:05d}.json"
-
-    @staticmethod
     def _compute_file_hash(path: Path, chunk_size: int = 4 * 1024 * 1024) -> str:
         hasher = hashlib.sha256()
         with path.open("rb") as f:
@@ -324,22 +312,8 @@ class TrainEngine:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    @classmethod
-    def _resolve_async_rank_file(cls, ckpt_dir: Path, rank: int, world_size: int) -> Path:
-        preferred = ckpt_dir / cls._async_rank_filename(rank, world_size)
-        if preferred.exists():
-            return preferred
-
-        legacy = ckpt_dir / f"rank_{rank:05d}.pt"
-        if legacy.exists():
-            return legacy
-
-        raise FileNotFoundError(f"Async checkpoint shard not found for rank={rank} under {ckpt_dir}")
-
-    def _allocate_cpu_buffer_like(self, tensor: torch.Tensor) -> torch.Tensor:
-        if isinstance(tensor, DTensor):
-            tensor = tensor.to_local()
-
+    @staticmethod
+    def _allocate_cpu_buffer_like(tensor: torch.Tensor) -> torch.Tensor:
         cpu_tensor = tensor.detach().to("cpu")
         if tensor.is_cuda:
             cpu_tensor = cpu_tensor.pin_memory()
@@ -352,8 +326,6 @@ class TrainEngine:
         path: tuple[Any, ...],
     ) -> torch.Tensor:
         detached = tensor.detach()
-        if isinstance(detached, DTensor):
-            detached = detached.to_local().detach()
 
         cached = cache.get(path)
         if cached is None or (
@@ -367,35 +339,6 @@ class TrainEngine:
 
         cached.copy_(detached, non_blocking=detached.is_cuda)
         return cached
-
-    def _copy_state_dict_to_cpu_snapshot(
-        self,
-        obj: Any,
-        cache: dict[tuple[Any, ...], torch.Tensor],
-        path: tuple[Any, ...] = (),
-    ) -> Any:
-        if torch.is_tensor(obj):
-            return self._get_or_update_cpu_tensor(obj, cache, path)
-
-        if isinstance(obj, dict):
-            result = {}
-            for key, value in obj.items():
-                result[key] = self._copy_state_dict_to_cpu_snapshot(value, cache, path + (("dict", key),))
-            return result
-
-        if isinstance(obj, list):
-            return [
-                self._copy_state_dict_to_cpu_snapshot(value, cache, path + (("list", idx),))
-                for idx, value in enumerate(obj)
-            ]
-
-        if isinstance(obj, tuple):
-            return tuple(
-                self._copy_state_dict_to_cpu_snapshot(value, cache, path + (("tuple", idx),))
-                for idx, value in enumerate(obj)
-            )
-
-        return obj
 
     def prepare_async_hf_snapshot(
         self,
@@ -492,120 +435,6 @@ class TrainEngine:
         with status_file.open("w") as f:
             f.write(json.dumps(local_status, indent=2))
 
-    def prepare_async_dcp_snapshot(
-        self,
-        model_dir: Path,
-        optimizer_dir: Path | None = None,
-        verify_hash: bool = False,
-    ) -> None:
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-        status_file = model_dir.parent / self._async_writer_status_filename(rank, world_size)
-
-        if rank == 0:
-            model_dir.mkdir(parents=True, exist_ok=True)
-            if optimizer_dir is not None:
-                optimizer_dir.mkdir(parents=True, exist_ok=True)
-        dist.barrier()
-
-        options = StateDictOptions(cpu_offload=False, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params)
-
-        model_state = get_model_state_dict(self.model, options=options)
-        model_snapshot = self._copy_state_dict_to_cpu_snapshot(
-            model_state,
-            cache=self._async_model_tensor_cache,
-            path=(("root", "model"),),
-        )
-
-        optimizer_snapshot = None
-        if optimizer_dir is not None:
-            optimizer_state = get_optimizer_state_dict(self.model, self.optimizer, options=options)
-            optimizer_snapshot = self._copy_state_dict_to_cpu_snapshot(
-                optimizer_state,
-                cache=self._async_optimizer_tensor_cache,
-                path=(("root", "optimizer"),),
-            )
-
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-
-        self._last_async_snapshot = {
-            "rank": rank,
-            "world_size": world_size,
-            "model_dir": model_dir,
-            "optimizer_dir": optimizer_dir,
-            "model_state": model_snapshot,
-            "optimizer_state": optimizer_snapshot,
-            "status_file": status_file,
-            "verify_hash": verify_hash,
-        }
-
-    def write_async_dcp_snapshot(self) -> None:
-        if self._last_async_snapshot is None:
-            raise RuntimeError("No async DCP snapshot prepared")
-
-        snapshot = self._last_async_snapshot
-        rank = snapshot["rank"]
-        world_size = snapshot["world_size"]
-        verify_hash = bool(snapshot.get("verify_hash", False))
-        status_file: Path = snapshot["status_file"]
-        local_status: dict[str, Any] = {"rank": rank, "ok": True, "error": "", "hashes": {}}
-
-        try:
-            model_file = snapshot["model_dir"] / self._async_rank_filename(rank, world_size)
-            torch.save(snapshot["model_state"], model_file)
-            if not model_file.exists() or model_file.stat().st_size <= 0:
-                raise RuntimeError(f"model shard missing or empty after save: {model_file}")
-            if verify_hash:
-                local_status["hashes"][f"model/{model_file.name}"] = self._compute_file_hash(model_file)
-
-            if snapshot["optimizer_dir"] is not None and snapshot["optimizer_state"] is not None:
-                optimizer_file = snapshot["optimizer_dir"] / self._async_rank_filename(rank, world_size)
-                torch.save(snapshot["optimizer_state"], optimizer_file)
-                if not optimizer_file.exists() or optimizer_file.stat().st_size <= 0:
-                    raise RuntimeError(f"optimizer shard missing or empty after save: {optimizer_file}")
-                if verify_hash:
-                    local_status["hashes"][f"optimizer/{optimizer_file.name}"] = self._compute_file_hash(optimizer_file)
-        except Exception as exc:
-            local_status["ok"] = False
-            local_status["error"] = str(exc)
-            with status_file.open("w") as f:
-                f.write(json.dumps(local_status, indent=2))
-            raise
-
-        with status_file.open("w") as f:
-            f.write(json.dumps(local_status, indent=2))
-
-    def _restore_state_dict_from_local_checkpoint(self, template: Any, loaded: Any) -> Any:
-        if torch.is_tensor(template):
-            if isinstance(template, DTensor):
-                local_tensor = template.to_local()
-                local_tensor.copy_(loaded.to(device=local_tensor.device, dtype=local_tensor.dtype))
-                return template
-
-            template.copy_(loaded.to(device=template.device, dtype=template.dtype))
-            return template
-
-        if isinstance(template, dict):
-            return {
-                key: self._restore_state_dict_from_local_checkpoint(value, loaded[key])
-                for key, value in template.items()
-            }
-
-        if isinstance(template, list):
-            return [
-                self._restore_state_dict_from_local_checkpoint(template_item, loaded_item)
-                for template_item, loaded_item in zip(template, loaded, strict=True)
-            ]
-
-        if isinstance(template, tuple):
-            return tuple(
-                self._restore_state_dict_from_local_checkpoint(template_item, loaded_item)
-                for template_item, loaded_item in zip(template, loaded, strict=True)
-            )
-
-        return loaded
-
     # TODO: Support async save
     def save_dcp(
         self,
@@ -691,144 +520,6 @@ class TrainEngine:
                         for key in default_keys:
                             param_group.pop(key)
                         param_group.update(init_defaults)  # lr, betas, eps, etc.
-
-                set_optimizer_state_dict(
-                    self.model,
-                    self.optimizer,
-                    optim_state_dict=shard_optimizer_state_dict,
-                    options=_set_options,
-                )
-
-    def load_async_checkpoint(
-        self,
-        model_dir: Path,
-        optimizer_dir: Path | None = None,
-        load_states: bool = True,
-        load_args: bool = True,
-        verify_hash: bool = False,
-        verify_hash_global: bool = True,
-        hash_algo: str | None = None,
-        expected_shard_hashes: dict[str, str] | None = None,
-        strict_topology: bool = True,
-        expected_world_size: int | None = None,
-        expected_topology: dict[str, int] | None = None,
-        runtime_topology: dict[str, int] | None = None,
-    ):
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-
-        if strict_topology:
-            if expected_world_size is None:
-                raise RuntimeError("Async checkpoint metadata missing world_size, strict topology check cannot proceed")
-            if expected_world_size != world_size:
-                raise RuntimeError(
-                    f"Async checkpoint world_size mismatch: checkpoint={expected_world_size}, runtime={world_size}"
-                )
-
-            if expected_topology is not None and runtime_topology is not None:
-                for key in ("dp_size", "sp_size", "tp_size"):
-                    if key in expected_topology and key in runtime_topology:
-                        if int(expected_topology[key]) != int(runtime_topology[key]):
-                            raise RuntimeError(
-                                "Async checkpoint topology mismatch: "
-                                f"{key} checkpoint={expected_topology[key]}, runtime={runtime_topology[key]}"
-                            )
-
-        model_file = self._resolve_async_rank_file(model_dir, rank, world_size)
-        optimizer_file = self._resolve_async_rank_file(optimizer_dir, rank, world_size) if optimizer_dir else None
-
-        if verify_hash:
-            local_ok = True
-            local_error = ""
-            if hash_algo != "sha256":
-                local_ok = False
-                local_error = f"Unsupported async checkpoint hash algorithm: {hash_algo}"
-            elif expected_shard_hashes is None:
-                local_ok = False
-                local_error = "Missing shard_hashes in async checkpoint metadata"
-            else:
-                try:
-                    model_key = f"model/{model_file.name}"
-                    expected_model_hash = expected_shard_hashes.get(model_key)
-                    actual_model_hash = self._compute_file_hash(model_file)
-                    if not expected_model_hash:
-                        local_ok = False
-                        local_error = f"Missing expected hash for {model_key}"
-                    elif actual_model_hash != expected_model_hash:
-                        local_ok = False
-                        local_error = (
-                            f"Hash mismatch for {model_key}: expected={expected_model_hash}, actual={actual_model_hash}"
-                        )
-
-                    if local_ok and optimizer_file is not None:
-                        optimizer_key = f"optimizer/{optimizer_file.name}"
-                        expected_optimizer_hash = expected_shard_hashes.get(optimizer_key)
-                        actual_optimizer_hash = self._compute_file_hash(optimizer_file)
-                        if not expected_optimizer_hash:
-                            local_ok = False
-                            local_error = f"Missing expected hash for {optimizer_key}"
-                        elif actual_optimizer_hash != expected_optimizer_hash:
-                            local_ok = False
-                            local_error = (
-                                f"Hash mismatch for {optimizer_key}: "
-                                f"expected={expected_optimizer_hash}, actual={actual_optimizer_hash}"
-                            )
-                except Exception as exc:
-                    local_ok = False
-                    local_error = f"Compute hash failed: {exc}"
-
-            if verify_hash_global:
-                local_status = {"rank": rank, "ok": local_ok, "error": local_error}
-                all_status: list[dict[str, Any]] = [None for _ in range(world_size)]  # type: ignore[list-item]
-                dist.all_gather_object(all_status, local_status)
-                if not all(status["ok"] for status in all_status):
-                    failed = ", ".join(
-                        f"rank={status['rank']}({status['error']})" for status in all_status if not status["ok"]
-                    )
-                    raise RuntimeError(f"Async checkpoint load hash verification failed: {failed}")
-            elif not local_ok:
-                raise RuntimeError(f"Async checkpoint load hash verification failed on rank={rank}: {local_error}")
-
-        _load_options = StateDictOptions(
-            cpu_offload=False, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params
-        )
-        if self.has_freeze_params:
-            _set_options = StateDictOptions(cpu_offload=False, strict=False)
-        else:
-            _set_options = StateDictOptions(cpu_offload=False, strict=True)
-
-        with profile_time_and_memory(f"[Load Async Checkpoint Model from {model_dir}]"):
-            shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
-            loaded_model_state = torch.load(model_file, map_location="cpu")
-            shard_model_state_dict = self._restore_state_dict_from_local_checkpoint(
-                shard_model_state_dict, loaded_model_state
-            )
-            set_model_state_dict(self.model, shard_model_state_dict, options=_set_options)
-
-        if optimizer_dir is not None:
-            with profile_time_and_memory(f"[Load Async Checkpoint Optimizer] from {optimizer_dir}"):
-                shard_optimizer_state_dict = get_optimizer_state_dict(
-                    self.model, self.optimizer, options=_load_options
-                )
-                assert optimizer_file is not None
-                loaded_optimizer_state = torch.load(optimizer_file, map_location="cpu")
-                shard_optimizer_state_dict = self._restore_state_dict_from_local_checkpoint(
-                    shard_optimizer_state_dict, loaded_optimizer_state
-                )
-                if not load_states:
-                    logger.info("Not loading optimizer states")
-                    shard_optimizer_state_dict["state"] = {}
-                if not load_args:
-                    logger.info("Not loading arg defaults")
-                    param_groups = self.optimizer.state_dict()["param_groups"]
-                    assert len(param_groups) == 1, "Only one param_group is supported now"
-                    init_defaults = param_groups[0]
-                    init_defaults.pop("params")
-                    for param_group in cast(List[Dict[str, Any]], shard_optimizer_state_dict["param_groups"]):
-                        default_keys = list(filter(lambda x: x != "params", param_group.keys()))
-                        for key in default_keys:
-                            param_group.pop(key)
-                        param_group.update(init_defaults)
 
                 set_optimizer_state_dict(
                     self.model,
