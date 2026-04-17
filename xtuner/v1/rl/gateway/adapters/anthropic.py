@@ -578,7 +578,7 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
             elif isinstance(block, CanonicalReasoningBlock):
                 reasoning_text = self._reasoning_to_text(block.reasoning)
                 if reasoning_text:
-                    blocks.append({"type": "reasoning", "text": reasoning_text})
+                    blocks.append({"type": "thinking", "thinking": reasoning_text})
         return blocks or [{"type": "text", "text": ""}]
 
     def _reasoning_to_text(self, reasoning: CanonicalReasoning) -> str:

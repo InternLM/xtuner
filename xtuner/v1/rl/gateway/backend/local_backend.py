@@ -9,12 +9,13 @@ from ray.actor import ActorHandle
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto import RolloutState, RolloutToolCall, SampleParams, Status
+from xtuner.v1.rl.rollout.parser.factory import build_tool_call_parser
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 from ..adapters.base import coerce_content_to_text
 from ..adapters.collector import append_current_trace_rollout_state
 from ..adapters.trace import normalize_trace_payload
-from ..core.exceptions import ContextLengthExceededError
+from ..core.exceptions import ContextLengthExceededError, ToolCallParseError
 from ..core.models import (
     BackendHealth,
     CanonicalAssistantTurn,
@@ -52,6 +53,7 @@ class LocalRolloutBackend:
                 trust_remote_code=True,
             )
         self._tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast = resolved_tokenizer
+        self._tool_call_parser = build_tool_call_parser(self._config.tool_call_parser)
 
     async def generate(self, request: CanonicalGenerateRequest) -> CanonicalGenerateResponse:
         rollout_state = self._canonical_request_to_rollout_state(request)
@@ -135,6 +137,11 @@ class LocalRolloutBackend:
         tool_calls = [
             self._rollout_tool_call_to_canonical(tool_call) for tool_call in (rollout_state.tool_calls or [])
         ]
+        self._raise_for_unparsed_tool_call_markup(
+            canonical_request=canonical_request,
+            normal_text=normal_text,
+            tool_calls=tool_calls,
+        )
         reasoning_text = None
         if isinstance(rollout_state.extra_fields.get("reasoning_text"), str):
             reasoning_text = rollout_state.extra_fields.get("reasoning_text")
@@ -176,6 +183,25 @@ class LocalRolloutBackend:
             ),
             metadata=metadata,
         )
+
+    def _raise_for_unparsed_tool_call_markup(
+        self,
+        *,
+        canonical_request: CanonicalGenerateRequest,
+        normal_text: str | None,
+        tool_calls: list[CanonicalToolCall],
+    ) -> None:
+        if self._tool_call_parser is None:
+            return
+        if self._tool_call_parser.should_reject_unparsed_markup(
+            has_tools=bool(canonical_request.tools),
+            text=normal_text,
+            parsed_tool_calls=tool_calls,
+        ):
+            raise ToolCallParseError(
+                "Tool-enabled generation returned tool-call markup that could not be parsed into structured "
+                "tool calls."
+            )
 
     def _canonical_messages_to_backend_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
         backend_messages: list[dict[str, Any]] = []
@@ -296,7 +322,7 @@ class LocalRolloutBackend:
         prompt_ids: list[int] | None,
         requested_max_tokens: int | None,
     ) -> int | None:
-        context_length = self._controller.config.context_length
+        context_length = self._config.context_length
         if context_length is None or prompt_ids is None or requested_max_tokens is None:
             return requested_max_tokens
         prompt_tokens = len(prompt_ids)
@@ -318,7 +344,6 @@ class LocalRolloutBackend:
             name=tool_call.function.name,
             arguments=tool_call.function.arguments,
             raw_arguments_text=tool_call.function.raw_arguments_text,
-            parsing_mode=tool_call.parsing_mode,
         )
 
     def _build_rollout_trace_snapshot(self, rollout_state: RolloutState) -> dict[str, Any]:

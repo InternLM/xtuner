@@ -1,19 +1,13 @@
 from __future__ import annotations
 
 import re
-from abc import ABC, abstractmethod
 
-from xtuner.v1.data_proto import ParsedReasoningResult, RolloutState
+from xtuner.v1.data_proto import RolloutState
 
-
-class ReasoningParser(ABC):
-    @abstractmethod
-    def parse(self, rollout_state: RolloutState) -> ParsedReasoningResult:
-        """Return parsed reasoning and remaining text for a rollout
-        response."""
+from .reasoning_parser import ParsedReasoningResult, ReasoningParser
 
 
-class ThinkTagReasoningParser(ReasoningParser):
+class Qwen3ReasoningParser(ReasoningParser):
     _reasoning_pattern = re.compile(r"<think>\s*(.*?)\s*</think>", re.DOTALL)
 
     def __init__(self, strip_tokens: list[str] | None = None):
@@ -38,3 +32,22 @@ class ThinkTagReasoningParser(ReasoningParser):
                 reasoning_chunks.append(truncated_reasoning)
         reasoning = "\n".join(reasoning_chunks).strip() or None
         return ParsedReasoningResult(reasoning_text=reasoning, remaining_text=content or None)
+
+
+def extract_qwen3_reasoning_strip_tokens(
+    tokenizer,
+) -> list[str]:
+    strip_tokens: list[str] = []
+
+    eos_token = getattr(tokenizer, "eos_token", None)
+    if isinstance(eos_token, str) and eos_token:
+        strip_tokens.append(eos_token)
+
+    for token in getattr(tokenizer, "additional_special_tokens", []) or []:
+        if not isinstance(token, str):
+            continue
+        lowered = token.lower()
+        if any(marker in lowered for marker in ("im_end", "eot", "end_of_turn", "turn_end")):
+            strip_tokens.append(token)
+
+    return list(dict.fromkeys(strip_tokens))

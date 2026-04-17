@@ -79,21 +79,6 @@ class RolloutToolCall(BaseModel):
     id: str
     type: Literal["function"] = "function"
     function: RolloutFunctionCall
-    parsing_mode: Literal["native_structured", "json_envelope", "legacy_regex"] = "legacy_regex"
-
-
-class ParsedToolCallResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    tool_calls: list[RolloutToolCall] = Field(default_factory=list)
-    remaining_text: str = ""
-
-
-class ParsedReasoningResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    reasoning_text: str | None = None
-    remaining_text: str | None = None
 
 
 class RolloutState(CacheObj, BaseModel):

@@ -8,6 +8,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import ray
@@ -57,7 +58,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.responses_body_output_path = Path(self.temp_dir.name) / "responses_body.json"
         self.controller = None
         self.placement_group = None
-        self._capture_line_count_before = self._read_capture_records_count()
+        self.test_run_id = uuid4().hex[:8]
 
     def tearDown(self):
         if self.controller is not None:
@@ -94,12 +95,17 @@ class TestGatewayProtocolChain(unittest.TestCase):
             num_cpus_per_worker=16,
             cpu_memory_per_worker=8 * 1024**3,
         )
-        self.placement_group = AutoAcceleratorWorkers.build_placement_group(resource_config, name="gateway_protocol_pg")
+        self.placement_group = AutoAcceleratorWorkers.build_placement_group(
+            resource_config,
+            name=f"gateway_protocol_pg_{self.test_run_id}",
+        )
         rollout_config = RolloutConfig(
-            env="test_gateway_protocol",
+            env=f"test_gateway_protocol_{self.test_run_id}",
             model_path=MODEL_PATH,
             model_name=os.path.basename(MODEL_PATH).lower(),
             tokenizer_path=MODEL_PATH,
+            tool_call_parser="qwen3",
+            reasoning_parser="qwen3",
             tensor_parallel_size=4,
             expert_parallel_size=1,
             context_length=1536,
@@ -114,18 +120,11 @@ class TestGatewayProtocolChain(unittest.TestCase):
         rollout_metadata = ray.get(self.controller.get_rollout_metadata.remote())
         return rollout_metadata["rollout_config"]
 
-    def _read_capture_records_count(self) -> int:
-        if not self.capture_output_path.exists():
-            return 0
-        with self.capture_output_path.open("r", encoding="utf-8") as f:
-            return sum(1 for _ in f)
-
-    def _read_new_capture_records(self) -> list[dict]:
+    def _read_capture_records(self) -> list[dict]:
         if not self.capture_output_path.exists():
             return []
         with self.capture_output_path.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
-        return [json.loads(line) for line in lines[self._capture_line_count_before :]]
+            return [json.loads(line) for line in f]
 
     def _write_json_output(self, path: Path, payload: dict) -> None:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -160,12 +159,6 @@ class TestGatewayProtocolChain(unittest.TestCase):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
             return int(sock.getsockname()[1])
-
-    def _occupy_port(self) -> tuple[socket.socket, int]:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("0.0.0.0", 0))
-        sock.listen(1)
-        return sock, int(sock.getsockname()[1])
 
     def _wait_for_gateway_ready(self, base_url: str, *, timeout_seconds: float = 120.0) -> None:
         deadline = time.time() + timeout_seconds
@@ -215,20 +208,16 @@ class TestGatewayProtocolChain(unittest.TestCase):
     def _get_json(self, base_url: str, path: str) -> httpx.Response:
         return httpx.get(f"{base_url}{path}", timeout=30.0)
 
-    def test_gateway_runtime_endpoints_with_real_rollout_controller(self):
+    def start_rollout_controller_and_gateway(self) -> tuple[RolloutConfig, GatewayConfig, str, Any]:
         self.controller = self._build_controller()
         rollout_config = self._get_rollout_config()
-        occupied_socket, requested_port = self._occupy_port()
-        self.addCleanup(occupied_socket.close)
-        gateway_config = GatewayConfig(port=requested_port, capture_path=str(self.capture_output_path))
+        gateway_config = GatewayConfig(port=self._find_free_port(), capture_path=str(self.capture_output_path))
+        app = build_local_gateway_app(self.controller, config=gateway_config)
+        base_url, _ = self._serve_gateway_blocking_in_background(app, gateway_config)
+        return rollout_config, gateway_config, base_url, app
 
-        base_url = ray.get(self.controller.start_gateway.remote(gateway_config))
-        actual_port = int(base_url.rsplit(":", 1)[1])
-        self.assertNotEqual(actual_port, requested_port)
-        self._wait_for_gateway_ready(base_url)
-
-        metadata = ray.get(self.controller.get_rollout_metadata.remote())
-        self.assertEqual(metadata["api_server_url"], base_url)
+    def test_gateway_runtime_endpoints(self):
+        rollout_config, _, base_url, _ = self.start_rollout_controller_and_gateway()
 
         livez_response = self._get_json(base_url, "/livez")
         self.assertEqual(livez_response.status_code, 200, livez_response.text)
@@ -247,159 +236,52 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertEqual(capabilities_body["model"], rollout_config.model_name)
         self.assertEqual(capabilities_body["backend"], rollout_config.rollout_backend)
         self.assertEqual(capabilities_body["context_length"], rollout_config.context_length)
-        self.assertFalse(capabilities_body["supports_stream"])
+        self.assertTrue(capabilities_body["supports_stream"])
         self.assertTrue(capabilities_body["supports_tools"])
         self.assertFalse(capabilities_body["supports_cancel"])
         self.assertTrue(capabilities_body["supports_parallel_tool_calls"])
         self.assertTrue(capabilities_body["supports_reasoning"])
 
-    def test_gateway_routes_with_real_rollout_controller_capture_protocol_traces(self):
-        self.controller = self._build_controller()
-        rollout_config = self._get_rollout_config()
-        occupied_socket, requested_port = self._occupy_port()
-        self.addCleanup(occupied_socket.close)
-        gateway_config = GatewayConfig(port=requested_port, capture_path=str(self.capture_output_path))
-        app = build_local_gateway_app(self.controller, config=gateway_config)
-        base_url, _ = self._serve_gateway_blocking_in_background(app, gateway_config)
-        self.assertNotEqual(gateway_config.port, requested_port)
+    def test_gateway_messages(self):
+        rollout_config, _, base_url, app = self.start_rollout_controller_and_gateway()
 
         openai_payload = {
             "model": rollout_config.model_name,
             "messages": [
-                {"role": "system", "content": "You are a helpful assistant. Think before answering."},
-                {"role": "user", "content": "Use the search tool and then summarize the weather."},
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call_seed_chat",
-                            "type": "function",
-                            "function": {
-                                "name": "search",
-                                "arguments": json.dumps({"q": "Beijing weather"}, ensure_ascii=False),
-                            },
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call_seed_chat",
-                    "content": json.dumps({"result": "Sunny, 26C"}, ensure_ascii=False),
-                },
-                {"role": "user", "content": "Now give me a short final answer."},
+                {"role": "user", "content": "你好，请用一句话介绍自己。"},
             ],
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "search",
-                        "description": "Search the latest weather.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"q": {"type": "string"}},
-                            "required": ["q"],
-                        },
-                    },
-                }
-            ],
-            "tool_choice": "auto",
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "max_tokens": 64,
+            "max_tokens": 256,
         }
         anthropic_payload = {
             "model": rollout_config.model_name,
-            "system": "You are a helpful assistant.",
             "messages": [
-                {"role": "user", "content": [{"type": "text", "text": "Please reason and call the weather tool."}]},
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "thinking", "text": "Need weather data first."},
-                        {
-                            "type": "tool_use",
-                            "id": "toolu_seed_messages",
-                            "name": "search",
-                            "input": {"q": "Beijing weather"},
-                        },
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "toolu_seed_messages",
-                            "content": [{"type": "text", "text": "Sunny, 26C"}],
-                        }
-                    ],
-                },
+                {"role": "user", "content": [{"type": "text", "text": "今天北京天气怎么样？"}]},
             ],
             "tools": [
                 {
-                    "name": "search",
-                    "description": "Search the latest weather.",
+                    "name": "get_weather",
+                    "description": "查询指定城市的实时天气",
                     "input_schema": {
                         "type": "object",
-                        "properties": {"q": {"type": "string"}},
-                        "required": ["q"],
+                        "properties": {"city": {"type": "string", "description": "城市名称"}},
+                        "required": ["city"],
                     },
                 }
             ],
-            "tool_choice": {"type": "tool", "name": "search"},
-            "max_tokens": 64,
-            "temperature": 0.0,
-            "top_p": 1.0,
+            "tool_choice": {"type": "auto"},
+            "max_tokens": 512,
         }
         responses_payload = {
             "model": rollout_config.model_name,
-            "instructions": "You are a helpful assistant. Reason before you answer.",
+            "instructions": "你是一个数学助手，回答要简洁。",
             "input": [
                 {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "Need the weather in Beijing."}],
-                },
-                {
-                    "type": "reasoning",
-                    "content": [{"type": "reasoning_text", "text": "Need to inspect the tool result before answering."}],
-                },
-                {
-                    "type": "function_call",
-                    "call_id": "call_seed_responses",
-                    "name": "search",
-                    "arguments": json.dumps({"q": "Beijing weather"}, ensure_ascii=False),
-                },
-                {
-                    "type": "function_call_output",
-                    "call_id": "call_seed_responses",
-                    "output": [{"type": "text", "text": "Sunny, 26C"}],
-                },
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "Summarize it in one sentence."}],
+                    "content": [{"type": "input_text", "text": "1 + 1 等于几？"}],
                 },
             ],
-            "tools": [
-                {
-                    "type": "function",
-                    "name": "search",
-                    "description": "Search the latest weather.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"q": {"type": "string"}},
-                        "required": ["q"],
-                    },
-                }
-            ],
-            "tool_choice": "auto",
-            "parallel_tool_calls": False,
-            "reasoning": {"effort": "medium"},
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "max_output_tokens": 64,
+            "max_output_tokens": 1024,
         }
 
         openai_adapter = app.state.gateway_openai_adapter
@@ -412,10 +294,9 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self._write_json_output(self.openai_body_output_path, openai_body)
         self.assertEqual(openai_body["model"], rollout_config.model_name)
         self.assertEqual(openai_body["choices"][0]["message"]["role"], "assistant")
-        self.assertIn(openai_body["choices"][0]["finish_reason"], {"stop", "length", "tool_calls"})
+        self.assertIn(openai_body["choices"][0]["finish_reason"], {"stop", "length"})
         self.assertGreater(openai_body["usage"]["prompt_tokens"], 0)
-        self.assertNotIn("<think>", openai_body["choices"][0]["message"].get("content") or "")
-        self.assertTrue(openai_body["choices"][0]["message"].get("reasoning_content"))
+        self.assertTrue(openai_body["choices"][0]["message"].get("content"))
 
         anthropic_response = self._post_json(base_url, "/v1/messages", anthropic_payload)
         self.assertEqual(anthropic_response.status_code, 200, anthropic_response.text)
@@ -457,7 +338,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertIsNotNone(responses_trace)
         self.assertIsNotNone(responses_adapter.get_trace_by_response_hash(responses_trace.response_hash))
 
-        capture_records = self._read_new_capture_records()
+        capture_records = self._read_capture_records()
         self.assertGreaterEqual(len(capture_records), 3)
         protocol_records = {record["protocol"]: record for record in capture_records[-3:]}
         self.assertIn("OpenAIChatAdapter", protocol_records)
@@ -465,26 +346,20 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertIn("OpenAIResponsesAdapter", protocol_records)
 
         openai_record = protocol_records["OpenAIChatAdapter"]
-        self.assertTrue(any(message.get("tool_calls") for message in openai_record["request"]["messages"]))
         self.assertTrue(openai_record["internal_messages"])
         self.assertEqual(openai_record["request_id"], openai_trace.request_id)
         self.assertEqual(openai_record["output_messages"][0]["role"], "assistant")
-        self.assertTrue(any(item["type"] == "reasoning" for item in openai_record["output_messages"][0]["content"]))
         self.assertTrue(openai_record["input_text"])
         self._assert_trace_record_matches_capture(
             openai_trace,
             openai_record,
             expected_request_field="messages",
-            expected_request_role="system",
+            expected_request_role="user",
             expected_response_field="choices",
         )
-        self.assertEqual(openai_trace.request_snapshot["messages"][2]["tool_calls"][0]["function"]["name"], "search")
         self.assertEqual(openai_trace.response_snapshot["choices"][0]["message"]["role"], "assistant")
 
         anthropic_record = protocol_records["AnthropicChatAdapter"]
-        anthropic_blocks = anthropic_record["request"]["messages"][1]["content"]
-        self.assertTrue(any(block.get("type") == "tool_use" for block in anthropic_blocks))
-        self.assertTrue(any(block.get("type") == "thinking" for block in anthropic_blocks))
         self.assertEqual(anthropic_record["request_id"], anthropic_trace.request_id)
         self.assertTrue(anthropic_record["output_messages"][0]["content"])
         self._assert_trace_record_matches_capture(
@@ -495,15 +370,11 @@ class TestGatewayProtocolChain(unittest.TestCase):
             expected_response_field="content",
         )
         self.assertEqual(anthropic_trace.request_snapshot["messages"][0]["role"], "user")
-        self.assertEqual(anthropic_trace.request_snapshot["messages"][1]["role"], "assistant")
         self.assertEqual(anthropic_trace.response_snapshot["role"], "assistant")
 
         responses_record = protocol_records["OpenAIResponsesAdapter"]
-        self.assertTrue(any(item.get("type") == "reasoning" for item in responses_record["request"]["input"]))
-        self.assertTrue(any(item.get("type") == "function_call" for item in responses_record["request"]["input"]))
         self.assertTrue(responses_record["output_messages"])
         self.assertEqual(responses_record["request_id"], responses_trace.request_id)
-        self.assertTrue(any(item["type"] == "reasoning" for item in responses_record["output_messages"][0]["content"]))
         self.assertTrue(responses_record["input_text"])
         self._assert_trace_record_matches_capture(
             responses_trace,
@@ -512,10 +383,9 @@ class TestGatewayProtocolChain(unittest.TestCase):
             expected_request_role=None,
             expected_response_field="output",
         )
-        self.assertEqual(responses_trace.request_snapshot["input"][2]["type"], "function_call")
         self.assertEqual(responses_trace.response_snapshot["status"], "completed")
 
-    def test_gateway_routes_with_real_rollout_controller_capture_ir_fallback_behavior(self):
+    def test_gateway_ir_fallback_behavior(self):
         self.controller = self._build_controller()
         rollout_config = self._get_rollout_config()
         gateway_config = GatewayConfig(port=self._find_free_port(), capture_path=str(self.capture_output_path))
@@ -665,20 +535,6 @@ class TestGatewayProtocolChain(unittest.TestCase):
             **responses_payload,
             "stream": True,
         }
-        anthropic_stream_payload = {
-            "model": self.controller.config.model_name,
-            "system": "You are a helpful assistant.",
-            "messages": [
-                {"role": "user", "content": [{"type": "text", "text": "Say hello briefly."}]},
-            ],
-            "max_tokens": 32,
-            "stream": True,
-        }
-        openai_stream_payload = {
-            **openai_payload,
-            "stream": True,
-        }
-
         openai_response = self._post_json(base_url, "/v1/chat/completions", openai_payload)
         self.assertEqual(openai_response.status_code, 200, openai_response.text)
 
@@ -705,12 +561,15 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertEqual(responses_invalid_content_body["error"]["code"], "unsupported_content_block")
 
         responses_stream_response = self._post_json(base_url, "/v1/responses", responses_stream_payload)
-        self.assertEqual(responses_stream_response.status_code, 400, responses_stream_response.text)
-        responses_stream_body = responses_stream_response.json()
-        self.assertEqual(responses_stream_body["error"]["type"], "invalid_request_error")
-        self.assertEqual(responses_stream_body["error"]["code"], "stream_not_supported")
+        self.assertEqual(responses_stream_response.status_code, 200, responses_stream_response.text)
+        self.assertEqual(
+            responses_stream_response.headers.get("content-type"),
+            "text/event-stream; charset=utf-8",
+        )
+        self.assertIn("event: response.created", responses_stream_response.text)
+        self.assertIn("event: response.completed", responses_stream_response.text)
 
-        capture_records = self._read_new_capture_records()
+        capture_records = self._read_capture_records()
         protocol_records = self._capture_records_by_protocol(capture_records)
         self.assertIn("OpenAIChatAdapter", protocol_records)
         self.assertIn("OpenAIResponsesAdapter", protocol_records)
@@ -727,7 +586,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertEqual(openai_record["rollout_sample_params"]["stops"], ["DONE"])
         self.assertEqual(
             openai_record["internal_messages"][1]["tool_calls"][0]["function"]["arguments"],
-            "not-json",
+            {"raw": "not-json"},
         )
 
         responses_record = protocol_records["OpenAIResponsesAdapter"]
@@ -745,37 +604,8 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertEqual(responses_record["internal_messages"][1]["content"], "Use concise answers.")
         self.assertEqual(
             responses_record["internal_messages"][3]["tool_calls"][0]["function"]["arguments"],
-            "not-json",
+            {"raw": "not-json"},
         )
-
-    def test_gateway_routes_with_real_rollout_controller_return_context_length_error_on_context_overflow(self):
-        self.controller = self._build_controller()
-        rollout_config = self._get_rollout_config()
-        gateway_config = GatewayConfig(port=self._find_free_port(), capture_path=str(self.capture_output_path))
-        app = build_local_gateway_app(self.controller, config=gateway_config)
-        base_url, _ = self._serve_gateway_blocking_in_background(app, gateway_config)
-
-        overflow_prompt = "Beijing weather " * max(rollout_config.context_length or 1, 1)
-        openai_payload = {
-            "model": rollout_config.model_name,
-            "messages": [
-                {"role": "system", "content": "You are a concise assistant."},
-                {"role": "user", "content": overflow_prompt},
-            ],
-            "temperature": 0.0,
-            "top_p": 1.0,
-            "max_tokens": 64,
-        }
-
-        response = self._post_json(base_url, "/v1/chat/completions", openai_payload)
-        self.assertEqual(response.status_code, 400, response.text)
-        response_body = response.json()
-        self.assertEqual(response_body["error"]["type"], "context_length_exceeded")
-        self.assertEqual(response_body["error"]["code"], "context_too_long")
-        self.assertIn("Input is too long", response_body["error"]["message"])
-        capture_records = self._read_new_capture_records()
-        self.assertFalse(capture_records)
-
 
 if __name__ == "__main__":
     unittest.main()

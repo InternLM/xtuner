@@ -21,3 +21,8 @@ class ContextLengthExceededError(GatewayError):
         super().__init__(f"Input is too long: prompt_tokens={prompt_tokens}, context_length={context_length}.")
         self.prompt_tokens = prompt_tokens
         self.context_length = context_length
+
+
+class ToolCallParseError(GatewayError):
+    """Raised when a tool-enabled response contains tool-call markup that could
+    not be parsed into structured tool calls."""

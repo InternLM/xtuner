@@ -11,8 +11,6 @@ from fastapi.responses import JSONResponse
 from ray.actor import ActorHandle
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.rl.rollout.reasoning_parser import ThinkTagReasoningParser
-from xtuner.v1.rl.rollout.tool_call_parser import CompositeToolCallParser, JsonToolCallParser, RegexToolCallParser
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 from ..adapters import AnthropicChatAdapter, OpenAIChatAdapter
@@ -20,7 +18,7 @@ from ..adapters.responses import OpenAIResponsesAdapter
 from ..backend.local_backend import LocalRolloutBackend
 from ..backend.protocol import GatewayBackend
 from ..config import GatewayConfig
-from ..core.exceptions import ContextLengthExceededError, GatewayError
+from ..core.exceptions import ContextLengthExceededError, GatewayError, ToolCallParseError
 from .routes import build_anthropic_router, build_openai_router, build_responses_router, build_runtime_router
 
 
@@ -60,6 +58,13 @@ def _create_base_gateway_app(
         return JSONResponse(
             status_code=500,
             content={"error": {"message": str(exc), "type": type(exc).__name__, "code": "gateway_error"}},
+        )
+
+    @app.exception_handler(ToolCallParseError)
+    async def tool_call_parse_error_handler(request: Request, exc: ToolCallParseError) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": str(exc), "type": "tool_call_parse_error", "code": "tool_call_parse_error"}},
         )
 
     @app.exception_handler(Exception)
@@ -142,20 +147,6 @@ def build_local_gateway_app(
     rollout_config: RolloutConfig = rollout_metadata["rollout_config"]
     tokenizer = AutoTokenizer.from_pretrained(rollout_config.tokenizer_path, trust_remote_code=True)
 
-    strip_tokens: list[str] = []
-    if tokenizer.eos_token:
-        strip_tokens.append(tokenizer.eos_token)
-    for tok in getattr(tokenizer, "additional_special_tokens", []):
-        if any(marker in tok.lower() for marker in ("im_end", "eot", "end_of_turn", "turn_end")):
-            strip_tokens.append(tok)
-
-    ray.get(
-        controller.configure_output_parsers.remote(
-            tool_call_parser=CompositeToolCallParser(parsers=[JsonToolCallParser(), RegexToolCallParser()]),
-            reasoning_parser=ThinkTagReasoningParser(strip_tokens=strip_tokens),
-        )
-    )
-
     model_name = rollout_config.model_name
     if model_name is None:
         raise ValueError("controller.config.model_name must be set when building a local gateway app")
@@ -233,7 +224,6 @@ def serve_gateway_in_thread(app: FastAPI, config: GatewayConfig) -> threading.Th
     Returns:
         The started daemon thread.
     """
-    _ensure_gateway_port_available(config)
     thread = threading.Thread(
         target=serve_gateway,
         args=(app, config),

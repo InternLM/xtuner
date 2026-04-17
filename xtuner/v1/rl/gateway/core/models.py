@@ -33,7 +33,6 @@ class CanonicalToolCall(GatewayCoreModel):
     name: str
     arguments: Any = None
     raw_arguments_text: str | None = None
-    parsing_mode: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

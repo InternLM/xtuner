@@ -223,6 +223,20 @@ class RolloutConfig(BaseModel):
             help="Context length for the rollout worker.",
         ),
     ] = None
+    tool_call_parser: Annotated[
+        Literal["none", "qwen3"],
+        Parameter(
+            group=infer_group,
+            help='Structured tool-call parser to apply to rollout output. Use "none" to disable parsing or "qwen3" to enable Qwen3 tool-call parsing.',
+        ),
+    ] = "none"
+    reasoning_parser: Annotated[
+        Literal["none", "qwen3"],
+        Parameter(
+            group=infer_group,
+            help='Reasoning parser to apply to rollout output. Use "none" to disable parsing or "qwen3" to enable Qwen3 <think> parsing.',
+        ),
+    ] = "none"
     enable_float8: Annotated[
         bool,
         Parameter(

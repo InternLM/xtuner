@@ -9,12 +9,14 @@ import ray
 from ray.actor import ActorProxy
 from ray.util.placement_group import PlacementGroup
 
+from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import get_logger
 
-from .reasoning_parser import ReasoningParser
-from .tool_call_parser import ToolCallParser
+from .parser.factory import build_reasoning_parser, build_tool_call_parser
+from .parser.reasoning_parser import ReasoningParser
+from .parser.tool_parser import ToolCallParser
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
 from .worker import RolloutConfig, RolloutWorker
 
@@ -104,8 +106,7 @@ class RolloutController:
             worker_infos_lock=self.worker_info_lock,
         )
         self.health_checker.start()
-        self._tool_call_parser: ToolCallParser | None = None
-        self._reasoning_parser: ReasoningParser | None = None
+        self._tool_call_parser, self._reasoning_parser = self._build_output_parsers()
         self._gateway_url: str | None = None
 
     def start_gateway(self, config: "GatewayConfig") -> str:
@@ -150,20 +151,19 @@ class RolloutController:
         }
         return rollout_metadata
 
-    def configure_output_parsers(
-        self,
-        tool_call_parser: ToolCallParser | None = None,
-        reasoning_parser: ReasoningParser | None = None,
-    ) -> None:
-        """Configure parsers that will be applied automatically after each
-        generate() call.
+    def _build_output_parsers(self) -> tuple[ToolCallParser | None, ReasoningParser | None]:
+        tool_call_parser = None
+        reasoning_parser = None
 
-        Args:
-            tool_call_parser: Parser to extract structured tool calls from model output.
-            reasoning_parser: Parser to extract reasoning traces from model output.
-        """
-        self._tool_call_parser = tool_call_parser
-        self._reasoning_parser = reasoning_parser
+        if self.config.tool_call_parser != "none":
+            tool_call_parser = build_tool_call_parser(self.config.tool_call_parser)
+
+        if self.config.reasoning_parser != "none":
+            tokenizer_path = self.config.tokenizer_path or self.config.model_path
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+            reasoning_parser = build_reasoning_parser(self.config.reasoning_parser, tokenizer)
+
+        return tool_call_parser, reasoning_parser
 
     def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
         with self.worker_info_lock:
