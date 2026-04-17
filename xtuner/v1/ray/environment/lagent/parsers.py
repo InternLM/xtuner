@@ -12,7 +12,7 @@ class ResponseParser(Protocol):
     def parse_response(self, data: AgentMessage) -> AgentMessage: ...
 
 
-class TokenReasonParser:
+class Qwen3TokenReasonParser:
     def __init__(self, tokenizer_path: str, resoning_token=dict(start='<think>', end='</think>')):
         self.start = resoning_token.get('start', '<think>')
         self.end = resoning_token.get('end', '</think>')
@@ -59,7 +59,7 @@ class TokenReasonParser:
         return data
 
 
-class FunctionCallParser:
+class Qwen3FunctionCallParser:
     def parse_response(self, data: AgentMessage) -> AgentMessage:
         matches = re.findall(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', data.content, flags=re.DOTALL)
         tool_calls, error_message = [], None
@@ -88,7 +88,7 @@ class FunctionCallParser:
         return data
 
 
-class XMLFunctionCallParser:
+class Qwen3_5FunctionCallParser:
     def parse_response(self, data: AgentMessage) -> AgentMessage:
         tool_call_blocks = re.findall(r'<tool_call>(.*?)</tool_call>', data.content, flags=re.DOTALL)
         tool_calls, error_message = [], None

@@ -7,9 +7,9 @@ from ray.actor import ActorClass
 from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem, SampleParams
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.environment.lagent.parsers import (
-    FunctionCallParser,
+    Qwen3FunctionCallParser,
+    Qwen3TokenReasonParser,
     ResponseParser,
-    TokenReasonParser,
 )
 from xtuner.v1.ray.environment.lagent.schema import AgentMessage
 from xtuner.v1.ray.environment.lagent.tokenize import tokenize
@@ -42,9 +42,11 @@ class ControllerWrapper:
         self.sample_params = sample_params or SampleParams()
         # default parsers
         self.reasoning_parser = (
-            reasoning_parser and create_object(reasoning_parser) or TokenReasonParser(self.rollout_cfg.tokenizer_path)
+            reasoning_parser
+            and create_object(reasoning_parser)
+            or Qwen3TokenReasonParser(self.rollout_cfg.tokenizer_path)
         )
-        self.tool_call_parser = tool_call_parser and create_object(tool_call_parser) or FunctionCallParser()
+        self.tool_call_parser = tool_call_parser and create_object(tool_call_parser) or Qwen3FunctionCallParser()
 
     async def chat(self, messages, session_id=None, tools: Optional[List[Dict]] = None, **kwargs):
         sample_params = self.sample_params.model_copy(update=kwargs)
