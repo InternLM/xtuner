@@ -421,8 +421,6 @@ class BaseModel(nn.Module):
 
         if self.fsdp_config.requires_grad:
             for name, module in self.named_modules():
-                # if "ts_model" in name:
-                #     torch.distributed.breakpoint()
                 for p_name, param in module.named_parameters(recurse=False):
                     if param.requires_grad:
                         param_fp32 = torch.nn.Parameter(param.to(dtype=torch.float32))
