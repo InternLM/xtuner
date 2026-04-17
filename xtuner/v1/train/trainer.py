@@ -1256,7 +1256,6 @@ class Trainer:
     def _data_iter(self):
         data_iter = iter(self._dataloader)
         while self._cur_step < self.total_step:
-            # dist.breakpoint(skip=14)
             try:
                 data = next(data_iter)
             except StopIteration:
