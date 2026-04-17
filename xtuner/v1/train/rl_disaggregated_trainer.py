@@ -337,7 +337,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         producer_task = create_task(
             self.agent_loop_manager.produce_loop(
                 batch_size=self.train_batch_size,
-                start_rollout_step=self._cur_step,
+                start_rollout_step=self._cur_step,  # rename: latest_consumer_step
             )
         )
         try:

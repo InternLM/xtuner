@@ -348,6 +348,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         if update_event is None:
             update_event = asyncio.Event()
 
+        # TODO: move next line after 1.
         await self._collect_done_tasks(replay_buffer, task_name)
 
         # 1. 当前 rollout 权重过旧时立即停机，不再处理 leftovers
@@ -358,12 +359,10 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         # 2. 处理上一轮遗留的 completed 样本
         await self._process_leftover_samples(replay_buffer, task_name, rollout_step)
+        previously_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
 
         # 3. 计算当前并发需求
-        previously_completed_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
-        data_concurrency = max(0, int((1 + self.over_sample_threshold) * batch_size) - previously_completed_count)
         expired_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
-        sample_from_expired_storage = False
 
         if self.tail_batch_trigger_size > 0 and expired_sample_count >= self.tail_batch_trigger_size:
             logger.info(
@@ -371,6 +370,9 @@ class AsyncProduceStrategy(ProduceStrategy):
             )
             sample_from_expired_storage = True
             data_concurrency = max(0, batch_size - previously_completed_count)
+        else:
+            data_concurrency = max(0, int((1 + self.over_sample_threshold) * batch_size) - previously_completed_count)
+            sample_from_expired_storage = False
 
         logger.info(
             f"[{self.__class__.__name__}] Task {task_name} | Starting produce: data_concurrency: {data_concurrency}, previously_completed: {previously_completed_count}, expired_sample_count: {expired_sample_count}, rollout_step: {rollout_step}"

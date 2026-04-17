@@ -19,6 +19,7 @@ from xtuner.v1.utils import get_logger
 from .agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_ctl
 from .producer import (
     GROUP_GENERATE_TIME_KEY,
+    AsyncProduceStrategy,
     ProduceBatchStatus,
     ProduceStrategy,
     ProduceStrategyConfig,
@@ -407,9 +408,8 @@ class AgentLoopManager:
 
         pause_time_s = 0.0
         for task in self.task_runners:
-            pause_time_s += await task.produce_strategy.pause_product(
-                task.agent_loop, self.replay_buffer, task.task_name
-            )
+            _produce_strategy: AsyncProduceStrategy | ProduceStrategy = task.produce_strategy
+            pause_time_s += await _produce_strategy.pause_product(task.agent_loop, self.replay_buffer, task.task_name)
         self._pause_time_s = pause_time_s
         return pause_time_s
 
@@ -491,8 +491,9 @@ class AgentLoopManager:
             for task, completed_count in zip(active_tasks, completed_counts)
         )
 
-    def continue_product(self, model_rollout_step: int) -> None:
         # continue_product 的语义是“producer 可以恢复工作了”。
+
+    def continue_product(self, model_rollout_step: int) -> None:
         #
         # 它和 pause_product(for_weight_update=True) 是一对：
         # - pause_product(...) 负责让 producer 停下来；
@@ -500,9 +501,9 @@ class AgentLoopManager:
         #
         # 这里同步更新 `_model_rollout_step`，表示 rollout 侧接下来生成样本时，
         # 应把“当前正在使用的是哪一版权重”记录成这个版本号。
-        self._update_event.clear()
         self._status = AgentLoopManagerStatus.NORMAL
         self._model_rollout_step = model_rollout_step
+        self._update_event.clear()
 
     async def _wait_for_status_exit(self, blocked_status: AgentLoopManagerStatus) -> None:
         while not self._finish_event.is_set() and self._status == blocked_status:
@@ -543,7 +544,7 @@ class AgentLoopManager:
             #
             # 共卡路径下，每次 produce_batch() 都对应当前 trainer 轮次的新权重版本，
             # 所以这里直接复用 continue_product() 同步恢复状态并更新 rollout model version。
-            self.continue_product(model_rollout_step=rollout_step - 1)
+            self.continue_product(model_rollout_step=rollout_step - 1)  # TODO: 更新样本过期信息
             status = await self._produce_batch_to_buffer(
                 batch_size=batch_size,
                 rollout_step=rollout_step,
@@ -590,14 +591,14 @@ class AgentLoopManager:
 
             rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
             await continue_generation(rollout_ctl)
-            status = await self._produce_batch_to_buffer(batch_size=batch_size, rollout_step=rollout_step)
+            produce_status = await self._produce_batch_to_buffer(batch_size=batch_size, rollout_step=rollout_step)
 
-            if status == ProduceBatchStatus.EXPIRED_BATCH:
+            if produce_status == ProduceBatchStatus.EXPIRED_BATCH:
                 # 注意：
                 # - EXPIRED_BATCH 是 producer 在生产过程中自己检测出来的“立即停下”信号
                 # - UPDATE_ABORT 则是 trainer 在同步前通过 pause_product() 主动设置的
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
-            elif status == ProduceBatchStatus.NORMAL:
+            elif produce_status == ProduceBatchStatus.NORMAL:
                 # 只有正常完成一轮生产时，producer 自己维护的 rollout_step 才前进一步。
                 rollout_step += 1
 
@@ -620,6 +621,7 @@ class AgentLoopManager:
                     rollout_states=[],
                     status=ProduceBatchStatus.EXPIRED_BATCH,
                 )
+            # TODO: call self.get_task_batch_sizes before while instead of below two functions
             if await self._is_batch_ready(batch_size=batch_size, rollout_step=rollout_step):
                 result = await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
                 if result.rollout_states:
