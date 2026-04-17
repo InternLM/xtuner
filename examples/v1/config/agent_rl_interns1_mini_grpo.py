@@ -1,11 +1,5 @@
 import os
-
-os.environ["XTUNER_USE_LMDEPLOY"] = "1"
-
-# os.environ["HF_HOME"] = "/mnt/shared-storage-user/liukuikun/.cache/huggingface"
-# os.environ["TRANSFORMERS_OFFLINE"] = "1"
 from copy import deepcopy
-from functools import partial
 
 import ray
 from lagent.actions.mcp_client import AsyncMCPClient
@@ -54,15 +48,9 @@ from xtuner.v1.train.agent_rl_trainer import AgentRLTrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils.compute_metric import compute_metric
 
-if not ray.is_initialized():
-    ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG_POST_MORTEM": "0"}})
-
-experimental_name = os.path.basename(__file__).split(".py")[0]
-base_work_dir = os.environ["BASE_WORK_DIR"]
-work_dir = os.path.join(base_work_dir, experimental_name)
-
+experimental_name = 'agent_rl_interns1_mini'
+work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
-stop_word = "<|im_end|>"
 
 # basic settings
 global_batch_size = 8
@@ -74,7 +62,7 @@ pack_max_length = 68 * 1024
 max_response_length = 64 * 1024
 
 train_ep_size = 1
-rollout_tp_size = 4
+rollout_tp_size = 1
 rollout_ep_size = 1
 enable_float8_rollout = False
 rollout_max_batch_size = 1024
@@ -87,10 +75,10 @@ lr = 1e-6
 train_optimizer_steps = 8  # mini batch steps
 hf_interval = 5
 total_epochs = 10
-sp_size = 2
+sp_size = 1
 # evaluation settings
 enable_evaluate = True
-enable_initial_evaluate = False
+enable_initial_evaluate = True
 evaluate_step = 5
 
 # 1. resources
@@ -120,52 +108,59 @@ rollout_config = RolloutConfig(
     enable_return_routed_experts=enable_return_routed_experts,
     router_n_groups=8,
     max_prefill_token_num=max_prefill_token_num,
-    extra_rollout_config=dict(lmdeploy_log_level="INFO", lmdeploy_uvicorn_log_level="INFO"),
+    extra_rollout_config=dict(lmdeploy_log_level="ERROR", lmdeploy_uvicorn_log_level="ERROR"),
 )
 
 # sampling params
 training_sample_params = SampleParams(
-    max_tokens=max_response_length,
-    top_k=0,
-    top_p=0.999,
-    temperature=1.0,
-    min_tokens=0,
+    max_tokens=max_response_length, top_k=0, top_p=0.999, temperature=1.0, min_tokens=0
 )
 evaluation_sample_params = deepcopy(training_sample_params)
 evaluation_sample_params.temperature = 0.8
-# evaluation_sample_params.max_tokens = max_response_length
+
+# 2. dataset
+import json
+
+from xtuner.v1.datasets import DatasetConfig
+from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFnConfig
+
+
+def parse_xpuyu_json_cfg(path, tokenize_fn_cfg, max_prompt_length, data_judger_mapping, ignore_multimodal_info=False):
+    with open(path, "r") as f:
+        json_cfg = json.load(f)
+    converted_cfg = []
+    for ds_name, ds_cfg in json_cfg.items():
+        annotation = ds_cfg["annotation"]
+        if isinstance(annotation, str):
+            annotation = [annotation]
+        for ann in annotation:
+            converted_cfg.append(
+                {
+                    "dataset": DatasetConfig(
+                        name=ds_name,
+                        anno_path=ann,
+                        sample_ratio=ds_cfg["sample_ratio"],
+                        media_root=ds_cfg.get("media_root", None),
+                        class_name='VLMJsonlDataset',
+                    ),
+                    "tokenize_fn": RLTokenizeFnConfig(
+                        tokenize_fn_cfg=tokenize_fn_cfg,
+                        system_prompt=ds_cfg.get("system_message", None),
+                        max_length=max_prompt_length,
+                        data_judger_mapping=data_judger_mapping,
+                        ignore_multimodal_info=ignore_multimodal_info,
+                    ),
+                }
+            )
+    return converted_cfg
+
 
 data_judger_mapping = {
-    'GAIA_sft_1229': {"compass_verifier_v2": 1.0},
-    'gaia-level1': {"compass_verifier_v2": 1.0},
-    'gaia-level2': {"compass_verifier_v2": 1.0},
-    'gaia-level3': {"compass_verifier_v2": 1.0},
+    'WebSearch': {"compass_verifier_v2": 1.0},
     'BrowseComp-ZH': {"compass_verifier_v2": 1.0},
     'HLE': {"compass_verifier_v2": 1.0},
 }
-tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(
-    processor_path=model_path,
-    min_pixels=None,
-    # max_pixels=None,
-    # max_pixels=2097152,
-    video_min_total_pixels=None,
-    video_max_total_pixels=None,
-    video_min_frames=None,
-    video_max_frames=None,
-    fps=None,
-    rand_video_max_frames=24,
-    add_vision_id=True,
-    system_message=None,
-    hash=None,
-    enable_3d_rope=False,
-    oss_loader_cfg=None,
-    debug=True,
-    oss_time_log_thr=10,
-)
-
-# 2. dataset
-from xtuner.v1.datasets.rl_tokenize_fn.xpuyu_dataset_vl import parse_xpuyu_json_cfg
-
+tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path, enable_3d_rope=False, debug=True)
 train_dataset_cfg = parse_xpuyu_json_cfg(
     os.environ['TRAIN_DATA_PATH'], tokenize_fn_cfg, max_prompt_length, data_judger_mapping
 )
@@ -178,11 +173,9 @@ dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="
 judger_cfg = JudgerConfig(reward_judger_configs=[CompassVerifierV2Config(hosts=[])])
 
 
-def prepare_agent_inputs(env, group_data_item: RLDataFlowItem, is_training=False):
+def prepare_agent_inputs(env, group_data_item: RLDataFlowItem):
     env_agent, session_id = env.agent.env_agent, group_data_item.uid.observation_id
     user_prompt = group_data_item.data.messages[-1]['content']
-    if is_training:
-        group_data_item.data.reward_model['ground_truth'] = group_data_item.data.reward_model['ground_truth']['target']
     env_message = AgentMessage(role="env", content=user_prompt)
     if session_id not in env_agent.memory.memory_map or not env_agent.memory.get_memory(session_id):
         set_env_message = AgentMessage(role="env", content=group_data_item)
@@ -220,22 +213,8 @@ rollout_controller = ray.remote(max_concurrency=1000)(RolloutController).remote(
 load_checkpoint_cfg = LoadCheckpointConfig(load_optimizer_states=False, load_optimizer_args=False)
 
 actions = [
-    dict(
-        type=AsyncMCPClient,
-        name='SerperSearch',
-        server_type='http',
-        rate_limit=100.0,
-        max_concurrency=30,
-        url=[],
-    ),
-    dict(
-        type=AsyncMCPClient,
-        name='JinaBrowse',
-        server_type='http',
-        rate_limit=100.0,
-        max_concurrency=40,
-        url=[],
-    ),
+    dict(type=AsyncMCPClient, name='SerperSearch', server_type='http', rate_limit=100.0, max_concurrency=30, url=[]),
+    dict(type=AsyncMCPClient, name='JinaBrowse', server_type='http', rate_limit=100.0, max_concurrency=40, url=[]),
 ]
 tool_prompt = get_tool_prompt(actions)
 
@@ -297,10 +276,7 @@ eval_agent = dict(
 
 
 def rollout_env_router_fn(item: RLDataFlowItem):
-    if item.data.extra_info['origin_data_source'].startswith('gaia') or item.data.extra_info['origin_data_source'] in [
-        'BrowseComp-ZH',
-        'HLE',
-    ]:
+    if item.data.extra_info['origin_data_source'] in ['BrowseComp-ZH', 'HLE']:
         return 'eval'
     return 'train_agent'
 
@@ -315,7 +291,7 @@ environment_config = dict(
             environment='websailor',
             agent_cfg=train_agent,
             rollout_controller=rollout_controller,
-            preprocess_func=partial(prepare_agent_inputs, is_training=True),
+            preprocess_func=prepare_agent_inputs,
             postprocess_func=convert_rollout_tractory_to_train,
         ),
         'eval': dict(
@@ -349,18 +325,7 @@ evaluator_cfg = (
         tokenizer=model_path,
         eval_sample_ratio=1.0,
         evaluate_step=evaluate_step,
-        compute_metric_func=partial(
-            compute_metric,
-            source_normalizer={
-                'miroRL': 'websearch',
-                'musique': 'websearch',
-                'websailor': 'websearch',
-                'webdancer': 'websearch',
-                'gaia-level1': ('gaia-level1', 'gaia'),
-                'gaia-level2': ('gaia-level2', 'gaia'),
-                'gaia-level3': ('gaia-level3', 'gaia'),
-            },
-        ),
+        compute_metric_func=compute_metric,
         sample_params=evaluation_sample_params,
         max_concurrent=8192,
     )
@@ -413,10 +378,7 @@ loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
         cliprange_high=0.2,
         cliprange_low=0.2,
-        loss_type="intern_s1_delivery.modules.pg_loss.pg_loss_fn",
-        clip_ratio_c=5.0,
-        log_prob_diff_min=-20.0,
-        log_prob_diff_max=20.0,
+        loss_type="vanilla",
     ),
     ignore_idx=-100,
     use_kl_loss=False,
@@ -467,14 +429,3 @@ trainer = AgentRLTrainerConfig(
     checkpoint_no_save_optimizer=True,
     skip_checkpoint_validation=True,
 )
-
-
-import torch.distributed as dist
-
-from xtuner.v1.train.agent_rl_trainer import AgentRLTrainer
-
-trainer = AgentRLTrainer.from_config(trainer)
-trainer.fit()
-
-if dist.is_initialized():
-    dist.destroy_process_group()
