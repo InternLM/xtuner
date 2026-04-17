@@ -121,7 +121,7 @@ def calculate_timestamps(
     if not isinstance(indices, list):
         indices = indices.tolist()
     if len(indices) % merge_size != 0:
-        indices.extend(indices[-1] for _ in range(merge_size - len(indices) % merge_size))
+        indices.extend(indices[-1] for _ in range(merge_size - len(indices) % merge_size))  # type: ignore[union-attr]
         if timestamps is not None:
             timestamps.extend(timestamps[-1] for _ in range(merge_size - len(timestamps) % merge_size))
 
@@ -297,14 +297,14 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"rand_video_max_frames: {self.rand_video_max_frames}"
         )
 
-        self.chat_template = copy.deepcopy(CHAT_TEMPLATE_MAP[chat_template])
+        self.chat_template = copy.deepcopy(CHAT_TEMPLATE_MAP[chat_template])  # type: ignore[assignment]
         if system_message is not None:
             self.chat_template.default_system = system_message
 
-        self.img_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_context_token)
-        self.video_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.video_context_token)
-        self.img_start_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_start_token)
-        self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)
+        self.img_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_context_token)  # type: ignore[attr-defined]
+        self.video_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.video_context_token)  # type: ignore[attr-defined]
+        self.img_start_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_start_token)  # type: ignore[attr-defined]
+        self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)  # type: ignore[attr-defined]
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
         _hash_str = (
@@ -317,7 +317,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
 
         self.size = SimpleNamespace(
             **(
-                asdict(self.video_processor.size)
+                asdict(self.video_processor.size)  # type: ignore[arg-type]
                 if is_dataclass(self.video_processor.size)
                 else self.video_processor.size
             )
@@ -421,7 +421,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             return {"num_tokens": 0, "num_img_tokens": [0]}  # type: ignore
 
         messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
-        replace_image_token(messages, self.chat_template, sum_media_grid_thw, add_vision_id=self.add_vision_id)
+        replace_image_token(messages, self.chat_template, sum_media_grid_thw, add_vision_id=self.add_vision_id)  # type: ignore[arg-type]
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
         input_ids = tokenized["input_ids"]
 
@@ -437,7 +437,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, _, _ = self._truncated_data_item(input_ids)
 
         # 如果图片被截断，则该数据丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()  # type: ignore[attr-defined]
         num_image_tokens_2 = sum_media_grid_thw.sum()
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
@@ -500,7 +500,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
         # 如果图片被截断，则该数据要丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()  # type: ignore[attr-defined]
         num_image_tokens_2 = torch.stack(grid_thw_merged, dim=0).sum()
         # assert 会被捕获，该数据会丢弃
         assert num_image_tokens_1 == num_image_tokens_2, (
@@ -701,7 +701,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         replace_video_token(
             messages,
-            self.chat_template,
+            self.chat_template,  # type: ignore[arg-type]
             num_image_token_list,
             timestamps_list=timestamps_list,
             add_vision_id=self.add_vision_id,
@@ -721,7 +721,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, _, _ = self._truncated_data_item(input_ids)
 
         # 如果图片被截断，则该数据丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()  # type: ignore[attr-defined]
         num_image_tokens_2 = total_sum_media_grid_thw
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
@@ -834,7 +834,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         messages = ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         replace_video_token(
             messages,
-            self.chat_template,
+            self.chat_template,  # type: ignore[arg-type]
             num_image_tokens_list,
             timestamps_list=timestamps_list,
             add_vision_id=self.add_vision_id,
@@ -871,7 +871,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
         # 如果图片被截断，则该数据要丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()  # type: ignore[attr-defined]
         num_image_tokens_2 = total_sum_media_grid_thw
         # assert 会被捕获，该数据会丢弃
         assert num_image_tokens_1 == num_image_tokens_2, (

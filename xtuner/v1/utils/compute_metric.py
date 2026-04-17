@@ -6,18 +6,20 @@ from scipy import stats
 
 from .logger import get_logger
 
+
 logger = get_logger()
 
 
-def compute_metric(samples, source_normalizer: dict | Callable[[str], str | Tuple[str]] = None):
+def compute_metric(samples, source_normalizer: dict | Callable[[str], str | Tuple[str]] | None = None):
     # group by data source
     group_by_data_source = defaultdict(list)
     for sample in samples:
-        data_source = str(sample.data.extra_info.get("origin_data_source", "unknown"))
+        data_source: str | Tuple[str] = str(sample.data.extra_info.get("origin_data_source", "unknown"))
         if isinstance(source_normalizer, dict):
-            data_source = source_normalizer.get(data_source, data_source)
+            data_source = source_normalizer.get(data_source, data_source)  # type: ignore[arg-type]  # noqa
+            assert isinstance(data_source, (str, tuple))
         elif callable(source_normalizer):
-            data_source = source_normalizer(data_source)
+            data_source = source_normalizer(data_source)  # type: ignore[arg-type]
         if isinstance(data_source, str):
             data_source = (data_source,)
         for ds in data_source:

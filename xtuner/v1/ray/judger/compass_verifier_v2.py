@@ -4,11 +4,12 @@ from typing import List
 
 import aiohttp
 import ray
-import requests
+import requests  # type: ignore[import-untyped]
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RLDataFlowItem, RLJudgerResponseItem
 from xtuner.v1.ray.judger.native import NativeJudgerConfig
+
 
 verify_prompt = """
 Please as a grading expert, judge whether the final answers given by the candidates below are consistent with the standard answers, that is, whether the candidates answered correctly.
@@ -73,8 +74,8 @@ class CompassVerifierV2:
         # print(f"[Judger]: input {data_item}")
         if data_item.env.rollout.finish_reason not in ["finished", "stop"]:
             return RLJudgerResponseItem(uid=data_item.uid.observation_id, reward={"score": -1})
-        question = data_item.data.messages[-1]["content"]
-        model_answer = data_item.env.rollout.response.replace("<|im_end|>", "").strip()
+        question = data_item.data.messages[-1]["content"]  # type: ignore[index]
+        model_answer = (data_item.env.rollout.response or "").replace("<|im_end|>", "").strip()
         for thinking_finish_word in self.thinking_finish_words:
             if thinking_finish_word in model_answer:
                 model_answer = model_answer.split(thinking_finish_word)[-1]
@@ -87,14 +88,14 @@ class CompassVerifierV2:
         if len(model_answer) > 1000:
             model_answer = model_answer[-1000:]
 
-        label = data_item.data.reward_model["ground_truth"]
+        label = data_item.data.reward_model["ground_truth"]  # type: ignore[index]
         outcome_reward = await self._judge_with_llm(question, model_answer, label)
         # print(f"[Judger]: final reward {final_reward}")
         return RLJudgerResponseItem(uid=data_item.uid.observation_id, reward={"score": outcome_reward})
 
-    async def _judge_with_llm(self, question: str, response: str, label: str):
+    async def _judge_with_llm(self, question: str, model_response: str, label: str):
         headers = {"Content-Type": "application/json"}
-        prompt = verify_prompt.format("", "", question=question, llm_response=response, gold_answer=label)
+        prompt = verify_prompt.format("", "", question=question, llm_response=model_response, gold_answer=label)
         data = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
@@ -119,7 +120,7 @@ class CompassVerifierV2:
                         else:
                             return -1
                 except Exception as e:
-                    asyncio.sleep(1)
+                    await asyncio.sleep(1)
                     print(f"[Judger]: Error try {i}: {str(e)}")
         raise RuntimeError(f"Cannot connect to judger service for {self.max_retries} times.")
 
@@ -153,4 +154,4 @@ class CompassVerifierV2Config(NativeJudgerConfig):
                 .remote(hosts=self.hosts)
             )
             workers_list.append(worker)
-        return workers_list
+        return workers_list  # type: ignore[return-value]

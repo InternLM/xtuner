@@ -12,8 +12,8 @@ import ray
 import uvicorn
 from fastapi import FastAPI
 from ray.util.placement_group import PlacementGroup
-from transformers import AutoTokenizer
 
+from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import (
     RLRolloutRequestItem,
     RLRolloutResponseItem,
@@ -25,6 +25,7 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
+
 
 ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 

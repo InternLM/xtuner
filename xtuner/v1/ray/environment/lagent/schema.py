@@ -8,7 +8,8 @@ from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem, RolloutState
 
 
 class AgentMessage(BaseAgentMessage):
-    """Extends the base AgentMessage to include RL model response conversion."""
+    """Extends the base AgentMessage to include RL model response
+    conversion."""
 
     content_ids: Optional[List[int]] = Field(default=None, repr=False)
     content_logprobs: Optional[List[float]] = Field(default=None, repr=False)
@@ -19,18 +20,20 @@ class AgentMessage(BaseAgentMessage):
     raw_content_ids: Optional[List[int]] = Field(default=None, repr=False)
     raw_content_logprobs: Optional[List[float]] = Field(default=None, repr=False)
 
-    def merge_with(self, other: 'AgentMessage') -> 'AgentMessage':
-        assert self.finish_reason == 'abort', f"Cannot merge with non-aborted message: {self.finish_reason}"
-        self.raw_content += other.raw_content or ""
+    def merge_with(self, other: "AgentMessage") -> "AgentMessage":
+        assert self.finish_reason == "abort", f"Cannot merge with non-aborted message: {self.finish_reason}"  # type: ignore[has-type]
+        self.raw_content = (self.raw_content or "") + (other.raw_content or "")
         self.content = self.raw_content
-        self.raw_content_ids.extend(other.raw_content_ids or [])
+        if self.raw_content_ids is not None:
+            self.raw_content_ids.extend(other.raw_content_ids or [])
         self.content_ids = self.raw_content_ids
-        self.raw_content_logprobs.extend(other.raw_content_logprobs or [])
+        if self.raw_content_logprobs is not None:
+            self.raw_content_logprobs.extend(other.raw_content_logprobs or [])
         self.content_logprobs = self.raw_content_logprobs
         self.reward = other.reward
-        self.finish_reason = other.finish_reason
-        self.stream_state = other.stream_state
-        self.extra_info = other.extra_info
+        self.finish_reason = other.finish_reason  # type: ignore[has-type, assignment]
+        self.stream_state = other.stream_state  # type: ignore[has-type, assignment]
+        self.extra_info = other.extra_info  # type: ignore[has-type, assignment]
         return self
 
     @classmethod
@@ -54,14 +57,14 @@ class AgentMessage(BaseAgentMessage):
                 if model_response.state in [RolloutState.COMPLETED, RolloutState.ABORTED]
                 else (
                     AgentStatusCode.SESSION_OUT_OF_LIMIT
-                    if model_response.finish_reason == 'length'
+                    if model_response.finish_reason == "length"
                     else AgentStatusCode.SERVER_ERR
                 )
             ),
             finish_reason=model_response.finish_reason,
         )
 
-    def to_model_request(self, role: str = 'assistant') -> dict:
+    def to_model_request(self, role: str = "assistant") -> dict:
         """Convert AgentMessage to model request dict."""
         return {
             "role": role,

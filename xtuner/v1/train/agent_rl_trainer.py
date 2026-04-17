@@ -11,14 +11,14 @@ import numpy as np
 import ray
 import torch
 from mmengine.dist import get_rank
-from pydantic import BaseModel, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
-from transformers import AutoTokenizer
+from ray.util.placement_group import PlacementGroup
 from typing_extensions import Self
 
+from transformers import AutoTokenizer
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment.lagent.tokenize import tokenize
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
@@ -34,14 +34,11 @@ from .rl_trainer import (
     RLTrainerConfig,
     bind_train_rollout,
 )
-from .trainer import LoadCheckpointConfig
+
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
-
-from pydantic import BaseModel, ConfigDict
-from ray.util.placement_group import PlacementGroup
 
 
 class AgentRLTrainerConfig(BaseModel):
@@ -84,12 +81,12 @@ class AgentRLTrainerConfig(BaseModel):
 
     @field_serializer("replay_buffer_config")
     def serialize_replay_buffer_cfg(self, replay_buffer_config: ReplayBufferConfig) -> str:
-        return replay_buffer_config.model_dump(include={"replay_ratio", "replay_weights"})
+        return replay_buffer_config.model_dump(include={"replay_ratio", "replay_weights"})  # type: ignore[return-value]
 
     @field_serializer("evaluator_config")
-    def serialize_evaluator_cfg(self, evaluator_config: EvaluatorConfig) -> str:
+    def serialize_evaluator_cfg(self, evaluator_config: EvaluatorConfig) -> str:  # type: ignore[return-value]
         if evaluator_config:
-            return evaluator_config.model_dump(exclude={"tokenizer", "dataset_cfg", "compute_metric_func"})
+            return evaluator_config.model_dump(exclude={"tokenizer", "dataset_cfg", "compute_metric_func"})  # type: ignore[return-value]
         else:
             return ""
 
@@ -103,7 +100,6 @@ class AgentRLTrainerConfig(BaseModel):
 
 
 class AgentRLTrainer(RLTrainer):
-
     def __init__(
         self,
         *,
@@ -239,10 +235,10 @@ class AgentRLTrainer(RLTrainer):
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             # resume rollout dataflow
             self.logger.info(f"Resume rollout dataflow from checkpoint {self._load_checkpoint_cfg.checkpoint_path}")
-            ray.get(self._rollout_dataflow.resume.remote(self._load_checkpoint_cfg.checkpoint_path))
+            ray.get(self._rollout_dataflow.resume.remote(self._load_checkpoint_cfg.checkpoint_path))  # type: ignore[union-attr]
 
         if self._enable_evaluate and evaluator_config:
-            self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined]
+            self._evaluator = Evaluator.remote(evaluator_config, self._rollout_env_controller)  # type: ignore[attr-defined, union-attr]
             self._eval_step = evaluator_config.evaluate_step
         else:
             pass
@@ -290,11 +286,11 @@ class AgentRLTrainer(RLTrainer):
         self._exp_tracker = self._init_tracker(exp_tracker, log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = display_all_workers_log
 
-        self._train_results = defaultdict(list)
-        self._eval_results = defaultdict(list)
+        self._train_results: dict = defaultdict(list)
+        self._eval_results: dict = defaultdict(list)
 
     @classmethod
-    def from_config(cls, config: AgentRLTrainerConfig) -> Self:
+    def from_config(cls, config: AgentRLTrainerConfig) -> Self:  # type: ignore[override]
         """Create a Trainer instance from a TrainerConfig.
 
         Args:
@@ -329,12 +325,12 @@ class AgentRLTrainer(RLTrainer):
             rollout_steps=config.rollout_steps,
             exp_tracker=config.exp_tracker,
             display_all_workers_log=config.display_all_workers_log,
-            trainer_cfg=config,
+            trainer_cfg=config,  # type: ignore[arg-type]
             skip_load_weights=config.skip_load_weights,
         )
         return self
 
-    def _build_rollout_dataflow(
+    def _build_rollout_dataflow(  # type: ignore[override]
         self, environment_cfg: Dict, dataflow_cfg: DataFlowConfig, replay_buffer_config: ReplayBufferConfig
     ):
         from lagent.utils import create_object
@@ -357,19 +353,19 @@ class AgentRLTrainer(RLTrainer):
             self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
             for name, score in scores.items():
                 self._eval_results[name].append((self._cur_step, score))
-            self.visulize_results('eval')
+            self.visulize_results("eval")
 
     def _rollout_step(self, rollout_idx: int, step_timer_dict: dict):
         rollout_info = super()._rollout_step(rollout_idx, step_timer_dict)
         metrics_results = self._compute_metrics(rollout_info["data_groups"])
         self.logger.info(
-            f"train idx {rollout_idx} scores {metrics_results["avg_reward"]},"
-            f" all-zero group ratio {metrics_results.pop("all_zero_ratio", None)},"
-            f" all-one group ratio {metrics_results.pop("all_one_ratio", None)}"
+            f"train idx {rollout_idx} scores {metrics_results['avg_reward']},"
+            f" all-zero group ratio {metrics_results.pop('all_zero_ratio', None)},"
+            f" all-one group ratio {metrics_results.pop('all_one_ratio', None)}"
         )
         for metric, result in metrics_results.items():
             self._train_results[metric].append((self._cur_step, result))
-        self.visulize_results('train')
+        self.visulize_results("train")
         return rollout_info
 
     def _evaluate_step(self, rollout_idx: int, step_timer_dict: dict):
@@ -386,7 +382,7 @@ class AgentRLTrainer(RLTrainer):
             self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=rollout_idx)
             for name, score in scores.items():
                 self._eval_results[name].append((self._cur_step, score))
-            self.visulize_results('eval')
+            self.visulize_results("eval")
         return eval_log_info
 
     def _save_trajectories(self, data_groups, save_path, rollout_idx=None, is_eval: bool = False):
@@ -402,20 +398,20 @@ class AgentRLTrainer(RLTrainer):
                         response_ids = data.env.rollout.response_ids
                     rollout_response_len_list.append(len(response_ids))
 
-        rewards = torch.tensor(rewards).float()
+        rewards_tensor = torch.tensor(rewards).float()
         rollout_response_lens = None
         if len(rollout_response_len_list) > 0:
             rollout_response_lens = torch.tensor(rollout_response_len_list).float()
 
         with open(save_path, "w", encoding="utf-8") as f:
             item = {
-                "reward_mean": rewards.mean().item(),
-                "reward_std": rewards.std().item(),
-                "reward_max": rewards.max().item(),
-                "reward_min": rewards.min().item(),
-                "total_len": len(rewards),
+                "reward_mean": rewards_tensor.mean().item(),
+                "reward_std": rewards_tensor.std().item(),
+                "reward_max": rewards_tensor.max().item(),
+                "reward_min": rewards_tensor.min().item(),
+                "total_len": len(rewards_tensor),
             }
-            if len(rollout_response_len_list) > 0:
+            if len(rollout_response_len_list) > 0 and rollout_response_lens is not None:
                 item.update(
                     {
                         "rollout_response_len_mean": rollout_response_lens.mean().item(),
@@ -428,14 +424,14 @@ class AgentRLTrainer(RLTrainer):
             f.write("\n")
             for group in data_groups:
                 for data in group:
-                    item = {
+                    entry = {
                         "raw_prompt": data.data.extra_info["raw_prompt"],
                         "prompt": [
                             {
-                                'role': msg['role'],
-                                'content': msg['raw_content'] if 'raw_content' in msg else msg['content'],
+                                "role": msg["role"],
+                                "content": msg["raw_content"] if "raw_content" in msg else msg["content"],
                             }
-                            for msg in data.env.agent.extra_info.get('messages', [])[:-1]
+                            for msg in data.env.agent.extra_info.get("messages", [])[:-1]
                         ],
                         "response": data.env.rollout.response,
                         "response_len": len(data.env.rollout.response_ids or []),
@@ -444,10 +440,10 @@ class AgentRLTrainer(RLTrainer):
                         # "round": sum(msg['role'] == 'assistant' for msg in data.env.agent.extra_info['messages'][:-1]),
                         # "judger_response": data.env.judger.extra_info,
                     }
-                    if 'completions' in data.env.agent.extra_info:
-                        item["completions"] = data.env.agent.extra_info['completions']
+                    if "completions" in data.env.agent.extra_info:
+                        entry["completions"] = data.env.agent.extra_info["completions"]
 
-                    json.dump(item, f, ensure_ascii=False, indent=2)
+                    json.dump(entry, f, ensure_ascii=False, indent=2)
                     f.write("\n")
 
     def _compute_metrics(self, data_groups):
@@ -472,8 +468,8 @@ class AgentRLTrainer(RLTrainer):
             tool_turns = []
             for group in data_groups:
                 for data in group:
-                    messages = data.env.agent.extra_info.get('messages', [])
-                    tool_turn_count = sum(1 for msg in messages if msg['role'] == 'tool')
+                    messages = data.env.agent.extra_info.get("messages", [])
+                    tool_turn_count = sum(1 for msg in messages if msg["role"] == "tool")
                     tool_turns.append(tool_turn_count)
             avg_tool_turns = sum(tool_turns) / len(tool_turns) if tool_turns else 0
             return avg_tool_turns
@@ -489,7 +485,7 @@ class AgentRLTrainer(RLTrainer):
         chat_data_groups, chat_multimodal_train_infos, agent_data_groups = [], [], []
         for j, group in enumerate(data_groups):
             # always place agent messages in the extra_info
-            if 'messages' in group[0].env.agent.extra_info or 'inputs' in group[0].env.agent.extra_info:
+            if "messages" in group[0].env.agent.extra_info or "inputs" in group[0].env.agent.extra_info:
                 agent_data_groups.append(group)
             else:
                 chat_data_groups.append(group)
@@ -505,9 +501,9 @@ class AgentRLTrainer(RLTrainer):
             return data_batches, info_dict
 
         def _tokenize_agent_messages(data_item):
-            if 'inputs' in data_item.env.agent.extra_info:
-                return data_item.env.agent.extra_info['inputs']
-            return tokenize(self.tokenizer, data_item.env.agent.extra_info['messages'])
+            if "inputs" in data_item.env.agent.extra_info:
+                return data_item.env.agent.extra_info["inputs"]
+            return tokenize(self.tokenizer, data_item.env.agent.extra_info["messages"])
 
         with ThreadPoolExecutor(max_workers=64) as executor:
             inputs_list = list(
@@ -547,15 +543,15 @@ class AgentRLTrainer(RLTrainer):
                 # messages = group[i].env.agent.extra_info['messages']
                 # assert messages[-1]['role'] == 'assistant'
                 inputs = group_inputs[i]
-                logprobs_tensor = torch.tensor(inputs['logprobs'], dtype=torch.float32)
+                logprobs_tensor = torch.tensor(inputs["logprobs"], dtype=torch.float32)
                 entropy = -(logprobs_tensor).sum()
                 sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
                 total_tokens += (logprobs_tensor != 0).sum().item()
             avg_entropy = sum_entropy / max(total_tokens, 1)
             entropy_upper_bound = 0.65
             entropy_lower_bound = 0.25
-            tau_upper = 0.0
-            tau_lower = 0.0  # 越大scale下降的越慢
+            _tau_upper = 0.0  # noqa: F841
+            _tau_lower = 0.0  # noqa: F841  # 越大scale下降的越慢
             coeff_min_upper = 0.2  # 熵高分支的最小缩放
             coeff_min_lower = 0.5  # 熵低分支的最小缩放
             if avg_entropy > entropy_upper_bound:
@@ -567,24 +563,24 @@ class AgentRLTrainer(RLTrainer):
             for i in range(prompt_repeat_k):
                 rollout = group[i].env.rollout
                 inputs = group_inputs[i]
-                input_ids, labels, logprobs = inputs['input_ids'], inputs['labels'], inputs['logprobs']
+                input_ids, labels, logprobs = inputs["input_ids"], inputs["labels"], inputs["logprobs"]
                 input_ids, shifted_labels, logprobs = input_ids[:-1], labels[1:], logprobs[1:]
 
                 response_len_list.append(len(rollout.response_ids))
                 prompt_len_list.append(len(input_ids) - len(rollout.response_ids))
                 advantages_list.extend([advantages[i]] * len(rollout.response_ids))
-                assert (
-                    len(input_ids) <= pack_max_length
-                ), f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
+                assert len(input_ids) <= pack_max_length, (
+                    f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
+                )
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
                 rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
-                assert (
-                    rollout_logprobs.size() == shifted_labels.size()
-                ), f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
+                assert rollout_logprobs.size() == shifted_labels.size(), (
+                    f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
+                )
 
                 seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
-                seq_ctx.rollout_routed_experts = inputs['routed_experts']
+                seq_ctx.rollout_routed_experts = inputs["routed_experts"]
                 data_batches.append(
                     dict(
                         seq_ctx=seq_ctx,
@@ -616,9 +612,7 @@ class AgentRLTrainer(RLTrainer):
 
     def visulize_results(self, stage: Literal["all", "train", "eval"] = "all"):
         def plot_accuracy_curve(data_list, x_label="training_steps", y_label="accuracy", save_path=None):
-            """
-            绘制折线图，输入的 data_list 是一个列表，元素为 (x, y) 元组，
-            其中 x 是横坐标，y 是纵坐标。
+            """绘制折线图，输入的 data_list 是一个列表，元素为 (x, y) 元组， 其中 x 是横坐标，y 是纵坐标。
 
             Args:
                 data_list (list of tuple): [(x1, y1), (x2, y2), ...]，要求按 x 升序排列
@@ -631,13 +625,13 @@ class AgentRLTrainer(RLTrainer):
             y_values = [y for _, y in data_list]
 
             plt.figure(figsize=(8, 5))
-            plt.plot(x_values, y_values, marker='o', linestyle='-', linewidth=2)
+            plt.plot(x_values, y_values, marker="o", linestyle="-", linewidth=2)
             plt.xlabel(x_label)
             plt.ylabel(y_label)
             plt.title(f"{y_label} vs {x_label}")
             plt.grid(True)
 
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
             print(f"图片已保存到: {save_path}")
 
         if stage in ["all", "eval"]:

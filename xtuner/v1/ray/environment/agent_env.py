@@ -35,7 +35,7 @@ def check_dead_actors():
     return dead_actors
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
+@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))  # type: ignore[call-overload]
 class AgentEnvironment(BaseEnvironment):
     def __init__(
         self,
@@ -45,7 +45,7 @@ class AgentEnvironment(BaseEnvironment):
         judger_pg=None,
         judger_cfg=None,
         preprocess_func: Callable[[Self, RLDataFlowItem], Tuple[AgentMessage]] = lambda _, item: (
-            AgentMessage(role='user', content=item.data.messages[0]['content']),
+            AgentMessage(role="user", content=item.data.messages[0]["content"]),  # type: ignore[index]
         ),
         postprocess_func: Callable[[Self, List[RLDataFlowItem]], List[RLDataFlowItem]] = lambda _, items: items,
     ):
@@ -55,53 +55,54 @@ class AgentEnvironment(BaseEnvironment):
         self.preprocess_func = preprocess_func
         self.postprocess_func = postprocess_func
 
-    async def generate(
+    async def generate(  # type: ignore[override]
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
     ) -> List[RLDataFlowItem]:
         sample_params = sample_params.model_dump() if sample_params else {}
 
         async def _inner_agent_call(item):
             if item.env.rollout.state == RolloutState.COMPLETED:
-                get_logger().debug(f'Rollout already completed for item {item.uid.observation_id}, skip agent call.')
-                return 'Passed'
+                get_logger().debug(f"Rollout already completed for item {item.uid.observation_id}, skip agent call.")
+                return "Passed"
             self.agent.reset(session_id=item.uid.observation_id, recursive=True)
-            if 'agent_state_dict' in item.env.rollout.extra_info:
+            if "agent_state_dict" in item.env.rollout.extra_info:  # type: ignore[operator]
                 self.agent.load_state_dict(
-                    item.env.rollout.extra_info.pop('agent_state_dict'), session_id=item.uid.observation_id
+                    item.env.rollout.extra_info.pop("agent_state_dict"),
+                    session_id=item.uid.observation_id,  # type: ignore[arg-type]
                 )
             agent_inputs = self.preprocess_func(self, deepcopy(item))
             try:
                 return await self.agent(*agent_inputs, session_id=item.uid.observation_id, **sample_params)
             except BaseException as exc:
                 get_logger().error(
-                    f'[Agent Inference Error] {exc}. Dead actors: {check_dead_actors()}\n{traceback.format_exc()}'
+                    f"[Agent Inference Error] {exc}. Dead actors: {check_dead_actors()}\n{traceback.format_exc()}"
                 )
-                return 'Failed'
+                return "Failed"
 
         results = await asyncio.gather(*[_inner_agent_call(sample) for sample in group_data_items])
         passed_data_items, completed_data_items = [], []
         for sample, message in zip(group_data_items, results):
-            if message == 'Failed':
+            if message == "Failed":
                 continue
-            if message == 'Passed':
+            if message == "Passed":
                 passed_data_items.append(sample)
-            elif message.finish_reason == 'abort':
+            elif message.finish_reason == "abort":
                 sample.env.rollout.state = RolloutState.ABORTED
                 agent_state_dict = self.agent.state_dict(sample.uid.observation_id)
                 # remove routed_experts from message extra_info to avoid serialization issue
                 for state in agent_state_dict.values():
                     for msg in state:
-                        msg['extra_info'].pop('routed_experts', None)
-                sample.env.rollout.extra_info['agent_state_dict'] = agent_state_dict
+                        msg["extra_info"].pop("routed_experts", None)
+                sample.env.rollout.extra_info["agent_state_dict"] = agent_state_dict  # type: ignore[typeddict-unknown-key]
                 passed_data_items.append(sample)
             else:
                 completed_data_items.append(sample)
-        completed_data_items: list = self.postprocess_func(self, completed_data_items)
-        return passed_data_items + (
-            await completed_data_items if inspect.iscoroutinefunction(self.postprocess_func) else completed_data_items
-        )
+        completed_data_items_result = self.postprocess_func(self, completed_data_items)  # type: ignore[arg-type]
+        if inspect.iscoroutinefunction(self.postprocess_func):
+            completed_data_items_result = await completed_data_items_result  # type: ignore[misc]
+        return passed_data_items + completed_data_items_result
 
-    async def run(
+    async def run(  # type: ignore[override]
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
     ) -> List[RLDataFlowItem]:
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)

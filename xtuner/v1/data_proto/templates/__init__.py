@@ -4,6 +4,7 @@ from datetime import datetime
 from .chat import ChatTemplate
 from .hybrid import HybridChatTemplate
 
+
 current_date = datetime.now().strftime("%Y-%m-%d")
 
 CHAT_TEMPLATE_MAP = {

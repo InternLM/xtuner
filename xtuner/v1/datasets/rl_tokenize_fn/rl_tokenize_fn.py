@@ -2,8 +2,8 @@
 from typing import cast
 
 from pydantic import BaseModel, ConfigDict
-from transformers import PreTrainedTokenizer
 
+from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.rl_data import RLDatasetItem
 from xtuner.v1.utils import get_logger
 
@@ -14,6 +14,7 @@ from ..utils import (
     CachableTokenizeFunction,
     replace_image_context_and_collect_media_data,
 )
+
 
 logger = get_logger()
 

@@ -1,5 +1,5 @@
 from copy import deepcopy
-from typing import Callable
+from typing import Callable, Optional
 
 from lagent.agents import AsyncAgent
 
@@ -20,14 +20,14 @@ class JudgerWrapper(AsyncAgent):
         judger_cfg=None,
         placement_group=None,
         judger_controller=None,
-        itemgetter: Callable[[AgentMessage], RLDataFlowItem] = lambda m: m.content,
-        reward_key: str = 'score',
-        name: str = None,
+        itemgetter: Callable[[AgentMessage], RLDataFlowItem] = lambda m: m.content,  # type: ignore[assignment,return-value]
+        reward_key: str = "score",
+        name: Optional[str] = None,
     ):
-        assert judger_controller is not None or (
-            judger_cfg and placement_group
-        ), "Either judger_controller or judger_cfg and placement_group must be provided."
-        self.judger_controller = judger_controller or JudgerController.remote(judger_cfg, placement_group)
+        assert judger_controller is not None or (judger_cfg and placement_group), (
+            "Either judger_controller or judger_cfg and placement_group must be provided."
+        )
+        self.judger_controller = judger_controller or JudgerController.remote(judger_cfg, placement_group)  # type: ignore[attr-defined]
         self.itemgetter = itemgetter
         self.reward_key = reward_key
         super().__init__(memory=None, aggregator=None, name=name)
@@ -38,13 +38,13 @@ class JudgerWrapper(AsyncAgent):
             item = RLDataFlowItem.model_validate(item)
         item = update_dataflow_item(
             [item],
-            'env.rollout',
+            "env.rollout",
             [
                 RLRolloutResponseItem(
                     response=message.content,
                     response_ids=message.content_ids,
                     logprobs=message.content_logprobs,
-                    finish_reason='finished',
+                    finish_reason="finished",
                     state=RolloutState.COMPLETED,
                 )
             ],

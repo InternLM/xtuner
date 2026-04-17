@@ -11,14 +11,14 @@ from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 from .base_env import BaseEnvironment
 
 
-@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))
+@ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))  # type: ignore[call-overload]
 class ComposedEnvironment(BaseEnvironment):
     def __init__(
         self,
         environment: str,
         rollout_controller,
         environments: Dict[str, BaseEnvironment | dict],
-        router: Callable[[RLDataFlowItem], str] = lambda item: item.data.extra_info['environment'],
+        router: Callable[[RLDataFlowItem], str] = lambda item: item.data.extra_info["environment"],
     ):
         super().__init__(environment, None, None, None, None)
         self.rollout_controller = rollout_controller
@@ -28,7 +28,7 @@ class ComposedEnvironment(BaseEnvironment):
     async def generate(self, data, sample_params, extra_params):
         return await super().generate(data, sample_params, extra_params)
 
-    async def run(
+    async def run(  # type: ignore[override]
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
     ) -> List[RLDataFlowItem]:
         results = await asyncio.gather(

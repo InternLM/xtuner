@@ -26,14 +26,14 @@ class ControllerWrapper:
         reasoning_parser: Optional[ResponseParser] = None,
         tool_call_parser: Optional[ResponseParser] = None,
     ):
-        assert rollout_controller is not None or (
-            placement_group and rollout_cfg
-        ), "Either rollout_controller or placement_group and rollout_cfg must be provided."
+        assert rollout_controller is not None or (placement_group and rollout_cfg), (
+            "Either rollout_controller or placement_group and rollout_cfg must be provided."
+        )
         if rollout_controller:
             self.rollout_controller = rollout_controller
-            self.rollout_cfg = ray.get(rollout_controller.get_rollout_info.remote())['rollout_config']
+            self.rollout_cfg = ray.get(rollout_controller.get_rollout_info.remote())["rollout_config"]  # type: ignore[call-overload, attr-defined]
         else:
-            self.rollout_controller = RolloutController.remote(rollout_cfg, placement_group)
+            self.rollout_controller = RolloutController.remote(rollout_cfg, placement_group)  # type: ignore[attr-defined]
             self.rollout_cfg = rollout_cfg
 
         from transformers import AutoTokenizer
@@ -51,26 +51,26 @@ class ControllerWrapper:
     async def chat(self, messages, session_id=None, tools: Optional[List[Dict]] = None, **kwargs):
         sample_params = self.sample_params.model_copy(update=kwargs)
         inputs = tokenize(self.tokenizer, messages, tools)
-        if len(inputs['input_ids']) >= self.rollout_cfg.context_length:
-            response = RLRolloutResponseItem(finish_reason='length')
+        if len(inputs["input_ids"]) >= self.rollout_cfg.context_length:
+            response = RLRolloutResponseItem(finish_reason="length")
         else:
-            extra_info = {'action_id': session_id}
-            if inputs['routed_experts'] is not None:
-                extra_info['routed_experts'] = inputs['routed_experts']
-            response: RLRolloutResponseItem = await self.rollout_controller.rollout.remote(
-                input_ids=inputs['input_ids'],
+            extra_info = {"action_id": session_id}
+            if inputs["routed_experts"] is not None:
+                extra_info["routed_experts"] = inputs["routed_experts"]
+            response = await self.rollout_controller.rollout.remote(  # type: ignore[no-redef, attr-defined]
+                input_ids=inputs["input_ids"],
                 sample_params=sample_params,
                 session_id=session_id,
                 extra_info=extra_info,
             )
             if (
-                response.finish_reason != 'abort'
+                response.finish_reason != "abort"
                 and self.rollout_cfg.enable_return_routed_experts
-                and 'routed_experts' not in response.extra_info
+                and "routed_experts" not in response.extra_info
             ):
                 raise ValueError("Routed experts expected in response extra_info but not found.")
 
-        response = AgentMessage.from_model_response(response, '')
+        response = AgentMessage.from_model_response(response, "")
         return self.parse_response(response)
 
     def parse_response(self, response: AgentMessage):

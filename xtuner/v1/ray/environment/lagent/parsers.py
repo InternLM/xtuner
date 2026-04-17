@@ -13,16 +13,16 @@ class ResponseParser(Protocol):
 
 
 class Qwen3TokenReasonParser:
-    def __init__(self, tokenizer_path: str, resoning_token=dict(start='<think>', end='</think>')):
-        self.start = resoning_token.get('start', '<think>')
-        self.end = resoning_token.get('end', '</think>')
+    def __init__(self, tokenizer_path: str, resoning_token=dict(start="<think>", end="</think>")):
+        self.start = resoning_token.get("start", "<think>")
+        self.end = resoning_token.get("end", "</think>")
 
         from transformers import AutoTokenizer
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
     def parse_response(self, data: AgentMessage) -> AgentMessage:
-        think, content = '', data.content or ''
+        think, content = "", data.content or ""
         thinking_start_idx = thinking_end_idx = -1
         if self.end in data.content:
             think, content = data.content.rsplit(self.end, 1)
@@ -38,7 +38,7 @@ class Qwen3TokenReasonParser:
         content_logprobs = data.content_logprobs or []
         start_token_ids = self.tokenizer.encode(self.start, add_special_tokens=False)
         end_token_ids = self.tokenizer.encode(self.end, add_special_tokens=False)
-        # find fisrt start_token_ids and last end_token_ids in content_ids
+        # find first start_token_ids and last end_token_ids in content_ids
         # thinking ids  should contain start_token_ids and end_token_ids
         for i in range(len(content_ids) - len(start_token_ids) + 1):
             if content_ids[i : i + len(start_token_ids)] == start_token_ids:
@@ -61,7 +61,7 @@ class Qwen3TokenReasonParser:
 
 class Qwen3FunctionCallParser:
     def parse_response(self, data: AgentMessage) -> AgentMessage:
-        matches = re.findall(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', data.content, flags=re.DOTALL)
+        matches = re.findall(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", data.content, flags=re.DOTALL)
         tool_calls, error_message = [], None
         for m in matches:
             tool_call = None
@@ -84,17 +84,17 @@ class Qwen3FunctionCallParser:
         if tool_calls:
             data.tool_calls = tool_calls
         if error_message:
-            data.extra_info['parse_tool_call_error'] = error_message
+            data.extra_info["parse_tool_call_error"] = error_message
         return data
 
 
 class Qwen3_5FunctionCallParser:
     def parse_response(self, data: AgentMessage) -> AgentMessage:
-        tool_call_blocks = re.findall(r'<tool_call>(.*?)</tool_call>', data.content, flags=re.DOTALL)
+        tool_call_blocks = re.findall(r"<tool_call>(.*?)</tool_call>", data.content, flags=re.DOTALL)
         tool_calls, error_message = [], None
 
         for block in tool_call_blocks:
-            func_match = re.search(r'<function=([^>]+)>(.*?)</function>', block, flags=re.DOTALL)
+            func_match = re.search(r"<function=([^>]+)>(.*?)</function>", block, flags=re.DOTALL)
             if not func_match:
                 error_message = "Could not find a valid <function=name>...</function> block inside <tool_call>."
                 continue
@@ -102,7 +102,7 @@ class Qwen3_5FunctionCallParser:
             func_name = func_match.group(1).strip()
             func_body = func_match.group(2)
 
-            param_matches = re.finditer(r'<parameter=([^>]+)>(.*?)</parameter>', func_body, flags=re.DOTALL)
+            param_matches = re.finditer(r"<parameter=([^>]+)>(.*?)</parameter>", func_body, flags=re.DOTALL)
             parameters = {}
             for p_match in param_matches:
                 p_name = p_match.group(1).strip()
@@ -118,5 +118,5 @@ class Qwen3_5FunctionCallParser:
         if tool_calls:
             data.tool_calls = tool_calls
         if error_message:
-            data.extra_info['parse_tool_call_error'] = error_message
+            data.extra_info["parse_tool_call_error"] = error_message
         return data
