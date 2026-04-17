@@ -1,11 +1,17 @@
 from datetime import datetime
 import os
+import json
 import parametrize
 from unittest import TestCase
 from transformers import AutoTokenizer
+import torch
+from packaging.version import Version
+from transformers import __version__ as transformers_version
+import unittest
 
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP 
 from xtuner.v1.data_proto.messages import ChatMessages
+from xtuner.v1.data_proto.messages.qwen35_chat import Qwen35ChatMessages, qwen35_tokenize_fn_slowspeed
 
 
 QWEN3_PATH = os.environ["QWEN3_PATH"]
@@ -222,6 +228,45 @@ class TestChatTemplate(TestCase):
         input_ids = _messages.tokenize(tokenizer, chat_template)['input_ids']
         
         self.assertTrue((input_ids == input_ids_ref))
+    
 
-
+    @unittest.skipIf(
+        Version(transformers_version) < Version("5.2.0"),
+        f"transformers >= 5.2.0 is required, but got {transformers_version}"
+    )
+    def test_qwen35vl_template(self):
+        QWEN35_VL_PATH = os.environ["QWEN3_5_MOE_PATH"]
+        chat_template = CHAT_TEMPLATE_MAP["qwen3.5-vl"]
+        tokenizer = AutoTokenizer.from_pretrained(QWEN35_VL_PATH, trust_remote_code=True)
         
+        jsonl_path = 'tests/resource/qwen35_tokenize_data.jsonl'
+        all_data= []
+        with open(jsonl_path, 'r') as f:
+            for line in f:
+                all_data.append(json.loads(line))
+        
+        for j, data in enumerate(all_data):
+            if j in [13,14]: # video 肯定和 hf 对不上
+                continue
+            gt_token_ids, gt_labels = qwen35_tokenize_fn_slowspeed(tokenizer, data['messages'], tools=data.get('tools'), add_vision_id=True)
+            _messages = Qwen35ChatMessages(messages=data["messages"], tools=data.get("tools"))
+            tokenized = _messages.tokenize(tokenizer, chat_template, add_vision_id=True)
+            decode_str = tokenizer.decode(tokenized['input_ids'], skip_special_tokens=False)
+
+            if j!=15 and j!=16:
+                self.assertEqual(tokenized['input_ids'], gt_token_ids)
+                self.assertEqual(tokenized['labels'], gt_labels)
+
+                enable_thinking = any("reasoning_content" in msg for msg in data['messages'])
+                hf_text = tokenizer.apply_chat_template(data['messages'],   
+                                                tools=data.get('tools'),       
+                                                add_vision_id=True,   
+                                                tokenize=False,
+                                                enable_thinking=enable_thinking,
+                                                add_generation_prompt=False)
+                self.assertEqual(decode_str, hf_text)
+            else:
+                if j==15:
+                    self.assertTrue('Video 1: <|vision_start|><|video_pad|><|vision_end|><|vision_start|><|video_pad|><|vision_end|><|vision_start|><|video_pad|><|vision_end|><0.0-10.0 seconds>Describe the video in detail. [NO_REASONING]<|im_end|>' in decode_str)
+                else:
+                    self.assertTrue('Video 1: <0.0 seconds><|vision_start|><|video_pad|><|vision_end|><1.0 seconds><|vision_start|><|video_pad|><|vision_end|><2.0 seconds><|vision_start|><|video_pad|><|vision_end|><0.0-10.0 seconds>Describe the video in detail. [NO_REASONING]<|im_end|>' in decode_str)
