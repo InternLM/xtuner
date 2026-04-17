@@ -45,19 +45,28 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
     def to_hf_key_list(self, key: str) -> list[str]:
         # Handle MTP parameters
         if key.startswith("mtp_block."):
-            # Remove "mtp_block." prefix
-            key = key.replace("mtp_block.", "", 1)
+            # Extract MTP name from mtp_block.{mtp_name}.{rest}
+            # Only "normal" and "sci" are supported
+            match = re.match(r"mtp_block\.(normal|sci)\.(.*)", key)
+            if not match:
+                raise ValueError(
+                    f"Invalid mtp_block key format: {key}. "
+                    f"Expected 'mtp_block.normal.*' or 'mtp_block.sci.*'"
+                )
+
+            mtp_name = match.group(1)
+            key = match.group(2)  # Get everything after mtp_block.{mtp_name}.
 
             # Handle MTP layer-specific parameters
-            # xtuner: mtp_block.layers.{idx}.decoder_layer.{param}
-            # HF: mtp.layers.{idx}.{param}
+            # xtuner: mtp_block.{mtp_name}.layers.{idx}.decoder_layer.{param}
+            # HF normal: mtp.layers.{idx}.{param}
+            # HF sci: mtp.sci.layers.{idx}.{param}
             key = re.sub(r"layers\.(\d+)\.decoder_layer\.", r"layers.\1.", key)
 
             # Handle MTP normalization layers
-            # xtuner: mtp_block.layers.{idx}.enorm -> HF: mtp.pre_fc_norm_embedding
-            # xtuner: mtp_block.layers.{idx}.hnorm -> HF: mtp.pre_fc_norm_hidden
-            # xtuner: mtp_block.layers.{idx}.final_layernorm -> HF: mtp.norm
-            # Note: Currently assuming single MTP layer (idx=0), may need adjustment for multiple layers
+            # xtuner: mtp_block.{mtp_name}.layers.{idx}.enorm -> HF: mtp[.sci].pre_fc_norm_embedding
+            # xtuner: mtp_block.{mtp_name}.layers.{idx}.hnorm -> HF: mtp[.sci].pre_fc_norm_hidden
+            # xtuner: mtp_block.{mtp_name}.layers.{idx}.final_layernorm -> HF: mtp[.sci].norm
             if ".enorm." in key:
                 key = re.sub(r"layers\.\d+\.enorm\.", "pre_fc_norm_embedding.", key)
             elif ".hnorm." in key:
@@ -66,13 +75,18 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
                 key = re.sub(r"layers\.\d+\.final_layernorm\.", "norm.", key)
 
             # Handle MTP projection layer
-            # xtuner: mtp_block.layers.{idx}.eh_proj -> HF: mtp.fc
+            # xtuner: mtp_block.{mtp_name}.layers.{idx}.eh_proj -> HF: mtp[.sci].fc
             if ".eh_proj." in key:
                 key = re.sub(r"layers\.\d+\.eh_proj\.", "fc.", key)
 
             # Handle MoE-specific transformations within MTP layers
             key = re.sub(r"layers\.(\d+)\.(experts|gate|shared_experts|shared_expert_gate)", r"layers.\1.mlp.\2", key)
             key = key.replace("shared_experts", "shared_expert")
+
+            # Determine HF prefix based on mtp_name
+            # Normal MTP (mtp_block.normal.*): mtp.{key}
+            # Science MTP (mtp_block.sci.*): mtp.sci.{key}
+            hf_prefix = "mtp." if mtp_name == "normal" else "mtp.sci."
 
             # Handle fused weights
             n_routed_experts = self.config.n_routed_experts
@@ -83,15 +97,15 @@ class Qwen3_5_VLTextMoE(Qwen3VLTextMoE):
                     w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.gate_proj.weight"))
                     w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.up_proj.weight"))
 
-                return [f"mtp.{key}" for key in w1w3_keys]
+                return [f"{hf_prefix}{key}" for key in w1w3_keys]
 
             elif "fused_w2.weight" in key:
                 w2_keys: list[str] = []
                 for i in range(n_routed_experts):
                     w2_keys.append(key.replace("fused_w2.weight", f"{i}.down_proj.weight"))
-                return [f"mtp.{key}" for key in w2_keys]
+                return [f"{hf_prefix}{key}" for key in w2_keys]
             else:
-                return ["mtp." + key]
+                return [hf_prefix + key]
 
         # Handle main model parameters
         if "layers" in key or "embed_tokens" in key:

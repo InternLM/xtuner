@@ -10,13 +10,17 @@ from torch.distributed.nn.functional import all_reduce
 
 from xtuner.v1.loss import BaseLossConfig, BaseLossContext, BaseLossKwargs
 from xtuner.v1.loss.chunk_loss import ChunkLoss
-from xtuner.v1.utils.device import get_device
+from xtuner.v1.utils import (
+    get_device,
+    get_logger,
+)
 
 # from xtuner.v1.profiler.prober import ProberList
 from .utils import sp_gather, sp_split
 
 
 DEVICE = get_device()
+logger = get_logger()
 
 
 class CELossConfig(BaseLossConfig):
@@ -261,12 +265,27 @@ class LMHeadLossContext(BaseLossContext):
         hidden_states: torch.Tensor,
         head_weight: torch.Tensor,
         head_bias: torch.Tensor | None = None,
+        mtp_config=None,
+        layer_idx: int = 0,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor | None, dict[str, Any]]]:
         from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 
         assert self.loss_kwargs is not None, "loss_kwargs must be set before calling forward"
         if head_bias is not None:
             raise NotImplementedError("Loss does not support head_bias yet.")
+
+        if mtp_config is not None:
+            if mtp_config.mask_type is None:
+                pass
+            elif mtp_config.mask_type == "v1":
+                self.process_loss_weights_v1(mtp_config, layer_idx)
+            elif mtp_config.mask_type == "v2":
+                assert layer_idx == 0, layer_idx
+                self.process_loss_weights_v2(mtp_config)
+            elif mtp_config.mask_type == "v3":
+                self.process_loss_weights_v3(mtp_config)
+            else:
+                raise NotImplementedError(mtp_config.mask_type)
 
         if self.loss_cfg.mode == "eager":
             loss, (logits, extra_info) = self.eager_mode(hidden_states, head_weight, head_bias, self.loss_kwargs)
@@ -284,6 +303,96 @@ class LMHeadLossContext(BaseLossContext):
             loss = all_reduce(loss, op=dist.ReduceOp.SUM, group=dist.group.WORLD)
 
         return loss, (logits, extra_info)
+
+    def process_loss_weights_v1(self, mtp_config, layer_idx):
+        shifted_labels = self.loss_kwargs.shifted_labels
+        loss_weight = self.loss_kwargs.loss_weight
+        sum_loss_weight = loss_weight.sum()
+        mtp_mask = torch.zeros_like(shifted_labels)
+        bsz, seq_len = shifted_labels.shape
+        inside_mtp_zone = False
+        assert bsz == 1, shifted_labels.shape
+        for j in range(seq_len):
+            token = shifted_labels[0, j].item()
+
+            if token in mtp_config.open_token_list:
+                inside_mtp_zone = True
+
+            if inside_mtp_zone:
+                flag = True
+                for i in range(layer_idx + 1 + 2):
+                    token_id = shifted_labels[0, j - i].item()
+                    token_in_list = token_id in mtp_config.open_token_list or token_id in mtp_config.close_token_list
+                    flag = flag and not token_in_list
+
+                if flag:
+                    mtp_mask[0, j] = 1.0
+
+            if token in mtp_config.close_token_list:
+                inside_mtp_zone = False
+        loss_weight[mtp_mask == 0.0] = 0.0
+        if loss_weight.sum().item() != 0:
+            loss_weight = loss_weight * sum_loss_weight / loss_weight.sum()
+
+        self.loss_kwargs.loss_weight = loss_weight
+
+    def process_loss_weights_v2(self, mtp_config):
+        shifted_labels = self.loss_kwargs.shifted_labels
+        loss_weight = self.loss_kwargs.loss_weight
+        sum_loss_weight = loss_weight.sum()
+
+        easy_to_use = torch.cat(
+            [
+                shifted_labels,
+                torch.zeros((shifted_labels.size(0), 1), dtype=shifted_labels.dtype, device=shifted_labels.device),
+            ],
+            dim=-1,
+        )
+
+        is_digit = torch.where(easy_to_use < 25, easy_to_use > 14, 0)
+        is_dot = torch.where(easy_to_use == 13, 1, 0)
+        is_digit_or_dot = is_digit + is_dot
+
+        mixed = is_digit_or_dot - torch.roll(is_digit_or_dot, shifts=1, dims=-1)
+
+        left = mixed > 0
+        right_unincluded = mixed < 0
+        left = torch.roll(left, shifts=1, dims=-1)
+        need_cumsum = torch.where(left, 1, 0) + torch.where(right_unincluded, -1, 0)
+
+        mtp_mask = torch.cumsum(need_cumsum, dim=-1).bool()[:, :-1]
+
+        loss_weight[mtp_mask == 0.0] = 0.0
+        if loss_weight.sum().item() != 0:
+            loss_weight = loss_weight * sum_loss_weight / loss_weight.sum()
+
+        self.loss_kwargs.loss_weight = loss_weight
+
+    def process_loss_weights_v3(self, mtp_config):
+        shifted_labels = self.loss_kwargs.shifted_labels
+        loss_weight = self.loss_kwargs.loss_weight
+        sum_loss_weight = loss_weight.sum()
+
+        easy_to_use = torch.cat(
+            [
+                shifted_labels,
+                torch.zeros((shifted_labels.size(0), 1), dtype=shifted_labels.dtype, device=shifted_labels.device),
+            ],
+            dim=-1,
+        )
+
+        is_digit = torch.where(easy_to_use < 25, easy_to_use > 14, 0)
+        is_dot = torch.where(easy_to_use == 13, 1, 0)
+        is_digit_or_dot = is_digit | is_dot
+
+        mask = is_digit_or_dot | torch.roll(is_digit_or_dot, shifts=1, dims=-1)
+        mtp_mask = mask.bool()[:, :-1]
+
+        loss_weight[mtp_mask == 0.0] = 0.0
+        if loss_weight.sum().item() != 0:
+            loss_weight = loss_weight * sum_loss_weight / loss_weight.sum()
+
+        self.loss_kwargs.loss_weight = loss_weight
 
 
 # Deprecated: Use LMHeadLossContext instead. Will be removed in version 1.1.0

@@ -905,7 +905,18 @@ class BaseModel(nn.Module):
             output_copy = output.model_copy()
             for name in output_copy.model_fields:
                 obj = getattr(output_copy, name)
-                if "loss" in name and isinstance(obj, torch.Tensor):
+                if name == "mtp_loss" and isinstance(obj, dict):
+                    for key, value in obj.items():
+                        loss_item = value.item()
+                        local_total_loss += loss_item
+                        reduced_name = f"{key}_reduced_mtp_loss"
+
+                        if reduced_name not in reduced_other_losses:
+                            reduced_other_losses[reduced_name] = loss_item
+                        else:
+                            reduced_other_losses[reduced_name] += loss_item
+
+                elif "loss" in name and isinstance(obj, torch.Tensor):
                     loss_item = obj.item()
                     local_total_loss += loss_item
                     reduced_name = f"reduced_{name}"
