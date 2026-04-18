@@ -83,7 +83,7 @@ def verify_window(path, center_step, metrics):
     return check_result
 
 if __name__ == "__main__":
-    base_dir = f"{sys.argv[1]}/{os.environ['GITHUB_RUN_ID']}/{sys.argv[2]}/sys.argv[3]}"
+    base_dir = f"{sys.argv[1]}/{os.environ['GITHUB_RUN_ID']}/{sys.argv[2]}/{sys.argv[3]}"
     real_dir = get_latest_subdir(base_dir)
     tracker = os.path.join(real_dir, "logs/exp_tracking/rank0/tracker.jsonl")
     center_step = int(sys.argv[4])
