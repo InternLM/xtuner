@@ -192,7 +192,6 @@ class MuonConfig(OptimConfig):
 
         optimizer = Muon(
             param_groups,
-            distributed_mesh=model.language_model.fsdp_mesh,  # TODO: 暂不支持 EP>1; maybe rm device_mesh dependency?
             lr=self.lr,
             mu=self.momentum,
             betas=self.betas,
