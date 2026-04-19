@@ -10,6 +10,7 @@ import torch
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status
+from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.rl.utils import (
     BetweenNode,
     ConditionNode,
@@ -65,6 +66,9 @@ class StorageBackend(ABC):
 
     @abstractmethod
     async def delete(self, uids: list[int]) -> None: ...
+
+    @abstractmethod
+    async def update(self, items: list[StorageItem]) -> None: ...
 
     @abstractmethod
     def __len__(self) -> int: ...
@@ -153,6 +157,14 @@ class NaiveStorage(StorageBackend):
             return
         for uid in uids:
             self._items.pop(uid, None)
+
+    async def update(self, items: list[StorageItem]) -> None:
+        for item in items:
+            old_item = self._items.get(item.uid)
+            if old_item is None:
+                continue
+            # 原地更新保留 uid/timestamp，避免刷新 staleness 改变 replay 顺序。
+            self._items[item.uid] = replace(item, uid=old_item.uid, timestamp_id=old_item.timestamp_id)
 
     def __len__(self) -> int:
         return len(self._items)
@@ -281,6 +293,19 @@ class PandasStorage(StorageBackend):
             return
         self._df = self._df[~self._df["uid"].isin(uids)]
 
+    async def update(self, items: list[StorageItem]) -> None:
+        self._flush_buffer()
+        if not items or self._df.empty:
+            return
+        for item in items:
+            mask = self._df["uid"] == item.uid
+            if not mask.any():
+                continue
+            for row_idx in self._df.index[mask]:
+                self._df.at[row_idx, "status"] = item.status
+                self._df.at[row_idx, "staleness"] = item.staleness
+                self._df.at[row_idx, "item"] = item.item
+
     def __len__(self) -> int:
         return len(self._df) + len(self._buffer)
 
@@ -372,6 +397,44 @@ class ReplayBuffer:
         query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": group_status}]}
         async with self._lock:
             return await self._policy.count(query_dsl, self._storage)
+
+    @staticmethod
+    def _refresh_seq_staleness(items: list[RolloutState], current_rollout_step: int) -> None:
+        for item in items:
+            response_rollout_steps = getattr(item, "response_rollout_steps", None) or []
+            if response_rollout_steps:
+                item.seq_staleness = calculate_seq_staleness(min(response_rollout_steps), current_rollout_step)
+            elif hasattr(item, "seq_staleness"):
+                item.seq_staleness = 0
+
+    async def refresh_completed_staleness(
+        self,
+        task_name: str,
+        current_rollout_step: int,
+        tail_batch_stale_threshold: int,
+    ) -> int:
+        query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": Status.COMPLETED}]}
+        async with self._lock:
+            records = await self._storage.get(query_dsl)
+            updated_records: list[StorageItem] = []
+            expired_count = 0
+            for record in records:
+                self._refresh_seq_staleness(record.item, current_rollout_step)
+                staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
+                should_expire = tail_batch_stale_threshold > 0 and any(
+                    getattr(item, "seq_staleness", 0) >= tail_batch_stale_threshold for item in record.item
+                )
+                if should_expire:
+                    # completed 样本过期时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
+                    for item in record.item:
+                        item.status = Status.EXPIRED
+                    status = Status.EXPIRED
+                    expired_count += 1
+                else:
+                    status = update_group_status(record.item)
+                updated_records.append(replace(record, status=status, staleness=staleness))
+            await self._storage.update(updated_records)
+            return expired_count
 
     def __len__(self) -> int:
         return len(self._storage)

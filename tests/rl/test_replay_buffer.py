@@ -7,11 +7,19 @@ from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBuffer
 
 
 class MockState:
-    def __init__(self, state_id, staleness=0, input_ids=None, status=Status.COMPLETED):
+    def __init__(
+        self,
+        state_id,
+        staleness=0,
+        input_ids=None,
+        status=Status.COMPLETED,
+        response_rollout_steps=None,
+    ):
         self.id = state_id
         self.seq_staleness = staleness
         self.status = status
         self.input_ids = input_ids if input_ids is not None else [state_id]
+        self.response_rollout_steps = response_rollout_steps
 
 
 class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
@@ -127,3 +135,29 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             task_name="task",
             sample_size=3,
         )
+
+    async def test_refresh_completed_staleness_expires_completed_in_place(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        await replay_buffer.put(
+            [MockState("stale", response_rollout_steps=[3], status=Status.COMPLETED)],
+            "task",
+        )
+        await replay_buffer.put(
+            [MockState("fresh", response_rollout_steps=[6], status=Status.COMPLETED)],
+            "task",
+        )
+
+        expired_count = await replay_buffer.refresh_completed_staleness(
+            task_name="task",
+            current_rollout_step=6,
+            tail_batch_stale_threshold=2,
+        )
+
+        self.assertEqual(expired_count, 1)
+        self.assertEqual(await replay_buffer.count("task", Status.COMPLETED), 1)
+        self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 1)
+        expired = await replay_buffer.get(1, "task", Status.EXPIRED)
+        completed = await replay_buffer.get(1, "task", Status.COMPLETED)
+        self.assertEqual(expired[0][0].id, "stale")
+        self.assertEqual(expired[0][0].seq_staleness, 2)
+        self.assertEqual(completed[0][0].id, "fresh")
