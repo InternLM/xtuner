@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 from xtuner.v1.rl.agent_loop import (
     AsyncProduceStrategyConfig,
     ProduceBatchStatus,
+    ProduceProgress,
     SamplerConfig,
     SyncProduceStrategyConfig,
 )
@@ -136,14 +137,49 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
 
-        # 验证：ReplayBuffer 中应该有 4 条 COMPLETED 数据，
-        # NOTE(@duanyanhui): 目前还没实现暂停功能，所以4条都会推理完成,4条数据按照新鲜度顺序排列，999 是最旧的，0 是最新的
+        # 验证：ReplayBuffer 中应该有 4 条 COMPLETED 数据。
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(final_data), 4)
-        self.assertEqual(final_data[0][0].id, 999)
-        self.assertEqual(final_data[1][0].id, 2)
-        self.assertEqual(final_data[2][0].id, 1)
-        self.assertEqual(final_data[3][0].id, 0)
+        self.assertEqual(sorted(group[0].id for group in final_data), [0, 1, 2, 999])
+
+    async def test_async_produce_strategy_uses_live_consumed_progress(self):
+        task_name = "test_live_consumed"
+        call_count = 0
+
+        async def mock_gen(rs, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            for r in rs:
+                r.status = Status.COMPLETED
+            return rs
+
+        mock_agent_loop = self._build_agent_loop()
+        mock_agent_loop.generate_group = mock_gen
+        sampler = self._build_sampler()
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
+        progress = ProduceProgress(
+            latest_consumer_step=1,
+            producer_future_step=2,
+            consumed_samples={task_name: 1},
+            target_samples={task_name: 2},
+            target_upto_future_step=2,
+        )
+
+        status = await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=1,
+            task_name=task_name,
+            rollout_step=2,
+            model_rollout_step=1,
+            target_cumulative=2,
+            progress=progress,
+        )
+
+        self.assertEqual(status, ProduceBatchStatus.NORMAL)
+        self.assertEqual(call_count, 1)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
 
     async def test_async_produce_strategy_reclaims_cross_call_pending_and_records_timing(self):
         task_name = "test_task"
@@ -237,31 +273,19 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 0)
 
-    async def test_leftover_completed_samples_refresh_staleness_before_expire_check(self):
+    async def test_refresh_completed_samples_refreshes_staleness_before_expire_check(self):
         task_name = "test_refresh_leftover"
-        strategy = AsyncProduceStrategyConfig(
-            enable_partial_rollout=True,
-            tail_batch_stale_threshold=2,
-        ).build()
-        mock_agent_loop = self._build_agent_loop()
-        sampler = self._build_sampler()
-
         stale_item = MockRolloutState(1000, seq_staleness=0, status=Status.COMPLETED)
         stale_item.response_rollout_steps = [3]
         await self.replay_buffer.put([stale_item], task_name)
 
-        status = await strategy.produce_batch(
-            mock_agent_loop,
-            sampler,
-            self.replay_buffer,
-            batch_size=0,
+        expired_count = await self.replay_buffer.refresh_completed_staleness(
             task_name=task_name,
-            rollout_step=6,
-            model_rollout_step=6,
+            current_rollout_step=6,
+            tail_batch_stale_threshold=2,
         )
-
         expired_groups = await self.replay_buffer.get(10, task_name, Status.EXPIRED)
 
-        self.assertEqual(status, ProduceBatchStatus.NORMAL)
+        self.assertEqual(expired_count, 1)
         self.assertEqual(len(expired_groups), 1)
         self.assertEqual(expired_groups[0][0].seq_staleness, 2)

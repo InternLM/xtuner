@@ -307,6 +307,11 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state["status"], "EXPIRED_BATCH")
             self.assertEqual(state["model_rollout_step"], 2)
             self.assertEqual(state["model_rollout_step_override"], 7)
+            self.assertEqual(state["latest_consumer_step"], 0)
+            self.assertEqual(state["producer_future_step"], 1)
+            self.assertEqual(state["consumed_samples"], {"task_a": 0})
+            self.assertEqual(state["target_samples"], {"task_a": 0})
+            self.assertEqual(state["target_upto_future_step"], 0)
 
             restored_step = manager.resume(checkpoint_path)
 
@@ -514,6 +519,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.get_batch(batch_size=1, rollout_step=9)
 
         self.assertEqual(result.rollout_states[0][0].seq_staleness, 4)
+        self.assertEqual(manager._produce_progress.latest_consumer_step, 9)
+        self.assertEqual(manager._produce_progress.consumed_samples["task_a"], 1)
 
     async def test_get_batch_waits_until_requested_batch_size_is_ready(self):
         replay_buffer = _SequencedCompletedReplayBuffer(
@@ -545,6 +552,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([group[0].uid for group in result.rollout_states], ["a-0", "a-1"])
         self.assertEqual(replay_buffer.get_calls, [(2, "task_a", Status.COMPLETED)])
         self.assertGreaterEqual(replay_buffer.completed_count_call_count, 3)
+        self.assertEqual(manager._produce_progress.consumed_samples["task_a"], 2)
 
     async def test_produce_batch_to_buffer_aggregates_status_with_update_abort_priority(self):
         manager = AgentLoopManager(

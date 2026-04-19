@@ -21,6 +21,7 @@ from .producer import (
     GROUP_GENERATE_TIME_KEY,
     AsyncProduceStrategy,
     ProduceBatchStatus,
+    ProduceProgress,
     ProduceStrategy,
     ProduceStrategyConfig,
     SyncProduceStrategyConfig,
@@ -138,7 +139,22 @@ async def _produce_single_task_to_buffer(
     rollout_step: int,
     model_rollout_step: int,
     update_event: asyncio.Event | None,
+    target_cumulative: int | None = None,
+    progress: ProduceProgress | None = None,
 ) -> ProduceBatchStatus:
+    if isinstance(task_runner.produce_strategy, AsyncProduceStrategy):
+        return await task_runner.produce_strategy.produce_batch(
+            task_runner.agent_loop,
+            task_runner.sampler,
+            replay_buffer,
+            batch_size,
+            task_runner.task_name,
+            rollout_step=rollout_step,
+            model_rollout_step=model_rollout_step,
+            update_event=update_event,
+            target_cumulative=target_cumulative,
+            progress=progress,
+        )
     return await task_runner.produce_strategy.produce_batch(
         task_runner.agent_loop,
         task_runner.sampler,
@@ -243,6 +259,14 @@ class AgentLoopManager:
         self._model_rollout_step = 0
         self._status = AgentLoopManagerStatus.NORMAL
         self._pause_time_s = 0.0
+        # producer/consumer 共享的绝对累计进度；对象引用保持稳定，strategy 读取 live 值。
+        self._produce_progress = ProduceProgress(
+            latest_consumer_step=0,
+            producer_future_step=1,
+            consumed_samples={task.task_name: 0 for task in self.task_runners},
+            target_samples={task.task_name: 0 for task in self.task_runners},
+            target_upto_future_step=0,
+        )
 
     def get_task_batch_sizes(self, global_batch_size: int, rollout_step: int) -> dict[str, int]:
         """Return the per-task batch sizes for the current rollout step.
@@ -304,6 +328,47 @@ class AgentLoopManager:
                 f"got total={total_batch_size}, expected={global_batch_size}"
             )
 
+    def _ensure_target_upto(self, batch_size: int, current_future_step: int) -> None:
+        progress = self._produce_progress
+        if current_future_step <= progress.target_upto_future_step:
+            return
+
+        for future_step in range(progress.target_upto_future_step + 1, current_future_step + 1):
+            if len(self.task_runners) == 1:
+                progress.target_samples[self.task_runners[0].task_name] += batch_size
+            else:
+                task_batch_sizes = self.get_task_batch_sizes(batch_size, future_step)
+                self._validate_task_batch_sizes(task_batch_sizes, batch_size)
+                for task_name, task_batch_size in task_batch_sizes.items():
+                    progress.target_samples[task_name] += task_batch_size
+
+        progress.target_upto_future_step = current_future_step
+
+    def _any_task_model_expired(self, current_future_step: int) -> bool:
+        expired_tasks = [
+            task.task_name
+            for task in self.task_runners
+            if isinstance(task.produce_strategy, AsyncProduceStrategy)
+            and task.produce_strategy.is_model_expired(current_future_step, self._model_rollout_step)
+        ]
+        if expired_tasks:
+            self.logger.info(f"Expired future_step={current_future_step}, tasks={expired_tasks}")
+            return True
+        return False
+
+    async def _refresh_completed_staleness_for_all_tasks(self, rollout_step: int) -> None:
+        refresh_completed_staleness = getattr(self.replay_buffer, "refresh_completed_staleness", None)
+        if refresh_completed_staleness is None:
+            return
+
+        for task in self.task_runners:
+            threshold = getattr(task.produce_strategy, "tail_batch_stale_threshold", 0)
+            await refresh_completed_staleness(
+                task_name=task.task_name,
+                current_rollout_step=rollout_step,
+                tail_batch_stale_threshold=threshold,
+            )
+
     @staticmethod
     def _aggregate_task_results(
         ordered_tasks: list[_TaskRunner], task_results: dict[str, ProduceBatchResult]
@@ -352,9 +417,32 @@ class AgentLoopManager:
     async def _produce_batch_to_buffer(
         self,
         batch_size: int,
-        rollout_step: int,
+        current_future_step: int | None = None,
+        *,
+        rollout_step: int | None = None,
+        use_global_progress: bool = True,
     ) -> ProduceBatchStatus:
+        if current_future_step is None:
+            if rollout_step is None:
+                raise ValueError("current_future_step must be provided.")
+            current_future_step = rollout_step
         model_rollout_step = self._model_rollout_step
+        progress = self._produce_progress if use_global_progress else None
+
+        if len(self.task_runners) == 1:
+            current_sizes = {self.task_runners[0].task_name: batch_size}
+        else:
+            current_sizes = self.get_task_batch_sizes(batch_size, current_future_step)
+            self._validate_task_batch_sizes(current_sizes, batch_size)
+
+        if use_global_progress:
+            self._ensure_target_upto(batch_size, current_future_step)
+            target_by_task = dict(self._produce_progress.target_samples)
+        else:
+            target_by_task = dict(current_sizes)
+
+        if self._any_task_model_expired(current_future_step):
+            return ProduceBatchStatus.EXPIRED_BATCH
 
         if len(self.task_runners) == 1:
             task = self.task_runners[0]
@@ -362,15 +450,18 @@ class AgentLoopManager:
             return await _produce_single_task_to_buffer(
                 task_runner=task,
                 replay_buffer=self.replay_buffer,
-                batch_size=batch_size,
-                rollout_step=rollout_step,
+                batch_size=current_sizes[task.task_name],
+                rollout_step=current_future_step,
                 model_rollout_step=model_rollout_step,
                 update_event=self._update_event,
+                target_cumulative=target_by_task[task.task_name] if use_global_progress else None,
+                progress=progress,
             )
 
-        task_batch_sizes = self.get_task_batch_sizes(batch_size, rollout_step)
-        self._validate_task_batch_sizes(task_batch_sizes, batch_size)
-        active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
+        if use_global_progress:
+            active_tasks = [task for task in self.task_runners if target_by_task[task.task_name] > 0]
+        else:
+            active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
         statuses = await asyncio.gather(
@@ -378,10 +469,12 @@ class AgentLoopManager:
                 _produce_single_task_to_buffer(
                     task_runner=task,
                     replay_buffer=self.replay_buffer,
-                    batch_size=task_batch_sizes[task.task_name],
-                    rollout_step=rollout_step,
+                    batch_size=current_sizes[task.task_name],
+                    rollout_step=current_future_step,
                     model_rollout_step=model_rollout_step,
                     update_event=self._update_event,
+                    target_cumulative=target_by_task[task.task_name] if use_global_progress else None,
+                    progress=progress,
                 )
                 for task in active_tasks
             ]
@@ -409,12 +502,35 @@ class AgentLoopManager:
         pause_time_s = 0.0
         for task in self.task_runners:
             _produce_strategy: AsyncProduceStrategy | ProduceStrategy = task.produce_strategy
-            pause_time_s += await _produce_strategy.pause_product(task.agent_loop, self.replay_buffer, task.task_name)
+            if isinstance(_produce_strategy, AsyncProduceStrategy):
+                if for_weight_update:
+                    pause_time_s += await _produce_strategy.pause_product(
+                        task.agent_loop,
+                        self.replay_buffer,
+                        task.task_name,
+                        progress=self._produce_progress,
+                    )
+                else:
+                    pause_time_s += await _produce_strategy.pause_product(
+                        task.agent_loop,
+                        self.replay_buffer,
+                        task.task_name,
+                    )
+            else:
+                pause_time_s += await _produce_strategy.pause_product(
+                    task.agent_loop,
+                    self.replay_buffer,
+                    task.task_name,
+                )
         self._pause_time_s = pause_time_s
         return pause_time_s
 
     async def _get_single_task_batch_from_buffer(
-        self, task_runner: _TaskRunner, batch_size: int, rollout_step: int
+        self,
+        task_runner: _TaskRunner,
+        batch_size: int,
+        rollout_step: int,
+        record_consumed: bool = False,
     ) -> ProduceBatchResult:
         result = ProduceBatchResult(rollout_states=[])
         batch_rollout_states: list[list[RolloutState]] = await self.replay_buffer.get(
@@ -423,6 +539,9 @@ class AgentLoopManager:
         for group in batch_rollout_states:
             refresh_seq_staleness(group, rollout_step)
         result.rollout_states = batch_rollout_states
+        if record_consumed:
+            # get 已从 buffer 删除样本，立刻更新 consumed，避免 producer 短暂误判缺口。
+            self._produce_progress.consumed_samples[task_runner.task_name] += len(batch_rollout_states)
         completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
             self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.COMPLETED),
             self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.ABORTED),
@@ -433,13 +552,23 @@ class AgentLoopManager:
         result.leftover_expired = expired_sample_count
         return result
 
-    async def _get_batch_from_buffer(self, batch_size: int, rollout_step: int) -> ProduceBatchResult:
+    async def _get_batch_from_buffer(
+        self,
+        batch_size: int,
+        rollout_step: int,
+        record_consumed: bool = False,
+    ) -> ProduceBatchResult:
         pause_time_s = self._pause_time_s
         self._pause_time_s = 0.0
 
         if len(self.task_runners) == 1:
             task = self.task_runners[0]
-            result = await self._get_single_task_batch_from_buffer(task, batch_size, rollout_step)
+            result = await self._get_single_task_batch_from_buffer(
+                task,
+                batch_size,
+                rollout_step,
+                record_consumed=record_consumed,
+            )
             _fill_group_timing_stats(result, result.rollout_states, pause_time_s=pause_time_s)
             return result
 
@@ -449,7 +578,12 @@ class AgentLoopManager:
         results = (
             await asyncio.gather(
                 *[
-                    self._get_single_task_batch_from_buffer(task, task_batch_sizes[task.task_name], rollout_step)
+                    self._get_single_task_batch_from_buffer(
+                        task,
+                        task_batch_sizes[task.task_name],
+                        rollout_step,
+                        record_consumed=record_consumed,
+                    )
                     for task in active_tasks
                 ]
             )
@@ -545,9 +679,12 @@ class AgentLoopManager:
             # 共卡路径下，每次 produce_batch() 都对应当前 trainer 轮次的新权重版本，
             # 所以这里直接复用 continue_product() 同步恢复状态并更新 rollout model version。
             self.continue_product(model_rollout_step=rollout_step - 1)  # TODO: 更新样本过期信息
+            # 共卡 produce_batch 也是消费入口；生产前先刷新 buffer 中已有 completed。
+            await self._refresh_completed_staleness_for_all_tasks(rollout_step)
             status = await self._produce_batch_to_buffer(
                 batch_size=batch_size,
-                rollout_step=rollout_step,
+                current_future_step=rollout_step,
+                use_global_progress=False,
             )
             await self.pause_product(for_weight_update=False)
             result = await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
@@ -560,11 +697,12 @@ class AgentLoopManager:
             await pause_generation(rollout_ctl)
 
         self.logger.info(
-            f"[AgentLoopManager][{self.name}] produce_batch done elapsed={time.perf_counter() - start:.3f}, completed_groups={len(result.rollout_states)}"
+            f"[AgentLoopManager][{self.name}] produce_batch done "
+            f"elapsed={time.perf_counter() - start:.3f}, completed_groups={len(result.rollout_states)}"
         )
         return result
 
-    async def produce_loop(self, batch_size: int, start_rollout_step: int = 0) -> None:
+    async def produce_loop(self, batch_size: int, start_rollout_step: int | None = None) -> None:
         # `produce_loop()` 是非共卡新增的后台生产循环。
         #
         # 和 colocate 最大的区别是：
@@ -574,7 +712,15 @@ class AgentLoopManager:
         #
         # 因此这里的核心职责不是“凑出一批训练数据”，而是根据 manager 的全局状态机
         # 决定什么时候继续生产、什么时候暂停等待、什么时候彻底退出。
-        rollout_step = start_rollout_step
+        if start_rollout_step is not None:
+            self._produce_progress.producer_future_step = start_rollout_step
+        if (
+            self._produce_progress.producer_future_step > 1
+            and self._produce_progress.target_upto_future_step == 0
+            and not any(self._produce_progress.target_samples.values())
+        ):
+            # 兼容旧 checkpoint：首次启动 producer 时重放历史 target。
+            self._ensure_target_upto(batch_size, self._produce_progress.producer_future_step - 1)
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.FINISH:
                 break
@@ -591,7 +737,11 @@ class AgentLoopManager:
 
             rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
             await continue_generation(rollout_ctl)
-            produce_status = await self._produce_batch_to_buffer(batch_size=batch_size, rollout_step=rollout_step)
+            produce_status = await self._produce_batch_to_buffer(
+                batch_size=batch_size,
+                current_future_step=self._produce_progress.producer_future_step,
+                use_global_progress=True,
+            )
 
             if produce_status == ProduceBatchStatus.EXPIRED_BATCH:
                 # 注意：
@@ -600,7 +750,7 @@ class AgentLoopManager:
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
             elif produce_status == ProduceBatchStatus.NORMAL:
                 # 只有正常完成一轮生产时，producer 自己维护的 rollout_step 才前进一步。
-                rollout_step += 1
+                self._produce_progress.producer_future_step += 1
 
             # 主动让出事件循环，避免 fake strategy / 极快路径在测试里造成忙等空转。
             await asyncio.sleep(0)
@@ -615,6 +765,9 @@ class AgentLoopManager:
         # 因而这里允许返回空 batch 的唯一合法场景仍然只有：
         # - 当 manager 已进入 EXPIRED_BATCH，返回空 batch + 状态信号
         # - trainer 看到后应跳过训练，优先去做权重同步
+        self._produce_progress.latest_consumer_step = rollout_step
+        await self._refresh_completed_staleness_for_all_tasks(rollout_step)
+
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
                 return ProduceBatchResult(
@@ -623,7 +776,11 @@ class AgentLoopManager:
                 )
             # TODO: call self.get_task_batch_sizes before while instead of below two functions
             if await self._is_batch_ready(batch_size=batch_size, rollout_step=rollout_step):
-                result = await self._get_batch_from_buffer(batch_size=batch_size, rollout_step=rollout_step)
+                result = await self._get_batch_from_buffer(
+                    batch_size=batch_size,
+                    rollout_step=rollout_step,
+                    record_consumed=True,
+                )
                 if result.rollout_states:
                     return result
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
@@ -662,12 +819,18 @@ class AgentLoopManager:
             task.sampler.save(task_checkpoint_path)
         asyncio_run(self.replay_buffer.save(checkpoint_path))
         manager_state_path = self._manager_state_path(checkpoint_path)
+        progress = self._produce_progress
         with manager_state_path.open("w") as f:
             json.dump(
                 {
                     "status": self._status.name,
                     "model_rollout_step": self._model_rollout_step,
                     "model_rollout_step_override": model_rollout_step_override,
+                    "latest_consumer_step": progress.latest_consumer_step,
+                    "producer_future_step": progress.producer_future_step,
+                    "consumed_samples": progress.consumed_samples,
+                    "target_samples": progress.target_samples,
+                    "target_upto_future_step": progress.target_upto_future_step,
                 },
                 f,
             )
@@ -688,6 +851,20 @@ class AgentLoopManager:
             model_rollout_step_override = manager_state.get("model_rollout_step_override")
             if model_rollout_step_override is not None:
                 saved_model_rollout_step = model_rollout_step_override
+            progress = self._produce_progress
+            progress.latest_consumer_step = manager_state.get("latest_consumer_step", progress.latest_consumer_step)
+            progress.producer_future_step = manager_state.get("producer_future_step", progress.producer_future_step)
+            progress.target_upto_future_step = manager_state.get(
+                "target_upto_future_step", progress.target_upto_future_step
+            )
+
+            # dict 原地更新，避免 strategy 持有旧引用。
+            progress.consumed_samples.clear()
+            progress.consumed_samples.update({task.task_name: 0 for task in self.task_runners})
+            progress.consumed_samples.update(manager_state.get("consumed_samples", {}))
+            progress.target_samples.clear()
+            progress.target_samples.update({task.task_name: 0 for task in self.task_runners})
+            progress.target_samples.update(manager_state.get("target_samples", {}))
 
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()

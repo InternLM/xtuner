@@ -202,31 +202,18 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-    async def test_1_2_second_rollout_samples_from_aborted_queue(self):
-        """1.2: Round 2's produce_batch re-samples exactly the oversampled items
-        left over from round 1.
+    async def test_1_2_second_rollout_does_not_convert_completed_leftovers(self):
+        """1.2: Round 2 no longer destructively converts COMPLETED leftovers.
 
-        Key mechanism (enable_partial_rollout=False):
-          - After round 1, replay_buffer holds INITIAL_DATA_CONCURRENCY - BATCH_SIZE
-            leftover items (all COMPLETED, since all tasks finished).
-          - At the start of round 2, _process_leftover_samples() converts those
-            leftover COMPLETED items to ABORTED (because enable_partial_rollout=False).
-          - _async_sample() then draws from the ABORTED pool via
-            Sampler.sample(group_status=Status.ABORTED) before issuing new samples.
-
-        We instrument Sampler.sample() to count how many times it returned items
-        that were already in ABORTED state (= drawn from replay buffer, not
-        freshly sampled from the dataloader).
-
-        The expected count equals the number of leftover items from round 1,
-        i.e. INITIAL_DATA_CONCURRENCY - BATCH_SIZE.
+        AsyncProduceStrategy v2.2 keeps completed leftovers in the fresh window.
+        Only existing ABORTED samples may be re-sampled through the ABORTED pool;
+        completed samples are either consumed as completed or refreshed/expired by
+        the manager consumer entry.
         """
         manager = _build_agent_loop_manager(
             self.rollout_ctl,
             task_name="test_1_2",
             over_sample_threshold=self.OVER_SAMPLE_THRESHOLD,
-            # enable_partial_rollout=False (default) so leftover COMPLETED are
-            # converted to ABORTED by _process_leftover_samples() in round 2.
         )
         replay_buffer = manager.replay_buffer
         original_sample = manager.data_sampler.sample
@@ -266,21 +253,16 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
                 f"aborted={round1_remain_aborted}, expected total={expected_leftover}"
             ),
         )
-        # These leftover items are the ones round 2 must re-sample from the
-        # ABORTED pool (after _process_leftover_samples converts them).
-        expected_resampled_from_aborted = round1_remain_completed + round1_remain_aborted
-
         # --- Round 2: reset counter then run ---
         sampled_from_aborted = 0
         await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=2)
 
-        self.assertEqual(
+        self.assertLessEqual(
             sampled_from_aborted,
-            expected_resampled_from_aborted,
+            round1_remain_aborted,
             msg=(
-                f"Round 2 should have re-sampled {expected_resampled_from_aborted} "
-                f"item(s) from the ABORTED queue (converted from round-1 leftovers), "
-                f"got sampled_from_aborted={sampled_from_aborted}"
+                "Round 2 should not convert round-1 COMPLETED leftovers into the ABORTED queue: "
+                f"sampled_from_aborted={sampled_from_aborted}, round1_remain_aborted={round1_remain_aborted}"
             ),
         )
 
@@ -596,9 +578,9 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             被 abort 的样本携带 step=1 生成的分段 response，response_rollout_steps=[1,...].
           Round 2 (step=2): round1 的 ABORTED 样本被续写，多数在 round2 内完成（COMPLETED）。
             postprocess 更新 seq_staleness = 2 - min([1,...]) = 1。
-            但 update_expired_status 只对 status==ABORTED 的样本触发，COMPLETED 不受影响。
+            producer put 前刷新 staleness，但该轮未消费的 COMPLETED 会留在 buffer 中。
             这些 COMPLETED 样本（seq_staleness=1）留在 buffer 中。
-          Round 3 (step=3): _process_leftover_samples 在 round3 开始时读取 buffer 中的
+          Round 3 (step=3): produce_batch 作为消费入口，先刷新 buffer 中的
             COMPLETED 样本，检查 seq_staleness=1 >= threshold=1 → 标为 EXPIRED，
             放回 buffer。由于 trigger_size=0，EXPIRED 样本不在本轮被消费。
 
@@ -620,9 +602,9 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
         )
         replay_buffer = manager.replay_buffer
 
-        # 3 轮是让 staleness 自然积累并被 _process_leftover_samples 标记的最少轮数：
+        # 3 轮是让 staleness 自然积累并被 produce_batch 入口刷新标记的最少轮数：
         #   round1 产生 ABORTED（step=1 tokens）→ round2 续写完成（COMPLETED, staleness=1）
-        #   → round3 开头 _process_leftover_samples 标 EXPIRED（staleness=1 >= 1）
+        #   → round3 开头刷新 completed 并标 EXPIRED（staleness=1 >= 1）
         for rollout_step in range(1, 5):
             await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=rollout_step)
 
@@ -637,7 +619,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             expired_count, 0,
             msg=(
                 f"threshold=1: after 3 rounds (steps 1→3), leftover COMPLETED samples "
-                f"with seq_staleness=1 should be marked EXPIRED by _process_leftover_samples. "
+                f"with seq_staleness=1 should be marked EXPIRED by produce_batch entry refresh. "
                 f"expired={expired_count}, aborted={aborted_count}"
             ),
         )

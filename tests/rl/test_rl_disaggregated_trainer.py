@@ -17,8 +17,8 @@ class _FakeManager:
         self._finish_event = asyncio.Event()
         self.calls: list[object] = []
 
-    async def produce_loop(self, batch_size: int, start_rollout_step: int = 0):
-        self.calls.append(("produce_loop_start", batch_size, start_rollout_step))
+    async def produce_loop(self, batch_size: int):
+        self.calls.append(("produce_loop_start", batch_size))
         await self._finish_event.wait()
         self.calls.append("produce_loop_exit")
 
