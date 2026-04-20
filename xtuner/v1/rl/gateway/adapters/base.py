@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Any, Generic, TypeVar
@@ -23,6 +24,7 @@ from .trace import ChatTraceRecord, ChatTraceStore, normalize_trace_payload, sna
 GenerateHandler = Callable[[CanonicalGenerateRequest], Awaitable[CanonicalGenerateResponse]]
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
+logger = logging.getLogger(__name__)
 
 
 def coerce_content_to_text(content: Any) -> str | None:
@@ -50,15 +52,15 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
         generate_handler: GenerateHandler,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | None,
         *,
-        capture_path: str | None = None,
+        capture_folder: str | None = None,
         trace_store_max_entries: int = 10000,
     ):
         self._generate_handler = generate_handler
         self._tokenizer = tokenizer
-        self._capture_path = capture_path
+        self._capture_folder = capture_folder
         self._trace_store = ChatTraceStore(max_entries=trace_store_max_entries)
 
-    async def handle_request(self, request: RequestT) -> ResponseT:
+    async def handle_request(self, request: RequestT, *, api_key: str | None = None) -> ResponseT:
         self.validate_request(request)
         canonical_request = self.request_to_canonical_request(request)
         rollout_states: list[RolloutState] = []
@@ -72,7 +74,11 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
             self._build_trace_record(request, response, canonical_response, rollout_states=rollout_states)
         )
         self._write_capture_record(
-            request=request, response=response, canonical_response=canonical_response, rollout_states=rollout_states
+            request=request,
+            response=response,
+            canonical_response=canonical_response,
+            rollout_states=rollout_states,
+            api_key=api_key,
         )
         return response
 
@@ -121,8 +127,9 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
         response: ResponseT,
         canonical_response: CanonicalGenerateResponse,
         rollout_states: list[RolloutState] | None = None,
+        api_key: str | None = None,
     ) -> None:
-        if self._capture_path is None:
+        if self._capture_folder is None:
             return
         rollout_trace = self._get_rollout_trace(canonical_response)
         try:
@@ -134,7 +141,7 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
             )
             output_messages = self._build_output_message_list(canonical_response)
             append_gateway_capture_record(
-                self._capture_path,
+                self._capture_folder,
                 {
                     "protocol": self.__class__.__name__,
                     "request_id": canonical_response.request_id,
@@ -154,8 +161,10 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
                     "input_text": rollout_trace.get("input_text", ""),
                     "output_text": render_blocks_as_text(output_messages),
                 },
+                api_key=api_key,
             )
         except Exception:
+            logger.warning("Failed to write gateway capture record to %s", self._capture_folder, exc_info=True)
             return
 
     def _get_rollout_trace(self, canonical_response: CanonicalGenerateResponse) -> dict[str, Any]:

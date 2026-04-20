@@ -59,7 +59,7 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str,
         default_model_name: str | None = None,
         context_length: int | None = None,
-        capture_path: str | None = None,
+        capture_folder: str | None = None,
         trace_store_max_entries: int = 10000,
     ):
         if isinstance(tokenizer, str):
@@ -67,17 +67,22 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         super().__init__(
             generate_handler,
             tokenizer=tokenizer,
-            capture_path=capture_path,
+            capture_folder=capture_folder,
             trace_store_max_entries=trace_store_max_entries,
         )
         self._default_model_name = default_model_name
         self._context_length = context_length
 
-    async def chat(self, request: ChatCompletionRequest) -> ChatCompletionResponse | StreamingResponse:
+    async def chat(
+        self,
+        request: ChatCompletionRequest,
+        *,
+        api_key: str | None = None,
+    ) -> ChatCompletionResponse | StreamingResponse:
         if request.stream:
-            response = await self.handle_request(request)
+            response = await self.handle_request(request, api_key=api_key)
             return build_sse_response(self.iter_stream_events(response, request))
-        return await self.handle_request(request)
+        return await self.handle_request(request, api_key=api_key)
 
     def validate_request(self, request: ChatCompletionRequest) -> None:
         if request.n not in (None, 1):

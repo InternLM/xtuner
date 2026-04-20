@@ -111,19 +111,24 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str | None,
         default_model_name: str | None = None,
         context_length: int | None = None,
-        capture_path: str | None = None,
+        capture_folder: str | None = None,
     ):
         if isinstance(tokenizer, str):
             tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
-        super().__init__(generate_handler, tokenizer=tokenizer, capture_path=capture_path)
+        super().__init__(generate_handler, tokenizer=tokenizer, capture_folder=capture_folder)
         self._default_model_name = default_model_name
         self._context_length = context_length
 
-    async def messages(self, request: AnthropicMessagesRequest) -> AnthropicMessagesResponse | StreamingResponse:
+    async def messages(
+        self,
+        request: AnthropicMessagesRequest,
+        *,
+        api_key: str | None = None,
+    ) -> AnthropicMessagesResponse | StreamingResponse:
         if request.stream:
-            response = await self.handle_request(request)
+            response = await self.handle_request(request, api_key=api_key)
             return build_sse_response(self.iter_stream_events(response))
-        return await self.handle_request(request)
+        return await self.handle_request(request, api_key=api_key)
 
     async def count_tokens(self, request: AnthropicCountTokensRequest) -> AnthropicCountTokensResponse:
         internal_messages = self._build_internal_messages(request)

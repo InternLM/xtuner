@@ -40,6 +40,21 @@ def get_responses_adapter(request: Request) -> OpenAIResponsesAdapter:
     return cast(OpenAIResponsesAdapter, adapter)
 
 
+def extract_api_key(request: Request) -> str | None:
+    authorization = request.headers.get("authorization")
+    if authorization:
+        scheme, _, credentials = authorization.partition(" ")
+        if scheme.lower() == "bearer" and credentials.strip():
+            return credentials.strip()
+        if authorization.strip():
+            return authorization.strip()
+
+    api_key = request.headers.get("x-api-key") or request.headers.get("api-key")
+    if api_key and api_key.strip():
+        return api_key.strip()
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Runtime router  (/livez, /readyz, /capabilities)
 # ---------------------------------------------------------------------------
@@ -88,10 +103,11 @@ def build_openai_router() -> APIRouter:
     @router.post("/v1/chat/completions")
     async def chat_completions(
         request_body: ChatCompletionRequest,
+        request: Request,
         adapter: OpenAIChatAdapter = Depends(get_openai_adapter),
     ):
         try:
-            return await adapter.chat(request_body)
+            return await adapter.chat(request_body, api_key=extract_api_key(request))
         except OpenAIChatAdapterError as exc:
             return JSONResponse(
                 status_code=400 if exc.error_type == "invalid_request_error" else 500,
@@ -112,10 +128,11 @@ def build_anthropic_router() -> APIRouter:
     @router.post("/v1/messages")
     async def messages(
         request_body: AnthropicMessagesRequest,
+        request: Request,
         adapter: AnthropicChatAdapter = Depends(get_anthropic_adapter),
     ):
         try:
-            return await adapter.messages(request_body)
+            return await adapter.messages(request_body, api_key=extract_api_key(request))
         except AnthropicChatAdapterError as exc:
             return JSONResponse(
                 status_code=400 if exc.error_type == "invalid_request_error" else 500,
@@ -136,10 +153,11 @@ def build_responses_router() -> APIRouter:
     @router.post("/v1/responses")
     async def responses(
         request_body: ResponsesRequest,
+        request: Request,
         adapter: OpenAIResponsesAdapter = Depends(get_responses_adapter),
     ):
         try:
-            return await adapter.responses(request_body)
+            return await adapter.responses(request_body, api_key=extract_api_key(request))
         except OpenAIChatAdapterError as exc:
             return JSONResponse(
                 status_code=400 if exc.error_type == "invalid_request_error" else 500,

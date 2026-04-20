@@ -105,7 +105,7 @@ def build_gateway_app(
             :func:`~transformers.AutoTokenizer.from_pretrained`.
         model_name: Default model name reported by the ``/capabilities`` endpoint.
         context_length: Maximum context length enforced by the gateway.
-        config: Gateway configuration (title, version, capture_path, …).
+        config: Gateway configuration (title, version, capture_folder, ...).
             Defaults to a bare :class:`~xtuner.v1.rl.gateway.config.GatewayConfig`
             with ``port=8080`` when not provided.
 
@@ -121,7 +121,7 @@ def build_gateway_app(
         "tokenizer": tokenizer,
         "default_model_name": model_name,
         "context_length": context_length,
-        "capture_path": cfg.capture_path,
+        "capture_folder": cfg.capture_folder,
     }
     app.state.gateway_openai_adapter = OpenAIChatAdapter(**adapter_kwargs)
     app.state.gateway_anthropic_adapter = AnthropicChatAdapter(**adapter_kwargs)

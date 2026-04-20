@@ -3,15 +3,24 @@ from __future__ import annotations
 import json
 import threading
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 
 _CAPTURE_LOCK = threading.RLock()
+_NO_API_KEY_CAPTURE_FILE_NAME = "api_key_none.jsonl"
 
 
-def append_gateway_capture_record(path: str | Path, record: dict[str, Any]) -> None:
-    capture_path = Path(path)
+def resolve_capture_output_path(folder: str | Path, api_key: str | None = None) -> Path:
+    if not api_key:
+        return Path(folder) / _NO_API_KEY_CAPTURE_FILE_NAME
+    api_key_hash = sha256(api_key.encode("utf-8")).hexdigest()[:16]
+    return Path(folder) / f"api_key_{api_key_hash}.jsonl"
+
+
+def append_gateway_capture_record(folder: str | Path, record: dict[str, Any], api_key: str | None = None) -> None:
+    capture_path = resolve_capture_output_path(folder, api_key=api_key)
     capture_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "type": "gateway_turn",

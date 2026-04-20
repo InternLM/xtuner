@@ -2,6 +2,7 @@ import asyncio
 import os
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
 
@@ -118,19 +119,20 @@ class RolloutController:
 
         Args:
             config: Gateway configuration.  ``port`` and ``host`` control where
-                the server binds; ``capture_path`` enables per-request trace files.
+                the server binds; ``capture_folder`` enables per-request trace files.
 
         Returns:
             The base URL of the gateway, e.g. ``"http://1.2.3.4:8080"``.
         """
         from xtuner.v1.rl.gateway import build_local_gateway_app, serve_gateway_in_thread
 
+        config.capture_folder = str(Path(self.config.worker_log_dir) / config._CAPTURE_PATH_FOLDER)
         app = build_local_gateway_app(ray.get_runtime_context().current_actor, config=config)
         serve_gateway_in_thread(app, config)
         node_ip = ray.util.get_node_ip_address()
         url = f"http://{node_ip}:{config.port}"
         self._gateway_url = url
-        self.logger.info(f"Gateway server started at {url}")
+        self.logger.info(f"Gateway server started at {url}, capture_folder: {config.capture_folder}")
         return url
 
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
