@@ -13,8 +13,8 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.agent_loop import (
     AgentLoopManagerConfig,
-    PauseProductSource,
     ProduceBatchStatus,
+    ProducePauseSource,
 )
 from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerStatus
 from xtuner.v1.rl.evaluator import EvaluatorConfig
@@ -310,7 +310,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
         self.fake_update_weights()
-        self.agent_loop_manager.continue_product(model_rollout_step=saved_model_rollout_step)
+        self.agent_loop_manager.continue_produce(model_rollout_step=saved_model_rollout_step)
 
     def fit(self):
         # 对外仍保留同步接口，和现有 CLI / config 调用方式保持一致。
@@ -402,15 +402,15 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
                         # - 不再继续补发新的 rollout
                         # - pending rollout 都在同步前被收尾
                         # - 后面的 save / sync 发生在相对静止的状态
-                        with timer("pause_product", step_timer_dict):
-                            await self.agent_loop_manager.pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP)
+                        with timer("pause_produce", step_timer_dict):
+                            await self.agent_loop_manager.pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP)
 
                         await self._sync_weights_and_save(rollout_idx, step_timer_dict)
 
                         if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
                             # 这里刻意把 eval 放在恢复 producer 前面。
                             # 设计上希望 eval 优先于 background producer，
-                            # 避免 continue_product 后 producer 立刻恢复生成，与 eval 竞争 rollout 资源。
+                            # 避免 continue_produce 后 producer 立刻恢复生成，与 eval 竞争 rollout 资源。
                             with timer("evaluation", step_timer_dict):
                                 eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
                                     self.evaluator.eval_batch_size, rollout_step=rollout_idx
@@ -423,10 +423,10 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
                                 self._save_trajectories(eval_batch, eval_trajectory_path)
                                 eval_log_info.update(eval_metrics)
 
-                        # pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP) 和 continue_product() 是一对：
+                        # pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP) 和 continue_produce() 是一对：
                         # - 前者让 producer 停下
                         # - 后者在同步和评测结束后恢复 producer
-                        self.agent_loop_manager.continue_product(model_rollout_step=rollout_idx)
+                        self.agent_loop_manager.continue_produce(model_rollout_step=rollout_idx)
 
                 self._log_step(rollout_idx, step_timer_dict, produce_result, train_log_info, eval_log_info)
                 self._cur_step = rollout_idx

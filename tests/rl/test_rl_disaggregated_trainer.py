@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.rl.agent_loop import PauseProductSource, ProduceBatchResult, ProduceBatchStatus
+from xtuner.v1.rl.agent_loop import ProducePauseSource, ProduceBatchResult, ProduceBatchStatus
 from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerStatus
 from xtuner.v1.train.rl_disaggregated_trainer import RLDisaggregatedTrainer, _validate_disagg_sync_schedule
 
@@ -26,12 +26,12 @@ class _FakeManager:
         self.calls.append(("get_batch", batch_size, rollout_step))
         return self._results.pop(0)
 
-    async def pause_product(self, source: PauseProductSource):
-        self.calls.append(("pause_product", source))
+    async def pause_produce(self, source: ProducePauseSource):
+        self.calls.append(("pause_produce", source))
         return 0.25
 
-    def continue_product(self, model_rollout_step: int):
-        self.calls.append(("continue_product", model_rollout_step))
+    def continue_produce(self, model_rollout_step: int):
+        self.calls.append(("continue_produce", model_rollout_step))
 
 
 class TestRLDisaggregatedTrainer(unittest.TestCase):
@@ -116,7 +116,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._prepare_train_data.assert_not_called()
         trainer.train_controller.fit.remote.assert_not_called()
         trainer._sync_weights_and_save.assert_awaited_once()
-        self.assertIn(("continue_product", 1), manager.calls)
+        self.assertIn(("continue_produce", 1), manager.calls)
         self.assertIn("produce_loop_exit", manager.calls)
 
     def test_fit_runs_eval_before_reset_and_stops_producer(self):
@@ -134,14 +134,14 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             events.append("eval")
             return ProduceBatchResult(rollout_states=[["eval"]])
 
-        def continue_product(model_rollout_step: int):
-            events.append("continue_product")
-            manager.calls.append(("continue_product", model_rollout_step))
+        def continue_produce(model_rollout_step: int):
+            events.append("continue_produce")
+            manager.calls.append(("continue_produce", model_rollout_step))
 
         trainer._sync_weights_and_save = AsyncMock(side_effect=sync_weights_and_save)
         trainer.eval_agent_loop_manager.produce_batch = AsyncMock(side_effect=eval_produce_batch)
         trainer.evaluator.run = MagicMock(return_value={"acc": 1.0})
-        manager.continue_product = continue_product
+        manager.continue_produce = continue_produce
 
         with patch("xtuner.v1.train.rl_disaggregated_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             asyncio.run(trainer._fit())
@@ -149,7 +149,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._prepare_train_data.assert_called_once()
         trainer.train_controller.fit.remote.assert_called_once()
         trainer.train_controller.onload.remote.assert_not_called()
-        self.assertEqual(events, ["sync", "eval", "continue_product"])
+        self.assertEqual(events, ["sync", "eval", "continue_produce"])
         self.assertTrue(manager._finish_event.is_set())
         self.assertIn("produce_loop_exit", manager.calls)
 
@@ -179,12 +179,12 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             events.append(f"manager_resume:{Path(checkpoint_path).name}")
             return 5
 
-        def manager_continue_product(model_rollout_step: int):
-            events.append(f"continue_product:{model_rollout_step}")
+        def manager_continue_produce(model_rollout_step: int):
+            events.append(f"continue_produce:{model_rollout_step}")
 
         trainer.agent_loop_manager = SimpleNamespace(
             resume=MagicMock(side_effect=manager_resume),
-            continue_product=MagicMock(side_effect=manager_continue_product),
+            continue_produce=MagicMock(side_effect=manager_continue_produce),
         )
         trainer.fake_update_weights = MagicMock(side_effect=lambda: events.append("fake_update"))
 
@@ -204,7 +204,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertEqual(trainer._cur_step, 3)
         trainer.agent_loop_manager.resume.assert_called_once_with(Path(self.temp_dir.name))
         self.assertTrue(events[0].startswith("manager_resume:"))
-        self.assertEqual(events[1:], ["bind", "fake_update", "continue_product:5"])
+        self.assertEqual(events[1:], ["bind", "fake_update", "continue_produce:5"])
 
     def test_validate_sync_schedule_accepts_multiples(self):
         _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=4, hf_interval=6)

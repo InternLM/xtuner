@@ -9,7 +9,7 @@ from xtuner.v1.rl.agent_loop.agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerStatus,
     AgentLoopManagerConfig,
-    PauseProductSource,
+    ProducePauseSource,
     TaskSpecConfig,
     _TaskRunner,
 )
@@ -73,7 +73,7 @@ class _FakeProduceStrategy:
         self.called_target_cumulatives.append(target_cumulative)
         return self.status
 
-    async def pause_product(self, agent_loop, replay_buffer, task_name: str, *, progress) -> float:
+    async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, progress) -> float:
         self.cleanup_call_count += 1
         self.cleanup_progresses.append(progress)
         return self.cleanup_pause_time_s
@@ -114,7 +114,7 @@ class _FakeStatusProduceStrategy:
         self.called_target_cumulatives.append(target_cumulative)
         return self.status
 
-    async def pause_product(self, agent_loop, replay_buffer, task_name: str, *, progress) -> float:
+    async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, progress) -> float:
         self.cleanup_call_count += 1
         self.cleanup_progresses.append(progress)
         return self.pause_time_s
@@ -510,7 +510,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(AssertionError, "must return non-empty rollout_states"):
             await manager.produce_batch(batch_size=1, rollout_step=3)
 
-    async def test_pause_product_from_async_produce_loop_sets_status_and_pause_time(self):
+    async def test_pause_produce_from_async_produce_loop_sets_status_and_pause_time(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
         manager = AgentLoopManager(
             task_runners=[
@@ -526,7 +526,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
 
-        pause_time_s = await manager.pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP)
+        pause_time_s = await manager.pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP)
 
         self.assertEqual(pause_time_s, 2.5)
         self.assertEqual(strategy.cleanup_call_count, 1)
@@ -650,11 +650,12 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         manager._model_rollout_step = 5
-        status = await manager._produce_batch_to_buffer(batch_size=3, current_future_step=5)
+        manager._produce_progress.producer_future_step = 5
+        status = await manager._produce_batch_to_buffer(batch_size=3, progress=manager._produce_progress)
 
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
 
-    async def test_produce_loop_waits_for_continue_product_and_stops_on_finish(self):
+    async def test_produce_loop_waits_for_continue_produce_and_stops_on_finish(self):
         strategy = _SequencedProduceStrategy(
             statuses=[ProduceBatchStatus.NORMAL, ProduceBatchStatus.EXPIRED_BATCH, ProduceBatchStatus.NORMAL],
         )
@@ -679,7 +680,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._status, AgentLoopManagerStatus.EXPIRED_BATCH)
         self.assertEqual(strategy.called_rollout_steps[:2], [3, 4])
 
-        manager.continue_product(model_rollout_step=9)
+        manager.continue_produce(model_rollout_step=9)
         await self._wait_until(lambda: len(strategy.called_rollout_steps) >= 3)
         self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
         self.assertEqual(strategy.called_rollout_steps[:3], [3, 4, 4])

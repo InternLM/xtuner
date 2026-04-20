@@ -83,7 +83,7 @@ if scheduled_effective < scheduled_target:
 
 ### 3. `_pending_tasks` 不能只靠循环顶部检查 `_update_event`
 
-`pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP)` 会先 set `_update_event`，但随后会立刻进入各 task strategy 的 `pause_product`。此时后台 producer 可能还停在 `asyncio.wait(self._pending_tasks, ...)` 中。
+`pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP)` 会先 set `_update_event`，但随后会立刻进入各 task strategy 的 `pause_produce`。此时后台 producer 可能还停在 `asyncio.wait(self._pending_tasks, ...)` 中。
 
 所以不能只假设 producer 会先返回，也不能只在 `produce_batch()` 循环顶部检查一次 event。需要在 strategy 内保证：
 
@@ -509,10 +509,10 @@ async def _schedule_one(..., update_event: asyncio.Event | None):
 
 ### pause
 
-`ProduceStrategy.pause_product` 使用统一接口；Manager 对 sync / async strategy 使用同一调用形态：
+`ProduceStrategy.pause_produce` 使用统一接口；Manager 对 sync / async strategy 使用同一调用形态：
 
 ```python
-async def pause_product(
+async def pause_produce(
     self,
     agent_loop,
     replay_buffer,
@@ -525,14 +525,14 @@ async def pause_product(
 
 Manager 侧按上下文选择 progress：
 
-- `PauseProductSource.ASYNC_PRODUCE_LOOP`：非共卡后台 `produce_loop` 在权重同步点前暂停，传全局 `_produce_progress`，因为后台 producer / trainer consumer 共享同一窗口。
-- `PauseProductSource.SYNC_PRODUCE_BATCH`：共卡同步 `produce_batch()` 的本次调用收尾，传本次调用的局部 progress。
+- `ProducePauseSource.ASYNC_PRODUCE_LOOP`：非共卡后台 `produce_loop` 在权重同步点前暂停，传全局 `_produce_progress`，因为后台 producer / trainer consumer 共享同一窗口。
+- `ProducePauseSource.SYNC_PRODUCE_BATCH`：共卡同步 `produce_batch()` 的本次调用收尾，传本次调用的局部 progress。
 - Sync strategy 的默认实现忽略 `progress` 并返回 `0.0`，因此无需在 Manager 侧按子类分支。
 
-`AsyncProduceStrategy.pause_product` 的收尾逻辑为：
+`AsyncProduceStrategy.pause_produce` 的收尾逻辑为：
 
 ```python
-async def pause_product(..., *, progress: ProduceProgress) -> float:
+async def pause_produce(..., *, progress: ProduceProgress) -> float:
     pause_start = time.perf_counter()
 
     if await self._pending_count() == 0:
@@ -610,7 +610,7 @@ async def produce_loop(self, batch_size: int):
 
         status = await self._produce_batch_to_buffer(
             batch_size=batch_size,
-            current_future_step=self._produce_progress.producer_future_step,
+            progress=self._produce_progress,
         )
 
         if status == ProduceBatchStatus.NORMAL:
@@ -669,16 +669,26 @@ strategy 内仍保留同样检查，作为单 task / 兼容路径的兜底。
 伪代码：
 
 ```python
-async def _produce_batch_to_buffer(self, batch_size: int, current_future_step: int):
-    progress = self._produce_progress
-    self._ensure_target_upto(batch_size, current_future_step)
+async def _produce_batch_to_buffer(
+    self,
+    batch_size: int,
+    progress: ProduceProgress,
+    *,
+    task_batch_sizes: dict[str, int] | None = None,
+):
+    current_future_step = progress.producer_future_step
+    if progress is self._produce_progress:
+        # 只有后台生产循环使用全局 progress，需要在这里推进累计 target；
+        # colocate 路径传入的是一次性本地 progress，不能污染全局计数。
+        self._ensure_target_upto(batch_size, current_future_step)
 
-    # 当前 step 的 task batch sizes 仍用于 active task 判断和日志。
-    if len(self.task_runners) == 1:
-        current_sizes = {self.task_runners[0].task_name: batch_size}
-    else:
-        current_sizes = self.get_task_batch_sizes(batch_size, current_future_step)
-        self._validate_task_batch_sizes(current_sizes, batch_size)
+    # 当前 step 的 task batch sizes 用于本轮 over-sample 预算；active task 由 progress target 决定。
+    current_sizes = (
+        self._get_task_batch_sizes_for_step(batch_size, current_future_step)
+        if task_batch_sizes is None
+        else task_batch_sizes
+    )
+    self._validate_task_batch_sizes(current_sizes, batch_size)
 
     if self._any_task_model_expired(current_future_step):
         return ProduceBatchStatus.EXPIRED_BATCH
@@ -758,32 +768,32 @@ consume_progress.consumed_samples[task_runner.task_name] += len(batch_rollout_st
 
 不要只按 `task_batch_sizes` 加，因为实际返回结果才是 buffer 被消费的权威事实。
 
-### `pause_product`
+### `pause_produce`
 
-manager 侧用 `PauseProductSource` 区分 pause 来自异步后台生产循环还是同步共卡生产接口：
+manager 侧用 `ProducePauseSource` 区分 pause 来自异步后台生产循环还是同步共卡生产接口：
 
 ```python
-class PauseProductSource(Enum):
+class ProducePauseSource(Enum):
     ASYNC_PRODUCE_LOOP = auto()
     SYNC_PRODUCE_BATCH = auto()
 ```
 
-`pause_product` 入口统一先置 event / status，再按来源选择 progress：
+`pause_produce` 入口统一先置 event / status，再按来源选择 progress：
 
 ```python
 self._update_event.set()
 self._status = AgentLoopManagerStatus.UPDATE_ABORT
 
-if source == PauseProductSource.ASYNC_PRODUCE_LOOP:
+if source == ProducePauseSource.ASYNC_PRODUCE_LOOP:
     pause_progress = self._produce_progress
 ```
 
-`PauseProductSource.ASYNC_PRODUCE_LOOP` 是 sticky pause：状态保持到 trainer 完成权重同步 / 评测后调用 `continue_product()`。
+`ProducePauseSource.ASYNC_PRODUCE_LOOP` 是 sticky pause：状态保持到 trainer 完成权重同步 / 评测后调用 `continue_produce()`。
 
-`PauseProductSource.SYNC_PRODUCE_BATCH` 用于共卡 `produce_batch()` 的显式收尾，必须传入本次调用的局部 progress；它也会 set `_update_event` / `UPDATE_ABORT`，由下一次 `produce_batch()` 入口的 `continue_product()` 清理：
+`ProducePauseSource.SYNC_PRODUCE_BATCH` 用于共卡 `produce_batch()` 的显式收尾，必须传入本次调用的局部 progress；它也会 set `_update_event` / `UPDATE_ABORT`，由下一次 `produce_batch()` 入口的 `continue_produce()` 清理：
 
 ```python
-elif source == PauseProductSource.SYNC_PRODUCE_BATCH:
+elif source == ProducePauseSource.SYNC_PRODUCE_BATCH:
     if progress is None:
         raise ValueError(...)
     pause_progress = progress
@@ -792,7 +802,7 @@ elif source == PauseProductSource.SYNC_PRODUCE_BATCH:
 随后调用 strategy 时传同一个 live progress 引用：
 
 ```python
-pause_time_s += await strategy.pause_product(
+pause_time_s += await strategy.pause_produce(
     task.agent_loop,
     self.replay_buffer,
     task.task_name,
@@ -811,10 +821,10 @@ required = max(0, target_abs - available_abs)
 
 因此不需要 `_target_base_step` / `_target_base_consumed`，也不需要在 resume / sync 后重置生产窗口。
 
-权重同步后的 `continue_product(model_rollout_step=...)` 只负责恢复状态机和更新 rollout 侧模型版本：
+权重同步后的 `continue_produce(model_rollout_step=...)` 只负责恢复状态机和更新 rollout 侧模型版本：
 
 ```python
-def continue_product(self, model_rollout_step: int) -> None:
+def continue_produce(self, model_rollout_step: int) -> None:
     self._status = AgentLoopManagerStatus.NORMAL
     self._model_rollout_step = model_rollout_step
     self._update_event.clear()
@@ -841,7 +851,7 @@ def continue_product(self, model_rollout_step: int) -> None:
 - 读回上述状态后，原地写回 `self._produce_progress` 的字段；这些字段都是新 checkpoint 的必需字段，缺失时直接 fail fast。
 - `_pending_tasks` 不保存；保存前仍要求 pending 为空。
 - 每个 strategy 初始化 `_pending_tasks = set()`；不再保存或恢复 strategy-local pause flag。
-- 保持现有 `resume()` 进入 `UPDATE_ABORT` 且 `_update_event.set()` 的语义，让 trainer 显式 `continue_product` 后再恢复生产。
+- 保持现有 `resume()` 进入 `UPDATE_ABORT` 且 `_update_event.set()` 的语义，让 trainer 显式 `continue_produce` 后再恢复生产。
 
 ## 共卡路径
 
@@ -850,15 +860,15 @@ def continue_product(self, model_rollout_step: int) -> None:
 实现方式：
 
 - 共卡路径不使用 disagg 的全局绝对 target 状态，避免污染后台 producer 的累计进度。
-- 共卡路径在调用 `_produce_batch_to_buffer(..., use_global_progress=False)` 前构造本次调用的局部 `ProduceProgress`：
+- 共卡路径在调用 `_produce_batch_to_buffer(..., progress=local_progress)` 前构造本次调用的局部 `ProduceProgress`：
   - `next_consumer_step = rollout_step`
   - `producer_future_step = rollout_step`
   - `consumed_samples = {task_name: 0}`
   - `target_samples = current_task_batch_sizes`
 
-共卡路径每次生产后仍调用 `pause_product(source=PauseProductSource.SYNC_PRODUCE_BATCH, progress=local_progress)` 收尾 pending，然后 `_get_batch_from_buffer` 返回训练 batch。
+共卡路径每次生产后仍调用 `pause_produce(source=ProducePauseSource.SYNC_PRODUCE_BATCH, progress=local_progress)` 收尾 pending，然后 `_get_batch_from_buffer` 返回训练 batch。
 
-共卡模式约束：同一个 `AgentLoopManager` 实例只用一种数据提供模式。`SYNC_PRODUCE_BATCH` 收尾会让 manager 保持 `UPDATE_ABORT` / `_update_event.set()`，下一次 `produce_batch()` 入口先调用 `continue_product(model_rollout_step=rollout_step - 1)` 恢复。不要在两次 sync `produce_batch()` 之间混用 `produce_loop()` / `get_batch()`。
+共卡模式约束：同一个 `AgentLoopManager` 实例只用一种数据提供模式。`SYNC_PRODUCE_BATCH` 收尾会让 manager 保持 `UPDATE_ABORT` / `_update_event.set()`，下一次 `produce_batch()` 入口先调用 `continue_produce(model_rollout_step=rollout_step - 1)` 恢复。不要在两次 sync `produce_batch()` 之间混用 `produce_loop()` / `get_batch()`。
 
 ## 删除 / 收敛的旧逻辑
 
@@ -870,10 +880,10 @@ def continue_product(self, model_rollout_step: int) -> None:
 - 所有 `self._pending_tasks = set(pending_tasks)`。
 - strategy 中基于 `previously_completed_count = replay_buffer.count(COMPLETED)` 的局部 batch 判断。
 - strategy 内 `progress=None` 时构造 local progress 的兜底逻辑。
-- `AsyncProduceStrategy._current_rollout_step` 以及 `pause_product` 中基于它的 fallback。
+- `AsyncProduceStrategy._current_rollout_step` 以及 `pause_produce` 中基于它的 fallback。
 - `AsyncProduceStrategy.produce_batch(..., model_rollout_step=None)` 的 fallback；调用方必须显式传入合法 `model_rollout_step`。
 - `AgentLoopManager.produce_loop(start_rollout_step=...)` 覆盖入口；producer 起点只来自 `progress.producer_future_step`。
-- `_produce_batch_to_buffer(..., rollout_step=...)` 兼容别名；内部统一使用必传的 `current_future_step`。
+- `_produce_batch_to_buffer(..., rollout_step=...)` / `current_future_step=...` / `use_global_progress` / `progress_override` 这些多入口参数；内部统一使用必传的 `progress.producer_future_step`。
 - `_refresh_completed_staleness_for_all_tasks` 中判断 replay buffer 是否存在刷新接口的 fallback；`ReplayBuffer.refresh_completed_staleness` 是固定依赖，缺失应 fail fast。
 - `get_batch` while 循环内的重复 completed refresh。
 - `_refresh_leftover_counts` 这类只为日志字段再次 recount 的逻辑。
@@ -946,7 +956,7 @@ self._pending_tasks.difference_update(claimed)
 3. completed stale：buffer 里已有 completed partial rollout，`get_batch(rollout_step)` 后超过 threshold 的 group in-place 变成 expired。
 4. put 前 stale：新生成 group 在 put 前按最新 `progress.next_consumer_step` 刷新；如果已经 stale，直接以 expired 入 buffer。
 5. 多 task：任一 task 在当前 future step 上 `EXPIRED_BATCH`，其他 task 不再 schedule。
-6. pending race：让 `produce_batch` 和 `pause_product` 同时 wait 同一个 pending task，确认 replay_buffer 只 put 一次。
+6. pending race：让 `produce_batch` 和 `pause_produce` 同时 wait 同一个 pending task，确认 replay_buffer 只 put 一次。
 7. checkpoint：保存 / 恢复后 `progress.producer_future_step`、`progress.target_samples`、`progress.target_upto_future_step` 和 `progress.consumed_samples` 不回退，buffer leftovers 仍可被后续 train step 消费。
 8. fixed over-sample budget：当前只缺 1 个样本时，`over_sample=1, task_batch_size=4` 应调度到 `target_abs + 4`，而不是按缺口只调度到 `available + 2`。
 9. tail-batch static mode：进入 tail-batch mode 后，本轮新增任务只从 `Status.EXPIRED` pool 取样，且 `scheduled_target == target_abs` 不超发。

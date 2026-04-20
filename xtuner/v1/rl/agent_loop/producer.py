@@ -198,7 +198,7 @@ class ProduceStrategy(ABC):
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus: ...
 
-    async def pause_product(
+    async def pause_produce(
         self,
         agent_loop: AgentLoopSpec,
         replay_buffer: ReplayBuffer,
@@ -406,7 +406,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         ):
             pass
 
-    async def pause_product(
+    async def pause_produce(
         self,
         agent_loop: AgentLoopSpec,
         replay_buffer: ReplayBuffer,
