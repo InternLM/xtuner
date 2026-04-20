@@ -8,7 +8,7 @@ default_config:
             gpus_per_task: 8
             cpus_per_task: 120
             memory_per_task: 512
-            image: registry.h.pjlab.org.cn/ailab-llmrazor/xtuner:pt28_latest
+            image: ailab-llmrazor/xtuner:pt28_latest
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
@@ -16,7 +16,7 @@ default_config:
             gpus_per_task: 0
             cpus_per_task: 16
             memory_per_task: 128
-            image: registry.h.pjlab.org.cn/ailab-puyu/auto-eval:ld_0101_oc_8ee07ac_v3
+            image: ailab-puyu/auto-eval:ld_0101_oc_8ee07ac_v3
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
                 - HF_DATASETS_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/llmeval/hf_cache

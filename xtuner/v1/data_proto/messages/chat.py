@@ -227,7 +227,7 @@ class ChatMessages(BaseMessages):
                 prompt += chat_template.sep
         return prompt
 
-    def tokenize(self, tokenizer: PreTrainedTokenizer, chat_template: ChatTemplate) -> Dict:
+    def tokenize(self, tokenizer: PreTrainedTokenizer, chat_template: ChatTemplate, **kwargs) -> Dict:
         input_ids = tokenizer.encode("", add_special_tokens=False)
         labels = [IGNORE_INDEX for _ in input_ids]
 
