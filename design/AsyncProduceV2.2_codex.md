@@ -56,12 +56,13 @@ desired_window = ceil((1 + over_sample) * target_cumulative)
 - 必要目标只缺 batch10 的 `B`。
 - 但上式要求窗口达到 `15B`，等价于对前 9 个已经消费掉的 batch 也重新保留超发窗口。
 
-修正为“按当前缺口 over-sample”：
+修正为“按当前 task batch size 给本轮 target 增加固定超发预算”：
 
 ```python
 available = consumed_abs + fresh
-required = max(0, target_abs - available)
-scheduled_target = available + ceil((1 + over_sample) * required)
+target_abs = progress.target_samples[task_name]
+oversample_budget = ceil(over_sample * task_batch_size)
+scheduled_target = target_abs + oversample_budget
 ```
 
 返回条件仍然是：
@@ -78,7 +79,7 @@ if scheduled_effective < scheduled_target:
     schedule_more()
 ```
 
-这样 over-sample 只覆盖当前还缺的样本，不会让历史消费量反复膨胀。
+这样 over-sample 只给当前 task batch 一个固定 ahead window，不会让历史累计目标反复膨胀。tail-batch mode 下 `oversample_budget = 0`，本轮新增任务固定从 `Status.EXPIRED` pool 取样，不主动停止已有 pending，也不强制清空 expired pool。
 
 ### 3. `_pending_tasks` 不能只靠 `_update_event` 避免竞争
 
@@ -139,7 +140,7 @@ required(task) = max(0, progress.target_samples[task] - available(task))
 - `progress` 的读取方必须显式读取：
   - Strategy 内使用 `progress.consumed_samples[task_name]` / `progress.target_samples[task_name]`。
   - 不使用 `dict.get(task_name, 0)` 这类兜底，避免把初始化或 checkpoint 漂移问题隐藏成“目标为 0 / 已消费为 0”。
-  - 不把 `progress` 字段先复制到局部标量或局部 dict 再使用，例如不要写 `current_rollout_step = progress.next_consumer_step` 或 `target_by_task = dict(progress.target_samples)`；需要字段值时直接读 `progress.xxx`，让并发更新能尽早生效。
+  - 除了本轮 `target_abs` / `scheduled_target` 这种语义上需要冻结的调度目标，不把 `progress` 字段先复制到局部标量或局部 dict 再使用，例如不要写 `current_rollout_step = progress.next_consumer_step` 或 `target_by_task = dict(progress.target_samples)`；需要字段值时直接读 `progress.xxx`，让并发更新能尽早生效。
   - `progress = self._produce_progress` 这类对象引用别名可以保留；它不复制字段值。
 - `target_cumulative` 只作为过渡期的一致性校验参数；strategy 不用它构造或修复 `progress`。
 - 所有 strategy 调用都必须显式传入已经初始化好的 `progress`，不再支持 `progress=None` 的本地兜底。
@@ -207,7 +208,7 @@ available = progress.consumed_samples[task_name] + fresh
 required = max(0, progress.target_samples[task_name] - available)
 ```
 
-这里 `progress` 是 Manager 传入的可变引用；strategy 不缓存 `consumed` 或 `next_consumer_step`，每次循环现场读取。
+这里 `progress` 是 Manager 传入的可变引用；strategy 不缓存 `consumed` 或 `next_consumer_step`，每次循环现场读取。`target_abs` / `scheduled_target` 是本轮 produce_batch 的静态调度决策，进入循环前冻结。
 
 ## AsyncProduceStrategy 动态控制
 
@@ -259,45 +260,51 @@ async def produce_batch(...):
     if progress.target_samples[task_name] <= 0:
         return ProduceBatchStatus.NORMAL
 
+    if update_event.is_set():
+        return ProduceBatchStatus.UPDATE_ABORT
+    if self.is_model_expired(current_future_step, model_rollout_step):
+        return ProduceBatchStatus.EXPIRED_BATCH
+
+    # 只在进入本轮时回收一次跨调用遗留的 done task，避免 done task 长期留在 pending 集合。
+    claimed_done = await self._claim_already_done()
+    await self._put_claimed_tasks(claimed_done, replay_buffer, task_name, progress, model_rollout_step)
+
+    if update_event.is_set():
+        return ProduceBatchStatus.UPDATE_ABORT
+    if self.is_model_expired(current_future_step, model_rollout_step):
+        return ProduceBatchStatus.EXPIRED_BATCH
+
+    expired_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
+    sample_from_expired = (
+        self.tail_batch_trigger_size > 0
+        and expired_count >= self.tail_batch_trigger_size
+    )
+    target_abs = progress.target_samples[task_name]
+    oversample_budget = 0 if sample_from_expired else math.ceil(self.over_sample_threshold * batch_size)
+    scheduled_target = target_abs + oversample_budget
+
     while True:
         if update_event.is_set():
             return ProduceBatchStatus.UPDATE_ABORT
         if self.is_model_expired(current_future_step, model_rollout_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
-        # 先收已经完成的 pending，put 前用最新 consumer step 刷新 staleness。
-        claimed_done = await self._claim_already_done()
-        for task in claimed_done:
-            await self._put_generated_group(
-                task.result(),
-                replay_buffer,
-                task_name,
-                current_rollout_step=progress.next_consumer_step,
-            )
-
         fresh = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         available = progress.consumed_samples[task_name] + fresh
-        required = max(0, progress.target_samples[task_name] - available)
-        if required == 0:
+        if available >= target_abs:
             return ProduceBatchStatus.NORMAL
 
-        scheduled_target = available + math.ceil((1 + self.over_sample_threshold) * required)
+        pending_count = await self._pending_count()
         desired_pending = max(0, scheduled_target - available)
-
-        expired_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
-        sample_from_expired = (
-            self.tail_batch_trigger_size > 0
-            and expired_count >= self.tail_batch_trigger_size
-        )
-
-        await self._schedule_tasks_until(
-            agent_loop=agent_loop,
-            sampler=sampler,
-            task_name=task_name,
-            desired_pending=desired_pending,
-            sample_from_expired=sample_from_expired,
-            model_rollout_step=model_rollout_step,
-        )
+        if available + pending_count < scheduled_target:
+            await self._schedule_tasks_until(
+                agent_loop=agent_loop,
+                sampler=sampler,
+                task_name=task_name,
+                desired_pending=desired_pending,
+                sample_from_expired=sample_from_expired,
+                model_rollout_step=model_rollout_step,
+            )
 
         pending_snapshot = await self._snapshot_pending()
         if not pending_snapshot:
@@ -310,19 +317,15 @@ async def produce_batch(...):
             return_when=asyncio.FIRST_COMPLETED,
         )
         claimed_done = await self._claim_done(done)
-        for task in claimed_done:
-            await self._put_generated_group(
-                task.result(),
-                replay_buffer,
-                task_name,
-                current_rollout_step=progress.next_consumer_step,
-            )
+        await self._put_claimed_tasks(claimed_done, replay_buffer, task_name, progress, model_rollout_step)
 ```
 
 注意：
 
-- `available >= target_cumulative` 才表示当前 future step 的必要目标达成。
+- `available >= target_abs` 才表示当前 future step 的必要目标达成。
 - `pending` 不参与返回条件，只参与“是否要继续调度”的判断。
+- `sample_from_expired` 和 `scheduled_target` 是本轮静态决策，放在循环前；循环中只更新 live `available` / `pending_count`。
+- tail-batch mode 下 `scheduled_target == target_abs`，本轮新增任务只从 `Status.EXPIRED` pool 取样，不主动停止已有 pending。
 - 失败、filtered、aborted 的 group 会被 put，但不会增加 `fresh`，下一轮自然会补发。
 - 如果 consumer 在本循环中间取走了 batch，下一次读取 `progress.consumed_samples[task_name]` 会看到新值，不会误补已消费的部分。
 
@@ -930,3 +933,5 @@ self._pending_tasks.difference_update(claimed)
 5. 多 task：任一 task 在当前 future step 上 `EXPIRED_BATCH`，其他 task 不再 schedule。
 6. pending race：让 `produce_batch` 和 `pause_product` 同时 wait 同一个 pending task，确认 replay_buffer 只 put 一次。
 7. checkpoint：保存 / 恢复后 `progress.producer_future_step`、`progress.target_samples`、`progress.target_upto_future_step` 和 `progress.consumed_samples` 不回退，buffer leftovers 仍可被后续 train step 消费。
+8. fixed over-sample budget：当前只缺 1 个样本时，`over_sample=1, task_batch_size=4` 应调度到 `target_abs + 4`，而不是按缺口只调度到 `available + 2`。
+9. tail-batch static mode：进入 tail-batch mode 后，本轮新增任务只从 `Status.EXPIRED` pool 取样，且 `scheduled_target == target_abs` 不超发。

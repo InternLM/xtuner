@@ -202,6 +202,70 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_count, 1)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
 
+    async def test_async_produce_strategy_uses_fixed_batch_oversample_budget(self):
+        task_name = "test_fixed_oversample"
+        sampler = MagicMock()
+        sample_ids = iter(range(100, 200))
+
+        async def sample(task_name, group_status=None):
+            self.assertEqual(group_status, Status.ABORTED)
+            return [MockRolloutState(next(sample_ids), status=Status.ABORTED)]
+
+        sampler.sample = AsyncMock(side_effect=sample)
+        mock_agent_loop = self._build_agent_loop()
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=1.0).build()
+        progress = self._build_progress(task_name, target=10, consumed=9)
+
+        status = await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=4,
+            task_name=task_name,
+            progress=progress,
+        )
+
+        self.assertEqual(status, ProduceBatchStatus.NORMAL)
+        # 当前只缺 1 个样本，但 over-sample 预算固定为 over * batch_size = 4，
+        # 因此本轮最多调度到 target + 4，对应初始发射 5 个任务。
+        self.assertEqual(sampler.sample.await_count, 5)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 5)
+
+    async def test_async_produce_strategy_tail_batch_is_static_and_no_oversample(self):
+        task_name = "test_tail_static"
+        for sample_id in (900, 901):
+            await self.replay_buffer.put([MockRolloutState(sample_id, status=Status.EXPIRED)], task_name)
+
+        sampler = self._build_sampler()
+        original_sample = sampler.sample
+        sampled_statuses: list[Status | None] = []
+
+        async def instrumented_sample(task_name, group_status=None):
+            sampled_statuses.append(group_status)
+            return await original_sample(task_name=task_name, group_status=group_status)
+
+        sampler.sample = instrumented_sample
+        mock_agent_loop = self._build_agent_loop()
+        strategy = AsyncProduceStrategyConfig(
+            over_sample_threshold=1.0,
+            tail_batch_trigger_size=1,
+        ).build()
+
+        status = await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=2,
+            task_name=task_name,
+            progress=self._build_progress(task_name, target=2),
+        )
+
+        self.assertEqual(status, ProduceBatchStatus.NORMAL)
+        # tail-batch 模式在本轮固定走 EXPIRED pool，并且不使用 over-sample 额外发射。
+        self.assertEqual(sampled_statuses, [Status.EXPIRED, Status.EXPIRED])
+        completed = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
+        self.assertEqual(sorted(group[0].id for group in completed), [900, 901])
+
     async def test_async_produce_strategy_fails_fast_on_invalid_progress(self):
         task_name = "test_invalid_progress"
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()

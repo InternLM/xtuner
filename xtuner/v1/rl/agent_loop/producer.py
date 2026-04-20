@@ -37,8 +37,9 @@ class ProduceProgress:
 
     使用注意：
     - 不要在 strategy 中补 key 或用 dict.get(..., 0) 兜底；缺少 task key 应 fail fast。
-    - 不要把字段值复制成局部快照后跨 await 使用；需要字段值时直接读 progress.xxx，
-      让并发更新后的 next_consumer_step / consumed_samples / target_samples 能尽早生效。
+    - 除非语义明确要求冻结本轮 produce_batch 的 target / scheduled_target，
+      否则不要把字段值复制成局部快照后跨 await 使用；需要字段值时直接读 progress.xxx，
+      让并发更新后的 next_consumer_step / consumed_samples 能尽早生效。
     - 运行中不要整体替换 ProduceProgress 对象；resume 时也应原地更新字段，避免旧引用失效。
 
     字段含义：
@@ -340,6 +341,24 @@ class AsyncProduceStrategy(ProduceStrategy):
         items = expire_group_if_needed(items, self.tail_batch_stale_threshold)
         await replay_buffer.put(items, task_name)
 
+    async def _put_claimed_tasks(
+        self,
+        claimed_tasks: set[asyncio.Task],
+        replay_buffer: ReplayBuffer,
+        task_name: str,
+        progress: ProduceProgress,
+        default_model_rollout_step: int,
+    ) -> None:
+        for task in claimed_tasks:
+            task_model_rollout_step = self._pending_task_model_steps.pop(task, default_model_rollout_step)
+            await self._put_generated_group(
+                task.result(),
+                replay_buffer,
+                task_name,
+                current_rollout_step=progress.next_consumer_step,
+                model_rollout_step=task_model_rollout_step,
+            )
+
     async def _schedule_one(
         self,
         agent_loop: AgentLoopSpec,
@@ -460,49 +479,62 @@ class AsyncProduceStrategy(ProduceStrategy):
         if progress.target_samples[task_name] <= 0:
             return ProduceBatchStatus.NORMAL
 
+        if update_event.is_set():
+            return ProduceBatchStatus.UPDATE_ABORT
+        if self.is_model_expired(rollout_step, model_rollout_step):
+            return ProduceBatchStatus.EXPIRED_BATCH
+
+        # 先回收跨 produce_batch 调用遗留的已完成任务，避免 done task 长期留在 pending 集合里。
+        claimed_done = await self._claim_already_done()
+        await self._put_claimed_tasks(
+            claimed_done,
+            replay_buffer,
+            task_name,
+            progress,
+            default_model_rollout_step=model_rollout_step,
+        )
+
+        if update_event.is_set():
+            return ProduceBatchStatus.UPDATE_ABORT
+        if self.is_model_expired(rollout_step, model_rollout_step):
+            return ProduceBatchStatus.EXPIRED_BATCH
+
+        expired_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
+        sample_from_expired = self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size
+        if sample_from_expired:
+            logger.info(
+                f"Tail batch trigger condition met: {expired_count} expired samples "
+                f"(threshold: {self.tail_batch_trigger_size}). Enabling tail batch mode."
+            )
+
+        # 本轮 produce_batch 的必要累计目标固定；normal 模式只按当前 task batch 追加固定超发预算。
+        # tail-batch 模式只补必要缺口，新增任务固定从 EXPIRED pool 取，不再扩大超发窗口。
+        target_abs = progress.target_samples[task_name]
+        oversample_budget = 0 if sample_from_expired else math.ceil(self.over_sample_threshold * batch_size)
+        scheduled_target = target_abs + oversample_budget
+
         while True:
             if update_event.is_set():
                 return ProduceBatchStatus.UPDATE_ABORT
             if self.is_model_expired(rollout_step, model_rollout_step):
                 return ProduceBatchStatus.EXPIRED_BATCH
 
-            # 先认领已完成任务，put 前用最新 consumer step 刷新 staleness。
-            claimed_done = await self._claim_already_done()
-            for task in claimed_done:
-                task_model_rollout_step = self._pending_task_model_steps.pop(task, model_rollout_step)
-                await self._put_generated_group(
-                    task.result(),
-                    replay_buffer,
-                    task_name,
-                    current_rollout_step=progress.next_consumer_step,
-                    model_rollout_step=task_model_rollout_step,
-                )
-
             fresh = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
             available = progress.consumed_samples[task_name] + fresh
-            required = max(0, progress.target_samples[task_name] - available)
-            if required == 0:
+            if available >= target_abs:
                 return ProduceBatchStatus.NORMAL
 
-            scheduled_target = available + math.ceil((1 + self.over_sample_threshold) * required)
+            pending_count = await self._pending_count()
             desired_pending = max(0, scheduled_target - available)
-
-            expired_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
-            sample_from_expired = self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size
-            if sample_from_expired:
-                logger.info(
-                    f"Tail batch trigger condition met: {expired_count} expired samples "
-                    f"(threshold: {self.tail_batch_trigger_size}). Enabling tail batch mode."
+            if available + pending_count < scheduled_target:
+                await self._schedule_tasks_until(
+                    agent_loop=agent_loop,
+                    sampler=sampler,
+                    task_name=task_name,
+                    desired_pending=desired_pending,
+                    sample_from_expired=sample_from_expired,
+                    model_rollout_step=model_rollout_step,
                 )
-
-            await self._schedule_tasks_until(
-                agent_loop=agent_loop,
-                sampler=sampler,
-                task_name=task_name,
-                desired_pending=desired_pending,
-                sample_from_expired=sample_from_expired,
-                model_rollout_step=model_rollout_step,
-            )
 
             pending_snapshot = await self._snapshot_pending()
             if not pending_snapshot:
@@ -515,12 +547,10 @@ class AsyncProduceStrategy(ProduceStrategy):
                 return_when=asyncio.FIRST_COMPLETED,
             )
             claimed_done = await self._claim_done(done_tasks)
-            for task in claimed_done:
-                task_model_rollout_step = self._pending_task_model_steps.pop(task, model_rollout_step)
-                await self._put_generated_group(
-                    task.result(),
-                    replay_buffer,
-                    task_name,
-                    current_rollout_step=progress.next_consumer_step,
-                    model_rollout_step=task_model_rollout_step,
-                )
+            await self._put_claimed_tasks(
+                claimed_done,
+                replay_buffer,
+                task_name,
+                progress,
+                default_model_rollout_step=model_rollout_step,
+            )
