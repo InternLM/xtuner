@@ -54,11 +54,11 @@ class TestAgentLoopUtils(unittest.TestCase):
             },
         )
 
-        result = handler.postprocess(rollout_state, model_rollout_step=5, current_rollout_step=9)
+        result = handler.postprocess(rollout_state, model_rollout_step=5)
 
         self.assertEqual(result.response_ids, [10, 11, 30, 31])
         self.assertEqual(result.response_rollout_steps, [2, 2, 5, 5])
-        self.assertEqual(result.seq_staleness, 6)
+        self.assertEqual(result.seq_staleness, 0)
 
 
 class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
@@ -77,17 +77,21 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
                 logger=MagicMock(),
             )
 
-    async def test_generate_sample_requires_both_step_kwargs(self):
+    async def test_generate_sample_does_not_update_staleness(self):
         agent_loop = self._build_agent_loop()
         rollout_state = _make_rollout_state(response_ids=[], status=Status.ABORTED)
+        generated_state = _make_rollout_state(response_ids=[30, 31], seq_staleness=7, status=Status.ABORTED)
+        agent_loop.rollout_ctl.generate.remote.return_value = generated_state
 
-        with self.assertRaises(ValueError):
-            await agent_loop.generate_sample(rollout_state, rollout_step=9)
+        result = await agent_loop.generate_sample(
+            rollout_state,
+            model_rollout_step=5,
+        )
 
-        with self.assertRaises(ValueError):
-            await agent_loop.generate_sample(rollout_state, model_rollout_step=5)
+        self.assertEqual(result.response_rollout_steps, [5, 5])
+        self.assertEqual(result.seq_staleness, 7)
 
-    async def test_generate_sample_uses_model_rollout_step_for_tokens_and_rollout_step_for_staleness(self):
+    async def test_generate_sample_uses_model_rollout_step_for_sample_version(self):
         agent_loop = self._build_agent_loop()
         rollout_state = _make_rollout_state(response_ids=[], status=Status.ABORTED)
         generated_state = _make_rollout_state(response_ids=[30, 31], status=Status.ABORTED)
@@ -96,11 +100,10 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         result = await agent_loop.generate_sample(
             rollout_state,
             model_rollout_step=5,
-            rollout_step=9,
         )
 
         self.assertEqual(result.response_rollout_steps, [5, 5])
-        self.assertEqual(result.seq_staleness, 3)
+        self.assertEqual(result.seq_staleness, 0)
 
     async def test_generate_sample_accepts_zero_model_rollout_step_when_explicitly_provided(self):
         agent_loop = self._build_agent_loop()
@@ -111,7 +114,6 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         result = await agent_loop.generate_sample(
             rollout_state,
             model_rollout_step=0,
-            rollout_step=1,
         )
 
         self.assertEqual(result.response_rollout_steps, [0, 0])

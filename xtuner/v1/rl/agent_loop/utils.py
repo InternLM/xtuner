@@ -2,7 +2,7 @@ import time
 
 import ray
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_seq_staleness
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_sample_version
 from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.utils import get_logger
 
@@ -77,16 +77,13 @@ class PartialRolloutHandler:
         }
         return rollout_state
 
-    def postprocess(
-        self, rollout_state: RolloutState, model_rollout_step: int, current_rollout_step: int
-    ) -> RolloutState:
+    def postprocess(self, rollout_state: RolloutState, model_rollout_step: int) -> RolloutState:
         # TODO: if not enable partial rollout, return directly?
 
-        # Record token source model version, then snapshot the current staleness.
-        rollout_state = update_seq_staleness(
+        # Record token source model version. Staleness is refreshed centrally by producer/buffer paths.
+        rollout_state = update_sample_version(
             rollout_state,
             model_rollout_step=model_rollout_step,
-            current_rollout_step=current_rollout_step,
         )
 
         # Concatenate history response fields

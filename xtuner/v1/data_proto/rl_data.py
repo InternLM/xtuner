@@ -14,8 +14,6 @@ from typing_extensions import NotRequired, TypedDict
 from xtuner.v1.utils.cache import CacheObj
 from xtuner.v1.utils.logger import get_logger
 
-from .utils import calculate_seq_staleness
-
 
 if TYPE_CHECKING:
     from ray import ObjectRef as RayObjectRef
@@ -93,9 +91,9 @@ class RolloutState(CacheObj, BaseModel):
     finish_reason: str | None = None
     # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
     response_mask: list[int] | None = None
-    # response_rollout_steps：记录 response_ids 中每个 token 是在哪个 rollout_step 生成的，与 response_ids 长度相同，每轮rollout在agent_loop中后处理中覆盖写
+    # response_rollout_steps：记录 response_ids 中每个 token 来自哪个 model_rollout_step，与 response_ids 长度相同。
     response_rollout_steps: list[int] | None = None
-    # 记录该样本过期程度，即最先生成的token与当前的训练步数的差值，数值越大表示越过期，在 agent_loop 中后处理中覆盖写
+    # 记录该样本过期程度，即最早生成 token 的模型版本与当前训练步数的差值，数值越大表示越过期。
     seq_staleness: int = 0
 
     #  --- Judger 输出 ---
@@ -213,17 +211,12 @@ def update_group_status(rollout_states: list[RolloutState]) -> Status:
         return Status.COMPLETED
 
 
-def update_seq_staleness(
-    rollout_state: RolloutState, model_rollout_step: int, current_rollout_step: int
-) -> RolloutState:
-    """Append token source model version and snapshot the current
-    seq_staleness."""
+def update_sample_version(rollout_state: RolloutState, model_rollout_step: int) -> RolloutState:
+    """Append token source model version for newly generated response
+    tokens."""
     response_len = len(rollout_state.response_ids or [])
     response_rollout_steps = [model_rollout_step] * response_len
     rollout_state.response_rollout_steps = (rollout_state.response_rollout_steps or []) + response_rollout_steps
-
-    cur_model_rollout_step = min(rollout_state.response_rollout_steps, default=model_rollout_step)
-    rollout_state.seq_staleness = calculate_seq_staleness(cur_model_rollout_step, current_rollout_step)
     return rollout_state
 
 

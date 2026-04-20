@@ -45,24 +45,21 @@ async def _timed_generate_group(
     agent_loop: AgentLoopSpec,
     rollout_state: list[RolloutState],
     enable_partial_rollout: bool = False,
-    rollout_step: int = 0,
     model_rollout_step: int | None = None,
 ) -> list[RolloutState]:
     start = time.perf_counter()
     if model_rollout_step is None:
-        model_rollout_step = rollout_step
+        model_rollout_step = 0
     if isinstance(agent_loop, ray.actor.ActorHandle):
         result = await agent_loop.generate_group.remote(
             rollout_state,
             enable_partial_rollout=enable_partial_rollout,
-            rollout_step=rollout_step,
             model_rollout_step=model_rollout_step,
         )
     else:
         result = await agent_loop.generate_group(
             rollout_state,
             enable_partial_rollout=enable_partial_rollout,
-            rollout_step=rollout_step,
             model_rollout_step=model_rollout_step,
         )
     elapsed = time.perf_counter() - start
@@ -204,7 +201,6 @@ class SyncProduceStrategy(ProduceStrategy):
                 _timed_generate_group(
                     agent_loop,
                     rollout_state,
-                    rollout_step=rollout_step,
                     model_rollout_step=model_rollout_step,
                 )
             )
@@ -236,7 +232,6 @@ class SyncProduceStrategy(ProduceStrategy):
                     _timed_generate_group(
                         agent_loop,
                         rollout_state,
-                        rollout_step=rollout_step,
                         model_rollout_step=model_rollout_step,
                     )
                 )
@@ -325,7 +320,6 @@ class AsyncProduceStrategy(ProduceStrategy):
                     agent_loop,
                     rollout_state,
                     enable_partial_rollout=self.enable_partial_rollout,
-                    rollout_step=model_rollout_step,
                     model_rollout_step=model_rollout_step,
                 )
             )

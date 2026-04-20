@@ -1,4 +1,4 @@
-from .rl_data import RolloutState, SampleParams, Status, update_expired_status, update_seq_staleness
+from .rl_data import RolloutState, SampleParams, Status, update_expired_status, update_sample_version
 from .sequence_context import SequenceContext
 
 
@@ -7,6 +7,6 @@ __all__ = [
     "RolloutState",
     "SampleParams",
     "Status",
-    "update_seq_staleness",
+    "update_sample_version",
     "update_expired_status",
 ]

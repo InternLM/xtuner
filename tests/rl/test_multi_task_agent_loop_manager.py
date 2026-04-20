@@ -14,6 +14,7 @@ from xtuner.v1.rl.agent_loop.agent_loop_manager import (
 )
 from xtuner.v1.rl.agent_loop.producer import GROUP_GENERATE_TIME_KEY, ProduceBatchStatus
 from xtuner.v1.data_proto import Status
+from xtuner.v1.data_proto.utils import calculate_seq_staleness
 
 
 class _FakeSampler:
@@ -138,6 +139,7 @@ class _FakeReplayBuffer:
         self._leftover_counts = leftover_counts
         self.saved_paths: list[Path] = []
         self.resumed_paths: list[Path] = []
+        self.refresh_completed_staleness_calls: list[tuple[str, int, int]] = []
 
     async def get(self, batch_size: int, task_name: str, group_status: Status):
         assert group_status == Status.COMPLETED
@@ -145,6 +147,24 @@ class _FakeReplayBuffer:
 
     async def count(self, task_name: str, group_status: Status):
         return self._leftover_counts.get((task_name, group_status), 0)
+
+    async def refresh_completed_staleness(
+        self,
+        task_name: str,
+        current_rollout_step: int,
+        tail_batch_stale_threshold: int,
+    ):
+        self.refresh_completed_staleness_calls.append(
+            (task_name, current_rollout_step, tail_batch_stale_threshold)
+        )
+        for group in self._rollout_states_by_task.get(task_name, []):
+            for state in group:
+                response_rollout_steps = getattr(state, "response_rollout_steps", None) or []
+                if response_rollout_steps and hasattr(state, "seq_staleness"):
+                    state.seq_staleness = calculate_seq_staleness(
+                        min(response_rollout_steps), current_rollout_step
+                    )
+        return 0
 
     async def save(self, checkpoint_path: Path | str):
         self.saved_paths.append(Path(checkpoint_path))
@@ -496,7 +516,13 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, ProduceBatchStatus.EXPIRED_BATCH)
         self.assertEqual(result.rollout_states, [])
 
-    async def test_get_batch_refreshes_seq_staleness_from_buffer(self):
+    async def test_get_batch_refreshes_completed_staleness_at_entry(self):
+        replay_buffer = _FakeReplayBuffer(
+            rollout_states_by_task={
+                "task_a": [[_FakeStalenessRolloutState("a-0", 0.2, response_rollout_steps=[4], seq_staleness=0)]],
+            },
+            leftover_counts={("task_a", Status.COMPLETED): 1},
+        )
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(
@@ -508,16 +534,12 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                     order=0,
                 ),
             ],
-            replay_buffer=_FakeReplayBuffer(
-                rollout_states_by_task={
-                    "task_a": [[_FakeStalenessRolloutState("a-0", 0.2, response_rollout_steps=[4], seq_staleness=0)]],
-                },
-                leftover_counts={("task_a", Status.COMPLETED): 1},
-            ),
+            replay_buffer=replay_buffer,
         )
 
         result = await manager.get_batch(batch_size=1, rollout_step=9)
 
+        self.assertEqual(replay_buffer.refresh_completed_staleness_calls, [("task_a", 9, 0)])
         self.assertEqual(result.rollout_states[0][0].seq_staleness, 4)
         self.assertEqual(manager._produce_progress.latest_consumer_step, 9)
         self.assertEqual(manager._produce_progress.consumed_samples["task_a"], 1)

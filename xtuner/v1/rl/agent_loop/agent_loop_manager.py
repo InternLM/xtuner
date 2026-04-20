@@ -27,7 +27,6 @@ from .producer import (
     SyncProduceStrategyConfig,
 )
 from .sampler import Sampler, SamplerConfig
-from .utils import refresh_seq_staleness
 
 
 @dataclass
@@ -536,8 +535,6 @@ class AgentLoopManager:
         batch_rollout_states: list[list[RolloutState]] = await self.replay_buffer.get(
             batch_size, task_runner.task_name, Status.COMPLETED
         )
-        for group in batch_rollout_states:
-            refresh_seq_staleness(group, rollout_step)
         result.rollout_states = batch_rollout_states
         if record_consumed:
             # get 已从 buffer 删除样本，立刻更新 consumed，避免 producer 短暂误判缺口。
