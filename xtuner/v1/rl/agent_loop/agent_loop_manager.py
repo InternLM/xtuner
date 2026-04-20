@@ -247,12 +247,29 @@ class AgentLoopManager:
             self.logger = get_logger()
         else:
             self.logger = logger
+
+        # 非共卡并发控制信号：consumer 在同步权重前置位，producer / strategy 应直接观察
+        # event 状态并尽快停止继续发新 rollout；不要用额外布尔快照替代这个 event。
         self._update_event = asyncio.Event()
+
         self._finish_event = asyncio.Event()
+
+        # 非共卡 producer 读取的 rollout 模型版本。consumer 完成权重同步后通过 continue_product 更新。
+        # producer 发起一轮生产时可以读取当前值作为本轮版本；已 schedule 的 pending task
+        # 必须在 strategy 内绑定发起时版本，不能在 task 完成时再读取最新值。
         self._model_rollout_step = 0
+
+        # 非共卡 producer / consumer 共享的控制状态。produce_loop / get_batch 应直接读取
+        # self._status，不要跨 await 缓存局部快照，避免错过同步、过期或结束状态变化。
         self._status = AgentLoopManagerStatus.NORMAL
+
+        # pause_product 写入、下一次 get batch 读取并清零的耗时指标。
+        # 只用于消费侧日志/metrics；读写不构成生产正确性依赖。
         self._pause_time_s = 0.0
-        # producer/consumer 共享的绝对累计进度；对象引用保持稳定，strategy 读取 live 值。
+
+        # 非共卡 producer / consumer 共享的绝对累计进度。对象引用必须保持稳定；
+        # consumer 原地更新字段，producer / strategy 需要字段值时直接读取 progress.xxx，
+        # 不要把字段值复制成跨 await 使用的局部快照。
         self._produce_progress = ProduceProgress(
             next_consumer_step=1,
             producer_future_step=1,
