@@ -225,9 +225,9 @@ async def produce_batch(
     batch_size: int,
     task_name: str,
     rollout_step: int = 0,              # disagg 下传 current_future_step
-    model_rollout_step: int | None = None,
     update_event: asyncio.Event | None = None,
     *,
+    model_rollout_step: int,
     progress: ProduceProgress,
     target_cumulative: int | None = None,
 ) -> ProduceBatchStatus:
@@ -252,8 +252,6 @@ if target_cumulative is not None and target_cumulative != progress.target_sample
 ```python
 async def produce_batch(...):
     current_future_step = rollout_step
-    if model_rollout_step is None:
-        model_rollout_step = current_future_step
     if update_event is None:
         update_event = asyncio.Event()
     _validate_progress_for_task(progress, task_name, target_cumulative)
@@ -267,7 +265,7 @@ async def produce_batch(...):
 
     # 只在进入本轮时回收一次跨调用遗留的 done task，避免 done task 长期留在 pending 集合。
     claimed_done = await self._claim_already_done()
-    await self._put_claimed_tasks(claimed_done, replay_buffer, task_name, progress, model_rollout_step)
+    await self._put_claimed_tasks(claimed_done, replay_buffer, task_name, progress)
 
     if update_event.is_set():
         return ProduceBatchStatus.UPDATE_ABORT
@@ -322,7 +320,7 @@ async def produce_batch(...):
             return_when=asyncio.FIRST_COMPLETED,
         )
         claimed_done = await self._claim_done(done)
-        await self._put_claimed_tasks(claimed_done, replay_buffer, task_name, progress, model_rollout_step)
+        await self._put_claimed_tasks(claimed_done, replay_buffer, task_name, progress)
 ```
 
 注意：
@@ -494,17 +492,20 @@ async def _schedule_one(..., update_event: asyncio.Event | None):
                 agent_loop,
                 rollout_state,
                 enable_partial_rollout=self.enable_partial_rollout,
-                rollout_step=model_rollout_step,
-                model_rollout_step=model_rollout_step,
             )
         )
         self._pending_tasks.add(task)
+        # 绑定 task 发起时的模型版本。partial rollout 可能已有更早版本的 prefix；
+        # put 前只为本次新增 token 补这个版本，不能用 task 完成时 manager 的最新版本。
+        self._pending_task_model_steps[task] = model_rollout_step
         return True
 ```
 
 如果不希望在 lock 内 `await sampler.sample(...)`，也可以引入 `_scheduling_count` 防止 pause 在“采样中但尚未 add pending”时提前返回；但这会增加状态。按“尽量少改且易维护”的约束，短锁方案更直接。
 
 `update_event` 是 manager 级暂停信号。`AsyncProduceStrategy` 不再维护 `_pausing` 作为第二套暂停状态；pause drain 只依赖 pending snapshot / claim helper。
+
+`_pending_task_model_steps` 是必要状态：它记录每个 pending rollout task 发起时使用的 `model_rollout_step`。partial rollout 样本的 `response_rollout_steps` 可能已经包含旧 prefix 的更早模型版本；task 完成后只为新增 token 追加该 task 发起时的版本，最终 staleness 仍按 `min(response_rollout_steps)` 计算。这个版本不能从 task 完成时的 manager `_model_rollout_step` 读取。
 
 ### pause
 
@@ -552,11 +553,13 @@ async def pause_product(..., *, progress: ProduceProgress) -> float:
         )
         claimed_done = await self._claim_done(done)
         for task in claimed_done:
+            task_model_rollout_step = self._pending_task_model_steps.pop(task)
             await self._put_generated_group(
                 task.result(),
                 replay_buffer,
                 task_name,
                 current_rollout_step=progress.next_consumer_step,
+                model_rollout_step=task_model_rollout_step,
             )
 
         if await self._pending_count() > 0:
@@ -576,7 +579,7 @@ async def pause_product(..., *, progress: ProduceProgress) -> float:
 
 ### `produce_loop`
 
-`produce_loop` 默认从 `progress.producer_future_step` 继续生产。`start_rollout_step` 只作为显式覆盖入口保留给测试 / 手动启动场景，不再承担 checkpoint 兼容重放逻辑。manager 初始化时把生产进度放到绝对坐标系原点：
+`produce_loop` 默认从 `progress.producer_future_step` 继续生产，不再接受 `start_rollout_step` 覆盖入口。测试 / resume 如需指定起点，应直接恢复或设置 `progress.producer_future_step`，保证生产 step 只有一个状态来源。manager 初始化时把生产进度放到绝对坐标系原点：
 
 ```python
 self._produce_progress = ProduceProgress(
@@ -591,10 +594,7 @@ self._produce_progress = ProduceProgress(
 resume 时从 checkpoint 恢复这些状态；trainer 不再把 `self._cur_step` 传进 `produce_loop`。
 
 ```python
-async def produce_loop(self, batch_size: int, start_rollout_step: int | None = None):
-    if start_rollout_step is not None:
-        self._produce_progress.producer_future_step = start_rollout_step
-
+async def produce_loop(self, batch_size: int):
     while not self._finish_event.is_set():
         if self._status == AgentLoopManagerStatus.FINISH:
             break
@@ -871,6 +871,10 @@ def continue_product(self, model_rollout_step: int) -> None:
 - strategy 中基于 `previously_completed_count = replay_buffer.count(COMPLETED)` 的局部 batch 判断。
 - strategy 内 `progress=None` 时构造 local progress 的兜底逻辑。
 - `AsyncProduceStrategy._current_rollout_step` 以及 `pause_product` 中基于它的 fallback。
+- `AsyncProduceStrategy.produce_batch(..., model_rollout_step=None)` 的 fallback；调用方必须显式传入合法 `model_rollout_step`。
+- `AgentLoopManager.produce_loop(start_rollout_step=...)` 覆盖入口；producer 起点只来自 `progress.producer_future_step`。
+- `_produce_batch_to_buffer(..., rollout_step=...)` 兼容别名；内部统一使用必传的 `current_future_step`。
+- `_refresh_completed_staleness_for_all_tasks` 中判断 replay buffer 是否存在刷新接口的 fallback；`ReplayBuffer.refresh_completed_staleness` 是固定依赖，缺失应 fail fast。
 - `get_batch` while 循环内的重复 completed refresh。
 - `_refresh_leftover_counts` 这类只为日志字段再次 recount 的逻辑。
 - resume 时读取 `latest_consumer_step` 或用 `manager_state.get(..., default)` 隐藏字段缺失的兼容逻辑。

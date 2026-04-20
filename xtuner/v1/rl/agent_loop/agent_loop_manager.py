@@ -367,13 +367,9 @@ class AgentLoopManager:
         return False
 
     async def _refresh_completed_staleness_for_all_tasks(self, rollout_step: int) -> None:
-        refresh_completed_staleness = getattr(self.replay_buffer, "refresh_completed_staleness", None)
-        if refresh_completed_staleness is None:
-            return
-
         for task in self.task_runners:
             threshold = getattr(task.produce_strategy, "tail_batch_stale_threshold", 0)
-            await refresh_completed_staleness(
+            await self.replay_buffer.refresh_completed_staleness(
                 task_name=task.task_name,
                 current_rollout_step=rollout_step,
                 tail_batch_stale_threshold=threshold,
@@ -448,17 +444,12 @@ class AgentLoopManager:
     async def _produce_batch_to_buffer(
         self,
         batch_size: int,
-        current_future_step: int | None = None,
+        current_future_step: int,
         *,
-        rollout_step: int | None = None,
         use_global_progress: bool = True,
         task_batch_sizes: dict[str, int] | None = None,
         progress_override: ProduceProgress | None = None,
     ) -> ProduceBatchStatus:
-        if current_future_step is None:
-            if rollout_step is None:
-                raise ValueError("current_future_step must be provided.")
-            current_future_step = rollout_step
         model_rollout_step = self._model_rollout_step
         current_sizes = (
             self._get_task_batch_sizes_for_step(batch_size, current_future_step)
@@ -736,7 +727,7 @@ class AgentLoopManager:
         )
         return result
 
-    async def produce_loop(self, batch_size: int, start_rollout_step: int | None = None) -> None:
+    async def produce_loop(self, batch_size: int) -> None:
         # `produce_loop()` 是非共卡新增的后台生产循环。
         #
         # 和 colocate 最大的区别是：
@@ -746,8 +737,6 @@ class AgentLoopManager:
         #
         # 因此这里的核心职责不是“凑出一批训练数据”，而是根据 manager 的全局状态机
         # 决定什么时候继续生产、什么时候暂停等待、什么时候彻底退出。
-        if start_rollout_step is not None:
-            self._produce_progress.producer_future_step = start_rollout_step
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.FINISH:
                 break

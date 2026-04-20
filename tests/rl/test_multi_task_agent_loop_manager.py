@@ -42,7 +42,7 @@ class _FakeProduceStrategy:
         self.cleanup_pause_time_s = cleanup_pause_time_s
         self.called_batch_sizes: list[int] = []
         self.called_rollout_steps: list[int] = []
-        self.called_model_rollout_steps: list[int | None] = []
+        self.called_model_rollout_steps: list[int] = []
         self.called_update_events: list[object | None] = []
         self.called_update_event_states: list[bool | None] = []
         self.called_progresses: list[object] = []
@@ -58,9 +58,9 @@ class _FakeProduceStrategy:
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-        model_rollout_step: int | None = None,
         update_event=None,
         *,
+        model_rollout_step: int,
         progress,
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
@@ -85,7 +85,7 @@ class _FakeStatusProduceStrategy:
         self.pause_time_s = pause_time_s
         self.cleanup_call_count = 0
         self.called_rollout_steps: list[int] = []
-        self.called_model_rollout_steps: list[int | None] = []
+        self.called_model_rollout_steps: list[int] = []
         self.called_update_events: list[object | None] = []
         self.called_update_event_states: list[bool | None] = []
         self.called_progresses: list[object] = []
@@ -100,9 +100,9 @@ class _FakeStatusProduceStrategy:
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-        model_rollout_step: int | None = None,
         update_event=None,
         *,
+        model_rollout_step: int,
         progress,
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
@@ -146,9 +146,9 @@ class _SequencedProduceStrategy(_FakeProduceStrategy):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-        model_rollout_step: int | None = None,
         update_event=None,
         *,
+        model_rollout_step: int,
         progress,
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
@@ -650,7 +650,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         manager._model_rollout_step = 5
-        status = await manager._produce_batch_to_buffer(batch_size=3, rollout_step=5)
+        status = await manager._produce_batch_to_buffer(batch_size=3, current_future_step=5)
 
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
 
@@ -673,7 +673,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
         manager._STATUS_POLL_INTERVAL_S = 0.01
 
-        loop_task = asyncio.create_task(manager.produce_loop(batch_size=1, start_rollout_step=3))
+        manager._produce_progress.producer_future_step = 3
+        loop_task = asyncio.create_task(manager.produce_loop(batch_size=1))
         await self._wait_until(lambda: manager._status == AgentLoopManagerStatus.EXPIRED_BATCH)
         self.assertEqual(manager._status, AgentLoopManagerStatus.EXPIRED_BATCH)
         self.assertEqual(strategy.called_rollout_steps[:2], [3, 4])

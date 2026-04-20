@@ -191,9 +191,9 @@ class ProduceStrategy(ABC):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-        model_rollout_step: int | None = None,
         update_event: asyncio.Event | None = None,
         *,
+        model_rollout_step: int,
         progress: ProduceProgress,
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus: ...
@@ -218,14 +218,12 @@ class SyncProduceStrategy(ProduceStrategy):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-        model_rollout_step: int | None = None,
         update_event: asyncio.Event | None = None,
         *,
+        model_rollout_step: int,
         progress: ProduceProgress,
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
-        if model_rollout_step is None:
-            model_rollout_step = rollout_step
         pending_tasks = set()
         completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
         # TODO: 是否支持 SyncProduceStrategy 在非共卡时使用？如果支持，下面这行注释掉？
@@ -346,10 +344,10 @@ class AsyncProduceStrategy(ProduceStrategy):
         replay_buffer: ReplayBuffer,
         task_name: str,
         progress: ProduceProgress,
-        default_model_rollout_step: int,
     ) -> None:
         for task in claimed_tasks:
-            task_model_rollout_step = self._pending_task_model_steps.pop(task, default_model_rollout_step)
+            # 每个 pending task 必须绑定调度时的模型版本；缺失说明调度状态已损坏，直接暴露。
+            task_model_rollout_step = self._pending_task_model_steps.pop(task)
             await self._put_generated_group(
                 task.result(),
                 replay_buffer,
@@ -435,7 +433,8 @@ class AsyncProduceStrategy(ProduceStrategy):
             claimed_done = await self._claim_done(done_tasks)
             for task in claimed_done:
                 paused_items = task.result()
-                task_model_rollout_step = self._pending_task_model_steps.pop(task, 0)
+                # pause 可能发生在权重同步之后，但这里仍要使用 task 发起时绑定的模型版本。
+                task_model_rollout_step = self._pending_task_model_steps.pop(task)
                 for item in paused_items:
                     logger.debug(
                         f"[{self.__class__.__name__}] Task {task_name} | "
@@ -462,14 +461,12 @@ class AsyncProduceStrategy(ProduceStrategy):
         batch_size: int,
         task_name: str,
         rollout_step: int = 0,
-        model_rollout_step: int | None = None,
         update_event: asyncio.Event | None = None,
         *,
+        model_rollout_step: int,
         progress: ProduceProgress,
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
-        if model_rollout_step is None:
-            model_rollout_step = rollout_step
         if update_event is None:
             update_event = asyncio.Event()
         _validate_progress_for_task(progress, task_name, target_cumulative)
@@ -489,7 +486,6 @@ class AsyncProduceStrategy(ProduceStrategy):
             replay_buffer,
             task_name,
             progress,
-            default_model_rollout_step=model_rollout_step,
         )
 
         if update_event.is_set():
@@ -555,5 +551,4 @@ class AsyncProduceStrategy(ProduceStrategy):
                 replay_buffer,
                 task_name,
                 progress,
-                default_model_rollout_step=model_rollout_step,
             )
