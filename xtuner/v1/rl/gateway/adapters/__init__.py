@@ -15,7 +15,12 @@ from .openai import (
     OpenAIChatAdapterError,
 )
 from .responses import ResponsesRequest, ResponsesResponse
-from .trace import ChatTraceRecord, ChatTraceStore
+from .trace import (
+    DEFAULT_CHAT_TRACE_KEY,
+    ChatTraceRecord,
+    ChatTraceStore,
+    build_api_key_trace_key,
+)
 
 
 __all__ = [
@@ -32,8 +37,10 @@ __all__ = [
     "ResponsesRequest",
     "ResponsesResponse",
     "BaseChatAPIAdapter",
+    "DEFAULT_CHAT_TRACE_KEY",
     "ChatTraceRecord",
     "ChatTraceStore",
+    "build_api_key_trace_key",
     "append_current_trace_rollout_state",
     "reset_current_trace_collector",
     "set_current_trace_collector",

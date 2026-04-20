@@ -27,7 +27,7 @@ from ..core.models import (
     CanonicalToolResult,
     CanonicalToolResultBlock,
 )
-from .base import BaseChatAPIAdapter
+from .base import BaseChatAPIAdapter, stringify_tool_arguments
 from .openai import OpenAIChatAdapterError
 from .streaming import build_sse_response, encode_sse_event
 from .trace import normalize_trace_payload
@@ -551,7 +551,7 @@ class OpenAIResponsesAdapter(BaseChatAPIAdapter[ResponsesRequest, ResponsesRespo
                         "status": "completed",
                         "call_id": block.tool_call.id,
                         "name": block.tool_call.name,
-                        "arguments": self._stringify_tool_arguments(block.tool_call),
+                        "arguments": stringify_tool_arguments(block.tool_call),
                     }
                 )
             elif isinstance(block, CanonicalToolResultBlock):
@@ -576,11 +576,6 @@ class OpenAIResponsesAdapter(BaseChatAPIAdapter[ResponsesRequest, ResponsesRespo
                         }
                     )
         return output_items
-
-    def _stringify_tool_arguments(self, tool_call: CanonicalToolCall) -> str:
-        if tool_call.raw_arguments_text is not None:
-            return tool_call.raw_arguments_text
-        return json.dumps(tool_call.arguments if tool_call.arguments is not None else {}, ensure_ascii=False)
 
     def _parse_json_string_or_mapping(self, value: Any) -> Any:
         if isinstance(value, str):

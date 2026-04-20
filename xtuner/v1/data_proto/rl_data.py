@@ -92,7 +92,7 @@ class RolloutState(CacheObj, BaseModel):
     mm_info: MultimodalInfo | None = None
     reward_model: dict[str, Any] | None = None
 
-    # --- InferEngine 输入 ---å
+    # --- InferEngine 输入 ---
     session_uid: int | None = None
     tokens: list[int] | None = None  # 每一次推理引擎的实际输入
     tools: list | None = None

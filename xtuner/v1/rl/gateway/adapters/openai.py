@@ -32,7 +32,7 @@ from ..core.models import (
     CanonicalToolResult,
     CanonicalToolResultBlock,
 )
-from .base import BaseChatAPIAdapter, coerce_content_to_text
+from .base import BaseChatAPIAdapter, coerce_content_to_text, stringify_tool_arguments
 from .streaming import build_sse_response, encode_sse_event
 from .trace import normalize_trace_payload
 
@@ -374,7 +374,7 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
                         "type": "function",
                         "function": {
                             "name": block.tool_call.name,
-                            "arguments": self._stringify_tool_arguments(block.tool_call.arguments, block.tool_call),
+                            "arguments": stringify_tool_arguments(block.tool_call),
                         },
                     }
                 )
@@ -403,10 +403,3 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
             return json.loads(raw_arguments)
         except Exception:
             return {"__parse_error__": True, "raw": raw_arguments}
-
-    def _stringify_tool_arguments(self, arguments: Any, tool_call: CanonicalToolCall) -> str:
-        if tool_call.raw_arguments_text is not None:
-            return tool_call.raw_arguments_text
-        if isinstance(arguments, str):
-            return arguments
-        return json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)

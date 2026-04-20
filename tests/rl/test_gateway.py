@@ -14,14 +14,7 @@ import httpx
 import ray
 import torch
 
-from xtuner.v1.rl.gateway.adapters import (
-    AnthropicMessagesRequest,
-    AnthropicMessagesResponse,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ResponsesRequest,
-    ResponsesResponse,
-)
+from xtuner.v1.rl.gateway.adapters import build_api_key_trace_key
 from xtuner.v1.rl.gateway.config import GatewayConfig
 from xtuner.v1.rl.gateway.server import build_local_gateway_app, serve_gateway
 from xtuner.v1.rl.rollout import RolloutController
@@ -52,7 +45,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
         ray.init(address="local", ignore_reinit_error=True)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.worker_log_dir = os.path.join(self.temp_dir.name, "work_dirs")
-        self.capture_output_path = Path(self.temp_dir.name) / "gateway_capture_output.jsonl"
+        self.capture_output_path = Path(self.temp_dir.name) / "gateway_capture_output"
         self.openai_body_output_path = Path(self.temp_dir.name) / "openai_body.json"
         self.anthropic_body_output_path = Path(self.temp_dir.name) / "anthropic_body.json"
         self.responses_body_output_path = Path(self.temp_dir.name) / "responses_body.json"
@@ -123,8 +116,14 @@ class TestGatewayProtocolChain(unittest.TestCase):
     def _read_capture_records(self) -> list[dict]:
         if not self.capture_output_path.exists():
             return []
-        with self.capture_output_path.open("r", encoding="utf-8") as f:
-            return [json.loads(line) for line in f]
+        if self.capture_output_path.is_file():
+            with self.capture_output_path.open("r", encoding="utf-8") as f:
+                return [json.loads(line) for line in f]
+        records = []
+        for capture_file in sorted(self.capture_output_path.glob("*.jsonl")):
+            with capture_file.open("r", encoding="utf-8") as f:
+                records.extend(json.loads(line) for line in f)
+        return records
 
     def _write_json_output(self, path: Path, payload: dict) -> None:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -147,6 +146,8 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertEqual(trace_record.status.value, capture_record["status"])
         self.assertGreater(len(trace_record.prompt_ids), 0)
         self.assertGreater(len(trace_record.response_ids), 0)
+        self.assertTrue(trace_record.input_text)
+        self.assertTrue(trace_record.output_text)
         self.assertGreater(capture_record["prompt_tokens"], 0)
         self.assertGreater(capture_record["completion_tokens"], 0)
         self.assertTrue(capture_record["input_text"])
@@ -202,8 +203,16 @@ class TestGatewayProtocolChain(unittest.TestCase):
             raise AssertionError(f"Gateway did not become ready for config port {config.port}: {last_error}") from last_error
         raise AssertionError(f"Gateway did not become ready for config port {config.port}")
 
-    def _post_json(self, base_url: str, path: str, payload: dict) -> httpx.Response:
-        return httpx.post(f"{base_url}{path}", json=payload, timeout=120.0)
+    def _post_json(
+        self,
+        base_url: str,
+        path: str,
+        payload: dict,
+        *,
+        api_key: str | None = None,
+    ) -> httpx.Response:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        return httpx.post(f"{base_url}{path}", json=payload, headers=headers, timeout=120.0)
 
     def _get_json(self, base_url: str, path: str) -> httpx.Response:
         return httpx.get(f"{base_url}{path}", timeout=30.0)
@@ -211,7 +220,7 @@ class TestGatewayProtocolChain(unittest.TestCase):
     def start_rollout_controller_and_gateway(self) -> tuple[RolloutConfig, GatewayConfig, str, Any]:
         self.controller = self._build_controller()
         rollout_config = self._get_rollout_config()
-        gateway_config = GatewayConfig(port=self._find_free_port(), capture_path=str(self.capture_output_path))
+        gateway_config = GatewayConfig(port=self._find_free_port(), capture_folder=str(self.capture_output_path))
         app = build_local_gateway_app(self.controller, config=gateway_config)
         base_url, _ = self._serve_gateway_blocking_in_background(app, gateway_config)
         return rollout_config, gateway_config, base_url, app
@@ -287,8 +296,19 @@ class TestGatewayProtocolChain(unittest.TestCase):
         openai_adapter = app.state.gateway_openai_adapter
         anthropic_adapter = app.state.gateway_anthropic_adapter
         responses_adapter = app.state.gateway_responses_adapter
+        openai_api_key = "trace-openai"
+        anthropic_api_key = "trace-anthropic"
+        responses_api_key = "trace-responses"
+        openai_trace_key = build_api_key_trace_key(openai_api_key)
+        anthropic_trace_key = build_api_key_trace_key(anthropic_api_key)
+        responses_trace_key = build_api_key_trace_key(responses_api_key)
 
-        openai_response = self._post_json(base_url, "/v1/chat/completions", openai_payload)
+        openai_response = self._post_json(
+            base_url,
+            "/v1/chat/completions",
+            openai_payload,
+            api_key=openai_api_key,
+        )
         self.assertEqual(openai_response.status_code, 200, openai_response.text)
         openai_body = openai_response.json()
         self._write_json_output(self.openai_body_output_path, openai_body)
@@ -298,7 +318,12 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertGreater(openai_body["usage"]["prompt_tokens"], 0)
         self.assertTrue(openai_body["choices"][0]["message"].get("content"))
 
-        anthropic_response = self._post_json(base_url, "/v1/messages", anthropic_payload)
+        anthropic_response = self._post_json(
+            base_url,
+            "/v1/messages",
+            anthropic_payload,
+            api_key=anthropic_api_key,
+        )
         self.assertEqual(anthropic_response.status_code, 200, anthropic_response.text)
         anthropic_body = anthropic_response.json()
         self._write_json_output(self.anthropic_body_output_path, anthropic_body)
@@ -308,7 +333,12 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertGreater(anthropic_body["usage"]["input_tokens"], 0)
         self.assertTrue(anthropic_body["content"])
 
-        responses_response = self._post_json(base_url, "/v1/responses", responses_payload)
+        responses_response = self._post_json(
+            base_url,
+            "/v1/responses",
+            responses_payload,
+            api_key=responses_api_key,
+        )
         self.assertEqual(responses_response.status_code, 200, responses_response.text)
         responses_body = responses_response.json()
         self._write_json_output(self.responses_body_output_path, responses_body)
@@ -317,26 +347,27 @@ class TestGatewayProtocolChain(unittest.TestCase):
         self.assertGreater(responses_body["usage"]["input_tokens"], 0)
         self.assertTrue(responses_body["output"])
 
-        openai_trace = openai_adapter.get_trace_by_request_response(
-            ChatCompletionRequest.model_validate(openai_payload),
-            ChatCompletionResponse.model_validate(openai_body),
-        )
-        self.assertIsNotNone(openai_trace)
-        self.assertIsNotNone(openai_adapter.get_trace_by_response_hash(openai_trace.response_hash))
-
-        anthropic_trace = anthropic_adapter.get_trace_by_request_response(
-            AnthropicMessagesRequest.model_validate(anthropic_payload),
-            AnthropicMessagesResponse.model_validate(anthropic_body),
-        )
-        self.assertIsNotNone(anthropic_trace)
-        self.assertIsNotNone(anthropic_adapter.get_trace_by_response_hash(anthropic_trace.response_hash))
-
-        responses_trace = responses_adapter.get_trace_by_request_response(
-            ResponsesRequest.model_validate(responses_payload),
-            ResponsesResponse.model_validate(responses_body),
-        )
-        self.assertIsNotNone(responses_trace)
-        self.assertIsNotNone(responses_adapter.get_trace_by_response_hash(responses_trace.response_hash))
+        openai_traces = openai_adapter.get_trace_records(openai_trace_key)
+        anthropic_traces = anthropic_adapter.get_trace_records(anthropic_trace_key)
+        responses_traces = responses_adapter.get_trace_records(responses_trace_key)
+        self.assertEqual(len(openai_traces), 1)
+        self.assertEqual(len(anthropic_traces), 1)
+        self.assertEqual(len(responses_traces), 1)
+        openai_trace = openai_traces[0]
+        anthropic_trace = anthropic_traces[0]
+        responses_trace = responses_traces[0]
+        self.assertEqual(openai_trace.trace_key, openai_trace_key)
+        self.assertEqual(anthropic_trace.trace_key, anthropic_trace_key)
+        self.assertEqual(responses_trace.trace_key, responses_trace_key)
+        self.assertNotEqual(openai_trace.trace_key, openai_api_key)
+        self.assertNotEqual(anthropic_trace.trace_key, anthropic_api_key)
+        self.assertNotEqual(responses_trace.trace_key, responses_api_key)
+        self.assertEqual(openai_trace.sequence, 0)
+        self.assertEqual(anthropic_trace.sequence, 0)
+        self.assertEqual(responses_trace.sequence, 0)
+        self.assertGreater(openai_trace.created_at, 0.0)
+        self.assertGreater(anthropic_trace.created_at, 0.0)
+        self.assertGreater(responses_trace.created_at, 0.0)
 
         capture_records = self._read_capture_records()
         self.assertGreaterEqual(len(capture_records), 3)
@@ -385,10 +416,17 @@ class TestGatewayProtocolChain(unittest.TestCase):
         )
         self.assertEqual(responses_trace.response_snapshot["status"], "completed")
 
+        self.assertEqual(openai_adapter.pop_trace_records(openai_trace_key), [openai_trace])
+        self.assertEqual(anthropic_adapter.pop_trace_records(anthropic_trace_key), [anthropic_trace])
+        self.assertEqual(responses_adapter.pop_trace_records(responses_trace_key), [responses_trace])
+        self.assertEqual(openai_adapter.get_trace_records(openai_trace_key), [])
+        self.assertEqual(anthropic_adapter.get_trace_records(anthropic_trace_key), [])
+        self.assertEqual(responses_adapter.get_trace_records(responses_trace_key), [])
+
     def test_gateway_ir_fallback_behavior(self):
         self.controller = self._build_controller()
         rollout_config = self._get_rollout_config()
-        gateway_config = GatewayConfig(port=self._find_free_port(), capture_path=str(self.capture_output_path))
+        gateway_config = GatewayConfig(port=self._find_free_port(), capture_folder=str(self.capture_output_path))
         app = build_local_gateway_app(self.controller, config=gateway_config)
         base_url, _ = self._serve_gateway_blocking_in_background(app, gateway_config)
 

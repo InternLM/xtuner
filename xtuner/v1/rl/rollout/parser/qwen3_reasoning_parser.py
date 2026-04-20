@@ -30,6 +30,12 @@ class Qwen3ReasoningParser(ReasoningParser):
             truncated_reasoning = suffix.replace("</think>", "").strip()
             if truncated_reasoning:
                 reasoning_chunks.append(truncated_reasoning)
+        elif not reasoning_chunks and "</think>" in cleaned:
+            reasoning_text, content = cleaned.split("</think>", 1)
+            reasoning_text = reasoning_text.strip()
+            if reasoning_text:
+                reasoning_chunks.append(reasoning_text)
+            content = content.strip()
         reasoning = "\n".join(reasoning_chunks).strip() or None
         return ParsedReasoningResult(reasoning_text=reasoning, remaining_text=content or None)
 

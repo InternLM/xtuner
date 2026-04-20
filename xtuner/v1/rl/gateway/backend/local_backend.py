@@ -362,7 +362,18 @@ class LocalRolloutBackend:
                 rollout_state.sample_params.model_dump(mode="python", exclude_none=True)
             ),
             "input_text": self._decode_prompt_ids(rollout_state),
+            "output_text": self._render_rollout_output_text(rollout_state),
         }
+
+    def _render_rollout_output_text(self, rollout_state: RolloutState) -> str:
+        parts = []
+        if rollout_state.response:
+            parts.append(rollout_state.response)
+        for rollout_tool_call in rollout_state.tool_calls or []:
+            tool_call = self._rollout_tool_call_to_canonical(rollout_tool_call)
+            arguments = self._stringify_tool_arguments(tool_call)
+            parts.append(f"<tool_use name={tool_call.name}>{arguments}</tool_use>")
+        return "\n".join(parts)
 
     def _decode_prompt_ids(self, rollout_state: RolloutState) -> str:
         """Decode prompt token IDs to text without re-running the chat
