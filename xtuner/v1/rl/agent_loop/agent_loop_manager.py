@@ -530,9 +530,13 @@ class AgentLoopManager:
         # - SYNC_PRODUCE_BATCH：共卡同步 produce_batch 的本次调用收尾，使用本地 progress。
         # 返回值 `pause_time_s` 不是业务语义，而是日志/诊断信息，
         # 供训练侧在下一次消费 batch 时上报。
+        # 先统一拉起 manager 级暂停信号，阻止仍在运行的 produce_batch 继续调度新 rollout。
+        # SYNC_PRODUCE_BATCH 模式会在下一次 produce_batch 入口通过 continue_product 恢复；
+        # ASYNC_PRODUCE_LOOP 模式则由 trainer 在权重同步和评测完成后显式恢复。
+        self._update_event.set()
+        self._status = AgentLoopManagerStatus.UPDATE_ABORT
+
         if source == PauseProductSource.ASYNC_PRODUCE_LOOP:
-            self._update_event.set()
-            self._status = AgentLoopManagerStatus.UPDATE_ABORT
             pause_progress = self._produce_progress
         elif source == PauseProductSource.SYNC_PRODUCE_BATCH:
             if progress is None:

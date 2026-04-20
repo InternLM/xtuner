@@ -437,6 +437,42 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 0)
 
+    async def test_async_produce_strategy_returns_update_abort_after_schedule_pause(self):
+        task_name = "test_update_abort_after_schedule"
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
+        mock_agent_loop = self._build_agent_loop({0: 0.05})
+        sampler = MagicMock()
+        update_event = asyncio.Event()
+        progress = self._build_progress(task_name, target=1)
+
+        async def sample(task_name, group_status=None):
+            # 模拟 manager 在调度临界区中途触发 pause；当前样本会进入 pending，后续应停止继续调度。
+            update_event.set()
+            return [MockRolloutState(0, status=Status.ABORTED)]
+
+        sampler.sample = AsyncMock(side_effect=sample)
+
+        status = await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=1,
+            task_name=task_name,
+            update_event=update_event,
+            progress=progress,
+        )
+
+        self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
+        self.assertEqual(sampler.sample.await_count, 1)
+
+        await strategy.pause_product(
+            mock_agent_loop,
+            self.replay_buffer,
+            task_name,
+            progress=progress,
+        )
+        self.assertEqual(len(strategy._pending_tasks), 0)
+
     async def test_async_produce_strategy_returns_expired_batch_before_processing_leftovers(self):
         task_name = "test_expired_batch"
         strategy = AsyncProduceStrategyConfig(tail_batch_stale_threshold=1).build()

@@ -295,7 +295,6 @@ class AsyncProduceStrategy(ProduceStrategy):
         self._pending_tasks: set[asyncio.Task] = set()
         self._pending_task_model_steps: dict[asyncio.Task, int] = {}
         self._pending_lock = asyncio.Lock()
-        self._pausing = False
 
     def is_model_expired(self, rollout_step: int, model_rollout_step: int) -> bool:
         if self.tail_batch_stale_threshold <= 0:
@@ -367,9 +366,13 @@ class AsyncProduceStrategy(ProduceStrategy):
         sample_from_expired: bool,
         task_name: str,
         model_rollout_step: int,
+        update_event: asyncio.Event | None,
     ) -> bool:
         async with self._pending_lock:
-            if self._pausing or len(self._pending_tasks) >= desired_pending:
+            # update_event 是 manager 级暂停信号；在调度临界区内检查，避免 pause 已触发后继续新增任务。
+            if update_event is not None and update_event.is_set():
+                return False
+            if len(self._pending_tasks) >= desired_pending:
                 return False
             group_status = Status.EXPIRED if sample_from_expired else Status.ABORTED
             rollout_state = await sampler.sample(task_name=task_name, group_status=group_status)
@@ -392,6 +395,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         desired_pending: int,
         sample_from_expired: bool,
         model_rollout_step: int,
+        update_event: asyncio.Event | None,
     ) -> None:
         while await self._schedule_one(
             agent_loop=agent_loop,
@@ -400,6 +404,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             sample_from_expired=sample_from_expired,
             task_name=task_name,
             model_rollout_step=model_rollout_step,
+            update_event=update_event,
         ):
             pass
 
@@ -412,48 +417,41 @@ class AsyncProduceStrategy(ProduceStrategy):
         progress: ProduceProgress,
     ) -> float:
         pause_start = time.perf_counter()
-        async with self._pending_lock:
-            self._pausing = True
+        if await self._pending_count() == 0:
+            return 0.0
 
-        try:
-            if await self._pending_count() == 0:
-                return 0.0
+        rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
+        await pause_generation(rollout_ctl)
+        while True:
+            pending_snapshot = await self._snapshot_pending()
+            if not pending_snapshot:
+                break
 
-            rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
-            await pause_generation(rollout_ctl)
-            while True:
-                pending_snapshot = await self._snapshot_pending()
-                if not pending_snapshot:
-                    break
-
-                done_tasks, _ = await asyncio.wait(
-                    pending_snapshot,
-                    timeout=1,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                claimed_done = await self._claim_done(done_tasks)
-                for task in claimed_done:
-                    paused_items = task.result()
-                    task_model_rollout_step = self._pending_task_model_steps.pop(task, 0)
-                    for item in paused_items:
-                        logger.debug(
-                            f"[{self.__class__.__name__}] Task {task_name} | "
-                            f"Collecting paused sample (uid: {item.uid}, status: {item.status}, "
-                            f"length: {len(item.response_ids or [])}) after pausing generation."
-                        )
-                    await self._put_generated_group(
-                        paused_items,
-                        replay_buffer,
-                        task_name,
-                        current_rollout_step=progress.next_consumer_step,
-                        model_rollout_step=task_model_rollout_step,
+            done_tasks, _ = await asyncio.wait(
+                pending_snapshot,
+                timeout=1,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            claimed_done = await self._claim_done(done_tasks)
+            for task in claimed_done:
+                paused_items = task.result()
+                task_model_rollout_step = self._pending_task_model_steps.pop(task, 0)
+                for item in paused_items:
+                    logger.debug(
+                        f"[{self.__class__.__name__}] Task {task_name} | "
+                        f"Collecting paused sample (uid: {item.uid}, status: {item.status}, "
+                        f"length: {len(item.response_ids or [])}) after pausing generation."
                     )
-                if await self._pending_count() > 0:
-                    await pause_generation(rollout_ctl)
-                    await asyncio.sleep(1)
-        finally:
-            async with self._pending_lock:
-                self._pausing = False
+                await self._put_generated_group(
+                    paused_items,
+                    replay_buffer,
+                    task_name,
+                    current_rollout_step=progress.next_consumer_step,
+                    model_rollout_step=task_model_rollout_step,
+                )
+            if await self._pending_count() > 0:
+                await pause_generation(rollout_ctl)
+                await asyncio.sleep(1)
         return time.perf_counter() - pause_start
 
     async def produce_batch(
@@ -534,9 +532,14 @@ class AsyncProduceStrategy(ProduceStrategy):
                     desired_pending=desired_pending,
                     sample_from_expired=sample_from_expired,
                     model_rollout_step=model_rollout_step,
+                    update_event=update_event,
                 )
+                if update_event.is_set():
+                    return ProduceBatchStatus.UPDATE_ABORT
 
             pending_snapshot = await self._snapshot_pending()
+            if update_event.is_set():
+                return ProduceBatchStatus.UPDATE_ABORT
             if not pending_snapshot:
                 logger.warning("All tasks are done but not enough samples collected.")
                 return ProduceBatchStatus.NORMAL

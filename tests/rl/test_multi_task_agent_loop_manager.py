@@ -44,6 +44,7 @@ class _FakeProduceStrategy:
         self.called_rollout_steps: list[int] = []
         self.called_model_rollout_steps: list[int | None] = []
         self.called_update_events: list[object | None] = []
+        self.called_update_event_states: list[bool | None] = []
         self.called_progresses: list[object] = []
         self.called_target_cumulatives: list[int | None] = []
         self.cleanup_progresses: list[object | None] = []
@@ -67,6 +68,7 @@ class _FakeProduceStrategy:
         self.called_rollout_steps.append(rollout_step)
         self.called_model_rollout_steps.append(model_rollout_step)
         self.called_update_events.append(update_event)
+        self.called_update_event_states.append(None if update_event is None else update_event.is_set())
         self.called_progresses.append(progress)
         self.called_target_cumulatives.append(target_cumulative)
         return self.status
@@ -85,6 +87,7 @@ class _FakeStatusProduceStrategy:
         self.called_rollout_steps: list[int] = []
         self.called_model_rollout_steps: list[int | None] = []
         self.called_update_events: list[object | None] = []
+        self.called_update_event_states: list[bool | None] = []
         self.called_progresses: list[object] = []
         self.called_target_cumulatives: list[int | None] = []
         self.cleanup_progresses: list[object | None] = []
@@ -106,6 +109,7 @@ class _FakeStatusProduceStrategy:
         self.called_rollout_steps.append(rollout_step)
         self.called_model_rollout_steps.append(model_rollout_step)
         self.called_update_events.append(update_event)
+        self.called_update_event_states.append(None if update_event is None else update_event.is_set())
         self.called_progresses.append(progress)
         self.called_target_cumulatives.append(target_cumulative)
         return self.status
@@ -152,6 +156,7 @@ class _SequencedProduceStrategy(_FakeProduceStrategy):
         self.called_rollout_steps.append(rollout_step)
         self.called_model_rollout_steps.append(model_rollout_step)
         self.called_update_events.append(update_event)
+        self.called_update_event_states.append(None if update_event is None else update_event.is_set())
         self.called_progresses.append(progress)
         self.called_target_cumulatives.append(target_cumulative)
         return self._statuses.pop(0) if self._statuses else ProduceBatchStatus.NORMAL
@@ -302,7 +307,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await multi_task_manager.produce_batch(batch_size=7, rollout_step=3)
 
         self.assertEqual(result.task_batch_sizes, {"task_a": 5, "task_b": 2, "task_c": 0})
-        self.assertEqual(multi_task_manager._status, AgentLoopManagerStatus.NORMAL)
+        # sync produce_batch 在本轮入口恢复 NORMAL，收尾 pause 后保留 UPDATE_ABORT 到下一轮入口再清理。
+        self.assertEqual(multi_task_manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
+        self.assertTrue(multi_task_manager._update_event.is_set())
         self.assertEqual(multi_task_manager._model_rollout_step, 2)
         self.assertEqual(strategy_a.called_batch_sizes, [5])
         self.assertEqual(strategy_b.called_batch_sizes, [2])
@@ -312,9 +319,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy_a.called_model_rollout_steps, [2])
         self.assertEqual(strategy_b.called_model_rollout_steps, [2])
         self.assertEqual(len(strategy_a.called_update_events), 1)
-        self.assertFalse(strategy_a.called_update_events[0].is_set())
+        self.assertFalse(strategy_a.called_update_event_states[0])
         self.assertEqual(len(strategy_b.called_update_events), 1)
-        self.assertFalse(strategy_b.called_update_events[0].is_set())
+        self.assertFalse(strategy_b.called_update_event_states[0])
         self.assertEqual(result.rollout_states, [["a-0"], ["a-1"], ["b-0"], ["b-1"]])
         self.assertEqual(result.leftover_completed, 1)
         self.assertEqual(result.leftover_aborted, 2)
@@ -476,7 +483,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.called_rollout_steps, [7])
         self.assertEqual(strategy.called_model_rollout_steps, [6])
         self.assertEqual(len(strategy.called_update_events), 1)
-        self.assertFalse(strategy.called_update_events[0].is_set())
+        self.assertFalse(strategy.called_update_event_states[0])
+        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
+        self.assertTrue(manager._update_event.is_set())
         self.assertEqual(result.group_gen_count, 2)
         self.assertAlmostEqual(result.group_gen_mean_s, 0.75)
         self.assertAlmostEqual(result.group_gen_p50_s, 1.0)

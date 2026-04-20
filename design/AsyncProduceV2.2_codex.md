@@ -81,15 +81,16 @@ if scheduled_effective < scheduled_target:
 
 这样 over-sample 只给当前 task batch 一个固定 ahead window，不会让历史累计目标反复膨胀。tail-batch mode 下 `oversample_budget = 0`，本轮新增任务固定从 `Status.EXPIRED` pool 取样，不主动停止已有 pending，也不强制清空 expired pool。
 
-### 3. `_pending_tasks` 不能只靠 `_update_event` 避免竞争
+### 3. `_pending_tasks` 不能只靠循环顶部检查 `_update_event`
 
 `pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP)` 会先 set `_update_event`，但随后会立刻进入各 task strategy 的 `pause_product`。此时后台 producer 可能还停在 `asyncio.wait(self._pending_tasks, ...)` 中。
 
-所以不能只假设 producer 会先返回。需要在 strategy 内保证：
+所以不能只假设 producer 会先返回，也不能只在 `produce_batch()` 循环顶部检查一次 event。需要在 strategy 内保证：
 
 - 同一个 done task 只能被一方认领。
 - `_pending_tasks` 只能增量 add / discard，不能 `self._pending_tasks = set(pending)` 整体覆盖。
-- pause 期间停止新增任务；如果有正在调度中的任务，也必须被纳入 pending 并被 pause drain 收尾。
+- `_schedule_one()` 在 pending lock 内检查 `update_event.is_set()`；如果 pause 发生在调度中途，本次已创建的 task 必须先加入 pending，再由 pause drain 收尾。
+- `_schedule_tasks_until()` 返回后还要再次检查 `update_event`，避免 pending 已被 pause drain 清空后误返回 `NORMAL`。
 
 ## 核心状态
 
@@ -161,7 +162,6 @@ required(task) = max(0, progress.target_samples[task] - available(task))
 ```python
 self._pending_tasks: set[asyncio.Task]
 self._pending_lock: asyncio.Lock
-self._pausing: bool
 ```
 
 `pending_count` 不建议再单独维护成第二份可变状态，直接使用：
@@ -304,11 +304,16 @@ async def produce_batch(...):
                 desired_pending=desired_pending,
                 sample_from_expired=sample_from_expired,
                 model_rollout_step=model_rollout_step,
+                update_event=update_event,
             )
+            if update_event.is_set():
+                return ProduceBatchStatus.UPDATE_ABORT
 
         pending_snapshot = await self._snapshot_pending()
+        if update_event.is_set():
+            return ProduceBatchStatus.UPDATE_ABORT
         if not pending_snapshot:
-            # sampler 无数据或 pause 已开始；交回 manager，避免忙等。
+            # sampler 无数据或当前没有 pending；交回 manager，避免忙等。
             return ProduceBatchStatus.NORMAL
 
         done, _ = await asyncio.wait(
@@ -470,14 +475,16 @@ async def _claim_already_done(self) -> set[asyncio.Task]:
 
 ### schedule
 
-`_schedule_tasks_until` 不再直接裸写 set。为避免 pause 正在开始时出现“采样后未纳入 pending”的缝隙，推荐把“检查 `_pausing` + sample + create task + add pending”包在同一个 pending lock 中。
+`_schedule_tasks_until` 不再直接裸写 set。为避免 pause 正在开始时出现“采样后未纳入 pending”的缝隙，把“检查 `update_event` + sample + create task + add pending”包在同一个 pending lock 中。
 
 这个 lock 不覆盖真正的 rollout generate，只覆盖一次轻量采样和 task 创建：
 
 ```python
-async def _schedule_one(...):
+async def _schedule_one(..., update_event: asyncio.Event | None):
     async with self._pending_lock:
-        if self._pausing or len(self._pending_tasks) >= desired_pending:
+        if update_event is not None and update_event.is_set():
+            return False
+        if len(self._pending_tasks) >= desired_pending:
             return False
 
         group_status = Status.EXPIRED if sample_from_expired else Status.ABORTED
@@ -496,6 +503,8 @@ async def _schedule_one(...):
 ```
 
 如果不希望在 lock 内 `await sampler.sample(...)`，也可以引入 `_scheduling_count` 防止 pause 在“采样中但尚未 add pending”时提前返回；但这会增加状态。按“尽量少改且易维护”的约束，短锁方案更直接。
+
+`update_event` 是 manager 级暂停信号。`AsyncProduceStrategy` 不再维护 `_pausing` 作为第二套暂停状态；pause drain 只依赖 pending snapshot / claim helper。
 
 ### pause
 
@@ -524,38 +533,35 @@ Manager 侧按上下文选择 progress：
 ```python
 async def pause_product(..., *, progress: ProduceProgress) -> float:
     pause_start = time.perf_counter()
-    async with self._pending_lock:
-        self._pausing = True
 
-    try:
-        rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
-        await pause_generation(rollout_ctl)
+    if await self._pending_count() == 0:
+        return 0.0
 
-        while True:
-            pending_snapshot = await self._snapshot_pending()
-            if not pending_snapshot:
-                break
+    rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
+    await pause_generation(rollout_ctl)
 
-            done, _ = await asyncio.wait(
-                pending_snapshot,
-                timeout=1,
-                return_when=asyncio.FIRST_COMPLETED,
+    while True:
+        pending_snapshot = await self._snapshot_pending()
+        if not pending_snapshot:
+            break
+
+        done, _ = await asyncio.wait(
+            pending_snapshot,
+            timeout=1,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        claimed_done = await self._claim_done(done)
+        for task in claimed_done:
+            await self._put_generated_group(
+                task.result(),
+                replay_buffer,
+                task_name,
+                current_rollout_step=progress.next_consumer_step,
             )
-            claimed_done = await self._claim_done(done)
-            for task in claimed_done:
-                await self._put_generated_group(
-                    task.result(),
-                    replay_buffer,
-                    task_name,
-                    current_rollout_step=progress.next_consumer_step,
-                )
 
-            if await self._pending_count() > 0:
-                await pause_generation(rollout_ctl)
-                await asyncio.sleep(1)
-    finally:
-        async with self._pending_lock:
-            self._pausing = False
+        if await self._pending_count() > 0:
+            await pause_generation(rollout_ctl)
+            await asyncio.sleep(1)
 
     return time.perf_counter() - pause_start
 ```
@@ -762,16 +768,19 @@ class PauseProductSource(Enum):
     SYNC_PRODUCE_BATCH = auto()
 ```
 
-`PauseProductSource.ASYNC_PRODUCE_LOOP` 保持先置 event 再 pause 的顺序，并使用全局 progress：
+`pause_product` 入口统一先置 event / status，再按来源选择 progress：
 
 ```python
+self._update_event.set()
+self._status = AgentLoopManagerStatus.UPDATE_ABORT
+
 if source == PauseProductSource.ASYNC_PRODUCE_LOOP:
-    self._update_event.set()
-    self._status = AgentLoopManagerStatus.UPDATE_ABORT
     pause_progress = self._produce_progress
 ```
 
-`PauseProductSource.SYNC_PRODUCE_BATCH` 用于共卡 `produce_batch()` 的显式收尾，必须传入本次调用的局部 progress：
+`PauseProductSource.ASYNC_PRODUCE_LOOP` 是 sticky pause：状态保持到 trainer 完成权重同步 / 评测后调用 `continue_product()`。
+
+`PauseProductSource.SYNC_PRODUCE_BATCH` 用于共卡 `produce_batch()` 的显式收尾，必须传入本次调用的局部 progress；它也会 set `_update_event` / `UPDATE_ABORT`，由下一次 `produce_batch()` 入口的 `continue_product()` 清理：
 
 ```python
 elif source == PauseProductSource.SYNC_PRODUCE_BATCH:
@@ -831,7 +840,7 @@ def continue_product(self, model_rollout_step: int) -> None:
 
 - 读回上述状态后，原地写回 `self._produce_progress` 的字段；这些字段都是新 checkpoint 的必需字段，缺失时直接 fail fast。
 - `_pending_tasks` 不保存；保存前仍要求 pending 为空。
-- 每个 strategy 初始化 `_pending_tasks = set()`、`_pausing = False`。
+- 每个 strategy 初始化 `_pending_tasks = set()`；不再保存或恢复 strategy-local pause flag。
 - 保持现有 `resume()` 进入 `UPDATE_ABORT` 且 `_update_event.set()` 的语义，让 trainer 显式 `continue_product` 后再恢复生产。
 
 ## 共卡路径
@@ -848,6 +857,8 @@ def continue_product(self, model_rollout_step: int) -> None:
   - `target_samples = current_task_batch_sizes`
 
 共卡路径每次生产后仍调用 `pause_product(source=PauseProductSource.SYNC_PRODUCE_BATCH, progress=local_progress)` 收尾 pending，然后 `_get_batch_from_buffer` 返回训练 batch。
+
+共卡模式约束：同一个 `AgentLoopManager` 实例只用一种数据提供模式。`SYNC_PRODUCE_BATCH` 收尾会让 manager 保持 `UPDATE_ABORT` / `_update_event.set()`，下一次 `produce_batch()` 入口先调用 `continue_product(model_rollout_step=rollout_step - 1)` 恢复。不要在两次 sync `produce_batch()` 之间混用 `produce_loop()` / `get_batch()`。
 
 ## 删除 / 收敛的旧逻辑
 
