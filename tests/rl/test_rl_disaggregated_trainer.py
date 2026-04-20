@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.rl.agent_loop import ProduceBatchResult, ProduceBatchStatus
+from xtuner.v1.rl.agent_loop import PauseProductSource, ProduceBatchResult, ProduceBatchStatus
 from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerStatus
 from xtuner.v1.train.rl_disaggregated_trainer import RLDisaggregatedTrainer, _validate_disagg_sync_schedule
 
@@ -26,8 +26,8 @@ class _FakeManager:
         self.calls.append(("get_batch", batch_size, rollout_step))
         return self._results.pop(0)
 
-    async def pause_product(self, for_weight_update: bool = False):
-        self.calls.append(("pause_product", for_weight_update))
+    async def pause_product(self, source: PauseProductSource):
+        self.calls.append(("pause_product", source))
         return 0.25
 
     def continue_product(self, model_rollout_step: int):

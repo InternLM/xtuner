@@ -88,6 +88,11 @@ class AgentLoopManagerStatus(Enum):
     FINISH = auto()
 
 
+class PauseProductSource(Enum):
+    ASYNC_PRODUCE_LOOP = auto()
+    SYNC_PRODUCE_BATCH = auto()
+
+
 def _fill_produce_timing_stats(
     result: ProduceBatchResult, generate_times_s: list[float], pause_time_s: float = 0.0
 ) -> None:
@@ -493,7 +498,7 @@ class AgentLoopManager:
 
     async def pause_product(
         self,
-        for_weight_update: bool = False,
+        source: PauseProductSource,
         *,
         progress: ProduceProgress | None = None,
     ) -> float:
@@ -503,20 +508,21 @@ class AgentLoopManager:
         # - 旧 colocate 语义里，一次 produce_batch() 结束后就自然收尾；
         # - 非共卡后，producer 可能在后台持续运行，何时停下来必须交给 trainer 明确控制。
         #
-        # 因此：
-        # - `for_weight_update=True` 表示 trainer 准备进入权重同步点，
-        #   这里先置 `_update_event`，再把 manager 状态切到 UPDATE_ABORT；
-        # - 后续各 task 的 strategy 会回收 pending rollout，并把结果写回 replay buffer；
-        # - 返回值 `pause_time_s` 不是业务语义，而是日志/诊断信息，
-        #   供训练侧在下一次消费 batch 时上报。
-        if for_weight_update:
-            # 用于非共卡训练中，在权重同步点前，先让 producer 停下来
+        # 因此调用方必须显式说明 pause 来自哪条生产路径：
+        # - ASYNC_PRODUCE_LOOP：非共卡后台生产循环在权重同步点前暂停，使用全局 progress；
+        # - SYNC_PRODUCE_BATCH：共卡同步 produce_batch 的本次调用收尾，使用本地 progress。
+        # 返回值 `pause_time_s` 不是业务语义，而是日志/诊断信息，
+        # 供训练侧在下一次消费 batch 时上报。
+        if source == PauseProductSource.ASYNC_PRODUCE_LOOP:
             self._update_event.set()
             self._status = AgentLoopManagerStatus.UPDATE_ABORT
-
-        pause_progress = self._produce_progress if for_weight_update else progress
-        if pause_progress is None:
-            raise ValueError("progress must be provided when pausing outside weight update.")
+            pause_progress = self._produce_progress
+        elif source == PauseProductSource.SYNC_PRODUCE_BATCH:
+            if progress is None:
+                raise ValueError("progress must be provided when pausing from sync produce_batch.")
+            pause_progress = progress
+        else:
+            raise ValueError(f"Unsupported pause_product source: {source}")
         pause_time_s = 0.0
         for task in self.task_runners:
             pause_time_s += await task.produce_strategy.pause_product(
@@ -632,7 +638,7 @@ class AgentLoopManager:
 
     def continue_product(self, model_rollout_step: int) -> None:
         #
-        # 它和 pause_product(for_weight_update=True) 是一对：
+        # 它和 pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP) 是一对：
         # - pause_product(...) 负责让 producer 停下来；
         # - continue_product(...) 负责在同步/评测完成后解除暂停。
         #
@@ -685,7 +691,10 @@ class AgentLoopManager:
                 task_batch_sizes=current_sizes,
                 progress_override=local_progress,
             )
-            await self.pause_product(for_weight_update=False, progress=local_progress)
+            await self.pause_product(
+                source=PauseProductSource.SYNC_PRODUCE_BATCH,
+                progress=local_progress,
+            )
             result = await self._get_batch_from_buffer(
                 batch_size=batch_size,
                 rollout_step=rollout_step,

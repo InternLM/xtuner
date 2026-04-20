@@ -12,6 +12,7 @@ from .agent_loop import (
 from .agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
+    PauseProductSource,
     ProduceBatchResult,
     TaskSpecConfig,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "ComposedJudgerConfig",
     "AgentLoopManagerConfig",
     "AgentLoopManager",
+    "PauseProductSource",
     "TaskSpecConfig",
     "ProduceBatchResult",
     "ProduceStrategyConfig",

@@ -13,6 +13,7 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.agent_loop import (
     AgentLoopManagerConfig,
+    PauseProductSource,
     ProduceBatchStatus,
 )
 from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerStatus
@@ -402,7 +403,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
                         # - pending rollout 都在同步前被收尾
                         # - 后面的 save / sync 发生在相对静止的状态
                         with timer("pause_product", step_timer_dict):
-                            await self.agent_loop_manager.pause_product(for_weight_update=True)
+                            await self.agent_loop_manager.pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP)
 
                         await self._sync_weights_and_save(rollout_idx, step_timer_dict)
 
@@ -422,7 +423,7 @@ class RLDisaggregatedTrainer(RLColocateTrainer):
                                 self._save_trajectories(eval_batch, eval_trajectory_path)
                                 eval_log_info.update(eval_metrics)
 
-                        # pause_product(for_weight_update=True) 和 continue_product() 是一对：
+                        # pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP) 和 continue_product() 是一对：
                         # - 前者让 producer 停下
                         # - 后者在同步和评测结束后恢复 producer
                         self.agent_loop_manager.continue_product(model_rollout_step=rollout_idx)

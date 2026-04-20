@@ -82,7 +82,7 @@ if scheduled_effective < scheduled_target:
 
 ### 3. `_pending_tasks` 不能只靠 `_update_event` 避免竞争
 
-`pause_product(for_weight_update=True)` 会先 set `_update_event`，但随后会立刻进入各 task strategy 的 `pause_product`。此时后台 producer 可能还停在 `asyncio.wait(self._pending_tasks, ...)` 中。
+`pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP)` 会先 set `_update_event`，但随后会立刻进入各 task strategy 的 `pause_product`。此时后台 producer 可能还停在 `asyncio.wait(self._pending_tasks, ...)` 中。
 
 所以不能只假设 producer 会先返回。需要在 strategy 内保证：
 
@@ -512,8 +512,8 @@ async def pause_product(
 
 Manager 侧按上下文选择 progress：
 
-- `for_weight_update=True`：传全局 `_produce_progress`，因为后台 producer / trainer consumer 共享同一窗口。
-- 共卡同步 `produce_batch()` 的收尾：传本次调用的局部 progress。
+- `PauseProductSource.ASYNC_PRODUCE_LOOP`：非共卡后台 `produce_loop` 在权重同步点前暂停，传全局 `_produce_progress`，因为后台 producer / trainer consumer 共享同一窗口。
+- `PauseProductSource.SYNC_PRODUCE_BATCH`：共卡同步 `produce_batch()` 的本次调用收尾，传本次调用的局部 progress。
 - Sync strategy 的默认实现忽略 `progress` 并返回 `0.0`，因此无需在 Manager 侧按子类分支。
 
 `AsyncProduceStrategy.pause_product` 的收尾逻辑为：
@@ -751,22 +751,40 @@ consume_progress.consumed_samples[task_runner.task_name] += len(batch_rollout_st
 
 ### `pause_product`
 
-manager 侧保持先置 event 再 pause 的顺序：
+manager 侧用 `PauseProductSource` 区分 pause 来自异步后台生产循环还是同步共卡生产接口：
 
 ```python
-if for_weight_update:
-    self._update_event.set()
-    self._status = AgentLoopManagerStatus.UPDATE_ABORT
+class PauseProductSource(Enum):
+    ASYNC_PRODUCE_LOOP = auto()
+    SYNC_PRODUCE_BATCH = auto()
 ```
 
-调用 strategy 时传同一个 live progress 引用：
+`PauseProductSource.ASYNC_PRODUCE_LOOP` 保持先置 event 再 pause 的顺序，并使用全局 progress：
+
+```python
+if source == PauseProductSource.ASYNC_PRODUCE_LOOP:
+    self._update_event.set()
+    self._status = AgentLoopManagerStatus.UPDATE_ABORT
+    pause_progress = self._produce_progress
+```
+
+`PauseProductSource.SYNC_PRODUCE_BATCH` 用于共卡 `produce_batch()` 的显式收尾，必须传入本次调用的局部 progress：
+
+```python
+elif source == PauseProductSource.SYNC_PRODUCE_BATCH:
+    if progress is None:
+        raise ValueError(...)
+    pause_progress = progress
+```
+
+随后调用 strategy 时传同一个 live progress 引用：
 
 ```python
 pause_time_s += await strategy.pause_product(
     task.agent_loop,
     self.replay_buffer,
     task.task_name,
-    progress=self._produce_progress,
+    progress=pause_progress,
 )
 ```
 
@@ -826,7 +844,7 @@ def continue_product(self, model_rollout_step: int) -> None:
   - `consumed_samples = {task_name: 0}`
   - `target_samples = current_task_batch_sizes`
 
-共卡路径每次生产后仍调用 `pause_product(for_weight_update=False)` 收尾 pending，然后 `_get_batch_from_buffer` 返回训练 batch。
+共卡路径每次生产后仍调用 `pause_product(source=PauseProductSource.SYNC_PRODUCE_BATCH, progress=local_progress)` 收尾 pending，然后 `_get_batch_from_buffer` 返回训练 batch。
 
 ## 删除 / 收敛的旧逻辑
 

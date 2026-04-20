@@ -9,6 +9,7 @@ from xtuner.v1.rl.agent_loop.agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerStatus,
     AgentLoopManagerConfig,
+    PauseProductSource,
     TaskSpecConfig,
     _TaskRunner,
 )
@@ -500,7 +501,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(AssertionError, "must return non-empty rollout_states"):
             await manager.produce_batch(batch_size=1, rollout_step=3)
 
-    async def test_pause_product_for_weight_update_sets_status_and_pause_time(self):
+    async def test_pause_product_from_async_produce_loop_sets_status_and_pause_time(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
         manager = AgentLoopManager(
             task_runners=[
@@ -516,7 +517,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
 
-        pause_time_s = await manager.pause_product(for_weight_update=True)
+        pause_time_s = await manager.pause_product(source=PauseProductSource.ASYNC_PRODUCE_LOOP)
 
         self.assertEqual(pause_time_s, 2.5)
         self.assertEqual(strategy.cleanup_call_count, 1)
