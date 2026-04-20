@@ -181,6 +181,51 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_count, 1)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
 
+    async def test_async_produce_strategy_fails_fast_on_invalid_progress(self):
+        task_name = "test_invalid_progress"
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
+        mock_agent_loop = self._build_agent_loop()
+        sampler = MagicMock()
+        sampler.sample = AsyncMock(side_effect=AssertionError("sampler.sample should not be called"))
+
+        missing_consumed = ProduceProgress(
+            latest_consumer_step=1,
+            producer_future_step=1,
+            consumed_samples={},
+            target_samples={task_name: 1},
+            target_upto_future_step=1,
+        )
+        with self.assertRaisesRegex(KeyError, "consumed_samples"):
+            await strategy.produce_batch(
+                mock_agent_loop,
+                sampler,
+                self.replay_buffer,
+                batch_size=1,
+                task_name=task_name,
+                rollout_step=1,
+                target_cumulative=1,
+                progress=missing_consumed,
+            )
+
+        mismatched_target = ProduceProgress(
+            latest_consumer_step=1,
+            producer_future_step=1,
+            consumed_samples={task_name: 0},
+            target_samples={task_name: 2},
+            target_upto_future_step=1,
+        )
+        with self.assertRaisesRegex(ValueError, "target_cumulative"):
+            await strategy.produce_batch(
+                mock_agent_loop,
+                sampler,
+                self.replay_buffer,
+                batch_size=1,
+                task_name=task_name,
+                rollout_step=1,
+                target_cumulative=1,
+                progress=mismatched_target,
+            )
+
     async def test_async_produce_strategy_reclaims_cross_call_pending_and_records_timing(self):
         task_name = "test_task"
         mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.05, 2: 0.05})

@@ -43,6 +43,7 @@ class _FakeProduceStrategy:
         self.called_rollout_steps: list[int] = []
         self.called_model_rollout_steps: list[int | None] = []
         self.called_update_events: list[object | None] = []
+        self.cleanup_progresses: list[object | None] = []
         self.cleanup_call_count = 0
 
     async def produce_batch(
@@ -62,8 +63,9 @@ class _FakeProduceStrategy:
         self.called_update_events.append(update_event)
         return self.status
 
-    async def pause_product(self, agent_loop, replay_buffer, task_name: str) -> float:
+    async def pause_product(self, agent_loop, replay_buffer, task_name: str, *, progress=None) -> float:
         self.cleanup_call_count += 1
+        self.cleanup_progresses.append(progress)
         return self.cleanup_pause_time_s
 
 
@@ -75,6 +77,7 @@ class _FakeStatusProduceStrategy:
         self.called_rollout_steps: list[int] = []
         self.called_model_rollout_steps: list[int | None] = []
         self.called_update_events: list[object | None] = []
+        self.cleanup_progresses: list[object | None] = []
 
     async def produce_batch(
         self,
@@ -92,8 +95,9 @@ class _FakeStatusProduceStrategy:
         self.called_update_events.append(update_event)
         return self.status
 
-    async def pause_product(self, agent_loop, replay_buffer, task_name: str) -> float:
+    async def pause_product(self, agent_loop, replay_buffer, task_name: str, *, progress=None) -> float:
         self.cleanup_call_count += 1
+        self.cleanup_progresses.append(progress)
         return self.pause_time_s
 
 
@@ -442,6 +446,9 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.produce_batch(batch_size=2, rollout_step=7)
 
         self.assertEqual(strategy.cleanup_call_count, 1)
+        self.assertEqual(len(strategy.cleanup_progresses), 1)
+        self.assertIsNotNone(strategy.cleanup_progresses[0])
+        self.assertEqual(strategy.cleanup_progresses[0].consumed_samples["task_a"], 2)
         self.assertEqual(manager._model_rollout_step, 6)
         self.assertEqual(strategy.called_rollout_steps, [7])
         self.assertEqual(strategy.called_model_rollout_steps, [6])
@@ -491,6 +498,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(pause_time_s, 2.5)
         self.assertEqual(strategy.cleanup_call_count, 1)
+        self.assertEqual(len(strategy.cleanup_progresses), 1)
+        self.assertIs(strategy.cleanup_progresses[0], manager._produce_progress)
         self.assertTrue(manager._update_event.is_set())
         self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
         self.assertEqual(manager._pause_time_s, 2.5)
@@ -629,6 +638,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             ],
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
+        manager._STATUS_POLL_INTERVAL_S = 0.01
 
         loop_task = asyncio.create_task(manager.produce_loop(batch_size=1, start_rollout_step=3))
         await self._wait_until(lambda: manager._status == AgentLoopManagerStatus.EXPIRED_BATCH)

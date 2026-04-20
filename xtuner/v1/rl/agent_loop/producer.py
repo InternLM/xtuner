@@ -94,6 +94,25 @@ def expire_group_if_needed(group: list[RolloutState], threshold: int) -> list[Ro
     return group
 
 
+def _validate_progress_for_task(
+    progress: ProduceProgress,
+    task_name: str,
+    target_cumulative: int | None,
+) -> int:
+    if task_name not in progress.consumed_samples:
+        raise KeyError(f"ProduceProgress.consumed_samples missing task_name={task_name!r}")
+    if task_name not in progress.target_samples:
+        raise KeyError(f"ProduceProgress.target_samples missing task_name={task_name!r}")
+
+    target_abs = progress.target_samples[task_name]
+    if target_cumulative is not None and target_cumulative != target_abs:
+        raise ValueError(
+            "target_cumulative must match progress.target_samples when progress is provided, "
+            f"got target_cumulative={target_cumulative}, progress.target_samples[{task_name!r}]={target_abs}"
+        )
+    return target_abs
+
+
 @runtime_checkable
 class IsValidSampleFn(Protocol):
     def __call__(self, samples: list[RolloutState]) -> bool: ...
@@ -418,22 +437,20 @@ class AsyncProduceStrategy(ProduceStrategy):
             model_rollout_step = rollout_step
         if update_event is None:
             update_event = asyncio.Event()
-        if target_cumulative is None:
-            target_cumulative = batch_size
         if progress is None:
             # 共卡/旧调用路径使用一次性 progress，不污染 manager 的全局累计进度。
+            target_abs = batch_size if target_cumulative is None else target_cumulative
             progress = ProduceProgress(
                 latest_consumer_step=rollout_step,
                 producer_future_step=rollout_step,
                 consumed_samples={task_name: 0},
-                target_samples={task_name: target_cumulative},
+                target_samples={task_name: target_abs},
                 target_upto_future_step=rollout_step,
             )
         else:
-            progress.consumed_samples.setdefault(task_name, 0)
-            progress.target_samples.setdefault(task_name, target_cumulative)
+            target_abs = _validate_progress_for_task(progress, task_name, target_cumulative)
 
-        if progress.target_samples.get(task_name, target_cumulative) <= 0:
+        if target_abs <= 0:
             return ProduceBatchStatus.NORMAL
 
         while True:
@@ -453,8 +470,8 @@ class AsyncProduceStrategy(ProduceStrategy):
                 )
 
             fresh = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
-            consumed = progress.consumed_samples.get(task_name, 0)
-            target_abs = progress.target_samples.get(task_name, target_cumulative)
+            consumed = progress.consumed_samples[task_name]
+            target_abs = progress.target_samples[task_name]
             available = consumed + fresh
             required = max(0, target_abs - available)
             if required == 0:

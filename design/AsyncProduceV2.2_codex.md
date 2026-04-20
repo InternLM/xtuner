@@ -126,6 +126,23 @@ required(task) = max(0, progress.target_samples[task] - available(task))
 - `self._produce_progress` 的对象引用应保持稳定，初始化后不要在运行中整体替换。
 - resume/load 时也优先原地更新字段，而不是 `self._produce_progress = ProduceProgress(...)` 后让 strategy 持有旧引用。
 - `consumed_samples` / `target_samples` 也按 key 原地更新；如果必须整体替换 dict，要保证 strategy 没有缓存旧 dict。
+- `progress` 的写入方应收敛在 Manager / 调用方初始化与消费入口：
+  - Manager 构造、resume、`_ensure_target_upto()`、`get_batch()` 消费计数负责维护全局 `progress`。
+  - Strategy 不在传入的 `progress` 上补 key，也不通过 `setdefault()` 修复缺失状态。
+  - 传入 `progress` 时，`consumed_samples[task_name]` 和 `target_samples[task_name]` 必须已经存在；缺失应 fail fast。
+- `progress` 的读取方必须显式读取：
+  - Strategy 内使用 `progress.consumed_samples[task_name]` / `progress.target_samples[task_name]`。
+  - 不使用 `dict.get(task_name, 0)` 这类兜底，避免把初始化或 checkpoint 漂移问题隐藏成“目标为 0 / 已消费为 0”。
+- `target_cumulative` 是兼容参数；当同时传入 `progress` 时，应只作为一致性校验，不作为修复 `progress.target_samples` 的第二数据源。
+
+### Colocate 路径的 progress 约束
+
+`AsyncProduceStrategy` 内部只保留一套语义：`available = consumed + fresh_completed`，并和 `target_samples[task_name]` 比较。区别只在 progress 的来源：
+
+- 非共卡 `produce_loop()` 使用 Manager 的全局 `_produce_progress`，target/consumed 都是跨 step 的绝对累计值。
+- 共卡 `AgentLoopManager.produce_batch()` 不复用非共卡全局进度窗口；它为本次同步调用构造一个局部 `ProduceProgress`，含义仍是“本次调用内的绝对累计目标和已消费数”。
+- 共卡取走 batch 后，如需要记录 consumed，也应写入这次调用的局部 `ProduceProgress`，不要污染非共卡全局 `_produce_progress`。
+- 直接调用 `AsyncProduceStrategy.produce_batch(..., progress=None)` 的旧路径仍可兼容：strategy 会构造一次性 local progress；但这是兼容入口，不是传入 progress 时的缺省修复机制。
 
 ### Strategy 侧
 
@@ -212,8 +229,8 @@ async def produce_batch(
 默认兼容旧语义：
 
 ```python
-target_cumulative = batch_size if target_cumulative is None else target_cumulative
 if progress is None:
+    target_cumulative = batch_size if target_cumulative is None else target_cumulative
     progress = ProduceProgress(
         latest_consumer_step=rollout_step,
         producer_future_step=rollout_step,
@@ -221,6 +238,14 @@ if progress is None:
         target_samples={task_name: target_cumulative},
         target_upto_future_step=rollout_step,
     )
+else:
+    # fail fast：调用方必须完整初始化 progress。
+    if task_name not in progress.consumed_samples:
+        raise KeyError(...)
+    if task_name not in progress.target_samples:
+        raise KeyError(...)
+    if target_cumulative is not None and target_cumulative != progress.target_samples[task_name]:
+        raise ValueError(...)
 ```
 
 ### 主循环
@@ -466,7 +491,7 @@ async def _schedule_one(...):
 
 ### pause
 
-`pause_product` 改为：
+`ProduceStrategy.pause_product` 使用统一接口；Manager 对 sync / async strategy 使用同一调用形态：
 
 ```python
 async def pause_product(
@@ -475,8 +500,21 @@ async def pause_product(
     replay_buffer,
     task_name: str,
     *,
-    progress: ProduceProgress,
+    progress: ProduceProgress | None = None,
 ) -> float:
+    ...
+```
+
+Manager 侧按上下文选择 progress：
+
+- `for_weight_update=True`：传全局 `_produce_progress`，因为后台 producer / trainer consumer 共享同一窗口。
+- 共卡同步 `produce_batch()` 的收尾：传本次调用的局部 progress，或在无局部 progress 的兼容路径传 `None` 并由 strategy 使用当前调用的 rollout step。
+- Sync strategy 的默认实现忽略 `progress` 并返回 `0.0`，因此无需在 Manager 侧按子类分支。
+
+`AsyncProduceStrategy.pause_product` 的收尾逻辑为：
+
+```python
+async def pause_product(..., *, progress: ProduceProgress | None = None) -> float:
     pause_start = time.perf_counter()
     async with self._pending_lock:
         self._pausing = True
@@ -496,12 +534,17 @@ async def pause_product(
                 return_when=asyncio.FIRST_COMPLETED,
             )
             claimed_done = await self._claim_done(done)
+            current_rollout_step = (
+                progress.latest_consumer_step
+                if progress is not None
+                else self._current_rollout_step
+            )
             for task in claimed_done:
                 await self._put_generated_group(
                     task.result(),
                     replay_buffer,
                     task_name,
-                    current_rollout_step=progress.latest_consumer_step,
+                    current_rollout_step=current_rollout_step,
                 )
 
             if await self._pending_count() > 0:
