@@ -1,0 +1,863 @@
+# `produce_loop` / `AsyncProduceStrategy` 重设计（v2.2 Codex 修正版）
+
+> 本方案以 `produce_loop_Question.md` 和 `produce_loop_QuestionV2.md` 为准。
+> 在 `AsyncProduceV2.1_codex.md` 的基础上，v2.2 保留绝对累计 target/consumed 口径，但不再向 strategy 传 getter；改为 Manager 维护一个可变 `ProduceProgress` 成员，并把该对象引用传给 `AsyncProduceStrategy`。
+
+## 目标
+
+在尽量少改现有结构的前提下，解决四件事：
+
+1. 保留 `AgentLoopManager.produce_loop` 本地的 `future_step`，继续按 future step 逐个预取 batch。
+2. `AsyncProduceStrategy.produce_batch` 的动态控制从“当前 buffer 中有多少 completed”改成“消费者已消费 + buffer fresh + pending”的累计口径，避免消费者取走 batch1 后，生产 batch2 时误补 batch1。
+3. staleness / expired 状态只在两个地方写：
+   - strategy 在 `replay_buffer.put` 前，根据 `progress.latest_consumer_step` 刷新。
+   - manager 在 `get_batch` 入口，根据刚更新的 `progress.latest_consumer_step` 刷新 buffer 中已有的 completed 样本。
+4. `_pending_tasks` 不再用整体赋值覆盖，改成 snapshot + claim 的增量认领，避免 producer 和 pause 并发 drain 同一 task。
+
+## 对 Opus V2 方案的主要修正
+
+### 1. `consumed_samples` 和 `consumer_step` 不能只传值
+
+Opus 方案里 `produce_batch(..., consumed_samples, consumer_step)` 是进入 strategy 时的一次性快照。
+
+这仍然有竞态：
+
+- producer 进入 `produce_batch` 时，`consumed_samples = 0, fresh = batch1`。
+- producer 正在等待 batch2 rollout 完成。
+- consumer 并发取走 batch1，此时 manager 中 `consumed_samples = batch1, fresh = 0`。
+- 如果 strategy 仍使用旧的 `consumed_samples = 0`，它会误以为 batch1 缺失，继续多补一批。
+
+因此 strategy 内每次计算动态控制、以及每次 put 前刷新 staleness 时，都必须读取 live 值。
+
+推荐接口不是传一组 getter，而是传一个可变 progress 引用：
+
+```python
+progress: ProduceProgress
+```
+
+只要 Manager 原地更新这个对象，strategy 每次读取 `progress.latest_consumer_step` / `progress.consumed_samples[task_name]` 时拿到的就是最新值。
+
+### 2. over-sample 不应放大全部历史累计目标
+
+Opus 方案使用：
+
+```python
+desired_window = ceil((1 + over_sample) * target_cumulative)
+```
+
+这会把已经消费过的历史目标也一起放大。假设 batch size = `B`，当前在预取 batch10，前 9 个 batch 都已消费，`over_sample=0.5`：
+
+- 必要目标只缺 batch10 的 `B`。
+- 但上式要求窗口达到 `15B`，等价于对前 9 个已经消费掉的 batch 也重新保留超发窗口。
+
+修正为“按当前缺口 over-sample”：
+
+```python
+available = consumed_abs + fresh
+required = max(0, target_abs - available)
+scheduled_target = available + ceil((1 + over_sample) * required)
+```
+
+返回条件仍然是：
+
+```python
+available >= target_abs
+```
+
+`pending` 只用于决定还要不要继续发任务：
+
+```python
+scheduled_effective = available + pending_count
+if scheduled_effective < scheduled_target:
+    schedule_more()
+```
+
+这样 over-sample 只覆盖当前还缺的样本，不会让历史消费量反复膨胀。
+
+### 3. `_pending_tasks` 不能只靠 `_update_event` 避免竞争
+
+`pause_product(for_weight_update=True)` 会先 set `_update_event`，但随后会立刻进入各 task strategy 的 `pause_product`。此时后台 producer 可能还停在 `asyncio.wait(self._pending_tasks, ...)` 中。
+
+所以不能只假设 producer 会先返回。需要在 strategy 内保证：
+
+- 同一个 done task 只能被一方认领。
+- `_pending_tasks` 只能增量 add / discard，不能 `self._pending_tasks = set(pending)` 整体覆盖。
+- pause 期间停止新增任务；如果有正在调度中的任务，也必须被纳入 pending 并被 pause drain 收尾。
+
+## 核心状态
+
+### Manager 侧
+
+新增一个 manager 持有的可变进度对象：
+
+```python
+@dataclass
+class ProduceProgress:
+    latest_consumer_step: int
+    producer_future_step: int
+    consumed_samples: dict[str, int]
+    target_samples: dict[str, int]
+    target_upto_future_step: int
+
+self._produce_progress: ProduceProgress
+```
+
+`ProduceProgress` 可以放在 `producer.py` 或一个小的 shared module 中；`agent_loop_manager.py` 已经依赖 `producer.py`，因此由 manager 构造并传给 strategy 不会引入新的反向依赖。
+
+含义：
+
+- `progress.latest_consumer_step`：consumer 最近一次调用 `get_batch(batch_size, rollout_step)` 的 `rollout_step`。
+- `progress.consumed_samples[task]`：consumer 已经从 buffer 取走并用于训练的 group 数，按 task 绝对累计。
+- `progress.producer_future_step`：producer 当前正在预取的 future step。它属于 manager，不属于 strategy。
+- `progress.target_samples[task]`：截至 `progress.target_upto_future_step`，该 task 应该累计生产出的目标 group 数。
+- `progress.target_upto_future_step`：`target_samples` 已经覆盖到的最大 future step；初始化为 `0`。
+
+动态控制使用绝对累计口径：
+
+```python
+available(task) = progress.consumed_samples[task] + fresh_completed(task)
+required(task) = max(0, progress.target_samples[task] - available(task))
+```
+
+只要 target 和 consumed 都是绝对累计量，就不需要维护 Progress Window，也不需要在 sync 后重置窗口。
+
+关键约束：
+
+- `self._produce_progress` 的对象引用应保持稳定，初始化后不要在运行中整体替换。
+- resume/load 时也优先原地更新字段，而不是 `self._produce_progress = ProduceProgress(...)` 后让 strategy 持有旧引用。
+- `consumed_samples` / `target_samples` 也按 key 原地更新；如果必须整体替换 dict，要保证 strategy 没有缓存旧 dict。
+
+### Strategy 侧
+
+`AsyncProduceStrategy` 保留 task 私有的 pending 集合：
+
+```python
+self._pending_tasks: set[asyncio.Task]
+self._pending_lock: asyncio.Lock
+self._pausing: bool
+```
+
+`pending_count` 不建议再单独维护成第二份可变状态，直接使用：
+
+```python
+pending_count = len(self._pending_tasks)
+```
+
+如果实现上为了日志或性能保留 `_pending_count`，也必须只在同一个 helper 中和 `_pending_tasks` 同步更新，不能分散手写。
+
+## Cumulative Target
+
+Manager 为当前 `progress.producer_future_step` 维护每个 task 的绝对累计目标。
+
+推荐不要每次从 step 1 重新求和，而是维护一个单调前进的 target 计数器，并 checkpoint：
+
+```python
+def _ensure_target_upto(self, batch_size: int, current_future_step: int) -> None:
+    progress = self._produce_progress
+    if current_future_step <= progress.target_upto_future_step:
+        return
+
+    for fs in range(progress.target_upto_future_step + 1, current_future_step + 1):
+        if len(self.task_runners) == 1:
+            progress.target_samples[self.task_runners[0].task_name] += batch_size
+        else:
+            sizes = self.get_task_batch_sizes(batch_size, fs)
+            self._validate_task_batch_sizes(sizes, batch_size)
+            for task_name, n in sizes.items():
+                progress.target_samples[task_name] += n
+
+    progress.target_upto_future_step = current_future_step
+```
+
+Manager 传给 strategy 的不是当前 step 的 `task_batch_size`，而是该 task 从 step 1 到当前 future step 的绝对累计目标 `target_cumulative`。
+
+`progress.target_samples` 需要 checkpoint。这样即使后续自定义的 `get_task_batch_sizes` 不是纯函数，也不会在 resume 后因为重算历史分配而漂移。
+
+strategy 内部实时计算：
+
+```python
+fresh = await replay_buffer.count(task_name, Status.COMPLETED)
+consumed = progress.consumed_samples[task_name]
+
+available = consumed + fresh
+target_cumulative = progress.target_samples[task_name]
+required = max(0, target_cumulative - available)
+```
+
+这里 `progress` 是 Manager 传入的可变引用；strategy 不缓存 `consumed` 或 `latest_consumer_step`，每次循环现场读取。
+
+## AsyncProduceStrategy 动态控制
+
+### 新接口
+
+在保持旧参数兼容的基础上，为 `AsyncProduceStrategy.produce_batch` 增加 keyword-only 参数：
+
+```python
+async def produce_batch(
+    self,
+    agent_loop,
+    sampler,
+    replay_buffer,
+    batch_size: int,
+    task_name: str,
+    rollout_step: int = 0,              # disagg 下传 current_future_step
+    model_rollout_step: int | None = None,
+    update_event: asyncio.Event | None = None,
+    *,
+    target_cumulative: int | None = None,
+    progress: ProduceProgress | None = None,
+) -> ProduceBatchStatus:
+```
+
+默认兼容旧语义：
+
+```python
+target_cumulative = batch_size if target_cumulative is None else target_cumulative
+if progress is None:
+    progress = ProduceProgress(
+        latest_consumer_step=rollout_step,
+        producer_future_step=rollout_step,
+        consumed_samples={task_name: 0},
+        target_samples={task_name: target_cumulative},
+        target_upto_future_step=rollout_step,
+    )
+```
+
+### 主循环
+
+伪代码：
+
+```python
+async def produce_batch(...):
+    current_future_step = rollout_step
+    if model_rollout_step is None:
+        model_rollout_step = current_future_step
+    if update_event is None:
+        update_event = asyncio.Event()
+    if target_cumulative <= 0:
+        return ProduceBatchStatus.NORMAL
+
+    while True:
+        if update_event.is_set():
+            return ProduceBatchStatus.UPDATE_ABORT
+        if self.is_model_expired(current_future_step, model_rollout_step):
+            return ProduceBatchStatus.EXPIRED_BATCH
+
+        # 先收已经完成的 pending，put 前用最新 consumer step 刷新 staleness。
+        claimed_done = await self._claim_already_done()
+        for task in claimed_done:
+            await self._put_generated_group(
+                task.result(),
+                replay_buffer,
+                task_name,
+                current_rollout_step=progress.latest_consumer_step,
+            )
+
+        fresh = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
+        consumed = progress.consumed_samples[task_name]
+        target_cumulative = progress.target_samples[task_name]
+        available = consumed + fresh
+        required = max(0, target_cumulative - available)
+        if required == 0:
+            return ProduceBatchStatus.NORMAL
+
+        scheduled_target = available + math.ceil((1 + self.over_sample_threshold) * required)
+        desired_pending = max(0, scheduled_target - available)
+
+        expired_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
+        sample_from_expired = (
+            self.tail_batch_trigger_size > 0
+            and expired_count >= self.tail_batch_trigger_size
+        )
+
+        await self._schedule_tasks_until(
+            agent_loop=agent_loop,
+            sampler=sampler,
+            task_name=task_name,
+            desired_pending=desired_pending,
+            sample_from_expired=sample_from_expired,
+            model_rollout_step=model_rollout_step,
+        )
+
+        pending_snapshot = await self._snapshot_pending()
+        if not pending_snapshot:
+            # sampler 无数据或 pause 已开始；交回 manager，避免忙等。
+            return ProduceBatchStatus.NORMAL
+
+        done, _ = await asyncio.wait(
+            pending_snapshot,
+            timeout=1,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        claimed_done = await self._claim_done(done)
+        for task in claimed_done:
+            await self._put_generated_group(
+                task.result(),
+                replay_buffer,
+                task_name,
+                current_rollout_step=progress.latest_consumer_step,
+            )
+```
+
+注意：
+
+- `available >= target_cumulative` 才表示当前 future step 的必要目标达成。
+- `pending` 不参与返回条件，只参与“是否要继续调度”的判断。
+- 失败、filtered、aborted 的 group 会被 put，但不会增加 `fresh`，下一轮自然会补发。
+- 如果 consumer 在本循环中间取走了 batch，下一次读取 `progress.consumed_samples[task_name]` 会看到新值，不会误补已消费的部分。
+
+## staleness / expired 写入策略
+
+只保留两个写入点。
+
+### 写入点 1：strategy put 前
+
+新增一个集中 helper，替代 scattered 的 `update_expired_status` 调用：
+
+```python
+async def _put_generated_group(
+    self,
+    items: list[RolloutState],
+    replay_buffer: ReplayBuffer,
+    task_name: str,
+    current_rollout_step: int,
+) -> None:
+    refresh_seq_staleness(items, current_rollout_step)
+    expire_group_if_needed(items, self.tail_batch_stale_threshold)
+    await replay_buffer.put(items, task_name)
+```
+
+`expire_group_if_needed` 的语义应覆盖 completed 和 aborted：
+
+```python
+def expire_group_if_needed(group: list[RolloutState], threshold: int) -> list[RolloutState]:
+    if threshold <= 0:
+        return group
+    group_status = update_group_status(group)
+    if group_status not in (Status.COMPLETED, Status.ABORTED):
+        return group
+    if any(sample.seq_staleness >= threshold for sample in group):
+        for sample in group:
+            sample.status = Status.EXPIRED
+    return group
+```
+
+为什么不直接复用当前 `update_expired_status`：
+
+- 当前实现只检查 `sample.status == Status.ABORTED` 的样本。
+- 本次需求要求 buffer 中 completed 样本也会因 train_step 推进而过期。
+- 因此需要一个对 completed / aborted group 都生效的 group-level 过期 helper，或扩展 `update_expired_status` 的语义。
+
+### 写入点 2：`AgentLoopManager.get_batch` 入口
+
+`get_batch` 一进来就更新 `progress.latest_consumer_step`，并刷新 buffer 中已有 completed：
+
+```python
+async def get_batch(self, batch_size: int, rollout_step: int) -> ProduceBatchResult:
+    self._produce_progress.latest_consumer_step = rollout_step
+
+    for task in self.task_runners:
+        threshold = getattr(task.produce_strategy, "tail_batch_stale_threshold", 0)
+        await self.replay_buffer.refresh_completed_staleness(
+            task_name=task.task_name,
+            current_rollout_step=rollout_step,
+            tail_batch_stale_threshold=threshold,
+        )
+
+    ...
+```
+
+`_get_single_task_batch_from_buffer` 中对返回 batch 调 `refresh_seq_staleness(group, rollout_step)` 可以保留；那只是刷新即将交给训练侧的数据对象，不再写回 buffer，不算第三个 buffer 状态写入点。
+
+## ReplayBuffer 改动
+
+新增：
+
+```python
+async def refresh_completed_staleness(
+    self,
+    task_name: str,
+    current_rollout_step: int,
+    tail_batch_stale_threshold: int,
+) -> int:
+    ...
+```
+
+语义：
+
+- 在 `ReplayBuffer._lock` 下查询该 task 的 `Status.COMPLETED` groups。
+- 对每个 group 调 `refresh_seq_staleness(group, current_rollout_step)`。
+- 更新 `StorageItem.staleness = max(sample.seq_staleness for sample in group)`。
+- 如果 `tail_batch_stale_threshold > 0` 且 group 中任意样本 `seq_staleness >= threshold`，则整组样本置 `Status.EXPIRED`，`StorageItem.status = Status.EXPIRED`。
+- 返回本次新翻转为 expired 的 group 数。
+
+为避免 destructive `get -> mutate -> put`，storage 增加最小 update 能力：
+
+```python
+class StorageBackend:
+    async def update(self, items: list[StorageItem]) -> None: ...
+```
+
+实现：
+
+- `NaiveStorage.update`：按 `uid` 覆盖 `_items[uid]`，保留原 `timestamp_id`。
+- `PandasStorage.update`：flush 后按 `uid` 更新 `status / staleness / item` 列。
+
+这样刷新 completed staleness 不会和 consumer 抢样本，也不会改变 FIFO / staleness policy 的时间顺序。
+
+## `_pending_tasks` 并发控制
+
+### helper
+
+strategy 内新增小锁保护的 helper：
+
+```python
+async def _snapshot_pending(self) -> set[asyncio.Task]:
+    async with self._pending_lock:
+        return set(self._pending_tasks)
+
+async def _pending_count(self) -> int:
+    async with self._pending_lock:
+        return len(self._pending_tasks)
+
+async def _claim_done(self, done: set[asyncio.Task]) -> set[asyncio.Task]:
+    async with self._pending_lock:
+        claimed = done & self._pending_tasks
+        self._pending_tasks.difference_update(claimed)
+        return claimed
+
+async def _claim_already_done(self) -> set[asyncio.Task]:
+    async with self._pending_lock:
+        done = {task for task in self._pending_tasks if task.done()}
+        self._pending_tasks.difference_update(done)
+        return done
+```
+
+所有 done task 都必须先 claim，再 `task.result()` / `replay_buffer.put`。
+
+### schedule
+
+`_schedule_tasks_until` 不再直接裸写 set。为避免 pause 正在开始时出现“采样后未纳入 pending”的缝隙，推荐把“检查 `_pausing` + sample + create task + add pending”包在同一个 pending lock 中。
+
+这个 lock 不覆盖真正的 rollout generate，只覆盖一次轻量采样和 task 创建：
+
+```python
+async def _schedule_one(...):
+    async with self._pending_lock:
+        if self._pausing or len(self._pending_tasks) >= desired_pending:
+            return False
+
+        group_status = Status.EXPIRED if sample_from_expired else Status.ABORTED
+        rollout_state = await sampler.sample(task_name=task_name, group_status=group_status)
+        task = create_task(
+            _timed_generate_group(
+                agent_loop,
+                rollout_state,
+                enable_partial_rollout=self.enable_partial_rollout,
+                rollout_step=model_rollout_step,
+                model_rollout_step=model_rollout_step,
+            )
+        )
+        self._pending_tasks.add(task)
+        return True
+```
+
+如果不希望在 lock 内 `await sampler.sample(...)`，也可以引入 `_scheduling_count` 防止 pause 在“采样中但尚未 add pending”时提前返回；但这会增加状态。按“尽量少改且易维护”的约束，短锁方案更直接。
+
+### pause
+
+`pause_product` 改为：
+
+```python
+async def pause_product(
+    self,
+    agent_loop,
+    replay_buffer,
+    task_name: str,
+    *,
+    progress: ProduceProgress,
+) -> float:
+    pause_start = time.perf_counter()
+    async with self._pending_lock:
+        self._pausing = True
+
+    try:
+        rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
+        await pause_generation(rollout_ctl)
+
+        while True:
+            pending_snapshot = await self._snapshot_pending()
+            if not pending_snapshot:
+                break
+
+            done, _ = await asyncio.wait(
+                pending_snapshot,
+                timeout=1,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            claimed_done = await self._claim_done(done)
+            for task in claimed_done:
+                await self._put_generated_group(
+                    task.result(),
+                    replay_buffer,
+                    task_name,
+                    current_rollout_step=progress.latest_consumer_step,
+                )
+
+            if await self._pending_count() > 0:
+                await pause_generation(rollout_ctl)
+                await asyncio.sleep(1)
+    finally:
+        async with self._pending_lock:
+            self._pausing = False
+
+    return time.perf_counter() - pause_start
+```
+
+关键点：
+
+- producer 和 pause 可以同时 `asyncio.wait` 同一份 snapshot，但只有先 `_claim_done` 的一方会处理结果。
+- 另一方拿到的 done task 因为已经不在 `_pending_tasks` 里，`claimed_done` 为空，不会重复 put。
+- 不再出现 `self._pending_tasks = set(pending_tasks)` 覆盖新 task 或复活旧 task。
+
+## Manager 生产流程
+
+### `produce_loop`
+
+`produce_loop` 不再接收 `start_rollout_step`。manager 初始化时把生产进度放到绝对坐标系原点：
+
+```python
+self._produce_progress = ProduceProgress(
+    latest_consumer_step=0,
+    producer_future_step=1,
+    consumed_samples={task.task_name: 0 for task in self.task_runners},
+    target_samples={task.task_name: 0 for task in self.task_runners},
+    target_upto_future_step=0,
+)
+```
+
+resume 时从 checkpoint 恢复这些状态；trainer 不再把 `self._cur_step` 传进 `produce_loop`。
+
+```python
+async def produce_loop(self, batch_size: int):
+    while not self._finish_event.is_set():
+        if self._status == AgentLoopManagerStatus.FINISH:
+            break
+        if self._status == AgentLoopManagerStatus.UPDATE_ABORT:
+            await self._wait_for_status_exit(AgentLoopManagerStatus.UPDATE_ABORT)
+            continue
+        if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+            await self._wait_for_status_exit(AgentLoopManagerStatus.EXPIRED_BATCH)
+            continue
+
+        rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
+        await continue_generation(rollout_ctl)
+
+        status = await self._produce_batch_to_buffer(
+            batch_size=batch_size,
+            current_future_step=self._produce_progress.producer_future_step,
+        )
+
+        if status == ProduceBatchStatus.NORMAL:
+            self._produce_progress.producer_future_step += 1
+        elif status == ProduceBatchStatus.EXPIRED_BATCH:
+            self._status = AgentLoopManagerStatus.EXPIRED_BATCH
+
+        await asyncio.sleep(0)
+```
+
+`RLDisaggregatedTrainer._fit` 对应改成：
+
+```python
+producer_task = create_task(
+    self.agent_loop_manager.produce_loop(batch_size=self.train_batch_size)
+)
+```
+
+恢复训练时，由 `agent_loop_manager.resume(...)` 原地恢复 `self._produce_progress` 的各字段，不再依赖 trainer 传入 `_cur_step`。
+
+### 多 task ExpiredBatch 提前停止
+
+多 task 下，如果任一 task 在当前 `future_step` 上已经整体过期，其他 task 不应继续生产。
+
+因为整体过期只依赖：
+
+```python
+current_future_step
+model_rollout_step
+task.produce_strategy.tail_batch_stale_threshold
+```
+
+所以 manager 可以在 `asyncio.gather` 前统一预检查：
+
+实现时把当前 strategy 内部的 `_is_model_expired` 提升为 public wrapper，例如 `is_model_expired`，供 manager 做这个预检查。
+
+```python
+expired_tasks = [
+    task.task_name
+    for task in self.task_runners
+    if isinstance(task.produce_strategy, AsyncProduceStrategy)
+    and task.produce_strategy.is_model_expired(
+        current_future_step,
+        self._model_rollout_step,
+    )
+]
+if expired_tasks:
+    self.logger.info(f"Expired future_step={current_future_step}, tasks={expired_tasks}")
+    return ProduceBatchStatus.EXPIRED_BATCH
+```
+
+strategy 内仍保留同样检查，作为单 task / 兼容路径的兜底。
+
+### `_produce_batch_to_buffer`
+
+伪代码：
+
+```python
+async def _produce_batch_to_buffer(self, batch_size: int, current_future_step: int):
+    self._ensure_target_upto(batch_size, current_future_step)
+    progress = self._produce_progress
+    target_by_task = dict(progress.target_samples)
+
+    # 当前 step 的 task batch sizes 仍用于 active task 判断和日志。
+    if len(self.task_runners) == 1:
+        current_sizes = {self.task_runners[0].task_name: batch_size}
+    else:
+        current_sizes = self.get_task_batch_sizes(batch_size, current_future_step)
+        self._validate_task_batch_sizes(current_sizes, batch_size)
+
+    if self._any_task_model_expired(current_future_step):
+        return ProduceBatchStatus.EXPIRED_BATCH
+
+    async def run_task(task):
+        name = task.task_name
+        return await task.produce_strategy.produce_batch(
+            task.agent_loop,
+            task.sampler,
+            self.replay_buffer,
+            current_sizes[name],
+            name,
+            rollout_step=current_future_step,
+            model_rollout_step=self._model_rollout_step,
+            update_event=self._update_event,
+            target_cumulative=target_by_task[name],
+            progress=progress,
+        )
+
+    # 注意：即使 current_sizes[name] == 0，该 task 也可能需要补之前因 expired/failed 造成的缺口。
+    tasks_to_run = [
+        task
+        for task in self.task_runners
+        if target_by_task[task.task_name] > 0
+    ]
+    statuses = await asyncio.gather(*(run_task(task) for task in tasks_to_run))
+    return _aggregate_status(statuses)
+```
+
+## Manager 消费流程
+
+### `get_batch`
+
+`get_batch` 做三件新增工作：
+
+1. 更新 `progress.latest_consumer_step`。
+2. 刷新 buffer 中 completed 样本的 staleness / expired。
+3. 成功取出 batch 后，按实际返回数量更新 `progress.consumed_samples`。
+
+伪代码：
+
+```python
+async def get_batch(self, batch_size: int, rollout_step: int) -> ProduceBatchResult:
+    progress = self._produce_progress
+    progress.latest_consumer_step = rollout_step
+    await self._refresh_completed_staleness_for_all_tasks(rollout_step)
+
+    while not self._finish_event.is_set():
+        if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
+            return ProduceBatchResult(
+                rollout_states=[],
+                status=ProduceBatchStatus.EXPIRED_BATCH,
+            )
+
+        if await self._is_batch_ready(batch_size, rollout_step):
+            result = await self._get_batch_from_buffer(batch_size, rollout_step)
+            if result.rollout_states:
+                self._record_consumed_samples(result)
+                return result
+
+        await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
+
+    return ProduceBatchResult(rollout_states=[])
+```
+
+`_record_consumed_samples` 应按实际结果计数：
+
+```python
+def _record_consumed_samples(self, result: ProduceBatchResult) -> None:
+    progress = self._produce_progress
+    if len(self.task_runners) == 1:
+        name = self.task_runners[0].task_name
+        progress.consumed_samples[name] += len(result.rollout_states)
+        return
+
+    assert result.task_results is not None
+    for task_name, task_result in result.task_results.items():
+        progress.consumed_samples[task_name] += len(task_result.rollout_states)
+```
+
+不要只按 `task_batch_sizes` 加，因为实际返回结果才是 buffer 被消费的权威事实。
+
+### `pause_product`
+
+manager 侧保持先置 event 再 pause 的顺序：
+
+```python
+if for_weight_update:
+    self._update_event.set()
+    self._status = AgentLoopManagerStatus.UPDATE_ABORT
+```
+
+调用 strategy 时传同一个 live progress 引用：
+
+```python
+pause_time_s += await strategy.pause_product(
+    task.agent_loop,
+    self.replay_buffer,
+    task.task_name,
+    progress=self._produce_progress,
+)
+```
+
+## 不再需要 Progress Window
+
+本版使用绝对累计 target 和绝对累计 consumed：
+
+```python
+available_abs = consumed_abs + fresh
+required = max(0, target_abs - available_abs)
+```
+
+因此不需要 `_target_base_step` / `_target_base_consumed`，也不需要在 resume / sync 后重置生产窗口。
+
+权重同步后的 `continue_product(model_rollout_step=...)` 只负责恢复状态机和更新 rollout 侧模型版本：
+
+```python
+def continue_product(self, model_rollout_step: int) -> None:
+    self._status = AgentLoopManagerStatus.NORMAL
+    self._model_rollout_step = model_rollout_step
+    self._update_event.clear()
+```
+
+`progress.producer_future_step`、`progress.target_samples`、`progress.target_upto_future_step` 和 `progress.consumed_samples` 都是训练全局绝对进度，不随 sync 重置。
+
+## Checkpoint
+
+保存 manager state 时追加：
+
+```json
+{
+  "latest_consumer_step": 0,
+  "consumed_samples": {"task": 0},
+  "producer_future_step": 1,
+  "target_samples": {"task": 0},
+  "target_upto_future_step": 0
+}
+```
+
+恢复时：
+
+- 读回上述状态后，原地写回 `self._produce_progress` 的字段；如果旧 checkpoint 没有 `target_samples`，需要兼容时可在第一次 `produce_loop(batch_size)` 时，用保存的 `producer_future_step` 重放 `get_task_batch_sizes(batch_size, fs)` 到 `producer_future_step - 1` 来重建，不能在非初始 checkpoint 中简单置 0。
+- `_pending_tasks` 不保存；保存前仍要求 pending 为空。
+- 每个 strategy 初始化 `_pending_tasks = set()`、`_pausing = False`。
+- 保持现有 `resume()` 进入 `UPDATE_ABORT` 且 `_update_event.set()` 的语义，让 trainer 显式 `continue_product` 后再恢复生产。
+
+## 共卡路径
+
+`AgentLoopManager.produce_batch` 继续作为 colocate 的同步入口，不改变外部契约。
+
+兼容方式：
+
+- 共卡路径不使用 disagg 的全局绝对 target 状态，避免污染后台 producer 的累计进度。
+- 直接依赖 `AsyncProduceStrategy.produce_batch` 的默认参数：
+  - `target_cumulative = batch_size`
+  - `progress = None`，strategy 内部创建一次性临时 `ProduceProgress`
+
+共卡路径每次生产后仍调用 `pause_product(for_weight_update=False)` 收尾 pending，然后 `_get_batch_from_buffer` 返回训练 batch。
+
+## 删除 / 收敛的旧逻辑
+
+删除或停止使用：
+
+- `AsyncProduceStrategy._process_leftover_samples`
+  - 它 destructive `get -> mutate -> put`，会和 consumer 抢 completed。
+  - completed staleness 刷新统一交给 `ReplayBuffer.refresh_completed_staleness`。
+- 所有 `self._pending_tasks = set(pending_tasks)`。
+- strategy 中基于 `previously_completed_count = replay_buffer.count(COMPLETED)` 的局部 batch 判断。
+
+收敛到：
+
+- `ReplayBuffer.refresh_completed_staleness` 负责 buffer 中 completed 的 in-place 刷新。
+- strategy `_put_generated_group` 负责新生成 / pause drain 结果 put 前刷新。
+- strategy `_claim_done` 负责 pending task 的唯一认领。
+
+## 正确性小结
+
+### 消费者取走 batch 不会导致 producer 误补
+
+生产 batch2 时：
+
+```python
+available_abs = consumed_abs + fresh
+```
+
+consumer 取走 batch1 后：
+
+- `fresh` 减少 `B`
+- `consumed_abs` 增加 `B`
+
+所以 `available_abs` 不变，producer 不会把已消费的 batch1 当成缺口。
+
+### completed 样本过期会触发补发
+
+`get_batch` 入口刷新 completed：
+
+- 过期样本从 `COMPLETED` 翻成 `EXPIRED`
+- `fresh` 下降
+- 下一轮 strategy 动态控制看到 `required > 0`
+- 自动补发
+
+partial rollout 的 staleness 使用 `min(response_rollout_steps)`，仍由 `refresh_seq_staleness` 统一计算。
+
+### 多 task 某 task 整 batch 过期时，全局尽早停
+
+manager 在 gather 前检查所有 task 的 `is_model_expired(current_future_step, model_rollout_step)`。
+
+只要一个 task expired：
+
+- 当前 `_produce_batch_to_buffer` 直接返回 `EXPIRED_BATCH`
+- 其他 task 不再新发 rollout
+- `produce_loop` 设置 manager status 为 `EXPIRED_BATCH`
+- consumer 的 `get_batch` 返回空 batch + `EXPIRED_BATCH`，trainer 优先同步权重
+
+### `_pending_tasks` 不重复 put、不丢 task
+
+两边可以同时 wait snapshot，但 done task 必须先 claim：
+
+```python
+claimed = done & self._pending_tasks
+self._pending_tasks.difference_update(claimed)
+```
+
+同一 task 只有一个协程能 claim 成功，因此不会重复 `task.result()` / `replay_buffer.put`。
+
+新增 task 只通过 helper add，不再用整体赋值覆盖集合，因此不会抹掉新 task 或复活已完成 task。
+
+## 建议测试
+
+1. 单 task：producer 已完成 batch1，consumer 取走 batch1，producer 生产 batch2 时只补 batch2，不额外补 batch1。
+2. 单 task：producer 进入 `produce_batch` 后 consumer 中途取走 batch，strategy 通过 live `progress.consumed_samples` 不误补。
+3. completed stale：buffer 里已有 completed partial rollout，`get_batch(rollout_step)` 后超过 threshold 的 group in-place 变成 expired。
+4. put 前 stale：新生成 group 在 put 前按最新 `progress.latest_consumer_step` 刷新；如果已经 stale，直接以 expired 入 buffer。
+5. 多 task：任一 task 在当前 future step 上 `EXPIRED_BATCH`，其他 task 不再 schedule。
+6. pending race：让 `produce_batch` 和 `pause_product` 同时 wait 同一个 pending task，确认 replay_buffer 只 put 一次。
+7. checkpoint：保存 / 恢复后 `progress.producer_future_step`、`progress.target_samples`、`progress.target_upto_future_step` 和 `progress.consumed_samples` 不回退，buffer leftovers 仍可被后续 train step 消费。
