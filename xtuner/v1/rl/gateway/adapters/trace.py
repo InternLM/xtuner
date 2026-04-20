@@ -6,12 +6,12 @@ import time
 from collections import OrderedDict
 from collections.abc import Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import Status
 
 
 DEFAULT_CHAT_TRACE_KEY = "__default__"
@@ -67,7 +67,6 @@ class ChatTraceRecord:
     sequence: int = -1
     created_at: float = 0.0
     request_id: str | None = None
-    rollout_states: list[RolloutState] = field(default_factory=list)
 
 
 class ChatTraceStore:

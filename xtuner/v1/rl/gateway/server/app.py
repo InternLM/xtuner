@@ -13,13 +13,19 @@ from ray.actor import ActorHandle
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
-from ..adapters import AnthropicChatAdapter, OpenAIChatAdapter
+from ..adapters import AnthropicChatAdapter, ChatTraceStore, OpenAIChatAdapter
 from ..adapters.responses import OpenAIResponsesAdapter
 from ..backend.local_backend import LocalRolloutBackend
 from ..backend.protocol import GatewayBackend
 from ..config import GatewayConfig
 from ..core.exceptions import ContextLengthExceededError, GatewayError, ToolCallParseError
-from .routes import build_anthropic_router, build_openai_router, build_responses_router, build_runtime_router
+from .routes import (
+    build_anthropic_router,
+    build_openai_router,
+    build_responses_router,
+    build_runtime_router,
+    build_trace_store_router,
+)
 
 
 TokenizerArg = Union[PreTrainedTokenizer, PreTrainedTokenizerFast, str]
@@ -116,12 +122,14 @@ def build_gateway_app(
         tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
     cfg = config or GatewayConfig(port=8080)
     app = _create_base_gateway_app(backend, title=cfg.title, version=cfg.version)
+    app.state.gateway_trace_store = ChatTraceStore()
     adapter_kwargs = {
         "generate_handler": backend.generate,
         "tokenizer": tokenizer,
         "default_model_name": model_name,
         "context_length": context_length,
         "capture_folder": cfg.capture_folder,
+        "trace_store": app.state.gateway_trace_store,
     }
     app.state.gateway_openai_adapter = OpenAIChatAdapter(**adapter_kwargs)
     app.state.gateway_anthropic_adapter = AnthropicChatAdapter(**adapter_kwargs)
@@ -129,6 +137,7 @@ def build_gateway_app(
     app.include_router(build_openai_router())
     app.include_router(build_anthropic_router())
     app.include_router(build_responses_router())
+    app.include_router(build_trace_store_router())
     return app
 
 

@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Generic, TypeVar
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import Status
 
 from ..core.models import (
     CanonicalGenerateRequest,
@@ -19,7 +19,6 @@ from ..core.models import (
     CanonicalToolResultBlock,
 )
 from .capture import append_gateway_capture_record, render_blocks_as_text
-from .collector import reset_current_trace_collector, set_current_trace_collector
 from .trace import (
     ChatTraceRecord,
     ChatTraceStore,
@@ -69,22 +68,18 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | None,
         *,
         capture_folder: str | None = None,
+        trace_store: ChatTraceStore | None = None,
         trace_store_max_entries: int = 10000,
     ):
         self._generate_handler = generate_handler
         self._tokenizer = tokenizer
         self._capture_folder = capture_folder
-        self._trace_store = ChatTraceStore(max_entries=trace_store_max_entries)
+        self._trace_store = trace_store or ChatTraceStore(max_entries=trace_store_max_entries)
 
     async def handle_request(self, request: RequestT, *, api_key: str | None = None) -> ResponseT:
         self.validate_request(request)
         canonical_request = self.request_to_canonical_request(request)
-        rollout_states: list[RolloutState] = []
-        token = set_current_trace_collector(rollout_states)
-        try:
-            canonical_response = await self._generate_handler(canonical_request)
-        finally:
-            reset_current_trace_collector(token)
+        canonical_response = await self._generate_handler(canonical_request)
         response = self.canonical_response_to_protocol_response(canonical_response, request)
         record_trace_key = build_api_key_trace_key(api_key)
         self._trace_store.append(
@@ -93,14 +88,12 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
                 request,
                 response,
                 canonical_response,
-                rollout_states=rollout_states,
             )
         )
         self._write_capture_record(
             request=request,
             response=response,
             canonical_response=canonical_response,
-            rollout_states=rollout_states,
             api_key=api_key,
         )
         return response
@@ -120,7 +113,6 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
         request: RequestT,
         response: ResponseT,
         canonical_response: CanonicalGenerateResponse,
-        rollout_states: list[RolloutState] | None = None,
     ) -> ChatTraceRecord:
         request_snapshot = self.normalize_request(request)
         response_snapshot = self.normalize_response(response)
@@ -142,7 +134,6 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
             finish_reason=rollout_trace.get("rollout_finish_reason") or canonical_response.finish_reason,
             status=Status(status) if isinstance(status, str) else status,
             request_id=canonical_response.request_id,
-            rollout_states=list(rollout_states) if rollout_states else [],
         )
 
     def _write_capture_record(
@@ -150,7 +141,6 @@ class BaseChatAPIAdapter(ABC, Generic[RequestT, ResponseT]):
         request: RequestT,
         response: ResponseT,
         canonical_response: CanonicalGenerateResponse,
-        rollout_states: list[RolloutState] | None = None,
         api_key: str | None = None,
     ) -> None:
         if self._capture_folder is None:

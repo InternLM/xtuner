@@ -25,7 +25,7 @@ from ..core.models import (
 )
 from .base import BaseChatAPIAdapter
 from .streaming import build_sse_response, encode_sse_event
-from .trace import normalize_trace_payload
+from .trace import ChatTraceStore, normalize_trace_payload
 
 
 class AnthropicTextContent(BaseModel):
@@ -112,10 +112,11 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         default_model_name: str | None = None,
         context_length: int | None = None,
         capture_folder: str | None = None,
+        trace_store: ChatTraceStore | None = None,
     ):
         if isinstance(tokenizer, str):
             tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
-        super().__init__(generate_handler, tokenizer=tokenizer, capture_folder=capture_folder)
+        super().__init__(generate_handler, tokenizer=tokenizer, capture_folder=capture_folder, trace_store=trace_store)
         self._default_model_name = default_model_name
         self._context_length = context_length
 

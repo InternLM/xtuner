@@ -34,7 +34,7 @@ from ..core.models import (
 )
 from .base import BaseChatAPIAdapter, coerce_content_to_text, stringify_tool_arguments
 from .streaming import build_sse_response, encode_sse_event
-from .trace import normalize_trace_payload
+from .trace import ChatTraceStore, normalize_trace_payload
 
 
 class OpenAIChatAdapterError(RuntimeError):
@@ -60,6 +60,7 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         default_model_name: str | None = None,
         context_length: int | None = None,
         capture_folder: str | None = None,
+        trace_store: ChatTraceStore | None = None,
         trace_store_max_entries: int = 10000,
     ):
         if isinstance(tokenizer, str):
@@ -68,6 +69,7 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
             generate_handler,
             tokenizer=tokenizer,
             capture_folder=capture_folder,
+            trace_store=trace_store,
             trace_store_max_entries=trace_store_max_entries,
         )
         self._default_model_name = default_model_name

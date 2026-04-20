@@ -7,7 +7,6 @@ from .anthropic import (
     AnthropicMessagesResponse,
 )
 from .base import BaseChatAPIAdapter
-from .collector import append_current_trace_rollout_state, reset_current_trace_collector, set_current_trace_collector
 from .openai import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -41,7 +40,4 @@ __all__ = [
     "ChatTraceRecord",
     "ChatTraceStore",
     "build_api_key_trace_key",
-    "append_current_trace_rollout_state",
-    "reset_current_trace_collector",
-    "set_current_trace_collector",
 ]

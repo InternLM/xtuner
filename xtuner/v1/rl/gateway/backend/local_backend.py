@@ -13,7 +13,6 @@ from xtuner.v1.rl.rollout.parser.factory import build_tool_call_parser
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
 from ..adapters.base import coerce_content_to_text
-from ..adapters.collector import append_current_trace_rollout_state
 from ..adapters.trace import normalize_trace_payload
 from ..core.exceptions import ContextLengthExceededError, ToolCallParseError
 from ..core.models import (
@@ -58,7 +57,6 @@ class LocalRolloutBackend:
     async def generate(self, request: CanonicalGenerateRequest) -> CanonicalGenerateResponse:
         rollout_state = self._canonical_request_to_rollout_state(request)
         rollout_state = await self._controller.generate.remote(rollout_state)
-        append_current_trace_rollout_state(rollout_state)
         self._raise_for_failed_rollout(rollout_state, request_id=str(rollout_state.uid))
         return self._rollout_state_to_canonical_response(rollout_state, request)
 

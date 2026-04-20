@@ -416,9 +416,51 @@ class TestGatewayProtocolChain(unittest.TestCase):
         )
         self.assertEqual(responses_trace.response_snapshot["status"], "completed")
 
-        self.assertEqual(openai_adapter.pop_trace_records(openai_trace_key), [openai_trace])
-        self.assertEqual(anthropic_adapter.pop_trace_records(anthropic_trace_key), [anthropic_trace])
-        self.assertEqual(responses_adapter.pop_trace_records(responses_trace_key), [responses_trace])
+        openai_trace_get_response = httpx.get(
+            f"{base_url}/trace_store",
+            headers={"Authorization": f"Bearer {openai_api_key}"},
+            timeout=30.0,
+        )
+        self.assertEqual(openai_trace_get_response.status_code, 200, openai_trace_get_response.text)
+        openai_trace_get_body = openai_trace_get_response.json()
+        self.assertEqual(openai_trace_get_body["trace_key"], openai_trace_key)
+        self.assertEqual(openai_trace_get_body["count"], 1)
+        self.assertEqual(openai_trace_get_body["records"][0]["request_id"], openai_trace.request_id)
+        self.assertEqual(openai_trace_get_body["records"][0]["status"], openai_trace.status.value)
+        self.assertEqual(openai_trace_get_body["records"][0]["sequence"], openai_trace.sequence)
+
+        openai_trace_pop_response = httpx.post(
+            f"{base_url}/trace_store/pop",
+            headers={"Authorization": f"Bearer {openai_api_key}"},
+            timeout=30.0,
+        )
+        self.assertEqual(openai_trace_pop_response.status_code, 200, openai_trace_pop_response.text)
+        openai_trace_pop_body = openai_trace_pop_response.json()
+        self.assertEqual(openai_trace_pop_body["trace_key"], openai_trace_key)
+        self.assertEqual(openai_trace_pop_body["count"], 1)
+        self.assertEqual(openai_trace_pop_body["records"][0]["request_id"], openai_trace.request_id)
+
+        anthropic_trace_pop_response = httpx.post(
+            f"{base_url}/trace_store/pop",
+            params={"trace_key": anthropic_trace_key},
+            timeout=30.0,
+        )
+        self.assertEqual(anthropic_trace_pop_response.status_code, 200, anthropic_trace_pop_response.text)
+        anthropic_trace_pop_body = anthropic_trace_pop_response.json()
+        self.assertEqual(anthropic_trace_pop_body["trace_key"], anthropic_trace_key)
+        self.assertEqual(anthropic_trace_pop_body["count"], 1)
+        self.assertEqual(anthropic_trace_pop_body["records"][0]["request_id"], anthropic_trace.request_id)
+
+        responses_trace_clear_response = httpx.post(
+            f"{base_url}/trace_store/clear",
+            params={"trace_key": responses_trace_key},
+            timeout=30.0,
+        )
+        self.assertEqual(responses_trace_clear_response.status_code, 200, responses_trace_clear_response.text)
+        responses_trace_clear_body = responses_trace_clear_response.json()
+        self.assertEqual(responses_trace_clear_body["trace_key"], responses_trace_key)
+        self.assertTrue(responses_trace_clear_body["cleared"])
+
         self.assertEqual(openai_adapter.get_trace_records(openai_trace_key), [])
         self.assertEqual(anthropic_adapter.get_trace_records(anthropic_trace_key), [])
         self.assertEqual(responses_adapter.get_trace_records(responses_trace_key), [])
