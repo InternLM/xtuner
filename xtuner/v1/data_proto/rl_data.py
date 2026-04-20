@@ -215,8 +215,11 @@ def update_sample_version(rollout_state: RolloutState, model_rollout_step: int) 
     """Append token source model version for newly generated response
     tokens."""
     response_len = len(rollout_state.response_ids or [])
-    response_rollout_steps = [model_rollout_step] * response_len
-    rollout_state.response_rollout_steps = (rollout_state.response_rollout_steps or []) + response_rollout_steps
+    response_rollout_steps = list(getattr(rollout_state, "response_rollout_steps", None) or [])
+    missing_response_steps = max(0, response_len - len(response_rollout_steps))
+    if missing_response_steps:
+        response_rollout_steps.extend([model_rollout_step] * missing_response_steps)
+    rollout_state.response_rollout_steps = response_rollout_steps
     return rollout_state
 
 

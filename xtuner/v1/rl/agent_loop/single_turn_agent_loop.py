@@ -35,7 +35,6 @@ class SingleTurnAgentLoop(AgentLoop):
         rollout_state: RolloutState,
         **kwargs,
     ) -> RolloutState:
-        model_rollout_step = kwargs.get("model_rollout_step", 0)
         enable_partial_rollout = kwargs.get("enable_partial_rollout", False)
 
         # rollout state 预处理, enable_partial_rollout = True 会在这里拼接 token 和修正 max_token
@@ -45,11 +44,8 @@ class SingleTurnAgentLoop(AgentLoop):
 
         # 推理引擎generate, 生成的结果会覆盖到 rollout_state.response_ids 上
         rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
-        # rollout state 后处理: 合并 partial rollout 的历史上下文, 记录 token 来源模型版本
-        rollout_state = self.partial_rollout_handler.postprocess(
-            rollout_state,
-            model_rollout_step=model_rollout_step,
-        )
+        # rollout state 后处理: 合并 partial rollout 的历史上下文
+        rollout_state = self.partial_rollout_handler.postprocess(rollout_state)
         # 非 COMPLETED 状态（如被截断、放弃等）直接早退，不触发打分
         if rollout_state.status != Status.COMPLETED:
             return rollout_state

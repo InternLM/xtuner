@@ -9,7 +9,7 @@ from typing import Protocol, runtime_checkable
 import ray
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status, update_sample_version
 from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout.utils import pause_generation
@@ -67,22 +67,17 @@ async def _timed_generate_group(
     agent_loop: AgentLoopSpec,
     rollout_state: list[RolloutState],
     enable_partial_rollout: bool = False,
-    model_rollout_step: int | None = None,
 ) -> list[RolloutState]:
     start = time.perf_counter()
-    if model_rollout_step is None:
-        model_rollout_step = 0
     if isinstance(agent_loop, ray.actor.ActorHandle):
         result = await agent_loop.generate_group.remote(
             rollout_state,
             enable_partial_rollout=enable_partial_rollout,
-            model_rollout_step=model_rollout_step,
         )
     else:
         result = await agent_loop.generate_group(
             rollout_state,
             enable_partial_rollout=enable_partial_rollout,
-            model_rollout_step=model_rollout_step,
         )
     elapsed = time.perf_counter() - start
     for item in result:
@@ -241,7 +236,6 @@ class SyncProduceStrategy(ProduceStrategy):
                 _timed_generate_group(
                     agent_loop,
                     rollout_state,
-                    model_rollout_step=model_rollout_step,
                 )
             )
             pending_tasks.add(task)
@@ -262,6 +256,9 @@ class SyncProduceStrategy(ProduceStrategy):
                 if self.is_valid_sample_fn(items):
                     completed_sample_count += 1
                     logger.info(f"Collected {completed_sample_count}/{batch_size} valid samples for task {task_name}.")
+                for item in items:
+                    update_sample_version(item, model_rollout_step)
+                refresh_seq_staleness(items, rollout_step)
                 await replay_buffer.put(items, task_name)
 
             while len(pending_tasks) + completed_sample_count < batch_size and self.should_continue_fn(
@@ -272,7 +269,6 @@ class SyncProduceStrategy(ProduceStrategy):
                     _timed_generate_group(
                         agent_loop,
                         rollout_state,
-                        model_rollout_step=model_rollout_step,
                     )
                 )
                 pending_tasks.add(task)
@@ -296,6 +292,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         self.tail_batch_stale_threshold = tail_batch_stale_threshold
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks: set[asyncio.Task] = set()
+        self._pending_task_model_steps: dict[asyncio.Task, int] = {}
         self._pending_lock = asyncio.Lock()
         self._pausing = False
 
@@ -335,7 +332,10 @@ class AsyncProduceStrategy(ProduceStrategy):
         replay_buffer: ReplayBuffer,
         task_name: str,
         current_rollout_step: int,
+        model_rollout_step: int,
     ) -> None:
+        for item in items:
+            update_sample_version(item, model_rollout_step)
         refresh_seq_staleness(items, current_rollout_step)
         items = expire_group_if_needed(items, self.tail_batch_stale_threshold)
         await replay_buffer.put(items, task_name)
@@ -359,10 +359,10 @@ class AsyncProduceStrategy(ProduceStrategy):
                     agent_loop,
                     rollout_state,
                     enable_partial_rollout=self.enable_partial_rollout,
-                    model_rollout_step=model_rollout_step,
                 )
             )
             self._pending_tasks.add(task)
+            self._pending_task_model_steps[task] = model_rollout_step
             return True
 
     async def _schedule_tasks_until(
@@ -415,6 +415,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                 claimed_done = await self._claim_done(done_tasks)
                 for task in claimed_done:
                     paused_items = task.result()
+                    task_model_rollout_step = self._pending_task_model_steps.pop(task, 0)
                     for item in paused_items:
                         logger.debug(
                             f"[{self.__class__.__name__}] Task {task_name} | "
@@ -426,6 +427,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                         replay_buffer,
                         task_name,
                         current_rollout_step=progress.next_consumer_step,
+                        model_rollout_step=task_model_rollout_step,
                     )
                 if await self._pending_count() > 0:
                     await pause_generation(rollout_ctl)
@@ -467,11 +469,13 @@ class AsyncProduceStrategy(ProduceStrategy):
             # 先认领已完成任务，put 前用最新 consumer step 刷新 staleness。
             claimed_done = await self._claim_already_done()
             for task in claimed_done:
+                task_model_rollout_step = self._pending_task_model_steps.pop(task, model_rollout_step)
                 await self._put_generated_group(
                     task.result(),
                     replay_buffer,
                     task_name,
                     current_rollout_step=progress.next_consumer_step,
+                    model_rollout_step=task_model_rollout_step,
                 )
 
             fresh = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
@@ -512,9 +516,11 @@ class AsyncProduceStrategy(ProduceStrategy):
             )
             claimed_done = await self._claim_done(done_tasks)
             for task in claimed_done:
+                task_model_rollout_step = self._pending_task_model_steps.pop(task, model_rollout_step)
                 await self._put_generated_group(
                     task.result(),
                     replay_buffer,
                     task_name,
                     current_rollout_step=progress.next_consumer_step,
+                    model_rollout_step=task_model_rollout_step,
                 )

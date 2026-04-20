@@ -577,7 +577,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
           Round 1 (step=1): 6 个并发任务，2 个完成后其余被 abort。
             被 abort 的样本携带 step=1 生成的分段 response，response_rollout_steps=[1,...].
           Round 2 (step=2): round1 的 ABORTED 样本被续写，多数在 round2 内完成（COMPLETED）。
-            postprocess 只记录 response_rollout_steps；producer put 前刷新 staleness。
+            postprocess 只拼接 partial rollout 历史；producer put 前记录 response_rollout_steps 并刷新 staleness。
             该轮未消费的 COMPLETED 样本会留在 buffer 中。
           Round 3 (step=3): produce_batch 作为消费入口，先刷新 buffer 中的
             COMPLETED 样本，检查 seq_staleness=1 >= threshold=1 → 标为 EXPIRED，
@@ -635,8 +635,8 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
           - 在调用 produce_batch 之前读取 expired_before。
           - 若 expired_before >= trigger_size，本轮由 strategy 进入 tail-batch 模式：
               从 EXPIRED 池取样 → preprocess 重置 response_ids=[], response_rollout_steps=[]
-              → 全新生成 → postprocess: response_rollout_steps=[model_rollout_step, ...]
-              → producer put 前刷新 staleness 为 0。
+              → 全新生成 → postprocess 拼接历史
+              → producer put 前记录 response_rollout_steps 并刷新 staleness 为 0。
           - 取到第一个 tail-batch 完成样本后退出循环。
 
         断言:

@@ -37,7 +37,7 @@ class TestAgentLoopUtils(unittest.TestCase):
 
         self.assertEqual(group[0].seq_staleness, 4)
 
-    def test_partial_rollout_postprocess_uses_model_rollout_step(self):
+    def test_partial_rollout_postprocess_only_concatenates_history(self):
         handler = PartialRolloutHandler(max_tokens=8)
         rollout_state = _make_rollout_state(
             response_ids=[30, 31],
@@ -54,10 +54,10 @@ class TestAgentLoopUtils(unittest.TestCase):
             },
         )
 
-        result = handler.postprocess(rollout_state, model_rollout_step=5)
+        result = handler.postprocess(rollout_state)
 
         self.assertEqual(result.response_ids, [10, 11, 30, 31])
-        self.assertEqual(result.response_rollout_steps, [2, 2, 5, 5])
+        self.assertEqual(result.response_rollout_steps, [2, 2])
         self.assertEqual(result.seq_staleness, 0)
 
 
@@ -85,36 +85,29 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         result = await agent_loop.generate_sample(
             rollout_state,
-            model_rollout_step=5,
         )
 
-        self.assertEqual(result.response_rollout_steps, [5, 5])
+        self.assertIsNone(result.response_rollout_steps)
         self.assertEqual(result.seq_staleness, 7)
 
-    async def test_generate_sample_uses_model_rollout_step_for_sample_version(self):
+    async def test_generate_sample_does_not_update_sample_version(self):
         agent_loop = self._build_agent_loop()
         rollout_state = _make_rollout_state(response_ids=[], status=Status.ABORTED)
         generated_state = _make_rollout_state(response_ids=[30, 31], status=Status.ABORTED)
         agent_loop.rollout_ctl.generate.remote.return_value = generated_state
 
-        result = await agent_loop.generate_sample(
-            rollout_state,
-            model_rollout_step=5,
-        )
+        result = await agent_loop.generate_sample(rollout_state)
 
-        self.assertEqual(result.response_rollout_steps, [5, 5])
+        self.assertIsNone(result.response_rollout_steps)
         self.assertEqual(result.seq_staleness, 0)
 
-    async def test_generate_sample_accepts_zero_model_rollout_step_when_explicitly_provided(self):
+    async def test_generate_sample_does_not_require_model_rollout_step(self):
         agent_loop = self._build_agent_loop()
         rollout_state = _make_rollout_state(response_ids=[], status=Status.ABORTED)
         generated_state = _make_rollout_state(response_ids=[30, 31], status=Status.ABORTED)
         agent_loop.rollout_ctl.generate.remote.return_value = generated_state
 
-        result = await agent_loop.generate_sample(
-            rollout_state,
-            model_rollout_step=0,
-        )
+        result = await agent_loop.generate_sample(rollout_state)
 
-        self.assertEqual(result.response_rollout_steps, [0, 0])
+        self.assertIsNone(result.response_rollout_steps)
         self.assertEqual(result.seq_staleness, 0)

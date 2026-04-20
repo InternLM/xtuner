@@ -247,6 +247,37 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 progress=mismatched_target,
             )
 
+    async def test_async_produce_strategy_records_sample_version_before_staleness_refresh(self):
+        task_name = "test_sample_version"
+
+        async def mock_gen(rs, **kwargs):
+            self.assertNotIn("model_rollout_step", kwargs)
+            for r in rs:
+                r.response_ids = [10, 11]
+                r.status = Status.COMPLETED
+            return rs
+
+        mock_agent_loop = self._build_agent_loop()
+        mock_agent_loop.generate_group = mock_gen
+        sampler = self._build_sampler()
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
+
+        status = await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=1,
+            task_name=task_name,
+            rollout_step=5,
+            model_rollout_step=3,
+            progress=self._build_progress(task_name, target=1, rollout_step=5),
+        )
+
+        self.assertEqual(status, ProduceBatchStatus.NORMAL)
+        completed = await self.replay_buffer.get(1, task_name, Status.COMPLETED)
+        self.assertEqual(completed[0][0].response_rollout_steps, [3, 3])
+        self.assertEqual(completed[0][0].seq_staleness, 1)
+
     async def test_async_produce_strategy_reclaims_cross_call_pending_and_records_timing(self):
         task_name = "test_task"
         mock_agent_loop = self._build_agent_loop({0: 0.01, 1: 0.05, 2: 0.05})
