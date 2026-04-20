@@ -14,7 +14,12 @@ from fastapi import FastAPI
 from ray.util.placement_group import PlacementGroup
 
 from transformers import AutoTokenizer
-from xtuner.v1.data_proto.rl_data import RLRolloutRequestItem, RLRolloutResponseItem, RolloutExtraParams, SampleParams
+from xtuner.v1.data_proto.rl_data import (
+    RLRolloutRequestItem,
+    RLRolloutResponseItem,
+    RolloutExtraParams,
+    SampleParams,
+)
 from xtuner.v1.ray.base import AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.utils import get_logger

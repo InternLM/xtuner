@@ -4,6 +4,7 @@ import copy
 import io
 import math
 import os
+from dataclasses import asdict, is_dataclass
 from itertools import chain
 from types import SimpleNamespace
 from typing import Dict, Literal, Optional, Union
@@ -120,7 +121,7 @@ def calculate_timestamps(
     if not isinstance(indices, list):
         indices = indices.tolist()
     if len(indices) % merge_size != 0:
-        indices.extend(indices[-1] for _ in range(merge_size - len(indices) % merge_size))
+        indices.extend(indices[-1] for _ in range(merge_size - len(indices) % merge_size))  # type: ignore[union-attr]
         if timestamps is not None:
             timestamps.extend(timestamps[-1] for _ in range(merge_size - len(timestamps) % merge_size))
 
@@ -368,10 +369,10 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         if system_message is not None:
             self.chat_template.default_system = system_message
 
-        self.img_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_context_token)
-        self.video_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.video_context_token)
-        self.img_start_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_start_token)
-        self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)
+        self.img_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_context_token)  # type: ignore[attr-defined]
+        self.video_context_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.video_context_token)  # type: ignore[attr-defined]
+        self.img_start_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_start_token)  # type: ignore[attr-defined]
+        self.img_end_token_id = tokenizer.convert_tokens_to_ids(self.chat_template.image_end_token)  # type: ignore[attr-defined]
 
         # Note: 比较重要，防止改了参数但是没有重新 cache
         _hash_str = (
@@ -382,7 +383,13 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
             f"{self.add_vision_id}_{system_message}_{max_length}_{self.rand_video_max_frames}"
         )
 
-        self.size = SimpleNamespace(**self.video_processor.size)
+        self.size = SimpleNamespace(
+            **(
+                asdict(self.video_processor.size)  # type: ignore[arg-type]
+                if is_dataclass(self.video_processor.size)
+                else self.video_processor.size
+            )
+        )
 
         self.add_eos_token = add_eos_token
         self.add_bos_token = add_bos_token
@@ -523,7 +530,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, _, _ = self._truncated_data_item(input_ids)
 
         # 如果图片被截断，则该数据丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.img_context_token_id).sum()  # type: ignore[attr-defined]
         num_image_tokens_2 = sum_media_grid_thw.sum()
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
@@ -819,7 +826,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
                 input_ids = input_ids + [self.eos_token_id]
         input_ids, _, _ = self._truncated_data_item(input_ids)
         # 如果图片被截断，则该数据丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()  # type: ignore[attr-defined]
         num_image_tokens_2 = total_sum_media_grid_thw
         if num_image_tokens_1 != num_image_tokens_2:
             logger.warning(
@@ -976,7 +983,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         input_ids, labels, position_ids = self._truncated_data_item(input_ids, labels, position_ids)
 
         # 如果图片被截断，则该数据要丢弃
-        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()
+        num_image_tokens_1 = (torch.tensor(input_ids) == self.video_context_token_id).sum()  # type: ignore[attr-defined]
         num_image_tokens_2 = total_sum_media_grid_thw
         # assert 会被捕获，该数据会丢弃
         assert num_image_tokens_1 == num_image_tokens_2, (
