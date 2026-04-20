@@ -43,6 +43,21 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         sampler_cfg = SamplerConfig.model_construct(dataloader_cfg=self.mock_dataloader_cfg)
         return sampler_cfg.build(self.mock_tokenizer, self.replay_buffer)
 
+    def _build_progress(
+        self,
+        task_name: str,
+        target: int,
+        rollout_step: int = 0,
+        consumed: int = 0,
+    ) -> ProduceProgress:
+        return ProduceProgress(
+            next_consumer_step=rollout_step,
+            producer_future_step=rollout_step,
+            consumed_samples={task_name: consumed},
+            target_samples={task_name: target},
+            target_upto_future_step=rollout_step,
+        )
+
     def _build_agent_loop(self, sleep_by_id: dict[int, float] | None = None):
         mock_agent_loop = MagicMock()
         mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
@@ -91,6 +106,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             batch_size=2,
             task_name=task_name,
             rollout_step=4,
+            progress=self._build_progress(task_name, target=2, rollout_step=4),
         )
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
 
@@ -133,7 +149,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         await self.replay_buffer.put([aborted_item], task_name)
         # 执行
         status = await strategy.produce_batch(
-            mock_agent_loop, sampler, self.replay_buffer, batch_size=2, task_name=task_name
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=2,
+            task_name=task_name,
+            progress=self._build_progress(task_name, target=2),
         )
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
 
@@ -158,7 +179,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         sampler = self._build_sampler()
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
         progress = ProduceProgress(
-            latest_consumer_step=1,
+            next_consumer_step=1,
             producer_future_step=2,
             consumed_samples={task_name: 1},
             target_samples={task_name: 2},
@@ -189,7 +210,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         sampler.sample = AsyncMock(side_effect=AssertionError("sampler.sample should not be called"))
 
         missing_consumed = ProduceProgress(
-            latest_consumer_step=1,
+            next_consumer_step=1,
             producer_future_step=1,
             consumed_samples={},
             target_samples={task_name: 1},
@@ -208,7 +229,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             )
 
         mismatched_target = ProduceProgress(
-            latest_consumer_step=1,
+            next_consumer_step=1,
             producer_future_step=1,
             consumed_samples={task_name: 0},
             target_samples={task_name: 2},
@@ -232,9 +253,15 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
         sampler = self._build_sampler()
         strategy = produce_strategy_cfg.build()
+        progress = self._build_progress(task_name, target=1)
 
         status = await strategy.produce_batch(
-            mock_agent_loop, sampler, self.replay_buffer, batch_size=1, task_name=task_name
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=1,
+            task_name=task_name,
+            progress=progress,
         )
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         self.assertGreater(len(strategy._pending_tasks), 0)
@@ -242,7 +269,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.08)
 
         status = await strategy.produce_batch(
-            mock_agent_loop, sampler, self.replay_buffer, batch_size=1, task_name=task_name
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=1,
+            task_name=task_name,
+            progress=progress,
         )
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         self.assertEqual(len(strategy._pending_tasks), 0)
@@ -260,11 +292,24 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         produce_strategy_cfg = AsyncProduceStrategyConfig(over_sample_threshold=2.0, enable_partial_rollout=True)
         sampler = self._build_sampler()
         strategy = produce_strategy_cfg.build()
+        progress = self._build_progress(task_name, target=1)
 
-        await strategy.produce_batch(mock_agent_loop, sampler, self.replay_buffer, batch_size=1, task_name=task_name)
+        await strategy.produce_batch(
+            mock_agent_loop,
+            sampler,
+            self.replay_buffer,
+            batch_size=1,
+            task_name=task_name,
+            progress=progress,
+        )
         self.assertGreater(len(strategy._pending_tasks), 0)
 
-        pause_time_s = await strategy.pause_product(mock_agent_loop, self.replay_buffer, task_name)
+        pause_time_s = await strategy.pause_product(
+            mock_agent_loop,
+            self.replay_buffer,
+            task_name,
+            progress=progress,
+        )
 
         self.assertGreaterEqual(pause_time_s, 0.0)
         self.assertEqual(len(strategy._pending_tasks), 0)
@@ -291,6 +336,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             rollout_step=1,
             model_rollout_step=1,
             update_event=update_event,
+            progress=self._build_progress(task_name, target=1, rollout_step=1),
         )
 
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
@@ -312,6 +358,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             task_name=task_name,
             rollout_step=3,
             model_rollout_step=1,
+            progress=self._build_progress(task_name, target=1, rollout_step=3),
         )
 
         self.assertEqual(status, ProduceBatchStatus.EXPIRED_BATCH)

@@ -27,8 +27,30 @@ GROUP_GENERATE_TIME_KEY = "group_generate_time_s"
 
 @dataclass
 class ProduceProgress:
-    # Manager 持有这个对象并原地更新；strategy 只保存引用，读取 live 进度。
-    latest_consumer_step: int = 0
+    """生产者和消费者共享的 live 进度对象。
+
+    设计目标：
+    - Manager / 调用方负责初始化并原地更新这个对象，strategy 只接收引用并读取最新进度。
+    - target / consumed 使用全局绝对累计口径，避免 consumer 取走 buffer 中的 completed 后，
+      producer 把已消费样本误判成缺口并重复补发。
+    - 同一套语义同时服务非共卡全局 progress 和共卡 produce_batch 的局部 progress。
+
+    使用注意：
+    - 不要在 strategy 中补 key 或用 dict.get(..., 0) 兜底；缺少 task key 应 fail fast。
+    - 不要把字段值复制成局部快照后跨 await 使用；需要字段值时直接读 progress.xxx，
+      让并发更新后的 next_consumer_step / consumed_samples / target_samples 能尽早生效。
+    - 运行中不要整体替换 ProduceProgress 对象；resume 时也应原地更新字段，避免旧引用失效。
+
+    字段含义：
+    - next_consumer_step：producer 写入新样本时应面向的训练 step。get_batch(i) 入口设为 i，
+      成功取出非空 batch 后设为 i + 1。
+    - producer_future_step：producer 当前准备生产的 future step。
+    - consumed_samples：各 task 已被 consumer 从 replay buffer 取走的 group 绝对累计数。
+    - target_samples：各 task 截至 target_upto_future_step 应生产出的 group 绝对累计目标。
+    - target_upto_future_step：target_samples 已覆盖到的最大 future step。
+    """
+
+    next_consumer_step: int = 1
     producer_future_step: int = 1
     consumed_samples: dict[str, int] = field(default_factory=dict)
     target_samples: dict[str, int] = field(default_factory=dict)
@@ -98,19 +120,18 @@ def _validate_progress_for_task(
     progress: ProduceProgress,
     task_name: str,
     target_cumulative: int | None,
-) -> int:
+) -> None:
     if task_name not in progress.consumed_samples:
         raise KeyError(f"ProduceProgress.consumed_samples missing task_name={task_name!r}")
     if task_name not in progress.target_samples:
         raise KeyError(f"ProduceProgress.target_samples missing task_name={task_name!r}")
 
-    target_abs = progress.target_samples[task_name]
-    if target_cumulative is not None and target_cumulative != target_abs:
+    if target_cumulative is not None and target_cumulative != progress.target_samples[task_name]:
         raise ValueError(
             "target_cumulative must match progress.target_samples when progress is provided, "
-            f"got target_cumulative={target_cumulative}, progress.target_samples[{task_name!r}]={target_abs}"
+            f"got target_cumulative={target_cumulative}, "
+            f"progress.target_samples[{task_name!r}]={progress.target_samples[task_name]}"
         )
-    return target_abs
 
 
 @runtime_checkable
@@ -177,8 +198,8 @@ class ProduceStrategy(ABC):
         model_rollout_step: int | None = None,
         update_event: asyncio.Event | None = None,
         *,
+        progress: ProduceProgress,
         target_cumulative: int | None = None,
-        progress: ProduceProgress | None = None,
     ) -> ProduceBatchStatus: ...
 
     async def pause_product(
@@ -187,7 +208,7 @@ class ProduceStrategy(ABC):
         replay_buffer: ReplayBuffer,
         task_name: str,
         *,
-        progress: ProduceProgress | None = None,
+        progress: ProduceProgress,
     ) -> float:
         return 0.0
 
@@ -204,8 +225,8 @@ class SyncProduceStrategy(ProduceStrategy):
         model_rollout_step: int | None = None,
         update_event: asyncio.Event | None = None,
         *,
+        progress: ProduceProgress,
         target_cumulative: int | None = None,
-        progress: ProduceProgress | None = None,
     ) -> ProduceBatchStatus:
         if model_rollout_step is None:
             model_rollout_step = rollout_step
@@ -277,7 +298,6 @@ class AsyncProduceStrategy(ProduceStrategy):
         self._pending_tasks: set[asyncio.Task] = set()
         self._pending_lock = asyncio.Lock()
         self._pausing = False
-        self._current_rollout_step = 0
 
     def is_model_expired(self, rollout_step: int, model_rollout_step: int) -> bool:
         if self.tail_batch_stale_threshold <= 0:
@@ -370,7 +390,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         replay_buffer: ReplayBuffer,
         task_name: str,
         *,
-        progress: ProduceProgress | None = None,
+        progress: ProduceProgress,
     ) -> float:
         pause_start = time.perf_counter()
         async with self._pending_lock:
@@ -393,9 +413,6 @@ class AsyncProduceStrategy(ProduceStrategy):
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 claimed_done = await self._claim_done(done_tasks)
-                current_rollout_step = (
-                    progress.latest_consumer_step if progress is not None else self._current_rollout_step
-                )
                 for task in claimed_done:
                     paused_items = task.result()
                     for item in paused_items:
@@ -408,7 +425,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                         paused_items,
                         replay_buffer,
                         task_name,
-                        current_rollout_step=current_rollout_step,
+                        current_rollout_step=progress.next_consumer_step,
                     )
                 if await self._pending_count() > 0:
                     await pause_generation(rollout_ctl)
@@ -429,28 +446,16 @@ class AsyncProduceStrategy(ProduceStrategy):
         model_rollout_step: int | None = None,
         update_event: asyncio.Event | None = None,
         *,
+        progress: ProduceProgress,
         target_cumulative: int | None = None,
-        progress: ProduceProgress | None = None,
     ) -> ProduceBatchStatus:
-        self._current_rollout_step = rollout_step
         if model_rollout_step is None:
             model_rollout_step = rollout_step
         if update_event is None:
             update_event = asyncio.Event()
-        if progress is None:
-            # 共卡/旧调用路径使用一次性 progress，不污染 manager 的全局累计进度。
-            target_abs = batch_size if target_cumulative is None else target_cumulative
-            progress = ProduceProgress(
-                latest_consumer_step=rollout_step,
-                producer_future_step=rollout_step,
-                consumed_samples={task_name: 0},
-                target_samples={task_name: target_abs},
-                target_upto_future_step=rollout_step,
-            )
-        else:
-            target_abs = _validate_progress_for_task(progress, task_name, target_cumulative)
+        _validate_progress_for_task(progress, task_name, target_cumulative)
 
-        if target_abs <= 0:
+        if progress.target_samples[task_name] <= 0:
             return ProduceBatchStatus.NORMAL
 
         while True:
@@ -466,14 +471,12 @@ class AsyncProduceStrategy(ProduceStrategy):
                     task.result(),
                     replay_buffer,
                     task_name,
-                    current_rollout_step=progress.latest_consumer_step,
+                    current_rollout_step=progress.next_consumer_step,
                 )
 
             fresh = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
-            consumed = progress.consumed_samples[task_name]
-            target_abs = progress.target_samples[task_name]
-            available = consumed + fresh
-            required = max(0, target_abs - available)
+            available = progress.consumed_samples[task_name] + fresh
+            required = max(0, progress.target_samples[task_name] - available)
             if required == 0:
                 return ProduceBatchStatus.NORMAL
 
@@ -513,5 +516,5 @@ class AsyncProduceStrategy(ProduceStrategy):
                     task.result(),
                     replay_buffer,
                     task_name,
-                    current_rollout_step=progress.latest_consumer_step,
+                    current_rollout_step=progress.next_consumer_step,
                 )
