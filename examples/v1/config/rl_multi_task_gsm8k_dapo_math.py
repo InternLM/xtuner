@@ -42,7 +42,7 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, get_eos_token
-from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
+from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -54,10 +54,10 @@ enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0
 NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 experimental_name = "multi_task_gsm8k_dapo_math"
-rollout_steps = 50
+total_train_steps = 50
 evaluate_step = 5
 train_optimizer_steps = 8
-global_batch_size = 128
+train_batch_size = 128
 gsm8k_task_weight = float(os.environ.get("GSM8K_TASK_WEIGHT", "1.0"))
 dapo_task_weight = float(os.environ.get("DAPO_TASK_WEIGHT", "1.0"))
 rollout_tp_size = 1
@@ -300,10 +300,10 @@ trainer = RLColocateTrainerConfig(
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,
     load_from=model_path,
-    global_batch_size=global_batch_size,
+    train_batch_size=train_batch_size,
     enable_evaluate=True,
     enable_initial_evaluate=False,
-    rollout_steps=rollout_steps,
+    total_train_steps=total_train_steps,
     evaluate_step=evaluate_step,
     work_dir=work_dir,
     seed=123,

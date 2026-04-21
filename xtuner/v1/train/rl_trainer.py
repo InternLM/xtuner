@@ -3,13 +3,13 @@ import os
 import random
 from pathlib import Path
 from shutil import rmtree
-from typing import Any, List, Union, cast
+from typing import Any, List, cast
 
 import ray
 import torch
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -17,14 +17,20 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, ProduceBatchResult
+from xtuner.v1.rl.agent_loop import (
+    AgentLoopManagerConfig,
+    ProduceBatchResult,
+    ProduceBatchStatus,
+    ProducePauseSource,
+)
+from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerStatus
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer.controller import TrainingControllerProxy
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run, create_task
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
 from xtuner.v1.utils import get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -149,25 +155,48 @@ def is_valid_for_training(group_data_items: list[RolloutState], logger) -> bool:
     return True
 
 
-class RLColocateTrainerConfig(BaseModel):
+def _validate_sync_intervals(
+    sync_weights_interval: int,
+    checkpoint_interval: int | None,
+    hf_interval: int | None,
+) -> None:
+    if sync_weights_interval <= 0:
+        raise ValueError(f"sync_weights_interval must be positive, got {sync_weights_interval}.")
+
+    for name, interval in (
+        ("checkpoint_interval", checkpoint_interval),
+        ("hf_interval", hf_interval),
+    ):
+        if interval is None or interval == -1:
+            continue
+        if interval <= 0:
+            raise ValueError(f"{name} must be positive or -1/None to disable it, got {interval}.")
+        if interval % sync_weights_interval != 0:
+            raise ValueError(
+                f"{name}={interval} must be a multiple of sync_weights_interval={sync_weights_interval}, "
+                "because checkpoint/HF saves only run on weight-sync steps."
+            )
+
+
+class BaseRLTrainerConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
-    resources: AcceleratorResourcesConfig
     train_worker_cfg: WorkerConfig
     rollout_config: RolloutConfig
-    tokenizer_path: Union[str, Path]
+    tokenizer_path: str | Path
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
     agent_loop_manager_cfg: AgentLoopManagerConfig
     eval_agent_loop_manager_cfg: AgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
-    load_from: Union[str, Path]
-    rollout_steps: int
-    global_batch_size: int
+    load_from: str | Path
+    total_train_steps: int
+    train_batch_size: int
+    sync_weights_interval: int = 1
 
     enable_evaluate: bool = True
     enable_initial_evaluate: bool = False
     evaluate_step: int = 1
-    work_dir: Union[Path, str, None] = None
+    work_dir: Path | str | None = None
     auto_resume: bool = False
     load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
     checkpoint_interval: int | None = -1
@@ -175,221 +204,149 @@ class RLColocateTrainerConfig(BaseModel):
     hf_interval: int | None = -1
     hf_max_keep: int | None = -1
     checkpoint_no_save_optimizer: bool = False
-    log_dir: Union[Path, str, None] = None
+    log_dir: Path | str | None = None
     seed: int = 66
     debug_rollout: bool = False
     skip_checkpoint_validation: bool = False
     exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
 
-    def build(self) -> "RLColocateTrainer":
-        return RLColocateTrainer(
-            resources=self.resources,
-            train_worker_cfg=self.train_worker_cfg,
-            rollout_config=self.rollout_config,
-            tokenizer_path=self.tokenizer_path,
-            replay_buffer_config=self.replay_buffer_config,
-            agent_loop_manager_cfg=self.agent_loop_manager_cfg,
-            eval_agent_loop_manager_cfg=self.eval_agent_loop_manager_cfg,
-            evaluator_config=self.evaluator_config,
-            enable_evaluate=self.enable_evaluate,
-            enable_initial_evaluate=self.enable_initial_evaluate,
-            evaluate_step=self.evaluate_step,
-            work_dir=self.work_dir,
-            auto_resume=self.auto_resume,
-            load_checkpoint_cfg=self.load_checkpoint_cfg,
+    @model_validator(mode="after")
+    def _validate_sync_intervals(self):
+        _validate_sync_intervals(
+            sync_weights_interval=self.sync_weights_interval,
             checkpoint_interval=self.checkpoint_interval,
-            checkpoint_maxkeep=self.checkpoint_maxkeep,
-            checkpoint_no_save_optimizer=self.checkpoint_no_save_optimizer,
             hf_interval=self.hf_interval,
-            hf_max_keep=self.hf_max_keep,
-            load_from=self.load_from,
-            log_dir=self.log_dir,
-            seed=self.seed,
-            debug_rollout=self.debug_rollout,
-            skip_checkpoint_validation=self.skip_checkpoint_validation,
-            rollout_steps=self.rollout_steps,
-            global_batch_size=self.global_batch_size,
-            exp_tracker=self.exp_tracker,
         )
+        return self
 
 
-class RLColocateTrainer:
-    _META_PATH = ".xtuner_rl_colocate_trainer"
+class RLColocateTrainerConfig(BaseRLTrainerConfig):
+    resources: AcceleratorResourcesConfig
+
+    @model_validator(mode="after")
+    def _validate_colocate_sync_interval(self):
+        if self.sync_weights_interval != 1:
+            raise ValueError("RLColocateTrainerConfig requires sync_weights_interval=1.")
+        return self
+
+    def build(self) -> "RLColocateTrainer":
+        return RLColocateTrainer(self)
+
+
+class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
+    train_resources: AcceleratorResourcesConfig
+    rollout_resources: AcceleratorResourcesConfig
+
+    def build(self) -> "RLDisaggregatedTrainer":
+        return RLDisaggregatedTrainer(self)
+
+
+class BaseRLTrainer:
     _EXP_TRACKING_PATH = "exp_tracking"
     _CHECKPOINT_DIR = "checkpoints"
     _HF_DIR = "hf"
     _SAVE_TRAIN_STATE_PATH = "train_state.json"
 
-    # 弱化Trainer：Trainer中代码尽量少，尽量用componet来组织代码。
-    # 目标是像torch一样，让用户自己写init 和 train loop，我们只提供组件。
-    def __init__(
-        self,
-        *,
-        resources: AcceleratorResourcesConfig,
-        train_worker_cfg: WorkerConfig,
-        rollout_config: RolloutConfig,
-        # Sampler config
-        # sampler_config: SamplerConfig,
-        tokenizer_path: str | Path,
-        replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig,
-        # agent loop config
-        # agent_loop_config: AgentLoopConfig,
-        # agent loop manager config
-        # produce_strategy_config: ProduceStrategyConfig,
-        agent_loop_manager_cfg: AgentLoopManagerConfig,
-        # eval configs
-        eval_agent_loop_manager_cfg: AgentLoopManagerConfig,
-        evaluator_config: EvaluatorConfig,
-        enable_evaluate: bool = True,
-        enable_initial_evaluate: bool = False,
-        evaluate_step: int = 1,
-        # work_dir and resume
-        work_dir: Path | str | None = None,
-        auto_resume: bool = False,
-        load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig(),
-        checkpoint_interval: int | None = -1,
-        checkpoint_maxkeep: int | None = -1,
-        checkpoint_no_save_optimizer: bool = False,
-        hf_interval: int | None = None,
-        hf_max_keep: int | None = None,
-        # others
-        load_from: str | Path,
-        log_dir: Path | str | None = None,
-        seed: int = 66,
-        debug_rollout: bool = False,
-        skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
-        # steps
-        rollout_steps: int,
-        global_batch_size: int,
-        # exp tracker
-        exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
-    ):
-        check_fa3()
+    train_controller: TrainingControllerProxy
+    rollout_controller: RolloutControllerProxy
 
-        # work_dir
-        work_dir = Path(work_dir) if work_dir else Path.cwd() / "work_dirs"
+    def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
+        check_fa3()
+        self._init_work_dir_and_meta(cfg, meta_path)
+        self._init_load_source(cfg)
+        self._init_save_config(cfg)
+        log_dir = self._init_logger(cfg, logger_tag)
+        self._init_train_state(cfg)
+        self._init_train_worker_config(cfg, log_dir)
+        self._init_rollout_config(cfg, log_dir)
+        self._init_runtime_flags(cfg)
+
+        self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
+        self._display_all_workers_log = False
+
+    def _init_work_dir_and_meta(self, cfg: BaseRLTrainerConfig, meta_path: str) -> None:
+        work_dir = Path(cfg.work_dir) if cfg.work_dir else Path.cwd() / "work_dirs"
         if get_rank() == 0:
             work_dir.mkdir(parents=True, exist_ok=True)
-        self._meta = XTunerMeta.build(work_dir, self._META_PATH, auto_resume)
+        self._meta = XTunerMeta.build(work_dir, meta_path, cfg.auto_resume)
+        self._meta_path = meta_path
 
-        # hf checkpoint config
-        self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
-        is_hf_path, error_info = is_hf_model_path(load_from) if load_from is not None else (False, "")
+    def _init_load_source(self, cfg: BaseRLTrainerConfig) -> None:
+        self._load_from = Path(cfg.load_from) if isinstance(cfg.load_from, str) else cfg.load_from
+        is_hf_path, error_info = is_hf_model_path(cfg.load_from) if cfg.load_from is not None else (False, "")
         self._load_from_hf = is_hf_path
-
         if not self._load_from_hf:
             raise NotImplementedError(error_info)
-        self._hf_max_keep = hf_max_keep
-        self._hf_interval = hf_interval
 
-        # checkpoint config
-        self._checkpoint_interval = checkpoint_interval
-        self._checkpoint_maxkeep = checkpoint_maxkeep
-        self._checkpoint_no_save_optimizer = checkpoint_no_save_optimizer
-        self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(auto_resume, load_checkpoint_cfg)
+    def _init_save_config(self, cfg: BaseRLTrainerConfig) -> None:
+        self._hf_max_keep = cfg.hf_max_keep
+        self._hf_interval = cfg.hf_interval
 
-        # log
+        self._checkpoint_interval = cfg.checkpoint_interval
+        self._checkpoint_maxkeep = cfg.checkpoint_maxkeep
+        self._checkpoint_no_save_optimizer = cfg.checkpoint_no_save_optimizer
+        self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(cfg.auto_resume, cfg.load_checkpoint_cfg)
+
+    def _init_logger(self, cfg: BaseRLTrainerConfig, logger_tag: str) -> Path:
         log_dir = self.exp_dir / "logs"
-        self.logger = get_logger(log_dir=log_dir, tag="RLTrainer")
-
+        self.logger = get_logger(log_dir=log_dir, tag=logger_tag)
         force_set_tokenize_workers(self.logger)
 
-        if skip_checkpoint_validation:
+        if cfg.skip_checkpoint_validation:
             patch_default_save_plan()
+        return log_dir
 
-        # steps
-        self._rollout_steps = rollout_steps
-        # self._total_epochs = total_epochs  # TODO
+    def _init_train_state(self, cfg: BaseRLTrainerConfig) -> None:
+        self._total_train_steps = cfg.total_train_steps
         self._cur_step = 0
         self._global_train_step = 0
-        self._seed = seed
+        self._seed = cfg.seed
+        self.train_batch_size = cfg.train_batch_size
+        self._sync_weights_interval = cfg.sync_weights_interval
         set_deterministic()
-        set_random_seed(seed)
-        self.global_batch_size = global_batch_size
+        set_random_seed(cfg.seed)
 
-        # main components
-        self._pg = AutoAcceleratorWorkers.build_placement_group(resources)
+    def _init_train_worker_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
+        if cfg.train_worker_cfg.seed is None:
+            self.logger.warning(f"RLTrainer seed {cfg.seed} is used as train worker seed.")
+            cfg.train_worker_cfg.seed = cfg.seed
+        cfg.train_worker_cfg.load_from = cfg.load_from
+        cfg.train_worker_cfg.log_dir = log_dir
+        self._train_worker_cfg = cfg.train_worker_cfg
 
-        # override train worker config
-        if train_worker_cfg.seed is None:
-            self.logger.warning(f"RLTrainer seed {seed} is used as train worker seed.")
-            train_worker_cfg.seed = seed
-        train_worker_cfg.load_from = load_from
-        train_worker_cfg.log_dir = log_dir
-        self._train_worker_cfg = train_worker_cfg
-
-        # override rollout config
-        rollout_config.worker_log_dir = log_dir
-
-        # If resuming from checkpoint, skip loading weights in rollout workers
+    def _init_rollout_config(self, cfg: BaseRLTrainerConfig, log_dir: Path) -> None:
+        cfg.rollout_config.worker_log_dir = log_dir
         if self._load_checkpoint_cfg.checkpoint_path is not None:
-            rollout_config.skip_load_weights = True
+            cfg.rollout_config.skip_load_weights = True
             self.logger.info(
                 f"Skip load rollout weights due to resume from checkpoint {self._load_checkpoint_cfg.checkpoint_path}"
             )
+        self._rollout_config = cfg.rollout_config
 
-        # build train controller and rollout controller
-        self.train_controller = train_worker_cfg.build(self._pg)
+    def _init_runtime_flags(self, cfg: BaseRLTrainerConfig) -> None:
+        self._enable_evaluate = cfg.enable_evaluate
+        self._enable_initial_evaluate = cfg.enable_initial_evaluate
+        self._evaluate_step = cfg.evaluate_step
+        self._debug_rollout = cfg.debug_rollout
 
-        # Resume train worker if checkpoint exists
-        if self._load_checkpoint_cfg.checkpoint_path is not None:
-            ray.get(self.train_controller.resume.remote(self._load_checkpoint_cfg))
-            train_state_path = Path(self._load_checkpoint_cfg.checkpoint_path) / self._SAVE_TRAIN_STATE_PATH
-            with train_state_path.open("r") as f:
-                train_state = json.load(f)
-                self._cur_step = train_state["cur_step"]
-
-        self.rollout_controller = rollout_config.build(self._pg)
-
-        replay_buffer = replay_buffer_config.build()
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-        # build agnet_loop_manager
-        self.agent_loop_manager = agent_loop_manager_cfg.build(
+    def _build_agent_loop_components(self, cfg: BaseRLTrainerConfig, replay_buffer) -> None:
+        self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
+        self.agent_loop_manager = cfg.agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
         )
 
-        # build eval agent loop manager
-        self.eval_agent_loop_manager = eval_agent_loop_manager_cfg.build(
+        self.eval_agent_loop_manager = cfg.eval_agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
         )
 
-        self._enable_evaluate = enable_evaluate
-        self._enable_initial_evaluate = enable_initial_evaluate
-        self._evaluate_step = evaluate_step
-
-        # build evaluator
         total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
-        self.evaluator = evaluator_config.build(total_eval_samples=total_eval_samples)
-
-        # Resume sampler and sync weights if checkpoint exists
-        if self._load_checkpoint_cfg.checkpoint_path is not None:
-            self.logger.info(f"Resume sampler from {self._load_checkpoint_cfg.checkpoint_path}")
-            self.agent_loop_manager.resume(self._load_checkpoint_cfg.checkpoint_path)
-
-            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-            self.logger.info("Rollout workers skip load weights, update weights from train workers.")
-            ray.get(self.train_controller.offload.remote(target="optimizer"))
-            ray.get(self.rollout_controller.offload.remote())
-            ray.get(self.rollout_controller.onload_weights.remote())
-            ray.get(self.train_controller.update_weights.remote())
-            ray.get(self.train_controller.offload.remote(target="model"))
-            ray.get(self.rollout_controller.onload_kvcache.remote())
-            self.logger.info("Rollout workers updated weights from train workers.")
-        else:
-            ray.get(self.train_controller.offload.remote(target="all"))
-
-        # others
-        if debug_rollout:
-            self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
-        self._debug_rollout = debug_rollout
-        self._exp_tracker = get_writer(writer_type=exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
-        self._display_all_workers_log = False
+        self.evaluator = cfg.evaluator_config.build(total_eval_samples=total_eval_samples)
 
     @property
     def exp_dir(self) -> Path:
@@ -404,6 +361,17 @@ class RLColocateTrainer:
             load_checkpoint_cfg.checkpoint_path = Path(latest_checkpoint)
         return load_checkpoint_cfg
 
+    def _resume_train_controller_and_state(self, checkpoint_path: Path | str) -> Path:
+        # 子类只复用训练 worker 和 train_state 恢复，权重同步流程各自维护。
+        checkpoint_path = Path(checkpoint_path)
+        ray.get(self.train_controller.resume.remote(self._load_checkpoint_cfg))
+
+        train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+        with train_state_path.open("r") as f:
+            train_state = json.load(f)
+        self._cur_step = train_state["cur_step"]
+        return checkpoint_path
+
     def _maybe_save_checkpoint(self, cur_step: int) -> None:
         """Save checkpoint if interval condition is met."""
         ckp_interval = self._checkpoint_interval
@@ -417,7 +385,7 @@ class RLColocateTrainer:
 
         # 1. Save sampler (dataloader) state
         self.logger.info(f"Saving sampler state to {checkpoint_path}")
-        self.agent_loop_manager.save(checkpoint_path)
+        self.agent_loop_manager.save(checkpoint_path, model_rollout_step=cur_step)
 
         # 2. Save DCP checkpoint (model + optimizer)
         self.logger.info(f"Saving DCP checkpoint to {checkpoint_path}")
@@ -442,7 +410,7 @@ class RLColocateTrainer:
             current_exp.checkpoint_list = ckp_list[-ckp_maxkeep:]
 
         # 6. Persist meta to disk
-        meta_path = self.exp_dir.parent / self._META_PATH
+        meta_path = self.exp_dir.parent / self._meta_path
         with meta_path.open("w") as f:
             f.write(self._meta.model_dump_json(indent=2))
 
@@ -456,7 +424,7 @@ class RLColocateTrainer:
                 "You meet this error means `load_from` of trainer is not a Huggingface model path."
             )
 
-        if cur_step % self._hf_interval != 0 and cur_step != self._rollout_steps:
+        if cur_step % self._hf_interval != 0 and cur_step != self._total_train_steps:
             return
 
         save_hf_path = self.exp_dir / self._HF_DIR / f"hf-step-{cur_step}"
@@ -480,103 +448,70 @@ class RLColocateTrainer:
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
 
-    def fit(self):
-        self.logger.info("Start RL training")
-        if self._cur_step >= self._rollout_steps:
-            self.logger.info(f"Rollout steps {self._rollout_steps} reached, stop training")
-            return
+    async def _run_initial_evaluate(self) -> None:
+        eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
+            self.evaluator.eval_batch_size, rollout_step=0
+        )
+        eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
+        self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
+        tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
+        self._exp_tracker.add_scalars(tag_scalar_dict=tb_scores, global_step=0)
 
-        if self._enable_initial_evaluate and not self._debug_rollout:
-            eval_produce_result = asyncio_run(
-                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size, rollout_step=0)
-            )
-            eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
-            self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
+    def _train_one_batch(
+        self,
+        train_batch: list[list[RolloutState]],
+        train_step: int,
+        step_timer_dict: dict,
+        *,
+        offload_rollout_before_train: bool = False,
+        onload_train_before_train: bool = False,
+    ) -> TrainInfo:
+        train_sample_count = sum(len(group) for group in train_batch)
+        self.logger.info(f"generate {train_sample_count} samples for training")
 
-            tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
-            self._exp_tracker.add_scalars(
-                tag_scalar_dict=tb_scores,
-                global_step=0,
-            )
+        train_trajectory_dir = self.exp_dir / "train_rollout"
+        train_trajectory_dir.mkdir(parents=True, exist_ok=True)
+        train_trajectory_path = train_trajectory_dir / f"train_rollout_{train_step}.jsonl"
+        self._save_trajectories(train_batch, train_trajectory_path)
+        self.logger.info(f"Train step {train_step} train trajectories saved to {train_trajectory_path}")
 
-        for rollout_idx in range(self._cur_step + 1, self._rollout_steps + 1):
-            self.logger.info(f"Rollout {rollout_idx}/{self._rollout_steps} start")
-            step_timer_dict = {}
-            with timer("step", step_timer_dict):
-                # 1. Rollout to generate experience
-                self.logger.info("start to generate rollout experience for training")
-                produce_result: ProduceBatchResult = asyncio_run(
-                    self.agent_loop_manager.produce_batch(self.global_batch_size, rollout_step=rollout_idx)
+        # 共卡需要先释放 rollout，再把训练 worker onload；非共卡不走这两个动作。
+        if offload_rollout_before_train:
+            ray.get(self.rollout_controller.offload.remote())
+        if onload_train_before_train:
+            with timer("onload", step_timer_dict):
+                ray.get(self.train_controller.onload.remote(target="all"))
+                self.logger.info("Training controller loaded")
+
+        with timer("prepare_data", step_timer_dict):
+            data_batches, data_info = self._prepare_train_data(train_batch, self._train_worker_cfg.pack_max_length)
+        self.logger.info(f"Prepared {len(data_batches)} training data batches")
+
+        with timer("training", step_timer_dict):
+            workers_log_item: list[WorkerLogItem] = ray.get(
+                self.train_controller.fit.remote(
+                    data_batches,
+                    pack_max_length=self._train_worker_cfg.pack_max_length,
+                    rollout_idx=train_step,
                 )
-                train_batch = produce_result.rollout_states
-                assert train_batch, (
-                    "RLColocateTrainer expects agent_loop_manager.produce_batch() to return non-empty rollout_states."
-                )
-                train_sample_count = sum(len(group) for group in train_batch)
-                self.logger.info(f"generate {train_sample_count} samples for training")
-                train_trajectory_dir = self.exp_dir / "train_rollout"
-                train_trajectory_dir.mkdir(parents=True, exist_ok=True)
-                train_trajectory_path = train_trajectory_dir / f"train_rollout_{rollout_idx}.jsonl"
-                self._save_trajectories(train_batch, train_trajectory_path)
-                self.logger.info(f"Rollout {rollout_idx} train trajectories saved to {train_trajectory_path}")
-                if not self._debug_rollout:
-                    ray.get(self.rollout_controller.offload.remote())
+            )
+        return {
+            "data_info": data_info,
+            "workers_log_item": workers_log_item,
+        }
 
-                if not self._debug_rollout:
-                    with timer("onload", step_timer_dict):
-                        ray.get(self.train_controller.onload.remote(target="all"))
-                        self.logger.info("Training controller loaded")
-
-                    # 2. Train on the generated experience
-                    # TODO: simplify with Packer.pack_pad_dispatch()
-                    # train_batch = Packer.pack_pad_dispatch(train_batch)
-                    with timer("prepare_data", step_timer_dict):
-                        data_batches, data_info = self._prepare_train_data(
-                            train_batch, self._train_worker_cfg.pack_max_length
-                        )
-                    self.logger.info(f"Prepared {len(data_batches)} training data batches")
-
-                    with timer("training", step_timer_dict):
-                        workers_log_item: list[WorkerLogItem] = ray.get(
-                            self.train_controller.fit.remote(
-                                data_batches,
-                                pack_max_length=self._train_worker_cfg.pack_max_length,
-                                rollout_idx=rollout_idx,
-                            )
-                        )
-                    train_log_info: TrainInfo = {
-                        "data_info": data_info,
-                        "workers_log_item": workers_log_item,
-                    }
-
-                    # 3. Synchronize weights and save checkpoints
-                    self._sync_weights_and_save(rollout_idx, step_timer_dict)
-
-                    # 4. Evaluate model performance
-                    eval_log_info = {}
-                    if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
-                        with timer("evaluation", step_timer_dict):
-                            eval_produce_result = asyncio_run(
-                                self.eval_agent_loop_manager.produce_batch(
-                                    self.evaluator.eval_batch_size, rollout_step=rollout_idx
-                                )
-                            )
-                            eval_batch = eval_produce_result.rollout_states
-                            eval_metrics = self.evaluator.run(eval_batch)
-                            eval_trajectory_dir = self.exp_dir / "eval_rollout"
-                            eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
-                            eval_trajectory_path = eval_trajectory_dir / f"eval_rollout_{rollout_idx}.jsonl"
-                            self._save_trajectories(eval_batch, eval_trajectory_path)
-                            self.logger.info(
-                                f"Rollout {rollout_idx} eval trajectories saved to {eval_trajectory_path}"
-                            )
-                            eval_log_info.update(eval_metrics)
-                else:
-                    train_log_info = {}
-                    eval_log_info = {}
-
-            self._log_step(rollout_idx, step_timer_dict, produce_result, train_log_info, eval_log_info)
-            self._cur_step = rollout_idx
+    async def _run_evaluation(self, train_step: int) -> dict[str, float]:
+        eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
+            self.evaluator.eval_batch_size, rollout_step=train_step
+        )
+        eval_batch = eval_produce_result.rollout_states
+        eval_metrics = self.evaluator.run(eval_batch)
+        eval_trajectory_dir = self.exp_dir / "eval_rollout"
+        eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
+        eval_trajectory_path = eval_trajectory_dir / f"eval_rollout_{train_step}.jsonl"
+        self._save_trajectories(eval_batch, eval_trajectory_path)
+        self.logger.info(f"Train step {train_step} eval trajectories saved to {eval_trajectory_path}")
+        return eval_metrics
 
     # TODO: simplify with Packer.pack_pad_dispatch()
     def _prepare_train_data(self, data_groups: list[list[RolloutState]], pack_max_length: int):
@@ -717,25 +652,9 @@ class RLColocateTrainer:
         }
         return data_batches, info_dict
 
-    def _sync_weights_and_save(self, rollout_idx: int, step_timer_dict: dict):
-        """Synchronizes weights and saves checkpoints."""
-        with timer("save_ckpt", step_timer_dict):
-            ray.get(self.train_controller.offload.remote(target="optimizer"))
-            self._maybe_save_checkpoint(rollout_idx)
-            self._maybe_save_hf(rollout_idx)
-
-        ray.get(self.rollout_controller.recover_failed_workers.remote())
-        with timer("sync_weight", step_timer_dict):
-            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-            ray.get(self.rollout_controller.onload_weights.remote())
-            ray.get(self.train_controller.update_weights.remote())
-            self.logger.info("Model weights synchronized successfully.")
-            ray.get(self.train_controller.offload.remote(target="model"))
-            ray.get(self.rollout_controller.onload_kvcache.remote())
-
     def _log_step(
         self,
-        rollout_idx: int,
+        train_step: int,
         step_timer_dict: dict,
         produce_result: ProduceBatchResult,
         train_info: TrainInfo,
@@ -747,7 +666,7 @@ class RLColocateTrainer:
         eval_str = ""
         if step_timer_dict:
             all_scalars.update({f"time/{k}": v for k, v in step_timer_dict.items()})
-            log_time_str = f"\nRollout {rollout_idx} finished and timing listed:\n"
+            log_time_str = f"\nTrain step {train_step} finished and timing listed:\n"
             log_time_str += "\n".join([f" - {k:<25}: {v:.2f}s" for k, v in step_timer_dict.items()])
 
         if produce_result.group_gen_count is not None:
@@ -763,7 +682,7 @@ class RLColocateTrainer:
 
         if train_info:
             all_scalars.update({f"response/{k}": v for k, v in train_info.get("data_info", {}).items()})
-            trajectory_str = f"\nRollout {rollout_idx} data statistics:\n"
+            trajectory_str = f"\nTrain step {train_step} data statistics:\n"
             trajectory_str += "\n".join([f"- {k:<25}: {v:.4f}" for k, v in train_info.get("data_info", {}).items()])
             rank0_log_item = train_info["workers_log_item"][0]
             rank0_rollout_is_metrics = rank0_log_item.get("rollout_is_metrics", {})
@@ -796,10 +715,10 @@ class RLColocateTrainer:
             all_scalars.update({f"eval/{k}": v for k, v in eval_info.items()})
             eval_str = " ".join([f"{k}: {v:.4f}" for k, v in eval_info.items()])
 
-        self.logger.info(f"Rollout {rollout_idx}/{self._rollout_steps}{log_time_str} {trajectory_str} ")
+        self.logger.info(f"Train step {train_step}/{self._total_train_steps}{log_time_str} {trajectory_str} ")
         if eval_str:
             self.logger.info(f"Eval: {eval_str}")
-        self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=rollout_idx)
+        self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=train_step)
 
     def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
         rewards = []
@@ -876,3 +795,247 @@ class RLColocateTrainer:
                     global_step=current_global_step,
                 )
         self._global_train_step += len(workers_log_item[0]["train_metrics"])
+
+
+class RLColocateTrainer(BaseRLTrainer):
+    _META_PATH = ".xtuner_rl_colocate_trainer"
+
+    # 共卡 trainer 保留自己的资源编排、resume、主循环和权重同步；通用保存、日志仍在 BaseRLTrainer。
+    def __init__(self, cfg: RLColocateTrainerConfig):
+        self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLTrainer")
+
+        self._pg = AutoAcceleratorWorkers.build_placement_group(cfg.resources)
+        self.train_controller = self._train_worker_cfg.build(self._pg)
+        self.rollout_controller = self._rollout_config.build(self._pg)
+
+        replay_buffer = cfg.replay_buffer_config.build()
+        self._build_agent_loop_components(cfg, replay_buffer)
+
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
+        else:
+            ray.get(self.train_controller.offload.remote(target="all"))
+
+        if self._debug_rollout:
+            self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
+
+    def _resume_from_checkpoint(self, checkpoint_path: Path | str) -> None:
+        checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
+
+        self.logger.info(f"Resume sampler from {checkpoint_path}")
+        self.agent_loop_manager.resume(checkpoint_path)
+
+        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+        self.logger.info("Rollout workers skip load weights, update weights from train workers.")
+        ray.get(self.train_controller.offload.remote(target="optimizer"))
+        ray.get(self.rollout_controller.offload.remote())
+        ray.get(self.rollout_controller.onload_weights.remote())
+        ray.get(self.train_controller.update_weights.remote())
+        ray.get(self.train_controller.offload.remote(target="model"))
+        ray.get(self.rollout_controller.onload_kvcache.remote())
+        self.logger.info("Rollout workers updated weights from train workers.")
+
+    def fit(self):
+        self.logger.info("Start RL training")
+        if self._cur_step >= self._total_train_steps:
+            self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
+            return
+
+        if self._enable_initial_evaluate and not self._debug_rollout:
+            asyncio_run(self._run_initial_evaluate())
+
+        for train_step in range(self._cur_step + 1, self._total_train_steps + 1):
+            self.logger.info(f"Train step {train_step}/{self._total_train_steps} start")
+            step_timer_dict = {}
+            with timer("step", step_timer_dict):
+                # 共卡路径一次调用内完成 rollout 生产和 replay buffer 消费。
+                self.logger.info("start to generate rollout experience for training")
+                produce_result: ProduceBatchResult = asyncio_run(
+                    self.agent_loop_manager.produce_batch(self.train_batch_size, rollout_step=train_step)
+                )
+                train_batch = produce_result.rollout_states
+                assert train_batch, (
+                    "RLColocateTrainer expects agent_loop_manager.produce_batch() to return non-empty rollout_states."
+                )
+
+                if not self._debug_rollout:
+                    train_log_info = self._train_one_batch(
+                        train_batch,
+                        train_step,
+                        step_timer_dict,
+                        offload_rollout_before_train=True,
+                        onload_train_before_train=True,
+                    )
+
+                    self._sync_weights_and_save(train_step, step_timer_dict)
+
+                    eval_log_info = {}
+                    if self._enable_evaluate and train_step % self._evaluate_step == 0:
+                        with timer("evaluation", step_timer_dict):
+                            eval_log_info.update(asyncio_run(self._run_evaluation(train_step)))
+                else:
+                    train_log_info = {}
+                    eval_log_info = {}
+
+            self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
+            self._cur_step = train_step
+
+    def _sync_weights_and_save(self, train_step: int, step_timer_dict: dict):
+        """Synchronizes weights and saves checkpoints."""
+        with timer("save_ckpt", step_timer_dict):
+            ray.get(self.train_controller.offload.remote(target="optimizer"))
+            self._maybe_save_checkpoint(train_step)
+            self._maybe_save_hf(train_step)
+
+        ray.get(self.rollout_controller.recover_failed_workers.remote())
+        with timer("sync_weight", step_timer_dict):
+            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+            ray.get(self.rollout_controller.onload_weights.remote())
+            ray.get(self.train_controller.update_weights.remote())
+            self.logger.info("Model weights synchronized successfully.")
+            ray.get(self.train_controller.offload.remote(target="model"))
+            ray.get(self.rollout_controller.onload_kvcache.remote())
+
+
+class RLDisaggregatedTrainer(BaseRLTrainer):
+    _META_PATH = ".xtuner_rl_disaggregated_trainer"
+
+    def __init__(self, cfg: RLDisaggregatedTrainerConfig):
+        self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLDisaggTrainer")
+
+        self._train_pg, self._rollout_pg = self._build_disaggregated_placement_groups(
+            train_resources=cfg.train_resources,
+            rollout_resources=cfg.rollout_resources,
+        )
+        self.train_controller = self._train_worker_cfg.build(self._train_pg)
+        self.rollout_controller = self._rollout_config.build(self._rollout_pg)
+
+        replay_buffer = cfg.replay_buffer_config.build()
+        self._build_agent_loop_components(cfg, replay_buffer)
+
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
+
+        if self._debug_rollout:
+            self.logger.warning(
+                "Debug rollout mode is enabled. Disaggregated training keeps rollout workers resident."
+            )
+
+    def _build_disaggregated_placement_groups(
+        self,
+        train_resources: AcceleratorResourcesConfig,
+        rollout_resources: AcceleratorResourcesConfig,
+    ):
+        pg_name_prefix = f"xtuner_rl_disagg_{self.exp_dir.name}"
+        train_pg_name = f"{pg_name_prefix}_train"
+        rollout_pg_name = f"{pg_name_prefix}_rollout"
+
+        train_pg = AutoAcceleratorWorkers.build_placement_group(train_resources, name=train_pg_name)
+        rollout_pg = AutoAcceleratorWorkers.build_placement_group(rollout_resources, name=rollout_pg_name)
+        if train_pg.id == rollout_pg.id:
+            raise RuntimeError(
+                "RLDisaggregatedTrainer requires distinct placement groups for train and rollout, "
+                f"but both resolved to the same placement group id={train_pg.id}. "
+                "Please check placement-group naming and stale Ray cluster state."
+            )
+
+        self.logger.info(
+            "Created disaggregated placement groups: "
+            f"train={train_pg_name}(id={train_pg.id}), "
+            f"rollout={rollout_pg_name}(id={rollout_pg.id})"
+        )
+        return train_pg, rollout_pg
+
+    def _resume_from_checkpoint(self, checkpoint_path: Path | str) -> None:
+        checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
+
+        self.logger.info(f"Resume sampler from {checkpoint_path}")
+        saved_model_rollout_step = self.agent_loop_manager.resume(checkpoint_path)
+        assert self._cur_step == saved_model_rollout_step
+
+        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+        self.logger.info("Rollout workers skip load weights, update weights from train workers.")
+        self.fake_update_weights()
+        self.agent_loop_manager.continue_produce(model_rollout_step=saved_model_rollout_step)
+
+    def fit(self):
+        # 对外保留同步 fit 接口，内部用 async loop 组织 producer/consumer。
+        return asyncio_run(self._fit())
+
+    async def _fit(self):
+        self.logger.info("Start RL disaggregated training")
+        if self._cur_step >= self._total_train_steps:
+            self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
+            return
+
+        if self._enable_initial_evaluate:
+            await self._run_initial_evaluate()
+
+        # 后台 producer 只负责持续往 replay buffer 写数据，前台 trainer 通过 get_batch 消费。
+        producer_task = create_task(
+            self.agent_loop_manager.produce_loop(
+                batch_size=self.train_batch_size,
+            )
+        )
+        try:
+            for train_step in range(self._cur_step + 1, self._total_train_steps + 1):
+                self.logger.info(f"Train step {train_step}/{self._total_train_steps} start")
+                step_timer_dict: dict[str, float] = {}
+                train_log_info = {}
+                eval_log_info = {}
+                with timer("step", step_timer_dict):
+                    produce_result = await self.agent_loop_manager.get_batch(
+                        self.train_batch_size, rollout_step=train_step
+                    )
+                    need_sync = (
+                        produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
+                        or train_step % self._sync_weights_interval == 0
+                        or train_step == self._total_train_steps
+                    )
+                    if produce_result.status != ProduceBatchStatus.EXPIRED_BATCH:
+                        train_batch = produce_result.rollout_states
+                        assert train_batch, (
+                            "RLDisaggregatedTrainer expects get_batch() to return non-empty rollout_states "
+                            "unless status is EXPIRED_BATCH."
+                        )
+                        train_log_info = self._train_one_batch(train_batch, train_step, step_timer_dict)
+                    else:
+                        self.logger.info(
+                            "Skip train step because rollout model is expired; prioritize weight sync first."
+                        )
+
+                    if need_sync:
+                        # 同步前先暂停后台 producer，避免 save/sync 时还有 pending rollout 继续写 buffer。
+                        with timer("pause_produce", step_timer_dict):
+                            await self.agent_loop_manager.pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP)
+
+                        await self._sync_weights_and_save(train_step, step_timer_dict)
+
+                        if self._enable_evaluate and train_step % self._evaluate_step == 0:
+                            # eval 放在恢复 producer 前，避免后台生产抢占 rollout 资源。
+                            with timer("evaluation", step_timer_dict):
+                                eval_log_info.update(await self._run_evaluation(train_step))
+
+                        self.agent_loop_manager.continue_produce(model_rollout_step=train_step)
+
+                self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
+                self._cur_step = train_step
+        finally:
+            self.agent_loop_manager._status = AgentLoopManagerStatus.FINISH
+            self.agent_loop_manager._finish_event.set()
+            await producer_task
+
+    async def _sync_weights_and_save(self, train_step: int, step_timer_dict: dict):
+        # 非共卡已经在 _fit 里暂停 producer；这里保持静止态下的 save -> bind -> update 顺序。
+        with timer("save_ckpt", step_timer_dict):
+            self._maybe_save_checkpoint(train_step)
+            self._maybe_save_hf(train_step)
+
+        ray.get(self.rollout_controller.recover_failed_workers.remote())
+        with timer("sync_weight", step_timer_dict):
+            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+            self.fake_update_weights()
+
+    def fake_update_weights(self):
+        ray.get(self.train_controller.update_weights.remote(), timeout=TRAINER_RAY_GET_TIMEOUT)
+        self.logger.info("Rollout workers updated weights through fake disaggregated sync.")

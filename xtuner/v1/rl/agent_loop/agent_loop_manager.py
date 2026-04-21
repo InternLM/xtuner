@@ -812,7 +812,7 @@ class AgentLoopManager:
                 pending_task_counts[task.task_name] = len(pending_tasks)
         return pending_task_counts
 
-    def save(self, checkpoint_path: Path | str, model_rollout_step_override: int | None = None) -> None:
+    def save(self, checkpoint_path: Path | str, model_rollout_step: int) -> None:
         """Save all task sampler states and the shared replay buffer."""
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -822,6 +822,8 @@ class AgentLoopManager:
                 "Cannot save AgentLoopManager while pending rollout tasks still exist: "
                 f"{pending_task_counts}. Call pause_produce() first."
             )
+        # 保存前显式记录当前 checkpoint 对应的模型步数，resume 时直接恢复这一份状态。
+        self._model_rollout_step = model_rollout_step
         for task in self.task_runners:
             task_checkpoint_path = self._task_checkpoint_path(checkpoint_path, task.task_name)
             task_checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -834,7 +836,6 @@ class AgentLoopManager:
                 {
                     "status": self._status.name,
                     "model_rollout_step": self._model_rollout_step,
-                    "model_rollout_step_override": model_rollout_step_override,
                     "next_consumer_step": progress.next_consumer_step,
                     "producer_future_step": progress.producer_future_step,
                     "consumed_samples": progress.consumed_samples,
@@ -852,24 +853,19 @@ class AgentLoopManager:
         asyncio_run(self.replay_buffer.resume(checkpoint_path))
 
         manager_state_path = self._manager_state_path(checkpoint_path)
-        saved_model_rollout_step = self._model_rollout_step
-        if manager_state_path.exists():
-            with manager_state_path.open("r") as f:
-                manager_state = json.load(f)
-            saved_model_rollout_step = manager_state["model_rollout_step"]
-            model_rollout_step_override = manager_state["model_rollout_step_override"]
-            if model_rollout_step_override is not None:
-                saved_model_rollout_step = model_rollout_step_override
-            progress = self._produce_progress
-            progress.next_consumer_step = manager_state["next_consumer_step"]
-            progress.producer_future_step = manager_state["producer_future_step"]
-            progress.target_upto_future_step = manager_state["target_upto_future_step"]
+        with manager_state_path.open("r") as f:
+            manager_state = json.load(f)
+        saved_model_rollout_step = manager_state["model_rollout_step"]
+        progress = self._produce_progress
+        progress.next_consumer_step = manager_state["next_consumer_step"]
+        progress.producer_future_step = manager_state["producer_future_step"]
+        progress.target_upto_future_step = manager_state["target_upto_future_step"]
 
-            # dict 原地更新，避免 strategy 持有旧引用。
-            progress.consumed_samples.clear()
-            progress.consumed_samples.update(manager_state["consumed_samples"])
-            progress.target_samples.clear()
-            progress.target_samples.update(manager_state["target_samples"])
+        # dict 原地更新，避免 strategy 持有旧引用。
+        progress.consumed_samples.clear()
+        progress.consumed_samples.update(manager_state["consumed_samples"])
+        progress.target_samples.clear()
+        progress.target_samples.update(manager_state["target_samples"])
 
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()

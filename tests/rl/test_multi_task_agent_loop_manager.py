@@ -352,15 +352,15 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             checkpoint_path = Path(tmp_dir)
-            manager.save(checkpoint_path, model_rollout_step_override=7)
+            manager.save(checkpoint_path, model_rollout_step=7)
 
             state_path = checkpoint_path / manager._MANAGER_STATE_PATH
             with state_path.open("r") as f:
                 state = json.load(f)
 
             self.assertEqual(state["status"], "EXPIRED_BATCH")
-            self.assertEqual(state["model_rollout_step"], 2)
-            self.assertEqual(state["model_rollout_step_override"], 7)
+            self.assertEqual(state["model_rollout_step"], 7)
+            self.assertNotIn("model_rollout_step_override", state)
             self.assertEqual(state["next_consumer_step"], 1)
             self.assertEqual(state["producer_future_step"], 1)
             self.assertEqual(state["consumed_samples"], {"task_a": 0})
@@ -399,7 +399,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             with self.assertRaisesRegex(RuntimeError, "pending rollout tasks"):
-                manager.save(tmp_dir)
+                manager.save(tmp_dir, model_rollout_step=0)
 
     async def test_custom_get_task_batch_sizes_can_disable_tasks(self):
         strategy_a = _FakeProduceStrategy()

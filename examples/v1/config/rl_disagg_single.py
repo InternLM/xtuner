@@ -56,7 +56,7 @@ from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
-from xtuner.v1.train.rl_disaggregated_trainer import (
+from xtuner.v1.train.rl_trainer import (
     RLDisaggregatedTrainerConfig,
 )
 

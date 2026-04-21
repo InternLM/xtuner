@@ -9,7 +9,7 @@ from xtuner.v1.data_proto import Status
 from xtuner.v1.rl.agent_loop import AsyncProduceStrategyConfig, ProduceBatchResult
 from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManager, _TaskRunner
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
-from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainer
+from xtuner.v1.train.rl_trainer import RLColocateTrainer
 
 
 class _FakeRolloutState:
@@ -76,10 +76,10 @@ class TestRLColocateTrainer(unittest.TestCase):
     def _make_trainer(self, agent_loop_manager):
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
         trainer.logger = MagicMock()
-        trainer._rollout_steps = 1
+        trainer._total_train_steps = 1
         trainer._cur_step = 0
         trainer._global_train_step = 0
-        trainer.global_batch_size = 1
+        trainer.train_batch_size = 1
         trainer._debug_rollout = False
         trainer._enable_evaluate = False
         trainer._enable_initial_evaluate = False
@@ -142,8 +142,8 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer = self._make_trainer(manager)
 
         with (
-            patch("xtuner.v1.train.rl_colocate_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_colocate_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
         ):
             trainer.fit()
 
@@ -164,8 +164,8 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer = self._make_trainer(empty_manager)
 
         with (
-            patch("xtuner.v1.train.rl_colocate_trainer.asyncio_run", side_effect=asyncio.run),
-            patch("xtuner.v1.train.rl_colocate_trainer.ray.get", side_effect=lambda obj: obj),
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
         ):
             with self.assertRaisesRegex(AssertionError, "return non-empty rollout_states"):
                 trainer.fit()

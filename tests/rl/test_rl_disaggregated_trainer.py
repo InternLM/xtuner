@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from xtuner.v1.rl.agent_loop import ProducePauseSource, ProduceBatchResult, ProduceBatchStatus
 from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerStatus
-from xtuner.v1.train.rl_disaggregated_trainer import RLDisaggregatedTrainer, _validate_disagg_sync_schedule
+from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
 
 
 class _FakeManager:
@@ -45,7 +45,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
         trainer.logger = MagicMock()
         trainer._cur_step = 0
-        trainer._rollout_steps = 1
+        trainer._total_train_steps = 1
         trainer._global_train_step = 0
         trainer.train_batch_size = 2
         trainer._sync_weights_interval = 1
@@ -93,13 +93,13 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.fake_update_weights = MagicMock(side_effect=lambda: events.append("fake_update"))
 
         with (
-            patch("xtuner.v1.train.rl_disaggregated_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
             patch(
-                "xtuner.v1.train.rl_disaggregated_trainer.bind_train_rollout",
+                "xtuner.v1.train.rl_trainer.bind_train_rollout",
                 side_effect=lambda train_controller, rollout_controller: events.append("bind"),
             ),
         ):
-            asyncio.run(trainer._sync_weights_and_save(rollout_idx=3, step_timer_dict={}))
+            asyncio.run(trainer._sync_weights_and_save(train_step=3, step_timer_dict={}))
 
         self.assertEqual(events, ["save:3", "hf:3", "bind", "fake_update"])
         trainer.train_controller.offload.remote.assert_not_called()
@@ -127,7 +127,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._enable_evaluate = True
         events: list[str] = []
 
-        async def sync_weights_and_save(rollout_idx: int, step_timer_dict: dict):
+        async def sync_weights_and_save(train_step: int, step_timer_dict: dict):
             events.append("sync")
 
         async def eval_produce_batch(batch_size: int, rollout_step: int):
@@ -143,7 +143,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.evaluator.run = MagicMock(return_value={"acc": 1.0})
         manager.continue_produce = continue_produce
 
-        with patch("xtuner.v1.train.rl_disaggregated_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             asyncio.run(trainer._fit())
 
         trainer._prepare_train_data.assert_called_once()
@@ -157,7 +157,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         manager = _FakeManager([])
         trainer = self._make_trainer(manager)
 
-        with patch("xtuner.v1.train.rl_disaggregated_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             trainer.fake_update_weights = RLDisaggregatedTrainer.fake_update_weights.__get__(
                 trainer, RLDisaggregatedTrainer
             )
@@ -177,7 +177,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
         def manager_resume(checkpoint_path):
             events.append(f"manager_resume:{Path(checkpoint_path).name}")
-            return 5
+            return 3
 
         def manager_continue_produce(model_rollout_step: int):
             events.append(f"continue_produce:{model_rollout_step}")
@@ -192,9 +192,9 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         train_state_path.write_text('{"cur_step": 3}')
 
         with (
-            patch("xtuner.v1.train.rl_disaggregated_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
             patch(
-                "xtuner.v1.train.rl_disaggregated_trainer.bind_train_rollout",
+                "xtuner.v1.train.rl_trainer.bind_train_rollout",
                 side_effect=lambda train_controller, rollout_controller: events.append("bind"),
             ),
         ):
@@ -204,19 +204,19 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertEqual(trainer._cur_step, 3)
         trainer.agent_loop_manager.resume.assert_called_once_with(Path(self.temp_dir.name))
         self.assertTrue(events[0].startswith("manager_resume:"))
-        self.assertEqual(events[1:], ["bind", "fake_update", "continue_produce:5"])
+        self.assertEqual(events[1:], ["bind", "fake_update", "continue_produce:3"])
 
     def test_validate_sync_schedule_accepts_multiples(self):
-        _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=4, hf_interval=6)
-        _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=-1, hf_interval=None)
+        _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=4, hf_interval=6)
+        _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=-1, hf_interval=None)
 
     def test_validate_sync_schedule_rejects_non_multiple_checkpoint_interval(self):
         with self.assertRaisesRegex(ValueError, "checkpoint_interval=5.*sync_weights_interval=2"):
-            _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=5, hf_interval=-1)
+            _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=5, hf_interval=-1)
 
     def test_validate_sync_schedule_rejects_non_multiple_hf_interval(self):
         with self.assertRaisesRegex(ValueError, "hf_interval=5.*sync_weights_interval=2"):
-            _validate_disagg_sync_schedule(sync_weights_interval=2, checkpoint_interval=4, hf_interval=5)
+            _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=4, hf_interval=5)
 
     def test_build_disaggregated_placement_groups_uses_distinct_names(self):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
@@ -228,7 +228,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         rollout_pg = SimpleNamespace(id="rollout-pg-id")
 
         with patch(
-            "xtuner.v1.train.rl_disaggregated_trainer.AutoAcceleratorWorkers.build_placement_group",
+            "xtuner.v1.train.rl_trainer.AutoAcceleratorWorkers.build_placement_group",
             side_effect=[train_pg, rollout_pg],
         ) as build_pg:
             built_train_pg, built_rollout_pg = trainer._build_disaggregated_placement_groups(
@@ -256,7 +256,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         shared_pg = SimpleNamespace(id="shared-pg-id")
 
         with patch(
-            "xtuner.v1.train.rl_disaggregated_trainer.AutoAcceleratorWorkers.build_placement_group",
+            "xtuner.v1.train.rl_trainer.AutoAcceleratorWorkers.build_placement_group",
             side_effect=[shared_pg, shared_pg],
         ):
             with self.assertRaisesRegex(RuntimeError, "distinct placement groups"):
