@@ -2,19 +2,28 @@ import asyncio
 import os
 import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TypeAlias, TypedDict
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, TypeAlias, TypedDict
 from uuid import uuid4
 
 import ray
 from ray.actor import ActorProxy
 from ray.util.placement_group import PlacementGroup
 
+from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
 from xtuner.v1.utils import get_logger
 
+from .parser.factory import build_reasoning_parser, build_tool_call_parser
+from .parser.reasoning_parser import ReasoningParser
+from .parser.tool_parser import ToolCallParser
 from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
 from .worker import RolloutConfig, RolloutWorker
+
+
+if TYPE_CHECKING:
+    from xtuner.v1.rl.gateway.config import GatewayConfig
 
 
 @dataclass
@@ -52,6 +61,10 @@ class RolloutWorkerMetadata(TypedDict):
     # 键：服务器 URL 字符串
     # 值：布尔值，True 表示该 worker 处于活跃状态，False 表示已失效或停用
     worker_server_urls_status: Dict[str, bool]
+
+    # Gateway HTTP server URL (e.g. "http://1.2.3.4:8080").
+    # Set after start_gateway() is called; None if the gateway has not been started.
+    api_server_url: Optional[str]
 
 
 class RolloutController:
@@ -94,6 +107,33 @@ class RolloutController:
             worker_infos_lock=self.worker_info_lock,
         )
         self.health_checker.start()
+        self._tool_call_parser, self._reasoning_parser = self._build_output_parsers()
+        self._gateway_url: str | None = None
+
+    def start_gateway(self, config: "GatewayConfig") -> str:
+        """Start the gateway HTTP server in a daemon thread and return its URL.
+
+        The gateway exposes OpenAI-compatible endpoints that forward requests to
+        this controller via :class:`~xtuner.v1.rl.gateway.backend.local_backend.LocalRolloutBackend`.
+        Agent loops (e.g. CamelAgentLoop) discover the URL via :meth:`get_rollout_metadata`.
+
+        Args:
+            config: Gateway configuration.  ``port`` and ``host`` control where
+                the server binds; ``capture_folder`` enables per-request trace files.
+
+        Returns:
+            The base URL of the gateway, e.g. ``"http://1.2.3.4:8080"``.
+        """
+        from xtuner.v1.rl.gateway import build_local_gateway_app, serve_gateway_in_thread
+
+        config.capture_folder = str(Path(self.config.worker_log_dir) / config._CAPTURE_PATH_FOLDER)
+        app = build_local_gateway_app(ray.get_runtime_context().current_actor, config=config)
+        serve_gateway_in_thread(app, config)
+        node_ip = ray.util.get_node_ip_address()
+        url = f"http://{node_ip}:{config.port}"
+        self._gateway_url = url
+        self.logger.info(f"Gateway server started at {url}, capture_folder: {config.capture_folder}")
+        return url
 
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
         """Get information about the current rollout setup.
@@ -109,8 +149,32 @@ class RolloutController:
             "server_url_dict": self.worker_server_urls_map,
             "rollout_config": self.config,
             "worker_server_urls_status": worker_server_urls_status,
+            "api_server_url": self._gateway_url,
         }
         return rollout_metadata
+
+    def _build_output_parsers(self) -> tuple[ToolCallParser | None, ReasoningParser | None]:
+        tool_call_parser = None
+        reasoning_parser = None
+
+        if self.config.tool_call_parser != "none":
+            tool_call_parser = build_tool_call_parser(self.config.tool_call_parser)
+
+        if self.config.reasoning_parser != "none":
+            tokenizer_path = self.config.tokenizer_path or self.config.model_path
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+            reasoning_parser = build_reasoning_parser(self.config.reasoning_parser, tokenizer)
+
+        return tool_call_parser, reasoning_parser
+
+    def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
+        with self.worker_info_lock:
+            active_workers = sum(1 for info in self.rank2info.values() if info.is_active)
+            total_workers = len(self.rank2info)
+        return active_workers > 0, {
+            "active_workers": active_workers,
+            "total_workers": total_workers,
+        }
 
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         session_id = rollout_state.session_uid if rollout_state.session_uid else uuid4().int
@@ -125,6 +189,7 @@ class RolloutController:
             response_rollout_state = await asyncio.wait_for(
                 response_ref, timeout=self.config.rollout_timeout * self.timeout_multiplier
             )
+            self._apply_output_parsers(response_rollout_state)
             return response_rollout_state
         except asyncio.TimeoutError:
             self.logger.error(f"Rollout timeout for worker {worker}. Skipping sample.")
@@ -133,6 +198,21 @@ class RolloutController:
                 f"Rollout request timed out after {self.config.rollout_timeout * self.timeout_multiplier} seconds."
             )
             return rollout_state
+
+    def _apply_output_parsers(self, rollout_state: RolloutState) -> None:
+        """Apply tool-call and reasoning parsers to the rollout state in-
+        place."""
+        if self._tool_call_parser is not None:
+            parsed = self._tool_call_parser.parse(rollout_state)
+            rollout_state.tool_calls = parsed.tool_calls
+            rollout_state.response = parsed.remaining_text or None
+        if self._reasoning_parser is not None:
+            parsed_reasoning = self._reasoning_parser.parse(rollout_state)
+            rollout_state.response = parsed_reasoning.remaining_text
+            if parsed_reasoning.reasoning_text:
+                rollout_state.extra_fields["reasoning_text"] = parsed_reasoning.reasoning_text
+            else:
+                rollout_state.extra_fields.pop("reasoning_text", None)
 
     def pause_generation(self):
         self.health_checker.pause()
