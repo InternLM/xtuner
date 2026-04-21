@@ -10,7 +10,6 @@ import torch
 from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status
-from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.rl.utils import (
     BetweenNode,
     ConditionNode,
@@ -20,6 +19,7 @@ from xtuner.v1.rl.utils import (
     QueryNode,
     ScalarNode,
     SetNode,
+    calculate_seq_staleness,
     parse_query,
 )
 from xtuner.v1.utils import get_logger

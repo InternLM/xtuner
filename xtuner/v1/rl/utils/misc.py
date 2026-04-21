@@ -19,6 +19,12 @@ Operators = Union[ScalarOperator, SetOperator, BetweenOperator]
 LogicOperator = Literal["$and", "$or"]
 
 
+def calculate_seq_staleness(model_step: int, current_train_step: int) -> int:
+    # model_step 是指哪个 train_step 训练后的模型，如果完全没有滞后(即同步状态)，current_train_step 领先
+    # model_step 1 步，此时 seq_staleness 为 current_train_step - model_step - 1 = 0。
+    return current_train_step - model_step - 1
+
+
 class QueryNode(ABC):
     """查询语法树的基类，仅作数据结构标记."""
 

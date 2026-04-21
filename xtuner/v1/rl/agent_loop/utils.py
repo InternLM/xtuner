@@ -3,7 +3,7 @@ import time
 import ray
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.data_proto.utils import calculate_seq_staleness
+from xtuner.v1.rl.utils import calculate_seq_staleness
 from xtuner.v1.utils import get_logger
 
 

@@ -11,6 +11,7 @@ from .misc import (
     ScalarOperator,
     SetNode,
     SetOperator,
+    calculate_seq_staleness,
     gather_logprobs,
     get_eos_token,
     load_function,
@@ -66,4 +67,5 @@ __all__ = [
     "LogicOperator",
     "Operators",
     "get_eos_token",
+    "calculate_seq_staleness",
 ]

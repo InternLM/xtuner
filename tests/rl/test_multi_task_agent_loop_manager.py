@@ -14,8 +14,8 @@ from xtuner.v1.rl.agent_loop.agent_loop_manager import (
     _TaskRunner,
 )
 from xtuner.v1.rl.agent_loop.producer import GROUP_GENERATE_TIME_KEY, ProduceBatchStatus
+from xtuner.v1.rl.utils import calculate_seq_staleness
 from xtuner.v1.data_proto import Status
-from xtuner.v1.data_proto.utils import calculate_seq_staleness
 
 
 class _FakeSampler:
