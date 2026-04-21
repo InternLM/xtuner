@@ -182,6 +182,7 @@ class AgentLoopManagerConfig(BaseModel):
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
         replay_buffer: ReplayBuffer,
         logger=None,
+        sync_weights_interval: int = 1,
     ) -> "AgentLoopManager":
         tasks = self.tasks if isinstance(self.tasks, list) else [self.tasks]
         if not tasks:
@@ -199,7 +200,7 @@ class AgentLoopManagerConfig(BaseModel):
                 judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
                 logger=logger,
             )
-            produce_strategy = task_cfg.produce_strategy_config.build()
+            produce_strategy = task_cfg.produce_strategy_config.build(sync_weights_interval=sync_weights_interval)
             sampler = task_cfg.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
             task_runners.append(
                 _TaskRunner(
@@ -368,11 +369,14 @@ class AgentLoopManager:
 
     async def _refresh_for_all_tasks(self, train_step: int, statuses: list[Status]) -> None:
         for task in self.task_runners:
-            threshold = getattr(task.produce_strategy, "tail_batch_stale_threshold", 0)
+            stale_threshold = getattr(task.produce_strategy, "stale_threshold", None)
+            if stale_threshold is None:
+                # 同步生产没有跨权重版本的后台样本，只有异步 strategy 需要刷新并淘汰历史样本。
+                continue
             await self.replay_buffer.refresh_completed_staleness(
                 task_name=task.task_name,
                 current_train_step=train_step,
-                tail_batch_stale_threshold=threshold,
+                stale_threshold=stale_threshold,
                 statuses=statuses,
             )
 

@@ -7,7 +7,7 @@ from enum import Enum, auto
 from typing import Protocol, runtime_checkable
 
 import ray
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status, update_sample_version
 from xtuner.v1.data_proto.utils import calculate_seq_staleness
@@ -98,14 +98,24 @@ def default_should_continue_fn(completed_count: int, batch_size: int, **kwargs) 
     return completed_count < batch_size
 
 
-def expire_group_if_needed(group: list[RolloutState], threshold: int) -> list[RolloutState]:
-    if threshold <= 0:
-        return group
+def calculate_stale_threshold(max_staleness: int, sync_weights_interval: int) -> int:
+    if max_staleness < 0:
+        raise ValueError(f"max_staleness must be non-negative, got {max_staleness}.")
+    if sync_weights_interval <= 0:
+        raise ValueError(f"sync_weights_interval must be positive, got {sync_weights_interval}.")
+
+    # max_staleness 按同步周期计数；+1 表示训练天然必须接受的当前同步周期滞后。
+    return (max_staleness + 1) * sync_weights_interval
+
+
+def expire_group_if_needed(group: list[RolloutState], stale_threshold: int) -> list[RolloutState]:
+    if stale_threshold <= 0:
+        raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
 
     group_status = update_group_status(group)
     if group_status not in (Status.COMPLETED, Status.ABORTED):
         return group
-    if any(getattr(sample, "seq_staleness", 0) >= threshold for sample in group):
+    if any(getattr(sample, "seq_staleness", 0) >= stale_threshold for sample in group):
         # completed / aborted 只要组内任一样本过期，就整组转为 EXPIRED。
         for sample in group:
             sample.status = Status.EXPIRED
@@ -146,11 +156,11 @@ class ProduceStrategyConfig(ABC, BaseModel):
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
 
     @abstractmethod
-    def build(self) -> "ProduceStrategy": ...
+    def build(self, *, sync_weights_interval: int = 1) -> "ProduceStrategy": ...
 
 
 class SyncProduceStrategyConfig(ProduceStrategyConfig):
-    def build(self) -> "SyncProduceStrategy":
+    def build(self, *, sync_weights_interval: int = 1) -> "SyncProduceStrategy":
         return SyncProduceStrategy(
             is_valid_sample_fn=self.is_valid_sample_fn, should_continue_fn=self.should_continue_fn
         )
@@ -159,14 +169,15 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
 class AsyncProduceStrategyConfig(ProduceStrategyConfig):
     over_sample_threshold: float = 0.0
     enable_partial_rollout: bool = False
-    tail_batch_stale_threshold: int = 0
+    max_staleness: int = Field(default=0, ge=0)
     tail_batch_trigger_size: int = 0
 
-    def build(self) -> "AsyncProduceStrategy":
+    def build(self, *, sync_weights_interval: int = 1) -> "AsyncProduceStrategy":
         return AsyncProduceStrategy(
             over_sample_threshold=self.over_sample_threshold,
             enable_partial_rollout=self.enable_partial_rollout,
-            tail_batch_stale_threshold=self.tail_batch_stale_threshold,
+            max_staleness=self.max_staleness,
+            sync_weights_interval=sync_weights_interval,
             tail_batch_trigger_size=self.tail_batch_trigger_size,
             is_valid_sample_fn=self.is_valid_sample_fn,
             should_continue_fn=self.should_continue_fn,
@@ -281,36 +292,25 @@ class AsyncProduceStrategy(ProduceStrategy):
         over_sample_threshold: float,
         enable_partial_rollout: bool,
         tail_batch_trigger_size: int,
-        tail_batch_stale_threshold: int,
+        max_staleness: int,
+        sync_weights_interval: int,
         is_valid_sample_fn: IsValidSampleFn,
         should_continue_fn: ShouldContinueFn,
     ):
         super().__init__(is_valid_sample_fn, should_continue_fn)
-        # TODO: 需要添加 tail_batch_max_tries
-        # 作用是：如果一个样本多次重试，则将它置为特殊状态 MAX_TRIES，这类样本和过期样本一起触发tail batch逻辑
-        # 这个依赖：RolloutState 添加并维护一个新的属性 num_tries，每次打断时加1，达到 max_tries 时置为 MAX_TRIES
-        # 如果 enable_partial_rollout=True，不会触发这个逻辑，所以不受此影响
-        # 如果 enable_partial_rollout=False，分两种情况：
-        # 1) staleness = 0，即不允许过期样本，此时过期触发tail batch逻辑已经cover了tail batch逻辑
-        # 2) staleness > 0，此时需要 重试tail batch逻辑，否则多次重试的样本会影响rollout 效率
-        if not enable_partial_rollout and tail_batch_stale_threshold > 0:
-            logger.warning(
-                "tail_batch_stale_threshold > 0, enable_partial_rollout is False, this will affect rollout efficiency because not support tail_batch_max_tries logic now"
-            )
         self.over_sample_threshold = over_sample_threshold
         self.enable_partial_rollout = enable_partial_rollout
-        self.tail_batch_stale_threshold = tail_batch_stale_threshold
+        self.max_staleness = max_staleness
+        self.sync_weights_interval = sync_weights_interval
+        self.stale_threshold = calculate_stale_threshold(max_staleness, sync_weights_interval)
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks: set[asyncio.Task] = set()
         self._pending_task_model_steps: dict[asyncio.Task, int] = {}
         self._pending_lock = asyncio.Lock()
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
-        if self.tail_batch_stale_threshold <= 0:
-            return False
-
         staleness = calculate_seq_staleness(model_step, train_step)
-        return staleness >= self.tail_batch_stale_threshold
+        return staleness >= self.stale_threshold
 
     def _is_model_expired(self, train_step: int, model_step: int) -> bool:
         return self.is_model_expired(train_step, model_step)
@@ -346,7 +346,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         for item in items:
             update_sample_version(item, model_step)
         refresh_seq_staleness(items, current_train_step)
-        items = expire_group_if_needed(items, self.tail_batch_stale_threshold)
+        items = expire_group_if_needed(items, self.stale_threshold)
         await replay_buffer.put(items, task_name)
 
     async def _put_claimed_tasks(

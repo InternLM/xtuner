@@ -25,6 +25,7 @@ from .producer import (
     ProduceStrategyConfig,
     SyncProduceStrategy,
     SyncProduceStrategyConfig,
+    calculate_stale_threshold,
 )
 from .sampler import Sampler, SamplerConfig
 from .single_turn_agent_loop import SingleTurnAgentLoop, SingleTurnAgentLoopConfig
@@ -56,6 +57,7 @@ __all__ = [
     "ProduceStrategy",
     "SyncProduceStrategy",
     "AsyncProduceStrategy",
+    "calculate_stale_threshold",
     "SamplerConfig",
     "Sampler",
 ]

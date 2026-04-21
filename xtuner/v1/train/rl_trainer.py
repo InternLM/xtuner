@@ -336,6 +336,7 @@ class BaseRLTrainer:
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
+            sync_weights_interval=cfg.sync_weights_interval,
         )
 
         self.eval_agent_loop_manager = cfg.eval_agent_loop_manager_cfg.build(
@@ -343,6 +344,7 @@ class BaseRLTrainer:
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
+            sync_weights_interval=cfg.sync_weights_interval,
         )
 
         total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)

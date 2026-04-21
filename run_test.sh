@@ -35,6 +35,7 @@ echo "run_test.sh: XTUNER_DIST_PORT_BASE=${XTUNER_DIST_PORT_BASE}"
 
 pytest --durations=20 \
   tests/rl/test_agent_loop_utils.py \
+  tests/rl/test_staleness_policy.py \
   tests/rl/test_replay_buffer.py \
   tests/rl/test_multi_task_agent_loop_manager.py \
   tests/rl/test_producer.py \

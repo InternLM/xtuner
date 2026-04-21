@@ -69,7 +69,7 @@ sync_weights_interval = int(os.environ.get("SYNC_WEIGHTS_INTERVAL", "1"))
 over_sample_threshold = float(os.environ.get("OVER_SAMPLE_THRESHOLD", "0.0"))
 partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
 tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "0"))
-tail_batch_stale_threshold = int(os.environ.get("TAIL_BATCH_STALE_THRESHOLD", "0"))
+max_staleness = int(os.environ.get("MAX_STALENESS", "0"))
 enable_evaluate = os.environ.get("ENABLE_EVALUATE", "0") == "1"
 gsm8k_task_weight = float(os.environ.get("GSM8K_TASK_WEIGHT", "3.0"))
 dapo_task_weight = float(os.environ.get("DAPO_TASK_WEIGHT", "1.0"))
@@ -225,7 +225,7 @@ if over_sample_threshold > 0 or partial_rollout:
         over_sample_threshold=over_sample_threshold,
         enable_partial_rollout=partial_rollout,
         tail_batch_trigger_size=tail_batch_trigger_size,
-        tail_batch_stale_threshold=tail_batch_stale_threshold,
+        max_staleness=max_staleness,
     )
 else:
     produce_strategy_config = SyncProduceStrategyConfig()

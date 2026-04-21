@@ -37,9 +37,15 @@ class _FakeSampler:
 
 
 class _FakeProduceStrategy:
-    def __init__(self, status: ProduceBatchStatus = ProduceBatchStatus.NORMAL, cleanup_pause_time_s: float = 0.0):
+    def __init__(
+        self,
+        status: ProduceBatchStatus = ProduceBatchStatus.NORMAL,
+        cleanup_pause_time_s: float = 0.0,
+        stale_threshold: int = 1,
+    ):
         self.status = status
         self.cleanup_pause_time_s = cleanup_pause_time_s
+        self.stale_threshold = stale_threshold
         self.called_batch_sizes: list[int] = []
         self.called_train_steps: list[int] = []
         self.called_model_steps: list[int] = []
@@ -184,12 +190,10 @@ class _FakeReplayBuffer:
         self,
         task_name: str,
         current_train_step: int,
-        tail_batch_stale_threshold: int,
+        stale_threshold: int,
         statuses: list[Status] | None = None,
     ):
-        self.refresh_completed_staleness_calls.append(
-            (task_name, current_train_step, tail_batch_stale_threshold, tuple(statuses or ()))
-        )
+        self.refresh_completed_staleness_calls.append((task_name, current_train_step, stale_threshold, tuple(statuses or ())))
         for group in self._rollout_states_by_task.get(task_name, []):
             for state in group:
                 response_model_steps = getattr(state, "response_model_steps", None) or []
@@ -339,7 +343,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 _TaskRunner(
                     task_name="task_a",
                     agent_loop=_fake_agent_loop(),
-                    produce_strategy=_FakeProduceStrategy(),
+                    produce_strategy=_FakeProduceStrategy(stale_threshold=5),
                     sampler=sampler,
                     weight=1.0,
                     order=0,
@@ -570,7 +574,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 _TaskRunner(
                     task_name="task_a",
                     agent_loop=_fake_agent_loop(),
-                    produce_strategy=_FakeProduceStrategy(),
+                    produce_strategy=_FakeProduceStrategy(stale_threshold=5),
                     sampler=_FakeSampler(),
                     weight=1.0,
                     order=0,
@@ -584,8 +588,8 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             replay_buffer.refresh_completed_staleness_calls,
             [
-                ("task_a", 9, 0, (Status.COMPLETED, Status.ABORTED)),
-                ("task_a", 10, 0, (Status.COMPLETED, Status.ABORTED)),
+                ("task_a", 9, 5, (Status.COMPLETED, Status.ABORTED)),
+                ("task_a", 10, 5, (Status.COMPLETED, Status.ABORTED)),
             ],
         )
         self.assertEqual(result.rollout_states[0][0].seq_staleness, 4)

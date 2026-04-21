@@ -223,16 +223,16 @@ def update_sample_version(rollout_state: RolloutState, model_step: int) -> Rollo
     return rollout_state
 
 
-def update_expired_status(samples: list[RolloutState], tail_batch_stale_threshold: int = 0) -> list[RolloutState]:
-    if tail_batch_stale_threshold <= 0:
-        return samples
+def update_expired_status(samples: list[RolloutState], stale_threshold: int) -> list[RolloutState]:
+    if stale_threshold <= 0:
+        raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
     is_group_expired = False
 
     # 1. 检查组内是否存过期的样本
     for sample in samples:
-        if sample.status == Status.ABORTED and sample.seq_staleness >= tail_batch_stale_threshold:
+        if sample.status == Status.ABORTED and sample.seq_staleness >= stale_threshold:
             logger.debug(
-                f"Sample {sample.uid} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({tail_batch_stale_threshold}). Triggering group expiration."
+                f"Sample {sample.uid} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({stale_threshold}). Triggering group expiration."
             )
             is_group_expired = True
             break  # 一旦发现过期，直接跳出，无需检查剩余样本

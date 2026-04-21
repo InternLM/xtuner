@@ -64,7 +64,7 @@ def _build_agent_loop_manager(
     task_name: str,
     over_sample_threshold: float = 0.0,
     enable_partial_rollout: bool = False,
-    tail_batch_stale_threshold: int = 0,
+    max_staleness: int = 0,
     tail_batch_trigger_size: int = 0,
     prompt_repeat_k: int = 1,
     max_tokens: int = MAX_RESPONSE_LENGTH,
@@ -100,7 +100,7 @@ def _build_agent_loop_manager(
     produce_strategy_config = AsyncProduceStrategyConfig(
         over_sample_threshold=over_sample_threshold,
         enable_partial_rollout=enable_partial_rollout,
-        tail_batch_stale_threshold=tail_batch_stale_threshold,
+        max_staleness=max_staleness,
         tail_batch_trigger_size=tail_batch_trigger_size,
     )
 
@@ -572,8 +572,8 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         ray.shutdown()
 
-    async def test_3_1_staleness_threshold_1_marks_expired(self):
-        """3.1a: tail_batch_stale_threshold=1 — 需要 3 轮才能在 buffer 中观察到 EXPIRED。
+    async def test_3_1_max_staleness_0_marks_expired(self):
+        """3.1a: max_staleness=0 — 需要 3 轮才能在 buffer 中观察到 EXPIRED。
 
         staleness 积累路径（enable_partial_rollout=True）：
           Round 1 (step=1): 6 个并发任务，2 个完成后其余被 abort。
@@ -582,14 +582,14 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             postprocess 只拼接 partial rollout 历史；producer put 前记录 response_model_steps 并刷新 staleness。
             该轮未消费的 COMPLETED 样本会留在 buffer 中。
           Round 3 (step=3): produce_batch 作为消费入口，先刷新 buffer 中的
-            COMPLETED 样本，检查 seq_staleness=1 >= threshold=1 → 标为 EXPIRED，
+            COMPLETED 样本，检查 seq_staleness=1 >= stale_threshold=1 → 标为 EXPIRED，
             放回 buffer。由于 trigger_size=0，EXPIRED 样本不在本轮被消费。
 
         断言: round3 结束后 buffer 中 expired > 0。
         """
         from xtuner.v1.data_proto import Status
 
-        STALE_THRESHOLD = 1
+        MAX_STALENESS = 0
         task_name = "test_3_1a"
 
         manager = _build_agent_loop_manager(
@@ -597,7 +597,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             task_name=task_name,
             over_sample_threshold=self.OVER_SAMPLE,
             enable_partial_rollout=True,
-            tail_batch_stale_threshold=STALE_THRESHOLD,
+            max_staleness=MAX_STALENESS,
             tail_batch_trigger_size=0,  # 只测 EXPIRED 标记，不触发 tail-batch 模式
             # 测试用 rollout context_length 是 MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH；
             # max_tokens 不能超过这个测试配置，否则 lmdeploy 会进入超长请求的异常/abort 路径。
@@ -621,7 +621,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(
             expired_count, 0,
             msg=(
-                f"threshold=1: after 3 rounds (steps 1→3), leftover COMPLETED samples "
+                f"max_staleness=0: after 3 rounds (steps 1→3), leftover COMPLETED samples "
                 f"with seq_staleness=1 should be marked EXPIRED by produce_batch entry refresh. "
                 f"expired={expired_count}, aborted={aborted_count}"
             ),
@@ -632,7 +632,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
 
         配置:
           over_sample_threshold=2.0    → 每轮产生大量遗留样本
-          tail_batch_stale_threshold=1 → staleness >= 1 即标 EXPIRED（一步即触发）
+          max_staleness=0              → stale_threshold=1，一步即触发 EXPIRED
           tail_batch_trigger_size = BATCH_SIZE // 2 = 1 → expired >= 1 即进入 tail-batch
 
         流程 (最多 10 轮):
@@ -649,7 +649,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
         """
         from xtuner.v1.data_proto import Status
 
-        STALE_THRESHOLD = 1
+        MAX_STALENESS = 0
         TRIGGER_SIZE = self.BATCH_SIZE // 2  # = 1
         task_name = "test_3_2"
 
@@ -658,7 +658,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             task_name=task_name,
             over_sample_threshold=self.OVER_SAMPLE,
             enable_partial_rollout=True,
-            tail_batch_stale_threshold=STALE_THRESHOLD,
+            max_staleness=MAX_STALENESS,
             tail_batch_trigger_size=TRIGGER_SIZE,
             # 保持在测试用 context_length 内，避免尾批测试被超长生成请求干扰。
             max_tokens=MAX_RESPONSE_LENGTH,

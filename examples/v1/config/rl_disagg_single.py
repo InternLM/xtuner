@@ -7,7 +7,7 @@ Common optional env vars:
   TRAIN_NUM_WORKERS=4, ROLLOUT_NUM_WORKERS=4, TRAIN_BATCH_SIZE=64,
   TOTAL_TRAIN_STEPS=45, SYNC_WEIGHTS_INTERVAL=1,
   OVER_SAMPLE_THRESHOLD=0.0, PARTIAL_ROLLOUT=0,
-  TAIL_BATCH_TRIGGER_SIZE=0, TAIL_BATCH_STALE_THRESHOLD=0, ENABLE_EVALUATE=0
+  TAIL_BATCH_TRIGGER_SIZE=0, MAX_STALENESS=0, ENABLE_EVALUATE=0
 
 Mode mapping in the current design:
   Mode 1 (On-Policy):
@@ -30,7 +30,7 @@ Responsibility split:
       TRAIN_BATCH_SIZE, TOTAL_TRAIN_STEPS, SYNC_WEIGHTS_INTERVAL
   - producer / replay-buffer policy:
       OVER_SAMPLE_THRESHOLD, PARTIAL_ROLLOUT,
-      TAIL_BATCH_TRIGGER_SIZE, TAIL_BATCH_STALE_THRESHOLD
+      TAIL_BATCH_TRIGGER_SIZE, MAX_STALENESS
 """
 
 import os
@@ -79,7 +79,7 @@ sync_weights_interval = int(os.environ.get("SYNC_WEIGHTS_INTERVAL", "1"))
 over_sample_threshold = float(os.environ.get("OVER_SAMPLE_THRESHOLD", "0.0"))
 partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
 tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "0"))
-tail_batch_stale_threshold = int(os.environ.get("TAIL_BATCH_STALE_THRESHOLD", "5"))
+max_staleness = int(os.environ.get("MAX_STALENESS", "0"))
 prompt_repeat_k = int(os.environ.get("PROMPT_REPEAT_K", "4"))
 rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "1"))
 rollout_ep_size = int(os.environ.get("ROLLOUT_EP_SIZE", "1"))
@@ -197,7 +197,7 @@ if over_sample_threshold > 0 or partial_rollout:
         over_sample_threshold=over_sample_threshold,
         enable_partial_rollout=partial_rollout,
         tail_batch_trigger_size=tail_batch_trigger_size,
-        tail_batch_stale_threshold=tail_batch_stale_threshold,
+        max_staleness=max_staleness,
     )
 else:
     produce_strategy_config = SyncProduceStrategyConfig()

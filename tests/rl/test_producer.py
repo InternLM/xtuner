@@ -188,7 +188,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop = self._build_agent_loop()
         mock_agent_loop.generate_group = mock_gen
         sampler = self._build_sampler()
-        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
+        # 该用例验证版本记录顺序，放宽 stale 策略避免在生产入口提前返回。
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0, max_staleness=3).build()
         progress = ProduceProgress(
             next_consumer_step=1,
             producer_future_step=2,
@@ -219,7 +220,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         sample_ids = iter(range(100, 200))
 
         async def sample(task_name, group_status=None):
-            self.assertEqual(group_status, Status.ABORTED)
+            self.assertEqual(group_status, [Status.ABORTED])
             return [MockRolloutState(next(sample_ids), status=Status.ABORTED)]
 
         sampler.sample = AsyncMock(side_effect=sample)
@@ -339,7 +340,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop = self._build_agent_loop()
         mock_agent_loop.generate_group = mock_gen
         sampler = self._build_sampler()
-        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
+        # 该用例验证版本记录顺序，放宽 stale 策略避免在生产入口提前返回。
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0, max_staleness=3).build()
 
         status = await strategy.produce_batch(
             mock_agent_loop,
@@ -374,7 +376,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop = self._build_agent_loop()
         mock_agent_loop.generate_group = mock_gen
         sampler = self._build_sampler()
-        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0, enable_partial_rollout=True).build()
+        # 该用例验证 partial rollout 版本拼接，放宽 stale 策略保留旧分段。
+        strategy = AsyncProduceStrategyConfig(
+            over_sample_threshold=0.0,
+            enable_partial_rollout=True,
+            max_staleness=3,
+        ).build()
 
         status = await strategy.produce_batch(
             mock_agent_loop,
@@ -529,7 +536,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_produce_strategy_returns_expired_batch_before_processing_leftovers(self):
         task_name = "test_expired_batch"
-        strategy = AsyncProduceStrategyConfig(tail_batch_stale_threshold=1).build()
+        strategy = AsyncProduceStrategyConfig(max_staleness=0).build()
         mock_agent_loop = self._build_agent_loop()
         sampler = MagicMock()
         sampler.sample = AsyncMock(side_effect=AssertionError("sampler.sample should not be called"))
@@ -559,7 +566,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         expired_count = await self.replay_buffer.refresh_completed_staleness(
             task_name=task_name,
             current_train_step=6,
-            tail_batch_stale_threshold=2,
+            stale_threshold=2,
         )
         expired_groups = await self.replay_buffer.get(10, task_name, Status.EXPIRED)
 

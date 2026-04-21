@@ -150,7 +150,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         expired_count = await replay_buffer.refresh_completed_staleness(
             task_name="task",
             current_train_step=6,
-            tail_batch_stale_threshold=2,
+            stale_threshold=2,
         )
 
         self.assertEqual(expired_count, 1)
@@ -176,7 +176,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         expired_count = await replay_buffer.refresh_completed_staleness(
             task_name="task",
             current_train_step=6,
-            tail_batch_stale_threshold=2,
+            stale_threshold=2,
         )
 
         self.assertEqual(expired_count, 1)
@@ -205,7 +205,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         expired_count = await replay_buffer.refresh_completed_staleness(
             task_name="task",
             current_train_step=6,
-            tail_batch_stale_threshold=2,
+            stale_threshold=2,
             statuses=[Status.ABORTED],
         )
 

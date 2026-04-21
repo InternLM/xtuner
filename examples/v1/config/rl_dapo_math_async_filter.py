@@ -153,7 +153,7 @@ def group_samples_filter_func(rollout_states):
 produce_strategy_config = AsyncProduceStrategyConfig(
     over_sample_threshold=0.2,
     enable_partial_rollout=True,
-    tail_batch_stale_threshold=1,
+    max_staleness=0,
     tail_batch_trigger_size=256,
     is_valid_sample_fn=group_samples_filter_func
 )

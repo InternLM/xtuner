@@ -411,10 +411,12 @@ class ReplayBuffer:
         self,
         task_name: str,
         current_train_step: int,
-        tail_batch_stale_threshold: int,
+        stale_threshold: int,
         statuses: list[Status] | None = None,
     ) -> int:
         # 保留历史方法名；可复用的 completed / aborted buffer 样本都需要随 train_step 刷新过期状态。
+        if stale_threshold <= 0:
+            raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
         if statuses is None:
             statuses = [Status.COMPLETED, Status.ABORTED]
         query_dsl: QueryDict = {
@@ -430,11 +432,9 @@ class ReplayBuffer:
             for record in records:
                 self._refresh_seq_staleness(record.item, current_train_step)
                 staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
-                should_expire = tail_batch_stale_threshold > 0 and any(
-                    getattr(item, "seq_staleness", 0) >= tail_batch_stale_threshold for item in record.item
-                )
+                should_expire = any(getattr(item, "seq_staleness", 0) >= stale_threshold for item in record.item)
                 if should_expire:
-                    # completed / aborted 样本过期时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
+                    # completed / aborted 样本超过 step 级阈值时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
                     for item in record.item:
                         item.status = Status.EXPIRED
                     status = Status.EXPIRED

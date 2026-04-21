@@ -132,7 +132,7 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 produce_strategy_config = AsyncProduceStrategyConfig(
     over_sample_threshold = 0.8,
     enable_partial_rollout = True,
-    tail_batch_stale_threshold=1,
+    max_staleness=0,
     tail_batch_trigger_size=64
 )
 agent_loop_manager_cfg = AgentLoopManagerConfig(
