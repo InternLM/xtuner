@@ -19,6 +19,7 @@ from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, ProduceBatchResult
 from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.gateway.config import GatewayConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
@@ -263,6 +264,8 @@ class RLColocateTrainer:
         global_batch_size: int,
         # exp tracker
         exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard",
+        # gateway
+        gateway_config: GatewayConfig | None = None,
     ):
         check_fa3()
 
@@ -340,6 +343,9 @@ class RLColocateTrainer:
                 self._cur_step = train_state["cur_step"]
 
         self.rollout_controller = rollout_config.build(self._pg)
+
+        if gateway_config is not None and gateway_config.auto_start:
+            ray.get(self.rollout_controller.start_gateway.remote(gateway_config))
 
         replay_buffer = replay_buffer_config.build()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -480,7 +486,7 @@ class RLColocateTrainer:
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
             self.tokenizer.save_pretrained(str(save_hf_path))
 
-    def fit(self):
+    def fit(self) -> None:
         self.logger.info("Start RL training")
         if self._cur_step >= self._rollout_steps:
             self.logger.info(f"Rollout steps {self._rollout_steps} reached, stop training")
@@ -501,7 +507,7 @@ class RLColocateTrainer:
 
         for rollout_idx in range(self._cur_step + 1, self._rollout_steps + 1):
             self.logger.info(f"Rollout {rollout_idx}/{self._rollout_steps} start")
-            step_timer_dict = {}
+            step_timer_dict: dict[str, float] = {}
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
                 self.logger.info("start to generate rollout experience for training")
