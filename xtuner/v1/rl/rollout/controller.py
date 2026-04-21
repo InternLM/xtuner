@@ -127,10 +127,12 @@ class RolloutController:
         from xtuner.v1.rl.gateway import build_local_gateway_app, serve_gateway_in_thread
 
         config.capture_folder = str(Path(self.config.worker_log_dir) / config._CAPTURE_PATH_FOLDER)
-        app = build_local_gateway_app(ray.get_runtime_context().current_actor, config=config)
+        app = build_local_gateway_app(
+            ray.get_runtime_context().current_actor, config=config, rollout_config=self.config
+        )
         serve_gateway_in_thread(app, config)
-        node_ip = ray.util.get_node_ip_address()
-        url = f"http://{node_ip}:{config.port}"
+        host = ray.util.get_node_ip_address() if config.host in ("", "0.0.0.0") else config.host
+        url = f"http://{host}:{config.port}"
         self._gateway_url = url
         self.logger.info(f"Gateway server started at {url}, capture_folder: {config.capture_folder}")
         return url
