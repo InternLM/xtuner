@@ -25,16 +25,41 @@ import asyncio
 import base64
 import fnmatch
 import io
+import json
 import logging
 import os
 import re
 import tarfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 
 logger = logging.getLogger(__name__)
+
+
+_BUNDLE_SIZE_LOG = Path("/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/work_dir/bundle_sizes.jsonl")
+
+
+def _log_bundle_size(size: int, extract_root: str, file_count: int) -> None:
+    """Append one JSON line describing this upload's tar size.
+
+    Silent on failure — the log file is observational, not required.
+    """
+    try:
+        _BUNDLE_SIZE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z",
+            "size_bytes": size,
+            "file_count": file_count,
+            "extract_root": extract_root,
+            "pid": os.getpid(),
+        }
+        with _BUNDLE_SIZE_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.warning("bundle-size log failed: %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -186,12 +211,13 @@ class DownloadHook(Hook):
 
 
 class SandboxStage:
-    """pre-hooks → entry → pull → post-hooks.  Each field is visible.
+    """pre-hooks → entry → post-hooks.  Each field is visible.
 
     Not every stage needs every phase:
       - ``entry`` can be ``None`` (pure setup/teardown stage).
       - ``pre`` / ``post`` default to empty.
-      - ``pull`` fetches sandbox paths straight into ``ctx["pulled"]``.
+      - Downloads live in post-hooks via :class:`DownloadHook` — no separate
+        ``pull`` contract.
     """
 
     def __init__(
@@ -202,7 +228,6 @@ class SandboxStage:
         entry: Resolvable = None,
         env: Resolvable = None,
         timeout: int = 600,
-        pull: Resolvable = (),
         post: list[Hook] = (),
     ):
         self.sandbox = sandbox
@@ -210,43 +235,38 @@ class SandboxStage:
         self._entry = entry
         self._env = env
         self.timeout = timeout
-        self._pull = pull
         self.post = list(post)
 
     async def run(self, client: Any, ctx: dict[str, Any]) -> StageResult:
         for hook in self.pre:
-            await hook(client, ctx)
+            await _run_hook(hook, client, ctx, phase="pre")
 
         stdout = stderr = ""
         rc = 0
-        pulled: dict[str, bytes] = {}
 
         entry = _resolve(self._entry, ctx)
         if entry:
             env = _resolve(self._env, ctx) or {}
             exec_res = await exec_in(
                 client, entry, env=env,
-                timeout_sec=self.timeout, raise_on_error=False,
+                timeout_sec=self.timeout, raise_on_error=True,
             )
             rc = _result_code(exec_res)
             stdout = exec_res.get("stdout") or ""
             stderr = exec_res.get("stderr") or ""
 
-        for path in _resolve(self._pull, ctx) or []:
-            try:
-                pulled[path] = await asyncio.to_thread(client.download_file, path)
-            except Exception as exc:
-                logger.warning("pull %s failed: %s", path, exc)
-
         result = StageResult(
-            stdout=stdout, stderr=stderr, return_code=rc, pulled=pulled,
+            stdout=stdout, stderr=stderr, return_code=rc,
+            pulled=ctx.get("pulled", {}),
             error=None if rc == 0 else f"return_code={rc}: {stderr[:400]}",
         )
         ctx["result"] = result
 
         for hook in self.post:
-            await hook(client, ctx)
+            await _run_hook(hook, client, ctx, phase="post")
 
+        # Post-hooks may have added downloads; reflect into the returned result.
+        result.pulled = ctx.get("pulled", {})
         return result
 
 
@@ -273,7 +293,7 @@ async def exec_in(
     client: Any,
     command: str,
     cwd: str = "/root",
-    timeout_sec: int = 60,
+    timeout_sec: int = 600,
     env: dict[str, str] | None = None,
     raise_on_error: bool = True,
 ) -> dict[str, Any]:
@@ -309,11 +329,12 @@ async def upload_tar_and_extract(
     if not file_map:
         return
     blob = await asyncio.to_thread(_tar_bytes, file_map, extract_root)
+    _log_bundle_size(len(blob), extract_root, len(file_map))
     tmp = "/tmp/_bundle.tar.gz"
     await http_upload(client, tmp, base64.b64encode(blob).decode())
     await exec_in(
         client,
-        f"mkdir -p {extract_root} && cd {extract_root} && tar xzf {tmp} && rm {tmp}",
+        f"mkdir -p {extract_root} && cd {extract_root} && tar xzf {tmp}",
     )
 
 
@@ -360,6 +381,26 @@ def _result_code(exec_res: dict[str, Any]) -> int:
     if rc is None:
         rc = exec_res.get("exit_code", 0 if exec_res.get("ok", True) else 1)
     return int(rc)
+
+
+async def _run_hook(hook: Hook, client: Any, ctx: dict[str, Any], *, phase: str) -> None:
+    """Run one hook; on failure, log + stash + re-raise with a label that
+    names the hook class so the traceback says which one blew up.
+    """
+    name = getattr(hook, "name", None) or type(hook).__name__
+    label = f"{phase}-hook {type(hook).__name__}({name!r})"
+    try:
+        await hook(client, ctx)
+    except Exception as exc:
+        import traceback as _tb
+        logger.error("%s failed: %s\n%s", label, exc, _tb.format_exc())
+        ctx.setdefault("hook_errors", []).append({
+            "phase": phase,
+            "hook": type(hook).__name__,
+            "name": name,
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+        raise RuntimeError(f"{label} failed: {exc}") from exc
 
 
 # ─────────────────────────────────────────────────────────────────
