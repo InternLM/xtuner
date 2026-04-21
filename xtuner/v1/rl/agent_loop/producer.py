@@ -286,6 +286,17 @@ class AsyncProduceStrategy(ProduceStrategy):
         should_continue_fn: ShouldContinueFn,
     ):
         super().__init__(is_valid_sample_fn, should_continue_fn)
+        # TODO: 需要添加 tail_batch_max_tries
+        # 作用是：如果一个样本多次重试，则将它置为特殊状态 MAX_TRIES，这类样本和过期样本一起触发tail batch逻辑
+        # 这个依赖：RolloutState 添加并维护一个新的属性 num_tries，每次打断时加1，达到 max_tries 时置为 MAX_TRIES
+        # 如果 enable_partial_rollout=True，不会触发这个逻辑，所以不受此影响
+        # 如果 enable_partial_rollout=False，分两种情况：
+        # 1) staleness = 0，即不允许过期样本，此时过期触发tail batch逻辑已经cover了tail batch逻辑
+        # 2) staleness > 0，此时需要 重试tail batch逻辑，否则多次重试的样本会影响rollout 效率
+        if not enable_partial_rollout and tail_batch_stale_threshold > 0:
+            logger.warning(
+                "tail_batch_stale_threshold > 0, enable_partial_rollout is False, this will affect rollout efficiency because not support tail_batch_max_tries logic now"
+            )
         self.over_sample_threshold = over_sample_threshold
         self.enable_partial_rollout = enable_partial_rollout
         self.tail_batch_stale_threshold = tail_batch_stale_threshold
