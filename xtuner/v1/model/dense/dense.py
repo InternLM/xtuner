@@ -288,6 +288,7 @@ class Dense(BaseModel):
         )
         self.set_modules_to_forward_prefetch([self.embed_tokens, self.layers["0"]])  # type: ignore
 
+        self._init_load_spec()
         self._to_empty_meta()
 
         # Make sure it works properly when using fsdp
