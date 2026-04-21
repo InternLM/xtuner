@@ -383,7 +383,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                 return False
             if len(self._pending_tasks) >= desired_pending:
                 return False
-            group_status = Status.EXPIRED if sample_from_expired else Status.ABORTED
+            group_status = [Status.EXPIRED, Status.ABORTED] if sample_from_expired else [Status.ABORTED]
             rollout_state = await sampler.sample(task_name=task_name, group_status=group_status)
             task = create_task(
                 _timed_generate_group(

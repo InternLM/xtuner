@@ -271,7 +271,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
     """Partial-rollout tests.
 
     All tests inject pre-constructed ABORTED samples directly into the
-    replay buffer so that Sampler.sample(group_status=ABORTED) picks them
+    replay buffer so that Sampler.sample(group_status=[ABORTED]) picks them
     up without any mocking.  The real AgentLoopManager.produce_batch() is
     used throughout.
 

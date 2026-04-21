@@ -84,12 +84,21 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         data = await sampler.sample(task_name)
         self.assertEqual(data[0].id, 0)
 
-        # 场景 B: ReplayBuffer 有 ABORTED 数据，优先拿
+        # 场景 B: ReplayBuffer 有多个候选状态，按列表顺序优先拿
         aborted_item = MockRolloutState(999, status=Status.ABORTED)
+        expired_item = MockRolloutState(1000, status=Status.EXPIRED)
         await self.replay_buffer.put([aborted_item], task_name)
-        
-        data = await sampler.sample(task_name, group_status=Status.ABORTED)
+        await self.replay_buffer.put([expired_item], task_name)
+
+        data = await sampler.sample(task_name, group_status=[Status.EXPIRED, Status.ABORTED])
+        self.assertEqual(data[0].id, 1000)
+
+        data = await sampler.sample(task_name, group_status=[Status.EXPIRED, Status.ABORTED])
         self.assertEqual(data[0].id, 999)
+
+        # 场景 C: ReplayBuffer 对应状态都为空，回退到 Dataloader
+        data = await sampler.sample(task_name, group_status=[Status.EXPIRED, Status.ABORTED])
+        self.assertEqual(data[0].id, 1)
 
     async def test_sync_produce_strategy(self):
         task_name = "test_task"
@@ -241,7 +250,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
         sampler = self._build_sampler()
         original_sample = sampler.sample
-        sampled_statuses: list[Status | None] = []
+        sampled_statuses: list[list[Status] | None] = []
 
         async def instrumented_sample(task_name, group_status=None):
             sampled_statuses.append(group_status)
@@ -265,8 +274,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
-        # tail-batch 模式在本轮固定走 EXPIRED pool，并且不使用 over-sample 额外发射。
-        self.assertEqual(sampled_statuses, [Status.EXPIRED, Status.EXPIRED])
+        # tail-batch 模式在本轮优先走 EXPIRED pool，并且不使用 over-sample 额外发射。
+        self.assertEqual(sampled_statuses, [[Status.EXPIRED, Status.ABORTED], [Status.EXPIRED, Status.ABORTED]])
         completed = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(sorted(group[0].id for group in completed), [900, 901])
 
