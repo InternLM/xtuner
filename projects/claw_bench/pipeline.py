@@ -1,8 +1,9 @@
 """claw-bench pipeline factory — all-explicit, hook-composed.
 
-Read :func:`claw_pipeline` top-to-bottom: every pre-hook is a named class
-with declared inputs, no lambdas, no hidden callables.  The only module
-that knows what a claw-bench task looks like; core stays bench-agnostic.
+Read :func:`claw_pipeline` top-to-bottom: infer-stage pre-hooks and the
+one rule_grader judger are both spelled out inline.  Same config level,
+no factory hiding.  The only module that knows what a claw-bench task
+looks like; core stays bench-agnostic.
 """
 
 from __future__ import annotations
@@ -10,26 +11,31 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from hooks import (
+from xtuner.v1.ray.environment.rl_task.hooks import (
     BenchEnv,
-    CheckOutputs,
     InstallLagent,
+    ParseJudgerStdout,
     PickAgent,
     RenderInstruction,
     RunAgentInstallDeps,
     UploadChosenAgent,
     WriteAgentConfig,
 )
-from judgers import Judger
-from runner import Runner
-from sandbox import ExecHook, SandboxStage, UploadHook
-from schemas import AgentSpec, SandboxSpec
-from validator import JudgerValidator
+from xtuner.v1.ray.environment.rl_task.judgers import Judger
+from xtuner.v1.ray.environment.rl_task.runner import Runner
+from xtuner.v1.ray.environment.rl_task.sandbox import (
+    DownloadHook,
+    ExecHook,
+    SandboxStage,
+    UploadHook,
+)
+from xtuner.v1.ray.environment.rl_task.schemas import AgentSpec, SandboxSpec
+from xtuner.v1.ray.environment.rl_task.validator import JudgerValidator
 
 
-HERE = Path(__file__).resolve().parent.parent.parent
-WRAPPERS = HERE / "common" / "wrappers"
-AGENT_TEMPLATES = HERE / "common" / "agent_templates"
+HERE = Path(__file__).resolve().parent
+WRAPPERS = HERE / "wrappers"
+AGENT_TEMPLATES = HERE / "agents"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -59,7 +65,6 @@ PATHS = SimpleNamespace(
     wrappers_lagent="/tmp/wrappers/lagent",
     agent_config="/tmp/agent_config.json",
     trajectory="/tmp/trajectory.json",
-    reference="/tmp/reference",
     verifier="/tmp/verifier",
 )
 
@@ -104,17 +109,56 @@ DEFAULT_SANDBOX = SandboxSpec(
 
 
 # ─────────────────────────────────────────────────────────────────
+# Judger (claw-bench only ever runs one pytest grader per task)
+# ─────────────────────────────────────────────────────────────────
+
+
+def _rule_grader(ws: str) -> Judger:
+    """Claw-bench's single pytest-based judger.  Reads ``verifier/test_output.py``
+    from the task dir, ships it to the infer sandbox, runs it via the shared
+    pytest wrapper, parses CTRF JSON on stdout.
+
+    Every piece of the SandboxStage is spelled out inline — the env vars
+    are literal, the pre-hook upload mapping is literal, no factory helper.
+    """
+    root = f"{PATHS.verifier}/rule_grader"
+    return Judger(
+        name="rule_grader",
+        weight=1.0,
+        sandbox="shared",     # reuse the infer sandbox (no extra provisioning)
+        stage=SandboxStage(
+            pre=[
+                # Ship verifier/ tree to /tmp/verifier/rule_grader/.
+                UploadHook([
+                    {"base": "verifier", "source": "**/*", "target": f"{root}/"},
+                ]),
+            ],
+            entry=f"bash {PATHS.wrappers_bench}/pytest_ctrf.sh",
+            env={
+                "JUDGER_NAME": "rule_grader",
+                "TASK_WORKSPACE": ws,
+                "TASK_JUDGER_DIR": root,
+                "PYTEST_TARGET": f"{root}/test_output.py",
+            },
+            timeout=300,
+            post=[ParseJudgerStdout("rule_grader")],
+        ),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
 # Pipeline factories
 # ─────────────────────────────────────────────────────────────────
 
 
 def claw_pipeline(
-    judgers: list[Judger],
     *,
     sandbox: SandboxSpec = DEFAULT_SANDBOX,
     agents: list[AgentSpec] = DEFAULT_AGENTS,
 ) -> Runner:
-    """Build a Runner for a claw-bench task.  Infer stage reads top-to-bottom."""
+    """Build a Runner for a claw-bench task.  Infer stage + rule_grader
+    judger both read top-to-bottom.
+    """
     ws = sandbox.workspace_path
 
     infer = SandboxStage(
@@ -146,7 +190,7 @@ def claw_pipeline(
             # 6. Ensure workspace dir exists (mirror doesn't create empty dirs).
             ExecHook(f"mkdir -p {ws}"),
             # 7. Render instruction.md: `workspace/` → abs path + {{KEY}} → env.
-            RenderInstruction(rewrites=CLAW_INSTRUCTION_REWRITES),
+            # RenderInstruction(rewrites=CLAW_INSTRUCTION_REWRITES),
             # 8. Exec chosen agent's config.py on host → upload resulting JSON.
             WriteAgentConfig(dst=PATHS.agent_config),
             # 9. Run install-deps.sh if the chosen agent template has one.
@@ -155,17 +199,16 @@ def claw_pipeline(
         entry=AGENT_ENTRY,
         env=BenchEnv(workspace=ws),
         timeout=1800,
-        pull=["/workspace", "/tmp/agent_response.txt"],
-        post=[CheckOutputs()],
+        post=[DownloadHook(["/workspace", "/tmp/agent_response.txt"])],
     )
 
     return Runner(
         infer=infer,
-        validate=JudgerValidator(judgers, reference_path=PATHS.reference),
+        validate=JudgerValidator([_rule_grader(ws)]),
     )
 
 
-def claw_solution_pipeline(judgers: list[Judger]) -> Runner:
+def claw_solution_pipeline() -> Runner:
     """Variant: run ``solution/solve.sh`` instead of an LLM rollout."""
     sandbox = SandboxSpec(
         image="ubuntu2404-v1", ttl_seconds=600, workspace_path="/workspace",
@@ -191,11 +234,10 @@ def claw_solution_pipeline(judgers: list[Judger]) -> Runner:
         entry=SOLUTION_ENTRY,
         env=BenchEnv(workspace=ws),
         timeout=600,
-        pull=["/workspace"],
-        post=[CheckOutputs()],
+        post=[DownloadHook(["/workspace"])],
     )
 
     return Runner(
         infer=infer,
-        validate=JudgerValidator(judgers, reference_path=PATHS.reference),
+        validate=JudgerValidator([_rule_grader(ws)]),
     )

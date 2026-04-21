@@ -13,7 +13,6 @@ Context dict keys this module reads/writes::
     ctx["uid"]              : dict  (set by Runner)
     ctx["runtime"]          : dict  (lagent_src_dir, llm_base_url, llm_api_key)
     ctx["chosen_agent"]     : AgentSpec  (set by PickAgent)
-    ctx["missing_required"] : list[str]  (set by CheckOutputs)
     ctx["judger_result"]    : JudgerResult  (set by ParseJudgerStdout)
     ctx["result"]           : StageResult  (set by SandboxStage after entry)
 """
@@ -280,7 +279,7 @@ class RunAgentInstallDeps(Hook):
         await exec_in(
             client,
             f'[ -f "{script}" ] && bash "{script}" || true',
-            timeout_sec=self.timeout, raise_on_error=False,
+            timeout_sec=self.timeout, raise_on_error=True,
         )
 
 
@@ -319,36 +318,8 @@ class BenchEnv:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Output contract + judger result parsing
+# Judger result parsing
 # ─────────────────────────────────────────────────────────────────
-
-
-class CheckOutputs(Hook):
-    """Verify ``data.outputs`` exist in the workspace after the entry.
-
-    Populates ``ctx["missing_required"]`` with any required-but-absent paths.
-    Runner reads this to decide whether to proceed to validate or fail fast.
-    """
-
-    name = "check_outputs"
-
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        ws = ctx["workspace"]
-        missing: list[str] = []
-        present: list[str] = []
-        for art in ctx["data"].outputs:
-            res = await exec_in(
-                client, f'test -e "{ws}/{art.path}" && echo yes || echo no',
-                raise_on_error=False,
-            )
-            if "yes" in (res.get("stdout") or ""):
-                present.append(art.path)
-            elif art.required:
-                missing.append(art.path)
-        ctx["missing_required"] = missing
-        ctx["present_outputs"] = present
-        if missing:
-            logger.warning("declared outputs missing: %s", missing)
 
 
 class ParseJudgerStdout(Hook):
@@ -366,32 +337,6 @@ class ParseJudgerStdout(Hook):
 
     async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
         ctx["judger_result"] = _parse_stage_stdout(self.judger_name, ctx["result"])
-
-
-# ─────────────────────────────────────────────────────────────────
-# Reference staging (validator-side helper)
-# ─────────────────────────────────────────────────────────────────
-
-
-class StageReference(Hook):
-    """Upload ``data.reference`` to ``dst``; no-op if the task has no reference."""
-
-    name = "stage_reference"
-
-    def __init__(self, dst: str = "/tmp/reference"):
-        self.dst = dst
-
-    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
-        data = ctx["data"]
-        task_root = ctx["task_root"]
-        if not data.reference:
-            return
-        src = task_root / data.reference
-        if not src.is_dir():
-            return
-        files = bundle.mirror_tree(src, self.dst, exclude=())
-        await upload_tar_and_extract(client, files, "/")
-        ctx["reference_path"] = self.dst
 
 
 # ─────────────────────────────────────────────────────────────────
