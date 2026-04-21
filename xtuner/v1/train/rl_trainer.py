@@ -385,7 +385,7 @@ class BaseRLTrainer:
 
         # 1. Save sampler (dataloader) state
         self.logger.info(f"Saving sampler state to {checkpoint_path}")
-        self.agent_loop_manager.save(checkpoint_path, model_rollout_step=cur_step)
+        self.agent_loop_manager.save(checkpoint_path, model_step=cur_step)
 
         # 2. Save DCP checkpoint (model + optimizer)
         self.logger.info(f"Saving DCP checkpoint to {checkpoint_path}")
@@ -450,7 +450,7 @@ class BaseRLTrainer:
 
     async def _run_initial_evaluate(self) -> None:
         eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-            self.evaluator.eval_batch_size, rollout_step=0
+            self.evaluator.eval_batch_size, train_step=0
         )
         eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
         self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
@@ -502,7 +502,7 @@ class BaseRLTrainer:
 
     async def _run_evaluation(self, train_step: int) -> dict[str, float]:
         eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-            self.evaluator.eval_batch_size, rollout_step=train_step
+            self.evaluator.eval_batch_size, train_step=train_step
         )
         eval_batch = eval_produce_result.rollout_states
         eval_metrics = self.evaluator.run(eval_batch)
@@ -851,7 +851,7 @@ class RLColocateTrainer(BaseRLTrainer):
                 # 共卡路径一次调用内完成 rollout 生产和 replay buffer 消费。
                 self.logger.info("start to generate rollout experience for training")
                 produce_result: ProduceBatchResult = asyncio_run(
-                    self.agent_loop_manager.produce_batch(self.train_batch_size, rollout_step=train_step)
+                    self.agent_loop_manager.produce_batch(self.train_batch_size, train_step=train_step)
                 )
                 train_batch = produce_result.rollout_states
                 assert train_batch, (
@@ -950,13 +950,13 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
 
         self.logger.info(f"Resume sampler from {checkpoint_path}")
-        saved_model_rollout_step = self.agent_loop_manager.resume(checkpoint_path)
-        assert self._cur_step == saved_model_rollout_step
+        saved_model_step = self.agent_loop_manager.resume(checkpoint_path)
+        assert self._cur_step == saved_model_step
 
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
         self.fake_update_weights()
-        self.agent_loop_manager.continue_produce(model_rollout_step=saved_model_rollout_step)
+        self.agent_loop_manager.continue_produce(model_step=saved_model_step)
 
     def fit(self):
         # 对外保留同步 fit 接口，内部用 async loop 组织 producer/consumer。
@@ -985,7 +985,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 eval_log_info = {}
                 with timer("step", step_timer_dict):
                     produce_result = await self.agent_loop_manager.get_batch(
-                        self.train_batch_size, rollout_step=train_step
+                        self.train_batch_size, train_step=train_step
                     )
                     need_sync = (
                         produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
@@ -1016,7 +1016,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             with timer("evaluation", step_timer_dict):
                                 eval_log_info.update(await self._run_evaluation(train_step))
 
-                        self.agent_loop_manager.continue_produce(model_rollout_step=train_step)
+                        self.agent_loop_manager.continue_produce(model_step=train_step)
 
                 self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
                 self._cur_step = train_step

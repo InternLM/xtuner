@@ -399,18 +399,18 @@ class ReplayBuffer:
             return await self._policy.count(query_dsl, self._storage)
 
     @staticmethod
-    def _refresh_seq_staleness(items: list[RolloutState], current_rollout_step: int) -> None:
+    def _refresh_seq_staleness(items: list[RolloutState], current_train_step: int) -> None:
         for item in items:
-            response_rollout_steps = getattr(item, "response_rollout_steps", None) or []
-            if response_rollout_steps:
-                item.seq_staleness = calculate_seq_staleness(min(response_rollout_steps), current_rollout_step)
+            response_model_steps = getattr(item, "response_model_steps", None) or []
+            if response_model_steps:
+                item.seq_staleness = calculate_seq_staleness(min(response_model_steps), current_train_step)
             elif hasattr(item, "seq_staleness"):
                 item.seq_staleness = 0
 
     async def refresh_completed_staleness(
         self,
         task_name: str,
-        current_rollout_step: int,
+        current_train_step: int,
         tail_batch_stale_threshold: int,
     ) -> int:
         query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": Status.COMPLETED}]}
@@ -419,7 +419,7 @@ class ReplayBuffer:
             updated_records: list[StorageItem] = []
             expired_count = 0
             for record in records:
-                self._refresh_seq_staleness(record.item, current_rollout_step)
+                self._refresh_seq_staleness(record.item, current_train_step)
                 staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
                 should_expire = tail_batch_stale_threshold > 0 and any(
                     getattr(item, "seq_staleness", 0) >= tail_batch_stale_threshold for item in record.item

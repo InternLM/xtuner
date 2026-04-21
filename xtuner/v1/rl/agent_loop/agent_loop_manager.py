@@ -140,8 +140,8 @@ async def _produce_single_task_to_buffer(
     task_runner: _TaskRunner,
     replay_buffer: ReplayBuffer,
     batch_size: int,
-    rollout_step: int,
-    model_rollout_step: int,
+    train_step: int,
+    model_step: int,
     update_event: asyncio.Event | None,
     progress: ProduceProgress,
     target_cumulative: int | None = None,
@@ -152,8 +152,8 @@ async def _produce_single_task_to_buffer(
         replay_buffer,
         batch_size,
         task_runner.task_name,
-        rollout_step=rollout_step,
-        model_rollout_step=model_rollout_step,
+        train_step=train_step,
+        model_step=model_step,
         update_event=update_event,
         progress=progress,
         target_cumulative=target_cumulative,
@@ -254,10 +254,10 @@ class AgentLoopManager:
 
         self._finish_event = asyncio.Event()
 
-        # 非共卡 producer 读取的 rollout 模型版本。consumer 完成权重同步后通过 continue_produce 更新。
-        # producer 发起一轮生产时可以读取当前值作为本轮版本；已 schedule 的 pending task
-        # 必须在 strategy 内绑定发起时版本，不能在 task 完成时再读取最新值。
-        self._model_rollout_step = 0
+        # 非共卡 producer 读取的 model_step：rollout 侧当前使用的是哪个 train_step 同步后的模型。
+        # consumer 完成权重同步后通过 continue_produce 更新；已 schedule 的 pending task
+        # 必须在 strategy 内绑定发起时的 model_step，不能在 task 完成时再读取最新值。
+        self._model_step = 0
 
         # 非共卡 producer / consumer 共享的控制状态。produce_loop / get_batch 应直接读取
         # self._status，不要跨 await 缓存局部快照，避免错过同步、过期或结束状态变化。
@@ -278,8 +278,8 @@ class AgentLoopManager:
             target_upto_future_step=0,
         )
 
-    def get_task_batch_sizes(self, global_batch_size: int, rollout_step: int) -> dict[str, int]:
-        """Return the per-task batch sizes for the current rollout step.
+    def get_task_batch_sizes(self, global_batch_size: int, train_step: int) -> dict[str, int]:
+        """Return the per-task batch sizes for the current train step.
 
         Subclasses may override this method to implement custom dynamic batch allocation policies. Returning 0 for a
         task effectively disables that task for the current produce_batch call.
@@ -359,41 +359,41 @@ class AgentLoopManager:
             task.task_name
             for task in self.task_runners
             if isinstance(task.produce_strategy, AsyncProduceStrategy)
-            and task.produce_strategy.is_model_expired(current_future_step, self._model_rollout_step)
+            and task.produce_strategy.is_model_expired(current_future_step, self._model_step)
         ]
         if expired_tasks:
             self.logger.info(f"Expired future_step={current_future_step}, tasks={expired_tasks}")
             return True
         return False
 
-    async def _refresh_completed_staleness_for_all_tasks(self, rollout_step: int) -> None:
+    async def _refresh_completed_staleness_for_all_tasks(self, train_step: int) -> None:
         for task in self.task_runners:
             threshold = getattr(task.produce_strategy, "tail_batch_stale_threshold", 0)
             await self.replay_buffer.refresh_completed_staleness(
                 task_name=task.task_name,
-                current_rollout_step=rollout_step,
+                current_train_step=train_step,
                 tail_batch_stale_threshold=threshold,
             )
 
-    def _get_task_batch_sizes_for_step(self, batch_size: int, rollout_step: int) -> dict[str, int]:
+    def _get_task_batch_sizes_for_step(self, batch_size: int, train_step: int) -> dict[str, int]:
         if len(self.task_runners) == 1:
             return {self.task_runners[0].task_name: batch_size}
 
-        task_batch_sizes = self.get_task_batch_sizes(batch_size, rollout_step)
+        task_batch_sizes = self.get_task_batch_sizes(batch_size, train_step)
         self._validate_task_batch_sizes(task_batch_sizes, batch_size)
         return task_batch_sizes
 
     def _build_local_produce_progress(
         self,
         task_batch_sizes: dict[str, int],
-        rollout_step: int,
+        train_step: int,
     ) -> ProduceProgress:
         return ProduceProgress(
-            next_consumer_step=rollout_step,
-            producer_future_step=rollout_step,
+            next_consumer_step=train_step,
+            producer_future_step=train_step,
             consumed_samples={task.task_name: 0 for task in self.task_runners},
             target_samples=dict(task_batch_sizes),
-            target_upto_future_step=rollout_step,
+            target_upto_future_step=train_step,
         )
 
     @staticmethod
@@ -449,7 +449,7 @@ class AgentLoopManager:
         task_batch_sizes: dict[str, int] | None = None,
     ) -> ProduceBatchStatus:
         current_future_step = progress.producer_future_step
-        model_rollout_step = self._model_rollout_step
+        model_step = self._model_step
         current_sizes = (
             self._get_task_batch_sizes_for_step(batch_size, current_future_step)
             if task_batch_sizes is None
@@ -472,8 +472,8 @@ class AgentLoopManager:
                 task_runner=task,
                 replay_buffer=self.replay_buffer,
                 batch_size=current_sizes[task.task_name],
-                rollout_step=current_future_step,
-                model_rollout_step=model_rollout_step,
+                train_step=current_future_step,
+                model_step=model_step,
                 update_event=self._update_event,
                 progress=progress,
             )
@@ -487,8 +487,8 @@ class AgentLoopManager:
                     task_runner=task,
                     replay_buffer=self.replay_buffer,
                     batch_size=current_sizes[task.task_name],
-                    rollout_step=current_future_step,
-                    model_rollout_step=model_rollout_step,
+                    train_step=current_future_step,
+                    model_step=model_step,
                     update_event=self._update_event,
                     progress=progress,
                 )
@@ -543,7 +543,7 @@ class AgentLoopManager:
         self,
         task_runner: _TaskRunner,
         batch_size: int,
-        rollout_step: int,
+        train_step: int,
         consume_progress: ProduceProgress | None = None,
     ) -> ProduceBatchResult:
         result = ProduceBatchResult(rollout_states=[])
@@ -567,7 +567,7 @@ class AgentLoopManager:
     async def _get_batch_from_buffer(
         self,
         batch_size: int,
-        rollout_step: int,
+        train_step: int,
         consume_progress: ProduceProgress | None = None,
         task_batch_sizes: dict[str, int] | None = None,
     ) -> ProduceBatchResult:
@@ -579,14 +579,14 @@ class AgentLoopManager:
             result = await self._get_single_task_batch_from_buffer(
                 task,
                 batch_size,
-                rollout_step,
+                train_step,
                 consume_progress=consume_progress,
             )
             _fill_group_timing_stats(result, result.rollout_states, pause_time_s=pause_time_s)
             return result
 
         if task_batch_sizes is None:
-            task_batch_sizes = self._get_task_batch_sizes_for_step(batch_size, rollout_step)
+            task_batch_sizes = self._get_task_batch_sizes_for_step(batch_size, train_step)
         else:
             self._validate_task_batch_sizes(task_batch_sizes, batch_size)
         active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
@@ -596,7 +596,7 @@ class AgentLoopManager:
                     self._get_single_task_batch_from_buffer(
                         task,
                         task_batch_sizes[task.task_name],
-                        rollout_step,
+                        train_step,
                         consume_progress=consume_progress,
                     )
                     for task in active_tasks
@@ -617,13 +617,13 @@ class AgentLoopManager:
         _fill_group_timing_stats(aggregated, aggregated.rollout_states, pause_time_s=pause_time_s)
         return aggregated
 
-    async def _is_batch_ready(self, batch_size: int, rollout_step: int) -> bool:
+    async def _is_batch_ready(self, batch_size: int, train_step: int) -> bool:
         if len(self.task_runners) == 1:
             task = self.task_runners[0]
             completed_count = await self.replay_buffer.count(task_name=task.task_name, group_status=Status.COMPLETED)
             return completed_count >= batch_size
 
-        task_batch_sizes = self._get_task_batch_sizes_for_step(batch_size, rollout_step)
+        task_batch_sizes = self._get_task_batch_sizes_for_step(batch_size, train_step)
         active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
         if not active_tasks:
             return True
@@ -641,23 +641,23 @@ class AgentLoopManager:
 
         # continue_produce 的语义是“producer 可以恢复工作了”。
 
-    def continue_produce(self, model_rollout_step: int) -> None:
+    def continue_produce(self, model_step: int) -> None:
         #
         # 它和 pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP) 是一对：
         # - pause_produce(...) 负责让 producer 停下来；
         # - continue_produce(...) 负责在同步/评测完成后解除暂停。
         #
-        # 这里同步更新 `_model_rollout_step`，表示 rollout 侧接下来生成样本时，
+        # 这里同步更新 `_model_step`，表示 rollout 侧接下来生成样本时，
         # 应把“当前正在使用的是哪一版权重”记录成这个版本号。
         self._status = AgentLoopManagerStatus.NORMAL
-        self._model_rollout_step = model_rollout_step
+        self._model_step = model_step
         self._update_event.clear()
 
     async def _wait_for_status_exit(self, blocked_status: AgentLoopManagerStatus) -> None:
         while not self._finish_event.is_set() and self._status == blocked_status:
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
 
-    async def produce_batch(self, batch_size: int, rollout_step: int = 0) -> ProduceBatchResult:
+    async def produce_batch(self, batch_size: int, train_step: int = 0) -> ProduceBatchResult:
         # `produce_batch()` 是保留给 colocate 路径的同步入口。
         #
         # 它虽然名字没变，但内部已经改成三段式：
@@ -672,7 +672,7 @@ class AgentLoopManager:
             raise ValueError(f"produce_batch expects batch_size > 0, got {batch_size}")
         start = time.perf_counter()
         self.logger.info(f"[AgentLoopManager][{self.name}] produce_batch start batch={batch_size}")
-        current_sizes = self._get_task_batch_sizes_for_step(batch_size, rollout_step)
+        current_sizes = self._get_task_batch_sizes_for_step(batch_size, train_step)
         active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
@@ -684,11 +684,11 @@ class AgentLoopManager:
             # produce_batch() 也应视作一次独立的同步生产过程，从干净状态开始。
             #
             # 共卡路径下，每次 produce_batch() 都对应当前 trainer 轮次的新权重版本，
-            # 所以这里直接复用 continue_produce() 同步恢复状态并更新 rollout model version。
-            self.continue_produce(model_rollout_step=rollout_step - 1)  # TODO: 更新样本过期信息
+            # 所以这里直接复用 continue_produce() 同步恢复状态并更新 model_step。
+            self.continue_produce(model_step=train_step - 1)  # TODO: 更新样本过期信息
             # 共卡 produce_batch 也是消费入口；生产前先刷新 buffer 中已有 completed。
-            await self._refresh_completed_staleness_for_all_tasks(rollout_step)
-            local_progress = self._build_local_produce_progress(current_sizes, rollout_step)
+            await self._refresh_completed_staleness_for_all_tasks(train_step)
+            local_progress = self._build_local_produce_progress(current_sizes, train_step)
             status = await self._produce_batch_to_buffer(
                 batch_size=batch_size,
                 progress=local_progress,
@@ -700,7 +700,7 @@ class AgentLoopManager:
             )
             result = await self._get_batch_from_buffer(
                 batch_size=batch_size,
-                rollout_step=rollout_step,
+                train_step=train_step,
                 consume_progress=local_progress,
                 task_batch_sizes=current_sizes,
             )
@@ -720,6 +720,8 @@ class AgentLoopManager:
 
     async def produce_loop(self, batch_size: int) -> None:
         # `produce_loop()` 是非共卡新增的后台生产循环。
+        # batch_size 表示每个 future train_step 的目标生产规模；producer 需要它来推进累计目标，
+        # 所以这个参数保留在后台生产入口，而不是从 get_batch() 的消费请求里推断。
         #
         # 和 colocate 最大的区别是：
         # - 它不直接把 batch 返回给 trainer
@@ -755,13 +757,13 @@ class AgentLoopManager:
                 # - UPDATE_ABORT 则是 trainer 在同步前通过 pause_produce() 主动设置的
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
             elif produce_status == ProduceBatchStatus.NORMAL:
-                # 只有正常完成一轮生产时，producer 自己维护的 rollout_step 才前进一步。
+                # 只有正常完成一轮生产时，producer 自己维护的 train_step 才前进一步。
                 self._produce_progress.producer_future_step += 1
 
             # 主动让出事件循环，避免 fake strategy / 极快路径在测试里造成忙等空转。
             await asyncio.sleep(0)
 
-    async def get_batch(self, batch_size: int, rollout_step: int) -> ProduceBatchResult:
+    async def get_batch(self, batch_size: int, train_step: int) -> ProduceBatchResult:
         # `get_batch()` 是非共卡路径给 trainer 的消费接口。
         #
         # 设计上它和 `produce_batch()` 明确分工：
@@ -772,8 +774,8 @@ class AgentLoopManager:
         # - 当 manager 已进入 EXPIRED_BATCH，返回空 batch + 状态信号
         # - trainer 看到后应跳过训练，优先去做权重同步
         progress = self._produce_progress
-        progress.next_consumer_step = rollout_step
-        await self._refresh_completed_staleness_for_all_tasks(rollout_step)
+        progress.next_consumer_step = train_step
+        await self._refresh_completed_staleness_for_all_tasks(train_step)
 
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
@@ -782,15 +784,15 @@ class AgentLoopManager:
                     status=ProduceBatchStatus.EXPIRED_BATCH,
                 )
             # TODO: call self.get_task_batch_sizes before while instead of below two functions
-            if await self._is_batch_ready(batch_size=batch_size, rollout_step=rollout_step):
+            if await self._is_batch_ready(batch_size=batch_size, train_step=train_step):
                 result = await self._get_batch_from_buffer(
                     batch_size=batch_size,
-                    rollout_step=rollout_step,
+                    train_step=train_step,
                     consume_progress=progress,
                 )
                 if result.rollout_states:
-                    progress.next_consumer_step = rollout_step + 1
-                    await self._refresh_completed_staleness_for_all_tasks(rollout_step + 1)
+                    progress.next_consumer_step = train_step + 1
+                    await self._refresh_completed_staleness_for_all_tasks(train_step + 1)
                     return result
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
 
@@ -812,7 +814,7 @@ class AgentLoopManager:
                 pending_task_counts[task.task_name] = len(pending_tasks)
         return pending_task_counts
 
-    def save(self, checkpoint_path: Path | str, model_rollout_step: int) -> None:
+    def save(self, checkpoint_path: Path | str, model_step: int) -> None:
         """Save all task sampler states and the shared replay buffer."""
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -823,7 +825,7 @@ class AgentLoopManager:
                 f"{pending_task_counts}. Call pause_produce() first."
             )
         # 保存前显式记录当前 checkpoint 对应的模型步数，resume 时直接恢复这一份状态。
-        self._model_rollout_step = model_rollout_step
+        self._model_step = model_step
         for task in self.task_runners:
             task_checkpoint_path = self._task_checkpoint_path(checkpoint_path, task.task_name)
             task_checkpoint_path.mkdir(parents=True, exist_ok=True)
@@ -835,7 +837,7 @@ class AgentLoopManager:
             json.dump(
                 {
                     "status": self._status.name,
-                    "model_rollout_step": self._model_rollout_step,
+                    "model_step": self._model_step,
                     "next_consumer_step": progress.next_consumer_step,
                     "producer_future_step": progress.producer_future_step,
                     "consumed_samples": progress.consumed_samples,
@@ -855,7 +857,7 @@ class AgentLoopManager:
         manager_state_path = self._manager_state_path(checkpoint_path)
         with manager_state_path.open("r") as f:
             manager_state = json.load(f)
-        saved_model_rollout_step = manager_state["model_rollout_step"]
+        saved_model_step = manager_state["model_step"]
         progress = self._produce_progress
         progress.next_consumer_step = manager_state["next_consumer_step"]
         progress.producer_future_step = manager_state["producer_future_step"]
@@ -872,5 +874,5 @@ class AgentLoopManager:
         self._update_event.set()
         self._status = AgentLoopManagerStatus.UPDATE_ABORT
         self._pause_time_s = 0.0
-        self._model_rollout_step = saved_model_rollout_step
-        return saved_model_rollout_step
+        self._model_step = saved_model_step
+        return saved_model_step

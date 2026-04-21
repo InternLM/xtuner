@@ -179,7 +179,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         )
         replay_buffer = manager.replay_buffer
 
-        await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=1)
+        await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=1)
 
         remain_completed = await replay_buffer.count(
             task_name="test_1_1", group_status=Status.COMPLETED
@@ -233,7 +233,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         manager.data_sampler.sample = instrumented_sample
 
         # --- Round 1 ---
-        await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=1)
+        await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=1)
 
         # After round 1: produce_batch consumed BATCH_SIZE completed items.
         # The leftover items (completed but not consumed) stay in the buffer.
@@ -255,7 +255,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         )
         # --- Round 2: reset counter then run ---
         sampled_from_aborted = 0
-        await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=2)
+        await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=2)
 
         self.assertLessEqual(
             sampled_from_aborted,
@@ -304,7 +304,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         ray.shutdown()
 
     def _make_aborted_state(self, uid: int, prompt: str, response_ids: list[int],
-                            response_rollout_steps: list[int] | None = None,
+                            response_model_steps: list[int] | None = None,
                             max_tokens: int = MAX_RESPONSE_LENGTH) -> "RolloutState":
         """Helper: build an ABORTED RolloutState with given response_ids."""
         from xtuner.v1.data_proto import RolloutState, SampleParams, Status
@@ -325,7 +325,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
             response="placeholder",
             logprobs=[0.0] * len(response_ids),
             response_mask=[1] * len(response_ids),
-            response_rollout_steps=response_rollout_steps if response_rollout_steps is not None else [0] * len(response_ids),
+            response_model_steps=response_model_steps if response_model_steps is not None else [0] * len(response_ids),
             seq_staleness=0,
             extra_fields={},
         )
@@ -369,9 +369,9 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         # Loop: with oversampling the injected sample may be aborted multiple times
         # before completing.  Search by uid across rounds.
         target_sample = None
-        for rollout_step in range(1, 15):
+        for train_step in range(1, 15):
             completed_groups = await manager.produce_batch(
-                batch_size=self.BATCH_SIZE, rollout_step=rollout_step
+                batch_size=self.BATCH_SIZE, train_step=train_step
             )
             for group in completed_groups.rollout_states:
                 for sample in group:
@@ -431,7 +431,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
         # EOS short-circuit completes with no LLM call → always wins the race.
         completed_groups = await manager.produce_batch(
-            batch_size=self.BATCH_SIZE, rollout_step=1
+            batch_size=self.BATCH_SIZE, train_step=1
         )
         completed_groups = completed_groups.rollout_states
 
@@ -478,7 +478,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
         # max_tokens short-circuit completes with no LLM call → always wins the race.
         completed_groups = await manager.produce_batch(
-            batch_size=self.BATCH_SIZE, rollout_step=1
+            batch_size=self.BATCH_SIZE, train_step=1
         )
         completed_groups = completed_groups.rollout_states
 
@@ -524,9 +524,9 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         await replay_buffer.put([state], task_name)
 
         target_sample = None
-        for rollout_step in range(1, 15):
+        for train_step in range(1, 15):
             completed_groups = await manager.produce_batch(
-                batch_size=self.BATCH_SIZE, rollout_step=rollout_step
+                batch_size=self.BATCH_SIZE, train_step=train_step
             )
             for group in completed_groups.rollout_states    :
                 for sample in group:
@@ -535,7 +535,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
                             len(sample.response_ids),
                             max_tokens,
                             msg=(
-                                f"Step {rollout_step}: accumulated response_ids length "
+                                f"Step {train_step}: accumulated response_ids length "
                                 f"{len(sample.response_ids)} exceeds max_tokens {max_tokens}"
                             ),
                         )
@@ -556,7 +556,9 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
 class TestTailBatch(unittest.IsolatedAsyncioTestCase):
     BATCH_SIZE = 2
-    OVER_SAMPLE = 5.0  # data_concurrency = (1 + 5.0) * BATCH_SIZE = 12
+    # 真实 lmdeploy 后端在大量并发 abort 时容易触发 session cleanup 异常；
+    # 这里沿用 oversampling 覆盖里已稳定验证的并发规模，仍足够产生 leftover。
+    OVER_SAMPLE = 2.0  # data_concurrency = (1 + 2.0) * BATCH_SIZE = 6
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -575,9 +577,9 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
 
         staleness 积累路径（enable_partial_rollout=True）：
           Round 1 (step=1): 6 个并发任务，2 个完成后其余被 abort。
-            被 abort 的样本携带 step=1 生成的分段 response，response_rollout_steps=[1,...].
+            被 abort 的样本携带 step=1 生成的分段 response，response_model_steps=[1,...].
           Round 2 (step=2): round1 的 ABORTED 样本被续写，多数在 round2 内完成（COMPLETED）。
-            postprocess 只拼接 partial rollout 历史；producer put 前记录 response_rollout_steps 并刷新 staleness。
+            postprocess 只拼接 partial rollout 历史；producer put 前记录 response_model_steps 并刷新 staleness。
             该轮未消费的 COMPLETED 样本会留在 buffer 中。
           Round 3 (step=3): produce_batch 作为消费入口，先刷新 buffer 中的
             COMPLETED 样本，检查 seq_staleness=1 >= threshold=1 → 标为 EXPIRED，
@@ -597,15 +599,17 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             enable_partial_rollout=True,
             tail_batch_stale_threshold=STALE_THRESHOLD,
             tail_batch_trigger_size=0,  # 只测 EXPIRED 标记，不触发 tail-batch 模式
-            max_tokens=8192,  # 让 response 足够长，确保 staleness 能积累到 1（不被 max_tokens 短路）
+            # 测试用 rollout context_length 是 MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH；
+            # max_tokens 不能超过这个测试配置，否则 lmdeploy 会进入超长请求的异常/abort 路径。
+            max_tokens=MAX_RESPONSE_LENGTH,
         )
         replay_buffer = manager.replay_buffer
 
         # 3 轮是让 staleness 自然积累并被 produce_batch 入口刷新标记的最少轮数：
         #   round1 产生 ABORTED（step=1 tokens）→ round2 续写完成并留作 COMPLETED
         #   → round3 开头刷新 completed 并标 EXPIRED（staleness=1 >= 1）
-        for rollout_step in range(1, 5):
-            await manager.produce_batch(batch_size=self.BATCH_SIZE, rollout_step=rollout_step)
+        for train_step in range(1, 5):
+            await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=train_step)
 
         expired_count = await replay_buffer.count(
             task_name=task_name, group_status=Status.EXPIRED
@@ -634,9 +638,9 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
         流程 (最多 10 轮):
           - 在调用 produce_batch 之前读取 expired_before。
           - 若 expired_before >= trigger_size，本轮由 strategy 进入 tail-batch 模式：
-              从 EXPIRED 池取样 → preprocess 重置 response_ids=[], response_rollout_steps=[]
+              从 EXPIRED 池取样 → preprocess 重置 response_ids=[], response_model_steps=[]
               → 全新生成 → postprocess 拼接历史
-              → producer put 前记录 response_rollout_steps 并刷新 staleness 为 0。
+              → producer put 前记录 response_model_steps 并刷新 staleness 为 0。
           - 取到第一个 tail-batch 完成样本后退出循环。
 
         断言:
@@ -656,20 +660,21 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             enable_partial_rollout=True,
             tail_batch_stale_threshold=STALE_THRESHOLD,
             tail_batch_trigger_size=TRIGGER_SIZE,
-            max_tokens=8192,
+            # 保持在测试用 context_length 内，避免尾批测试被超长生成请求干扰。
+            max_tokens=MAX_RESPONSE_LENGTH,
         )
         replay_buffer = manager.replay_buffer
 
         tail_batch_triggered = False
         completed_from_tail_batch = None
 
-        for rollout_step in range(1, 11):
+        for train_step in range(1, 11):
             expired_before = await replay_buffer.count(
                 task_name=task_name, group_status=Status.EXPIRED
             )
 
             completed_groups = await manager.produce_batch(
-                batch_size=self.BATCH_SIZE, rollout_step=rollout_step
+                batch_size=self.BATCH_SIZE, train_step=train_step
             )
             completed_groups = completed_groups.rollout_states
 

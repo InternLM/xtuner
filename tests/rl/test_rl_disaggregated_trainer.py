@@ -22,16 +22,16 @@ class _FakeManager:
         await self._finish_event.wait()
         self.calls.append("produce_loop_exit")
 
-    async def get_batch(self, batch_size: int, rollout_step: int):
-        self.calls.append(("get_batch", batch_size, rollout_step))
+    async def get_batch(self, batch_size: int, train_step: int):
+        self.calls.append(("get_batch", batch_size, train_step))
         return self._results.pop(0)
 
     async def pause_produce(self, source: ProducePauseSource):
         self.calls.append(("pause_produce", source))
         return 0.25
 
-    def continue_produce(self, model_rollout_step: int):
-        self.calls.append(("continue_produce", model_rollout_step))
+    def continue_produce(self, model_step: int):
+        self.calls.append(("continue_produce", model_step))
 
 
 class TestRLDisaggregatedTrainer(unittest.TestCase):
@@ -130,13 +130,13 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         async def sync_weights_and_save(train_step: int, step_timer_dict: dict):
             events.append("sync")
 
-        async def eval_produce_batch(batch_size: int, rollout_step: int):
+        async def eval_produce_batch(batch_size: int, train_step: int):
             events.append("eval")
             return ProduceBatchResult(rollout_states=[["eval"]])
 
-        def continue_produce(model_rollout_step: int):
+        def continue_produce(model_step: int):
             events.append("continue_produce")
-            manager.calls.append(("continue_produce", model_rollout_step))
+            manager.calls.append(("continue_produce", model_step))
 
         trainer._sync_weights_and_save = AsyncMock(side_effect=sync_weights_and_save)
         trainer.eval_agent_loop_manager.produce_batch = AsyncMock(side_effect=eval_produce_batch)
@@ -179,8 +179,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             events.append(f"manager_resume:{Path(checkpoint_path).name}")
             return 3
 
-        def manager_continue_produce(model_rollout_step: int):
-            events.append(f"continue_produce:{model_rollout_step}")
+        def manager_continue_produce(model_step: int):
+            events.append(f"continue_produce:{model_step}")
 
         trainer.agent_loop_manager = SimpleNamespace(
             resume=MagicMock(side_effect=manager_resume),

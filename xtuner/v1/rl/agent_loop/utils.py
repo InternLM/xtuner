@@ -10,13 +10,13 @@ from xtuner.v1.utils import get_logger
 logger = get_logger()
 
 
-def refresh_seq_staleness(group: list[RolloutState], current_rollout_step: int) -> list[RolloutState]:
+def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) -> list[RolloutState]:
     for rollout_state in group:
         if not hasattr(rollout_state, "seq_staleness"):
             continue
-        response_rollout_steps = getattr(rollout_state, "response_rollout_steps", None) or []
-        if response_rollout_steps:
-            rollout_state.seq_staleness = calculate_seq_staleness(min(response_rollout_steps), current_rollout_step)
+        response_model_steps = getattr(rollout_state, "response_model_steps", None) or []
+        if response_model_steps:
+            rollout_state.seq_staleness = calculate_seq_staleness(min(response_model_steps), current_train_step)
         else:
             rollout_state.seq_staleness = 0
     return group
@@ -51,7 +51,7 @@ class PartialRolloutHandler:
             rollout_state.response = ""
             rollout_state.logprobs = []
             rollout_state.response_mask = []
-            rollout_state.response_rollout_steps = []
+            rollout_state.response_model_steps = []
             return rollout_state
 
         # Set up token and length variable

@@ -190,10 +190,10 @@ class ProduceStrategy(ABC):
         replay_buffer: ReplayBuffer,
         batch_size: int,
         task_name: str,
-        rollout_step: int = 0,
+        train_step: int = 0,
         update_event: asyncio.Event | None = None,
         *,
-        model_rollout_step: int,
+        model_step: int,
         progress: ProduceProgress,
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus: ...
@@ -217,10 +217,10 @@ class SyncProduceStrategy(ProduceStrategy):
         replay_buffer: ReplayBuffer,
         batch_size: int,
         task_name: str,
-        rollout_step: int = 0,
+        train_step: int = 0,
         update_event: asyncio.Event | None = None,
         *,
-        model_rollout_step: int,
+        model_step: int,
         progress: ProduceProgress,
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
@@ -256,8 +256,8 @@ class SyncProduceStrategy(ProduceStrategy):
                     completed_sample_count += 1
                     logger.info(f"Collected {completed_sample_count}/{batch_size} valid samples for task {task_name}.")
                 for item in items:
-                    update_sample_version(item, model_rollout_step)
-                refresh_seq_staleness(items, rollout_step)
+                    update_sample_version(item, model_step)
+                refresh_seq_staleness(items, train_step)
                 await replay_buffer.put(items, task_name)
 
             while len(pending_tasks) + completed_sample_count < batch_size and self.should_continue_fn(
@@ -294,15 +294,15 @@ class AsyncProduceStrategy(ProduceStrategy):
         self._pending_task_model_steps: dict[asyncio.Task, int] = {}
         self._pending_lock = asyncio.Lock()
 
-    def is_model_expired(self, rollout_step: int, model_rollout_step: int) -> bool:
+    def is_model_expired(self, train_step: int, model_step: int) -> bool:
         if self.tail_batch_stale_threshold <= 0:
             return False
 
-        staleness = calculate_seq_staleness(model_rollout_step, rollout_step)
+        staleness = calculate_seq_staleness(model_step, train_step)
         return staleness >= self.tail_batch_stale_threshold
 
-    def _is_model_expired(self, rollout_step: int, model_rollout_step: int) -> bool:
-        return self.is_model_expired(rollout_step, model_rollout_step)
+    def _is_model_expired(self, train_step: int, model_step: int) -> bool:
+        return self.is_model_expired(train_step, model_step)
 
     async def _snapshot_pending(self) -> set[asyncio.Task]:
         async with self._pending_lock:
@@ -329,12 +329,12 @@ class AsyncProduceStrategy(ProduceStrategy):
         items: list[RolloutState],
         replay_buffer: ReplayBuffer,
         task_name: str,
-        current_rollout_step: int,
-        model_rollout_step: int,
+        current_train_step: int,
+        model_step: int,
     ) -> None:
         for item in items:
-            update_sample_version(item, model_rollout_step)
-        refresh_seq_staleness(items, current_rollout_step)
+            update_sample_version(item, model_step)
+        refresh_seq_staleness(items, current_train_step)
         items = expire_group_if_needed(items, self.tail_batch_stale_threshold)
         await replay_buffer.put(items, task_name)
 
@@ -347,13 +347,13 @@ class AsyncProduceStrategy(ProduceStrategy):
     ) -> None:
         for task in claimed_tasks:
             # 每个 pending task 必须绑定调度时的模型版本；缺失说明调度状态已损坏，直接暴露。
-            task_model_rollout_step = self._pending_task_model_steps.pop(task)
+            task_model_step = self._pending_task_model_steps.pop(task)
             await self._put_generated_group(
                 task.result(),
                 replay_buffer,
                 task_name,
-                current_rollout_step=progress.next_consumer_step,
-                model_rollout_step=task_model_rollout_step,
+                current_train_step=progress.next_consumer_step,
+                model_step=task_model_step,
             )
 
     async def _schedule_one(
@@ -363,7 +363,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         desired_pending: int,
         sample_from_expired: bool,
         task_name: str,
-        model_rollout_step: int,
+        model_step: int,
         update_event: asyncio.Event | None,
     ) -> bool:
         async with self._pending_lock:
@@ -382,7 +382,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                 )
             )
             self._pending_tasks.add(task)
-            self._pending_task_model_steps[task] = model_rollout_step
+            self._pending_task_model_steps[task] = model_step
             return True
 
     async def _schedule_tasks_until(
@@ -392,7 +392,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         task_name: str,
         desired_pending: int,
         sample_from_expired: bool,
-        model_rollout_step: int,
+        model_step: int,
         update_event: asyncio.Event | None,
     ) -> None:
         while await self._schedule_one(
@@ -401,7 +401,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             desired_pending=desired_pending,
             sample_from_expired=sample_from_expired,
             task_name=task_name,
-            model_rollout_step=model_rollout_step,
+            model_step=model_step,
             update_event=update_event,
         ):
             pass
@@ -434,7 +434,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             for task in claimed_done:
                 paused_items = task.result()
                 # pause 可能发生在权重同步之后，但这里仍要使用 task 发起时绑定的模型版本。
-                task_model_rollout_step = self._pending_task_model_steps.pop(task)
+                task_model_step = self._pending_task_model_steps.pop(task)
                 for item in paused_items:
                     logger.debug(
                         f"[{self.__class__.__name__}] Task {task_name} | "
@@ -445,8 +445,8 @@ class AsyncProduceStrategy(ProduceStrategy):
                     paused_items,
                     replay_buffer,
                     task_name,
-                    current_rollout_step=progress.next_consumer_step,
-                    model_rollout_step=task_model_rollout_step,
+                    current_train_step=progress.next_consumer_step,
+                    model_step=task_model_step,
                 )
             if await self._pending_count() > 0:
                 await pause_generation(rollout_ctl)
@@ -460,10 +460,10 @@ class AsyncProduceStrategy(ProduceStrategy):
         replay_buffer: ReplayBuffer,
         batch_size: int,
         task_name: str,
-        rollout_step: int = 0,
+        train_step: int = 0,
         update_event: asyncio.Event | None = None,
         *,
-        model_rollout_step: int,
+        model_step: int,
         progress: ProduceProgress,
         target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
@@ -476,7 +476,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         if update_event.is_set():
             return ProduceBatchStatus.UPDATE_ABORT
-        if self.is_model_expired(rollout_step, model_rollout_step):
+        if self.is_model_expired(train_step, model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
         # 先回收跨 produce_batch 调用遗留的已完成任务，避免 done task 长期留在 pending 集合里。
@@ -490,7 +490,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         if update_event.is_set():
             return ProduceBatchStatus.UPDATE_ABORT
-        if self.is_model_expired(rollout_step, model_rollout_step):
+        if self.is_model_expired(train_step, model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
         expired_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
@@ -510,7 +510,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         while True:
             if update_event.is_set():
                 return ProduceBatchStatus.UPDATE_ABORT
-            if self.is_model_expired(rollout_step, model_rollout_step):
+            if self.is_model_expired(train_step, model_step):
                 return ProduceBatchStatus.EXPIRED_BATCH
 
             fresh = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
@@ -527,7 +527,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                     task_name=task_name,
                     desired_pending=desired_pending,
                     sample_from_expired=sample_from_expired,
-                    model_rollout_step=model_rollout_step,
+                    model_step=model_step,
                     update_event=update_event,
                 )
                 if update_event.is_set():

@@ -47,15 +47,15 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self,
         task_name: str,
         target: int,
-        rollout_step: int = 0,
+        train_step: int = 0,
         consumed: int = 0,
     ) -> ProduceProgress:
         return ProduceProgress(
-            next_consumer_step=rollout_step,
-            producer_future_step=rollout_step,
+            next_consumer_step=train_step,
+            producer_future_step=train_step,
             consumed_samples={task_name: consumed},
             target_samples={task_name: target},
-            target_upto_future_step=rollout_step,
+            target_upto_future_step=train_step,
         )
 
     def _build_agent_loop(self, sleep_by_id: dict[int, float] | None = None):
@@ -69,7 +69,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         async def mock_gen(rs, **kwargs):
             await asyncio.sleep(sleep_by_id.get(rs[0].id, 0.0))
             for r in rs:
-                r.seq_staleness = kwargs.get("model_rollout_step", kwargs.get("rollout_step", 0))
+                r.seq_staleness = kwargs.get("model_step", kwargs.get("train_step", 0))
                 r.status = Status.COMPLETED
             return rs
 
@@ -105,9 +105,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=2,
             task_name=task_name,
-            rollout_step=4,
-            model_rollout_step=3,
-            progress=self._build_progress(task_name, target=2, rollout_step=4),
+            train_step=4,
+            model_step=3,
+            progress=self._build_progress(task_name, target=2, train_step=4),
         )
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
 
@@ -155,7 +155,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=2,
             task_name=task_name,
-            model_rollout_step=0,
+            model_step=0,
             progress=self._build_progress(task_name, target=2),
         )
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
@@ -194,8 +194,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=1,
             task_name=task_name,
-            rollout_step=2,
-            model_rollout_step=1,
+            train_step=2,
+            model_step=1,
             target_cumulative=2,
             progress=progress,
         )
@@ -224,7 +224,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=4,
             task_name=task_name,
-            model_rollout_step=0,
+            model_step=0,
             progress=progress,
         )
 
@@ -260,7 +260,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=2,
             task_name=task_name,
-            model_rollout_step=0,
+            model_step=0,
             progress=self._build_progress(task_name, target=2),
         )
 
@@ -291,8 +291,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 self.replay_buffer,
                 batch_size=1,
                 task_name=task_name,
-                rollout_step=1,
-                model_rollout_step=0,
+                train_step=1,
+                model_step=0,
                 target_cumulative=1,
                 progress=missing_consumed,
             )
@@ -311,8 +311,8 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 self.replay_buffer,
                 batch_size=1,
                 task_name=task_name,
-                rollout_step=1,
-                model_rollout_step=0,
+                train_step=1,
+                model_step=0,
                 target_cumulative=1,
                 progress=mismatched_target,
             )
@@ -321,7 +321,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         task_name = "test_sample_version"
 
         async def mock_gen(rs, **kwargs):
-            self.assertNotIn("model_rollout_step", kwargs)
+            self.assertNotIn("model_step", kwargs)
             for r in rs:
                 r.response_ids = [10, 11]
                 r.status = Status.COMPLETED
@@ -338,25 +338,25 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=1,
             task_name=task_name,
-            rollout_step=5,
-            model_rollout_step=3,
-            progress=self._build_progress(task_name, target=1, rollout_step=5),
+            train_step=5,
+            model_step=3,
+            progress=self._build_progress(task_name, target=1, train_step=5),
         )
 
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         completed = await self.replay_buffer.get(1, task_name, Status.COMPLETED)
-        self.assertEqual(completed[0][0].response_rollout_steps, [3, 3])
+        self.assertEqual(completed[0][0].response_model_steps, [3, 3])
         self.assertEqual(completed[0][0].seq_staleness, 1)
 
     async def test_async_produce_strategy_preserves_partial_rollout_old_versions(self):
         task_name = "test_partial_rollout_versions"
         partial_item = MockRolloutState(700, status=Status.ABORTED)
         partial_item.response_ids = [10]
-        partial_item.response_rollout_steps = [1]
+        partial_item.response_model_steps = [1]
         await self.replay_buffer.put([partial_item], task_name)
 
         async def mock_gen(rs, **kwargs):
-            self.assertNotIn("model_rollout_step", kwargs)
+            self.assertNotIn("model_step", kwargs)
             # partial rollout 的历史 token 已有版本，新 token 应按本次调度时的模型版本补齐。
             rs[0].response_ids = [10, 11, 12]
             rs[0].status = Status.COMPLETED
@@ -373,14 +373,14 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=1,
             task_name=task_name,
-            rollout_step=5,
-            model_rollout_step=3,
-            progress=self._build_progress(task_name, target=1, rollout_step=5),
+            train_step=5,
+            model_step=3,
+            progress=self._build_progress(task_name, target=1, train_step=5),
         )
 
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         completed = await self.replay_buffer.get(1, task_name, Status.COMPLETED)
-        self.assertEqual(completed[0][0].response_rollout_steps, [1, 3, 3])
+        self.assertEqual(completed[0][0].response_model_steps, [1, 3, 3])
         self.assertEqual(completed[0][0].seq_staleness, 3)
 
     async def test_async_produce_strategy_reclaims_cross_call_pending_and_records_timing(self):
@@ -397,7 +397,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=1,
             task_name=task_name,
-            model_rollout_step=0,
+            model_step=0,
             progress=progress,
         )
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
@@ -411,7 +411,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=1,
             task_name=task_name,
-            model_rollout_step=0,
+            model_step=0,
             progress=progress,
         )
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
@@ -438,7 +438,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=1,
             task_name=task_name,
-            model_rollout_step=0,
+            model_step=0,
             progress=progress,
         )
         self.assertGreater(len(strategy._pending_tasks), 0)
@@ -472,10 +472,10 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=1,
             task_name=task_name,
-            rollout_step=1,
-            model_rollout_step=1,
+            train_step=1,
+            model_step=1,
             update_event=update_event,
-            progress=self._build_progress(task_name, target=1, rollout_step=1),
+            progress=self._build_progress(task_name, target=1, train_step=1),
         )
 
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
@@ -503,7 +503,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             batch_size=1,
             task_name=task_name,
             update_event=update_event,
-            model_rollout_step=0,
+            model_step=0,
             progress=progress,
         )
 
@@ -532,9 +532,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             self.replay_buffer,
             batch_size=1,
             task_name=task_name,
-            rollout_step=3,
-            model_rollout_step=1,
-            progress=self._build_progress(task_name, target=1, rollout_step=3),
+            train_step=3,
+            model_step=1,
+            progress=self._build_progress(task_name, target=1, train_step=3),
         )
 
         self.assertEqual(status, ProduceBatchStatus.EXPIRED_BATCH)
@@ -544,12 +544,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
     async def test_refresh_completed_samples_refreshes_staleness_before_expire_check(self):
         task_name = "test_refresh_leftover"
         stale_item = MockRolloutState(1000, seq_staleness=0, status=Status.COMPLETED)
-        stale_item.response_rollout_steps = [3]
+        stale_item.response_model_steps = [3]
         await self.replay_buffer.put([stale_item], task_name)
 
         expired_count = await self.replay_buffer.refresh_completed_staleness(
             task_name=task_name,
-            current_rollout_step=6,
+            current_train_step=6,
             tail_batch_stale_threshold=2,
         )
         expired_groups = await self.replay_buffer.get(10, task_name, Status.EXPIRED)

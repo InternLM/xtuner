@@ -38,6 +38,9 @@ pytest --durations=20 \
   tests/rl/test_replay_buffer.py \
   tests/rl/test_multi_task_agent_loop_manager.py \
   tests/rl/test_producer.py \
+  tests/rl/test_async_rollout.py::TestOversampling \
+  tests/rl/test_async_rollout.py::TestPartialRollout \
+  tests/rl/test_async_rollout.py::TestTailBatch \
   tests/rl/test_rl_colocate_trainer.py \
   tests/rl/test_rl_disaggregated_trainer.py \
   tests/rl/test_agent_loop.py::TestAgentLoop::test_gsm8k_agent_loop_manager

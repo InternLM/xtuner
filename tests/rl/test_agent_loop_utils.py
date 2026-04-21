@@ -8,7 +8,7 @@ from xtuner.v1.rl.agent_loop.utils import PartialRolloutHandler, refresh_seq_sta
 
 def _make_rollout_state(
     response_ids: list[int],
-    response_rollout_steps: list[int] | None = None,
+    response_model_steps: list[int] | None = None,
     seq_staleness: int = 0,
     status: Status = Status.ABORTED,
     extra_fields: dict | None = None,
@@ -21,7 +21,7 @@ def _make_rollout_state(
         response="resp",
         logprobs=[0.0] * len(response_ids),
         response_mask=[1] * len(response_ids),
-        response_rollout_steps=response_rollout_steps,
+        response_model_steps=response_model_steps,
         seq_staleness=seq_staleness,
         sample_params=SampleParams(max_tokens=8),
         status=status,
@@ -30,10 +30,10 @@ def _make_rollout_state(
 
 
 class TestAgentLoopUtils(unittest.TestCase):
-    def test_refresh_seq_staleness_recomputes_from_response_rollout_steps(self):
-        group = [_make_rollout_state(response_ids=[1, 2], response_rollout_steps=[3, 4], seq_staleness=0)]
+    def test_refresh_seq_staleness_recomputes_from_response_model_steps(self):
+        group = [_make_rollout_state(response_ids=[1, 2], response_model_steps=[3, 4], seq_staleness=0)]
 
-        refresh_seq_staleness(group, current_rollout_step=8)
+        refresh_seq_staleness(group, current_train_step=8)
 
         self.assertEqual(group[0].seq_staleness, 4)
 
@@ -41,7 +41,7 @@ class TestAgentLoopUtils(unittest.TestCase):
         handler = PartialRolloutHandler(max_tokens=8)
         rollout_state = _make_rollout_state(
             response_ids=[30, 31],
-            response_rollout_steps=[2, 2],
+            response_model_steps=[2, 2],
             seq_staleness=0,
             extra_fields={
                 "history_response_dict": {
@@ -57,7 +57,7 @@ class TestAgentLoopUtils(unittest.TestCase):
         result = handler.postprocess(rollout_state)
 
         self.assertEqual(result.response_ids, [10, 11, 30, 31])
-        self.assertEqual(result.response_rollout_steps, [2, 2])
+        self.assertEqual(result.response_model_steps, [2, 2])
         self.assertEqual(result.seq_staleness, 0)
 
 
@@ -87,7 +87,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
             rollout_state,
         )
 
-        self.assertIsNone(result.response_rollout_steps)
+        self.assertIsNone(result.response_model_steps)
         self.assertEqual(result.seq_staleness, 7)
 
     async def test_generate_sample_does_not_update_sample_version(self):
@@ -98,10 +98,10 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         result = await agent_loop.generate_sample(rollout_state)
 
-        self.assertIsNone(result.response_rollout_steps)
+        self.assertIsNone(result.response_model_steps)
         self.assertEqual(result.seq_staleness, 0)
 
-    async def test_generate_sample_does_not_require_model_rollout_step(self):
+    async def test_generate_sample_does_not_require_model_step(self):
         agent_loop = self._build_agent_loop()
         rollout_state = _make_rollout_state(response_ids=[], status=Status.ABORTED)
         generated_state = _make_rollout_state(response_ids=[30, 31], status=Status.ABORTED)
@@ -109,5 +109,5 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
 
         result = await agent_loop.generate_sample(rollout_state)
 
-        self.assertIsNone(result.response_rollout_steps)
+        self.assertIsNone(result.response_model_steps)
         self.assertEqual(result.seq_staleness, 0)

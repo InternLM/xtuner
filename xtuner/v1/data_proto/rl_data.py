@@ -91,8 +91,8 @@ class RolloutState(CacheObj, BaseModel):
     finish_reason: str | None = None
     # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
     response_mask: list[int] | None = None
-    # response_rollout_steps：记录 response_ids 中每个 token 来自哪个 model_rollout_step，与 response_ids 长度相同。
-    response_rollout_steps: list[int] | None = None
+    # response_model_steps：记录 response_ids 中每个 token 来自哪个 model_step，与 response_ids 长度相同。
+    response_model_steps: list[int] | None = None
     # 记录该样本过期程度，即最早生成 token 的模型版本与当前训练步数的差值，数值越大表示越过期。
     seq_staleness: int = 0
 
@@ -211,15 +211,15 @@ def update_group_status(rollout_states: list[RolloutState]) -> Status:
         return Status.COMPLETED
 
 
-def update_sample_version(rollout_state: RolloutState, model_rollout_step: int) -> RolloutState:
+def update_sample_version(rollout_state: RolloutState, model_step: int) -> RolloutState:
     """Append token source model version for newly generated response
     tokens."""
     response_len = len(rollout_state.response_ids or [])
-    response_rollout_steps = list(getattr(rollout_state, "response_rollout_steps", None) or [])
-    missing_response_steps = max(0, response_len - len(response_rollout_steps))
+    response_model_steps = list(getattr(rollout_state, "response_model_steps", None) or [])
+    missing_response_steps = max(0, response_len - len(response_model_steps))
     if missing_response_steps:
-        response_rollout_steps.extend([model_rollout_step] * missing_response_steps)
-    rollout_state.response_rollout_steps = response_rollout_steps
+        response_model_steps.extend([model_step] * missing_response_steps)
+    rollout_state.response_model_steps = response_model_steps
     return rollout_state
 
 

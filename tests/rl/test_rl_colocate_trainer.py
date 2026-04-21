@@ -22,7 +22,7 @@ class _FakeRolloutState:
         self.response = None
         self.reward = None
         self.extra_fields = {}
-        self.response_rollout_steps = []
+        self.response_model_steps = []
 
 
 class _FakeSampler:
@@ -53,13 +53,13 @@ def _build_fake_agent_loop():
     agent_loop.rollout_ctl = rollout_ctl
 
     async def generate_group(rollout_states, **kwargs):
-        model_rollout_step = kwargs.get("model_rollout_step", kwargs.get("rollout_step", 0))
+        model_step = kwargs.get("model_step", kwargs.get("train_step", 0))
         for state in rollout_states:
             state.status = Status.COMPLETED
             state.response_ids = [1, 2, 3]
             state.response = "ok"
             state.reward = {"score": 1.0}
-            state.response_rollout_steps = [model_rollout_step]
+            state.response_model_steps = [model_step]
         return rollout_states
 
     agent_loop.generate_group = generate_group
@@ -157,7 +157,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         self.assertEqual(trainer._cur_step, 1)
 
     def test_fit_requires_non_empty_batch_from_manager(self):
-        async def _produce_empty(batch_size, rollout_step=0):
+        async def _produce_empty(batch_size, train_step=0):
             return ProduceBatchResult(rollout_states=[])
 
         empty_manager = SimpleNamespace(produce_batch=_produce_empty)

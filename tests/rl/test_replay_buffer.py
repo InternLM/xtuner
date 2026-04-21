@@ -13,13 +13,13 @@ class MockState:
         staleness=0,
         input_ids=None,
         status=Status.COMPLETED,
-        response_rollout_steps=None,
+        response_model_steps=None,
     ):
         self.id = state_id
         self.seq_staleness = staleness
         self.status = status
         self.input_ids = input_ids if input_ids is not None else [state_id]
-        self.response_rollout_steps = response_rollout_steps
+        self.response_model_steps = response_model_steps
 
 
 class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
@@ -139,17 +139,17 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
     async def test_refresh_completed_staleness_expires_completed_in_place(self):
         replay_buffer = AsyncReplayBufferConfig().build()
         await replay_buffer.put(
-            [MockState("stale", response_rollout_steps=[3], status=Status.COMPLETED)],
+            [MockState("stale", response_model_steps=[3], status=Status.COMPLETED)],
             "task",
         )
         await replay_buffer.put(
-            [MockState("fresh", response_rollout_steps=[6], status=Status.COMPLETED)],
+            [MockState("fresh", response_model_steps=[6], status=Status.COMPLETED)],
             "task",
         )
 
         expired_count = await replay_buffer.refresh_completed_staleness(
             task_name="task",
-            current_rollout_step=6,
+            current_train_step=6,
             tail_batch_stale_threshold=2,
         )
 
