@@ -44,7 +44,7 @@ from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.trainer.worker import WorkerConfig
+from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, get_eos_token
 from xtuner.v1.train.rl_disaggregated_trainer import (
     RLDisaggregatedTrainerConfig,

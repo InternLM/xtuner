@@ -10,7 +10,7 @@ from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
-from xtuner.v1.rl.trainer.worker import WorkerConfig
+from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, TaskSpecConfig, SingleTurnAgentLoopConfig, AsyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig

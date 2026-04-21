@@ -22,7 +22,7 @@ from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.trainer.worker import WorkerConfig
+from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
 
