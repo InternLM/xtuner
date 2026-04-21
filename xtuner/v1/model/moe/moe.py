@@ -1085,6 +1085,7 @@ class MoE(BaseModel):
             if isinstance(module, nn.Embedding):
                 module.forward = types.MethodType(self.patched_emb_forward, module)  # type: ignore
 
+        self._init_load_spec()
         self._to_empty_meta()
         return self
 
