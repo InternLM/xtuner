@@ -231,21 +231,24 @@ DEFAULT_GATEWAY = "http://env-gateway.ailab.ailab.ai"
 DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
 
 
-def _load_dataset(name: str, tasks_root: str) -> Any:
-    """Import ``datasets.<name>`` and instantiate its main class.
+def _load_dataset_from_config(config_path: Path) -> Any:
+    """Exec a config file on the host; return its ``dataset`` binding.
 
-    Convention: each dataset module has a single class whose ``name``
-    attribute matches the module name (e.g., ``ClawBench.name = "claw-bench"``).
+    The config is just a Python file that imports a project package and
+    instantiates a dataset class.  Project must already be on PYTHONPATH;
+    runner doesn't auto-add anything.
+
+    Example config::
+
+        # configs/claw_bench_calendar.py
+        from claw_bench import ClawBench
+        dataset = ClawBench(tasks_root="/data/bench/claw-bench/tasks")
     """
-    import importlib
-    mod = importlib.import_module(f"datasets.{name}")
-    # Find the class whose ``.name`` matches the module name (hyphenated).
-    hyphen = name.replace("_", "-")
-    for attr in dir(mod):
-        obj = getattr(mod, attr)
-        if isinstance(obj, type) and getattr(obj, "name", None) in (name, hyphen):
-            return obj(tasks_root=tasks_root)
-    raise ValueError(f"no dataset class with name={name!r} in datasets.{name}")
+    ns: dict[str, Any] = {}
+    exec(compile(config_path.read_text(encoding="utf-8"), str(config_path), "exec"), ns)
+    if "dataset" not in ns:
+        raise KeyError(f"`dataset` not defined in {config_path}")
+    return ns["dataset"]
 
 
 async def _run_one(
@@ -272,7 +275,7 @@ async def _run_one(
 
 async def main_async(args: argparse.Namespace) -> int:
     provider = GatewayProvider(args.gateway)
-    dataset = _load_dataset(args.dataset, args.tasks_root)
+    dataset = _load_dataset_from_config(Path(args.config))
     lagent_src = args.lagent_src or None
 
     if args.task_dirs:
@@ -312,12 +315,9 @@ def main() -> int:
         help="Task root directories (omit to iterate the dataset).",
     )
     parser.add_argument(
-        "--dataset", default="claw_bench",
-        help="Dataset module name under datasets/ (without .py).",
-    )
-    parser.add_argument(
-        "--tasks-root", required=True,
-        help="Root dir containing the dataset's tasks.",
+        "--config", required=True,
+        help="Path to a config .py that imports a project package and binds "
+             "`dataset = <DatasetClass>(...)`.",
     )
     parser.add_argument("--limit", type=int, default=0, help="Max tasks when iterating.")
     parser.add_argument("--gateway", default=DEFAULT_GATEWAY)

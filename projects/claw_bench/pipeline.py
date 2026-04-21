@@ -27,9 +27,9 @@ from schemas import AgentSpec, SandboxSpec
 from validator import JudgerValidator
 
 
-HERE = Path(__file__).resolve().parent.parent.parent
-WRAPPERS = HERE / "common" / "wrappers"
-AGENT_TEMPLATES = HERE / "common" / "agent_templates"
+HERE = Path(__file__).resolve().parent
+WRAPPERS = HERE / "wrappers"
+AGENT_TEMPLATES = HERE / "agents"
 
 
 # ─────────────────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ import tomllib
 from pathlib import Path
 from typing import Iterator
 
-from common.pipelines.claw_bench import claw_pipeline
+from claw_bench.pipeline import PATHS, claw_pipeline
 from judgers import Judger, pytest_ctrf_judger
 from runner import Runner
 from schemas import TaskData, WorkspaceArtifact
@@ -95,7 +95,6 @@ class ClawBench:
     # -- private --
 
     def _default_judger(self) -> Judger:
-        from common.pipelines.claw_bench import PATHS
         return pytest_ctrf_judger(
             name="rule_grader",
             target="verifier/test_output.py",
