@@ -168,7 +168,7 @@ class _FakeReplayBuffer:
         self._leftover_counts = leftover_counts
         self.saved_paths: list[Path] = []
         self.resumed_paths: list[Path] = []
-        self.refresh_completed_staleness_calls: list[tuple[str, int, int]] = []
+        self.refresh_completed_staleness_calls: list[tuple[str, int, int, tuple[Status, ...]]] = []
 
     async def get(self, batch_size: int, task_name: str, group_status: Status):
         assert group_status == Status.COMPLETED
@@ -185,9 +185,10 @@ class _FakeReplayBuffer:
         task_name: str,
         current_train_step: int,
         tail_batch_stale_threshold: int,
+        statuses: list[Status] | None = None,
     ):
         self.refresh_completed_staleness_calls.append(
-            (task_name, current_train_step, tail_batch_stale_threshold)
+            (task_name, current_train_step, tail_batch_stale_threshold, tuple(statuses or ()))
         )
         for group in self._rollout_states_by_task.get(task_name, []):
             for state in group:
@@ -580,7 +581,13 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         result = await manager.get_batch(batch_size=1, train_step=9)
 
-        self.assertEqual(replay_buffer.refresh_completed_staleness_calls, [("task_a", 9, 0), ("task_a", 10, 0)])
+        self.assertEqual(
+            replay_buffer.refresh_completed_staleness_calls,
+            [
+                ("task_a", 9, 0, (Status.COMPLETED, Status.ABORTED)),
+                ("task_a", 10, 0, (Status.COMPLETED, Status.ABORTED)),
+            ],
+        )
         self.assertEqual(result.rollout_states[0][0].seq_staleness, 4)
         self.assertEqual(manager._produce_progress.next_consumer_step, 10)
         self.assertEqual(manager._produce_progress.consumed_samples["task_a"], 1)

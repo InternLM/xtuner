@@ -366,13 +366,14 @@ class AgentLoopManager:
             return True
         return False
 
-    async def _refresh_completed_staleness_for_all_tasks(self, train_step: int) -> None:
+    async def _refresh_for_all_tasks(self, train_step: int, statuses: list[Status]) -> None:
         for task in self.task_runners:
             threshold = getattr(task.produce_strategy, "tail_batch_stale_threshold", 0)
             await self.replay_buffer.refresh_completed_staleness(
                 task_name=task.task_name,
                 current_train_step=train_step,
                 tail_batch_stale_threshold=threshold,
+                statuses=statuses,
             )
 
     def _get_task_batch_sizes_for_step(self, batch_size: int, train_step: int) -> dict[str, int]:
@@ -686,8 +687,8 @@ class AgentLoopManager:
             # 共卡路径下，每次 produce_batch() 都对应当前 trainer 轮次的新权重版本，
             # 所以这里直接复用 continue_produce() 同步恢复状态并更新 model_step。
             self.continue_produce(model_step=train_step - 1)  # TODO: 更新样本过期信息
-            # 共卡 produce_batch 也是消费入口；生产前先刷新 buffer 中已有 completed。
-            await self._refresh_completed_staleness_for_all_tasks(train_step)
+            # 共卡 produce_batch 也是消费入口；生产前先刷新 buffer 中已有 completed / aborted。
+            await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
             local_progress = self._build_local_produce_progress(current_sizes, train_step)
             status = await self._produce_batch_to_buffer(
                 batch_size=batch_size,
@@ -775,7 +776,7 @@ class AgentLoopManager:
         # - trainer 看到后应跳过训练，优先去做权重同步
         progress = self._produce_progress
         progress.next_consumer_step = train_step
-        await self._refresh_completed_staleness_for_all_tasks(train_step)
+        await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
 
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.EXPIRED_BATCH:
@@ -792,7 +793,7 @@ class AgentLoopManager:
                 )
                 if result.rollout_states:
                     progress.next_consumer_step = train_step + 1
-                    await self._refresh_completed_staleness_for_all_tasks(train_step + 1)
+                    await self._refresh_for_all_tasks(train_step + 1, [Status.COMPLETED, Status.ABORTED])
                     return result
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
 

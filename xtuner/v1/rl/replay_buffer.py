@@ -412,8 +412,17 @@ class ReplayBuffer:
         task_name: str,
         current_train_step: int,
         tail_batch_stale_threshold: int,
+        statuses: list[Status] | None = None,
     ) -> int:
-        query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": Status.COMPLETED}]}
+        # 保留历史方法名；可复用的 completed / aborted buffer 样本都需要随 train_step 刷新过期状态。
+        if statuses is None:
+            statuses = [Status.COMPLETED, Status.ABORTED]
+        query_dsl: QueryDict = {
+            "$and": [
+                {"task_name": task_name},
+                {"status": {"$in": statuses}},
+            ]
+        }
         async with self._lock:
             records = await self._storage.get(query_dsl)
             updated_records: list[StorageItem] = []
@@ -425,7 +434,7 @@ class ReplayBuffer:
                     getattr(item, "seq_staleness", 0) >= tail_batch_stale_threshold for item in record.item
                 )
                 if should_expire:
-                    # completed 样本过期时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
+                    # completed / aborted 样本过期时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
                     for item in record.item:
                         item.status = Status.EXPIRED
                     status = Status.EXPIRED

@@ -161,3 +161,61 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(expired[0][0].id, "stale")
         self.assertEqual(expired[0][0].seq_staleness, 2)
         self.assertEqual(completed[0][0].id, "fresh")
+
+    async def test_refresh_completed_staleness_expires_aborted_in_place(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        await replay_buffer.put(
+            [MockState("stale-aborted", response_model_steps=[3], status=Status.ABORTED)],
+            "task",
+        )
+        await replay_buffer.put(
+            [MockState("fresh-aborted", response_model_steps=[5], status=Status.ABORTED)],
+            "task",
+        )
+
+        expired_count = await replay_buffer.refresh_completed_staleness(
+            task_name="task",
+            current_train_step=6,
+            tail_batch_stale_threshold=2,
+        )
+
+        self.assertEqual(expired_count, 1)
+        self.assertEqual(await replay_buffer.count("task", Status.ABORTED), 1)
+        self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 1)
+        expired = await replay_buffer.get(1, "task", Status.EXPIRED)
+        aborted = await replay_buffer.get(1, "task", Status.ABORTED)
+        self.assertEqual(expired[0][0].id, "stale-aborted")
+        self.assertEqual(expired[0][0].seq_staleness, 2)
+        self.assertEqual(expired[0][0].status, Status.EXPIRED)
+        self.assertEqual(aborted[0][0].id, "fresh-aborted")
+        self.assertEqual(aborted[0][0].seq_staleness, 0)
+        self.assertEqual(aborted[0][0].status, Status.ABORTED)
+
+    async def test_refresh_completed_staleness_respects_status_filter(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        await replay_buffer.put(
+            [MockState("stale-completed", response_model_steps=[3], status=Status.COMPLETED)],
+            "task",
+        )
+        await replay_buffer.put(
+            [MockState("stale-aborted", response_model_steps=[3], status=Status.ABORTED)],
+            "task",
+        )
+
+        expired_count = await replay_buffer.refresh_completed_staleness(
+            task_name="task",
+            current_train_step=6,
+            tail_batch_stale_threshold=2,
+            statuses=[Status.ABORTED],
+        )
+
+        self.assertEqual(expired_count, 1)
+        self.assertEqual(await replay_buffer.count("task", Status.COMPLETED), 1)
+        self.assertEqual(await replay_buffer.count("task", Status.ABORTED), 0)
+        self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 1)
+        completed = await replay_buffer.get(1, "task", Status.COMPLETED)
+        expired = await replay_buffer.get(1, "task", Status.EXPIRED)
+        self.assertEqual(completed[0][0].id, "stale-completed")
+        self.assertEqual(completed[0][0].status, Status.COMPLETED)
+        self.assertEqual(expired[0][0].id, "stale-aborted")
+        self.assertEqual(expired[0][0].status, Status.EXPIRED)
