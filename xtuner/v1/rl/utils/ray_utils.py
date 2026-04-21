@@ -183,6 +183,6 @@ def bind_train_rollout(
         train_workers: A list of training worker actors.
         rollout_controller: The rollout controller actor.
     """
-    info_dict = ray.get(rollout_controller.get_rollout_info.remote())  # type: ignore[attr-defined]
+    info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())  # type: ignore[attr-defined]
     ray.get([worker.update_rollout_info.remote(**info_dict) for worker in train_workers])  # type: ignore[attr-defined]
     return

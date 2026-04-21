@@ -117,6 +117,10 @@ class RolloutConfig(BaseModel):
         int,
         Parameter(group=infer_group, help="Port number for the rollout API server. If not set, 8000 will be used."),
     ] = 8000
+    api_host: Annotated[
+        str,
+        Parameter(group=infer_group, help="Host for the rollout API server."),
+    ] = "0.0.0.0"
     gpus_per_node: Annotated[int, Parameter(group=infer_group, help="Number of GPUs allocated per node.")] = 8
     dtype: Annotated[
         str,
@@ -226,6 +230,20 @@ class RolloutConfig(BaseModel):
             help="Context length for the rollout worker.",
         ),
     ] = None
+    tool_call_parser: Annotated[
+        Literal["none", "qwen3", "qwen3p5"],
+        Parameter(
+            group=infer_group,
+            help='Structured tool-call parser to apply to rollout output. Use "none" to disable parsing, "qwen3" to enable Qwen3 tool-call parsing, or "qwen3p5" to enable Qwen3.5 coder-style tool-call parsing.',
+        ),
+    ] = "none"
+    reasoning_parser: Annotated[
+        Literal["none", "qwen3"],
+        Parameter(
+            group=infer_group,
+            help='Reasoning parser to apply to rollout output. Use "none" to disable parsing or "qwen3" to enable Qwen3 <think> parsing.',
+        ),
+    ] = "none"
     enable_float8: Annotated[
         bool,
         Parameter(
@@ -341,7 +359,7 @@ class RolloutConfig(BaseModel):
         while True:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 try:
-                    s.bind(("localhost", port))
+                    s.bind((self.api_host if self.api_host != "0.0.0.0" else "localhost", port))
                     break
                 except OSError:
                     port += 1
