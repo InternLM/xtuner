@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Shard as DTensorShard
 from torch.distributed.tensor import distribute_tensor
+from torch.distributed.tensor.placement_types import _StridedShard
 
 from xtuner.v1.model.base import BaseModel, XTunerBaseModelConfig
 from xtuner.v1.utils import load_spec as load_spec_module
@@ -73,6 +74,28 @@ class TestLoadSpecSchema:
         assert spec.fused_dim is None
         assert [(shard.dim, shard.start, shard.end) for shard in spec.shards] == [(0, 0, 128)]
 
+    def test_dtensor_shards_follow_explicit_placement_order(self, single_rank_group: dist.ProcessGroup) -> None:
+        class FakeDeviceMesh:
+            shape = (2, 2)
+
+            def size(self, mesh_dim: int) -> int:
+                return self.shape[mesh_dim]
+
+            def get_local_rank(self, mesh_dim: int) -> int:
+                return (1, 0)[mesh_dim]
+
+            def get_group(self, mesh_dim: int) -> dist.ProcessGroup:
+                return single_rank_group
+
+        class FakeDTensor:
+            shape = (8,)
+            placements = (_StridedShard(0, split_factor=2), DTensorShard(0))
+            device_mesh = FakeDeviceMesh()
+
+        shards = load_spec_module._dtensor_shards(FakeDTensor())  # type: ignore[arg-type]
+
+        assert [(shard.dim, shard.start, shard.end) for shard in shards] == [(0, 0, 4), (0, 2, 4)]
+
     def test_fused_spec_requires_fused_dim(self) -> None:
         with pytest.raises(ValidationError, match="fused_dim"):
             LoadSpec(
@@ -113,6 +136,19 @@ class TestLoadSpecSchema:
                     ShardDescriptor(dim=0, start=65, end=80, group=single_rank_group),
                 ],
             )
+
+    def test_zero_size_dtensor_shards_are_valid(self, single_rank_group: dist.ProcessGroup) -> None:
+        spec = LoadSpec(
+            name="embeddings.cls_embedding",
+            global_hf_keys=["embeddings.cls_embedding"],
+            global_shape=(1, 1, 1024),
+            shards=[ShardDescriptor(dim=0, start=1, end=1, group=single_rank_group)],
+        )
+
+        plan = spec.plan_hf_load()
+
+        assert plan.zero_fill is True
+        assert plan.hf_keys == []
 
 
 class TestHFLoadPlan:
@@ -361,3 +397,27 @@ class TestHFSaveUnshardScheduler:
 
         assert [tuple(tensor.shape) for tensor in output] == [(8, 2), (4, 2)]
         assert [call["shapes"] for call in calls] == [[(4, 2), (4, 2)], [(8, 2)]]
+
+
+class TestBaseModelHFSave:
+    """BaseModel save should preserve state semantics outside LoadSpec."""
+
+    def test_non_dtensor_buffers_keep_runtime_dtype(self) -> None:
+        class BufferModel(BaseModel):
+            def __init__(self) -> None:
+                super().__init__(XTunerBaseModelConfig())
+                self.register_buffer("rotary_coef", torch.tensor([1.25], dtype=torch.float32), persistent=True)
+                self._init_load_spec()
+
+            def to_hf_key_list(self, key: str) -> list[str]:
+                return [key]
+
+        model = BufferModel()
+
+        [(names, tensors)] = list(
+            model._get_hf_param(model._load_spec_params(), dtype=torch.bfloat16, distributed_save=True)
+        )
+
+        assert names == ["rotary_coef"]
+        assert tensors[0].dtype == torch.float32
+        assert torch.equal(tensors[0], model.rotary_coef)
