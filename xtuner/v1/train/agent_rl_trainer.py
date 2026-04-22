@@ -22,6 +22,7 @@ from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment.lagent.tokenize import tokenize
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
+from xtuner.v1.ray.rollout.lmdeploy import get_lmdeploy_routed_experts_ref
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import is_hf_model_path, timer
@@ -584,7 +585,10 @@ class AgentRLTrainer(RLTrainer):
                 )
 
                 seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
-                seq_ctx.rollout_routed_experts = inputs["routed_experts"]
+                routed_experts = inputs["routed_experts"]
+                if isinstance(routed_experts, str):
+                    routed_experts = get_lmdeploy_routed_experts_ref(routed_experts)
+                seq_ctx.rollout_routed_experts = routed_experts
                 data_batches.append(
                     dict(
                         seq_ctx=seq_ctx,
