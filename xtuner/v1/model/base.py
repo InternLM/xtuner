@@ -958,14 +958,18 @@ class BaseModel(nn.Module):
 
         safetensor_size = 0
         bucket: list[_HFSaveBucketItem] = []
+        buffer_names = {self._clean_param_name(name) for name, _ in self.named_buffers()}
 
         for param, load_spec in params:
             runtime_tensor = param._local_tensor if isinstance(param, DTensor) else param
             runtime_is_float8 = is_float8_weight(runtime_tensor)
-            if runtime_tensor.is_floating_point():
+            is_buffer = load_spec.name in buffer_names
+            if runtime_tensor.is_floating_point() and not is_buffer:
                 save_dtype = self._get_save_dtype(load_spec.global_hf_keys[0], torch.bfloat16)
                 local_tensor = runtime_tensor.to(dtype=save_dtype)
             else:
+                # Persistent buffers, e.g. FoPE rotary coefficients, are part of HF state but are not trainable
+                # weights. Keep the legacy behavior and write them in their runtime dtype instead of save_dtype.
                 local_tensor = runtime_tensor
             tensor_size = self._get_tensor_size(runtime_tensor, dtype)
 
@@ -1324,8 +1328,11 @@ class BaseModel(nn.Module):
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
         load_plan = load_spec.plan_hf_load()
         if load_plan.zero_fill:
-            # This rank owns only XTuner runtime padding, so no checkpoint key overlaps its local slice.
-            assert load_spec.origin_shape is not None, "Empty load plan is only legal for runtime pad-only ranks"
+            # No checkpoint key overlaps this rank. This can be fp8 runtime padding, or a legal zero-sized DTensor
+            # shard when a tiny tensor dimension is split across more ranks than it has elements.
+            assert load_spec.origin_shape is not None or local_tensor.numel() == 0, (
+                "Empty load plan is only legal for runtime pad-only or zero-sized local tensors"
+            )
             local_tensor.zero_()  # type: ignore
             return []
 

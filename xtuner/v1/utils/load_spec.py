@@ -1,8 +1,10 @@
 import math
-from typing import NamedTuple
+from collections.abc import Callable
+from typing import Any, NamedTuple, cast
 
 import torch
 import torch.distributed as dist
+import torch.distributed.tensor._utils as dtensor_utils
 import torch.nn.functional as F
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 from torch.distributed.tensor import DTensor, Shard
@@ -42,12 +44,13 @@ class ShardDescriptor(BaseModel):
 def _dtensor_shards(tensor: DTensor) -> list[ShardDescriptor]:
     current_shape = list(tensor.shape)
     shards: list[ShardDescriptor] = []
-    for mesh_dim, placement in enumerate(tensor.placements):
+    for mesh_dim, placement in _ordered_dtensor_placements(tensor):
         if not isinstance(placement, Shard):
             continue
 
-        # DTensor applies placements in mesh-dim order. ShardDescriptor keeps the same order and stores each
-        # boundary in the coordinate system produced by the previous shard descriptors.
+        # DTensor placement order is not always the raw mesh-dim order. FSDP2 can represent right-to-left sharding
+        # with _StridedShard, and PyTorch's checkpoint offset helper first expands that into the effective shard
+        # order. LoadSpec must preserve the same order so its descriptor intervals match DTensor local tensors.
         #
         # XTuner may initialize modules while the default device is "meta". PyTorch's Shard placement helpers can
         # inherit that default device for temporary shape arithmetic, so force XTuner's real runtime device before
@@ -68,6 +71,16 @@ def _dtensor_shards(tensor: DTensor) -> list[ShardDescriptor]:
         )
         current_shape[placement.dim] = local_size
     return shards
+
+
+def _ordered_dtensor_placements(tensor: DTensor) -> list[tuple[int, object]]:
+    # PyTorch keeps this helper private and does not expose it in type stubs, but it is the same ordering logic used
+    # by `compute_local_shape_and_global_offset`. Access it dynamically so mypy does not reject the private symbol.
+    explicit_order_placements = cast(
+        Callable[[Any, Any], list[tuple[int, object]]],
+        getattr(dtensor_utils, "_explicit_order_placements"),
+    )
+    return explicit_order_placements(tensor.device_mesh.shape, tensor.placements)
 
 
 class LoadSlice(BaseModel):
@@ -647,7 +660,7 @@ class LoadSpec(BaseModel):
                 f"Invalid shard dim {shard.dim} for global_shape={self.global_shape}"
             )
             current_size = current_shape[shard.dim]
-            assert 0 <= shard.start < shard.end <= current_size, (
+            assert 0 <= shard.start <= shard.end <= current_size, (
                 f"Invalid shard descriptor {shard} against current_shape={tuple(current_shape)}"
             )
             current_shape[shard.dim] = shard.end - shard.start
