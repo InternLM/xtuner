@@ -314,7 +314,7 @@ class TrainEngine:
 
     @staticmethod
     def _allocate_cpu_buffer_like(tensor: torch.Tensor) -> torch.Tensor:
-        cpu_tensor = tensor.detach().to("cpu")
+        cpu_tensor = torch.empty_like(tensor, device="cpu")
         if tensor.is_cuda:
             cpu_tensor = cpu_tensor.pin_memory()
         return cpu_tensor
@@ -417,9 +417,9 @@ class TrainEngine:
                     if cached_tensor is None:
                         raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
                     tensors[name] = cached_tensor
-                self.model._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
-                if tensors:
-                    written_files.append(filename)
+                written_files.extend(
+                    self.model._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
+                )
 
             local_status["weight_map"] = weight_map
             if verify_hash:
