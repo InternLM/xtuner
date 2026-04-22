@@ -3,7 +3,7 @@ from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto import RolloutState
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import CacheDict, get_logger
 
 from ..utils import CachableTokenizeFunction
 
@@ -11,7 +11,7 @@ from ..utils import CachableTokenizeFunction
 logger = get_logger()
 
 
-class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
+class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState | CacheDict]):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
@@ -22,7 +22,7 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
         self.max_length = max_length
         self.tools_schema = tools_schema if tools_schema is not None else []
 
-    def __call__(self, item: dict, **kwargs) -> RolloutState:
+    def __call__(self, item: dict, **kwargs) -> RolloutState | CacheDict:
         """example:
         item = {
                 "data_source": data_source,
@@ -57,6 +57,10 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
         if self.state == "cache":
             if self.max_length is not None and num_tokens > self.max_length:
                 num_tokens = 0  # will be filtered out by the dataset filter
+            return {
+                "num_tokens": num_tokens,
+                "proxy_attn_flops": float(num_tokens),
+            }
         else:
             if self.max_length is not None:
                 assert num_tokens <= self.max_length, f"num_tokens {num_tokens} > max_length {self.max_length}"

@@ -7,6 +7,8 @@ from typing_extensions import TypedDict
 
 class CacheDict(TypedDict, total=False):
     num_tokens: int
+    proxy_attn_flops: float
+    chunks: list[int]
 
 
 class CacheObj:

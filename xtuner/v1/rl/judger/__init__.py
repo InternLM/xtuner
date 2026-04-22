@@ -1,3 +1,4 @@
+from .compass_verifier_v2 import CompassVerifierV2Config
 from .composed import (
     ComposedJudger,
     ComposedJudgerConfig,
