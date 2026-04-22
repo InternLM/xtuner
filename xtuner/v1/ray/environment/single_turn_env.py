@@ -67,6 +67,7 @@ class RawSingleTurnEnvironment(BaseEnvironment):
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
+        self.cancel_response_timeout = 5.0
         self.rollout_cfg = rollout_cfg
 
     async def generate(  # type: ignore[override]
@@ -140,10 +141,25 @@ class RawSingleTurnEnvironment(BaseEnvironment):
 
                 response_future.append(fut)
             try:
+                response_gather = asyncio.gather(*response_future)
                 rollout_responses = await asyncio.wait_for(
-                    asyncio.gather(*response_future), timeout=self.rollout_timeout * self.timeout_multiplier
+                    asyncio.shield(response_gather), timeout=self.rollout_timeout * self.timeout_multiplier
                 )
+            except asyncio.CancelledError as exc:
+                for fut in response_future:
+                    ray.cancel(fut, recursive=True)
+                try:
+                    rollout_responses = await asyncio.wait_for(
+                        asyncio.gather(*response_future, return_exceptions=True),
+                        timeout=self.cancel_response_timeout,
+                    )
+                except BaseException:
+                    raise exc
+                if not all(isinstance(response, RLRolloutResponseItem) for response in rollout_responses):
+                    raise exc
             except asyncio.TimeoutError:
+                for fut in response_future:
+                    ray.cancel(fut, recursive=True)
                 self.logger.error("Get rollout controller response timeout and return the failed response.")
                 rollout_responses = [RLRolloutResponseItem(state="skipped") for _ in group_data_items]
             group_data_items = update_rollout_item(group_data_items, rollout_responses)
@@ -171,12 +187,17 @@ class RawSingleTurnEnvironment(BaseEnvironment):
         group_data_items = await self.generate(group_data_items, sample_params, extra_params)  # type: ignore[assignment]
         continue_judger = is_valid_for_training(group_data_items)
         if self.judger_controller and continue_judger:
+            judger_response_ref = self.judger_controller.run.remote(group_data_items)
             try:
                 judger_responses: List[RLJudgerResponseItem] = await asyncio.wait_for(
-                    self.judger_controller.run.remote(group_data_items),
+                    judger_response_ref,
                     timeout=self.judger_timeout * self.timeout_multiplier,
                 )
+            except asyncio.CancelledError:
+                ray.cancel(judger_response_ref, recursive=True)
+                raise
             except asyncio.TimeoutError:
+                ray.cancel(judger_response_ref, recursive=True)
                 self.logger.error("Get judger controller response timeout and return the failed response.")
                 judger_responses = [
                     RLJudgerResponseItem(
