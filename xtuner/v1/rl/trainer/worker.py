@@ -52,7 +52,7 @@ from xtuner.v1.utils import (
 )
 from xtuner.v1.utils.load_spec import LoadEnum
 
-from .rollout_is import merge_rollout_is_metrics
+from ..rollout_is import merge_rollout_is_metrics
 
 
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices

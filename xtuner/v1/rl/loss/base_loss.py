@@ -8,7 +8,7 @@ from xtuner.v1.loss.ce_loss import CELossConfig, CELossContext, CELossKwargs
 from xtuner.v1.loss.utils import sp_gather, sp_split
 
 # from ..utils import sp_split
-from xtuner.v1.rl.trainer.rollout_is import RolloutImportanceSampling
+from xtuner.v1.rl.rollout_is import RolloutImportanceSampling
 from xtuner.v1.utils.device import get_device
 
 

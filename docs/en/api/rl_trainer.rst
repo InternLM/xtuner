@@ -7,4 +7,7 @@ RL Trainer
    :toctree: generated
    :nosignatures:
 
-   train.rl_trainer.RLTrainer
+   train.rl_trainer.RLColocateTrainer
+   train.rl_trainer.RLColocateTrainerConfig
+   train.rl_trainer.RLDisaggregatedTrainer
+   train.rl_trainer.RLDisaggregatedTrainerConfig
