@@ -69,10 +69,10 @@ PATHS = SimpleNamespace(
 )
 
 
-# ─────────────────────────────────────────────────────────────────
-# Entry commands
-# ─────────────────────────────────────────────────────────────────
-
+# Entry commands.  ``cd /`` before the script is upstream convention — they
+# run with ``cwd=task_dir`` so that relative ``workspace/<file>`` paths land
+# under ``/workspace/``.  Equivalent here: the parent of $TASK_WORKSPACE is /,
+# so cd / makes ``workspace/foo`` resolve to ``/workspace/foo``.
 AGENT_ENTRY = (
     f"bash {PATHS.wrappers_bench}/pre_entry.sh && "
     f"bash {PATHS.wrappers_lagent}/lagent_entry.sh "
@@ -85,7 +85,7 @@ AGENT_ENTRY = (
 
 SOLUTION_ENTRY = (
     f"bash {PATHS.wrappers_bench}/pre_entry.sh && "
-    f"bash $TASK_WORKSPACE/solution/solve.sh $TASK_WORKSPACE"
+    f"cd / && bash $TASK_WORKSPACE/solution/solve.sh $TASK_WORKSPACE"
 )
 
 
@@ -197,7 +197,11 @@ def claw_pipeline(
             RunAgentInstallDeps(workspace=ws),
         ],
         entry=AGENT_ENTRY,
-        env=BenchEnv(workspace=ws),
+        env=BenchEnv(
+            workspace=ws,
+            # Upstream setup.sh/solve.sh conventions.
+            extras={"WORKSPACE": ws, "CLAW_WORKSPACE": ws},
+        ),
         timeout=1800,
         post=[DownloadHook(["/workspace", "/tmp/agent_response.txt"])],
     )
@@ -211,13 +215,14 @@ def claw_pipeline(
 def claw_solution_pipeline() -> Runner:
     """Variant: run ``solution/solve.sh`` instead of an LLM rollout."""
     sandbox = SandboxSpec(
-        image="ubuntu2404-v1", ttl_seconds=600, workspace_path="/workspace",
+        image="ubuntu2404-v2", ttl_seconds=600, workspace_path="/workspace",
     )
     ws = sandbox.workspace_path
 
     infer = SandboxStage(
         sandbox=sandbox,
         pre=[
+            ExecHook(f"mkdir -p {ws}"),
             UploadHook([
                 {"base": str(WRAPPERS / "claw_bench"),
                  "source": "*", "target": PATHS.wrappers_bench + "/", "flatten": True},
@@ -229,10 +234,12 @@ def claw_solution_pipeline() -> Runner:
                 {"source": "**/*", "target": f"{ws}/",
                  "exclude": ["task.toml", "task.py", "verifier/**", "agent/**"]},
             ]),
-            ExecHook(f"mkdir -p {ws}"),
         ],
         entry=SOLUTION_ENTRY,
-        env=BenchEnv(workspace=ws),
+        env=BenchEnv(
+            workspace=ws,
+            extras={"WORKSPACE": ws, "CLAW_WORKSPACE": ws},
+        ),
         timeout=600,
         post=[DownloadHook(["/workspace"])],
     )

@@ -292,15 +292,19 @@ class BenchEnv:
     """Callable that produces the infer stage's env vars from ctx.
 
     Exports only what wrappers + agent config actually read — no
-    speculative vars.  Also stores the map in
-    ``ctx["env_vars_for_instruction"]`` so :class:`RenderInstruction` can
-    pick them up for ``{{KEY}}`` placeholder expansion.
+    speculative vars.  ``extras`` lets a bench-specific pipeline inject
+    additional literal vars (e.g. upstream-convention aliases like
+    ``WORKSPACE``, ``CLAW_WORKSPACE``) without subclassing.
+
+    Also stores the map in ``ctx["env_vars_for_instruction"]`` so
+    :class:`RenderInstruction` can substitute ``{{KEY}}`` placeholders.
 
     Pass an instance to ``SandboxStage(env=BenchEnv(...))``.
     """
 
-    def __init__(self, *, workspace: str):
+    def __init__(self, *, workspace: str, extras: dict[str, str] | None = None):
         self.workspace = workspace
+        self.extras = dict(extras or {})
 
     def __call__(self, ctx: dict[str, Any]) -> dict[str, str]:
         data = ctx["data"]
@@ -313,6 +317,7 @@ class BenchEnv:
             env["RL_LLM_BASE_URL"] = runtime["llm_base_url"]
         if runtime.get("llm_api_key"):
             env["RL_LLM_API_KEY"] = runtime["llm_api_key"]
+        env.update(self.extras)
         ctx["env_vars_for_instruction"] = env
         return env
 

@@ -188,7 +188,16 @@ class ExecHook(Hook):
 
 
 class DownloadHook(Hook):
-    """Pull sandbox paths into ``ctx["pulled"]`` (same shape as stage pull)."""
+    """Pull sandbox paths into ``ctx["pulled"]``.
+
+    Each entry is auto-detected as file vs directory:
+      - **file** → bytes of the file (from ``/download`` endpoint)
+      - **directory** → bytes of a gzipped tar produced in-sandbox
+        (sandbox ``/download`` only serves files, so dirs are tarred first)
+
+    ``ctx["pulled"]`` is ``{path: bytes}`` in both cases; ``ctx["pulled_kinds"]``
+    records ``{path: "file" | "dir"}`` so consumers know how to interpret.
+    """
 
     name = "download"
 
@@ -198,9 +207,12 @@ class DownloadHook(Hook):
     async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
         paths = _resolve(self.paths, ctx)
         pulled = ctx.setdefault("pulled", {})
+        kinds = ctx.setdefault("pulled_kinds", {})
         for p in paths:
             try:
-                pulled[p] = await asyncio.to_thread(client.download_file, p)
+                blob, kind = await download_path(client, p)
+                pulled[p] = blob
+                kinds[p] = kind
             except Exception as exc:
                 logger.warning("download %s failed: %s", p, exc)
 
@@ -338,6 +350,44 @@ async def upload_tar_and_extract(
     )
 
 
+async def download_path(client: Any, remote_path: str) -> tuple[bytes, str]:
+    """Download a sandbox file or directory.
+
+    Files come back via the ``/download`` endpoint.  Directories are tarred
+    in-sandbox first (``/download`` only serves files), then the tar is
+    downloaded and the tmp tar is cleaned up.
+
+    Returns:
+        tuple[bytes, str]: ``(content, kind)`` where ``kind`` is ``"file"``
+        or ``"dir"``.  For ``"dir"`` the bytes are a gzipped tarball —
+        caller unpacks with ``tarfile.open(fileobj=io.BytesIO(content))``.
+    """
+    check = await exec_in(
+        client, f'test -d "{remote_path}" && echo DIR || echo FILE',
+        raise_on_error=False,
+    )
+    is_dir = "DIR" in (check.get("stdout") or "")
+
+    if not is_dir:
+        blob = await asyncio.to_thread(client.download_file, remote_path)
+        return blob, "file"
+
+    # Tar the dir into /tmp, download, remove the tmp.
+    rp = remote_path.rstrip("/") or "/"
+    parent = rp.rsplit("/", 1)[0] or "/"
+    name = rp.rsplit("/", 1)[-1] or "root"
+    tar_remote = f"/tmp/_dl_{name}.tar.gz"
+    await exec_in(
+        client,
+        f'cd "{parent}" && tar czf {tar_remote} "{name}"',
+    )
+    try:
+        blob = await asyncio.to_thread(client.download_file, tar_remote)
+    finally:
+        await exec_in(client, f"rm -f {tar_remote}", raise_on_error=False)
+    return blob, "dir"
+
+
 def tar_dir(src: Path, arcname_prefix: str = "") -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -389,11 +439,15 @@ async def _run_hook(hook: Hook, client: Any, ctx: dict[str, Any], *, phase: str)
     """
     name = getattr(hook, "name", None) or type(hook).__name__
     label = f"{phase}-hook {type(hook).__name__}({name!r})"
+    tid = (ctx.get("data") and getattr(ctx["data"], "id", None)) or "?"
+    logger.debug("[%s] %s start", tid, label)
+    t0 = time.monotonic()
     try:
         await hook(client, ctx)
+        logger.debug("[%s] %s done (%.2fs)", tid, label, time.monotonic() - t0)
     except Exception as exc:
         import traceback as _tb
-        logger.error("%s failed: %s\n%s", label, exc, _tb.format_exc())
+        logger.error("[%s] %s failed: %s\n%s", tid, label, exc, _tb.format_exc())
         ctx.setdefault("hook_errors", []).append({
             "phase": phase,
             "hook": type(hook).__name__,
