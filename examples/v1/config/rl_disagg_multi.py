@@ -1,6 +1,6 @@
-"""RL Colocate Trainer 示例配置（Multi-Task: GSM8K + DAPO Math）。
+"""RL Disaggregated Trainer example config (Multi-Task: GSM8K + DAPO Math).
 
-需设置环境变量：
+Required env vars:
     WORK_DIR
     MODEL_PATH
     GSM8K_DATA_PATH
@@ -8,14 +8,17 @@
     DAPO_DATA_PATH
     DAPO_EVAL_DATA_PATH
 
-可选环境变量：
-    WORLD_SIZE
-    ENABLE_RETURN_ROUTED_EXPERTS
-    LOSS_TYPE
-    LOSS_MODE
-    SP_SIZE
-    GSM8K_TASK_WEIGHT
-    DAPO_TASK_WEIGHT
+Common optional env vars:
+    TRAIN_NUM_WORKERS=4
+    ROLLOUT_NUM_WORKERS=4
+    TRAIN_BATCH_SIZE=64
+    TOTAL_TRAIN_STEPS=4
+    SYNC_WEIGHTS_INTERVAL=1
+    OVER_SAMPLE_THRESHOLD=0.0
+    PARTIAL_ROLLOUT=0
+    GSM8K_TASK_WEIGHT=3.0
+    DAPO_TASK_WEIGHT=1.0
+    ENABLE_EVALUATE=0
 """
 
 import os
@@ -31,18 +34,22 @@ from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
+    AsyncProduceStrategyConfig,
     SamplerConfig,
     SyncProduceStrategyConfig,
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
+from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, get_eos_token
-from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
+from xtuner.v1.train.rl_trainer import (
+    RLDisaggregatedTrainerConfig,
+)
+
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -51,53 +58,69 @@ gsm8k_eval_data_path = os.environ["GSM8K_EVAL_DATA_PATH"]
 dapo_data_path = os.environ["DAPO_DATA_PATH"]
 dapo_eval_data_path = os.environ["DAPO_EVAL_DATA_PATH"]
 enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0")
-NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
-experimental_name = "multi_task_gsm8k_dapo_math"
-total_train_steps = 50
-evaluate_step = 5
-train_optimizer_steps = 8
-train_batch_size = 128
-gsm8k_task_weight = float(os.environ.get("GSM8K_TASK_WEIGHT", "1.0"))
+
+experimental_name = "disaggregated_multi_task_gsm8k_dapo_math"
+total_train_steps = int(os.environ.get("TOTAL_TRAIN_STEPS", "4"))
+evaluate_step = int(os.environ.get("EVALUATE_STEP", str(total_train_steps)))
+train_optimizer_steps = int(os.environ.get("TRAIN_OPTIMIZER_STEPS", "4"))
+train_batch_size = int(os.environ.get("TRAIN_BATCH_SIZE", "64"))
+sync_weights_interval = int(os.environ.get("SYNC_WEIGHTS_INTERVAL", "1"))
+over_sample_threshold = float(os.environ.get("OVER_SAMPLE_THRESHOLD", "0.0"))
+partial_rollout = os.environ.get("PARTIAL_ROLLOUT", "0") == "1"
+tail_batch_trigger_size = int(os.environ.get("TAIL_BATCH_TRIGGER_SIZE", "0"))
+max_staleness = int(os.environ.get("MAX_STALENESS", "0"))
+enable_evaluate = os.environ.get("ENABLE_EVALUATE", "0") == "1"
+gsm8k_task_weight = float(os.environ.get("GSM8K_TASK_WEIGHT", "3.0"))
 dapo_task_weight = float(os.environ.get("DAPO_TASK_WEIGHT", "1.0"))
-rollout_tp_size = 1
-rollout_ep_size = 1
-gsm8k_prompt_repeat_k = 5
-dapo_prompt_repeat_k = 8
-gsm8k_max_prompt_length = 512
-dapo_max_prompt_length = 2048
-gsm8k_max_response_length = 1024
-dapo_max_response_length = 8192
+rollout_tp_size = int(os.environ.get("ROLLOUT_TP_SIZE", "1"))
+rollout_ep_size = int(os.environ.get("ROLLOUT_EP_SIZE", "1"))
+gsm8k_prompt_repeat_k = int(os.environ.get("GSM8K_PROMPT_REPEAT_K", "3"))
+dapo_prompt_repeat_k = int(os.environ.get("DAPO_PROMPT_REPEAT_K", "4"))
+gsm8k_max_prompt_length = int(os.environ.get("GSM8K_MAX_PROMPT_LENGTH", "512"))
+dapo_max_prompt_length = int(os.environ.get("DAPO_MAX_PROMPT_LENGTH", "2048"))
+gsm8k_max_response_length = int(os.environ.get("GSM8K_MAX_RESPONSE_LENGTH", "1024"))
+dapo_max_response_length = int(os.environ.get("DAPO_MAX_RESPONSE_LENGTH", "4096"))
+pack_max_length = int(os.environ.get("PACK_MAX_LENGTH", "32768"))
+
 max_prompt_length = dapo_max_prompt_length
 max_response_length = dapo_max_response_length
-pack_max_length = 32768
 
-resources = AcceleratorResourcesConfig(
-    accelerator="GPU",
-    num_workers=8 * NNODE,
-    num_cpus_per_worker=12,
-    cpu_memory_per_worker=16 * 1024**3,
+
+train_resources = AcceleratorResourcesConfig(
+    accelerator=os.environ.get("ACCELERATOR", "GPU"),
+    num_workers=int(os.environ.get("TRAIN_NUM_WORKERS", "4")),
+    num_cpus_per_worker=float(os.environ.get("TRAIN_CPUS_PER_WORKER", "12")),
+    cpu_memory_per_worker=int(os.environ.get("TRAIN_CPU_MEMORY_PER_WORKER", str(16 * 1024**3))),
 )
+
+rollout_resources = AcceleratorResourcesConfig(
+    accelerator=os.environ.get("ACCELERATOR", "GPU"),
+    num_workers=int(os.environ.get("ROLLOUT_NUM_WORKERS", "4")),
+    num_cpus_per_worker=float(os.environ.get("ROLLOUT_CPUS_PER_WORKER", "12")),
+    cpu_memory_per_worker=int(os.environ.get("ROLLOUT_CPU_MEMORY_PER_WORKER", str(16 * 1024**3))),
+)
+
 
 rollout_config = RolloutConfig(
     env=experimental_name,
-    device=resources.accelerator,
+    device=rollout_resources.accelerator,
     model_path=model_path,
     dtype="bfloat16",
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
-    gpu_memory_utilization=0.8,
+    gpu_memory_utilization=float(os.environ.get("ROLLOUT_GPU_MEMORY_UTILIZATION", "0.8")),
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=(enable_return_routed_experts == "1"),
     rollout_max_batch_size_per_instance=2048,
 )
+
 
 eos_token_id = get_eos_token(model_path)
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
 judger_config = DapoMathJudgerConfig(
     judger_name="dapo_math",
-    num_ray_actors=1,
     eos_token=eos_token_str,
     enable_overlong_buffer=True,
     max_response_len=max_response_length,
@@ -105,6 +128,7 @@ judger_config = DapoMathJudgerConfig(
     overlong_penalty_factor=1.0,
     tokenizer=tokenizer,
 )
+
 
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
@@ -141,6 +165,7 @@ train_worker_cfg = WorkerConfig(
     optimizer_steps=train_optimizer_steps,
     pack_max_length=pack_max_length,
 )
+
 
 gsm8k_train_tokenizer_config = RLTextTokenizeFnConfig(max_length=gsm8k_max_prompt_length)
 dapo_train_tokenizer_config = RLTextTokenizeFnConfig(max_length=dapo_max_prompt_length)
@@ -195,6 +220,16 @@ dapo_train_agent_loop_config = SingleTurnAgentLoopConfig(
     ),
 )
 
+if over_sample_threshold > 0 or partial_rollout:
+    produce_strategy_config = AsyncProduceStrategyConfig(
+        over_sample_threshold=over_sample_threshold,
+        enable_partial_rollout=partial_rollout,
+        tail_batch_trigger_size=tail_batch_trigger_size,
+        max_staleness=max_staleness,
+    )
+else:
+    produce_strategy_config = SyncProduceStrategyConfig()
+
 agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=[
         TaskSpecConfig(
@@ -202,18 +237,20 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
             weight=dapo_task_weight,
             agent_loop_config=dapo_train_agent_loop_config,
             judger_config=judger_config,
-            produce_strategy_config=SyncProduceStrategyConfig(),
+            produce_strategy_config=produce_strategy_config,
             sampler_config=dapo_train_sampler_config,
         ),
         TaskSpecConfig(
             task_name="train_task:gsm8k",
             weight=gsm8k_task_weight,
             agent_loop_config=gsm8k_train_agent_loop_config,
-            produce_strategy_config=SyncProduceStrategyConfig(),
+            judger_config=judger_config,
+            produce_strategy_config=produce_strategy_config,
             sampler_config=gsm8k_train_sampler_config,
         ),
     ],
 )
+
 
 gsm8k_eval_sampler_config = SamplerConfig(
     dataloader_cfg=DataloaderConfig(
@@ -278,6 +315,7 @@ eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
             task_name="eval_task:gsm8k",
             weight=gsm8k_task_weight,
             agent_loop_config=gsm8k_eval_agent_loop_config,
+            judger_config=judger_config,
             sampler_config=gsm8k_eval_sampler_config,
         ),
     ],
@@ -290,8 +328,9 @@ def compute_metric(samples):
 
 evaluator_config = EvaluatorConfig(compute_metric_func=compute_metric)
 
-trainer = RLColocateTrainerConfig(
-    resources=resources,
+trainer = RLDisaggregatedTrainerConfig(
+    train_resources=train_resources,
+    rollout_resources=rollout_resources,
     train_worker_cfg=train_worker_cfg,
     rollout_config=rollout_config,
     tokenizer_path=model_path,
@@ -301,11 +340,12 @@ trainer = RLColocateTrainerConfig(
     evaluator_config=evaluator_config,
     load_from=model_path,
     train_batch_size=train_batch_size,
-    enable_evaluate=True,
-    enable_initial_evaluate=False,
     total_train_steps=total_train_steps,
+    sync_weights_interval=sync_weights_interval,
+    enable_evaluate=enable_evaluate,
+    enable_initial_evaluate=False,
     evaluate_step=evaluate_step,
     work_dir=work_dir,
-    seed=123,
-    debug_rollout=False,
+    seed=int(os.environ.get("SEED", "123")),
+    debug_rollout=os.environ.get("DEBUG_ROLLOUT", "0") == "1",
 )

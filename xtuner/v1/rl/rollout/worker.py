@@ -589,7 +589,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             rollout_state.response = ""
             rollout_state.logprobs = []
             rollout_state.response_mask = []
-            rollout_state.response_rollout_steps = []
+            rollout_state.response_model_steps = []
             rollout_state.finish_reason = "stop" if is_eos_reached else "length"
             return rollout_state
 
