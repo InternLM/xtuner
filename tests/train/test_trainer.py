@@ -1,5 +1,6 @@
 import os
 import tempfile
+from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import patch, Mock
 import pickle
@@ -30,6 +31,7 @@ from xtuner.v1.loss import CELossConfig
 from xtuner._testing import DeterministicDDPTestCase
 from unittest import TestCase
 from xtuner.v1.train.trainer import XTunerMeta, ExpInfo, ExpHistory, GitInfo
+from xtuner.v1.engine.train_engine import AsyncCheckpointFutures
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.datasets.dataloader import Dataloader
 from torch.optim.lr_scheduler import SequentialLR
@@ -78,12 +80,27 @@ class FakeEngine:
         return torch.tensor(1.0)
 
     load_dcp = Mock()
+    load_dcp_merged = Mock()
 
     def save_dcp(self, model_dir: Path, optimizer_dir: Path | None):
         model_dir.mkdir(parents=True, exist_ok=True)
         if optimizer_dir is not None:
             optimizer_dir.mkdir(parents=True, exist_ok=True)
 
+    def async_save_dcp(self, model_dir: Path, optimizer_dir: Path | None) -> AsyncCheckpointFutures:
+        self.save_dcp(model_dir, optimizer_dir)
+        f: Future = Future()
+        f.set_result(None)
+        return AsyncCheckpointFutures(staging=[f], upload=[f])
+
+    def async_save_dcp_merged(self, weights_dir: Path) -> AsyncCheckpointFutures:
+        weights_dir.mkdir(parents=True, exist_ok=True)
+        f: Future = Future()
+        f.set_result(None)
+        return AsyncCheckpointFutures(staging=[f], upload=[f])
+
+    def destroy_async_checkpoint_pg(self) -> None:
+        pass
 
 def prepare(fn):
     def wrapper(self, *args, **kwargs):
@@ -255,6 +272,58 @@ class TestTrainerSaveHF(DistributedTestBase):
         for checkpoint, step in zip(trainer.meta.latest_exp.checkpoint_list, [3, 6, 9, 10]):
             assert f"step-{step}" in str(checkpoint)
             assert os.path.exists(checkpoint)
+
+    @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
+    @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
+    @prepare
+    def test_async_save_checkpoint_interval(self):
+        self.create_pg(DEVICE)
+        work_dir_list = [self.work_dir]
+        dist.broadcast_object_list(work_dir_list, src=0)
+        self.work_dir = Path(work_dir_list[0])
+        model_cfg = Qwen3MoE30BA3Config()
+        optim_cfg = AdamWConfig(lr=1e-4, weight_decay=0.01)
+        fsdp_cfg = FSDPConfig(tp_size=1)
+        dataset_cfg = [
+            {
+                "dataset": DatasetConfig(name="alpaca", anno_path=self.alpaca_path, sample_ratio=1.0),
+                "tokenize_fn": FTDPTokenizeFnConfig(),
+            },
+        ]
+        dataloader_cfg = DataloaderConfig()
+        lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0.1, lr_min=1e-6)
+
+        trainer = Trainer(
+            load_from=str(self.fake_hf_model_dir),
+            model_cfg=model_cfg,
+            optim_cfg=optim_cfg,
+            fsdp_cfg=fsdp_cfg,
+            dataset_cfg=dataset_cfg,
+            dataloader_cfg=dataloader_cfg,
+            lr_cfg=lr_cfg,
+            tokenizer_path=self.tokenizer_path,
+            global_batch_size=2,
+            total_step=10,
+            work_dir=str(self.work_dir),
+            hf_interval=3,
+            hf_max_keep=2,
+            seed=42,
+            debug=False,
+            checkpoint_interval=5,
+            async_checkpoint=True,
+        )
+
+        trainer.fit()
+        dist.barrier()
+        assert len(trainer.meta.latest_exp.checkpoint_list) == 2
+        for checkpoint, step in zip(trainer.meta.latest_exp.checkpoint_list, [5, 10]):
+            assert f"step-{step}" in str(checkpoint)
+            assert os.path.exists(checkpoint)
+            # Verify new merged format: 'weights/' dir exists, not 'model/' + 'optimizer/'
+            weights_dir = Path(checkpoint) / "weights"
+            model_dir = Path(checkpoint) / "model"
+            assert weights_dir.exists(), f"Expected merged weights dir at {weights_dir}"
+            assert not model_dir.exists(), f"Legacy model dir should not exist at {model_dir}"
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
