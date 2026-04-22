@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from cyclopts import Group, Parameter
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.rl.advantage.base import AdvantageEstimator
 
@@ -11,6 +11,8 @@ advantage_group = Group("Advantage Estimation", sort_key=2, help="Advantage esti
 
 class BaseAdvantageConfig(BaseModel):
     """Intermediate base for discriminated union."""
+
+    model_config = ConfigDict(extra="forbid")
 
     def build(self) -> AdvantageEstimator:
         raise NotImplementedError("Subclasses must implement this method.")

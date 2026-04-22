@@ -1,11 +1,10 @@
 import os
 from argparse import Namespace
 from itertools import chain
-from typing import List
+from typing import Any, Dict, List
 
 import ray
 import requests
-import torch
 from ray.util.placement_group import placement_group_table
 
 from transformers import AutoTokenizer

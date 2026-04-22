@@ -7,7 +7,8 @@ import requests
 import torch
 from urllib3.exceptions import NewConnectionError
 
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
+from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
 from .worker import RolloutConfig, RolloutWorker
 
