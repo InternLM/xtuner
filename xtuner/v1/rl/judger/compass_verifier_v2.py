@@ -1,15 +1,12 @@
 import asyncio
 import random
-from typing import List
 
 import aiohttp
-import ray
 import requests  # type: ignore[import-untyped]
 from pydantic import ConfigDict
-from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto import RolloutState, Status
-from xtuner.v1.rl.judger.native import RouterJudgerConfig
+from xtuner.v1.rl.judger.native import Judger, JudgerConfig
 from xtuner.v1.utils.type_helper import ray_method
 
 
@@ -40,7 +37,7 @@ Judging the correctness of the candidate's answer:
 """
 
 
-class CompassVerifierV2:
+class CompassVerifierV2(Judger):
     def __init__(
         self,
         hosts: list[str],
@@ -62,7 +59,7 @@ class CompassVerifierV2:
         self.judger_name = "compass_verifier_v2"
 
     @ray_method
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:
+    async def judge(self, rollout_state: RolloutState) -> RolloutState:  # type: ignore[override]
         if rollout_state.status != Status.COMPLETED or rollout_state.response is None:
             rollout_state.reward = {"score": -1}
             return rollout_state
@@ -118,7 +115,7 @@ class CompassVerifierV2:
         return self.judger_name
 
 
-class CompassVerifierV2Config(RouterJudgerConfig):
+class CompassVerifierV2Config(JudgerConfig):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     hosts: list[str]
@@ -127,39 +124,10 @@ class CompassVerifierV2Config(RouterJudgerConfig):
     max_retries: int = 3
     thinking_finish_words: list[str] = ["<conclude>", "**Final Answer**", "</think>"]
 
-    def _build_workers(self, pg: PlacementGroup | None = None, start_bundle_idx: int = 0) -> List[ray.actor.ActorHandle]:
-        if pg is None:
-            from xtuner.v1.rl.utils.ray_worker import CPUResourcesConfig
-
-            cpu_resource_cfg = CPUResourcesConfig(
-                num_workers=self.num_ray_actors,
-                num_cpus_per_worker=self.num_cpus_per_actor,
-                cpu_memory_per_worker=self.cpu_memory_per_actor,
-            )
-            pg = cpu_resource_cfg.build_placement_group()
-            ray.get(pg.ready())
-            start_bundle_idx = 0
-
-        workers_list = []
-        assert len(pg.bundle_specs) >= self.num_ray_actors, (
-            "Placement group does not have enough bundles for the number of ray actors."
+    def build_local(self) -> CompassVerifierV2:
+        return CompassVerifierV2(
+            hosts=self.hosts,
+            request_timeout=self.request_timeout,
+            max_retries=self.max_retries,
+            thinking_finish_words=self.thinking_finish_words,
         )
-        for idx in range(self.num_ray_actors):
-            bundle_idx = start_bundle_idx + idx
-            pg_options = {"num_cpus": self.num_cpus_per_actor, "memory": self.cpu_memory_per_actor}
-            worker = (
-                ray.remote(CompassVerifierV2)
-                .options(
-                    placement_group=pg,
-                    placement_group_bundle_index=bundle_idx,
-                    **pg_options,
-                )
-                .remote(
-                    hosts=self.hosts,
-                    request_timeout=self.request_timeout,
-                    max_retries=self.max_retries,
-                    thinking_finish_words=self.thinking_finish_words,
-                )
-            )
-            workers_list.append(worker)
-        return workers_list

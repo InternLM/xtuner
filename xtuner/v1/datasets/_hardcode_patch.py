@@ -26,8 +26,6 @@ from transformers import PreTrainedTokenizer
 from xtuner.v1.utils import get_logger
 
 from .ftdp import FtdpTokenizeFunction
-
-# from .rl_tokenize_fn.rl_tokenize_fn import InternS1VLTokenizeFunction
 from .mllm_tokenize_fn import InternS1VLTokenizeFunction, Qwen3VLTokenizeFunction
 from .pt_tokenize_fn import PretrainTokenizeFunction
 from .sft_tokenize_fn import OpenaiTokenizeFunction

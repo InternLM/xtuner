@@ -38,9 +38,10 @@ from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
+from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.utils import SingleAcceleratorWorker, gather_logprobs
+from xtuner.v1.rl.utils import SingleAcceleratorWorker
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,

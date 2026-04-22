@@ -8,7 +8,7 @@ from ray.actor import ActorProxy
 
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.model.compose.base import BaseComposeConfig
-from xtuner.v1.ray.utils import free_object_refs
+from xtuner.v1.rl.utils import free_object_refs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import get_logger, ray_method
 

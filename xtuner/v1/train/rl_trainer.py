@@ -9,7 +9,7 @@ import ray
 import torch
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -17,6 +17,7 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
+from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     AgentLoopManagerStatus,
@@ -201,8 +202,10 @@ class BaseRLTrainerConfig(BaseModel):
     eval_agent_loop_manager_cfg: AgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
     load_from: str | Path
-    total_train_steps: int
+    total_train_steps: int | None = None
+    total_epochs: int | None = None
     train_batch_size: int
+    advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
     sync_weights_interval: int = 1
     gateway_config: GatewayConfig | None = None
 
@@ -225,6 +228,12 @@ class BaseRLTrainerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_sync_intervals(self):
+        if self.total_train_steps is None and self.total_epochs is None:
+            raise ValueError("Either total_train_steps or total_epochs must be provided.")
+        if self.total_train_steps is not None and self.total_train_steps <= 0:
+            raise ValueError(f"total_train_steps must be positive, got {self.total_train_steps}.")
+        if self.total_epochs is not None and self.total_epochs <= 0:
+            raise ValueError(f"total_epochs must be positive, got {self.total_epochs}.")
         _validate_sync_intervals(
             sync_weights_interval=self.sync_weights_interval,
             checkpoint_interval=self.checkpoint_interval,
@@ -269,6 +278,7 @@ class BaseRLTrainer:
         self._init_train_worker_config(cfg, log_dir)
         self._init_rollout_config(cfg, log_dir)
         self._init_runtime_flags(cfg)
+        self._advantage_estimator = cfg.advantage_estimator_config.build()
 
         self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
@@ -306,7 +316,8 @@ class BaseRLTrainer:
         return log_dir
 
     def _init_train_state(self, cfg: BaseRLTrainerConfig) -> None:
-        self._total_train_steps = cfg.total_train_steps
+        self._total_train_steps = cfg.total_train_steps or 0
+        self._total_epochs = cfg.total_epochs
         self._cur_step = 0
         self._global_train_step = 0
         self._seed = cfg.seed
@@ -364,6 +375,21 @@ class BaseRLTrainer:
 
         total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
         self.evaluator = cfg.evaluator_config.build(total_eval_samples=total_eval_samples)
+        self._resolve_total_train_steps(cfg)
+
+    def _resolve_total_train_steps(self, cfg: BaseRLTrainerConfig) -> None:
+        if cfg.total_train_steps is not None:
+            self._total_train_steps = cfg.total_train_steps
+            return
+
+        assert cfg.total_epochs is not None
+        dataset_size = len(self.agent_loop_manager.data_sampler)
+        self._total_train_steps = dataset_size // cfg.train_batch_size * cfg.total_epochs
+        self.logger.info(
+            "Resolved total_train_steps from total_epochs: "
+            f"dataset_size={dataset_size}, train_batch_size={cfg.train_batch_size}, "
+            f"total_epochs={cfg.total_epochs}, total_train_steps={self._total_train_steps}"
+        )
 
     @property
     def exp_dir(self) -> Path:
@@ -566,7 +592,7 @@ class BaseRLTrainer:
 
             rewards_list.extend(rewards)
             rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
-            advantages = (rewards_tensor - rewards_tensor.mean(0)) / (rewards_tensor.std(0) + 1e-8)
+            advantages = self._advantage_estimator.compute(rewards_tensor, group)
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
@@ -718,8 +744,7 @@ class BaseRLTrainer:
                     break
                 mini_batch_metrics: dict[str, List[float]] = {}
                 for mini_batch_log in log_item["train_metrics"]:
-                    rl_worker_log = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
-                    for k, v in rl_worker_log.items():
+                    for k, v in mini_batch_log.items():
                         mini_batch_metrics.setdefault(k, []).append(cast(float, v))
 
                 for key, value in mini_batch_metrics.items():
@@ -808,8 +833,7 @@ class BaseRLTrainer:
                     break
                 current_global_step = train_start_step + step_idx
 
-                metrics: dict[str, Any] = dict(mini_batch_log["loss_log"])
-                metrics.update(mini_batch_log["rl_other_log"])
+                metrics: dict[str, Any] = dict(mini_batch_log)
 
                 self._exp_tracker.add_scalars(
                     tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": float(v) for k, v in metrics.items()},
