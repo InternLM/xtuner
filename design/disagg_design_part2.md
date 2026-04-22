@@ -1,8 +1,5 @@
 # `produce_loop` / `AsyncProduceStrategy` 重设计
 
-> 本方案以 `produce_loop_Question.md` 和 `produce_loop_QuestionV2.md` 为准。
-> 在 `AsyncProduceV2.1_codex.md` 的基础上，v2.2 保留绝对累计 target/consumed 口径，但不再向 strategy 传 getter；改为 Manager 维护一个可变 `ProduceProgress` 成员，并把该对象引用传给 `AsyncProduceStrategy`。
-
 ## 目标
 
 在尽量少改现有结构的前提下，解决四件事：
