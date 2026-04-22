@@ -63,14 +63,14 @@ class _DatasetSampler:
             self.dataloader_iter = iter(self.dataloader)
         assert self.dataloader_iter is not None
         try:
-            data = next(self.dataloader_iter)[0]
+            data = cast(RolloutState, next(self.dataloader_iter)[0])
             data = put_to_ray(data)
 
         except StopIteration:
             self.cur_epoch += 1
             self.dataloader.set_epoch(self.cur_epoch)
             self.dataloader_iter = iter(self.dataloader)
-            data = next(self.dataloader_iter)[0]
+            data = cast(RolloutState, next(self.dataloader_iter)[0])
             data = put_to_ray(data)
 
         group_data = []
@@ -104,7 +104,7 @@ class Sampler(_DatasetSampler):
     def save(self, checkpoint_path: Path | str) -> None:
         """Save the sampler's dataloader state to checkpoint."""
         checkpoint_path = Path(checkpoint_path)
-        dataloader_state = self.dataloader.get_state_dict(self._consumed_samples)
+        dataloader_state = self.dataloader.get_state_dict()
         torch.save(dataloader_state, checkpoint_path / self._DATALOADER_FILE)
 
     def resume(self, checkpoint_path: Path | str) -> None:

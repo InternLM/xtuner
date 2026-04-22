@@ -19,6 +19,14 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
 
 
+def split_to_chunks(n: int, chunk_size: int) -> list[int]:
+    full, remainder = divmod(n, chunk_size)
+    result = [chunk_size] * full
+    if remainder > 0:
+        result.append(remainder)
+    return result
+
+
 def fake_collator(instances: list[RolloutState], **kwargs):
     return instances
 

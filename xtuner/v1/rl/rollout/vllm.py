@@ -12,6 +12,9 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.utils import cli_env_setup
 from vllm.utils import FlexibleArgumentParser
 
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_status_from_finish_reason
+from xtuner.v1.utils.device import get_device, get_torch_device_module
+
 from .worker import RolloutConfig, RolloutWorker
 
 
@@ -298,7 +301,7 @@ class vLLMWorker(RolloutWorker):
         args["max_model_len"] = self.config.context_length
         args["enforce_eager"] = False
         args["enable_sleep_mode"] = True
-        args["worker_extension_cls"] = "xtuner.v1.ray.rollout.vllm.WorkerWrap"
+        args["worker_extension_cls"] = "xtuner.v1.rl.rollout.vllm.WorkerWrap"
         args["trust_remote_code"] = True
         args["enable_prefix_caching"] = False
         args["allowed_local_media_path"] = "/"
@@ -357,41 +360,75 @@ class vLLMWorker(RolloutWorker):
             ray_runtime_env={"env_vars": env},
         )
 
-    async def _handle_stream_response(self, uid, sample_params, extra_params, response) -> RLRolloutResponseItem:
+    async def _safe_handle_response(self, rollout_state: RolloutState, http_response) -> RolloutState:
+        if rollout_state.sample_params.stream:
+            return await self._handle_stream_response(rollout_state, http_response)
+        return await self._handle_non_stream_response(rollout_state, http_response)
+
+    async def _handle_stream_response(self, rollout_state: RolloutState, response) -> RolloutState:
         raise NotImplementedError
 
-    async def _handle_non_stream_response(
-        self, root_id, action_id, sample_params, extra_params, response, input_extra_info
-    ) -> RLRolloutResponseItem:
-        uid = action_id
-        last_token_ids = []
-        last_logprobs = []
+    async def _handle_non_stream_response(self, rollout_state: RolloutState, response) -> RolloutState:
+        uid = rollout_state.uid or rollout_state.message_uid
+        sample_params = rollout_state.sample_params
+        last_token_ids: list[int] = []
+        last_logprobs: list[float] = []
+        routed_experts = None
 
-        response = response.json()["choices"][0]
-        if "logprobs" in response:
-            last_token_ids = response["token_ids"]
-            last_logprobs = [item["logprob"] for item in response["logprobs"]["content"]]
+        response_json = response.json()
+        response_choice = response_json["choices"][0]
+        if response_choice.get("logprobs") is not None:
+            last_token_ids = response_choice.get("token_ids", response_json.get("token_ids", []))
+            last_logprobs = [
+                item["logprob"] for item in response_choice["logprobs"].get("content", []) if "logprob" in item
+            ]
             assert len(last_token_ids) == len(last_logprobs)
-            assert len(last_token_ids) <= sample_params["max_tokens"], (
-                f"Generation length exceeds limit: generated {len(last_token_ids)}, limit {sample_params['max_tokens']}"
+            assert len(last_token_ids) <= sample_params.max_tokens, (
+                f"Generation length exceeds limit: generated {len(last_token_ids)}, limit {sample_params.max_tokens}"
             )
-        last_trajectory = response["message"]["content"]
-        finish_reason = response["finish_reason"]
+
+        last_trajectory = response_choice["message"].get("content") or ""
+        finish_reason = response_choice.get("finish_reason")
         if finish_reason == "abort" and self.receive_abort_request.is_set() is False:
             self.receive_abort_request.set()
             self.logger.info(f"Setting receive_abort_request to True for rank {self.rank}")
 
-        if finish_reason != "abort" and (len(last_token_ids) == 0 or len(last_logprobs) == 0):
-            self.logger.error(f"Invalid rollout response for request {uid}: {response}")
-            return RLRolloutResponseItem(state=RolloutState.SKIPPED)
+        if self.enable_return_routed_experts:
+            routed_experts = response_choice.get("routed_experts", response_json.get("routed_experts"))
+            if routed_experts is not None:
+                if isinstance(routed_experts, str):
+                    import base64
 
-        rollout_response = RLRolloutResponseItem(
-            response=last_trajectory,
-            response_ids=last_token_ids if len(last_token_ids) > 0 else None,
-            num_return_tokens=len(last_token_ids) if len(last_token_ids) > 0 else None,
-            finish_reason=finish_reason,
-            logprobs=last_logprobs,
-            state=RolloutState.ABORTED if finish_reason == "abort" else RolloutState.COMPLETED,
-        )
+                    data = base64.b64decode(routed_experts)
+                    routed_experts = ray.cloudpickle.loads(data)
+                else:
+                    routed_experts = torch.tensor(routed_experts)
+                    routed_experts = ray.put(routed_experts)
 
-        return rollout_response
+        rollout_status = update_status_from_finish_reason(finish_reason)
+        if rollout_status == Status.COMPLETED:
+            validation_errors = []
+            if sample_params.return_token_ids and len(last_token_ids) == 0:
+                validation_errors.append("empty response_ids")
+            if sample_params.return_logprob and len(last_logprobs) == 0:
+                validation_errors.append("missing logprobs")
+            if not last_trajectory:
+                validation_errors.append("empty response text")
+            if self.enable_return_routed_experts and routed_experts is None:
+                validation_errors.append("missing routed_experts")
+
+            if validation_errors:
+                error_msg = f"Incomplete rollout data for request {uid}: {', '.join(validation_errors)}"
+                self.logger.error(f"{error_msg}. Raw response: {response_json}")
+                rollout_state.status = Status.FAILED
+                rollout_state.error_msg = error_msg
+                return rollout_state
+
+        rollout_state.response = last_trajectory
+        rollout_state.response_ids = last_token_ids if len(last_token_ids) > 0 else None
+        rollout_state.logprobs = last_logprobs if len(last_logprobs) > 0 else None
+        rollout_state.routed_experts = routed_experts
+        rollout_state.finish_reason = finish_reason
+        rollout_state.status = rollout_status
+
+        return rollout_state

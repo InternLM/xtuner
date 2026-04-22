@@ -1,6 +1,7 @@
 from typing import cast
 
 from xtuner.v1.data_proto import RolloutState
+from xtuner.v1.utils import CacheDict
 
 from ...data_proto.rl_data import MultimodalInfo
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwen3VLTokenizeFunction, QwenVL3DataItem
@@ -26,14 +27,17 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
         super().__init__(*args, **kwargs)
 
     # TODO: tool call
-    def __call__(self, item: dict, media_root: str = "", **kwargs) -> RolloutState:
+    def __call__(self, item: dict, media_root: str = "", **kwargs) -> RolloutState | CacheDict:
         extra_info = item.get("extra_info", {})
         message = item["prompt"]
 
         data = super().__call__({"messages": message}, media_root=media_root)
 
         if self.state == "cache":
-            return RolloutState(message=message, num_tokens=data["num_tokens"])
+            return {
+                "num_tokens": data["num_tokens"],
+                "proxy_attn_flops": data.get("proxy_attn_flops", float(data["num_tokens"])),
+            }
         else:
             data = cast(QwenVL3DataItem, data)
             image_data, _ = replace_image_context_and_collect_media_data(message, media_root, True)
@@ -79,6 +83,7 @@ class RLQwen3VLTokenizeFnConfig(Qwen3VLTokenizeFnConfig):
             tokenizer,
             self.processor_path,
             anno_name,
+            chat_template=self.chat_template,
             min_pixels=self.min_pixels,
             max_pixels=self.max_pixels,
             oss_loader_cfg=self.oss_loader_cfg,

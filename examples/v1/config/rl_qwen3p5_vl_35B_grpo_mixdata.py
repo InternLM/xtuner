@@ -1,23 +1,29 @@
-import os
-from transformers import AutoTokenizer
-from xtuner.v1.config import (
-    AdamWConfig,
-    FSDPConfig,
-    LRConfig,
-)
 import json
-from xtuner.v1.ray.judger.dapo_math import DapoMathJudgerConfig
-from xtuner.v1.data_proto.rl_data import SampleParams
+import os
+
+from transformers import AutoTokenizer
+
+from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
+from xtuner.v1.data_proto import SampleParams
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
-from xtuner.v1.ray.base import AcceleratorResourcesConfig
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
-from xtuner.v1.ray.judger.controller import JudgerConfig
-from xtuner.v1.rl.base import WorkerConfig
-from xtuner.v1.rl.grpo import GRPOLossConfig
-from xtuner.v1.train.rl_trainer import RLTrainerConfig
-from xtuner.v1.datasets import RLTokenizeFnConfig, DatasetConfig, Qwen3VLTokenizeFnConfig, DataloaderConfig
-from xtuner.v1.rl.base.rollout_is import RolloutImportanceSampling
+from xtuner.v1.rl.advantage import GRPOAdvantageConfig
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, SamplerConfig, SyncProduceStrategyConfig, TaskSpecConfig
+from xtuner.v1.rl.evaluator import EvaluatorConfig
+from xtuner.v1.rl.judger import DapoMathJudgerConfig
+from xtuner.v1.rl.loss import GRPOLossConfig
+from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.trainer import RolloutImportanceSampling, WorkerConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, get_eos_token
+from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
+
+
+def _as_list(value):
+    return value if isinstance(value, list) else [value]
+
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -41,7 +47,7 @@ resources = AcceleratorResourcesConfig(
     accelerator="GPU",
     num_workers=8,
     num_cpus_per_worker=12,
-    cpu_memory_per_worker=16 * 1024**3,  # 16 GB
+    cpu_memory_per_worker=16 * 1024**3,
 )
 
 # 2. rollout
@@ -54,7 +60,7 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.8,
-    context_length = max_response_length + max_prompt_length,
+    context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=512,
 )
@@ -67,64 +73,89 @@ training_sample_params = SampleParams(
     temperature=1.0,
     min_tokens=0,
 )
+evaluation_sample_params = SampleParams(
+    max_tokens=max_response_length,
+    top_k=1,
+    top_p=1.0,
+    temperature=0.0,
+    min_tokens=0,
+)
 
-
-tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
-with open(meta_data_path) as f:
+# 3. datasets
+with open(meta_data_path, "r", encoding="utf-8") as f:
     ds_collections = json.load(f)
 
 train_dataset_cfg = []
-for name, _data in ds_collections.items():
-    tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path, 
-                                            max_length=max_prompt_length, 
-                                            system_message=_data.get('system_message', None),
-                                            chat_template="qwen3-vl-rl")
-    _data_cfg = {"dataset": DatasetConfig(name=name,
-                                          anno_path=_data['annotation'],
-                                          media_root=_data.get('media_root', ''),
-                                          sample_ratio=_data.get('sample_ratio', 1.0),
-                                          class_name='VLMJsonlDataset'),
-                "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length,
-                                                tokenize_fn_cfg=tokenize_fn_cfg),
-                 }
-    train_dataset_cfg.append(_data_cfg)
+eval_dataset_cfg = []
+for name, data in ds_collections.items():
+    annotations = _as_list(data["annotation"])
+    for annotation in annotations:
+        train_dataset_cfg.append(
+            {
+                "dataset": DatasetConfig(
+                    name=name,
+                    anno_path=annotation,
+                    media_root=data.get("media_root", ""),
+                    sample_ratio=data.get("sample_ratio", 1.0),
+                    class_name="VLMJsonlDataset",
+                ),
+                "tokenize_fn": RLQwen3VLTokenizeFnConfig(
+                    processor_path=model_path,
+                    max_length=max_prompt_length,
+                    system_message=data.get("system_message", None),
+                    chat_template="qwen3.5-vl",
+                ),
+            }
+        )
+        eval_dataset_cfg.append(
+            {
+                "dataset": DatasetConfig(
+                    name=name,
+                    anno_path=annotation,
+                    media_root=data.get("media_root", ""),
+                    sample_ratio=data.get("sample_ratio", 1.0),
+                    class_name="VLMJsonlDataset",
+                ),
+                "tokenize_fn": RLQwen3VLTokenizeFnConfig(
+                    processor_path=model_path,
+                    max_length=max_prompt_length,
+                    system_message=data.get("system_message", None),
+                    chat_template="qwen3.5-vl",
+                    ignore_multimodal_info=True,
+                ),
+            }
+        )
 
-dataloader_config = DataloaderConfig(num_workers=8,
-                                     collator="fake_collator",
-                                     pack_level="none")
+dataloader_cfg = DataloaderConfig(
+    dataset_config_list=train_dataset_cfg,
+    num_workers=8,
+    collator="fake_collator",
+    pack_level="none",
+    pack_max_length=pack_max_length,
+)
+eval_dataloader_cfg = DataloaderConfig(
+    dataset_config_list=eval_dataset_cfg,
+    num_workers=8,
+    collator="fake_collator",
+    pack_level="none",
+    pack_max_length=pack_max_length,
+)
 
-# 3. judger
-from xtuner.v1.utils.rl_test_utils import get_eos_token
+# 4. judger
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_id = get_eos_token(model_path)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
-dapomath_judger_config = DapoMathJudgerConfig(
-    judger_name="dapo_math", 
+judger_config = DapoMathJudgerConfig(
+    judger_name="dapo_math",
     eos_token=eos_token_str,
-    enable_overlong_buffer = True, 
-    max_response_len =max_response_length, 
-    overlong_buffer_len=4096, 
-    overlong_penalty_factor=1.0, 
-    tokenizer=tokenizer)
-judger_cfg = JudgerConfig(reward_judger_configs=[dapomath_judger_config])
-
-# 4. dataflow and evaluator
-dataflow_config = DataFlowConfig(
-    env=experimental_name,
-    prompt_repeat_k=prompt_repeat_k,
-    global_batch_size=global_batch_size,
-    sample_params=training_sample_params,
-    # max_concurrent=64,  # optional, will be determined automatically if not set
+    enable_overlong_buffer=True,
+    max_response_len=max_response_length,
+    overlong_buffer_len=4096,
+    overlong_penalty_factor=1.0,
+    tokenizer=tokenizer,
 )
 
-
-# replay buffer config: : 不需要修改
-replay_buffer_cfg = ReplayBufferConfig(
-    dataset_cfg=train_dataset_cfg, dataloader_cfg=dataloader_config, tokenizer=tokenizer
-)
-
-# 5. Train worker
-# NOTE: modify model_cfg
+# 5. train worker
 model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
 optim_cfg = AdamWConfig(lr=1e-6, betas=(0.9, 0.999), max_grad_norm=1.0, weight_decay=0.1, foreach=False)
 loss_cfg = GRPOLossConfig(
@@ -152,7 +183,7 @@ loss_cfg = GRPOLossConfig(
 )
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
 fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1, fp32_lm_head=True)
-train_worker_cfg: WorkerConfig = WorkerConfig(
+train_worker_cfg = WorkerConfig(
     model_cfg=model_cfg,
     load_from=model_path,
     optim_cfg=optim_cfg,
@@ -164,17 +195,51 @@ train_worker_cfg: WorkerConfig = WorkerConfig(
     pack_max_length=pack_max_length,
 )
 
-# 6. RL Trainer
-trainer = RLTrainerConfig(
-    load_from=model_path,
+# 6. agent loop managers
+agent_loop_config = SingleTurnAgentLoopConfig(
+    hf_checkpoint=model_path,
+    sample_params=training_sample_params,
+)
+agent_loop_manager_cfg = AgentLoopManagerConfig(
+    tasks=TaskSpecConfig(
+        task_name="train_task",
+        agent_loop_config=agent_loop_config,
+        judger_config=judger_config,
+        produce_strategy_config=SyncProduceStrategyConfig(),
+        sampler_config=SamplerConfig(dataloader_cfg=dataloader_cfg, prompt_repeat_k=prompt_repeat_k),
+    ),
+)
+
+eval_agent_loop_config = SingleTurnAgentLoopConfig(
+    hf_checkpoint=model_path,
+    sample_params=evaluation_sample_params,
+)
+eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+    tasks=TaskSpecConfig(
+        task_name="eval_task",
+        agent_loop_config=eval_agent_loop_config,
+        judger_config=judger_config,
+        sampler_config=SamplerConfig(dataloader_cfg=eval_dataloader_cfg, prompt_repeat_k=1),
+    ),
+)
+
+# 7. trainer
+trainer = RLColocateTrainerConfig(
     resources=resources,
+    train_worker_cfg=train_worker_cfg,
     rollout_config=rollout_config,
-    dataflow_config=dataflow_config,
-    judger_config=judger_cfg,
-    replay_buffer_config=replay_buffer_cfg,
-    train_worker_config=train_worker_cfg,
     tokenizer_path=model_path,
-    work_dir=work_dir,
+    replay_buffer_config=SyncReplayBufferConfig(),
+    agent_loop_manager_cfg=agent_loop_manager_cfg,
+    eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
+    evaluator_config=EvaluatorConfig(compute_metric_func=None),
+    load_from=model_path,
     total_epochs=total_epochs,
+    train_batch_size=global_batch_size,
+    advantage_estimator_config=GRPOAdvantageConfig(eps=1e-8),
+    enable_evaluate=False,
+    enable_initial_evaluate=False,
+    evaluate_step=1,
+    work_dir=work_dir,
     hf_interval=hf_interval,
 )

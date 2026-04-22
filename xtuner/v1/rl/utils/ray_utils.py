@@ -1,7 +1,7 @@
 import atexit
 import signal
 import subprocess
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import ray
 from ray import ObjectRef
@@ -88,6 +88,17 @@ def get_ray_accelerator() -> "AcceleratorType":
         )
 
     return cast("AcceleratorType", accelerator)
+
+
+def free_object_refs(refs: list[ObjectRef]) -> None:
+    valid_refs = [ref for ref in refs if isinstance(ref, ObjectRef)]
+    if not valid_refs:
+        return
+
+    try:
+        ray._private.internal_api.free(valid_refs, local_only=False)
+    except Exception:
+        ray.internal.free(valid_refs, local_only=False)
 
 
 def close_ray():
