@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from typing import Union
 
+import httpx
 import ray
 import uvicorn
 from fastapi import FastAPI, Request
@@ -149,11 +151,13 @@ def build_gateway_app(
 def build_local_gateway_app(
     controller: ActorHandle,
     config: GatewayConfig | None = None,
+    rollout_config: RolloutConfig | None = None,
 ) -> FastAPI:
     """Build a gateway app backed by a Ray-actor RolloutController."""
     cfg = config or GatewayConfig(port=8080)
-    rollout_metadata = ray.get(controller.get_rollout_metadata.remote())
-    rollout_config: RolloutConfig = rollout_metadata["rollout_config"]
+    if rollout_config is None:
+        rollout_metadata = ray.get(controller.get_rollout_metadata.remote())
+        rollout_config = rollout_metadata["rollout_config"]
     tokenizer = AutoTokenizer.from_pretrained(rollout_config.tokenizer_path, trust_remote_code=True)
 
     model_name = rollout_config.model_name
@@ -163,7 +167,7 @@ def build_local_gateway_app(
     if context_length is None:
         raise ValueError("controller.config.context_length must be set when building a local gateway app")
 
-    backend = LocalRolloutBackend(controller, tokenizer=tokenizer)
+    backend = LocalRolloutBackend(controller, tokenizer=tokenizer, rollout_config=rollout_config)
     return build_gateway_app(
         backend,
         tokenizer=tokenizer,
@@ -241,6 +245,22 @@ def serve_gateway_in_thread(app: FastAPI, config: GatewayConfig) -> threading.Th
     )
     thread.start()
     return thread
+
+
+def wait_for_gateway_ready(base_url: str, *, timeout_seconds: float = 180.0) -> None:
+    """Block until a gateway server responds successfully on ``/livez``."""
+    deadline = time.time() + timeout_seconds
+    last_error = None
+    while time.time() < deadline:
+        try:
+            response = httpx.get(f"{base_url}/livez", timeout=5.0)
+            if response.status_code == 200:
+                return
+            last_error = response.text
+        except Exception as exc:
+            last_error = repr(exc)
+        time.sleep(1.0)
+    raise AssertionError(f"Gateway did not become ready at {base_url}: {last_error}")
 
 
 def _ensure_gateway_port_available(config: GatewayConfig) -> None:
