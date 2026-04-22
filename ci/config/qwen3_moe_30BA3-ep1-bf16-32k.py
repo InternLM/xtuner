@@ -9,6 +9,7 @@ from xtuner.v1.config import (
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
+from pathlib import Path
 
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -27,15 +28,15 @@ fsdp_cfg = FSDPConfig(
 dataset_config = [
     {
         "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-        "tokenize_fn": FTDPTokenizeFnConfig(max_length=16386),
+        "tokenize_fn": FTDPTokenizeFnConfig(max_length=4096),
     },
 ]
 
 dataloader_config = DataloaderConfig(
-    pack_max_length=16384
+    pack_max_length=32768,
 )
 
-loss_cfg = CELossConfig()
+loss_cfg = CELossConfig(mode="chunk")
 
 
 trainer = TrainerConfig(
@@ -50,7 +51,7 @@ trainer = TrainerConfig(
     tokenizer_path=QWEN3_MOE_PATH,
     global_batch_size=16,
     total_step=100000,
-    work_dir="/mnt/shared-storage-user/llmrazor-share/profiles/qwen3.5-30BA3/fullgraph-ep1",
+    work_dir=f"/mnt/shared-storage-user/llmrazor-share/profiles/qwen3.5-30BA3/{Path(__file__).stem}",
     seed=0,
     profile_step=10,
 )
