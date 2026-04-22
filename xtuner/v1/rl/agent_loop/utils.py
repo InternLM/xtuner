@@ -2,7 +2,7 @@ import time
 
 import ray
 
-from xtuner.v1.data_proto import RolloutState, Status, update_seq_staleness
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.utils import get_logger
 
 
@@ -38,7 +38,7 @@ class PartialRolloutHandler:
             rollout_state.response = ""
             rollout_state.logprobs = []
             rollout_state.response_mask = []
-            rollout_state.response_rollout_steps = []
+            rollout_state.response_model_steps = []
             return rollout_state
 
         # Set up token and length variable
@@ -64,9 +64,8 @@ class PartialRolloutHandler:
         }
         return rollout_state
 
-    def postprocess(self, rollout_state: RolloutState, rollout_step: int) -> RolloutState:
-        # Update seq_staleness
-        rollout_state = update_seq_staleness(rollout_state, rollout_step)
+    def postprocess(self, rollout_state: RolloutState) -> RolloutState:
+        # TODO: if not enable partial rollout, return directly?
 
         # Concatenate history response fields
         history_dict = rollout_state.extra_fields.pop("history_response_dict", None)

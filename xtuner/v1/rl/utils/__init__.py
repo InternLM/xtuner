@@ -11,6 +11,7 @@ from .misc import (
     ScalarOperator,
     SetNode,
     SetOperator,
+    calculate_seq_staleness,
     chat_trace_records_to_rollout_states,
     find_free_ports,
     gather_logprobs,
@@ -68,6 +69,7 @@ __all__ = [
     "LogicOperator",
     "Operators",
     "get_eos_token",
+    "calculate_seq_staleness",
     "chat_trace_records_to_rollout_states",
     "find_free_ports",
 ]

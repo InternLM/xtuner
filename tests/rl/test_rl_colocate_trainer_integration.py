@@ -11,7 +11,7 @@ from xtuner.v1.model import get_model_config_from_hf
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
-from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
+from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
@@ -19,12 +19,12 @@ from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.agent_loop import (
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
-    TaskSpecConfig,
-    SingleTurnAgentLoopConfig,
-    SyncProduceStrategyConfig,
     SamplerConfig,
+    SyncProduceStrategyConfig,
+    TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.data_proto import SampleParams
@@ -206,8 +206,8 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
             eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
             evaluator_config=evaluator_config,
             load_from=model_path,
-            rollout_steps=2,
-            global_batch_size=4,
+            total_train_steps=2,
+            train_batch_size=4,
             enable_evaluate=False,
             enable_initial_evaluate=False,
             work_dir=work_dir,

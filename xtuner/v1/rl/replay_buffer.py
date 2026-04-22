@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, refresh_seq_staleness, update_group_status
 from xtuner.v1.rl.utils import (
     BetweenNode,
     ConditionNode,
@@ -65,6 +65,9 @@ class StorageBackend(ABC):
 
     @abstractmethod
     async def delete(self, uids: list[int]) -> None: ...
+
+    @abstractmethod
+    async def update(self, items: list[StorageItem]) -> None: ...
 
     @abstractmethod
     def __len__(self) -> int: ...
@@ -153,6 +156,14 @@ class NaiveStorage(StorageBackend):
             return
         for uid in uids:
             self._items.pop(uid, None)
+
+    async def update(self, items: list[StorageItem]) -> None:
+        for item in items:
+            old_item = self._items.get(item.uid)
+            if old_item is None:
+                continue
+            # 原地更新保留 uid/timestamp，避免刷新 staleness 改变 replay 顺序。
+            self._items[item.uid] = replace(item, uid=old_item.uid, timestamp_id=old_item.timestamp_id)
 
     def __len__(self) -> int:
         return len(self._items)
@@ -281,6 +292,19 @@ class PandasStorage(StorageBackend):
             return
         self._df = self._df[~self._df["uid"].isin(uids)]
 
+    async def update(self, items: list[StorageItem]) -> None:
+        self._flush_buffer()
+        if not items or self._df.empty:
+            return
+        for item in items:
+            mask = self._df["uid"] == item.uid
+            if not mask.any():
+                continue
+            for row_idx in self._df.index[mask]:
+                self._df.at[row_idx, "status"] = item.status
+                self._df.at[row_idx, "staleness"] = item.staleness
+                self._df.at[row_idx, "item"] = item.item
+
     def __len__(self) -> int:
         return len(self._df) + len(self._buffer)
 
@@ -372,6 +396,44 @@ class ReplayBuffer:
         query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": group_status}]}
         async with self._lock:
             return await self._policy.count(query_dsl, self._storage)
+
+    async def refresh_staleness(
+        self,
+        task_name: str,
+        current_train_step: int,
+        stale_threshold: int,
+        statuses: list[Status] | None = None,
+    ) -> int:
+        # 刷新可复用样本的 staleness；completed / aborted 都可能来自旧权重，需要按 train_step 淘汰。
+        if stale_threshold <= 0:
+            raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
+        if statuses is None:
+            statuses = [Status.COMPLETED, Status.ABORTED]
+        query_dsl: QueryDict = {
+            "$and": [
+                {"task_name": task_name},
+                {"status": {"$in": statuses}},
+            ]
+        }
+        async with self._lock:
+            records = await self._storage.get(query_dsl)
+            updated_records: list[StorageItem] = []
+            expired_count = 0
+            for record in records:
+                refresh_seq_staleness(record.item, current_train_step)
+                staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
+                should_expire = any(getattr(item, "seq_staleness", 0) >= stale_threshold for item in record.item)
+                if should_expire:
+                    # completed / aborted 样本超过 step 级阈值时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
+                    for item in record.item:
+                        item.status = Status.EXPIRED
+                    status = Status.EXPIRED
+                    expired_count += 1
+                else:
+                    status = update_group_status(record.item)
+                updated_records.append(replace(record, status=status, staleness=staleness))
+            await self._storage.update(updated_records)
+            return expired_count
 
     def __len__(self) -> int:
         return len(self._storage)
