@@ -1,13 +1,17 @@
 import importlib
 import json
+import random
 import socket
 import typing
 from abc import ABC
+from copy import deepcopy
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, List, Literal, Union
 
 import torch.nn.functional as F
 
+from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.utils.logger import get_logger
 
 
@@ -122,13 +126,93 @@ def load_function(path):
     return getattr(module, attr)
 
 
-def _is_port_available(check_socket: socket.socket, port: int) -> bool:
-    try:
-        check_socket.bind(("", port))
-        check_socket.listen(1)
-        return True
-    except OSError:
-        return False
+def find_free_ports(
+    *,
+    nums: int = 1,
+    host: str = "127.0.0.1",
+    start_port: int | None = None,
+    end_port: int | None = None,
+    contiguous: bool = False,
+) -> list[int]:
+    """Return available TCP ports on the given host.
+
+    The candidate sockets are kept open until all requested ports are found so
+    one call cannot return duplicate ports. Set ``contiguous=True`` to require
+    the returned ports to be a continuous range.
+    """
+    if nums < 1:
+        raise ValueError("nums must be greater than 0.")
+    if start_port is not None:
+        if end_port is None:
+            raise ValueError("end_port must be set when start_port is set.")
+        if end_port - start_port < nums:
+            raise ValueError("The port range must contain at least nums ports.")
+
+    def try_bind_ports(candidate_ports: list[int]) -> list[int] | None:
+        ports: list[int] = []
+        sockets: list[socket.socket] = []
+        try:
+            for candidate_port in candidate_ports:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind((host, candidate_port))
+                    sock.listen(1)
+                except OSError:
+                    sock.close()
+                    return None
+
+                sockets.append(sock)
+                ports.append(int(sock.getsockname()[1]))
+            return ports
+        finally:
+            for sock in sockets:
+                sock.close()
+
+    if contiguous:
+        if start_port is None:
+            for _ in range(100):
+                candidate = random.randint(20000, 60000 - nums)
+                bound_ports = try_bind_ports(list(range(candidate, candidate + nums)))
+                if bound_ports is not None:
+                    return bound_ports
+        else:
+            assert end_port is not None
+            for candidate in range(start_port, end_port - nums + 1):
+                bound_ports = try_bind_ports(list(range(candidate, candidate + nums)))
+                if bound_ports is not None:
+                    return bound_ports
+    else:
+        available_ports: list[int] = []
+        sockets: list[socket.socket] = []
+        try:
+            if start_port is None:
+                candidates: range | list[int] = [0] * nums
+            else:
+                assert end_port is not None
+                candidates = range(start_port, end_port)
+
+            for candidate_port in candidates:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind((host, candidate_port))
+                    sock.listen(1)
+                except OSError:
+                    sock.close()
+                    continue
+
+                sockets.append(sock)
+                available_ports.append(int(sock.getsockname()[1]))
+                if len(available_ports) >= nums:
+                    return available_ports
+        finally:
+            for sock in sockets:
+                sock.close()
+
+    if start_port is None:
+        raise RuntimeError(f"Could not find {nums} available ports.")
+    raise RuntimeError(f"Could not find {nums} available ports from {start_port} to {end_port}.")
 
 
 def get_eos_token(model_path: str) -> int | List[int]:
@@ -146,3 +230,99 @@ def get_eos_token(model_path: str) -> int | List[int]:
             f"eos_token_id is not found in {generation_config_path}. You must provide eos_token manually."
         )
     return eos_token_id
+
+
+def chat_trace_records_to_rollout_states(
+    rollout_state: RolloutState,
+    records: list[Any],
+    *,
+    tokenizer: Any | None = None,
+    extra_fields: dict[str, Any] | None = None,
+) -> list[RolloutState]:
+    """Convert Gateway chat trace records into trainable rollout states.
+
+    The records may be ``ChatTraceRecord`` dataclass instances or serialized
+    dictionaries returned by ``/trace_store``.
+    """
+    normalized_records = []
+    for record in records:
+        if isinstance(record, dict):
+            normalized_records.append(record)
+        elif not isinstance(record, type) and is_dataclass(record):
+            normalized_records.append(asdict(record))
+        elif hasattr(record, "__dict__"):
+            normalized_records.append(dict(record.__dict__))
+        else:
+            raise TypeError(f"Unsupported chat trace record type: {type(record)}")
+
+    trace_count = len(normalized_records)
+    trace_summary = [
+        {
+            "request_id": record.get("request_id"),
+            "finish_reason": record.get("finish_reason"),
+            "status": record.get("status"),
+            "prompt_ids": record.get("prompt_ids", []),
+            "response_ids": record.get("response_ids", []),
+        }
+        for record in normalized_records
+    ]
+
+    states: list[RolloutState] = []
+    for index, record in enumerate(normalized_records):
+        prompt_ids = record.get("prompt_ids")
+        response_ids = record.get("response_ids")
+        if not prompt_ids or not response_ids:
+            raise RuntimeError(f"Gateway trace record {index} is missing prompt_ids or response_ids.")
+
+        logprobs = record.get("logprobs")
+        if not isinstance(logprobs, list) or len(logprobs) != len(response_ids):
+            logprobs = None
+
+        status_value = record.get("status")
+        if isinstance(status_value, Status):
+            status = status_value
+        elif isinstance(status_value, str):
+            try:
+                status = Status(status_value)
+            except ValueError:
+                status = Status.FAILED
+        else:
+            status = Status.FAILED
+
+        request_id = record.get("request_id")
+        try:
+            uid = int(request_id) if request_id is not None else None
+        except (TypeError, ValueError):
+            uid = None
+
+        response = record.get("output_text")
+        if response is None and tokenizer is not None:
+            try:
+                response = tokenizer.decode(response_ids)
+            except Exception:
+                response = None
+
+        normalized = rollout_state.model_copy(deep=True)
+        normalized.uid = uid
+        normalized.prompt_ids = list(prompt_ids)
+        normalized.tokens = list(prompt_ids)
+        normalized.response_ids = list(response_ids)
+        normalized.response_mask = [1] * len(response_ids)
+        normalized.logprobs = logprobs
+        normalized.response = response
+        normalized.finish_reason = record.get("finish_reason")
+        normalized.status = status
+        normalized.error_msg = None if status == Status.COMPLETED else f"Gateway trace status={status.value}"
+        normalized.reward = None
+        normalized.extra_fields = {
+            **deepcopy(rollout_state.extra_fields),
+            "gateway_trace_index": index,
+            "gateway_trace_count": trace_count,
+            "gateway_trace_records": deepcopy(trace_summary),
+            "gateway_request_id": record.get("request_id"),
+            "gateway_request_snapshot": record.get("request_snapshot"),
+            "gateway_response_snapshot": record.get("response_snapshot"),
+            **deepcopy(extra_fields or {}),
+        }
+        states.append(normalized)
+    return states

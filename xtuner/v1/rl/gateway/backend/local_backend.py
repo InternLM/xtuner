@@ -40,9 +40,10 @@ class LocalRolloutBackend:
         self,
         controller: ActorHandle,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast | str | None = None,
+        rollout_config: RolloutConfig | None = None,
     ):
         self._controller = controller
-        self._config = self._resolve_rollout_config(controller)
+        self._config = rollout_config or self._resolve_rollout_config(controller)
         if isinstance(tokenizer, str):
             tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
         resolved_tokenizer = tokenizer
@@ -297,7 +298,7 @@ class LocalRolloutBackend:
     ) -> SampleParams:
         kwargs = {
             "return_token_ids": True,
-            "return_logprob": False,
+            "return_logprob": True,
             "stream": canonical_request.stream,
             "stops": canonical_request.stop,
             **{

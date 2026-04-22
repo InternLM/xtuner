@@ -271,7 +271,10 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
         canonical_response: CanonicalGenerateResponse,
         request: AnthropicMessagesRequest,
     ) -> AnthropicMessagesResponse:
-        content = self._canonical_response_to_anthropic_blocks(canonical_response)
+        content = self._canonical_response_to_anthropic_blocks(
+            canonical_response,
+            tools=self._anthropic_tools_to_canonical(request.tools),
+        )
         stop_reason = canonical_response.finish_reason or "stop"
         if any(block.get("type") == "tool_use" for block in content):
             stop_reason = "tool_use"
@@ -554,6 +557,7 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
     def _canonical_response_to_anthropic_blocks(
         self,
         response: CanonicalGenerateResponse,
+        tools: list[CanonicalToolDefinition] | None = None,
     ) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []
         for block in response.output.content:
@@ -561,12 +565,13 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
                 if block.text:
                     blocks.append({"type": "text", "text": block.text})
             elif isinstance(block, CanonicalToolCallBlock):
+                tool_call = self._sanitize_tool_call_for_request(block.tool_call, tools=tools or [])
                 blocks.append(
                     {
                         "type": "tool_use",
-                        "id": block.tool_call.id,
-                        "name": block.tool_call.name,
-                        "input": block.tool_call.arguments if block.tool_call.arguments is not None else {},
+                        "id": tool_call.id,
+                        "name": tool_call.name,
+                        "input": tool_call.arguments if tool_call.arguments is not None else {},
                     }
                 )
             elif isinstance(block, CanonicalToolResultBlock):
@@ -586,6 +591,58 @@ class AnthropicChatAdapter(BaseChatAPIAdapter[AnthropicMessagesRequest, Anthropi
                 if reasoning_text:
                     blocks.append({"type": "thinking", "thinking": reasoning_text})
         return blocks or [{"type": "text", "text": ""}]
+
+    def _sanitize_tool_call_for_request(
+        self,
+        tool_call: CanonicalToolCall,
+        *,
+        tools: list[CanonicalToolDefinition],
+    ) -> CanonicalToolCall:
+        tool_definition = next((tool for tool in tools if tool.name == tool_call.name), None)
+        if tool_definition is None:
+            return tool_call
+
+        properties = tool_definition.parameters_json_schema.get("properties")
+        if not isinstance(properties, dict):
+            return tool_call
+
+        arguments = tool_call.arguments
+        normalized_arguments = False
+        if not isinstance(arguments, dict):
+            normalized_arguments = True
+            if tool_call.raw_arguments_text is not None:
+                try:
+                    decoded = json.loads(tool_call.raw_arguments_text)
+                except Exception:
+                    decoded = {"raw": tool_call.raw_arguments_text}
+                arguments = decoded if isinstance(decoded, dict) else {"value": decoded}
+            elif arguments is None:
+                arguments = {}
+            elif isinstance(arguments, str):
+                try:
+                    decoded = json.loads(arguments)
+                except Exception:
+                    decoded = {"raw": arguments}
+                arguments = decoded if isinstance(decoded, dict) else {"value": decoded}
+            else:
+                arguments = {"value": arguments}
+
+        allowed_keys = set(properties)
+        cleaned_arguments = {key: value for key, value in arguments.items() if key in allowed_keys}
+        if cleaned_arguments == arguments and not normalized_arguments:
+            return tool_call
+
+        dropped_keys = sorted(set(arguments) - set(cleaned_arguments))
+        metadata = dict(tool_call.metadata)
+        if dropped_keys:
+            metadata["dropped_arguments"] = dropped_keys
+        return CanonicalToolCall(
+            id=tool_call.id,
+            name=tool_call.name,
+            arguments=cleaned_arguments,
+            raw_arguments_text=None,
+            metadata=metadata,
+        )
 
     def _reasoning_to_text(self, reasoning: CanonicalReasoning) -> str:
         return "\n".join(step.text for step in reasoning.steps if step.text).strip()
