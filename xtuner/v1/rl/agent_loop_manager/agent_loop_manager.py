@@ -108,11 +108,6 @@ class AgentLoopManagerStatus(Enum):
     FINISH = auto()
 
 
-class ProducePauseSource(Enum):
-    ASYNC_PRODUCE_LOOP = auto()
-    SYNC_PRODUCE_BATCH = auto()
-
-
 def _fill_produce_timing_stats(
     result: ProduceBatchResult, generate_times_s: list[float], pause_time_s: float = 0.0
 ) -> None:
@@ -524,8 +519,8 @@ class AgentLoopManager:
 
     async def pause_produce(
         self,
-        source: ProducePauseSource,
         *,
+        use_global_progress: bool,
         progress: ProduceProgress | None = None,
     ) -> float:
         # 这是 producer 的“显式刹车”接口。
@@ -534,25 +529,25 @@ class AgentLoopManager:
         # - 旧 colocate 语义里，一次 produce_batch() 结束后就自然收尾；
         # - 非共卡后，producer 可能在后台持续运行，何时停下来必须交给 trainer 明确控制。
         #
-        # 因此调用方必须显式说明 pause 来自哪条生产路径：
-        # - ASYNC_PRODUCE_LOOP：非共卡后台生产循环在权重同步点前暂停，使用全局 progress；
-        # - SYNC_PRODUCE_BATCH：共卡同步 produce_batch 的本次调用收尾，使用本地 progress。
+        # 因此调用方必须显式说明是否使用全局 progress：
+        # - use_global_progress=True：非共卡后台生产循环在权重同步点前暂停；
+        # - use_global_progress=False：共卡同步 produce_batch 的本次调用收尾，使用本地 progress。
         # 返回值 `pause_time_s` 不是业务语义，而是日志/诊断信息，
         # 供训练侧在下一次消费 batch 时上报。
-        # 先统一拉起 manager 级暂停信号，阻止仍在运行的 produce_batch 继续调度新 rollout。
-        # SYNC_PRODUCE_BATCH 模式会在下一次 produce_batch 入口通过 continue_produce 恢复；
-        # ASYNC_PRODUCE_LOOP 模式则由 trainer 在权重同步和评测完成后显式恢复。
+        # use_global_progress=False 模式会在下一次 produce_batch 入口通过 continue_produce 恢复；
+        # use_global_progress=True 模式则由 trainer 在权重同步和评测完成后显式恢复。
+        if use_global_progress:
+            if progress is not None:
+                raise ValueError("progress must not be provided when use_global_progress=True.")
+            pause_progress = self._produce_progress
+        else:
+            if progress is None:
+                raise ValueError("progress must be provided when use_global_progress=False.")
+            pause_progress = progress
+
+        # 合法参数确认后，统一拉起 manager 级暂停信号，阻止仍在运行的 produce_batch 继续调度新 rollout。
         self._update_event.set()
         self._status = AgentLoopManagerStatus.UPDATE_ABORT
-
-        if source == ProducePauseSource.ASYNC_PRODUCE_LOOP:
-            pause_progress = self._produce_progress
-        elif source == ProducePauseSource.SYNC_PRODUCE_BATCH:
-            if progress is None:
-                raise ValueError("progress must be provided when pausing from sync produce_batch.")
-            pause_progress = progress
-        else:
-            raise ValueError(f"Unsupported pause_produce source: {source}")
         pause_time_s = 0.0
         for task in self.task_runners:
             pause_time_s += await task.produce_strategy.pause_produce(
@@ -668,7 +663,7 @@ class AgentLoopManager:
 
     def continue_produce(self, model_step: int) -> None:
         #
-        # 它和 pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP) 是一对：
+        # 它和 pause_produce(use_global_progress=True) 是一对：
         # - pause_produce(...) 负责让 producer 停下来；
         # - continue_produce(...) 负责在同步/评测完成后解除暂停。
         #
@@ -725,7 +720,7 @@ class AgentLoopManager:
                 task_batch_sizes=current_sizes,
             )
             await self.pause_produce(
-                source=ProducePauseSource.SYNC_PRODUCE_BATCH,
+                use_global_progress=False,
                 progress=local_progress,
             )
             result = await self._get_batch_from_buffer(

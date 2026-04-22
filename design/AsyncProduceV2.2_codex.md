@@ -83,7 +83,7 @@ if scheduled_effective < scheduled_target:
 
 ### 3. `_pending_tasks` 不能只靠循环顶部检查 `_update_event`
 
-`pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP)` 会先 set `_update_event`，但随后会立刻进入各 task strategy 的 `pause_produce`。此时后台 producer 可能还停在 `asyncio.wait(self._pending_tasks, ...)` 中。
+`pause_produce(use_global_progress=True)` 会先 set `_update_event`，但随后会立刻进入各 task strategy 的 `pause_produce`。此时后台 producer 可能还停在 `asyncio.wait(self._pending_tasks, ...)` 中。
 
 所以不能只假设 producer 会先返回，也不能只在 `produce_batch()` 循环顶部检查一次 event。需要在 strategy 内保证：
 
@@ -523,10 +523,10 @@ async def pause_produce(
     ...
 ```
 
-Manager 侧按上下文选择 progress：
+Manager 侧按 `use_global_progress` 选择 progress：
 
-- `ProducePauseSource.ASYNC_PRODUCE_LOOP`：非共卡后台 `produce_loop` 在权重同步点前暂停，传全局 `_produce_progress`，因为后台 producer / trainer consumer 共享同一窗口。
-- `ProducePauseSource.SYNC_PRODUCE_BATCH`：共卡同步 `produce_batch()` 的本次调用收尾，传本次调用的局部 progress。
+- `use_global_progress=True`：非共卡后台 `produce_loop` 在权重同步点前暂停，传全局 `_produce_progress`，因为后台 producer / trainer consumer 共享同一窗口。
+- `use_global_progress=False`：共卡同步 `produce_batch()` 的本次调用收尾，传本次调用的局部 progress。
 - Sync strategy 的默认实现忽略 `progress` 并返回 `0.0`，因此无需在 Manager 侧按子类分支。
 
 `AsyncProduceStrategy.pause_produce` 的收尾逻辑为：
@@ -770,30 +770,33 @@ consume_progress.consumed_samples[task_runner.task_name] += len(batch_rollout_st
 
 ### `pause_produce`
 
-manager 侧用 `ProducePauseSource` 区分 pause 来自异步后台生产循环还是同步共卡生产接口：
+manager 侧用 `use_global_progress` 区分使用全局 progress 还是本次调用的局部 progress：
 
 ```python
-class ProducePauseSource(Enum):
-    ASYNC_PRODUCE_LOOP = auto()
-    SYNC_PRODUCE_BATCH = auto()
+async def pause_produce(
+    *,
+    use_global_progress: bool,
+    progress: ProduceProgress | None = None,
+) -> float:
+    ...
 ```
 
-`pause_produce` 入口统一先置 event / status，再按来源选择 progress：
+`pause_produce` 入口先校验参数并选择 progress，再置 event / status：
 
 ```python
+if use_global_progress:
+    pause_progress = self._produce_progress
+
 self._update_event.set()
 self._status = AgentLoopManagerStatus.UPDATE_ABORT
-
-if source == ProducePauseSource.ASYNC_PRODUCE_LOOP:
-    pause_progress = self._produce_progress
 ```
 
-`ProducePauseSource.ASYNC_PRODUCE_LOOP` 是 sticky pause：状态保持到 trainer 完成权重同步 / 评测后调用 `continue_produce()`。
+`use_global_progress=True` 是 sticky pause：状态保持到 trainer 完成权重同步 / 评测后调用 `continue_produce()`。
 
-`ProducePauseSource.SYNC_PRODUCE_BATCH` 用于共卡 `produce_batch()` 的显式收尾，必须传入本次调用的局部 progress；它也会 set `_update_event` / `UPDATE_ABORT`，由下一次 `produce_batch()` 入口的 `continue_produce()` 清理：
+`use_global_progress=False` 用于共卡 `produce_batch()` 的显式收尾，必须传入本次调用的局部 progress；它也会 set `_update_event` / `UPDATE_ABORT`，由下一次 `produce_batch()` 入口的 `continue_produce()` 清理：
 
 ```python
-elif source == ProducePauseSource.SYNC_PRODUCE_BATCH:
+else:
     if progress is None:
         raise ValueError(...)
     pause_progress = progress
@@ -866,7 +869,7 @@ def continue_produce(self, model_rollout_step: int) -> None:
   - `consumed_samples = {task_name: 0}`
   - `target_samples = current_task_batch_sizes`
 
-共卡路径每次生产后仍调用 `pause_produce(source=ProducePauseSource.SYNC_PRODUCE_BATCH, progress=local_progress)` 收尾 pending，然后 `_get_batch_from_buffer` 返回训练 batch。
+共卡路径每次生产后仍调用 `pause_produce(use_global_progress=False, progress=local_progress)` 收尾 pending，然后 `_get_batch_from_buffer` 返回训练 batch。
 
 共卡模式约束：同一个 `AgentLoopManager` 实例只用一种数据提供模式。`SYNC_PRODUCE_BATCH` 收尾会让 manager 保持 `UPDATE_ABORT` / `_update_event.set()`，下一次 `produce_batch()` 入口先调用 `continue_produce(model_rollout_step=rollout_step - 1)` 恢复。不要在两次 sync `produce_batch()` 之间混用 `produce_loop()` / `get_batch()`。
 

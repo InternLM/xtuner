@@ -9,7 +9,6 @@ from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerStatus,
     ProduceBatchResult,
     ProduceBatchStatus,
-    ProducePauseSource,
 )
 from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
 
@@ -30,8 +29,8 @@ class _FakeManager:
         self.calls.append(("get_batch", batch_size, train_step))
         return self._results.pop(0)
 
-    async def pause_produce(self, source: ProducePauseSource):
-        self.calls.append(("pause_produce", source))
+    async def pause_produce(self, *, use_global_progress: bool):
+        self.calls.append(("pause_produce", use_global_progress))
         return 0.25
 
     def continue_produce(self, model_step: int):

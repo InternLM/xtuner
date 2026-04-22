@@ -22,7 +22,6 @@ from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerStatus,
     ProduceBatchResult,
     ProduceBatchStatus,
-    ProducePauseSource,
 )
 from xtuner.v1.rl.agent_loop_manager.producer import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
@@ -1050,7 +1049,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     if need_sync:
                         # 同步前先暂停后台 producer，避免 save/sync 时还有 pending rollout 继续写 buffer。
                         with timer("pause_produce", step_timer_dict):
-                            await self.agent_loop_manager.pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP)
+                            await self.agent_loop_manager.pause_produce(use_global_progress=True)
 
                         await self._sync_weights_and_save(train_step, step_timer_dict)
 

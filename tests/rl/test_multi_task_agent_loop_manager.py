@@ -9,7 +9,6 @@ from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
     AgentLoopManagerStatus,
-    ProducePauseSource,
     TaskSpecConfig,
     _TaskRunner,
 )
@@ -531,7 +530,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=_FakeReplayBuffer({}, {}),
         )
 
-        pause_time_s = await manager.pause_produce(source=ProducePauseSource.ASYNC_PRODUCE_LOOP)
+        pause_time_s = await manager.pause_produce(use_global_progress=True)
 
         self.assertEqual(pause_time_s, 2.5)
         self.assertEqual(strategy.cleanup_call_count, 1)
@@ -540,6 +539,33 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(manager._update_event.is_set())
         self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
         self.assertEqual(manager._pause_time_s, 2.5)
+
+    async def test_pause_produce_validates_progress_selection_before_state_change(self):
+        strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=strategy,
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+            ],
+            replay_buffer=_FakeReplayBuffer({}, {}),
+        )
+
+        with self.assertRaisesRegex(ValueError, "progress must not be provided"):
+            await manager.pause_produce(use_global_progress=True, progress=object())
+        self.assertFalse(manager._update_event.is_set())
+        self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
+
+        with self.assertRaisesRegex(ValueError, "progress must be provided"):
+            await manager.pause_produce(use_global_progress=False)
+        self.assertFalse(manager._update_event.is_set())
+        self.assertEqual(manager._status, AgentLoopManagerStatus.NORMAL)
+        self.assertEqual(strategy.cleanup_call_count, 0)
 
     async def test_get_batch_returns_expired_batch_when_manager_is_expired(self):
         manager = AgentLoopManager(

@@ -3,7 +3,6 @@ from .agent_loop_manager import (
     AgentLoopManagerConfig,
     AgentLoopManagerStatus,
     ProduceBatchResult,
-    ProducePauseSource,
     TaskSpecConfig,
 )
 from .producer import (
@@ -25,7 +24,6 @@ __all__ = [
     "AgentLoopManagerConfig",
     "AgentLoopManager",
     "AgentLoopManagerStatus",
-    "ProducePauseSource",
     "TaskSpecConfig",
     "ProduceBatchResult",
     "ProduceStrategyConfig",
