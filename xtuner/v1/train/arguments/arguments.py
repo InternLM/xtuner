@@ -105,6 +105,7 @@ class TrainingArguments(BaseModel):
     load_scheduler: Annotated[bool, Parameter(group=checkpoint_group, help="load scheduler state from checkpoint")] = (
         True
     )
+    async_checkpoint: Annotated[bool, Parameter(group=checkpoint_group, help="enable async checkpoint saving")] = False
     fsdp_config: Annotated[FSDPConfig | None, Parameter(group=parallel_group, help="FSDP configuration")] = None
     float8_config: Annotated[Float8Config | None, Parameter(group=parallel_group, help="use float8 training")] = None
 
@@ -165,6 +166,7 @@ class TrainingArguments(BaseModel):
             total_epoch=self.epoch_num,
             resume_cfg=resume_cfg,
             work_dir=self.work_dir,
+            async_checkpoint=self.async_checkpoint,
         )
 
     def _get_dataset_config(self) -> DatasetConfigList:
