@@ -12,8 +12,8 @@ import ray
 import uvicorn
 from fastapi import FastAPI
 from ray.util.placement_group import PlacementGroup
-
 from transformers import AutoTokenizer
+
 from xtuner.v1.data_proto.rl_data import (
     RLRolloutRequestItem,
     RLRolloutResponseItem,
@@ -25,7 +25,6 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
-
 
 ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
@@ -163,6 +162,14 @@ class RolloutController:
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
+
+        from xtuner.v1.ray.environment.lagent.parsers import (
+            Qwen3_5FunctionCallParser,
+            Qwen3TokenReasonParser,
+        )
+
+        self.reasoning_parser = Qwen3TokenReasonParser(infer_config.tokenizer_path)
+        self.tool_call_parser = Qwen3_5FunctionCallParser()
 
     def _get_worker_status_for_router(self) -> Dict[RolloutWorker, bool]:
         """Helper to generate the status dict required by the SessionRouter."""
@@ -446,16 +453,60 @@ class RolloutController:
         if original_port != port:
             self.logger.info(f"API server will use port {port} instead of the originally configured {original_port}.")
 
+        from openai.types.completion_usage import CompletionUsage
+
+        from xtuner.v1.ray.environment.lagent.schema import (
+            AgentMessage,
+            LagentChatCompletion,
+            LagentChatCompletionMessage,
+            LagentChatCompletionRequest,
+            LagentChoice,
+        )
+        from xtuner.v1.ray.environment.lagent.tokenize import tokenize
+
         @app.post("/v1/chat/completions")
-        async def chat_completions(request: RLRolloutRequestItem) -> RLRolloutResponseItem:
-            response = await self.rollout(
+        async def chat_completions(request: LagentChatCompletionRequest):
+            import base64
+
+            from ray import cloudpickle
+
+            inputs = tokenize(self.tokenizer, request.messages, request.tools)
+            response: RLRolloutResponseItem = await self.rollout(
                 prompt=request.messages,
+                input_ids=inputs['input_ids'],
                 tools=request.tools,
                 tool_choice=request.tool_choice,
                 sample_params=request.sample_params,
                 extra_params=request.extra_params,
+                extra_info=(
+                    {'routed_experts': inputs['routed_experts']} if inputs['routed_experts'] is not None else {}
+                ),
             )
-            return response
+            if isinstance(response.extra_info.get('routed_experts'), ray.ObjectRef):
+                response.extra_info['routed_experts'] = base64.b64encode(
+                    cloudpickle.dumps(response.extra_info['routed_experts'])
+                ).decode('utf-8')
+            message = AgentMessage.from_model_response(response, 'assistant')
+            message = self.reasoning_parser.parse_response(message)
+            message = self.tool_call_parser.parse_response(message)
+            completion_message = LagentChatCompletionMessage.from_agent_message(message)
+            return LagentChatCompletion(
+                model=request.model,
+                choices=[
+                    LagentChoice(
+                        index=0,
+                        message=completion_message,
+                        finish_reason=message.finish_reason,
+                        reward=message.reward,
+                        stream_state=message.stream_state,
+                    )
+                ],
+                usage=CompletionUsage(
+                    prompt_tokens=len(inputs['input_ids']),
+                    completion_tokens=response.num_return_tokens,
+                    total_tokens=len(inputs['input_ids']) + response.num_return_tokens,
+                ),
+            ).model_dump()
 
         config = uvicorn.Config(app, host=host, port=port)
         server = uvicorn.Server(config)
@@ -598,4 +649,5 @@ class RolloutController:
         Args:
             block (bool): Whether to block until the operation completes.
         """
+        return self._broadcast_to_active_workers("shutdown", block)
         return self._broadcast_to_active_workers("shutdown", block)
