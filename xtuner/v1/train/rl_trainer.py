@@ -17,13 +17,14 @@ from xtuner.v1._writer import get_writer
 from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.rl.agent_loop import (
+from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
+    AgentLoopManagerStatus,
     ProduceBatchResult,
     ProduceBatchStatus,
     ProducePauseSource,
 )
-from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerStatus
+from xtuner.v1.rl.agent_loop_manager.producer import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
@@ -945,6 +946,15 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
+        # 在非共卡使用模式时，生产者和消费者并发执行
+        # 为了让生产者和消费者配合，不能引入生产中的早停机制，否则生产不够，消费者会被阻塞
+        # 所以 should_continue_fn 必须为 default_should_continue_fn
+        for task_runner in self.agent_loop_manager.task_runners:
+            if task_runner.produce_strategy.should_continue_fn is not default_should_continue_fn:
+                raise ValueError(
+                    "In disaggregated mode, should_continue_fn must be default, "
+                    "because it does not allow early stopping in production."
+                )
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)

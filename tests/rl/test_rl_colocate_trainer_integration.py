@@ -19,12 +19,12 @@ from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.agent_loop import (
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
-    TaskSpecConfig,
-    SingleTurnAgentLoopConfig,
-    SyncProduceStrategyConfig,
     SamplerConfig,
+    SyncProduceStrategyConfig,
+    TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.data_proto import SampleParams

@@ -7,12 +7,12 @@ import torch
 from transformers import AutoTokenizer
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.agent_loop import (
-    SingleTurnAgentLoopConfig,
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
-    TaskSpecConfig,
-    SyncProduceStrategyConfig,
     SamplerConfig,
+    SyncProduceStrategyConfig,
+    TaskSpecConfig,
 )
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams
 from xtuner.v1.rl.rollout import RolloutController

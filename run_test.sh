@@ -34,6 +34,7 @@ echo "run_test.sh: CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "run_test.sh: XTUNER_DIST_PORT_BASE=${XTUNER_DIST_PORT_BASE}"
 
 pytest --durations=20 \
+  tests/rl/test_agent_loop_package_layout.py \
   tests/rl/test_agent_loop_utils.py \
   tests/rl/test_staleness_policy.py \
   tests/rl/test_replay_buffer.py \

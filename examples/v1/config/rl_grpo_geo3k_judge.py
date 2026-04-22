@@ -16,7 +16,8 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GEO3KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, TaskSpecConfig, SingleTurnAgentLoopConfig, SyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, SamplerConfig, SyncProduceStrategyConfig, TaskSpecConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig

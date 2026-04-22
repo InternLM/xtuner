@@ -2,7 +2,7 @@ import unittest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from xtuner.v1.rl.agent_loop import (
+from xtuner.v1.rl.agent_loop_manager import (
     AsyncProduceStrategyConfig,
     ProduceBatchStatus,
     ProduceProgress,

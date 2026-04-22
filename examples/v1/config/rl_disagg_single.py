@@ -41,11 +41,11 @@ from xtuner.v1.data_proto import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.rl.agent_loop import (
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     AsyncProduceStrategyConfig,
     SamplerConfig,
-    SingleTurnAgentLoopConfig,
     SyncProduceStrategyConfig,
     TaskSpecConfig,
 )

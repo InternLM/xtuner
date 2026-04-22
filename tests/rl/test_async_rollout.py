@@ -11,11 +11,11 @@ from transformers import AutoTokenizer
 from xtuner.v1.data_proto import SampleParams, Status
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
-from xtuner.v1.rl.agent_loop import (
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     AsyncProduceStrategyConfig,
     SamplerConfig,
-    SingleTurnAgentLoopConfig,
     TaskSpecConfig,
 )
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig

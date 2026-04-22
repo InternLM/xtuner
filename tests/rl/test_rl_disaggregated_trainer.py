@@ -5,8 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.rl.agent_loop import ProducePauseSource, ProduceBatchResult, ProduceBatchStatus
-from xtuner.v1.rl.agent_loop.agent_loop_manager import AgentLoopManagerStatus
+from xtuner.v1.rl.agent_loop_manager import (
+    AgentLoopManagerStatus,
+    ProduceBatchResult,
+    ProduceBatchStatus,
+    ProducePauseSource,
+)
 from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
 
 

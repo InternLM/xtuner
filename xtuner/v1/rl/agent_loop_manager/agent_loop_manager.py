@@ -10,13 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto import RolloutState, Status
+from xtuner.v1.rl.agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout import RolloutController, continue_generation, pause_generation
 from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
-from .agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_ctl
 from .producer import (
     GROUP_GENERATE_TIME_KEY,
     AsyncProduceStrategy,

@@ -16,12 +16,12 @@ from xtuner.v1.data_proto.rl_data import (
     update_group_status,
     update_sample_version,
 )
+from xtuner.v1.rl.agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout.utils import pause_generation
 from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
 from xtuner.v1.utils import get_logger
 
-from .agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from .sampler import Sampler
 
 
@@ -530,7 +530,8 @@ class AsyncProduceStrategy(ProduceStrategy):
 
             fresh = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
             available = progress.consumed_samples[task_name] + fresh
-            if available >= target_abs:
+            # if available >= target_abs:
+            if not self.should_continue_fn(available, target_abs):
                 return ProduceBatchStatus.NORMAL
 
             pending_count = await self._pending_count()
