@@ -1,21 +1,24 @@
 """Runner — top-level orchestrator for one task rollout.
 
-Tiny: owns the infer sandbox lifecycle, threads a context dict through
-the two stages (infer → validate), and assembles the result envelope.
-All real work is done by :class:`SandboxStage` hooks (pre/entry/post)
-and :class:`JudgerValidator`.
+Owns the infer sandbox lifecycle, threads a context dict through the two
+stages (infer → validate), assembles the result envelope.  All real work
+is hook-driven (:class:`sandbox.SandboxStage` pre/entry/post) +
+:class:`validator.JudgerValidator`.
 
-Task format:
+Invocation:
 
-    # task.py
-    from common.pipelines.claw_bench import claw_pipeline
-    from judgers import pytest_ctrf_judger
+    # config.py (user-written)
+    from claw_bench import ClawBench           # bench project on PYTHONPATH
+    dataset = ClawBench(tasks_root="/data/bench/claw-bench/tasks")
 
-    data = {...}
-    runner = claw_pipeline(judgers=[pytest_ctrf_judger(name="rule_grader", target="verifier/test_output.py")])
+    # Run:
+    python runner.py --config config.py TASK_DIR [TASK_DIR ...]
+    python runner.py --config config.py --limit 10     # iterate whole dataset
 
-``runner`` is a :class:`Runner` instance (no type-dispatched config — the
-pipeline factory composes it in pure Python).
+``dataset`` in the config provides ``pipeline`` (a :class:`Runner` shared
+by all its tasks) and ``load_task(task_dir) → TaskData``.  No
+type-dispatched config — the pipeline is composed in pure Python by the
+project's factory.
 """
 
 from __future__ import annotations
@@ -83,12 +86,13 @@ class Runner:
         client = None
         env_id: str | None = None
         try:
+            logger.info('start build image')
             client, env_id = await asyncio.to_thread(
                 provider.create,
                 image_tag=self.infer.sandbox.image,
                 ttl_seconds=self.infer.sandbox.ttl_seconds,
             )
-
+            logger.info('end build image')
             infer_result = await self.infer.run(client, ctx)
             if not infer_result.ok:
                 await _dump_daemon_log(client)
@@ -97,11 +101,6 @@ class Runner:
                     metadata=_infer_metadata(ctx),
                 )
 
-            artifacts = {
-                "missing_required": ctx.get("missing_required", []),
-                "present": ctx.get("present_outputs", []),
-            }
-
             aggregated = await self.validate.run(
                 client, ctx, provider, self.infer.sandbox.workspace_path,
             )
@@ -109,7 +108,6 @@ class Runner:
             return _mark_completed(
                 data, uid,
                 metadata=_infer_metadata(ctx),
-                artifact_check=artifacts,
                 judge=aggregated,
             )
         except Exception as exc:
@@ -158,12 +156,8 @@ def _mark_completed(
     uid: dict[str, int],
     *,
     metadata: dict[str, Any],
-    artifact_check: dict[str, Any],
     judge,
 ) -> dict[str, Any]:
-    missing = artifact_check.get("missing_required") or []
-    state = "failed" if missing else "completed"
-    reason = "missing_artifacts" if missing else "stop"
     return {
         "uid": uid,
         "data": {
@@ -176,12 +170,9 @@ def _mark_completed(
         },
         "env": {
             "rollout": {
-                "state": state,
-                "finish_reason": reason,
-                "extra_info": {
-                    **metadata,
-                    "artifact_check": artifact_check,
-                },
+                "state": "completed",
+                "finish_reason": "stop",
+                "extra_info": {**metadata},
             },
             "judger": {
                 "total": judge.total,
@@ -241,8 +232,10 @@ def _load_dataset_from_config(config_path: Path) -> Any:
     Example config::
 
         # configs/claw_bench_calendar.py
-        from claw_bench import ClawBench
-        dataset = ClawBench(tasks_root="/data/bench/claw-bench/tasks")
+        from claw_bench.dataset import ClawBench
+        from claw_bench.pipeline import claw_pipeline
+        dataset = ClawBench(tasks_root="/data/bench/claw-bench/tasks",
+                            pipeline=claw_pipeline())
     """
     ns: dict[str, Any] = {}
     exec(compile(config_path.read_text(encoding="utf-8"), str(config_path), "exec"), ns)
@@ -289,15 +282,19 @@ async def main_async(args: argparse.Namespace) -> int:
         logger.error("no tasks to run")
         return 1
 
-    results = await asyncio.gather(*[
-        _run_one(
-            dataset, td, provider,
-            lagent_src_dir=lagent_src,
-            llm_base_url=args.llm_base_url,
-            llm_api_key=args.llm_api_key,
-        )
-        for td in task_dirs
-    ])
+    print(f"TotalTask: {len(task_dirs)} (concurrency={args.concurrency})")
+    sem = asyncio.Semaphore(max(1, args.concurrency))
+
+    async def _guarded(td: Path) -> dict[str, Any]:
+        async with sem:
+            return await _run_one(
+                dataset, td, provider,
+                lagent_src_dir=lagent_src,
+                llm_base_url=args.llm_base_url,
+                llm_api_key=args.llm_api_key,
+            )
+
+    results = await asyncio.gather(*[_guarded(td) for td in task_dirs])
     for r in results:
         print(json.dumps(r, ensure_ascii=False, indent=2, default=str))
     any_failed = any(r["env"]["rollout"]["state"] == "failed" for r in results)
@@ -320,6 +317,10 @@ def main() -> int:
              "`dataset = <DatasetClass>(...)`.",
     )
     parser.add_argument("--limit", type=int, default=0, help="Max tasks when iterating.")
+    parser.add_argument(
+        "--concurrency", type=int, default=32,
+        help="Max tasks running in parallel (semaphore-gated).",
+    )
     parser.add_argument("--gateway", default=DEFAULT_GATEWAY)
     parser.add_argument(
         "--lagent-src", default=DEFAULT_LAGENT_SRC,
@@ -327,7 +328,7 @@ def main() -> int:
     )
     parser.add_argument("--llm-base-url", default=None)
     parser.add_argument("--llm-api-key", default=None)
-    args = parser.parse_args()
+    args = parser.parse_args(['--config', "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/projects/claw_bench/configs/calendar_solution.py"])
     if args.lagent_src == "":
         args.lagent_src = None
 

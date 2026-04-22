@@ -1,8 +1,7 @@
 """Validator — fans out to a list of :class:`Judger` stages, aggregates scores.
 
-Each judger is a :class:`SandboxStage`; isolated judgers get a fresh
-sandbox, shared ones reuse the infer client.  The validator is a plain
-orchestrator — no more, no less.
+Judgers are self-contained: each one's stage declares everything it needs
+(uploads, env vars, entry, post-hooks).  The validator just orchestrates.
 """
 
 from __future__ import annotations
@@ -13,29 +12,23 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from hooks import StageReference
 from judgers import Judger
-from sandbox import StageResult, exec_in, http_upload, upload_tar_and_extract
+from sandbox import exec_in, http_upload
 from schemas import AggregatedScore, JudgerResult, SandboxSpec
-import bundle
 
 
 logger = logging.getLogger(__name__)
 
 
 class JudgerValidator:
-    """Run judgers, aggregate scores.
+    """Run every judger, aggregate results.
 
     Init args:
-        judgers (list[Judger]): Judger instances (built by
-            :func:`judgers.pytest_ctrf_judger` / :func:`bash_script_judger`).
+        judgers (list[Judger]): Judger instances to fan out to.
         aggregator (str): ``"weighted_sum"`` / ``"mean"`` / ``"max"`` /
             ``"min"`` / ``"all_or_nothing"``.
         on_error (str): ``"zero"`` (sum over usable) or ``"fail"`` (any
             error → total=0, failed=True).
-        reference_path (str): Where :class:`StageReference` stages the
-            reference dir in the infer sandbox; judgers read it via
-            ``ctx["reference_path"]``.
     """
 
     def __init__(
@@ -46,13 +39,10 @@ class JudgerValidator:
             "weighted_sum", "mean", "max", "min", "all_or_nothing",
         ] = "weighted_sum",
         on_error: Literal["zero", "fail"] = "zero",
-        reference_path: str = "/tmp/reference",
     ):
         self.judgers = list(judgers)
         self.aggregator = aggregator
         self.on_error = on_error
-        self.reference_path = reference_path
-        self._stage_reference = StageReference(dst=reference_path)
 
     async def run(
         self,
@@ -61,7 +51,6 @@ class JudgerValidator:
         provider: Any,
         infer_workspace: str,
     ) -> AggregatedScore:
-        await self._stage_reference(infer_client, ctx)
         owned: dict[str, tuple[Any, str]] = {}
         results: list[JudgerResult] = []
         try:
@@ -75,12 +64,6 @@ class JudgerValidator:
                     await asyncio.to_thread(provider.delete, env_id)
                 except Exception as exc:
                     logger.warning("isolated judger teardown: %s", exc)
-            # Clean up reference in the shared sandbox.
-            if ctx.get("reference_path") == self.reference_path:
-                await exec_in(
-                    infer_client, f"rm -rf {self.reference_path}",
-                    raise_on_error=False,
-                )
         return self._aggregate(results)
 
     # -- internals --
@@ -98,8 +81,6 @@ class JudgerValidator:
             client, j_workspace = await self._acquire_client(
                 j, infer_client, ctx, provider, infer_workspace, owned,
             )
-            # Per-judger ctx: same keys as the top-level ctx, but workspace
-            # may differ for isolated judgers.
             j_ctx = {
                 **ctx,
                 "workspace": j_workspace,
@@ -135,7 +116,7 @@ class JudgerValidator:
         )
         owned[j.name] = (client, env_id)
 
-        # Seed the isolated sandbox with the agent's workspace + trajectory.
+        # Seed the isolated sandbox with the agent's workspace.
         ws = j.sandbox.workspace_path
         await exec_in(client, f"mkdir -p {ws}")
         try:
@@ -152,14 +133,6 @@ class JudgerValidator:
             )
         except Exception as exc:
             logger.warning("isolated workspace copy for %s failed: %s", j.name, exc)
-
-        # Re-stage reference for the isolated sandbox, if it was staged.
-        if ctx.get("reference_path") and ctx.get("data") and ctx["data"].reference:
-            ref_files = bundle.mirror_tree(
-                ctx["task_root"] / ctx["data"].reference,
-                self.reference_path, exclude=(),
-            )
-            await upload_tar_and_extract(client, ref_files, "/")
 
         for hook in j.on_isolated_pre:
             await hook(client, ctx)

@@ -22,37 +22,19 @@ from pydantic import BaseModel, ConfigDict, Field
 # ─────────────────────────────────────────────────────────────────
 
 
-class WorkspaceArtifact(BaseModel):
-    """One required/expected product in ``$TASK_WORKSPACE`` after infer."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    path: str                                            # relative to $TASK_WORKSPACE
-    required: bool = True
-    kind: Literal["json", "text", "binary", "directory"] = "text"
-    schema_ref: str | None = None
-
-
 class TaskData(BaseModel):
     """Per-task content contract.
 
-    A task directory ships one ``task.py`` which constructs this with a
-    ``data = dict(...)`` literal.  Only three fields drive pipeline
-    behavior — the rest are metadata for result bookkeeping:
-
-    Behavioral:
+    Fields that drive pipeline behavior:
       - ``instruction``: path (relative to task root) of the natural-language
-        task the agent sees.  The inferencer exports it as
-        ``$TASK_INSTRUCTION``.
-      - ``reference``: optional path to a ground-truth directory.  If set,
-        the Validator stages it outside the agent workspace so judgers can
-        read it without the agent ever seeing it.
-      - ``outputs``: declared artifacts.  After infer, :meth:`Inferencer.check_outputs`
-        reports which ``required`` ones are missing — a fast-fail signal
-        before judgers run.
+        task the agent sees.  Pipeline exports it as ``$TASK_INSTRUCTION``.
 
-    Metadata (surfaced in result envelope):
-      - ``id``, ``data_source``, ``ability``, ``tags``: routing / aggregation.
+    Metadata (surfaced in the result envelope for downstream aggregation):
+      - ``id``, ``data_source``, ``ability``, ``tags``.
+
+    Any judger-only files (reference answers, fixture data) are the
+    judger's own concern — it uploads what it needs via its own
+    pre-hooks.  No hidden ``reference`` field here.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -65,8 +47,6 @@ class TaskData(BaseModel):
 
     # Behavior.
     instruction: str                                     # relative to task root
-    reference: str | None = None                         # relative dir; optional
-    outputs: list[WorkspaceArtifact] = []
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -152,7 +132,6 @@ __all__ = [
     "TaskData",
     "SandboxSpec",
     "AgentSpec",
-    "WorkspaceArtifact",
     "CriterionScore",
     "StepReward",
     "JudgerResult",
