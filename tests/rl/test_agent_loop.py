@@ -7,12 +7,12 @@ import torch
 from transformers import AutoTokenizer
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.rl.agent_loop import (
-    SingleTurnAgentLoopConfig,
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
-    TaskSpecConfig,
-    SyncProduceStrategyConfig,
     SamplerConfig,
+    SyncProduceStrategyConfig,
+    TaskSpecConfig,
 )
 from xtuner.v1.data_proto import RolloutState, Status, SampleParams
 from xtuner.v1.rl.rollout import RolloutController
@@ -25,6 +25,8 @@ MODEL_PATH = os.environ["ROLLOUT_MODEL_PATH"]
 MOE_MODEL_PATH = os.environ["QWEN3_MOE_PATH"]
 TRAIN_DATA_PATH = os.environ["ROLLOUT_DATA_PATH"]
 TEST_DATA_PATH = os.environ["ROLLOUT_TEST_DATA_PATH"]
+TEST_DIST_PORT_BASE = int(os.environ.get("XTUNER_DIST_PORT_BASE", "35000"))
+TEST_NUM_WORKERS = int(os.environ.get("XTUNER_TEST_NUM_WORKERS", "1"))
 FAKE_INPUT_ITEM = RolloutState(
     message=[{
         'role': 'user',
@@ -51,7 +53,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
     def init_config(self):
         self.resources_cfg = AcceleratorResourcesConfig(
             accelerator=resource_map[torch.accelerator.current_accelerator().type],
-            num_workers=1,
+            num_workers=TEST_NUM_WORKERS,
             num_cpus_per_worker=8,
             cpu_memory_per_worker=16 * 1024**3,  # 16 GB
         )
@@ -80,6 +82,8 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             model_name=os.path.basename(self.model_path).lower(),
             tokenizer_path=self.model_path,
             context_length=self.context_length,
+            dist_port_base=TEST_DIST_PORT_BASE,
+            tensor_parallel_size=TEST_NUM_WORKERS,
             worker_log_dir=self.worker_log_dir,
         )
         judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
@@ -120,6 +124,8 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             model_name=os.path.basename(self.model_path).lower(),
             tokenizer_path=self.model_path,
             context_length=self.context_length,
+            dist_port_base=TEST_DIST_PORT_BASE,
+            tensor_parallel_size=TEST_NUM_WORKERS,
             worker_log_dir=self.worker_log_dir,
         )
         judger_config = GSM8KJudgerConfig(
@@ -166,6 +172,8 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             model_name=os.path.basename(self.model_path).lower(),
             tokenizer_path=self.model_path,
             context_length=self.context_length,
+            dist_port_base=TEST_DIST_PORT_BASE,
+            tensor_parallel_size=TEST_NUM_WORKERS,
             worker_log_dir=self.worker_log_dir,
         )
         judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
@@ -212,7 +220,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
             replay_buffer=replay_buffer,
         )
         # 4. 执行 produce_batch
-        result = await agent_loop_manager.produce_batch(batch_size=4)
+        result = await agent_loop_manager.produce_batch(batch_size=4, train_step=0, model_step=0)
         batch_rollout_states = result.rollout_states
         # 5. 验证结果
         self.assertEqual(len(batch_rollout_states), 4)
