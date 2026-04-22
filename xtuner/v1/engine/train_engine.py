@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import json
 import os
 import threading
-from concurrent.futures import wait
+from concurrent.futures import Future, wait
 from pathlib import Path
 from typing import Any, Dict, List, cast
 
@@ -9,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from safetensors import safe_open
+from torch.distributed.checkpoint.filesystem import FileSystemWriter
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -134,6 +137,7 @@ class TrainEngine:
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,
+        async_checkpoint: bool = False,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
@@ -143,6 +147,10 @@ class TrainEngine:
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
         self.has_freeze_params = self.__has_freeze_params()
+        self._async_checkpoint_pg: dist.ProcessGroup | None = None
+        self._async_state_dict_cache: dict[str, Any] | None = None
+        if async_checkpoint:
+            self._async_checkpoint_pg = dist.new_group(backend="gloo")
 
     def __has_freeze_params(self) -> bool:
         has_freeze_params = False
@@ -294,98 +302,133 @@ class TrainEngine:
         """
         self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
 
-    # TODO: Support async save
+    def _get_dcp_state_dict(
+        self,
+        *,
+        cpu_offload: bool,
+        save_optimizer: bool = True,
+    ) -> dict[str, Any]:
+        options = StateDictOptions(
+            cpu_offload=cpu_offload,
+            ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params,
+        )
+        state_dict: dict[str, Any] = {}
+
+        with profile_time_and_memory("[DCP Collect Model State Dict]"):
+            state_dict["model"] = get_model_state_dict(self.model, options=options)
+
+        if save_optimizer:
+            with profile_time_and_memory("[DCP Collect Optimizer State Dict]"):
+                state_dict["optimizer"] = get_optimizer_state_dict(self.model, self.optimizer, options=options)
+
+        return state_dict
+
     def save_dcp(
         self,
-        model_dir: Path,
-        optimizer_dir: Path | None = None,
-    ):
-        rank = dist.get_rank()
+        weights_dir: Path,
+        save_optimizer: bool = True,
+    ) -> None:
+        if dist.get_rank() == 0:
+            weights_dir.mkdir(parents=True, exist_ok=True)
 
-        if rank == 0:
-            model_dir.mkdir(parents=True, exist_ok=True)
-            if optimizer_dir is not None:
-                optimizer_dir.mkdir(parents=True, exist_ok=True)
+        state_dict = self._get_dcp_state_dict(cpu_offload=True, save_optimizer=save_optimizer)
 
-        _options = StateDictOptions(cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params)
-        with profile_time_and_memory(f"[DCP Checkpoint to {model_dir}]"):
-            model_state = get_model_state_dict(self.model, options=_options)
+        with profile_time_and_memory(f"[DCP save for {weights_dir}]"):
             dcp.save(
-                model_state,
-                checkpoint_id=model_dir,
+                state_dict,
+                checkpoint_id=weights_dir,
             )
 
-        with profile_time_and_memory(f"[DCP Checkpoint to {optimizer_dir}]"):
-            if optimizer_dir is not None:
-                shard_optimizer_state_dict = get_optimizer_state_dict(self.model, self.optimizer, options=_options)
-                dcp.save(
-                    shard_optimizer_state_dict,
-                    checkpoint_id=optimizer_dir,
-                )
+    def async_save_dcp(
+        self,
+        weights_dir: Path,
+        save_optimizer: bool = True,
+    ) -> Future:
+        if not hasattr(dcp, "async_save"):
+            raise RuntimeError(
+                "dcp.async_save is not available in this PyTorch version. "
+                "Please upgrade PyTorch or set async_checkpoint=False."
+            )
+
+        if dist.get_rank() == 0:
+            weights_dir.mkdir(parents=True, exist_ok=True)
+
+        state_dict = self._get_dcp_state_dict(cpu_offload=False, save_optimizer=save_optimizer)
+        # Invalidate pinned buffer cache if state_dict structure differs from last call
+        if self._async_state_dict_cache is not None:
+            cached_has_optim = "optimizer" in self._async_state_dict_cache
+            if cached_has_optim != save_optimizer:
+                self._async_state_dict_cache = None
+        storage_writer = FileSystemWriter(weights_dir, cache_staged_state_dict=True)
+        storage_writer.state_dict_cache = self._async_state_dict_cache
+
+        with profile_time_and_memory(f"[DCP async_save for {weights_dir}]"):
+            future = dcp.async_save(
+                state_dict,
+                checkpoint_id=weights_dir,
+                storage_writer=storage_writer,
+                process_group=self._async_checkpoint_pg,
+            )
+
+        self._async_state_dict_cache = storage_writer.state_dict_cache
+        return future
+
+    def destroy_async_checkpoint_pg(self) -> None:
+        """Destroy the dedicated gloo process group used for async checkpoint."""
+        self._async_state_dict_cache = None
+        if self._async_checkpoint_pg is not None:
+            dist.destroy_process_group(self._async_checkpoint_pg)
+            self._async_checkpoint_pg = None
 
     def load_dcp(
         self,
-        model_dir: Path,
-        optimizer_dir: Path | None = None,
+        weights_dir: Path,
         load_states: bool = True,
         load_args: bool = True,
-    ):
-        """Load the dcp model from the given directory.
+    ) -> None:
+        """Load a DCP checkpoint saved in the merged weights format.
 
-        Args:
-            dcp_dir (str): The directory to load the model from.
+        If the checkpoint was saved without optimizer (checkpoint_save_optimizer=False),
+        only model weights will be loaded regardless of load_states/load_args settings.
         """
-        _load_options = StateDictOptions(
-            cpu_offload=True, ignore_frozen_params=self.model_cfg.dcp_ignore_frozen_params
-        )
+        load_optimizer = load_states or load_args
+        state_dict = self._get_dcp_state_dict(cpu_offload=True, save_optimizer=load_optimizer)
+
         if self.has_freeze_params:
-            _set_options = StateDictOptions(cpu_offload=True, strict=False)
+            set_options = StateDictOptions(cpu_offload=True, strict=False)
         else:
-            _set_options = StateDictOptions(cpu_offload=True, strict=True)
-        with profile_time_and_memory(f"[Load DCP Model from {model_dir}]"):
-            shard_model_state_dict = get_model_state_dict(self.model, options=_load_options)
-            # inplace state_dict
-            dcp.load(
-                state_dict=shard_model_state_dict,
-                checkpoint_id=model_dir,
+            set_options = StateDictOptions(cpu_offload=True, strict=True)
+
+        with profile_time_and_memory(f"[Load DCP from {weights_dir}]"):
+            dcp.load(state_dict=state_dict, checkpoint_id=weights_dir)
+
+            set_model_state_dict(self.model, state_dict["model"], options=set_options)
+
+            if not load_optimizer:
+                return
+
+            optimizer_state_dict = state_dict["optimizer"]
+            if not load_states:
+                logger.info("Not loading optimizer states")
+                optimizer_state_dict["state"] = {}
+            if not load_args:
+                logger.info("Not loading arg defaults")
+                param_groups = self.optimizer.state_dict()["param_groups"]
+                assert len(param_groups) == 1, "Only one param_group is supported now"
+                init_defaults = param_groups[0]
+                init_defaults.pop("params")
+                for param_group in cast(List[Dict[str, Any]], optimizer_state_dict["param_groups"]):
+                    default_keys = list(filter(lambda x: x != "params", param_group.keys()))
+                    for key in default_keys:
+                        param_group.pop(key)
+                    param_group.update(init_defaults)
+
+            set_optimizer_state_dict(
+                self.model,
+                self.optimizer,
+                optim_state_dict=optimizer_state_dict,
+                options=set_options,
             )
-            set_model_state_dict(self.model, shard_model_state_dict, options=_set_options)
-
-        if optimizer_dir is not None:
-            with profile_time_and_memory(f"[Load DCP Optimizer] from {optimizer_dir}"):
-                shard_optimizer_state_dict = get_optimizer_state_dict(
-                    self.model, self.optimizer, options=_load_options
-                )
-                dcp.load(
-                    state_dict=shard_optimizer_state_dict,
-                    checkpoint_id=optimizer_dir,
-                )
-                if not load_states:
-                    logger.info("Not loading optimizer states")
-                    shard_optimizer_state_dict["state"] = {}
-                if not load_args:
-                    logger.info("Not loading arg defaults")
-                    param_groups = self.optimizer.state_dict()["param_groups"]
-                    # Now we only support one param_group. If we want to support different lr for different parameters,
-                    # we may use multiple param_groups like:
-                    # [{'params': ['net1.weight', 'net2.weight'], 'lr': 0.001}, {'params': ['net3.weight'], 'lr': 0.002}]
-                    # Then we need change the code here
-                    assert len(param_groups) == 1, "Only one param_group is supported now"
-                    init_defaults = param_groups[0]
-                    init_defaults.pop("params")
-                    for param_group in cast(List[Dict[str, Any]], shard_optimizer_state_dict["param_groups"]):
-                        # param_group is like: {'params': ['net1.weight', 'net2.weight'], 'lr': 0.001, 'betas': (0.9, 0.999), 'eps': 1e-08, 'weight_decay': 0.01}
-                        default_keys = list(filter(lambda x: x != "params", param_group.keys()))
-                        for key in default_keys:
-                            param_group.pop(key)
-                        param_group.update(init_defaults)  # lr, betas, eps, etc.
-
-                set_optimizer_state_dict(
-                    self.model,
-                    self.optimizer,
-                    optim_state_dict=shard_optimizer_state_dict,
-                    options=_set_options,
-                )
 
     def put_model_to_device(self, device: torch.device | str):
         """Put the model to the given device."""
