@@ -1,6 +1,5 @@
 import atexit
 import signal
-import socket
 import subprocess
 from typing import TYPE_CHECKING, cast
 
@@ -8,7 +7,7 @@ import ray
 
 from xtuner.v1.utils.logger import get_logger
 
-from .misc import _is_port_available
+from .misc import find_free_ports
 
 
 if TYPE_CHECKING:
@@ -37,43 +36,7 @@ def find_master_addr_and_port(nums=1, start_port=None, end_port=None):
         or a list of ports if `nums` is greater than 1.
     """
     addr = ray.util.get_node_ip_address()
-    ports: list[int] = []
-    sockets: list[socket.socket] = []
-
-    if start_port is None:
-        for _ in range(nums):
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # if the port is binded and listened by this socket and then we close it,
-            # socket.SO_REUSEADDR would make the port be reusable even it's in TIME_WAIT state.
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sockets.append(s)
-            if _is_port_available(check_socket=s, port=0):
-                ports.append(s.getsockname()[1])
-    else:
-        assert isinstance(start_port, int), "If start_port isn't None, it must be an integer."
-        assert isinstance(end_port, int), "If start_port isn't None, end_port must be an integer."
-        assert end_port - start_port >= nums, (
-            "If start_port isn't None, the range between start_port and end_port must be at least nums."
-        )
-
-        for candidate_port in range(start_port, end_port):
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # if the port is binded and listened by this socket and then we close it,
-            # socket.SO_REUSEADDR would make the port be reusable even it's in TIME_WAIT state.
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sockets.append(s)
-            if _is_port_available(check_socket=s, port=candidate_port):
-                ports.append(candidate_port)
-            # enough ports found
-            if len(ports) >= nums:
-                break
-
-        if len(ports) < nums:
-            raise RuntimeError(f"Could not find {nums} available ports starting from port {start_port} to {end_port}.")
-
-    # close all sockets, no matter available or not
-    for s in sockets:
-        s.close()
+    ports = find_free_ports(nums=nums, host="", start_port=start_port, end_port=end_port)
 
     if len(ports) == 1:
         return addr, ports[0]
