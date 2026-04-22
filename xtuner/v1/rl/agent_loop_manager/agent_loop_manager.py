@@ -388,7 +388,7 @@ class AgentLoopManager:
             if stale_threshold is None:
                 # 同步生产没有跨权重版本的后台样本，只有异步 strategy 需要刷新并淘汰历史样本。
                 continue
-            await self.replay_buffer.refresh_completed_staleness(
+            await self.replay_buffer.refresh_staleness(
                 task_name=task.task_name,
                 current_train_step=train_step,
                 stale_threshold=stale_threshold,

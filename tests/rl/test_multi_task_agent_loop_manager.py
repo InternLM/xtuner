@@ -173,7 +173,7 @@ class _FakeReplayBuffer:
         self._leftover_counts = leftover_counts
         self.saved_paths: list[Path] = []
         self.resumed_paths: list[Path] = []
-        self.refresh_completed_staleness_calls: list[tuple[str, int, int, tuple[Status, ...]]] = []
+        self.refresh_staleness_calls: list[tuple[str, int, int, tuple[Status, ...]]] = []
 
     async def get(self, batch_size: int, task_name: str, group_status: Status):
         assert group_status == Status.COMPLETED
@@ -185,14 +185,14 @@ class _FakeReplayBuffer:
     async def count(self, task_name: str, group_status: Status):
         return self._leftover_counts.get((task_name, group_status), 0)
 
-    async def refresh_completed_staleness(
+    async def refresh_staleness(
         self,
         task_name: str,
         current_train_step: int,
         stale_threshold: int,
         statuses: list[Status] | None = None,
     ):
-        self.refresh_completed_staleness_calls.append((task_name, current_train_step, stale_threshold, tuple(statuses or ())))
+        self.refresh_staleness_calls.append((task_name, current_train_step, stale_threshold, tuple(statuses or ())))
         for group in self._rollout_states_by_task.get(task_name, []):
             for state in group:
                 response_model_steps = getattr(state, "response_model_steps", None) or []
@@ -588,7 +588,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, ProduceBatchStatus.EXPIRED_BATCH)
         self.assertEqual(result.rollout_states, [])
 
-    async def test_get_batch_refreshes_completed_staleness_at_entry(self):
+    async def test_get_batch_refreshes_staleness_at_entry(self):
         replay_buffer = _FakeReplayBuffer(
             rollout_states_by_task={
                 "task_a": [[_FakeStalenessRolloutState("a-0", 0.2, response_model_steps=[4], seq_staleness=0)]],
@@ -612,7 +612,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         result = await manager.get_batch(batch_size=1, train_step=9)
 
         self.assertEqual(
-            replay_buffer.refresh_completed_staleness_calls,
+            replay_buffer.refresh_staleness_calls,
             [
                 ("task_a", 9, 5, (Status.COMPLETED, Status.ABORTED)),
                 ("task_a", 10, 5, (Status.COMPLETED, Status.ABORTED)),

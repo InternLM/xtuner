@@ -397,14 +397,14 @@ class ReplayBuffer:
         async with self._lock:
             return await self._policy.count(query_dsl, self._storage)
 
-    async def refresh_completed_staleness(
+    async def refresh_staleness(
         self,
         task_name: str,
         current_train_step: int,
         stale_threshold: int,
         statuses: list[Status] | None = None,
     ) -> int:
-        # 保留历史方法名；可复用的 completed / aborted buffer 样本都需要随 train_step 刷新过期状态。
+        # 刷新可复用样本的 staleness；completed / aborted 都可能来自旧权重，需要按 train_step 淘汰。
         if stale_threshold <= 0:
             raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
         if statuses is None:

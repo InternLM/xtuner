@@ -136,7 +136,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             sample_size=3,
         )
 
-    async def test_refresh_completed_staleness_expires_completed_in_place(self):
+    async def test_refresh_staleness_expires_completed_in_place(self):
         replay_buffer = AsyncReplayBufferConfig().build()
         await replay_buffer.put(
             [MockState("stale", response_model_steps=[3], status=Status.COMPLETED)],
@@ -147,7 +147,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             "task",
         )
 
-        expired_count = await replay_buffer.refresh_completed_staleness(
+        expired_count = await replay_buffer.refresh_staleness(
             task_name="task",
             current_train_step=6,
             stale_threshold=2,
@@ -162,7 +162,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(expired[0][0].seq_staleness, 2)
         self.assertEqual(completed[0][0].id, "fresh")
 
-    async def test_refresh_completed_staleness_expires_aborted_in_place(self):
+    async def test_refresh_staleness_expires_aborted_in_place(self):
         replay_buffer = AsyncReplayBufferConfig().build()
         await replay_buffer.put(
             [MockState("stale-aborted", response_model_steps=[3], status=Status.ABORTED)],
@@ -173,7 +173,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             "task",
         )
 
-        expired_count = await replay_buffer.refresh_completed_staleness(
+        expired_count = await replay_buffer.refresh_staleness(
             task_name="task",
             current_train_step=6,
             stale_threshold=2,
@@ -191,7 +191,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(aborted[0][0].seq_staleness, 0)
         self.assertEqual(aborted[0][0].status, Status.ABORTED)
 
-    async def test_refresh_completed_staleness_respects_status_filter(self):
+    async def test_refresh_staleness_respects_status_filter(self):
         replay_buffer = AsyncReplayBufferConfig().build()
         await replay_buffer.put(
             [MockState("stale-completed", response_model_steps=[3], status=Status.COMPLETED)],
@@ -202,7 +202,7 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             "task",
         )
 
-        expired_count = await replay_buffer.refresh_completed_staleness(
+        expired_count = await replay_buffer.refresh_staleness(
             task_name="task",
             current_train_step=6,
             stale_threshold=2,

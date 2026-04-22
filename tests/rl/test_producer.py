@@ -557,13 +557,13 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 0)
 
-    async def test_refresh_completed_samples_refreshes_staleness_before_expire_check(self):
+    async def test_refresh_staleness_refreshes_before_expire_check(self):
         task_name = "test_refresh_leftover"
         stale_item = MockRolloutState(1000, seq_staleness=0, status=Status.COMPLETED)
         stale_item.response_model_steps = [3]
         await self.replay_buffer.put([stale_item], task_name)
 
-        expired_count = await self.replay_buffer.refresh_completed_staleness(
+        expired_count = await self.replay_buffer.refresh_staleness(
             task_name=task_name,
             current_train_step=6,
             stale_threshold=2,
