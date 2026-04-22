@@ -12,6 +12,7 @@ from typing import Any, List, Literal, Union
 import torch.nn.functional as F
 
 from xtuner.v1.data_proto import RolloutState, Status
+from xtuner.v1.data_proto.utils import calculate_seq_staleness as calculate_seq_staleness
 from xtuner.v1.utils.logger import get_logger
 
 

@@ -12,6 +12,7 @@ from typing_extensions import NotRequired, TypedDict
 # ====================================
 # ====== DataFlow 数据流 ==============
 # ====================================
+from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.utils.cache import CacheObj
 from xtuner.v1.utils.logger import get_logger
 
@@ -109,9 +110,9 @@ class RolloutState(CacheObj, BaseModel):
     finish_reason: str | None = None
     # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
     response_mask: list[int] | None = None
-    # response_rollout_steps：记录 response_ids 中每个 token 是在哪个 rollout_step 生成的，与 response_ids 长度相同，每轮rollout在agent_loop中后处理中覆盖写
-    response_rollout_steps: list[int] | None = None
-    # 记录该样本过期程度，即最先生成的token与当前的训练步数的差值，数值越大表示越过期，在 agent_loop 中后处理中覆盖写
+    # response_model_steps：记录 response_ids 中每个 token 来自哪个 model_step，与 response_ids 长度相同。
+    response_model_steps: list[int] | None = None
+    # 记录该样本过期程度，即最早生成 token 的模型版本与当前训练步数的差值，数值越大表示越过期。
     seq_staleness: int = 0
 
     #  --- Judger 输出 ---
@@ -253,28 +254,40 @@ def update_group_status(rollout_states: list[RolloutState]) -> Status:
         return Status.COMPLETED
 
 
-def update_seq_staleness(rollout_state: RolloutState, rollout_step: int) -> RolloutState:
-    """计算 response_rollout_steps 列表，表示 rollout_state.response_ids 中的每个 token
-    是在哪个 rollout_step 生成的。"""
+def update_sample_version(rollout_state: RolloutState, model_step: int) -> RolloutState:
+    """Append token source model version for newly generated response
+    tokens."""
     response_len = len(rollout_state.response_ids or [])
-    response_rollout_steps = [rollout_step] * response_len
-    rollout_state.response_rollout_steps = (rollout_state.response_rollout_steps or []) + response_rollout_steps
-
-    cur_rollout_steps = min(rollout_state.response_rollout_steps, default=rollout_step)
-    rollout_state.seq_staleness = rollout_step - cur_rollout_steps
+    response_model_steps = list(getattr(rollout_state, "response_model_steps", None) or [])
+    missing_response_steps = max(0, response_len - len(response_model_steps))
+    if missing_response_steps:
+        response_model_steps.extend([model_step] * missing_response_steps)
+    rollout_state.response_model_steps = response_model_steps
     return rollout_state
 
 
-def update_expired_status(samples: list[RolloutState], tail_batch_stale_threshold: int = 0) -> list[RolloutState]:
-    if tail_batch_stale_threshold <= 0:
-        return samples
+def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) -> list[RolloutState]:
+    for rollout_state in group:
+        # response_model_steps 记录每个 response token 的模型版本；
+        # 最早版本决定整条样本的滞后程度。
+        response_model_steps = getattr(rollout_state, "response_model_steps", None) or []
+        if response_model_steps:
+            rollout_state.seq_staleness = calculate_seq_staleness(min(response_model_steps), current_train_step)
+        else:
+            rollout_state.seq_staleness = 0
+    return group
+
+
+def update_expired_status(samples: list[RolloutState], stale_threshold: int) -> list[RolloutState]:
+    if stale_threshold <= 0:
+        raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
     is_group_expired = False
 
     # 1. 检查组内是否存过期的样本
     for sample in samples:
-        if sample.status == Status.ABORTED and sample.seq_staleness >= tail_batch_stale_threshold:
+        if sample.status == Status.ABORTED and sample.seq_staleness >= stale_threshold:
             logger.debug(
-                f"Sample {sample.uid} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({tail_batch_stale_threshold}). Triggering group expiration."
+                f"Sample {sample.uid} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({stale_threshold}). Triggering group expiration."
             )
             is_group_expired = True
             break  # 一旦发现过期，直接跳出，无需检查剩余样本

@@ -1,11 +1,11 @@
-from .controller import ColateItem, RawTrainingController, TrainingController, TrainingControllerProxy
-from .rollout_is import (
+from ..rollout_is import (
     RolloutImportanceSampling,
     compute_is_metrics,
     compute_mismatch_metrics,
     compute_rollout_importance_weights,
     merge_rollout_is_metrics,
 )
+from .controller import ColateItem, RawTrainingController, TrainingController, TrainingControllerProxy
 from .worker import RLOtherLog, TrainingWorker, WorkerConfig, WorkerInputItem, WorkerLogItem, WorkerTrainLogItem
 
 

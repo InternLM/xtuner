@@ -94,9 +94,9 @@ class Sampler(_DatasetSampler):
         super().__init__(dataloader, prompt_repeat_k)
         self.replay_buffer = replay_buffer
 
-    async def sample(self, task_name: str, group_status: Status | None = None) -> list[RolloutState]:
-        if group_status is not None:
-            buffer_data = await self.replay_buffer.get(1, task_name=task_name, group_status=group_status)
+    async def sample(self, task_name: str, group_status: list[Status] | None = None) -> list[RolloutState]:
+        for status in group_status or []:
+            buffer_data = await self.replay_buffer.get(1, task_name=task_name, group_status=status)
             if buffer_data:
                 return buffer_data[0]
         return self.sample_from_dataloader()

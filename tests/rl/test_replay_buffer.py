@@ -7,11 +7,19 @@ from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBuffer
 
 
 class MockState:
-    def __init__(self, state_id, staleness=0, input_ids=None, status=Status.COMPLETED):
+    def __init__(
+        self,
+        state_id,
+        staleness=0,
+        input_ids=None,
+        status=Status.COMPLETED,
+        response_model_steps=None,
+    ):
         self.id = state_id
         self.seq_staleness = staleness
         self.status = status
         self.input_ids = input_ids if input_ids is not None else [state_id]
+        self.response_model_steps = response_model_steps
 
 
 class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
@@ -127,3 +135,87 @@ class TestReplayBuffer(unittest.IsolatedAsyncioTestCase):
             task_name="task",
             sample_size=3,
         )
+
+    async def test_refresh_staleness_expires_completed_in_place(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        await replay_buffer.put(
+            [MockState("stale", response_model_steps=[3], status=Status.COMPLETED)],
+            "task",
+        )
+        await replay_buffer.put(
+            [MockState("fresh", response_model_steps=[6], status=Status.COMPLETED)],
+            "task",
+        )
+
+        expired_count = await replay_buffer.refresh_staleness(
+            task_name="task",
+            current_train_step=6,
+            stale_threshold=2,
+        )
+
+        self.assertEqual(expired_count, 1)
+        self.assertEqual(await replay_buffer.count("task", Status.COMPLETED), 1)
+        self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 1)
+        expired = await replay_buffer.get(1, "task", Status.EXPIRED)
+        completed = await replay_buffer.get(1, "task", Status.COMPLETED)
+        self.assertEqual(expired[0][0].id, "stale")
+        self.assertEqual(expired[0][0].seq_staleness, 2)
+        self.assertEqual(completed[0][0].id, "fresh")
+
+    async def test_refresh_staleness_expires_aborted_in_place(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        await replay_buffer.put(
+            [MockState("stale-aborted", response_model_steps=[3], status=Status.ABORTED)],
+            "task",
+        )
+        await replay_buffer.put(
+            [MockState("fresh-aborted", response_model_steps=[5], status=Status.ABORTED)],
+            "task",
+        )
+
+        expired_count = await replay_buffer.refresh_staleness(
+            task_name="task",
+            current_train_step=6,
+            stale_threshold=2,
+        )
+
+        self.assertEqual(expired_count, 1)
+        self.assertEqual(await replay_buffer.count("task", Status.ABORTED), 1)
+        self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 1)
+        expired = await replay_buffer.get(1, "task", Status.EXPIRED)
+        aborted = await replay_buffer.get(1, "task", Status.ABORTED)
+        self.assertEqual(expired[0][0].id, "stale-aborted")
+        self.assertEqual(expired[0][0].seq_staleness, 2)
+        self.assertEqual(expired[0][0].status, Status.EXPIRED)
+        self.assertEqual(aborted[0][0].id, "fresh-aborted")
+        self.assertEqual(aborted[0][0].seq_staleness, 0)
+        self.assertEqual(aborted[0][0].status, Status.ABORTED)
+
+    async def test_refresh_staleness_respects_status_filter(self):
+        replay_buffer = AsyncReplayBufferConfig().build()
+        await replay_buffer.put(
+            [MockState("stale-completed", response_model_steps=[3], status=Status.COMPLETED)],
+            "task",
+        )
+        await replay_buffer.put(
+            [MockState("stale-aborted", response_model_steps=[3], status=Status.ABORTED)],
+            "task",
+        )
+
+        expired_count = await replay_buffer.refresh_staleness(
+            task_name="task",
+            current_train_step=6,
+            stale_threshold=2,
+            statuses=[Status.ABORTED],
+        )
+
+        self.assertEqual(expired_count, 1)
+        self.assertEqual(await replay_buffer.count("task", Status.COMPLETED), 1)
+        self.assertEqual(await replay_buffer.count("task", Status.ABORTED), 0)
+        self.assertEqual(await replay_buffer.count("task", Status.EXPIRED), 1)
+        completed = await replay_buffer.get(1, "task", Status.COMPLETED)
+        expired = await replay_buffer.get(1, "task", Status.EXPIRED)
+        self.assertEqual(completed[0][0].id, "stale-completed")
+        self.assertEqual(completed[0][0].status, Status.COMPLETED)
+        self.assertEqual(expired[0][0].id, "stale-aborted")
+        self.assertEqual(expired[0][0].status, Status.EXPIRED)
