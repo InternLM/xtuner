@@ -230,6 +230,10 @@ class AgentRLTrainer(RLTrainer):
             dataflow_cfg=dataflow_config,
             replay_buffer_config=replay_buffer_config,
         )
+
+        import time
+        time.sleep(10000)
+
         self._dataflow_partial_rollout_step = dataflow_config.tail_batch_candidate_steps
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
