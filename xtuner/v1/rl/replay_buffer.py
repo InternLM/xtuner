@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, refresh_seq_staleness, update_group_status
 from xtuner.v1.rl.utils import (
     BetweenNode,
     ConditionNode,
@@ -19,7 +19,6 @@ from xtuner.v1.rl.utils import (
     QueryNode,
     ScalarNode,
     SetNode,
-    calculate_seq_staleness,
     parse_query,
 )
 from xtuner.v1.utils import get_logger
@@ -398,15 +397,6 @@ class ReplayBuffer:
         async with self._lock:
             return await self._policy.count(query_dsl, self._storage)
 
-    @staticmethod
-    def _refresh_seq_staleness(items: list[RolloutState], current_train_step: int) -> None:
-        for item in items:
-            response_model_steps = getattr(item, "response_model_steps", None) or []
-            if response_model_steps:
-                item.seq_staleness = calculate_seq_staleness(min(response_model_steps), current_train_step)
-            elif hasattr(item, "seq_staleness"):
-                item.seq_staleness = 0
-
     async def refresh_completed_staleness(
         self,
         task_name: str,
@@ -430,7 +420,7 @@ class ReplayBuffer:
             updated_records: list[StorageItem] = []
             expired_count = 0
             for record in records:
-                self._refresh_seq_staleness(record.item, current_train_step)
+                refresh_seq_staleness(record.item, current_train_step)
                 staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
                 should_expire = any(getattr(item, "seq_staleness", 0) >= stale_threshold for item in record.item)
                 if should_expire:

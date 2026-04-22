@@ -8,6 +8,7 @@ from typing import Any, List, Literal, Union
 
 import torch.nn.functional as F
 
+from xtuner.v1.data_proto.utils import calculate_seq_staleness as calculate_seq_staleness
 from xtuner.v1.utils.logger import get_logger
 
 
@@ -17,12 +18,6 @@ SetOperator = Literal["$in", "$not_in"]
 BetweenOperator = Literal["$between"]
 Operators = Union[ScalarOperator, SetOperator, BetweenOperator]
 LogicOperator = Literal["$and", "$or"]
-
-
-def calculate_seq_staleness(model_step: int, current_train_step: int) -> int:
-    # model_step 是指哪个 train_step 训练后的模型，如果完全没有滞后(即同步状态)，current_train_step 领先
-    # model_step 1 步，此时 seq_staleness 为 current_train_step - model_step - 1 = 0。
-    return current_train_step - model_step - 1
 
 
 class QueryNode(ABC):

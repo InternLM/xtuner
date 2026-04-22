@@ -9,7 +9,13 @@ from typing import Protocol, runtime_checkable
 import ray
 from pydantic import BaseModel, ConfigDict, Field
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status, update_group_status, update_sample_version
+from xtuner.v1.data_proto.rl_data import (
+    RolloutState,
+    Status,
+    refresh_seq_staleness,
+    update_group_status,
+    update_sample_version,
+)
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout.utils import pause_generation
 from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
@@ -17,7 +23,6 @@ from xtuner.v1.utils import get_logger
 
 from .agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from .sampler import Sampler
-from .utils import refresh_seq_staleness
 
 
 logger = get_logger()

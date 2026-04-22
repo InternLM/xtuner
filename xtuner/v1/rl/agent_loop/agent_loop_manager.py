@@ -82,6 +82,26 @@ class _TaskSamplerView:
 
 
 class AgentLoopManagerStatus(Enum):
+    """AgentLoopManager 的全局状态.
+
+    按下面的路径流转：
+    - 初始状态是 NORMAL
+    - NORMAL -> UPDATE_ABORT
+      - trainer 开始做权重同步前触发
+    - UPDATE_ABORT -> NORMAL
+      - 权重同步完成后调用 continue_product()
+    - NORMAL -> EXPIRED_BATCH
+      - 当前 rollout model 已经过旧
+    - EXPIRED_BATCH -> UPDATE_ABORT
+      - trainer 检测到过期后，进入权重同步阶段
+    - 任意状态 -> FINISH
+      - 训练结束
+
+    这里有一个重要区分：
+    - AgentLoopManagerStatus 是“后台 producer 的全局运行状态”
+    - ProduceBatchStatus 是“单次调度调用的局部结果”
+    """
+
     NORMAL = auto()
     UPDATE_ABORT = auto()
     EXPIRED_BATCH = auto()

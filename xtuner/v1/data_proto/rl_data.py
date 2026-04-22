@@ -11,6 +11,7 @@ from typing_extensions import NotRequired, TypedDict
 # ====================================
 # ====== DataFlow 数据流 ==============
 # ====================================
+from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.utils.cache import CacheObj
 from xtuner.v1.utils.logger import get_logger
 
@@ -221,6 +222,18 @@ def update_sample_version(rollout_state: RolloutState, model_step: int) -> Rollo
         response_model_steps.extend([model_step] * missing_response_steps)
     rollout_state.response_model_steps = response_model_steps
     return rollout_state
+
+
+def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) -> list[RolloutState]:
+    for rollout_state in group:
+        # response_model_steps 记录每个 response token 的模型版本；
+        # 最早版本决定整条样本的滞后程度。
+        response_model_steps = getattr(rollout_state, "response_model_steps", None) or []
+        if response_model_steps:
+            rollout_state.seq_staleness = calculate_seq_staleness(min(response_model_steps), current_train_step)
+        else:
+            rollout_state.seq_staleness = 0
+    return group
 
 
 def update_expired_status(samples: list[RolloutState], stale_threshold: int) -> list[RolloutState]:

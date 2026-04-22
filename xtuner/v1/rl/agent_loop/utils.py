@@ -3,23 +3,10 @@ import time
 import ray
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.utils import calculate_seq_staleness
 from xtuner.v1.utils import get_logger
 
 
 logger = get_logger()
-
-
-def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) -> list[RolloutState]:
-    for rollout_state in group:
-        if not hasattr(rollout_state, "seq_staleness"):
-            continue
-        response_model_steps = getattr(rollout_state, "response_model_steps", None) or []
-        if response_model_steps:
-            rollout_state.seq_staleness = calculate_seq_staleness(min(response_model_steps), current_train_step)
-        else:
-            rollout_state.seq_staleness = 0
-    return group
 
 
 def _resolve_routed_experts(routed_experts: list[int] | ray.ObjectRef) -> list[int]:
