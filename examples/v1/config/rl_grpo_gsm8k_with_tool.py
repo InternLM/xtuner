@@ -17,10 +17,10 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, TaskSpecConfig, SyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, SamplerConfig, SyncProduceStrategyConfig, TaskSpecConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
-from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
+from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 from xtuner.v1.rl.agent_loop.gsm8k_with_tool import GSM8KToolAgentLoopConfig
 
 # env
@@ -33,10 +33,10 @@ NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
 experimental_name = "grpo_gsm8k_with_tool"
-rollout_steps = 45
+total_train_steps = 45
 evaluate_step = 45
 train_optimizer_steps = 1
-global_batch_size = 64 * train_optimizer_steps
+train_batch_size = 64 * train_optimizer_steps
 prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 1
@@ -211,8 +211,8 @@ trainer = RLColocateTrainerConfig(
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,
     load_from=model_path,
-    rollout_steps=rollout_steps,
-    global_batch_size=global_batch_size,
+    total_train_steps=total_train_steps,
+    train_batch_size=train_batch_size,
     enable_evaluate=True,
     enable_initial_evaluate=False,
     evaluate_step=evaluate_step,

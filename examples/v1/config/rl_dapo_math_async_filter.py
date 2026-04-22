@@ -11,10 +11,11 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 from xtuner.v1.rl.trainer import WorkerConfig
-from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, TaskSpecConfig, SingleTurnAgentLoopConfig, AsyncProduceStrategyConfig, SamplerConfig
+from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
+from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, AsyncProduceStrategyConfig, SamplerConfig, TaskSpecConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
-from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
+from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
@@ -26,7 +27,7 @@ NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 # basic settings
 experimental_name = "dapo_math"
 total_epochs = 1
-global_batch_size = 512
+train_batch_size = 512
 prompt_repeat_k = 16
 rollout_tp_size = 1
 rollout_ep_size = 1
@@ -153,7 +154,7 @@ def group_samples_filter_func(rollout_states):
 produce_strategy_config = AsyncProduceStrategyConfig(
     over_sample_threshold=0.2,
     enable_partial_rollout=True,
-    tail_batch_stale_threshold=1,
+    max_staleness=0,
     tail_batch_trigger_size=256,
     is_valid_sample_fn=group_samples_filter_func
 )
@@ -217,7 +218,7 @@ trainer = RLColocateTrainerConfig(
     eval_agent_loop_manager_cfg=eval_agent_loop_manager_cfg,
     evaluator_config=evaluator_config,
     load_from=model_path,
-    global_batch_size=global_batch_size,
+    train_batch_size=train_batch_size,
     enable_evaluate=True,
     enable_initial_evaluate=False,
     evaluate_step=evaluate_step,
