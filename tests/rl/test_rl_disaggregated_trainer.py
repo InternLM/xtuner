@@ -130,7 +130,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         async def sync_weights_and_save(train_step: int, step_timer_dict: dict):
             events.append("sync")
 
-        async def eval_produce_batch(batch_size: int, train_step: int):
+        async def eval_produce_batch(batch_size: int, train_step: int, model_step: int):
             events.append("eval")
             return ProduceBatchResult(rollout_states=[["eval"]])
 
@@ -209,6 +209,13 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
     def test_validate_sync_schedule_accepts_multiples(self):
         _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=4, hf_interval=6)
         _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=-1, hf_interval=None)
+        _validate_sync_intervals(
+            sync_weights_interval=2,
+            checkpoint_interval=-1,
+            hf_interval=None,
+            evaluate_step=4,
+            enable_evaluate=True,
+        )
 
     def test_validate_sync_schedule_rejects_non_multiple_checkpoint_interval(self):
         with self.assertRaisesRegex(ValueError, "checkpoint_interval=5.*sync_weights_interval=2"):
@@ -217,6 +224,16 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
     def test_validate_sync_schedule_rejects_non_multiple_hf_interval(self):
         with self.assertRaisesRegex(ValueError, "hf_interval=5.*sync_weights_interval=2"):
             _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=4, hf_interval=5)
+
+    def test_validate_sync_schedule_rejects_non_multiple_evaluate_step(self):
+        with self.assertRaisesRegex(ValueError, "evaluate_step=5.*sync_weights_interval=2"):
+            _validate_sync_intervals(
+                sync_weights_interval=2,
+                checkpoint_interval=4,
+                hf_interval=6,
+                evaluate_step=5,
+                enable_evaluate=True,
+            )
 
     def test_build_disaggregated_placement_groups_uses_distinct_names(self):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)

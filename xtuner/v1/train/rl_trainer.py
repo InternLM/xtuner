@@ -159,6 +159,8 @@ def _validate_sync_intervals(
     sync_weights_interval: int,
     checkpoint_interval: int | None,
     hf_interval: int | None,
+    evaluate_step: int | None = None,
+    enable_evaluate: bool = False,
 ) -> None:
     if sync_weights_interval <= 0:
         raise ValueError(f"sync_weights_interval must be positive, got {sync_weights_interval}.")
@@ -175,6 +177,15 @@ def _validate_sync_intervals(
             raise ValueError(
                 f"{name}={interval} must be a multiple of sync_weights_interval={sync_weights_interval}, "
                 "because checkpoint/HF saves only run on weight-sync steps."
+            )
+
+    if enable_evaluate:
+        if evaluate_step is None or evaluate_step <= 0:
+            raise ValueError(f"evaluate_step must be positive when evaluation is enabled, got {evaluate_step}.")
+        if evaluate_step % sync_weights_interval != 0:
+            raise ValueError(
+                f"evaluate_step={evaluate_step} must be a multiple of "
+                f"sync_weights_interval={sync_weights_interval}, because evaluation only runs on weight-sync steps."
             )
 
 
@@ -216,18 +227,14 @@ class BaseRLTrainerConfig(BaseModel):
             sync_weights_interval=self.sync_weights_interval,
             checkpoint_interval=self.checkpoint_interval,
             hf_interval=self.hf_interval,
+            evaluate_step=self.evaluate_step,
+            enable_evaluate=self.enable_evaluate,
         )
         return self
 
 
 class RLColocateTrainerConfig(BaseRLTrainerConfig):
     resources: AcceleratorResourcesConfig
-
-    @model_validator(mode="after")
-    def _validate_colocate_sync_interval(self):
-        if self.sync_weights_interval != 1:
-            raise ValueError("RLColocateTrainerConfig requires sync_weights_interval=1.")
-        return self
 
     def build(self) -> "RLColocateTrainer":
         return RLColocateTrainer(self)
@@ -452,7 +459,9 @@ class BaseRLTrainer:
 
     async def _run_initial_evaluate(self) -> None:
         eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-            self.evaluator.eval_batch_size, train_step=0
+            self.evaluator.eval_batch_size,
+            train_step=1,
+            model_step=0,
         )
         eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
         self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
@@ -504,7 +513,9 @@ class BaseRLTrainer:
 
     async def _run_evaluation(self, train_step: int) -> dict[str, float]:
         eval_produce_result = await self.eval_agent_loop_manager.produce_batch(
-            self.evaluator.eval_batch_size, train_step=train_step
+            self.evaluator.eval_batch_size,
+            train_step=1,
+            model_step=0,
         )
         eval_batch = eval_produce_result.rollout_states
         eval_metrics = self.evaluator.run(eval_batch)
@@ -846,14 +857,20 @@ class RLColocateTrainer(BaseRLTrainer):
         if self._enable_initial_evaluate and not self._debug_rollout:
             asyncio_run(self._run_initial_evaluate())
 
-        for train_step in range(self._cur_step + 1, self._total_train_steps + 1):
+        init_train_step = self._cur_step + 1
+        model_step = self._get_colocate_rollout_model_step(init_train_step)
+        for train_step in range(init_train_step, self._total_train_steps + 1):
             self.logger.info(f"Train step {train_step}/{self._total_train_steps} start")
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 共卡路径一次调用内完成 rollout 生产和 replay buffer 消费。
                 self.logger.info("start to generate rollout experience for training")
                 produce_result: ProduceBatchResult = asyncio_run(
-                    self.agent_loop_manager.produce_batch(self.train_batch_size, train_step=train_step)
+                    self.agent_loop_manager.produce_batch(
+                        self.train_batch_size,
+                        train_step=train_step,
+                        model_step=model_step,
+                    )
                 )
                 train_batch = produce_result.rollout_states
                 assert train_batch, (
@@ -869,10 +886,12 @@ class RLColocateTrainer(BaseRLTrainer):
                         onload_train_before_train=True,
                     )
 
-                    self._sync_weights_and_save(train_step, step_timer_dict)
+                    weights_synced = self._sync_weights_and_save(train_step, step_timer_dict)
+                    if weights_synced:
+                        model_step = train_step
 
                     eval_log_info = {}
-                    if self._enable_evaluate and train_step % self._evaluate_step == 0:
+                    if weights_synced and self._enable_evaluate and train_step % self._evaluate_step == 0:
                         with timer("evaluation", step_timer_dict):
                             eval_log_info.update(asyncio_run(self._run_evaluation(train_step)))
                 else:
@@ -882,21 +901,33 @@ class RLColocateTrainer(BaseRLTrainer):
             self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
             self._cur_step = train_step
 
-    def _sync_weights_and_save(self, train_step: int, step_timer_dict: dict):
-        """Synchronizes weights and saves checkpoints."""
+    def _get_colocate_rollout_model_step(self, train_step: int) -> int:
+        previous_step = train_step - 1
+        return previous_step - (previous_step % self._sync_weights_interval)
+
+    def _sync_weights_and_save(self, train_step: int, step_timer_dict: dict) -> bool:
+        """Save state and switch colocated resources back to rollout
+        workers."""
+        should_sync_weights = train_step % self._sync_weights_interval == 0
         with timer("save_ckpt", step_timer_dict):
             ray.get(self.train_controller.offload.remote(target="optimizer"))
             self._maybe_save_checkpoint(train_step)
             self._maybe_save_hf(train_step)
 
         ray.get(self.rollout_controller.recover_failed_workers.remote())
-        with timer("sync_weight", step_timer_dict):
-            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-            ray.get(self.rollout_controller.onload_weights.remote())
-            ray.get(self.train_controller.update_weights.remote())
-            self.logger.info("Model weights synchronized successfully.")
-            ray.get(self.train_controller.offload.remote(target="model"))
+        timer_name = "sync_weight" if should_sync_weights else "switch_to_rollout"
+        with timer(timer_name, step_timer_dict):
+            if should_sync_weights:
+                bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+                ray.get(self.rollout_controller.onload_weights.remote())
+                ray.get(self.train_controller.update_weights.remote())
+                self.logger.info("Model weights synchronized successfully.")
+                ray.get(self.train_controller.offload.remote(target="model"))
+            else:
+                ray.get(self.train_controller.offload.remote(target="model"))
+                ray.get(self.rollout_controller.onload_weights.remote())
             ray.get(self.rollout_controller.onload_kvcache.remote())
+        return should_sync_weights
 
 
 class RLDisaggregatedTrainer(BaseRLTrainer):

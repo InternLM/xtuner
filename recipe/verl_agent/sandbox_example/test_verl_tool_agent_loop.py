@@ -384,7 +384,7 @@ class TestVerlToolAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
 
         # 4. 执行 produce_batch
-        results = await agent_loop_manager.produce_batch(batch_size=4)
+        results = await agent_loop_manager.produce_batch(batch_size=4, train_step=0, model_step=0)
         batch_rollout_states = results.rollout_states
         
         # 5. 验证结果

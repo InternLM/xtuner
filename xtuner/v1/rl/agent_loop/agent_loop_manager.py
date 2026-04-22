@@ -662,7 +662,13 @@ class AgentLoopManager:
         while not self._finish_event.is_set() and self._status == blocked_status:
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
 
-    async def produce_batch(self, batch_size: int, train_step: int = 0) -> ProduceBatchResult:
+    async def produce_batch(
+        self,
+        batch_size: int,
+        train_step: int,
+        *,
+        model_step: int,
+    ) -> ProduceBatchResult:
         # `produce_batch()` 是保留给 colocate 路径的同步入口。
         #
         # 它虽然名字没变，但内部已经改成三段式：
@@ -688,9 +694,8 @@ class AgentLoopManager:
             # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_ABORT，
             # produce_batch() 也应视作一次独立的同步生产过程，从干净状态开始。
             #
-            # 共卡路径下，每次 produce_batch() 都对应当前 trainer 轮次的新权重版本，
-            # 所以这里直接复用 continue_produce() 同步恢复状态并更新 model_step。
-            self.continue_produce(model_step=train_step - 1)  # TODO: 更新样本过期信息
+            # 共卡路径下，produce_batch() 对应 rollout worker 当前持有的权重版本。
+            self.continue_produce(model_step=model_step)
             # 共卡 produce_batch 也是消费入口；生产前先刷新 buffer 中已有 completed / aborted。
             await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
             local_progress = self._build_local_produce_progress(current_sizes, train_step)

@@ -73,13 +73,14 @@ class TestRLColocateTrainer(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def _make_trainer(self, agent_loop_manager):
+    def _make_trainer(self, agent_loop_manager, *, total_train_steps: int = 1, sync_weights_interval: int = 1):
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
         trainer.logger = MagicMock()
-        trainer._total_train_steps = 1
+        trainer._total_train_steps = total_train_steps
         trainer._cur_step = 0
         trainer._global_train_step = 0
         trainer.train_batch_size = 1
+        trainer._sync_weights_interval = sync_weights_interval
         trainer._debug_rollout = False
         trainer._enable_evaluate = False
         trainer._enable_initial_evaluate = False
@@ -96,7 +97,9 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._exp_tracker = MagicMock()
         trainer._display_all_workers_log = False
         trainer._save_trajectories = MagicMock()
-        trainer._sync_weights_and_save = MagicMock()
+        trainer._sync_weights_and_save = MagicMock(
+            side_effect=lambda train_step, step_timer_dict: train_step % trainer._sync_weights_interval == 0
+        )
         trainer._log_step = MagicMock()
         trainer._prepare_train_data = MagicMock(
             return_value=([{"seq_ctx": "fake"}], {"batch_size": 1, "rewards/mean": 1.0})
@@ -157,7 +160,7 @@ class TestRLColocateTrainer(unittest.TestCase):
         self.assertEqual(trainer._cur_step, 1)
 
     def test_fit_requires_non_empty_batch_from_manager(self):
-        async def _produce_empty(batch_size, train_step=0):
+        async def _produce_empty(batch_size, train_step, **kwargs):
             return ProduceBatchResult(rollout_states=[])
 
         empty_manager = SimpleNamespace(produce_batch=_produce_empty)
@@ -178,6 +181,120 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._sync_weights_and_save.assert_not_called()
         trainer._log_step.assert_not_called()
         self.assertEqual(trainer._cur_step, 0)
+
+    def test_fit_uses_sync_interval_and_passes_rollout_model_step(self):
+        produce_calls = []
+
+        async def _produce_batch(batch_size, train_step, *, model_step):
+            produce_calls.append((batch_size, train_step, model_step))
+            return ProduceBatchResult(rollout_states=[[f"sample-{train_step}"]])
+
+        trainer = self._make_trainer(
+            SimpleNamespace(produce_batch=_produce_batch),
+            total_train_steps=3,
+            sync_weights_interval=2,
+        )
+        with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+        ):
+            trainer.fit()
+
+        self.assertEqual(produce_calls, [(1, 1, 0), (1, 2, 0), (1, 3, 2)])
+        self.assertEqual(
+            [call.args[0] for call in trainer._sync_weights_and_save.call_args_list],
+            [1, 2, 3],
+        )
+        self.assertEqual(trainer._cur_step, 3)
+
+    def test_sync_weights_and_save_can_skip_weight_update_and_restore_rollout(self):
+        trainer = RLColocateTrainer.__new__(RLColocateTrainer)
+        events = []
+        trainer._sync_weights_interval = 2
+        trainer._maybe_save_checkpoint = MagicMock(side_effect=lambda step: events.append(f"save:{step}"))
+        trainer._maybe_save_hf = MagicMock(side_effect=lambda step: events.append(f"hf:{step}"))
+        trainer.train_controller = SimpleNamespace(
+            update_weights=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("update_weights"))),
+            offload=SimpleNamespace(
+                remote=MagicMock(side_effect=lambda target="all": events.append(("train_offload", target)))
+            )
+        )
+        trainer.rollout_controller = SimpleNamespace(
+            recover_failed_workers=SimpleNamespace(
+                remote=MagicMock(side_effect=lambda: events.append("recover_rollout"))
+            ),
+            onload_weights=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("onload_weights"))),
+            onload_kvcache=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("onload_kvcache"))),
+        )
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch(
+                "xtuner.v1.train.rl_trainer.bind_train_rollout",
+                side_effect=lambda train_controller, rollout_controller: events.append("bind"),
+            ),
+        ):
+            synced = trainer._sync_weights_and_save(train_step=1, step_timer_dict={})
+
+        self.assertFalse(synced)
+        self.assertEqual(
+            events,
+            [
+                ("train_offload", "optimizer"),
+                "save:1",
+                "hf:1",
+                "recover_rollout",
+                ("train_offload", "model"),
+                "onload_weights",
+                "onload_kvcache",
+            ],
+        )
+
+    def test_sync_weights_and_save_updates_weights_on_interval_step(self):
+        trainer = RLColocateTrainer.__new__(RLColocateTrainer)
+        events = []
+        trainer.logger = MagicMock()
+        trainer._sync_weights_interval = 2
+        trainer._maybe_save_checkpoint = MagicMock(side_effect=lambda step: events.append(f"save:{step}"))
+        trainer._maybe_save_hf = MagicMock(side_effect=lambda step: events.append(f"hf:{step}"))
+        trainer.train_controller = SimpleNamespace(
+            update_weights=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("update_weights"))),
+            offload=SimpleNamespace(
+                remote=MagicMock(side_effect=lambda target="all": events.append(("train_offload", target)))
+            ),
+        )
+        trainer.rollout_controller = SimpleNamespace(
+            recover_failed_workers=SimpleNamespace(
+                remote=MagicMock(side_effect=lambda: events.append("recover_rollout"))
+            ),
+            onload_weights=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("onload_weights"))),
+            onload_kvcache=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("onload_kvcache"))),
+        )
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+            patch(
+                "xtuner.v1.train.rl_trainer.bind_train_rollout",
+                side_effect=lambda train_controller, rollout_controller: events.append("bind"),
+            ),
+        ):
+            synced = trainer._sync_weights_and_save(train_step=2, step_timer_dict={})
+
+        self.assertTrue(synced)
+        self.assertEqual(
+            events,
+            [
+                ("train_offload", "optimizer"),
+                "save:2",
+                "hf:2",
+                "recover_rollout",
+                "bind",
+                "onload_weights",
+                "update_weights",
+                ("train_offload", "model"),
+                "onload_kvcache",
+            ],
+        )
 
 
 if __name__ == "__main__":

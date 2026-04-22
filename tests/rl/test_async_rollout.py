@@ -179,7 +179,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         )
         replay_buffer = manager.replay_buffer
 
-        await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=1)
+        await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=1, model_step=0)
 
         remain_completed = await replay_buffer.count(
             task_name="test_1_1", group_status=Status.COMPLETED
@@ -233,7 +233,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         manager.data_sampler.sample = instrumented_sample
 
         # --- Round 1 ---
-        await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=1)
+        await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=1, model_step=0)
 
         # After round 1: produce_batch consumed BATCH_SIZE completed items.
         # The leftover items (completed but not consumed) stay in the buffer.
@@ -255,7 +255,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
         )
         # --- Round 2: reset counter then run ---
         sampled_from_aborted = 0
-        await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=2)
+        await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=2, model_step=1)
 
         self.assertLessEqual(
             sampled_from_aborted,
@@ -371,7 +371,9 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         target_sample = None
         for train_step in range(1, 15):
             completed_groups = await manager.produce_batch(
-                batch_size=self.BATCH_SIZE, train_step=train_step
+                batch_size=self.BATCH_SIZE,
+                train_step=train_step,
+                model_step=train_step - 1,
             )
             for group in completed_groups.rollout_states:
                 for sample in group:
@@ -431,7 +433,9 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
         # EOS short-circuit completes with no LLM call → always wins the race.
         completed_groups = await manager.produce_batch(
-            batch_size=self.BATCH_SIZE, train_step=1
+            batch_size=self.BATCH_SIZE,
+            train_step=1,
+            model_step=0,
         )
         completed_groups = completed_groups.rollout_states
 
@@ -478,7 +482,9 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
         # max_tokens short-circuit completes with no LLM call → always wins the race.
         completed_groups = await manager.produce_batch(
-            batch_size=self.BATCH_SIZE, train_step=1
+            batch_size=self.BATCH_SIZE,
+            train_step=1,
+            model_step=0,
         )
         completed_groups = completed_groups.rollout_states
 
@@ -526,7 +532,9 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         target_sample = None
         for train_step in range(1, 15):
             completed_groups = await manager.produce_batch(
-                batch_size=self.BATCH_SIZE, train_step=train_step
+                batch_size=self.BATCH_SIZE,
+                train_step=train_step,
+                model_step=train_step - 1,
             )
             for group in completed_groups.rollout_states    :
                 for sample in group:
@@ -609,7 +617,11 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
         #   round1 产生 ABORTED（step=1 tokens）→ round2 续写完成并留作 COMPLETED
         #   → round3 开头刷新 completed 并标 EXPIRED（staleness=1 >= 1）
         for train_step in range(1, 5):
-            await manager.produce_batch(batch_size=self.BATCH_SIZE, train_step=train_step)
+            await manager.produce_batch(
+                batch_size=self.BATCH_SIZE,
+                train_step=train_step,
+                model_step=train_step - 1,
+            )
 
         expired_count = await replay_buffer.count(
             task_name=task_name, group_status=Status.EXPIRED
@@ -674,7 +686,9 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
             )
 
             completed_groups = await manager.produce_batch(
-                batch_size=self.BATCH_SIZE, train_step=train_step
+                batch_size=self.BATCH_SIZE,
+                train_step=train_step,
+                model_step=train_step - 1,
             )
             completed_groups = completed_groups.rollout_states
 

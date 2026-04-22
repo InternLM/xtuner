@@ -309,7 +309,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         multi_task_manager._status = AgentLoopManagerStatus.UPDATE_ABORT
         multi_task_manager._update_event.set()
 
-        result = await multi_task_manager.produce_batch(batch_size=7, train_step=3)
+        result = await multi_task_manager.produce_batch(batch_size=7, train_step=3, model_step=2)
 
         self.assertEqual(result.task_batch_sizes, {"task_a": 5, "task_b": 2, "task_c": 0})
         # sync produce_batch 在本轮入口恢复 NORMAL，收尾 pause 后保留 UPDATE_ABORT 到下一轮入口再清理。
@@ -444,7 +444,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=replay_buffer,
         )
 
-        result = await multi_task_manager.produce_batch(batch_size=2, train_step=9)
+        result = await multi_task_manager.produce_batch(batch_size=2, train_step=9, model_step=8)
 
         self.assertEqual(multi_task_manager.observed_train_step, 9)
         self.assertEqual(result.task_batch_sizes, {"task_a": 0, "task_b": 2})
@@ -478,7 +478,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             replay_buffer=replay_buffer,
         )
 
-        result = await manager.produce_batch(batch_size=2, train_step=7)
+        result = await manager.produce_batch(batch_size=2, train_step=7, model_step=6)
 
         self.assertEqual(strategy.cleanup_call_count, 1)
         self.assertEqual(len(strategy.cleanup_progresses), 1)
@@ -513,7 +513,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         with self.assertRaisesRegex(AssertionError, "must return non-empty rollout_states"):
-            await manager.produce_batch(batch_size=1, train_step=3)
+            await manager.produce_batch(batch_size=1, train_step=3, model_step=2)
 
     async def test_pause_produce_from_async_produce_loop_sets_status_and_pause_time(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
