@@ -17,7 +17,7 @@ from calculator_tool import (
     write_calculator_mcp_server,
 )
 from claudecode_agent_loop import ClaudeCodeAgentLoopConfig
-from xtuner.v1.data_proto import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.gateway import wait_for_gateway_ready
 from xtuner.v1.rl.utils import find_free_ports
 

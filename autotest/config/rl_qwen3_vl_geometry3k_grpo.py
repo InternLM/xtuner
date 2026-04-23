@@ -2,7 +2,7 @@ import os
 from copy import deepcopy
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
-from xtuner.v1.data_proto import SampleParams
+from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense8BConfig

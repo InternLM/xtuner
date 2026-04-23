@@ -55,7 +55,6 @@ def main(
         track_thread.start()
 
     trainer_cfg = Config.fromfile(config)["trainer"]
-    # trainer = RLTrainer.from_config(trainer_cfg)
     trainer = trainer_cfg.build()
     trainer.fit()
 

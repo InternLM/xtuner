@@ -4,7 +4,7 @@ from typing import Annotated, Protocol, cast, runtime_checkable
 from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict, Field
 
-from xtuner.v1.data_proto import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState
 
 
 @runtime_checkable
