@@ -272,23 +272,22 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
 
         # RLColocateTrainer initializes by offloading train workers to CPU.
         # Align with RLColocateTrainer.fit() which onloads before training.
-        ray.get(train_controller.onload.remote(target="all"))
+        train_controller.onload(target="all")
 
         # First fit and save
-        ray.get(train_controller.fit.remote(data_batches, pack_max_length=1024, rollout_idx=0))
+        train_controller.fit(data_batches, pack_max_length=1024, rollout_idx=0)
         checkpoint_path = str(work_dir / "save_test")
-        ray.get(train_controller.save.remote(checkpoint_path, no_save_optimizer=True))
+        train_controller.save(checkpoint_path, no_save_optimizer=True)
 
         # Second fit and collect metrics
-        ray.get(train_controller.onload.remote(target="all"))
-        log_infos = ray.get(train_controller.fit.remote(data_batches, pack_max_length=1024, rollout_idx=1))
+        train_controller.onload(target="all")
+        log_infos = train_controller.fit(data_batches, pack_max_length=1024, rollout_idx=1)
         efficient_attn_ratio_list = []
         for log_info in log_infos:
             efficient_attn_ratio_list.append(log_info['sft_train_metrics']['efficient_attn_ratio'])
         self.assertTrue(all([ratio > 0 for ratio in efficient_attn_ratio_list]))
 
         # Kill and rebuild
-        ray.kill(train_controller)
         del trainer
         ray.shutdown()
         # Re-init Ray with enough resources for AcceleratorResourcesConfig(num_workers=8, num_cpus_per_worker=4).
@@ -309,10 +308,10 @@ class TestRLColocateTrainerIntegration(unittest.TestCase):
             load_optimizer_states=False,
             load_optimizer_args=False
         )
-        ray.get(train_controller.resume.remote(load_checkpoint_cfg))
+        train_controller.resume(load_checkpoint_cfg)
 
-        ray.get(train_controller.onload.remote(target="all"))
-        log_infos = ray.get(train_controller.fit.remote(data_batches, pack_max_length=1024, rollout_idx=1))
+        train_controller.onload(target="all")
+        log_infos = train_controller.fit(data_batches, pack_max_length=1024, rollout_idx=1)
         new_efficient_attn_ratio_list = []
         for log_info in log_infos:
             new_efficient_attn_ratio_list.append(log_info['sft_train_metrics']['efficient_attn_ratio'])
