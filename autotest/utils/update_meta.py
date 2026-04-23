@@ -29,7 +29,7 @@ def get_latest_subdir(work_dir):
     return os.path.join(work_dir, latest)
 
 
-base_dir =  f"{sys.argv[1]}/{os.environ['GITHUB_RUN_ID']}/{sys.argv[2]}/{sys.argv[3]}"
+base_dir = f"{sys.argv[1]}/{os.environ['GITHUB_RUN_ID']}/{sys.argv[2]}/{sys.argv[3]}"
 real_dir = get_latest_subdir(base_dir)
 new_meta = {"end": 10, "exp_dir": real_dir, "checkpoint_list": [f"{real_dir}/checkpoints/ckpt-step-10"]}
 update_meta(f"{base_dir}/.xtuner", new_meta)
