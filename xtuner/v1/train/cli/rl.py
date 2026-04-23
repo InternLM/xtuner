@@ -11,6 +11,7 @@ from cyclopts.group import Group
 
 from xtuner.v1.rl.utils import register_cleanup
 from xtuner.v1.train.rl_trainer import RLTrainer
+from xtuner.v1.train.agent_rl_trainer import AgentRLTrainer
 from xtuner.v1.utils import Config
 from xtuner.v1.utils.track_rl_mem import monitor_actor_memory
 
@@ -49,14 +50,15 @@ def main(
         else:
             ray.init(num_cpus=128)
 
-    if os.getenv("XTUNER_RL_MEM_DIR"):
-        print("Start to monitor actor memory")
-        track_thread = threading.Thread(target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"),))
-        track_thread.daemon = True
-        track_thread.start()
+    # if os.getenv("XTUNER_RL_MEM_DIR"):
+    #     print("Start to monitor actor memory")
+    #     track_thread = threading.Thread(target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"),))
+    #     track_thread.daemon = True
+    #     track_thread.start()
 
     trainer_cfg = Config.fromfile(config)["trainer"]
-    trainer = RLTrainer.from_config(trainer_cfg)
+
+    trainer = AgentRLTrainer.from_config(trainer_cfg)
     trainer.fit()
 
     if dist.is_initialized():

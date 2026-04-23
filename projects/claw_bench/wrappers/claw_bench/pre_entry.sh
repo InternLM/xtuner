@@ -19,30 +19,6 @@ set -euo pipefail
 
 : "${TASK_WORKSPACE:?TASK_WORKSPACE not set}"
 
-
-# ── 0. Common deps ─────────────────────────────────────────────────────
-#
-# Any system package / python module that upstream scripts reference.
-# Add as we find them.  Each line is idempotent and quiet on success.
-
-_install_apt() {
-    # $1 = command name, $2 = apt package (defaults to $1)
-    local cmd="$1" pkg="${2:-$1}"
-    command -v "$cmd" >/dev/null 2>&1 && return 0
-    apt-get update -qq >/dev/null 2>&1 || true
-    apt-get install -y -qq --no-install-recommends "$pkg" >/dev/null 2>&1 || true
-}
-
-_install_pip() {
-    # $1 = importable module, $2 = pip package (defaults to $1)
-    local mod="$1" pkg="${2:-$1}"
-    python3 -c "import $mod" 2>/dev/null && return 0
-    pip install -q --no-input "$pkg" >/dev/null 2>&1 || true
-}
-
-
-# ── 1. Flatten upstream data dir into workspace root ───────────────────
-
 if [ -d "$TASK_WORKSPACE/environment/data" ]; then
     cp -r "$TASK_WORKSPACE/environment/data/." "$TASK_WORKSPACE/"
 fi

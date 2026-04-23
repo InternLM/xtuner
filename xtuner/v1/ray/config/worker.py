@@ -186,6 +186,13 @@ class RolloutConfig(BaseModel):
             help="Whether to enable returning routed experts for the rollout worker.",
         ),
     ] = False
+    return_routed_experts_key: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Whether to keep LMDeploy routed experts as shared-store string keys before training.",
+        ),
+    ] = False
     launch_server_method: Annotated[
         Literal["ray", "multiprocessing"],
         Parameter(
