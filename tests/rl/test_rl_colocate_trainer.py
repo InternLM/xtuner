@@ -109,20 +109,18 @@ class TestRLColocateTrainer(unittest.TestCase):
             offload=SimpleNamespace(remote=MagicMock(return_value="rollout_offloaded")),
         )
         trainer.train_controller = SimpleNamespace(
-            onload=SimpleNamespace(remote=MagicMock(return_value="train_onloaded")),
-            fit=SimpleNamespace(
-                remote=MagicMock(
-                    return_value=[
-                        {
-                            "rollout_is_metrics": {},
-                            "mismatch_metrics": {},
-                            "rollout_entropy": 0.0,
-                            "train_entropy": 0.0,
-                            "train_metrics": [],
-                            "sft_train_metrics": {},
-                        }
-                    ]
-                )
+            onload=MagicMock(return_value="train_onloaded"),
+            fit=MagicMock(
+                return_value=[
+                    {
+                        "rollout_is_metrics": {},
+                        "mismatch_metrics": {},
+                        "rollout_entropy": 0.0,
+                        "train_entropy": 0.0,
+                        "train_metrics": [],
+                        "sft_train_metrics": {},
+                    }
+                ]
             ),
         )
         return trainer
@@ -151,8 +149,8 @@ class TestRLColocateTrainer(unittest.TestCase):
             trainer.fit()
 
         trainer.rollout_controller.offload.remote.assert_called_once_with()
-        trainer.train_controller.onload.remote.assert_called_once_with(target="all")
-        trainer.train_controller.fit.remote.assert_called_once()
+        trainer.train_controller.onload.assert_called_once_with(target="all")
+        trainer.train_controller.fit.assert_called_once()
         trainer._prepare_train_data.assert_called_once()
         trainer._save_trajectories.assert_called_once()
         trainer._sync_weights_and_save.assert_called_once()
@@ -174,8 +172,8 @@ class TestRLColocateTrainer(unittest.TestCase):
                 trainer.fit()
 
         trainer.rollout_controller.offload.remote.assert_not_called()
-        trainer.train_controller.onload.remote.assert_not_called()
-        trainer.train_controller.fit.remote.assert_not_called()
+        trainer.train_controller.onload.assert_not_called()
+        trainer.train_controller.fit.assert_not_called()
         trainer._prepare_train_data.assert_not_called()
         trainer._save_trajectories.assert_not_called()
         trainer._sync_weights_and_save.assert_not_called()
@@ -214,10 +212,8 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._maybe_save_checkpoint = MagicMock(side_effect=lambda step: events.append(f"save:{step}"))
         trainer._maybe_save_hf = MagicMock(side_effect=lambda step: events.append(f"hf:{step}"))
         trainer.train_controller = SimpleNamespace(
-            update_weights=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("update_weights"))),
-            offload=SimpleNamespace(
-                remote=MagicMock(side_effect=lambda target="all": events.append(("train_offload", target)))
-            )
+            update_weights=MagicMock(side_effect=lambda: events.append("update_weights")),
+            offload=MagicMock(side_effect=lambda target="all": events.append(("train_offload", target))),
         )
         trainer.rollout_controller = SimpleNamespace(
             recover_failed_workers=SimpleNamespace(
@@ -258,10 +254,8 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer._maybe_save_checkpoint = MagicMock(side_effect=lambda step: events.append(f"save:{step}"))
         trainer._maybe_save_hf = MagicMock(side_effect=lambda step: events.append(f"hf:{step}"))
         trainer.train_controller = SimpleNamespace(
-            update_weights=SimpleNamespace(remote=MagicMock(side_effect=lambda: events.append("update_weights"))),
-            offload=SimpleNamespace(
-                remote=MagicMock(side_effect=lambda target="all": events.append(("train_offload", target)))
-            ),
+            update_weights=MagicMock(side_effect=lambda: events.append("update_weights")),
+            offload=MagicMock(side_effect=lambda target="all": events.append(("train_offload", target))),
         )
         trainer.rollout_controller = SimpleNamespace(
             recover_failed_workers=SimpleNamespace(

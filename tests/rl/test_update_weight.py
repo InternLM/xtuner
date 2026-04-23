@@ -106,11 +106,9 @@ class TestUpdateWeight(unittest.TestCase):
         )
         futures = [ worker.test_all_reduce.remote() for worker in train_workers ]
         ray.get(futures)
-        train_controller = TrainingController.remote(
+        train_controller = TrainingController(
             workers=train_workers,
         )
-        ray.get(train_controller.__ray_ready__.remote())
-
         # fixed sample params
         sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
 
@@ -126,15 +124,15 @@ class TestUpdateWeight(unittest.TestCase):
         
         # start update weight test
         info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
-        ray.get(train_controller.update_rollout_info.remote(info_dict))
+        train_controller.update_rollout_info(info_dict)
         
         # update weights
         ray.get(rollout_controller.offload.remote())
-        ray.get(train_controller.onload.remote(target="all"))
-        ray.get(train_controller.offload.remote(["optimizer"]))
+        train_controller.onload(target="all")
+        train_controller.offload("optimizer")
         ray.get(rollout_controller.onload_weights.remote())
-        ray.get(train_controller.update_weights.remote())
-        ray.get(train_controller.offload.remote(["model"]))
+        train_controller.update_weights()
+        train_controller.offload("model")
         ray.get(rollout_controller.onload_kvcache.remote())
 
         res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state)) 
