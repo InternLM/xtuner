@@ -18,6 +18,7 @@ from .misc import (
     get_eos_token,
     load_function,
     parse_query,
+    sort_rollout_state_for_deterministic,
 )
 from .ray_utils import (
     bind_train_rollout,
@@ -73,5 +74,6 @@ __all__ = [
     "get_eos_token",
     "calculate_seq_staleness",
     "chat_trace_records_to_rollout_states",
+    "sort_rollout_state_for_deterministic",
     "find_free_ports",
 ]
