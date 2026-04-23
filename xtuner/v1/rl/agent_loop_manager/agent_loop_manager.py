@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import os
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -383,16 +384,33 @@ class AgentLoopManager:
         return False
 
     async def _refresh_for_all_tasks(self, train_step: int, statuses: list[Status]) -> None:
+        XTUNER_REFRESH_STALENESS = os.environ.get("XTUNER_REFRESH_STALENESS", "1") == "1"
+        self.logger.debug(f"[AgentLoopManager][{self.name}] XTUNER_REFRESH_STALENESS={XTUNER_REFRESH_STALENESS}")
         for task in self.task_runners:
-            stale_threshold = getattr(task.produce_strategy, "stale_threshold", None)
-            if stale_threshold is None:
+            if XTUNER_REFRESH_STALENESS:
+                # TODO: 同步Colocate训练，都必须走这个分支才能保证精度正常,
+                #       但是逻辑与下面分支有何不同？ 查清原因后删除分支判断
+                stale_threshold = getattr(task.produce_strategy, "stale_threshold", 1)
+            else:
                 # 同步生产没有跨权重版本的后台样本，只有异步 strategy 需要刷新并淘汰历史样本。
-                continue
-            await self.replay_buffer.refresh_staleness(
+                stale_threshold = getattr(task.produce_strategy, "stale_threshold", None)
+                if stale_threshold is None:
+                    expired_count = await self.replay_buffer.count(
+                        task_name=task.task_name, group_status=Status.EXPIRED
+                    )
+                    self.logger.info(
+                        f"[AgentLoopManager][{self.name}] Skip Refresh staleness for task {task.task_name}: expired_count={expired_count}"
+                    )
+                    continue
+
+            expired_count = await self.replay_buffer.refresh_staleness(
                 task_name=task.task_name,
                 current_train_step=train_step,
                 stale_threshold=stale_threshold,
                 statuses=statuses,
+            )
+            self.logger.info(
+                f"[AgentLoopManager][{self.name}] Refresh staleness for task {task.task_name}: expired_count={expired_count}"
             )
 
     def _get_task_batch_sizes_for_step(self, batch_size: int, train_step: int) -> dict[str, int]:
@@ -483,6 +501,9 @@ class AgentLoopManager:
             self._ensure_target_upto(batch_size, current_future_step)
 
         if self._any_task_model_expired(current_future_step):
+            self.logger.info(
+                f"[AgentLoopManager][{self.name}] EXPIRED_BATCH: any task model expired at future_step {current_future_step}"
+            )
             return ProduceBatchStatus.EXPIRED_BATCH
 
         if len(self.task_runners) == 1:
@@ -697,7 +718,9 @@ class AgentLoopManager:
         if batch_size <= 0:
             raise ValueError(f"produce_batch expects batch_size > 0, got {batch_size}")
         start = time.perf_counter()
-        self.logger.info(f"[AgentLoopManager][{self.name}] produce_batch start batch={batch_size}")
+        self.logger.info(
+            f"[AgentLoopManager][{self.name}] Start produce_batch: train_step={train_step} model_step={model_step} batch_size={batch_size}"
+        )
         current_sizes = self._get_task_batch_sizes_for_step(batch_size, train_step)
         active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
