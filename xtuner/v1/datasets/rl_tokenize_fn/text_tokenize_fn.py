@@ -3,15 +3,16 @@ from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState
-from xtuner.v1.utils import CacheDict, get_logger
+from xtuner.v1.utils import get_logger
 
+from ..data_item import CacheItem
 from ..utils import CachableTokenizeFunction
 
 
 logger = get_logger()
 
 
-class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState | CacheDict]):
+class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState | CacheItem]):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
@@ -22,7 +23,7 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState | CacheDict]):
         self.max_length = max_length
         self.tools_schema = tools_schema if tools_schema is not None else []
 
-    def __call__(self, item: dict, **kwargs) -> RolloutState | CacheDict:
+    def __call__(self, item: dict, **kwargs) -> RolloutState | CacheItem:
         """example:
         item = {
                 "data_source": data_source,

@@ -1,9 +1,9 @@
 from typing import cast
 
 from xtuner.v1.data_proto.rl_data import RolloutState
-from xtuner.v1.utils import CacheDict
 
 from ...data_proto.rl_data import MultimodalInfo
+from ..data_item import CacheItem
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwen3VLTokenizeFunction, QwenVL3DataItem
 from ..utils import replace_image_context_and_collect_media_data
 
@@ -27,7 +27,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
         super().__init__(*args, **kwargs)
 
     # TODO: tool call
-    def __call__(self, item: dict, media_root: str = "", **kwargs) -> RolloutState | CacheDict:
+    def __call__(self, item: dict, media_root: str = "", **kwargs) -> RolloutState | CacheItem:
         extra_info = item.get("extra_info", {})
         message = item["prompt"]
 
@@ -75,6 +75,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
 
     def hash(self) -> str:
         return "RLQwen3VLTokenizeFunction"
+
 
 class RLQwen3VLTokenizeFnConfig(Qwen3VLTokenizeFnConfig):
     ignore_multimodal_info: bool = False  # eval is True
