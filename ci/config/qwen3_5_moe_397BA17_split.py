@@ -9,6 +9,8 @@ from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.qwen3_5_text_split import Qwen3_5_VLTextMoE397BA17BSplitConfig
+from xtuner.v1.module.router import GreedyRouterConfig
+from xtuner.v1.module.router.greedy import GreedyGroupedRouter
 from xtuner.v1.train import TrainerConfig
 
 
@@ -32,7 +34,6 @@ model_cfg = Qwen3_5_VLTextMoE397BA17BSplitConfig(
     hf_key_mapping={r"^model\.": "model.language_model."},
     float8_cfg=float8_cfg,
     num_hidden_layers=4,
-
 )
 ep_size = model_cfg.ep_size
 optim_cfg = AdamWConfig(lr=6e-05)
@@ -51,7 +52,7 @@ dataset_config = [
     },
 ]
 
-dataloader_config = DataloaderConfig(pack_max_length=16384)
+dataloader_config = DataloaderConfig(pack_max_length=8192)
 
 loss_cfg = CELossConfig(mode="chunk")
 
@@ -66,11 +67,11 @@ trainer = TrainerConfig(
     lr_cfg=lr_cfg,
     loss_cfg=loss_cfg,
     tokenizer_path=QWEN3_5_MOE_SPLIT_PATH,
-    global_batch_size=16,
+    global_batch_size=32,
     work_dir="/mnt/shared-storage-user/llmrazor-share/profiles/qwen3.5-35BA3/fullgraph-ep1-bf16-32k",
     seed=0,
     strict_load=False,
     total_step=1000000,
     profile_step=10,
-    intra_layer_micro_batch=2,
+    intra_layer_micro_batch=4,
 )

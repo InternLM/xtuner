@@ -116,6 +116,11 @@ class SequenceContext:
         self._shard_size = shard_size
         self.seq_idx = None
 
+        if sequence_parallel_mesh is not None:
+            self._sp_rank = sequence_parallel_mesh.get_local_rank()
+        else:
+            self._sp_rank = 0
+
         seq_lens_k = self.cu_seq_lens_k[1:] - self.cu_seq_lens_k[:-1]
         seq_lens_q = self.cu_seq_lens_q[1:] - self.cu_seq_lens_q[:-1]
 
@@ -127,6 +132,10 @@ class SequenceContext:
                 position_ids = split_for_sequence_parallel(position_ids, dim=1, sp_mesh=self.sequence_parallel_mesh)  # type: ignore
 
         self.position_ids = position_ids
+
+    @property
+    def sp_rank(self):
+        return self._sp_rank
 
     @classmethod
     def from_input_ids(
@@ -428,6 +437,7 @@ class SequenceContext:
     def set_sp_mesh(self, sp_mesh: DeviceMesh) -> Self:
         """Set the sequence parallel mesh."""
         self.sequence_parallel_mesh = sp_mesh
+        self._sp_rank = sp_mesh.get_local_rank()
         return self
 
     def copy(self, **overrides) -> Self:

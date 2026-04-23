@@ -28,9 +28,9 @@ ALPACA_PATH = os.environ["ALPACA_PATH"]
 # model_cfg = Qwen3_5_VLMoE35BA3SplitConfig(only_llm_forward=True)
 # model_cfg.text_config.ep_size = 2
 model_cfg = Qwen3_5_VLTextMoE35BA3BSplitConfig(
-    ep_size=8, dispatcher="deepep",
+    ep_size=1, dispatcher="all2all",
     hf_key_mapping={r"^model\.": "model.language_model."},
-    float8_cfg=float8_cfg,
+    # float8_cfg=float8_cfg,
 
 )
 ep_size = model_cfg.ep_size
@@ -38,7 +38,7 @@ optim_cfg = AdamWConfig(lr=6e-05)
 
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
-    torch_compile=True,
+    torch_compile=False,
     cpu_offload=False,
     ep_size=ep_size,
 )
@@ -65,11 +65,12 @@ trainer = TrainerConfig(
     lr_cfg=lr_cfg,
     loss_cfg=loss_cfg,
     tokenizer_path=QWEN3_5_MOE_SPLIT_PATH,
-    global_batch_size=16,
+    global_batch_size=4,
     work_dir="/mnt/shared-storage-user/llmrazor-share/profiles/qwen3.5-35BA3/fullgraph-ep1-bf16-32k",
     seed=0,
     strict_load=False,
     total_step=1000000,
     profile_step=10,
-    intra_layer_micro_batch=2,
+    intra_layer_micro_batch=1,
+    sp_size=2,
 )
