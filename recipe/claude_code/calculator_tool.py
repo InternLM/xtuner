@@ -5,7 +5,7 @@ import re
 import sys
 from pathlib import Path
 
-from xtuner.v1.data_proto import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.rl.judger.native import Judger
 
 

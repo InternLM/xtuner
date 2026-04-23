@@ -8,7 +8,7 @@ import torch
 
 from transformers import AutoTokenizer
 
-from xtuner.v1.data_proto import SampleParams, Status
+from xtuner.v1.data_proto.rl_data import SampleParams, Status
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
@@ -307,7 +307,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
                             response_model_steps: list[int] | None = None,
                             max_tokens: int = MAX_RESPONSE_LENGTH) -> "RolloutState":
         """Helper: build an ABORTED RolloutState with given response_ids."""
-        from xtuner.v1.data_proto import RolloutState, SampleParams, Status
+        from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
         prompt_ids = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
         state = RolloutState(
             uid=uid,
@@ -344,7 +344,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
         断言: 最终完成的 uid=9001 样本的 response_ids 以初始 4 token 为前缀，
               且长度 > 4（确实生成了新内容）。
         """
-        from xtuner.v1.data_proto import Status
+        from xtuner.v1.data_proto.rl_data import Status
         task_name = "test_2_1"
         initial_response_ids = [1000, 1001, 1002, 1003]
         injected_uid = 9001
@@ -405,7 +405,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
         断言: 返回样本的 response_ids 与注入时完全相同。
         """
-        from xtuner.v1.data_proto import Status
+        from xtuner.v1.data_proto.rl_data import Status
         from xtuner.v1.rl.rollout.worker import get_eos_token
 
         task_name = "test_2_2"
@@ -457,7 +457,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
         断言: 返回样本的 response_ids 与注入时完全相同。
         """
-        from xtuner.v1.data_proto import Status
+        from xtuner.v1.data_proto.rl_data import Status
         task_name = "test_2_3"
         max_tokens = self.MAX_TOKENS_SHORT
         initial_response_ids = list(range(1010, 1010 + max_tokens))  # len == max_tokens
@@ -507,7 +507,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
 
         按 uid 搜索目标样本，最多跑 14 轮。
         """
-        from xtuner.v1.data_proto import Status
+        from xtuner.v1.data_proto.rl_data import Status
         task_name = "test_2_4"
         max_tokens = self.MAX_TOKENS_MULTI
         injected_uid = 9004
@@ -595,7 +595,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
 
         断言: round3 结束后 buffer 中 expired > 0。
         """
-        from xtuner.v1.data_proto import Status
+        from xtuner.v1.data_proto.rl_data import Status
 
         MAX_STALENESS = 0
         task_name = "test_3_1a"
@@ -659,7 +659,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
           1. tail-batch 模式在 10 轮内被触发。
           2. 该轮返回的 COMPLETED 样本 seq_staleness == 0。
         """
-        from xtuner.v1.data_proto import Status
+        from xtuner.v1.data_proto.rl_data import Status
 
         MAX_STALENESS = 0
         TRIGGER_SIZE = self.BATCH_SIZE // 2  # = 1

@@ -2,7 +2,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from xtuner.v1.data_proto import Status
+from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, calculate_stale_threshold
 from xtuner.v1.rl.agent_loop_manager.producer import expire_group_if_needed
 
