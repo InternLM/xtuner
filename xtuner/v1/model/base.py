@@ -28,7 +28,9 @@ from torch.distributed.fsdp import (
     fully_shard,
 )
 from torch.distributed.tensor import DTensor, Placement, Replicate, Shard, distribute_tensor
-from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+from torch.distributed.tensor._utils import (
+    compute_local_shape_and_global_offset as _compute_local_shape_and_global_offset,
+)
 from torch.utils import _pytree
 from typing_extensions import NotRequired, Self, TypedDict, overload
 
@@ -58,6 +60,12 @@ logger = get_logger()
 
 DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
+
+
+def compute_local_shape_and_global_offset(*args, **kwargs):
+    "wrapper of _compute_local_shape_and_global_offset avoiding meta tensor error"
+    with torch.device(DEVICE):
+        return _compute_local_shape_and_global_offset(*args, **kwargs)
 
 
 class DataBatchInfo(TypedDict):
@@ -413,8 +421,6 @@ class BaseModel(nn.Module):
 
         if self.fsdp_config.requires_grad:
             for name, module in self.named_modules():
-                # if "ts_model" in name:
-                #     torch.distributed.breakpoint()
                 for p_name, param in module.named_parameters(recurse=False):
                     if param.requires_grad:
                         param_fp32 = torch.nn.Parameter(param.to(dtype=torch.float32))

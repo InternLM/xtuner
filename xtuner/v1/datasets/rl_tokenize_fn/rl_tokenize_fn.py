@@ -10,7 +10,10 @@ from xtuner.v1.utils import get_logger
 from ..data_item import OmniDataItem
 from ..mllm_tokenize_fn.intern_s1_vl_tokenize_fn import InternS1VLTokenizeFunction
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFunction
-from ..utils import CachableTokenizeFunction, replace_image_context_and_collect_media_data
+from ..utils import (
+    CachableTokenizeFunction,
+    replace_image_context_and_collect_media_data,
+)
 
 
 logger = get_logger()
@@ -36,6 +39,8 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
         tokenizer: PreTrainedTokenizer,
         max_length: int | None = None,
         ignore_multimodal_info: bool = False,
+        data_judger_mapping: dict | None = None,
+        system_prompt: str | None = None,
     ):
         super().__init__(tokenizer)
         self.tokenizer_fn = tokenizer_fn
@@ -43,6 +48,8 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
 
         self.img_context_id = None
         self.ignore_multimodal_info = ignore_multimodal_info
+        self.data_judger_mapping = data_judger_mapping
+        self.system_prompt = system_prompt
         self.model_name = "default"
         if self.tokenizer_fn:
             if isinstance(self.tokenizer_fn, Qwen3VLTokenizeFunction):
@@ -76,6 +83,10 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
 
         extra_info = item.get("extra_info", {})
         messages = item["prompt"]
+        if self.system_prompt:
+            if messages[0]["role"] == "system":
+                messages = messages[1:]
+            messages = [{"role": "system", "content": self.system_prompt}] + messages
         if self.tokenizer_fn is None:
             # pure text
             raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
@@ -122,6 +133,8 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             if not self.ignore_multimodal_info:
                 if "pixel_values" in data:
                     multimodal_train_info["pixel_values"] = data["pixel_values"]
+                if "image_flags" in data:
+                    multimodal_train_info["image_flags"] = data["image_flags"]  # intern-s1 or intern-vl
                 if "image_grid_thw" in data:
                     multimodal_train_info["image_grid_thw"] = data["image_grid_thw"]  # qwen3-vl
                 if "position_ids" in data:
@@ -131,6 +144,13 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             # 为了统一训练处理逻辑，额外保存 train_prompt_ids
             extra_info["train_prompt_ids"] = data["input_ids"]
 
+        data_source = item.get("data_source")
+        assert data_source is not None, "data_source is required in item"
+        extra_info["origin_data_source"] = data_source
+        if self.data_judger_mapping is not None:
+            mapped_judger_name_and_weight = self.data_judger_mapping.get(data_source)
+        else:
+            mapped_judger_name_and_weight = {data_source: 1.0}
         rl_out_data = {
             "messages": messages,
             "input_ids": prompt_token_ids,
@@ -138,7 +158,7 @@ class RLTokenizeFn(CachableTokenizeFunction[RLDatasetItem]):
             "proxy_attn_flops": float(num_tokens),  # unused for RL. for comatibility of jsonldataset
             "reward_model": item["reward_model"],
             "ability": item.get("ability", None),
-            "data_source": {item.get("data_source"): 1.0},
+            "data_source": mapped_judger_name_and_weight,
             "extra_info": extra_info,
             "multimodal_train_info": multimodal_train_info,
         }
@@ -153,6 +173,8 @@ class RLTokenizeFnConfig(BaseModel):
     tokenize_fn_cfg: BaseModel | None = None
     max_length: int | None = None
     ignore_multimodal_info: bool = False  # eval is True
+    data_judger_mapping: dict | None = None  # {data_source: (judger_name, judger_weight)}
+    system_prompt: str | None = None
 
     def build(
         self, tokenizer: PreTrainedTokenizer, tokenizer_hash: str | None = None, anno_name: str | None = None, **kwargs
@@ -170,4 +192,6 @@ class RLTokenizeFnConfig(BaseModel):
             tokenizer=tokenizer,
             max_length=self.max_length,
             ignore_multimodal_info=self.ignore_multimodal_info,
+            data_judger_mapping=self.data_judger_mapping,
+            system_prompt=self.system_prompt,
         )

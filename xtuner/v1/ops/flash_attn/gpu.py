@@ -529,8 +529,7 @@ try:
             return_softmax,
             None,
         )
-        # if out.isnan().any() or softmax_lse.isnan().any():
-        #     breakpoint()
+
         return out, softmax_lse, S_dmask, rng_state
 
     @torch.library.register_fake("flash_attn::_flash_attn_varlen_forward_v2")

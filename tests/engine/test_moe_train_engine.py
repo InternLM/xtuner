@@ -407,14 +407,12 @@ class TestMoEEngine(DeterministicDDPTestCase):
             fsdp_cfg=fsdp_cfg,
         )
         engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir, load_args=False)
-        # print(f"len(engine.optimizer.state), len(engine2.optimizer.state): {len(engine.optimizer.state)}, {len(engine2.optimizer.state)}")
         assert len(engine.optimizer.state) == len(engine2.optimizer.state)
         assert len(engine.optimizer.state) != 0
         for param_group in engine2.optimizer.param_groups:
-            # print(f"param_group['lr']: {param_group['lr']}")
             assert param_group['lr'] == lr2
             assert param_group['eps'] == eps2
-        
+
         lr3 = 1e-1
         eps3 = 1e-3
         optim_cfg3 = AdamWConfig(lr=lr3, eps=eps3)

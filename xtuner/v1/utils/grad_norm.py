@@ -69,7 +69,6 @@ def cal_total_norm(
 
 def cal_grad_norm(grads: List[DTensor], dtype=torch.float32):
     grouped_grads = group_tensors_by_device_mesh_and_placements(grads)
-    # print(f"clip_grad_norm dtype: {dtype}")
     total_norms = []
     for grads in grouped_grads.values():
         total_norm = cal_total_norm(grads, norm_type=2.0, foreach=True, dtype=dtype)

@@ -1,6 +1,6 @@
 base_path:
-    base_output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
-    base_baseline_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_baseline
+    base_output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
+    base_baseline_path: /mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_baseline
 
 default_config:
     train: 
@@ -30,12 +30,12 @@ case:
             type: sft
             parameters:
                 config: autotest/config/npu_qwen3.py
-                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 num_nodes: 1
                 envs: 
-                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - QWEN3_MOE_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
@@ -57,12 +57,12 @@ case:
             type: sft
             parameters:
                 config: autotest/config/npu_qwen3_moe_30BA3_ep8.py
-                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 num_nodes: 1
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - QWEN3_MOE_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
@@ -80,16 +80,16 @@ case:
         -
             type: sft
             pre_action:
-                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output npu-qwen3-sft-ep8 sft'
+                command: 'python ./autotest/utils/update_meta.py /mnt/hwfile/llmrazor/qa-llm-cicd/test_output npu-qwen3-sft-ep8 sft'
             parameters:
                 config: autotest/config/npu_qwen3_moe_30BA3_ep8_resume.py
-                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 num_nodes: 1
                 cpus_per_task: 80
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - QWEN3_MOE_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
@@ -109,11 +109,11 @@ case:
             type: sft
             parameters:
                 config: autotest/config/npu_qwen3_moe_30BA3_tp2.py
-                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - QWEN3_MOE_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_USE_FA3=1
                     - TORCH_NPU_USE_HCCL=1
@@ -135,13 +135,13 @@ case:
             type: sft
             parameters:
                 config: autotest/config/npu_qwen3_recompute.py
-                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
                 cpus_per_task: 256
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - QWEN3_MOE_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_ACTIVATION_OFFLOAD=1
                     - TORCH_NPU_USE_HCCL=1
@@ -163,12 +163,12 @@ case:
             type: sft
             parameters:
                 config: autotest/config/npu_qwen3_16nums.py
-                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 num_nodes: 2
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - QWEN3_MOE_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple
@@ -186,12 +186,12 @@ case:
             type: sft
             parameters:
                 config: autotest/config/npu_qwen3_sft_celoss.py
-                output_path: /mnt/hwfile/vc-intern-delivery/qa-llm-cicd/test_output
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cicd/test_output
             resource:
                 num_nodes: 1
                 envs:
-                    - QWEN3_MOE_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
-                    - ALPACA_PATH=/mnt/hwfile/vc-intern-delivery/qa-llm-cicd/xtuner_resource/datasets/alpaca
+                    - QWEN3_MOE_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - ALPACA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/alpaca
                     - XTUNER_DETERMINISTIC=true
                     - TORCH_NPU_USE_HCCL=1
                     - PIP_INDEX_URL=http://pkg.pjlab.org.cn/repository/pypi-tsinghua/simple

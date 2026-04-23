@@ -692,15 +692,6 @@ class _BackwardSync(Function):
     def backward(ctx, grad_output: torch.Tensor):
         current_stream = torch.cuda.current_stream()
 
-        # if ctx.name == "pre_dispatched":
-        #     torch.cuda.synchronize()
-        #
-        # if ctx.name == "dispatched":
-        #     torch.cuda.synchronize()
-        #
-        # if ctx.name == "pre_combined":
-        #     torch.cuda.synchronize()
-        #
         if ctx.previous_backward_event is not None:
             current_stream.wait_event(ctx.previous_backward_event)
         if ctx.finished_backward_event is not None:
@@ -710,19 +701,3 @@ class _BackwardSync(Function):
 
 
 backward_sync = _BackwardSync.apply
-
-
-# class _DebugBackward(Function):
-#     @staticmethod
-#     def forward(
-#         ctx,
-#         input_tensor: torch.Tensor,
-#         name: str
-#     ) -> torch.Tensor:
-#         ctx.name = name
-#         return input_tensor
-#
-#     @staticmethod
-#     def backward(ctx, grad_output: torch.Tensor):
-#         print(ctx.name)
-#         return grad_output, None
