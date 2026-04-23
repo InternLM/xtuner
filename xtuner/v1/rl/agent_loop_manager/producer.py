@@ -254,11 +254,11 @@ class SyncProduceStrategy(ProduceStrategy):
             )
             pending_tasks.add(task)
 
-        logger.info(f"Started {len(pending_tasks)} initial tasks for SyncProduceStrategy.")
+        logger.info(f"[SyncProduceStrategy] Started {len(pending_tasks)} initial tasks.")
 
         while self.should_continue_fn(completed_sample_count, batch_size):
             if not pending_tasks:
-                logger.warning("All tasks are done but not enough samples collected.")
+                logger.warning("[SyncProduceStrategy] All tasks are done but not enough samples collected.")
                 break
             done_tasks, pending_tasks = await asyncio.wait(
                 pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
@@ -269,7 +269,9 @@ class SyncProduceStrategy(ProduceStrategy):
                 items = task.result()
                 if self.is_valid_sample_fn(items):
                     completed_sample_count += 1
-                    logger.info(f"Collected {completed_sample_count}/{batch_size} valid samples for task {task_name}.")
+                    logger.info(
+                        f"[SyncProduceStrategy] Collected {completed_sample_count}/{batch_size} valid samples for task {task_name}."
+                    )
                 for item in items:
                     update_sample_version(item, model_step)
                 refresh_seq_staleness(items, train_step)
@@ -302,6 +304,19 @@ class AsyncProduceStrategy(ProduceStrategy):
         should_continue_fn: ShouldContinueFn,
     ):
         super().__init__(is_valid_sample_fn, should_continue_fn)
+
+        # TODO: 需要添加 tail_batch_max_tries
+        # 作用是：如果一个样本多次重试，则将它置为特殊状态 MAX_TRIES，这类样本和过期样本一起触发tail batch逻辑
+        # 这个依赖：RolloutState 添加并维护一个新的属性 num_tries，每次打断时加1，达到 max_tries 时置为 MAX_TRIES
+        # 如果 enable_partial_rollout=True，不会触发这个逻辑，所以不受此影响
+        # 如果 enable_partial_rollout=False，分两种情况：
+        # 1) staleness = 0，即不允许过期样本，此时过期触发tail batch逻辑已经cover了tail batch逻辑
+        # 2) staleness > 0，此时需要 重试tail batch逻辑，否则多次重试的样本会影响rollout 效率
+        if not enable_partial_rollout and max_staleness > 0:
+            logger.warning(
+                "max_staleness > 0, enable_partial_rollout is False, this will affect rollout efficiency because not support tail_batch_max_tries logic now"
+            )
+
         self.over_sample_threshold = over_sample_threshold
         self.enable_partial_rollout = enable_partial_rollout
         self.max_staleness = max_staleness
