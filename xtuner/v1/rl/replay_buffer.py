@@ -20,6 +20,7 @@ from xtuner.v1.rl.utils import (
     QueryNode,
     ScalarNode,
     SetNode,
+    clear_rollout_response_for_rerun,
     parse_query,
 )
 from xtuner.v1.utils import get_logger
@@ -433,12 +434,16 @@ class ReplayBuffer:
     async def put(self, items: list[RolloutState], task_name: str) -> None:
         if not items:
             return
+        status = update_group_status(items)
+        if status == Status.EXPIRED:
+            for item in items:
+                clear_rollout_response_for_rerun(item)
         storage_item = StorageItem(
             item=items,
             uid=0,
             timestamp_id=0,
             task_name=task_name,
-            status=update_group_status(items),
+            status=status,
             staleness=max(item.seq_staleness for item in items),
         )
         async with self._lock:
@@ -485,6 +490,7 @@ class ReplayBuffer:
                 if should_expire:
                     # completed / aborted 样本超过 step 级阈值时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
                     for item in record.item:
+                        clear_rollout_response_for_rerun(item)
                         item.status = Status.EXPIRED
                     status = Status.EXPIRED
                     expired_count += 1
@@ -499,7 +505,7 @@ class ReplayBuffer:
 
     async def save(self, path: str | Path) -> None:
         file_path = Path(path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.mkdir(parents=True, exist_ok=True)
         replay_buffer_path = file_path / self._SAVE_PATH
         async with self._lock:
             state = {
