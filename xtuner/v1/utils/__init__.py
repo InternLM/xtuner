@@ -1,4 +1,3 @@
-from .cache import CacheDict, CacheObj
 from .compile import maybe_compile
 from .config import Config
 from .device import get_device, get_torch_device_module
@@ -64,8 +63,6 @@ __all__ = [
     "ray_method",
     "profile_time",
     "clean_param_name",
-    "CacheDict",
-    "CacheObj",
     "set_deterministic",
     "trim_memory",
 ]
