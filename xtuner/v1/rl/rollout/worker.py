@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Union
 import httpx
 import ray
 import requests  # type: ignore[import-untyped]
-import torch
 from cyclopts import Group, Parameter
 from packaging.version import Version
 from pydantic import BaseModel, ConfigDict, PrivateAttr
@@ -573,6 +572,9 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False
 
+    def _decode_routed_experts(self, routed_experts: Any) -> Any:
+        return routed_experts
+
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         # TODO(@duanyanhui):
         # 1. support claude format input
@@ -857,13 +859,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                     )
                     routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
                     if routed_experts is not None:
-                        if isinstance(routed_experts, str):
-                            import base64
-
-                            data = base64.b64decode(routed_experts)
-                            routed_experts = ray.cloudpickle.loads(data)
-                        else:
-                            routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                        routed_experts = self._decode_routed_experts(routed_experts)
+                        if not isinstance(routed_experts, ray.ObjectRef):
                             routed_experts = ray.put(routed_experts)
 
                 # 获取 status
