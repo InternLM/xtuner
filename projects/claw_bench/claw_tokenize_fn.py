@@ -8,8 +8,8 @@ from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.rl_data import RLDatasetItem
 from xtuner.v1.utils import get_logger
 
-from xtuner.v1.utils import CachableTokenizeFunction
-from xtuner.v1.datasets.rl_tokenize_fn import RLTokenizeFn
+from xtuner.v1.datasets.utils import CachableTokenizeFunction
+from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFn
 from xtuner.v1.ray.environment.rl_task.schemas import TaskData
 
 logger = get_logger()
@@ -69,7 +69,7 @@ class RLClawTokenizeFn(RLTokenizeFn):
         
         task_data = TaskData(
             id=toml.get("id") or task_dir.name,
-            data_source=self.name,
+            data_source='claw-bench',
             ability=toml.get("domain"),
             tags=list(toml.get("tags") or []),
             instruction="instruction.md",
@@ -85,7 +85,7 @@ class RLClawTokenizeFn(RLTokenizeFn):
             "data_source": {"claw-bench": 1.0},
             "extra_info": {
                 "task_data": task_data,
-                "task_dir": item["task_dir"],
+                "task_dir": task_dir.name,
                 "pipeline": "claw_bench.pipeline.claw_pipeline",
             },
         }

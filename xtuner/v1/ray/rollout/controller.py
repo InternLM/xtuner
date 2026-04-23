@@ -231,7 +231,8 @@ class RolloutController:
 
         Returns:
             dict: A dictionary containing the engine mesh list, server URL
-                dictionary, and the rollout configuration.
+                dictionary, the rollout configuration, and the API server URL
+                (real node IP + port) for external callers.
         """
         worker_server_urls_status = {url: info.is_active for url, info in self.workers_info.items()}
         return dict(
@@ -239,6 +240,7 @@ class RolloutController:
             server_url_dict=self.worker_server_urls_map,
             rollout_config=self.config,
             worker_server_urls_status=worker_server_urls_status,
+            api_server_url=getattr(self, "api_server_url", None),
         )
 
     def init_workers(self):
@@ -447,6 +449,11 @@ class RolloutController:
         app = FastAPI()
         port = self.config.api_port if self.config.api_port else port
 
+        # Resolve the real node IP via Ray so callers outside the cluster can
+        # reach this server.  The server still binds on 0.0.0.0 to accept
+        # connections on all interfaces.
+        node_ip = ray.util.get_node_ip_address()
+
         original_port = port
         while self._is_port_in_use(host, port):
             self.logger.warning(f"Port {port} is in use, trying port {port + 1}")
@@ -454,6 +461,9 @@ class RolloutController:
 
         if original_port != port:
             self.logger.info(f"API server will use port {port} instead of the originally configured {original_port}.")
+
+        self.api_server_url = f"http://{node_ip}:{port}"
+        self.logger.info(f"API server accessible at {self.api_server_url}")
 
         from openai.types.completion_usage import CompletionUsage
 

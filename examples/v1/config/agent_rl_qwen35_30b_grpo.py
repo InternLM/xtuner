@@ -27,13 +27,16 @@ from xtuner.v1.train.trainer import LoadCheckpointConfig
 
 from projects.claw_bench.claw_tokenize_fn import RLClawTokenizeFnConfig
 
+# export RL_LLM_MODEL='xtuner-qwen35-30b'
+# bash examples/v1/scripts/run_rl.sh examples/v1/config/agent_rl_qwen35_30b_grpo.py "lmdeploy" $QWEN3P5_VL_MODEL_PATH $TRAIN_DATA_PATH
 experimental_name = 'agent_rl_qwen3.5_30b_grpo'
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
+model_name = os.environ["RL_LLM_MODEL"]
 
 # basic settings
 global_batch_size = 8
-prompt_repeat_k = 8
+prompt_repeat_k = 2
 train_optimizer_steps = 8  # mini batch steps
 max_concurrent_groups = 512
 
@@ -47,7 +50,9 @@ rollout_ep_size = 1
 enable_float8_rollout = False
 rollout_max_batch_size = 1024
 max_prefill_token_num = 1024
-enable_return_routed_experts = True
+
+enable_return_routed_experts = False
+
 enable_partial_rollout = False
 auto_resume = False
 skip_load_weights = False
@@ -71,6 +76,7 @@ resources = AcceleratorResourcesConfig(
 # 2. rollout
 rollout_config = RolloutConfig(
     env=experimental_name,
+    model_name=model_name,
     device=resources.accelerator,
     model_path=model_path,
     dtype="bfloat16",
@@ -85,7 +91,7 @@ rollout_config = RolloutConfig(
     rollout_timeout=36000,
     enable_return_routed_experts=enable_return_routed_experts,
     max_prefill_token_num=max_prefill_token_num,
-    extra_rollout_config=dict(lmdeploy_log_level="ERROR", lmdeploy_uvicorn_log_level="ERROR"),
+    extra_rollout_config=dict(lmdeploy_log_level="INFO", lmdeploy_uvicorn_log_level="INFO"),
 )
 
 # sampling params
@@ -140,12 +146,12 @@ load_checkpoint_cfg = LoadCheckpointConfig(load_optimizer_states=False, load_opt
 
 
 environment_config = dict(
-        type=InstallAgentEnvironment,
-        environment='claw-bench',
-        rollout_controller=rollout_controller,
-        preprocess_func=prepare_agent_inputs,
-        postprocess_func=convert_rollout_tractory_to_train,
-    )
+    type=InstallAgentEnvironment,
+    environment='claw-bench',
+    rollout_controller=rollout_controller,
+    preprocess_func=prepare_agent_inputs,
+    postprocess_func=convert_rollout_tractory_to_train,
+)
 
 
 # 4. dataflow and evaluator

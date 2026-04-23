@@ -3,10 +3,10 @@ import inspect
 import os
 import traceback
 from copy import deepcopy
+import importlib
 from typing import Callable, List, Self, Tuple
 
 import ray
-from lagent.utils import create_object
 from lagent.serving.sandbox.providers.gateway import GatewayProvider
 
 from xtuner.v1.data_proto.rl_data import (
@@ -38,6 +38,25 @@ def check_dead_actors():
 DEFAULT_GATEWAY = "http://env-gateway.ailab.ailab.ai"
 DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
 
+
+def _import_from_path(path: str):
+    """Import an object from a dotted path like 'pkg.mod.attr'."""
+    if not path or not isinstance(path, str):
+        raise TypeError(f"pipeline must be a non-empty str, got {type(path)}")
+    module_name, _, attr = path.rpartition(".")
+    if not module_name or not attr:
+        raise ValueError(f"Invalid import path: {path!r}. Expected 'module.attr'.")
+    module = importlib.import_module(module_name)
+    return getattr(module, attr)
+
+
+def _resolve_pipeline(pipeline_spec):
+    """Resolve pipeline spec into a Runner-like object with run_single()."""
+    obj = _import_from_path(pipeline_spec)
+    # Most configs point to a factory function (e.g., claw_pipeline()).
+    return obj() if callable(obj) else obj
+
+
 @ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))  # type: ignore[call-overload]
 class InstallAgentEnvironment(BaseEnvironment):
     def __init__(
@@ -67,12 +86,15 @@ class InstallAgentEnvironment(BaseEnvironment):
 
             # agent_inputs = self.preprocess_func(self, deepcopy(item))
             pipeline = item.data.extra_info.get("pipeline", None)
-            pipeline = eval(pipeline)
+            pipeline = _resolve_pipeline(pipeline)
 
             task_dir = item.data.extra_info.get("task_dir", None)
             data = item.data.extra_info.get("task_data", None)
-            uid = {"root_id": 0, "action_id": 0, "observation_id": 0}
-            
+            uid = {"root_id": item.uid.root_id, "action_id": item.uid.action_id, "observation_id": item.uid.observation_id}
+            get_logger().info(f"running task={task_dir} (dataset={data.id})")
+
+            # import debugpy
+            # debugpy.connect(('10.102.151.17', 5680))
             try:
                 return await pipeline.run_single(
                         task_dir, data, uid,

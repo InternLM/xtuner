@@ -247,10 +247,12 @@ class SandboxStage:
         entry = _resolve(self._entry, ctx)
         if entry:
             env = _resolve(self._env, ctx) or {}
+            print(f'running entry {entry}')
             exec_res = await exec_in(
                 client, entry, env=env,
                 timeout_sec=self.timeout, raise_on_error=True,
             )
+            print(f'entry exec_res {exec_res}')
             rc = _result_code(exec_res)
             stdout = exec_res.get("stdout") or ""
             stderr = exec_res.get("stderr") or ""
@@ -261,6 +263,8 @@ class SandboxStage:
             error=None if rc == 0 else f"return_code={rc}: {stderr[:400]}",
         )
         ctx["result"] = result
+
+        print(f'result {result}')
 
         for hook in self.post:
             await _run_hook(hook, client, ctx, phase="post")

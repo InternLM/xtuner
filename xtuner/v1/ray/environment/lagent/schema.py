@@ -18,7 +18,9 @@ from xtuner.v1.data_proto.rl_data import (
 class AgentMessage(BaseAgentMessage):
     """Extends the base AgentMessage to include RL model response
     conversion."""
-
+    
+    thinking: Optional[str] = None
+    finish_reason: Optional[str] = None
     content_ids: Optional[List[int]] = Field(default=None, repr=False)
     content_logprobs: Optional[List[float]] = Field(default=None, repr=False)
     thinking_ids: Optional[List[int]] = Field(default=None, repr=False)

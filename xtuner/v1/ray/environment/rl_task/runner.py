@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
+import json
 import os
 import sys
 import traceback
@@ -42,9 +42,9 @@ from lagent.serving.sandbox.providers.gateway import GatewayProvider  # noqa: E4
 from sandbox import SandboxStage                      # noqa: E402
 from schemas import TaskData                          # noqa: E402
 from validator import JudgerValidator                 # noqa: E402
+from xtuner.v1.utils import get_logger
 
-
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -100,11 +100,11 @@ class Runner:
                     data, uid, f"infer failed: {infer_result.error}",
                     metadata=_infer_metadata(ctx),
                 )
-
+            logger.info('infer success. start validate')
             aggregated = await self.validate.run(
                 client, ctx, provider, self.infer.sandbox.workspace_path,
             )
-
+            logger.info('validate success')
             return _mark_completed(
                 data, uid,
                 metadata=_infer_metadata(ctx),
@@ -328,7 +328,8 @@ def main() -> int:
     )
     parser.add_argument("--llm-base-url", default=None)
     parser.add_argument("--llm-api-key", default=None)
-    args = parser.parse_args(['--config', "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/projects/claw_bench/configs/calendar_solution.py"])
+    # args = parser.parse_args(['--config', "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/projects/claw_bench/configs/calendar_solution.py"])
+    args = parser.parse_args()
     if args.lagent_src == "":
         args.lagent_src = None
 
