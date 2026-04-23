@@ -897,7 +897,9 @@ class RLColocateTrainer(BaseRLTrainer):
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 共卡路径一次调用内完成 rollout 生产和 replay buffer 消费。
-                self.logger.info("start to generate rollout experience for training")
+                self.logger.info(
+                    f"[Step {train_step}] start to generate rollout experience for train step {train_step} with model step {model_step}"
+                )
                 produce_result: ProduceBatchResult = asyncio_run(
                     self.agent_loop_manager.produce_batch(
                         self.train_batch_size,
