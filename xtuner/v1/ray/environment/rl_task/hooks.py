@@ -1,4 +1,5 @@
-"""Specialized hooks — agent setup, instruction rendering, output/judger plumbing.
+"""Specialized hooks — agent setup, instruction rendering, output/judger
+plumbing.
 
 Each class here is a :class:`sandbox.Hook` subclass with a clear purpose
 you can infer from its name.  Primitive hooks (Upload/Exec/Download) cover
@@ -26,9 +27,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
 import bundle
+from pydantic import ValidationError
 from sandbox import (
     Hook,
     StageResult,
@@ -124,25 +124,32 @@ class InstallLagent(Hook):
         lagent_src = (ctx.get("runtime") or {}).get("lagent_src_dir")
         if lagent_src is not None:
             blob = await asyncio.to_thread(
-                tar_dir, Path(lagent_src) / "lagent", "lagent",
+                tar_dir,
+                Path(lagent_src) / "lagent",
+                "lagent",
             )
             await http_upload(
-                client, "/tmp/_lagent.tar.gz", base64.b64encode(blob).decode(),
+                client,
+                "/tmp/_lagent.tar.gz",
+                base64.b64encode(blob).decode(),
             )
             await exec_in(
                 client,
                 "cd /tmp && tar xzf /tmp/_lagent.tar.gz && rm /tmp/_lagent.tar.gz",
             )
             await http_upload(
-                client, "/tmp/lagent/actions/__init__.py",
+                client,
+                "/tmp/lagent/actions/__init__.py",
                 base64.b64encode(_MINIMAL_ACTIONS_INIT.encode()).decode(),
             )
             await http_upload(
-                client, "/tmp/lagent/hooks/__init__.py",
+                client,
+                "/tmp/lagent/hooks/__init__.py",
                 base64.b64encode(_MINIMAL_HOOKS_INIT.encode()).decode(),
             )
         await http_upload(
-            client, _LAGENT_PY_PATH,
+            client,
+            _LAGENT_PY_PATH,
             base64.b64encode(_LAGENT_PY_WRAPPER.encode()).decode(),
         )
         await exec_in(client, f"chmod +x {_LAGENT_PY_PATH}")
@@ -183,13 +190,13 @@ class RenderInstruction(Hook):
 
         text = src.read_text(encoding="utf-8")
         resolved = {
-            needle: bundle.rewrite_text(repl, {"$TASK_WORKSPACE": workspace})
-            for needle, repl in self.rewrites.items()
+            needle: bundle.rewrite_text(repl, {"$TASK_WORKSPACE": workspace}) for needle, repl in self.rewrites.items()
         }
         text = bundle.rewrite_text(text, resolved)
         env_for_placeholders = ctx.get("env_vars_for_instruction", {})
         text = bundle.rewrite_text(
-            text, {"{{" + k + "}}": v for k, v in env_for_placeholders.items()},
+            text,
+            {"{{" + k + "}}": v for k, v in env_for_placeholders.items()},
         )
 
         tmp = Path("/tmp") / f".rendered_{src.name}"
@@ -205,8 +212,8 @@ class RenderInstruction(Hook):
 
 
 class WriteAgentConfig(Hook):
-    """Exec the chosen agent's ``config.py`` on the host; upload the
-    resulting ``agent_config`` dict as JSON to ``dst``.
+    """Exec the chosen agent's ``config.py`` on the host; upload the resulting
+    ``agent_config`` dict as JSON to ``dst``.
 
     Agent template lives at ``ctx["agent_template_root"] / chosen.name /``
     (populated by :class:`PickAgent`).
@@ -249,9 +256,7 @@ class UploadChosenAgent(Hook):
         template_root: Path = ctx["agent_template_root"]
         src = template_root / chosen.name
         if not src.is_dir():
-            raise FileNotFoundError(
-                f"agent template {src!r} not found for chosen agent {chosen.name!r}"
-            )
+            raise FileNotFoundError(f"agent template {src!r} not found for chosen agent {chosen.name!r}")
         files: dict[str, Path] = {}
         for f in walk_files(src):
             rel = f.relative_to(src).as_posix()
@@ -279,7 +284,8 @@ class RunAgentInstallDeps(Hook):
         await exec_in(
             client,
             f'[ -f "{script}" ] && bash "{script}" || true',
-            timeout_sec=self.timeout, raise_on_error=True,
+            timeout_sec=self.timeout,
+            raise_on_error=True,
         )
 
 
@@ -328,7 +334,8 @@ class BenchEnv:
 
 
 class ParseJudgerStdout(Hook):
-    """Turn the stage's stdout into a :class:`JudgerResult` at ``ctx['judger_result']``.
+    """Turn the stage's stdout into a :class:`JudgerResult` at
+    ``ctx['judger_result']``.
 
     Accepts the two payload shapes the wrappers can emit:
       - JudgerResult-shaped dict (has ``total`` key).
@@ -360,7 +367,8 @@ def _exec_python_ns(path: Path, expected_name: str) -> Any:
 def _parse_stage_stdout(name: str, result: StageResult) -> JudgerResult:
     if result.return_code != 0:
         return JudgerResult(
-            judger_name=name, total=0.0,
+            judger_name=name,
+            total=0.0,
             error=f"return_code={result.return_code}: {result.stderr[:500]}",
         )
     stdout = result.stdout.strip()
@@ -388,13 +396,11 @@ def _parse_stage_stdout(name: str, result: StageResult) -> JudgerResult:
 
     if isinstance(payload, dict) and "total_score" in payload:
         total = float(payload.pop("total_score"))
-        criteria = {
-            k: CriterionScore(score=float(v))
-            for k, v in payload.items() if isinstance(v, (int, float))
-        }
+        criteria = {k: CriterionScore(score=float(v)) for k, v in payload.items() if isinstance(v, (int, float))}
         return JudgerResult(judger_name=name, total=total, criteria=criteria)
 
     return JudgerResult(
-        judger_name=name, total=0.0,
+        judger_name=name,
+        total=0.0,
         error=f"unrecognized payload: {json_line[:200]}",
     )
