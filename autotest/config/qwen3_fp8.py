@@ -7,10 +7,10 @@ from xtuner.v1.config import (
 )
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
+from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.train import TrainerConfig
-from xtuner.v1.float8.config import Float8Config, ScalingGranularity
 
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
@@ -21,11 +21,10 @@ float8_cfg = Float8Config(
     scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
 )
 
-moe_cfg = Qwen3MoE30BA3Config(float8_cfg=float8_cfg,ep_size=8)
+moe_cfg = Qwen3MoE30BA3Config(float8_cfg=float8_cfg, ep_size=8, compile_cfg=False)
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
-    torch_compile=False,
     cpu_offload=False,
     ep_size=moe_cfg.ep_size,
 )

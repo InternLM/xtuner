@@ -18,6 +18,7 @@ ALPACA_PATH = os.environ["ALPACA_PATH"]
 
 
 gptoss_cfg = GptOss21BA3P6Config(
+    compile_cfg=False,
     rope_scaling_cfg=RopeScalingConfig(
         type="yarn",
         beta_fast=16.0,
@@ -25,12 +26,11 @@ gptoss_cfg = GptOss21BA3P6Config(
         factor=16.0,
         original_max_position_embeddings=4096,
         truncate=True,
-    )
+    ),
 )
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
-    torch_compile=False,
     cpu_offload=False,
     ep_size=gptoss_cfg.ep_size,
 )
@@ -38,7 +38,7 @@ fsdp_cfg = FSDPConfig(
 dataset_config = [
     {
         "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template='gpt-oss', max_length=16384),
+        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template="gpt-oss", max_length=16384),
     },
 ]
 
