@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 import ray
 import requests
+import torch
 from ray.util.placement_group import placement_group_table
 
 from transformers import AutoTokenizer
@@ -175,6 +176,14 @@ class LMDeployWorker(RolloutWorker):
         response = requests.post(url, headers=headers, params=data)
         assert response.status_code == 200, response.status_code
         return response.text
+
+    def _decode_routed_experts(self, routed_experts: Any) -> Any:
+        if isinstance(routed_experts, str):
+            if self.lmdeploy_actor is None:
+                self.lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
+            assert self.lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
+            return self.lmdeploy_actor.get.remote(routed_experts)
+        return torch.tensor(routed_experts)
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         """Transform the RolloutConfig into a Namespace suitable for the
