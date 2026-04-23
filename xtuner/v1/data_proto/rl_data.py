@@ -38,6 +38,7 @@ class SampleParams(BaseModel):
     stops: list[str] = []
     stop_token_ids: list[int] = []
     skip_special_tokens: bool = True
+    sampling_seed: int | None = None
     stream: bool = False
     return_logprob: bool = True
     top_logprobs: int = 1
