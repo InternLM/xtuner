@@ -14,6 +14,7 @@ from xtuner.v1.train import ResumeConfig, TrainerConfig
 
 QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
+CACHE_DIR = os.environ["CACHE_DIR"]
 
 
 moe_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
@@ -22,19 +23,18 @@ lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
     torch_compile=True,
     cpu_offload=False,
-    tp_size=2,
 )
 
 dataset_config = [
     {
-        "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
+        "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0, cache_dir=CACHE_DIR),
         "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template='qwen3', max_length=16384),
     },
 ]
 
 dataloader_config = DataloaderConfig(pack_max_length=16384)
 
-loss_cfg = CELossConfig(mode="chunk", chunk_size=1024)
+loss_cfg = CELossConfig(mode="chunk", chunk_size=1024, loss_reduction="square")
 
 
 trainer = TrainerConfig(
@@ -42,7 +42,7 @@ trainer = TrainerConfig(
     model_cfg=moe_cfg,
     optim_cfg=optim_cfg,
     fsdp_cfg=fsdp_cfg,
-    sp_size=4,
+    sp_size=8,
     dataset_cfg=dataset_config,
     dataloader_cfg=dataloader_config,
     lr_cfg=lr_cfg,
@@ -53,6 +53,4 @@ trainer = TrainerConfig(
     work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
     resume_cfg=ResumeConfig(auto_resume=True),
-    checkpoint_interval=10,
-    checkpoint_maxkeep=2,
 )

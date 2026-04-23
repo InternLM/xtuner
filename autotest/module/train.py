@@ -84,7 +84,11 @@ class Train:
                 run_cmd(action_cmd)
 
     def post_action(config=None):
-        return True, config
+        action_info = config.get("post_action", None)
+        if action_info:
+            action_cmd = action_info.get("command", None)
+            if action_cmd:
+                run_cmd(action_cmd)
 
 
 def get_latest_subdir(work_dir):

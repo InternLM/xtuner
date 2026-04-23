@@ -45,7 +45,7 @@ class ClusterTaskExecutor:
                 gpus_per_task=resource.get("gpus_per_task", 8),
                 cpus_per_task=resource.get("cpus_per_task", 32),
                 memory_per_task=resource.get("memory_per_task", 512),
-                priority=resource.get("priority", 4),
+                priority=resource.get("priority", 9),
                 priority_preemptible=resource.get("preemptible", False),
                 num_nodes=resource.get("num_nodes", 1),
                 image=resource.get("image", None),
