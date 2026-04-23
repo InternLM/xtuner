@@ -39,7 +39,6 @@ from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
-TRAINER_RAY_GET_TIMEOUT = 5 * 3600  # 5 hour
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 

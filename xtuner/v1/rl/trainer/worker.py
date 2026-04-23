@@ -861,7 +861,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         server_url_dict: ServiceUrlMap,
         rollout_config: RolloutConfig,
         worker_server_urls_status: Dict[str, bool],
-        **kwargs,
+        api_server_url: str | None = None,
     ):
         """Update the rollout information for the training worker."""
         tp = rollout_config.tensor_parallel_size
