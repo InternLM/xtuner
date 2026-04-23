@@ -189,7 +189,7 @@ class WorkerConfig(BaseModel):
         )(TrainingWorker)
         train_workers, _ = AutoAcceleratorWorkers.from_placement_group(TrainingWorkerCls, self, placement_group)
         ray.wait([w.ready.remote() for w in train_workers])
-        return TrainingController.remote(workers=train_workers)
+        return TrainingController(workers=train_workers)
 
 
 class WorkerInputItem(TypedDict):
@@ -861,6 +861,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         server_url_dict: ServiceUrlMap,
         rollout_config: RolloutConfig,
         worker_server_urls_status: Dict[str, bool],
+        api_server_url: str | None = None,
     ):
         """Update the rollout information for the training worker."""
         tp = rollout_config.tensor_parallel_size

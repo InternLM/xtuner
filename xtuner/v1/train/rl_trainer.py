@@ -29,7 +29,7 @@ from xtuner.v1.rl.gateway.config import GatewayConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.trainer.controller import TrainingControllerProxy
+from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run, create_task
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
@@ -39,7 +39,6 @@ from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 PG_READY_TIMEOUT = 30
-TRAINER_RAY_GET_TIMEOUT = 5 * 3600  # 5 hour
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
@@ -74,12 +73,12 @@ def force_set_tokenize_workers(logger):
 
 
 def bind_train_rollout(
-    train_controller: TrainingControllerProxy,
+    train_controller: TrainingController,
     rollout_controller: RolloutControllerProxy,
 ) -> None:
     """Bind the training and rollout workers for update weights."""
     info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())  # type: ignore[attr-defined]
-    ray.get(train_controller.update_rollout_info.remote(info_dict))
+    train_controller.update_rollout_info(info_dict)
     return
 
 
@@ -256,7 +255,7 @@ class BaseRLTrainer:
     _HF_DIR = "hf"
     _SAVE_TRAIN_STATE_PATH = "train_state.json"
 
-    train_controller: TrainingControllerProxy
+    train_controller: TrainingController
     rollout_controller: RolloutControllerProxy
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
@@ -381,7 +380,7 @@ class BaseRLTrainer:
     def _resume_train_controller_and_state(self, checkpoint_path: Path | str) -> Path:
         # 子类只复用训练 worker 和 train_state 恢复，权重同步流程各自维护。
         checkpoint_path = Path(checkpoint_path)
-        ray.get(self.train_controller.resume.remote(self._load_checkpoint_cfg))
+        self.train_controller.resume(self._load_checkpoint_cfg)
 
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
         with train_state_path.open("r") as f:
@@ -406,7 +405,7 @@ class BaseRLTrainer:
 
         # 2. Save DCP checkpoint (model + optimizer)
         self.logger.info(f"Saving DCP checkpoint to {checkpoint_path}")
-        ray.get(self.train_controller.save.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer))
+        self.train_controller.save(str(checkpoint_path), self._checkpoint_no_save_optimizer)
 
         # 3. Save train state JSON
         train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
@@ -459,7 +458,7 @@ class BaseRLTrainer:
                 if Path(deleted).exists():
                     rmtree(deleted, ignore_errors=True)
             current_exp.hf_checkpoint_list = hf_list[-self._hf_max_keep :]
-        ray.get(self.train_controller.save_hf.remote(str(save_hf_path)), timeout=TRAINER_RAY_GET_TIMEOUT)
+        self.train_controller.save_hf(str(save_hf_path))
 
         # save tokenizer
         if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
@@ -499,7 +498,7 @@ class BaseRLTrainer:
             ray.get(self.rollout_controller.offload.remote())
         if onload_train_before_train:
             with timer("onload", step_timer_dict):
-                ray.get(self.train_controller.onload.remote(target="all"))
+                self.train_controller.onload(target="all")
                 self.logger.info("Training controller loaded")
 
         with timer("prepare_data", step_timer_dict):
@@ -507,12 +506,10 @@ class BaseRLTrainer:
         self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
         with timer("training", step_timer_dict):
-            workers_log_item: list[WorkerLogItem] = ray.get(
-                self.train_controller.fit.remote(
-                    data_batches,
-                    pack_max_length=self._train_worker_cfg.pack_max_length,
-                    rollout_idx=train_step,
-                )
+            workers_log_item: list[WorkerLogItem] = self.train_controller.fit(
+                data_batches,
+                pack_max_length=self._train_worker_cfg.pack_max_length,
+                rollout_idx=train_step,
             )
         return {
             "data_info": data_info,
@@ -836,7 +833,7 @@ class RLColocateTrainer(BaseRLTrainer):
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
         else:
-            ray.get(self.train_controller.offload.remote(target="all"))
+            self.train_controller.offload(target="all")
 
         if self._debug_rollout:
             self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
@@ -849,11 +846,11 @@ class RLColocateTrainer(BaseRLTrainer):
 
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
-        ray.get(self.train_controller.offload.remote(target="optimizer"))
+        self.train_controller.offload(target="optimizer")
         ray.get(self.rollout_controller.offload.remote())
         ray.get(self.rollout_controller.onload_weights.remote())
-        ray.get(self.train_controller.update_weights.remote())
-        ray.get(self.train_controller.offload.remote(target="model"))
+        self.train_controller.update_weights()
+        self.train_controller.offload(target="model")
         ray.get(self.rollout_controller.onload_kvcache.remote())
         self.logger.info("Rollout workers updated weights from train workers.")
 
@@ -921,7 +918,7 @@ class RLColocateTrainer(BaseRLTrainer):
         workers."""
         should_sync_weights = train_step % self._sync_weights_interval == 0
         with timer("save_ckpt", step_timer_dict):
-            ray.get(self.train_controller.offload.remote(target="optimizer"))
+            self.train_controller.offload(target="optimizer")
             self._maybe_save_checkpoint(train_step)
             self._maybe_save_hf(train_step)
 
@@ -931,11 +928,11 @@ class RLColocateTrainer(BaseRLTrainer):
             if should_sync_weights:
                 bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
                 ray.get(self.rollout_controller.onload_weights.remote())
-                ray.get(self.train_controller.update_weights.remote())
+                self.train_controller.update_weights()
                 self.logger.info("Model weights synchronized successfully.")
-                ray.get(self.train_controller.offload.remote(target="model"))
+                self.train_controller.offload(target="model")
             else:
-                ray.get(self.train_controller.offload.remote(target="model"))
+                self.train_controller.offload(target="model")
                 ray.get(self.rollout_controller.onload_weights.remote())
             ray.get(self.rollout_controller.onload_kvcache.remote())
         return should_sync_weights
@@ -1091,5 +1088,5 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             self.fake_update_weights()
 
     def fake_update_weights(self):
-        ray.get(self.train_controller.update_weights.remote(), timeout=TRAINER_RAY_GET_TIMEOUT)
+        self.train_controller.update_weights()
         self.logger.info("Rollout workers updated weights through fake disaggregated sync.")
