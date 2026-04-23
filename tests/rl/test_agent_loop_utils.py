@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.data_proto import RolloutState, SampleParams, Status, refresh_seq_staleness
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, refresh_seq_staleness
 from xtuner.v1.rl.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
 from xtuner.v1.rl.agent_loop.utils import PartialRolloutHandler
 

@@ -14,7 +14,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     SyncProduceStrategyConfig,
     TaskSpecConfig,
 )
-from xtuner.v1.data_proto import RolloutState, Status, SampleParams
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, SampleParams
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig

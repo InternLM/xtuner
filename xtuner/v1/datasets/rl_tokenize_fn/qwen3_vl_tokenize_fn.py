@@ -1,6 +1,6 @@
 from typing import cast
 
-from xtuner.v1.data_proto import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import CacheDict
 
 from ...data_proto.rl_data import MultimodalInfo
@@ -64,6 +64,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
             return RolloutState(
                 message=message,
                 num_tokens=data["num_tokens"],
+                proxy_attn_flops=data.get("proxy_attn_flops", float(data["num_tokens"])),
                 prompt_ids=prompt_token_ids,
                 position_ids=data["position_ids"],
                 data_source=item.get("data_source", "default"),
@@ -72,6 +73,8 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                 extra_fields=extra_info,
             )
 
+    def hash(self) -> str:
+        return "RLQwen3VLTokenizeFunction"
 
 class RLQwen3VLTokenizeFnConfig(Qwen3VLTokenizeFnConfig):
     ignore_multimodal_info: bool = False  # eval is True

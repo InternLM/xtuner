@@ -5,7 +5,7 @@ from typing import Callable, TypeAlias
 from pydantic import BaseModel, ConfigDict, Field
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState
 
 from .native import Judger, JudgerConfig
 

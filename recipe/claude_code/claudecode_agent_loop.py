@@ -10,7 +10,7 @@ from uuid import uuid4
 import httpx
 from pydantic import ConfigDict, Field
 
-from xtuner.v1.data_proto import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status
 from xtuner.v1.rl.agent_loop.agent_loop import AgentLoop, AgentLoopConfig
 from xtuner.v1.rl.judger.native import Judger
 from xtuner.v1.rl.rollout import RolloutController

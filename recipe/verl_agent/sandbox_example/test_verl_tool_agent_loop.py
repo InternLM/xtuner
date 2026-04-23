@@ -18,7 +18,7 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from recipe.verl_agent.common.agent_loop_verl_tool import VerlToolAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import AgentLoopManagerConfig, SamplerConfig, SyncProduceStrategyConfig
-from xtuner.v1.data_proto import RolloutState, Status, SampleParams
+from xtuner.v1.data_proto.rl_data import RolloutState, Status, SampleParams
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.utils import create_task

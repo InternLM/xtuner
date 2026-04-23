@@ -4,7 +4,7 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from xtuner.v1.data_proto import RolloutToolCall
+from xtuner.v1.data_proto.rl_data import RolloutToolCall
 
 from .tool_parser import (
     ParsedToolCallResult,
