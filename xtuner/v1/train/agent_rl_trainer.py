@@ -5,7 +5,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Literal, cast
-
+import requests
 import matplotlib.pyplot as plt
 import numpy as np
 import ray
@@ -16,6 +16,7 @@ from ray.actor import ActorClass
 from ray.util.placement_group import PlacementGroup
 from typing_extensions import Self
 
+from xtuner.v1.ray.config.worker import RolloutConfig
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
@@ -231,6 +232,27 @@ class AgentRLTrainer(RLTrainer):
             dataflow_cfg=dataflow_config,
             replay_buffer_config=replay_buffer_config,
         )
+
+        rollout_info = ray.get(self._rollout_env_controller.get_rollout_info.remote()) 
+        print(f'rollout_info {rollout_info}')
+        self.model_name = rollout_info["rollout_config"].model_name
+        api_server_url = rollout_info["api_server_url"]
+
+        # 写死 0.0.0.0:8000
+        url = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000/v1/models/new"
+        payload = {
+            "model_name": self.model_name,
+            "api_key": "sk-admin",
+            "api_base": api_server_url,
+        }
+        headers = {
+            "accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        print('register model success', resp.json())
+
         self._dataflow_partial_rollout_step = dataflow_config.tail_batch_candidate_steps
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
