@@ -13,7 +13,7 @@ from ray.util.placement_group import PlacementGroup
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from .parser.factory import build_reasoning_parser, build_tool_call_parser
 from .parser.reasoning_parser import ReasoningParser
@@ -181,7 +181,14 @@ class RolloutController:
         }
 
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
-        session_id = rollout_state.session_uid if rollout_state.session_uid else uuid4().int
+        if XTUNER_DETERMINISTIC:
+            sample_params = rollout_state.sample_params.model_copy(deep=True)
+            sample_params.sampling_seed = self.config.random_seed + (
+                (rollout_state.uid or 0) - (rollout_state.message_uid or 0)
+            )
+            rollout_state.sample_params = sample_params
+
+        session_id = rollout_state.session_uid if rollout_state.session_uid is not None else uuid4().int
         worker = await self.router.get_worker(session_id)
         if worker is None:
             rollout_state.status = Status.FAILED
