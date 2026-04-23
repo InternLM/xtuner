@@ -2,9 +2,8 @@ import json
 import math
 import os
 import time
-from itertools import chain
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
+from typing import Any, Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
 
 import ray
 import requests
@@ -29,7 +28,7 @@ from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import CELossConfig, LogProbConfig
 from xtuner.v1.loss.ce_loss import CELossContext
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
-from xtuner.v1.model.base import ModelItem, TransformerConfig
+from xtuner.v1.model.base import ModelItem, TransformerConfig, is_float8_weight
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
@@ -46,7 +45,6 @@ from xtuner.v1.utils import (
     monkey_unpatch_torch_reductions,
     ray_method,
 )
-from xtuner.v1.utils.load_spec import LoadEnum
 
 from ..loss_fn import kl_penalty
 from .loss import BaseRLLossConfig
@@ -878,53 +876,47 @@ class TrainingWorker(SingleAcceleratorWorker):
         dtype = torch.bfloat16
 
         bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
-        same_gen = model._get_same_hf_param(
-            model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE, bucket_size=bucket_size
-        )
-        fused_gen = model._get_fused_hf_param(
-            model._group_param_by_load_spec(LoadEnum.FUSED),
+        ep_fused_params = []
+        other_params = []
+        ep_mesh = getattr(model, "ep_mesh", None)
+        ep_group = ep_mesh.get_group() if ep_mesh is not None and ep_mesh.size() > 1 else None
+        for param, load_spec in model._load_spec_params():
+            is_ep_fused = (
+                ep_group is not None
+                and load_spec.is_fused
+                and load_spec.fused_dim is not None
+                and any(
+                    shard.dim == load_spec.fused_dim and model._is_same_process_group(shard.group, ep_group)
+                    for shard in load_spec.shards
+                )
+            )
+            if is_ep_fused:
+                ep_fused_params.append((param, load_spec))
+            else:
+                other_params.append((param, load_spec))
+
+        fused_gen = model._get_hf_param(
+            ep_fused_params,
             dtype=dtype,
             device=DEVICE,
             bucket_size=bucket_size,
-            update_weights_for_rl=True,
+            preserved_fused_shard_group=ep_group,
         )
-        shard_gen = model._get_shard_hf_param(
-            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE, bucket_size=bucket_size
+        for name_list, param_list in fused_gen:
+            state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
+            assert ep_group is not None
+            # Stream one EP rank's fused expert slice at a time. This keeps RL weight sync at the old
+            # peak-memory behavior instead of materializing the full expert tensor on every rank.
+            self._request_ep_sequential_update(state_dict, ep_group)
+            del state_dict, name_list, param_list
+
+        other_gen = model._get_hf_param(
+            other_params,
+            dtype=dtype,
+            device=DEVICE,
+            bucket_size=bucket_size,
         )
-
-        for name_list, fused_param_list in fused_gen:
-            state_dict = {name: param.detach() for name, param in zip(name_list, fused_param_list)}
-            if model.fsdp_config.ep_size > 1:
-                # When ep_size > 1, generator generates part of the fused param on each ep rank in one ep_group.
-                # We can all gather them to get full fused param but it would lead to a larger memory usage.
-                # So we broadcast the part fused param from each ep rank in ep_group sequentially,
-                # and update the part of the fused param sequentially to reduce memory usage.
-                if isinstance(model.config, BaseComposeConfig):
-                    ep_mesh: DeviceMesh = model.language_model.ep_mesh
-                else:
-                    ep_mesh: DeviceMesh = model.ep_mesh
-                ep_group = ep_mesh.get_group()
-                global_rank = dist.get_rank()
-                for src_global_rank in dist.get_process_group_ranks(ep_group):
-                    broadcast_state_dict = dict()
-                    for key, tensor in state_dict.items():
-                        obj_to_broadcast = [key, tensor.to("meta")] if global_rank == src_global_rank else [None, None]
-                        dist.broadcast_object_list(obj_to_broadcast, src=src_global_rank, group=ep_group)
-                        real_key, meta_tensor = obj_to_broadcast
-                        buffer = (
-                            state_dict[real_key]
-                            if global_rank == src_global_rank
-                            else torch.empty_like(meta_tensor, device=DEVICE)
-                        )
-                        dist.broadcast(buffer, src=src_global_rank, group=ep_group)
-                        broadcast_state_dict[real_key] = buffer
-                    self.request_update_params(broadcast_state_dict, finished=False)
-                    del broadcast_state_dict, buffer
-            else:
-                self.request_update_params(state_dict, finished=False)
-            del state_dict, name_list, fused_param_list
-
-        for name_list, param_list in chain(same_gen, shard_gen):
+        for name_list, param_list in other_gen:
             state_dict = {name: param.detach() for name, param in zip(name_list, param_list)}
             self.request_update_params(state_dict, finished=False)
             del state_dict, name_list, param_list
@@ -935,6 +927,43 @@ class TrainingWorker(SingleAcceleratorWorker):
         dist.barrier()
         DEVICE_MODULE.empty_cache()
         return
+
+    def _request_ep_sequential_update(
+        self,
+        local_state_dict: dict[str, torch.Tensor],
+        ep_group: dist.ProcessGroup,
+    ) -> None:
+        global_rank = dist.get_rank()
+        ep_ranks = dist.get_process_group_ranks(ep_group)
+        local_items = list(local_state_dict.items())
+
+        for src_global_rank in ep_ranks:
+            item_count_obj: list[int | None] = [len(local_items)] if global_rank == src_global_rank else [None]
+            dist.broadcast_object_list(item_count_obj, src=src_global_rank, group=ep_group)
+            item_count = cast(int, item_count_obj[0])
+            broadcast_state_dict: dict[str, torch.Tensor] = {}
+
+            for item_idx in range(item_count):
+                source_tensor: torch.Tensor | None = None
+                if global_rank == src_global_rank:
+                    source_key, source_tensor = local_items[item_idx]
+                    obj_to_broadcast = [source_key, tuple(source_tensor.shape), source_tensor.dtype]
+                else:
+                    obj_to_broadcast = [None, None, None]
+
+                dist.broadcast_object_list(obj_to_broadcast, src=src_global_rank, group=ep_group)
+                real_key = cast(str, obj_to_broadcast[0])
+                tensor_shape = cast(tuple[int, ...], obj_to_broadcast[1])
+                tensor_dtype = cast(torch.dtype, obj_to_broadcast[2])
+                if source_tensor is not None:
+                    buffer = source_tensor
+                else:
+                    buffer = torch.empty(tensor_shape, dtype=tensor_dtype, device=DEVICE)
+                dist.broadcast(buffer, src=src_global_rank, group=ep_group)
+                broadcast_state_dict[real_key] = buffer
+
+            if broadcast_state_dict:
+                cast(Any, self.request_update_params)(broadcast_state_dict, finished=False)
 
     def _update_weights_by_layer(self):
         """Update the model weights."""
@@ -954,11 +983,16 @@ class TrainingWorker(SingleAcceleratorWorker):
                 dtype = torch.bfloat16
 
         def get_params(tensor_list, name_list, save_dtype):
-            _tensor_list, _spec_list = list(zip(*tensor_list))
+            _tensor_list = [item[0] for item in tensor_list]
+            _spec_list = [item[1] for item in tensor_list]
+            runtime_is_float8_list = [item[2] for item in tensor_list]
             fsdp_unshard_tensor_list = model._fsdp_foreach_allgather(_tensor_list, _spec_list)
             if save_dtype == torch.float8_e4m3fn:
                 fsdp_unshard_tensor_list, name_list = model._to_float8(
-                    fsdp_unshard_tensor_list, name_list, _tensor_list, save_dtype
+                    fsdp_unshard_tensor_list,
+                    name_list,
+                    runtime_is_float8_list,
+                    save_dtype,
                 )
             return fsdp_unshard_tensor_list, name_list
 
@@ -987,6 +1021,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 else:
                     saved_list.append(f"layers.{i}.{sub_name}")
                 local_tensor = param._local_tensor if isinstance(param, DTensor) else param
+                runtime_is_float8 = is_float8_weight(local_tensor)
                 local_tensor = local_tensor.bfloat16()
                 load_spec = language_model.load_spec_mapping.get(f"layers.{i}.{sub_name}")
 
@@ -1000,7 +1035,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                 if ".gate." in name and ".mlp.gate." not in name:
                     name = name.replace(".gate.", ".mlp.gate.")
                 name_list.append(name)
-                tensor_list.append((local_tensor, load_spec))
+                tensor_list.append((local_tensor, load_spec, runtime_is_float8))
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
             state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
             self.request_update_params(state_dict)
@@ -1009,6 +1044,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if name in saved_list:
                 continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
+            runtime_is_float8 = is_float8_weight(local_tensor)
             local_tensor = local_tensor.bfloat16()
             load_spec = model.load_spec_mapping.get(name)
 
@@ -1028,7 +1064,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     name = "model.norm.weight"
                 elif name == "embed_tokens.weight":
                     name = "model.embed_tokens.weight"
-            tensor_list = [(local_tensor, load_spec)]
+            tensor_list = [(local_tensor, load_spec, runtime_is_float8)]
             name_list = [name]
             fsdp_unshard_tensor_list, name_list = get_params(tensor_list, name_list, dtype)
             state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
@@ -1040,183 +1076,6 @@ class TrainingWorker(SingleAcceleratorWorker):
         dist.barrier()
         DEVICE_MODULE.empty_cache()
         return
-
-    # def update_weights1(self):
-    #     """Update the model weights."""
-    #     self.endpoints["update_weights"] = "update_weights"
-    #     assert self.rollout_device_mesh is not None
-    #     time1 = time.time()
-
-    #     model = self._engine.model
-    #     DEVICE_MODULE.empty_cache()
-
-    #     if (model.config.float8_cfg is not None) and (model.config.float8_cfg.enable_float8):
-    #         dtype = torch.float8_e4m3fn
-    #     else:
-    #         dtype = torch.bfloat16
-
-    #     fused_params = []
-    #     for name, param in model.state_dict().items():
-    #         load_spec = model.load_spec_mapping.get(name)
-    #         if load_spec.load_enum == LoadEnum.FUSED:
-    #             fused_params.append((name, param, load_spec))
-
-    #     # TODO: decouple update_weights from the model structure
-    #     bucket_size = 1024**3
-    #     safetensor_size = 0
-    #     tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
-    #     name_list: list[str] = []
-    #     for name, param, load_spec in fused_params:
-    #         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
-    #         local_tensor = local_tensor.bfloat16()
-    #         if safetensor_size + model._get_tensor_size(param, dtype) > bucket_size:
-    #             _tensor_list, _spec_list = list(zip(*tensor_list))
-    #             fsdp_unshard_tensor_list = model._fsdp_foreach_allgather(_tensor_list, _spec_list)
-    #             if dtype == torch.float8_e4m3fn:
-    #                 fsdp_unshard_tensor_list, name_list = model._to_float8(
-    #                     fsdp_unshard_tensor_list, name_list, _tensor_list, dtype
-    #                 )
-    #             state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
-    #             self.request_update_params(state_dict)
-    #             safetensor_size = 0
-    #             tensor_list = [(local_tensor, load_spec)]
-    #             name_list = ["model." + name.replace(".experts.", ".mlp.experts.")]
-    #             continue
-    #         safetensor_size += model._get_tensor_size(param, dtype)
-    #         tensor_list.append((local_tensor, load_spec))
-    #         name_list.append("model." + name.replace(".experts.", ".mlp.experts."))
-
-    #     if tensor_list:
-    #         assert len(name_list) == len(tensor_list)
-    #         _tensor_list, _spec_list = list(zip(*tensor_list))
-    #         fsdp_unshard_tensor_list = model._fsdp_foreach_allgather(_tensor_list, _spec_list)
-    #         if dtype == torch.float8_e4m3fn:
-    #             fsdp_unshard_tensor_list, name_list = model._to_float8(
-    #                 fsdp_unshard_tensor_list, name_list, _tensor_list, dtype
-    #             )
-    #         state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
-    #         self.request_update_params(state_dict)
-
-    #     same_gen = model._get_same_hf_param(
-    #         model._group_param_by_load_spec(LoadEnum.SAME),
-    #         dtype=dtype,
-    #         device="cuda",
-    #         bucket_size=1024**3,
-    #     )
-    #     for name_list, gathered_tensor_list in tqdm.tqdm(same_gen, desc="[update dense weights]"):
-    #         state_dict = dict(zip(name_list, gathered_tensor_list))
-    #         self.request_update_params(state_dict)
-    #         del state_dict
-
-    #     self.request_update_params({}, finished=True)
-
-    #     dist.barrier()
-    #     logger.info(f"update weights time: {time.time() - time1}")
-    #     DEVICE_MODULE.empty_cache()
-    #     return
-
-    # def update_weights(self):
-    #     """Update the model weights."""
-    #     self.endpoints["update_weights"] = "update_weights"
-    #     assert self.rollout_device_mesh is not None
-
-    #     model = self._engine.model
-    #     DEVICE_MODULE.empty_cache()
-
-    #     saved_keys = []
-    #     gather_duration = []
-    #     weight_duration = []
-    #     reshard_duration = []
-
-    #     # update decoder layers
-    #     for i, layer in tqdm.tqdm(model.layers.items(), desc="[gather weight]"):
-    #         start = time.perf_counter()
-    #         layer.unshard()
-    #         layer_state_dict = {}
-
-    #         for sub_name, param in layer.named_parameters():
-    #             if "_checkpoint_wrapped_module." in sub_name:
-    #                 sub_name = sub_name.replace("_checkpoint_wrapped_module.", "")
-    #             if isinstance(param, DTensor):
-    #                 param = param.to_local()
-
-    #             if isinstance(param, WeightWithDynamicTilewiseFloat8CastTensor):
-    #                 param = param._tensor
-
-    #             if isinstance(param, Float8Tensor):
-    #                 scale_name = f"model.layers.{i}.{sub_name}_scale_inv"
-    #                 assert "fused_w1w3" in sub_name or "fused_w2" in sub_name
-    #                 # save scale_inv parameter to state_dict
-    #                 scale_tensor = param._scale
-    #                 quant_tensor = param._data
-    #                 ep_mesh = model.ep_mesh
-    #                 if ep_mesh.size() > 1:
-    #                     scale_tensor = torch.cat(dist.nn.all_gather(scale_tensor, group=ep_mesh.get_group()), dim=0)
-    #                     quant_tensor = torch.cat(dist.nn.all_gather(quant_tensor, group=ep_mesh.get_group()), dim=0)
-    #                 layer_state_dict[scale_name] = scale_tensor.detach()
-    #                 # set `param` which will be added to state_dict at the bottom of the for-block
-    #                 param = quant_tensor
-
-    #             param = param.to(DEVICE)
-    #             name = f"model.layers.{i}.{sub_name}"
-    #             saved_keys.append(name.replace("model.", ""))
-    #             if ".experts." in name and ".mlp." not in name:
-    #                 name = name.replace(".experts.", ".mlp.experts.")
-    #             if ".gate." in name and ".mlp." not in name:
-    #                 name = name.replace(".gate.", ".mlp.gate.")
-    #             layer_state_dict[name] = param.detach()
-    #         gather_duration.append(time.perf_counter() - start)
-    #         start = time.perf_counter()
-    #         self.request_update_params(layer_state_dict, finished=True)
-    #         breakpoint()
-    #         weight_duration.append(time.perf_counter() - start)
-
-    #         start = time.perf_counter()
-    #         del layer_state_dict
-    #         layer.reshard()
-    #         reshard_duration.append(time.perf_counter() - start)
-
-    #     if dist.get_rank() == 0:
-    #         logger.debug(
-    #             f"Rank 0 Gather decoder layers done, total {sum(gather_duration):.2f}s, avg "
-    #             f"{sum(gather_duration) / len(gather_duration):.2f}s"
-    #         )
-    #         logger.debug(
-    #             f"Rank 0 migrate/save decoder layers done, total {sum(weight_duration):.2f}s, avg "
-    #             f"{sum(weight_duration) / len(weight_duration):.2f}s"
-    #         )
-    #         logger.debug(
-    #             f"Rank 0 reshard decoder layers done, total {sum(reshard_duration):.2f}s, avg "
-    #             f"{sum(reshard_duration) / len(reshard_duration):.2f}s"
-    #         )
-
-    #     # update other params
-    #     model.norm.unshard()
-    #     model.lm_head.unshard()
-    #     model.embed_tokens.unshard()
-    #     others_state_dict = {}
-    #     for name, param in model.named_parameters():
-    #         if "_checkpoint_wrapped_module." in name:
-    #             continue
-    #         if name not in saved_keys:
-    #             saved_keys.append(name)
-    #             if name == "norm.weight":
-    #                 name = "model.norm.weight"
-    #             if name == "embed_tokens.weight":
-    #                 name = "model.embed_tokens.weight"
-    #             if isinstance(param, DTensor):
-    #                 param = param.to_local()
-    #             others_state_dict[name] = param.detach()
-    #     self.request_update_params(others_state_dict, finished=True)
-    #     model.norm.reshard()
-    #     model.lm_head.reshard()
-    #     model.embed_tokens.reshard()
-    #     del others_state_dict
-    #     del param
-
-    #     dist.barrier()
-    #     DEVICE_MODULE.empty_cache()
-    #     return
 
     @ray_method
     def request_update_params(self, state_dict, finished=False):
