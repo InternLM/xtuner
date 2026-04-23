@@ -12,6 +12,8 @@ from .misc import find_free_ports
 
 
 if TYPE_CHECKING:
+    from xtuner.v1.data_proto.rl_data import RolloutState
+
     from .ray_worker import AcceleratorType
 
 
@@ -99,6 +101,23 @@ def free_object_refs(refs: list[ObjectRef]) -> None:
         ray._private.internal_api.free(valid_refs, local_only=False)
     except Exception:
         ray.internal.free(valid_refs, local_only=False)
+
+
+def clear_rollout_response_for_rerun(rollout_state: "RolloutState") -> "RolloutState":
+    routed_experts = getattr(rollout_state, "routed_experts", None)
+    if isinstance(routed_experts, ObjectRef):
+        free_object_refs([routed_experts])
+    rollout_state.tokens = getattr(rollout_state, "prompt_ids", None)
+    rollout_state.response = None
+    rollout_state.response_ids = []
+    rollout_state.logprobs = []
+    rollout_state.routed_experts = None
+    rollout_state.finish_reason = None
+    rollout_state.response_mask = []
+    rollout_state.response_model_steps = []
+    rollout_state.reward = None
+    rollout_state.error_msg = None
+    return rollout_state
 
 
 def close_ray():
