@@ -20,10 +20,8 @@ def extract_value(file, center_step, metrics):
     window_steps = list(range(center_step + 1, center_step + 4))
     want = frozenset(window_steps)
     by_step = {s: {m: [] for m in metrics} for s in window_steps}
-    total_lines = 0
     with open(file, encoding="utf-8") as f:
         for line in f:
-            total_lines += 1
             obj = json.loads(line)
             s = obj.get("step")
             if s not in want:
@@ -31,11 +29,11 @@ def extract_value(file, center_step, metrics):
             row = by_step[s]
             for m in metrics:
                 row[m].append(obj[m] if m in obj else None)
-    return total_lines, window_steps, by_step
+    return window_steps, by_step
 
 
 def verify_window(path, center_step, metrics):
-    _, window_steps, by_step = extract_value(path, center_step, metrics)
+    window_steps, by_step = extract_value(path, center_step, metrics)
     missing_steps = {}
     missing_keys = []
     not_equal = {}
@@ -88,4 +86,4 @@ if __name__ == "__main__":
     tracker = os.path.join(real_dir, "logs/exp_tracking/rank0/tracker.jsonl")
     center_step = int(sys.argv[4])
     metrics = sys.argv[5].split(',')
-    assert verify_window(tracker, center_step, metrics)
+    assert verify_window(tracker, center_step, metrics), "Resume validation failed, see the printed output for details"
