@@ -67,6 +67,8 @@ class RolloutWorkerMetadata(TypedDict):
     api_server_url: Optional[str]
 
 
+# Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
+# state; passing a normal Python object would serialize a separate copy into each actor.
 class RolloutController:
     """Controller for managing and coordinating multiple RolloutWorker
     actors."""
