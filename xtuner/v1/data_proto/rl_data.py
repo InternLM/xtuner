@@ -13,7 +13,6 @@ from typing_extensions import NotRequired, TypedDict
 # ====== DataFlow 数据流 ==============
 # ====================================
 from xtuner.v1.data_proto.utils import calculate_seq_staleness
-from xtuner.v1.utils.cache import CacheObj
 from xtuner.v1.utils.logger import get_logger
 
 
@@ -82,7 +81,7 @@ class RolloutToolCall(BaseModel):
     function: RolloutFunctionCall
 
 
-class RolloutState(CacheObj, BaseModel):
+class RolloutState(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     # --- 数据 ---
