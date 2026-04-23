@@ -5,7 +5,7 @@ import aiohttp
 import requests  # type: ignore[import-untyped]
 from pydantic import ConfigDict
 
-from xtuner.v1.data_proto import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.judger.native import Judger, JudgerConfig
 from xtuner.v1.utils.type_helper import ray_method
 

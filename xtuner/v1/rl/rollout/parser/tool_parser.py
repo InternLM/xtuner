@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto import RolloutFunctionCall, RolloutState, RolloutToolCall
+from xtuner.v1.data_proto.rl_data import RolloutFunctionCall, RolloutState, RolloutToolCall
 
 
 class ParsedToolCallResult(BaseModel):

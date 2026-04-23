@@ -2,7 +2,7 @@
 from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
-from xtuner.v1.data_proto import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import CacheDict, get_logger
 
 from ..utils import CachableTokenizeFunction
@@ -71,12 +71,13 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState | CacheDict]):
             data_source=item.get("data_source", "default"),
             reward_model=item.get("reward_model", {}),
             num_tokens=num_tokens,
+            proxy_attn_flops=float(num_tokens),
             extra_fields=extra_info,
         )
         return rollout_state
 
     def hash(self) -> str:
-        raise ValueError("不应该触发这个方法, 因为 RLTokenizeFn 不需要缓存。")
+        return "RLTextTokenizeFn"
 
 
 class RLTextTokenizeFnConfig(BaseModel):

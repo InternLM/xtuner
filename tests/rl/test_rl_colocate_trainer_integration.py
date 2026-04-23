@@ -27,7 +27,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.data_proto import SampleParams
+from xtuner.v1.data_proto.rl_data import SampleParams
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from transformers import AutoTokenizer
 import torch

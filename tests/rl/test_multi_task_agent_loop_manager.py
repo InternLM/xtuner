@@ -13,7 +13,7 @@ from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     _TaskRunner,
 )
 from xtuner.v1.rl.agent_loop_manager.producer import GROUP_GENERATE_TIME_KEY, ProduceBatchStatus
-from xtuner.v1.data_proto import Status
+from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.utils import calculate_seq_staleness
 
 

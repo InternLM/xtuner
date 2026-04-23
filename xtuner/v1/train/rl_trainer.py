@@ -14,7 +14,7 @@ from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig

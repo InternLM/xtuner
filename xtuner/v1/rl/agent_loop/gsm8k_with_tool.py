@@ -5,7 +5,7 @@ from typing import cast
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto import RolloutState, SampleParams
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.rl.agent_loop import AgentLoop, AgentLoopConfig
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController

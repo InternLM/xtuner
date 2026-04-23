@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ray.actor import ActorClass, ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from xtuner.v1.data_proto import RolloutState, SampleParams
+from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.rl.judger import Judger
 from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import CPUActorLauncher, create_task
