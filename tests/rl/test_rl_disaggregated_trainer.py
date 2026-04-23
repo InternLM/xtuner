@@ -75,10 +75,10 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer._maybe_save_hf = MagicMock()
         trainer.fake_update_weights = MagicMock()
         trainer.train_controller = SimpleNamespace(
-            fit=SimpleNamespace(remote=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}])),
-            onload=SimpleNamespace(remote=MagicMock(return_value="onload")),
-            offload=SimpleNamespace(remote=MagicMock(return_value="offload")),
-            update_weights=SimpleNamespace(remote=MagicMock(return_value="update")),
+            fit=MagicMock(return_value=[{"train_metrics": [], "sft_train_metrics": {}}]),
+            onload=MagicMock(return_value="onload"),
+            offload=MagicMock(return_value="offload"),
+            update_weights=MagicMock(return_value="update"),
         )
         trainer.rollout_controller = SimpleNamespace(
             recover_failed_workers=SimpleNamespace(remote=MagicMock(return_value="recover")),
@@ -105,7 +105,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             asyncio.run(trainer._sync_weights_and_save(train_step=3, step_timer_dict={}))
 
         self.assertEqual(events, ["save:3", "hf:3", "bind", "fake_update"])
-        trainer.train_controller.offload.remote.assert_not_called()
+        trainer.train_controller.offload.assert_not_called()
 
     def test_fit_skips_train_when_batch_is_expired(self):
         manager = _FakeManager(
@@ -117,7 +117,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         asyncio.run(trainer._fit())
 
         trainer._prepare_train_data.assert_not_called()
-        trainer.train_controller.fit.remote.assert_not_called()
+        trainer.train_controller.fit.assert_not_called()
         trainer._sync_weights_and_save.assert_awaited_once()
         self.assertIn(("continue_produce", 1), manager.calls)
         self.assertIn("produce_loop_exit", manager.calls)
@@ -150,8 +150,8 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             asyncio.run(trainer._fit())
 
         trainer._prepare_train_data.assert_called_once()
-        trainer.train_controller.fit.remote.assert_called_once()
-        trainer.train_controller.onload.remote.assert_not_called()
+        trainer.train_controller.fit.assert_called_once()
+        trainer.train_controller.onload.assert_not_called()
         self.assertEqual(events, ["sync", "eval", "continue_produce"])
         self.assertTrue(manager._finish_event.is_set())
         self.assertIn("produce_loop_exit", manager.calls)
@@ -166,7 +166,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
             )
             trainer.fake_update_weights()
 
-        trainer.train_controller.update_weights.remote.assert_called_once_with()
+        trainer.train_controller.update_weights.assert_called_once_with()
         trainer.rollout_controller.onload_weights.remote.assert_not_called()
         trainer.rollout_controller.onload_kvcache.remote.assert_not_called()
 
@@ -174,7 +174,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
         trainer.logger = MagicMock()
         trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=Path(self.temp_dir.name))
-        trainer.train_controller = SimpleNamespace(resume=SimpleNamespace(remote=MagicMock(return_value="resume")))
+        trainer.train_controller = SimpleNamespace(resume=MagicMock(return_value="resume"))
         trainer.rollout_controller = SimpleNamespace()
         events: list[str] = []
 
@@ -203,7 +203,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         ):
             trainer._resume_from_checkpoint(self.temp_dir.name)
 
-        trainer.train_controller.resume.remote.assert_called_once_with(trainer._load_checkpoint_cfg)
+        trainer.train_controller.resume.assert_called_once_with(trainer._load_checkpoint_cfg)
         self.assertEqual(trainer._cur_step, 3)
         trainer.agent_loop_manager.resume.assert_called_once_with(Path(self.temp_dir.name))
         self.assertTrue(events[0].startswith("manager_resume:"))
