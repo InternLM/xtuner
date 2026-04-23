@@ -310,6 +310,7 @@ class LocalRolloutBackend:
                     "top_p": canonical_request.top_p,
                     "presence_penalty": canonical_request.metadata.get("presence_penalty"),
                     "frequency_penalty": canonical_request.metadata.get("frequency_penalty"),
+                    "sampling_seed": canonical_request.metadata.get("sampling_seed"),
                 }.items()
                 if value is not None
             },

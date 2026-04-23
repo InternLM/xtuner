@@ -32,9 +32,15 @@ from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run, create_task
+from xtuner.v1.rl.utils import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    asyncio_run,
+    create_task,
+    sort_rollout_state_for_deterministic,
+)
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
-from xtuner.v1.utils import get_logger, is_hf_model_path, set_deterministic, timer
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
@@ -496,6 +502,10 @@ class BaseRLTrainer:
             train_step=1,
             model_step=0,
         )
+        if XTUNER_DETERMINISTIC:
+            eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                eval_produce_result.rollout_states
+            )
         eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
         self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
         tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
@@ -548,6 +558,10 @@ class BaseRLTrainer:
             train_step=1,
             model_step=0,
         )
+        if XTUNER_DETERMINISTIC:
+            eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                eval_produce_result.rollout_states
+            )
         eval_batch = eval_produce_result.rollout_states
         eval_metrics = self.evaluator.run(eval_batch)
         eval_trajectory_dir = self.exp_dir / "eval_rollout"
@@ -671,7 +685,8 @@ class BaseRLTrainer:
                 seq_ctx.rollout_routed_experts = group[i].routed_experts  # n,layer*expert
 
                 data_batches.append(data_dict)
-        random.shuffle(data_batches)
+        if not XTUNER_DETERMINISTIC:
+            random.shuffle(data_batches)
 
         rewards_t = torch.tensor(rewards_list).float() if rewards_list else torch.tensor([0.0]).float()
         advantages_t = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
@@ -904,6 +919,8 @@ class RLColocateTrainer(BaseRLTrainer):
                         model_step=model_step,
                     )
                 )
+                if XTUNER_DETERMINISTIC:
+                    produce_result.rollout_states = sort_rollout_state_for_deterministic(produce_result.rollout_states)
                 train_batch = produce_result.rollout_states
                 assert train_batch, (
                     "RLColocateTrainer expects agent_loop_manager.produce_batch() to return non-empty rollout_states."
@@ -1062,6 +1079,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     produce_result = await self.agent_loop_manager.get_batch(
                         self.train_batch_size, train_step=train_step
                     )
+                    if XTUNER_DETERMINISTIC:
+                        produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                            produce_result.rollout_states
+                        )
                     need_sync = (
                         produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
                         or train_step % self._sync_weights_interval == 0
