@@ -3,6 +3,7 @@ import time
 import ray
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
+from xtuner.v1.rl.utils import clear_rollout_response_for_rerun, free_object_refs
 from xtuner.v1.utils import get_logger
 
 
@@ -26,19 +27,17 @@ class PartialRolloutHandler:
         self.max_tokens = max_tokens
 
     def preprocess(self, rollout_state: RolloutState, enable_partial_rollout: bool = False) -> RolloutState:
-        # for partial rollout
-        if not enable_partial_rollout or not rollout_state.response_ids or rollout_state.status == Status.COMPLETED:
-            return rollout_state
-
-        # If status is EXPIRED, reset tokens, sample_params and responses for fresh generation
-        if rollout_state.status == Status.EXPIRED:
-            rollout_state.tokens = rollout_state.prompt_ids
-            rollout_state.sample_params = rollout_state.sample_params.copy(update={"max_tokens": self.max_tokens})
-            rollout_state.response_ids = []
+        if rollout_state.status == Status.EXPIRED or (
+            not enable_partial_rollout and rollout_state.status == Status.ABORTED
+        ):
+            rollout_state = clear_rollout_response_for_rerun(rollout_state)
+            rollout_state.sample_params = rollout_state.sample_params.model_copy(
+                update={"max_tokens": self.max_tokens}
+            )
             rollout_state.response = ""
-            rollout_state.logprobs = []
-            rollout_state.response_mask = []
-            rollout_state.response_model_steps = []
+            rollout_state.status = Status.INIT
+
+        if not rollout_state.response_ids or rollout_state.status == Status.COMPLETED:
             return rollout_state
 
         # Set up token and length variable
@@ -103,6 +102,9 @@ class PartialRolloutHandler:
                 f"prompt={len(prompt_ids)}, response={len(response_ids)}"
             )
             rollout_state.routed_experts = ray.put(concat_routed_experts)
+            free_object_refs(
+                [ref for ref in (history_routed_experts_ref, cur_routed_experts_ref) if isinstance(ref, ray.ObjectRef)]
+            )
             end_time = time.time()
             logger.info(
                 f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"
