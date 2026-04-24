@@ -373,8 +373,9 @@ class DeepEPDispatcher(
         tokens_per_expert = torch.tensor(
             num_recv_tokens_per_expert_list,
             dtype=torch.long,
-            device=dispatched["topk_weights"].device,
+            pin_memory=True,
         )
+        tokens_per_expert = tokens_per_expert.to(dispatched["topk_weights"].device, non_blocking=True)
 
         if decoding:
             raise NotImplementedError
