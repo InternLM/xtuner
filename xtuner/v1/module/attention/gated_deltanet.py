@@ -199,7 +199,7 @@ class GatedDeltaNet(nn.Module):
             bias = bias.to_local()
 
         assert seq_ctx.sequence_parallel_mesh is not None, "sequence_parallel_mesh is required for forward_for_sp"
-        sp_rank = seq_ctx.sequence_parallel_mesh.get_local_rank()
+        sp_rank = seq_ctx.sp_rank
         sp_size = seq_ctx.sequence_parallel_mesh.size()
         if seq_ctx.seq_idx is None:
             # SP restores the full packed sequence before convolution, so seq_idx uses the global length.
