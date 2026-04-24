@@ -37,9 +37,7 @@ class Qwen3_5_VLMoE35BA3Config(Qwen3_5_BaseConfig):
 class Qwen3_5_VLMoE35BA3SplitConfig(Qwen3_5_BaseConfig):
     vision_config: Qwen3_5_VisionConfig = Qwen3_5_VisionConfig()
     projector_config: Qwen3_5_ProjectorConfig = Qwen3_5_ProjectorConfig()
-    text_config: MoEConfig = Qwen3_5_VLTextMoE35BA3BSplitConfig(
-        hf_key_mapping={r"^model\.": "model.language_model."}
-    )
+    text_config: MoEConfig = Qwen3_5_VLTextMoE35BA3BSplitConfig(hf_key_mapping={r"^model\.": "model.language_model."})
 
 
 class Qwen3_5TimeSeriesMoE35BA3Config(Qwen3_5_VLMoE35BA3Config):

@@ -54,19 +54,19 @@ class Qwen3_5_VLTextMoESplit(MoE):
             # Handle fused weights
             n_routed_experts = self.config.n_routed_experts
             if "fused_w1w3.weight" in key:
-                w1w3_keys: list[str] = []
+                mtp_w1w3_keys: list[str] = []
 
                 for i in range(n_routed_experts):
-                    w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.gate_proj.weight"))
-                    w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.up_proj.weight"))
+                    mtp_w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.gate_proj.weight"))
+                    mtp_w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.up_proj.weight"))
 
-                return [f"mtp.{key}" for key in w1w3_keys]
+                return [f"mtp.{key}" for key in mtp_w1w3_keys]
 
             elif "fused_w2.weight" in key:
-                w2_keys: list[str] = []
+                mtp_w2_keys: list[str] = []
                 for i in range(n_routed_experts):
-                    w2_keys.append(key.replace("fused_w2.weight", f"{i}.down_proj.weight"))
-                return [f"mtp.{key}" for key in w2_keys]
+                    mtp_w2_keys.append(key.replace("fused_w2.weight", f"{i}.down_proj.weight"))
+                return [f"mtp.{key}" for key in mtp_w2_keys]
             else:
                 return ["mtp." + key]
 
@@ -84,16 +84,16 @@ class Qwen3_5_VLTextMoESplit(MoE):
 
         n_routed_experts = self.config.n_routed_experts
         if "fused_w1w3.weight" in key:
-            w1w3_keys: list[str] = []
+            model_w1w3_keys: list[str] = []
             for i in range(n_routed_experts):
-                w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.gate_proj.weight"))
-                w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.up_proj.weight"))
-            return w1w3_keys
+                model_w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.gate_proj.weight"))
+                model_w1w3_keys.append(key.replace("fused_w1w3.weight", f"{i}.up_proj.weight"))
+            return model_w1w3_keys
         elif "fused_w2.weight" in key:
-            w2_keys: list[str] = []
+            model_w2_keys: list[str] = []
             for i in range(n_routed_experts):
-                w2_keys.append(key.replace("fused_w2.weight", f"{i}.down_proj.weight"))
-            return w2_keys
+                model_w2_keys.append(key.replace("fused_w2.weight", f"{i}.down_proj.weight"))
+            return model_w2_keys
 
         # MoE bias tensors are [num_experts, out_features], while BaseModel's FUSED save path
         # partitions only dim0 evenly across HF keys. Keep the fused bias naming unless that save path
