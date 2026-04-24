@@ -1,5 +1,6 @@
 from xtuner.v1.model.moe.moe import MoEConfig
 from xtuner.v1.model.moe.qwen3_5_text import Qwen3_5_VLTextMoE35BA3BConfig
+from xtuner.v1.model.moe.qwen3_5_text_split import Qwen3_5_VLTextMoE35BA3BSplitConfig
 from xtuner.v1.utils import get_logger
 
 from ..qwen3_vl.qwen3_vl_config import Qwen3VLBaseConfig, Qwen3VLProjectorConfig, Qwen3VLVisionConfig
@@ -31,3 +32,16 @@ class Qwen3_5_VLMoE35BA3Config(Qwen3_5_BaseConfig):
     vision_config: Qwen3_5_VisionConfig = Qwen3_5_VisionConfig()
     projector_config: Qwen3_5_ProjectorConfig = Qwen3_5_ProjectorConfig()
     text_config: MoEConfig = Qwen3_5_VLTextMoE35BA3BConfig()
+
+
+class Qwen3_5_VLMoE35BA3SplitConfig(Qwen3_5_BaseConfig):
+    vision_config: Qwen3_5_VisionConfig = Qwen3_5_VisionConfig()
+    projector_config: Qwen3_5_ProjectorConfig = Qwen3_5_ProjectorConfig()
+    text_config: MoEConfig = Qwen3_5_VLTextMoE35BA3BSplitConfig(
+        hf_key_mapping={r"^model\.": "model.language_model."}
+    )
+
+
+class Qwen3_5TimeSeriesMoE35BA3Config(Qwen3_5_VLMoE35BA3Config):
+    time_series_encoder_path: str | None = None
+    ts_token_id: int = 248093
