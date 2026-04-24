@@ -271,12 +271,13 @@ trainer = AgentRLTrainerConfig(
 )
 
 
-import torch.distributed as dist
+if __name__ == '__main__':
+    import torch.distributed as dist
 
-from xtuner.v1.train.agent_rl_trainer import AgentRLTrainer
+    from xtuner.v1.train.agent_rl_trainer import AgentRLTrainer
 
-trainer = AgentRLTrainer.from_config(trainer)
-trainer.fit()
+    trainer = AgentRLTrainer.from_config(trainer)
+    trainer.fit()
 
-if dist.is_initialized():
-    dist.destroy_process_group()
+    if dist.is_initialized():
+        dist.destroy_process_group()
