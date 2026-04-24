@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -40,9 +39,6 @@ from xtuner.v1.ray.environment.rl_task.sandbox import (
     walk_files,
 )
 from xtuner.v1.ray.environment.rl_task.schemas import AgentSpec, CriterionScore, JudgerResult
-
-
-logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────

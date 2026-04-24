@@ -27,7 +27,6 @@ import argparse
 import asyncio
 import concurrent.futures
 import json
-import logging
 import os
 import re
 import sys
@@ -46,9 +45,7 @@ from lagent.serving.sandbox.providers.gateway import GatewayProvider  # noqa: E4
 from xtuner.v1.ray.environment.rl_task.sandbox import SandboxStage  # noqa: E402
 from xtuner.v1.ray.environment.rl_task.schemas import TaskData  # noqa: E402
 from xtuner.v1.ray.environment.rl_task.validator import JudgerValidator  # noqa: E402
-
-
-logger = logging.getLogger(__name__)
+from xtuner.v1.utils import get_logger
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -94,23 +91,18 @@ class Runner:
         env_id: str | None = None
         tid = data.id
         try:
-            logger.info("[%s] acquiring sandbox (image=%s)", tid, self.infer.sandbox.image)
+            get_logger().info(f"[{tid}] acquiring sandbox (image={self.infer.sandbox.image})")
             t0 = time.monotonic()
             client, env_id = await _acquire_ready_sandbox(
                 provider,
                 self.infer.sandbox,
             )
-            logger.info("[%s] sandbox ready env_id=%s (%.1fs)", tid, env_id, time.monotonic() - t0)
+            get_logger().info(f"[{tid}] sandbox ready env_id={env_id} ({time.monotonic() - t0:.1f}s)")
 
-            logger.info("[%s] infer: start (%d pre-hooks)", tid, len(self.infer.pre))
+            get_logger().info(f"[{tid}] infer: start ({len(self.infer.pre)} pre-hooks)")
             t1 = time.monotonic()
             infer_result = await self.infer.run(client, ctx)
-            logger.info(
-                "[%s] infer: done rc=%d (%.1fs)",
-                tid,
-                infer_result.return_code,
-                time.monotonic() - t1,
-            )
+            get_logger().info(f"[{tid}] infer: done rc={infer_result.return_code} ({time.monotonic() - t1:.1f}s)")
             if not infer_result.ok:
                 await _dump_daemon_log(client)
                 return _mark_failed(
@@ -120,7 +112,7 @@ class Runner:
                     metadata=_infer_metadata(ctx),
                 )
 
-            logger.info("[%s] validate: start (%d judgers)", tid, len(self.validate.judgers))
+            get_logger().info(f"[{tid}] validate: start ({len(self.validate.judgers)} judgers)")
             t2 = time.monotonic()
             aggregated = await self.validate.run(
                 client,
@@ -128,12 +120,7 @@ class Runner:
                 provider,
                 self.infer.sandbox.workspace_path,
             )
-            logger.info(
-                "[%s] validate: done total=%.4f (%.1fs)",
-                tid,
-                aggregated.total,
-                time.monotonic() - t2,
-            )
+            get_logger().info(f"[{tid}] validate: done total={aggregated.total:.4f} ({time.monotonic() - t2:.1f}s)")
 
             return _mark_completed(
                 data,
@@ -142,12 +129,7 @@ class Runner:
                 judge=aggregated,
             )
         except Exception as exc:
-            logger.error(
-                "[%s] runner failed: %s\n%s",
-                tid,
-                exc,
-                traceback.format_exc(),
-            )
+            get_logger().error(f"[{tid}] runner failed: {exc}\n{traceback.format_exc()}")
             return _mark_failed(
                 data,
                 uid,
@@ -159,7 +141,7 @@ class Runner:
                 try:
                     await asyncio.to_thread(client.close)
                 except Exception as exc:
-                    logger.warning("[%s] teardown failed: %s", tid, exc)
+                    get_logger().warning(f"[{tid}] teardown failed: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -178,12 +160,9 @@ def _infer_metadata(ctx: dict[str, Any]) -> dict[str, Any]:
 async def _dump_daemon_log(client) -> None:
     try:
         data = await asyncio.to_thread(client.download_file, "/tmp/agent_daemon.log")
-        logger.error(
-            "agent daemon log tail:\n%s",
-            data.decode(errors="replace")[-4000:],
-        )
+        get_logger().error(f"agent daemon log tail:\n{data.decode(errors='replace')[-4000:]}")
     except Exception as exc:
-        logger.warning("could not download daemon log: %s", exc)
+        get_logger().warning(f"could not download daemon log: {exc}")
 
 
 _ACQUIRE_MAX_ATTEMPTS = 3
@@ -213,21 +192,18 @@ async def _acquire_ready_sandbox(provider: Any, spec: Any) -> tuple[Any, str]:
             )
         except Exception as exc:
             last_err = exc
-            logger.warning("provider.create attempt %d failed: %s", attempt, exc)
+            get_logger().warning(f"provider.create attempt {attempt} failed: {exc}")
             await asyncio.sleep(min(2**attempt, 8))
             continue
 
         if await _wait_healthy(client):
             return client, env_id
 
-        logger.warning(
-            "sandbox %s never became healthy; deleting and retrying",
-            env_id,
-        )
+        get_logger().warning(f"sandbox {env_id} never became healthy; deleting and retrying")
         try:
             await asyncio.to_thread(client.stop_heartbeat)
         except Exception as exc:
-            logger.warning("cleanup of unhealthy %s: %s", env_id, exc)
+            get_logger().warning(f"cleanup of unhealthy {env_id}: {exc}")
         last_err = RuntimeError(f"sandbox {env_id} unhealthy")
 
     raise RuntimeError(f"could not acquire a healthy sandbox after {_ACQUIRE_MAX_ATTEMPTS} attempts: {last_err}")
@@ -243,7 +219,7 @@ async def _wait_healthy(client: Any) -> bool:
             if h.get("ok"):
                 return True
         except Exception as exc:
-            logger.debug("health poll error: %s", exc)
+            get_logger().debug(f"health poll error: {exc}")
         await asyncio.sleep(_HEALTH_POLL_INTERVAL_SEC)
     return False
 
@@ -353,7 +329,7 @@ async def _run_one(
 ) -> dict[str, Any]:
     data = dataset.load_task(task_dir)
     runner: Runner = dataset.pipeline
-    logger.info("running task=%s (dataset=%s, uid=%s)", data.id, dataset.name, uid)
+    get_logger().info(f"running task={data.id} (dataset={dataset.name}, uid={uid})")
     return await runner.run_single(
         task_dir,
         data,
@@ -390,7 +366,7 @@ async def main_async(args: argparse.Namespace) -> int:
             base_dirs = base_dirs[: args.limit]
 
     if not base_dirs:
-        logger.error("no tasks to run")
+        get_logger().error("no tasks to run")
         return 1
 
     # Stress: each repeat runs the full task list again with a distinct uid
@@ -428,16 +404,9 @@ async def main_async(args: argparse.Namespace) -> int:
                 state = (result.get("env", {}).get("rollout") or {}).get("state", "?")
                 tid = (result.get("data", {}).get("extra_info") or {}).get("task_id", "?")
                 took = time.monotonic() - started
-                logger.info(
-                    "[%d/%d] %s %s took=%.1fs | elapsed=%ds eta=%ds (rate=%.1f/s)",
-                    completed,
-                    total,
-                    tid,
-                    state,
-                    took,
-                    int(elapsed),
-                    int(remaining),
-                    rate,
+                get_logger().info(
+                    f"[{completed}/{total}] {tid} {state} took={took:.1f}s | "
+                    f"elapsed={int(elapsed)}s eta={int(remaining)}s (rate={rate:.1f}/s)"
                 )
             return result
 
@@ -619,10 +588,6 @@ def main() -> int:
     if args.lagent_src == "":
         args.lagent_src = None
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
     return asyncio.run(main_async(args))
 
 
