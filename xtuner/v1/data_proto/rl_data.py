@@ -1,453 +1,304 @@
 from __future__ import annotations
 
-import copy
-from typing import TYPE_CHECKING, Any, TypeAlias
+import base64
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
+import numpy as np
 import torch
-from cyclopts import Parameter
-from pydantic import BaseModel, ConfigDict, Field
-from typing_extensions import Annotated, NotRequired, Self, TypedDict
-
-from xtuner.v1.utils import StrEnum
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from typing_extensions import NotRequired, TypedDict
 
 # ====================================
 # ====== DataFlow 数据流 ==============
 # ====================================
+from xtuner.v1.data_proto.utils import calculate_seq_staleness
 from xtuner.v1.utils.logger import get_logger
 
 
 if TYPE_CHECKING:
-    import ray
-
-    RayObjectRef = ray.ObjectRef
+    from ray import ObjectRef as RayObjectRef
 else:
     RayObjectRef: TypeAlias = Any
 
 logger = get_logger()
 
 
-class RolloutState(StrEnum):
-    """
+class SampleParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    n: int = 1
+    top_k: int = 0
+    top_p: float = 1.0
+    temperature: float = 1.0
+    repetition_penalty: float = 1.0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    min_tokens: int = 0
+    max_tokens: int = 2048
+    stops: list[str] = []
+    stop_token_ids: list[int] = []
+    skip_special_tokens: bool = True
+    sampling_seed: int | None = None
+    stream: bool = False
+    return_logprob: bool = True
+    top_logprobs: int = 1
+    return_token_ids: bool = True
+    include_stop_str_in_output: bool = True
+    no_stop_trim: bool = True
+    spaces_between_special_tokens: bool = False
+    return_routed_experts: bool = False
 
-    1. State Transitions from finish_reason and RolloutState:
-    - A new task starts as `INIT`.
-    - A successful generation (finish_reason 'stop' or 'length') becomes `COMPLETED`.
-    - A generation stopped by the dataflow (e.g., for partial rollout) becomes `ABORTED`.
-    - A generation that fails due to an inference server error becomes `FAILED`.
-    - A generation skipped due to client errors or timeout errors (e.g., invalid input) becomes `SKIPPED`.
-    - Data used for training is marked as `ARCHIVED`.
-    - Old data (rollout for morn than expiration step) in the replay buffer is marked as `EXPIRED`.
 
-    2. Dataflow Handling Based on RolloutState:
-    - `INIT`: Data is in progress; no special handling.
-    - `COMPLETED`: Data is valid for filtering, replay buffer insertion and training.
-    - `ABORTED`: Data may be partially valid; It's valid for replay buffer insertion but not for filtering and training.
-    - `FAILED`: Data is invalid; not used for filtering, replay buffer or training.
-    - `SKIPPED`: Data is invalid; not used for filtering, replay buffer or training.
-    - `ARCHIVED`: Data is stored for historical purposes; not used for training.
-    - `EXPIRED`: Data is removed from the replay buffer; not used for training.
-    """
-
+class Status(Enum):
     INIT = "init"
     COMPLETED = "completed"
     ABORTED = "aborted"
-    FAILED = "failed"
-    ARCHIVED = "archived"
     EXPIRED = "expired"
-    SKIPPED = "skipped"
-
-    @staticmethod
-    def from_str(state_str: str) -> RolloutState:
-        for state in RolloutState:
-            if state.value == state_str:
-                return state
-        raise ValueError(f"Unknown ReplayState string: {state_str}")
+    FAILED = "failed"
+    FILTERED = "filtered"
+    # 归档，这个状态还是要保留，用不用再说，用于表示这个数据已经用于一次训练了，但保留在数据库里以备查询
+    ARCHIVED = "archived"
 
 
-class RLUIDItem(BaseModel):
-    """A unique identifier for tracking data items within the dataflow.
-
-    Attributes:
-        env (str): The environment name.
-        root_id (int): The root ID for grouping related data items.
-        action_id (int): The ID for a specific action in prompt.
-        observation_id (int): The ID for a specific observation in response.
-        version (int): The version number of the data item.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    env: str = ""
-    root_id: int = -1
-    action_id: int = -1
-    observation_id: int = -1
-    version: int = 0
-
-
-class MultimodalTrainInfo(TypedDict):
-    pixel_values: NotRequired[torch.Tensor | RayObjectRef | None]  # type: ignore[valid-type]
+class MultimodalInfo(TypedDict):
+    # 使用TypedDict给出pixel_values的类型提示
+    pixel_values: NotRequired[np.ndarray | RayObjectRef | None]
     image_grid_thw: NotRequired[torch.Tensor]
-    position_ids: NotRequired[torch.Tensor | None]
 
 
-class RLDatasetItem(BaseModel):
-    """Represents the data structure output from the dataset.
+class RolloutFunctionCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-    Attributes:
-        messages (Optional[List[Dict[str, Any]]]): The message list for the prompt.
-        input_ids (Optional[List[int]]): The tokenized input IDs.
-        num_tokens (Optional[int]): The number of tokens in the input.
-        proxy_attn_flops (Optional[float]): The estimated proxy attention FLOPs for the sample. unused for RL
-        ability (Optional[str]): The ability or category of the data.
-        reward_model (Optional[Dict[str, Any]]): Data required by the reward model, like ground truth.
-        data_source (Optional[Dict[str, Any]]): The source of the data, used for weighting rewards.
-        extra_info (Dict[str, Any]): Additional user-defined information.
-    """
+    name: str
+    arguments: Any = Field(default_factory=dict)
+    raw_arguments_text: str | None = None
 
+
+class RolloutToolCall(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: Literal["function"] = "function"
+    function: RolloutFunctionCall
+
+
+class RolloutState(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
-    messages: list[dict[str, Any]] | None = None
-    input_ids: list[int] | None = None
+
+    # --- 数据 ---
+    message_uid: int | None = None  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
+    message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
+    prompt_ids: list[int] | None = None  # 原始 prompt的token ids
     num_tokens: int | None = None
     proxy_attn_flops: float | None = None
-    ability: str | None = None
+    data_source: dict[str, Any] | str | None = None
+    mm_info: MultimodalInfo | None = None
     reward_model: dict[str, Any] | None = None
-    data_source: dict[str, Any] | None = None
-    extra_info: dict[str, Any] = dict()
-    multimodal_train_info: MultimodalTrainInfo | None = None
 
+    # --- InferEngine 输入 ---
+    session_uid: int | None = None
+    tokens: list[int] | None = None  # 每一次推理引擎的实际输入
+    tools: list | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    sample_params: SampleParams = SampleParams()
 
-class RolloutExtraInfo(TypedDict):
-    routed_experts: NotRequired[list[int] | RayObjectRef]  # type: ignore[valid-type]
-    partial_rollout_input_ids: NotRequired[list[int]]
-
-
-class RLRolloutResponseItem(BaseModel):
-    """Represents the data structure output from the rollout process.
-
-    Attributes:
-        response (Optional[str]): The generated text response from the model.
-        response_ids (Optional[List[int]]): The token IDs of the generated response.
-        num_return_tokens (Optional[int]): The number of tokens in the response.
-        finish_reason (Optional[str]): The reason why the generation finished (e.g., 'stop', 'length').
-        logprobs (Optional[List[float]]): The log probabilities of the generated tokens.
-        extra_info (Dict[str, Any]): Additional user-defined information.
-    """
-
-    model_config = ConfigDict(extra="forbid")
+    # --- InferEngine 输出 ---
+    # 每一次推理引擎的实际输出, 在rollout worker中被覆盖写
     response: str | None = None
+    tool_calls: list[RolloutToolCall] | None = None
     response_ids: list[int] | None = None
     logprobs: list[float] | None = None
-    num_return_tokens: int | None = None
-    versioned_response: list[str] = Field(default_factory=list)
-    versioned_response_ids: list[list[int]] = Field(default_factory=list)
-    versioned_logprobs: list[list[float]] = Field(default_factory=list)
-    versioned_num_return_tokens: list[int] = Field(default_factory=list)
-    finish_reason: str | None = None  # "stop", "length", "abort", "failed", "skipped"
-    extra_info: RolloutExtraInfo = Field(default_factory=dict)
-    state: RolloutState = RolloutState.INIT
+    routed_experts: list[int] | RayObjectRef | None = None
+    finish_reason: str | None = None
+    # response_mask: 记录response_ids中哪个token算loss, 与response_ids长度相同，每轮rollout在 agent_loop.generate 中覆盖写
+    response_mask: list[int] | None = None
+    # response_model_steps：记录 response_ids 中每个 token 来自哪个 model_step，与 response_ids 长度相同。
+    response_model_steps: list[int] | None = None
+    # 记录该样本过期程度，即最早生成 token 的模型版本与当前训练步数的差值，数值越大表示越过期。
+    seq_staleness: int = 0
 
-    def _update_by_append(self, other: Self) -> None:
-        other_ids_copy = copy.deepcopy(other.response_ids)
-        other_logprobs_copy = copy.deepcopy(other.logprobs)
-        other_response_copy = copy.deepcopy(other.response)
-        if other_response_copy is not None:
-            assert self.response is not None, "response must not be None when updating partial data."
-            self.response += other_response_copy
-            self.versioned_response.append(other_response_copy)
+    #  --- Judger 输出 ---
+    reward: dict[str, Any] | None = None
 
-        if other_ids_copy is not None:
-            assert self.response_ids is not None, "response_ids must not be None when updating partial data."
-            self.response_ids.extend(other_ids_copy.copy())
-            self.versioned_response_ids.append(other_ids_copy)
-            self.versioned_num_return_tokens.append(len(other_ids_copy))
-
-        if other_logprobs_copy is not None:
-            assert self.logprobs is not None, "logprobs must not be None when updating partial data."
-            self.logprobs.extend(other_logprobs_copy.copy())
-            self.versioned_logprobs.append(other_logprobs_copy)
-
-        self.num_return_tokens = len(self.response_ids) if self.response_ids is not None else 0
-        self.finish_reason = other.finish_reason
-        self.extra_info.update(other.extra_info)
-        self.state = other.state
-        return
-
-    def update(self, other: Self) -> None:
-        """Updates this RLRolloutResponseItem with data from another one.
-
-        If partial_rollout is True, concat other response to this RLRolloutResponseItem's response.
-        """
-        if not isinstance(other, RLRolloutResponseItem):
-            raise TypeError("Can only update with another RLRolloutResponseItem instance.")
-
-        if other.response_ids is None and other.logprobs is None and other.response is None:
-            self.finish_reason = other.finish_reason
-            self.state = other.state
-            self.extra_info.update(other.extra_info)
-            return
-
-        if self.response_ids is None:
-            assert self.response is None and self.logprobs is None, (
-                "Inconsistent state: if response_ids is None, response and logprobs must also be None."
-            )
-            self.response = ""
-            self.response_ids = []
-            self.logprobs = []
-            self.num_return_tokens = 0
-        else:
-            assert self.response is not None and self.logprobs is not None, (
-                "Inconsistent state: if response_ids is not None, response and logprobs must also be not None."
-            )
-
-        self._update_by_append(other)
-
-
-class RLJudgerResponseItem(BaseModel):
-    """Represents the data structure output from the judger.
-
-    Attributes:
-        uid (Optional[int]): A unique ID to identify which input the result corresponds to.
-        reward (Dict[str, Any]): A dictionary of reward scores, e.g., {"score": score}.
-        extra_info (Dict[str, Any]): Additional user-defined information.
-    """
-
-    model_config = ConfigDict(extra="forbid")
+    #  --- 状态 ---
     uid: int | None = None
-    reward: dict[str, Any] = Field(default_factory=lambda: {"score": 0.0, "val": 0.0})
-    extra_info: dict[str, Any] = dict()
+    task_name: str | None = None
+    status: Status = Status.INIT
+    error_msg: str | None = None
+    position_ids: torch.Tensor | None = None
+    extra_fields: dict[str, Any] = {}
+
+    @field_serializer("routed_experts")
+    def _serialize_routed_experts(self, value: list[int] | RayObjectRef | None) -> list[int] | str | None:
+        """序列化 routed_experts 字段：
+
+        - None -> None
+        - list[int] -> list[int]（原样保留）
+        - RayObjectRef -> base64 编码的字符串（通过 ray.cloudpickle 序列化）
+        """
+        import ray
+
+        if value is None:
+            return None
+        if isinstance(value, ray.ObjectRef):
+            data = ray.cloudpickle.dumps(value)
+            return base64.b64encode(data).decode("utf-8")
+        return value
+
+    @field_validator("routed_experts", mode="before")
+    @classmethod
+    def _deserialize_routed_experts(cls, value: Any) -> list[int] | RayObjectRef | None:
+        """反序列化 routed_experts 字段：
+
+        - None -> None
+        - list[int] -> list[int]（原样保留）
+        - str（base64 编码）-> RayObjectRef（通过 ray.cloudpickle 反序列化）
+        - RayObjectRef -> RayObjectRef（原样保留）
+        """
+        import ray
+
+        if value is None:
+            return None
+        if isinstance(value, ray.ObjectRef):
+            return value
+        if isinstance(value, str):
+            data = base64.b64decode(value)
+            return ray.cloudpickle.loads(data)
+        if isinstance(value, list):
+            return value
+        return value
+
+    @field_serializer("mm_info")
+    def _serialize_mm_info(self, value: MultimodalInfo | None) -> MultimodalInfo | None:
+        # TODO: Not currently needed
+        return None
 
 
-class RLAgentDataItem(BaseModel):
-    # todo: define agent output data structure
-    model_config = ConfigDict(extra="forbid")
-    extra_info: dict[str, Any] = dict()
+def update_status_from_finish_reason(finish_reason: str | None) -> Status:
+    """Updates the internal status based on the inference engine's finish
+    reason.
 
-
-class RLEnvDataItem(BaseModel):
-    """Contains the internal data structures of the environment, stored as an
-    observation.
-
-    Attributes:
-        rollout (RLRolloutResponseItem): Data from the rollout stage.
-        judger (RLJudgerResponseItem): Data from the judger stage.
-        agent (RLAgentDataItem): Data from the agent stage.
-        extra_info (Dict[str, Any]): Additional user-defined information.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    rollout: RLRolloutResponseItem = RLRolloutResponseItem()
-    judger: RLJudgerResponseItem = RLJudgerResponseItem()
-    agent: RLAgentDataItem = RLAgentDataItem()
-    extra_info: dict[str, Any] = dict()
-
-
-class RLExtraDataItem(BaseModel):
-    """Reserved for data that does not belong to a specific stage of the
-    dataflow.
-
-    Attributes:
-        retry_times (int): The number of times the data processing has been retried.
-        extra_info (Dict[str, Any]): Additional user-defined information.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    retry_times: int = 0
-    extra_info: dict[str, Any] = dict()
-
-
-class RLDataFlowItem(BaseModel):
-    """The core data structure that flows through the dataflow and environment.
-
-    It encapsulates all information related to a single data point, including its
-    unique ID, the original data, environment outputs, and extra metadata.
-
-    Attributes:
-        uid (RLUIDItem): The unique identifier for the data item.
-        data (RLDatasetItem): The original data from the dataset.
-        env (RLEnvDataItem): The collected outputs from the environment stages.
-        extra_info (RLExtraDataItem): Additional reserved information.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    uid: RLUIDItem = RLUIDItem()
-    data: RLDatasetItem = RLDatasetItem()
-    env: RLEnvDataItem = RLEnvDataItem()
-    extra_info: RLExtraDataItem = RLExtraDataItem()
-
-
-def is_valid_for_replaybuffer(group_data_items: list[RLDataFlowItem]) -> bool:
-    """Checks if a group of data items is valid for insertion into the replay
-    buffer.
-
-    Args:
-        group_data_items: A list of RLDataFlowItem objects.
-
-    Returns:
-        True if the group is valid, False otherwise.
-
-    NOTE: Why this check is needed:
-    - For system fault tolerance, this check is performed at rollout / dataflow
-    time, but we still do it here to ensure replay buffer data integrity.
-    - 'skipped' or 'failed' states indicate that the rollout process did not
-      complete successfully or was intentionally bypassed.
-    - 'aborted' states may still contain useful data for the replay buffer,
-      as the rollout was started but not finished.
-    - 'completed' states are valid and should be included in the replay buffer.
-    """
-    is_skipped = any(item.env.rollout.state == RolloutState.SKIPPED for item in group_data_items)
-    is_failed = any(item.env.rollout.state == RolloutState.FAILED for item in group_data_items)
-    if is_skipped or is_failed:
-        logger.warning(
-            "Invalid dataflow group found during replay buffer insertion, skipped: {is_skipped}, failed: {is_failed}."
-        )
-        return False
-    return True
-
-
-def is_valid_for_training(group_data_items: list[RLDataFlowItem]) -> bool:
-    """Checks if a group of data items is valid for a training step.
+    State Transition Logic:
+    -------------------------------------------------------------
+    | Finish Reason (Input)          | Internal Status (Output) |
+    | :----------------------------- | :----------------------- |
+    | `stop`, `length`, `tool_calls` | `Status.COMPLETED`       |
+    | `abort`                        | `Status.ABORTED`         |
+    | `error` or `None`              | `Status.FAILED`          |
+    | *Others*                       | *Raises ValueError*      |
+    -------------------------------------------------------------
 
     Args:
-        group_data_items: A list of RLDataFlowItem objects.
+        finish_reason (str | None): The raw finish reason string returned by
+            the inference engine (e.g., vLLM, LMDeploy).
+
+    Raises:
+        ValueError: If the ``finish_reason`` is unknown and cannot be mapped.
+    """
+    if finish_reason is None:
+        logger.error("finish_reason is None, setting status to FAILED.")
+        return Status.FAILED
+
+    reason = finish_reason.lower()
+    if reason in ("stop", "length", "tool_calls"):
+        return Status.COMPLETED
+    elif reason == "abort":
+        return Status.ABORTED
+    elif reason == "error":
+        logger.warning("finish_reason is 'error', setting status to FAILED.")
+        return Status.FAILED
+    else:
+        logger.error(f"finish_reason '{finish_reason}' is unknown, setting status to FAILED.")
+        return Status.FAILED
+
+
+def update_group_status(rollout_states: list[RolloutState]) -> Status:
+    """Updates the group status based on the individual rollout states.
+
+    Group Status Logic:
+    -------------------------------------------------------------
+    | Individual Rollout States       | Group Status (Output)   |
+    | :----------------------------- | :----------------------- |
+    | All `Status.COMPLETED`          | `Status.COMPLETED`       |
+    | Any `Status.FAILED`             | `Status.FAILED`          |
+    | Any `Status.ABORTED`            | `Status.ABORTED`         |
+    | Any `Status.EXPIRED`            | `Status.EXPIRED`         |
+    | Any `Status.FILTERED`           | `Status.FILTERED`        |
+    | *Others*                       | *Determined by priority*|
+    -------------------------------------------------------------
+
+    Priority Order (from highest to lowest):
+    1. FAILED
+    2. ABORTED
+    3. EXPIRED
+    4. FILTERED
+    5. COMPLETED
+
+    Args:
+        rollout_states (list[RolloutState]): A list of individual rollout states.
 
     Returns:
-        True if the group is valid, False otherwise.
-
-    NOTE: Why this check is needed:
-    - For system fault tolerance, this check is performed at rollout / dataflow
-      time, but we still do it here to ensure training data integrity.
-    - 'skipped'/'failed': These items are fundamentally broken or incomplete and
-      should not be used for training.
-    - 'aborted': These items represent rollouts that were stopped
-      prematurely. Using such partial data could lead the model to learn
-      undesirable behaviors (e.g., stopping generation too early).
-    - Empty response/response_ids: The model's generated response is the core
-      of the training data for RL algorithms like PPO. If the response is
-      missing, there is nothing to compute rewards on or to train the model with.
+        Status: The aggregated group status based on the individual states.
     """
-    is_abort = any(item.env.rollout.state == RolloutState.ABORTED for item in group_data_items)
-    is_skipped = any(item.env.rollout.state == RolloutState.SKIPPED for item in group_data_items)
-    is_failed = any(item.env.rollout.state == RolloutState.FAILED for item in group_data_items)
-    if is_skipped or is_failed or is_abort:
-        logger.debug(
-            f"Invalid dataflow group found during training, rollout state skipped: {is_skipped}, failed: {is_failed}, aborted: {is_abort}."
-        )
-        return False
-    for item in group_data_items:
-        rollout_info = item.env.rollout
-        response_valid = True if rollout_info.response is not None and len(rollout_info.response) > 0 else False
-        ids_valid = True if rollout_info.response_ids is not None and len(rollout_info.response_ids) > 0 else False
-        if not ids_valid:
-            # NOTE: `response_ids` is the critical field for token-in-token-out mode, so we ensure it's not empty.
-            logger.warning(
-                "Invalid dataflow item found during training: no response or response_ids and skip this item."
+    if all(state.status == Status.COMPLETED for state in rollout_states):
+        return Status.COMPLETED
+    elif any(state.status == Status.FAILED for state in rollout_states):
+        return Status.FAILED
+    elif any(state.status == Status.ABORTED for state in rollout_states):
+        return Status.ABORTED
+    elif any(state.status == Status.EXPIRED for state in rollout_states):
+        return Status.EXPIRED
+    elif any(state.status == Status.FILTERED for state in rollout_states):
+        return Status.FILTERED
+    else:
+        # If there are other statuses, we can determine the group status based on a defined priority order.
+        # For now, we will default to COMPLETED if none of the above conditions are met.
+        return Status.COMPLETED
+
+
+def update_sample_version(rollout_state: RolloutState, model_step: int) -> RolloutState:
+    """Append token source model version for newly generated response
+    tokens."""
+    response_len = len(rollout_state.response_ids or [])
+    response_model_steps = list(getattr(rollout_state, "response_model_steps", None) or [])
+    missing_response_steps = max(0, response_len - len(response_model_steps))
+    if missing_response_steps:
+        response_model_steps.extend([model_step] * missing_response_steps)
+    rollout_state.response_model_steps = response_model_steps
+    return rollout_state
+
+
+def refresh_seq_staleness(group: list[RolloutState], current_train_step: int) -> list[RolloutState]:
+    for rollout_state in group:
+        # response_model_steps 记录每个 response token 的模型版本；
+        # 最早版本决定整条样本的滞后程度。
+        response_model_steps = getattr(rollout_state, "response_model_steps", None) or []
+        if response_model_steps:
+            rollout_state.seq_staleness = calculate_seq_staleness(min(response_model_steps), current_train_step)
+        else:
+            rollout_state.seq_staleness = 0
+    return group
+
+
+def update_expired_status(samples: list[RolloutState], stale_threshold: int) -> list[RolloutState]:
+    if stale_threshold <= 0:
+        raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
+    is_group_expired = False
+
+    # 1. 检查组内是否存过期的样本
+    for sample in samples:
+        if sample.status == Status.ABORTED and sample.seq_staleness >= stale_threshold:
+            logger.debug(
+                f"Sample {sample.uid} (seq_staleness: {sample.seq_staleness}) exceeded threshold ({stale_threshold}). Triggering group expiration."
             )
-            return False
-        if not response_valid:
-            # NOTE: check valid response string for judger inputs
-            logger.warning("Invalid dataflow item found during training: empty response string and skip this item.")
-            return False
-    return True
+            is_group_expired = True
+            break  # 一旦发现过期，直接跳出，无需检查剩余样本
 
+    # 2. 如果存在过期样本，将组内所有样本置为过期
+    if is_group_expired:
+        # NOTE: 当一组数据中有一个样本被标记为过期后，这组数据中就可能出现未超过过期阈值但状态是 aborted 的样本。
+        # 这些样本在后续的生成过程中也不应该被继续生成了，所以直接把它们都标记为过期, 才能在preprocess中将之前的response清掉。
+        for sample in samples:
+            sample.status = Status.EXPIRED
 
-def update_rollout_item(group_data_items, target_value):
-    """Update a list of RLDataFlowItem objects by merging another
-    RLRolloutResponseItem into each item's env.rollout attribute.
-
-    Args:
-        group_data_items (List[RLDataFlowItem]): List of data items to update.
-        target_value (List[RLRolloutResponseItem]): The rollout response item to merge into each data item.
-
-    Returns:
-        List[RLDataFlowItem]: The updated list of data items.
-
-    Example:
-        >>> # Suppose you want to update the rollout response for each item
-        >>> items = [RLDataFlowItem(), RLDataFlowItem()]
-        >>> rollout_response = RLRolloutResponseItem(response="new response", response_ids=[1,2,3])
-        >>> update_rollout_item(items, rollout_response)
-        # Now each item's env.rollout has been updated with the new response and response_ids
-    """
-
-    for idx, item in enumerate(group_data_items):
-        item.env.rollout.update(target_value[idx])
-
-    return group_data_items
-
-
-def update_dataflow_item(group_data_items, target_key, target_value):
-    """Update a list of RLDataFlowItem objects by setting a nested attribute
-    for each item.
-
-    Args:
-        group_data_items (List[RLDataFlowItem]): List of data items to update.
-        target_key (str): Dot-separated path to the attribute to update (e.g., 'env.rollout.response').
-        target_value (List[Any]): List of values to set, one for each data item.
-
-    Returns:
-        List[RLDataFlowItem]: The updated list of data items.
-
-    Example:
-        >>> # Suppose you want to update the 'response' field in env.rollout for each item
-        >>> items = [RLDataFlowItem(), RLDataFlowItem()]
-        >>> responses = ["hello", "world"]
-        >>> update_dataflow_item(items, "env.rollout.response", responses)
-        # Now items[0].env.rollout.response == "hello", items[1].env.rollout.response == "world"
-    """
-
-    group_length = len(group_data_items)
-    assert group_length == len(target_value)
-
-    keys = target_key.split(".")
-
-    for i in range(group_length):
-        parent_obj = group_data_items[i]
-        for key in keys[:-1]:
-            parent_obj = getattr(parent_obj, key)
-        setattr(parent_obj, keys[-1], target_value[i])
-
-    return group_data_items
-
-
-# ==============================================
-# ====== Rollout API Server 数据流 ==============
-# ==============================================
-
-
-class SampleParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    n: Annotated[int, Parameter(help="Number of samples to generate.")] = 1
-    top_k: Annotated[
-        int, Parameter(help="The number of highest probability vocabulary tokens to keep for top-k-filtering.")
-    ] = 0
-    top_p: Annotated[float, Parameter(help="The cumulative probability for nucleus sampling.")] = 1.0
-    temperature: Annotated[float, Parameter(help="The value used to module the next token probabilities.")] = 1.0
-    repetition_penalty: Annotated[float, Parameter(help="The parameter for repetition penalty.")] = 1.0
-    presence_penalty: Annotated[float, Parameter(help="The parameter for presence penalty.")] = 0.0
-    frequency_penalty: Annotated[float, Parameter(help="The parameter for frequency penalty.")] = 0.0
-    min_tokens: Annotated[int, Parameter(help="Minimum number of tokens to generate.")] = 0
-    max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
-    stops: Annotated[list[str], Parameter(help="List of stop sequences.")] = []
-    stop_token_ids: Annotated[list[int], Parameter(help="List of stop token IDs.")] = []
-    skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True
-    sampling_seed: Annotated[int | None, Parameter(help="The seed for random number generator in sampling.")] = None
-
-
-class RolloutExtraParams(TypedDict):
-    stream: bool
-    return_logprob: bool
-    top_logprobs: int
-    return_token_ids: bool
-    include_stop_str_in_output: bool
-    no_stop_trim: bool
-    skip_special_tokens: bool
-    spaces_between_special_tokens: bool
-
-
-# 说明： 这里没定义API server情况数据格式，因为直接使用openai server的格式
-class RLRolloutRequestItem(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    messages: list[dict[str, Any]]
-    tools: list = Field(default_factory=list)
-    tool_choice: str = "auto"
-    sample_params: SampleParams = Field(default_factory=SampleParams)
-    extra_params: dict[str, Any] = Field(default_factory=dict)
+    return samples

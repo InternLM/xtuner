@@ -17,6 +17,7 @@ from .misc import (
     get_padding_length,
     is_hf_model_path,
     record_git_info,
+    set_deterministic,
     trim_memory,
 )
 from .pad import pad_to_max_length, pad_to_multiple_of
@@ -62,5 +63,6 @@ __all__ = [
     "ray_method",
     "profile_time",
     "clean_param_name",
+    "set_deterministic",
     "trim_memory",
 ]
