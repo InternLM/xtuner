@@ -1,20 +1,26 @@
 import json
 import os
+
+os.environ["XTUNER_USE_LMDEPLOY"] = "1"
 from copy import deepcopy
 
 import ray
-from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
+
+from projects.claw_bench.claw_tokenize_fn import RLClawTokenizeFnConfig
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import (
+    RLAgentDataItem,
     RLDataFlowItem,
+    RLJudgerResponseItem,
+    RLRolloutResponseItem,
+    RolloutState,
     SampleParams,
+    update_dataflow_item,
 )
 from xtuner.v1.datasets import DatasetConfig
 from xtuner.v1.datasets.config import DataloaderConfig
-from xtuner.v1.ray.base import (
-    AcceleratorResourcesConfig,
-    AutoAcceleratorWorkers
-)
+from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
+from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment.install_agent_env import InstallAgentEnvironment
@@ -25,19 +31,19 @@ from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.agent_rl_trainer import AgentRLTrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 
-from claw_bench.claw_tokenize_fn import RLClawTokenizeFnConfig
-
+if not ray.is_initialized():
+    ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG_POST_MORTEM": "1"}})
 # export RL_LLM_MODEL='xtuner-qwen35-30b'
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/agent_rl_qwen35_30b_grpo.py "lmdeploy" $QWEN3P5_VL_MODEL_PATH $TRAIN_DATA_PATH
 experimental_name = 'agent_rl_qwen3.5_30b_grpo'
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
-model_name = os.environ["RL_LLM_MODEL"]
+model_name = os.getenv("RL_LLM_MODEL")
 
 # basic settings
-global_batch_size = 8
+global_batch_size = 1
 prompt_repeat_k = 2
-train_optimizer_steps = 8  # mini batch steps
+train_optimizer_steps = 1  # mini batch steps
 max_concurrent_groups = 512
 
 max_prompt_length = 4096
@@ -51,7 +57,7 @@ enable_float8_rollout = False
 rollout_max_batch_size = 1024
 max_prefill_token_num = 1024
 
-enable_return_routed_experts = False
+enable_return_routed_experts = True
 
 enable_partial_rollout = False
 auto_resume = False
@@ -90,6 +96,7 @@ rollout_config = RolloutConfig(
     allow_over_concurrency_ratio=2,
     rollout_timeout=36000,
     enable_return_routed_experts=enable_return_routed_experts,
+    return_routed_experts_key=True,
     max_prefill_token_num=max_prefill_token_num,
     extra_rollout_config=dict(lmdeploy_log_level="INFO", lmdeploy_uvicorn_log_level="INFO"),
 )
@@ -100,6 +107,7 @@ training_sample_params = SampleParams(
 )
 evaluation_sample_params = deepcopy(training_sample_params)
 evaluation_sample_params.temperature = 0.8
+
 
 # 2. dataset
 def parse_xpuyu_json_cfg(path, max_prompt_length):
@@ -120,8 +128,7 @@ def parse_xpuyu_json_cfg(path, max_prompt_length):
                         class_name='JsonlDataset',
                     ),
                     "tokenize_fn": RLClawTokenizeFnConfig(
-                        root_path=ds_cfg.get("root_path", None),
-                        max_length=max_prompt_length
+                        root_path=ds_cfg.get("root_path", None), max_length=max_prompt_length
                     ),
                 }
             )
@@ -137,6 +144,24 @@ def prepare_agent_inputs(env, group_data_item: RLDataFlowItem):
 
 
 def convert_rollout_tractory_to_train(env, group_data_items):
+    agent_data_items, rollout_response_items, judger_response_items = [], [], []
+    for i in range(len(group_data_items)):
+        messages = group_data_items[i].env.agent.extra_info['message_dict']['policy_agent.messages']
+        agent_data_items.append(RLAgentDataItem(extra_info=dict(messages=messages)))
+        rollout_response_items.append(
+            RLRolloutResponseItem(
+                response=messages[-1]['raw_content'],
+                response_ids=messages[-1]['raw_content_ids'],
+                logprobs=messages[-1]['raw_content_logprobs'],
+                state=RolloutState.COMPLETED,
+            )
+        )
+        reward_payload = group_data_items[i].env.judger.extra_info['total']
+        judger_response_items.append(RLJudgerResponseItem(reward=dict(score=reward_payload)))
+    group_data_items = update_dataflow_item(group_data_items, "env.agent", agent_data_items)
+    group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_response_items)
+    group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_response_items)
+    # breakpoint()
     return group_data_items
 
 
@@ -244,3 +269,14 @@ trainer = AgentRLTrainerConfig(
     checkpoint_no_save_optimizer=True,
     skip_checkpoint_validation=True,
 )
+
+
+import torch.distributed as dist
+
+from xtuner.v1.train.agent_rl_trainer import AgentRLTrainer
+
+trainer = AgentRLTrainer.from_config(trainer)
+trainer.fit()
+
+if dist.is_initialized():
+    dist.destroy_process_group()
