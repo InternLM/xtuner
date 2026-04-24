@@ -85,7 +85,7 @@ class RLClawTokenizeFn(RLTokenizeFn):
             "data_source": {"claw-bench": 1.0},
             "extra_info": {
                 "task_data": task_data,
-                "task_dir": task_dir.name,
+                "task_dir": task_dir.as_posix(),
                 "pipeline": "claw_bench.pipeline.claw_pipeline",
             },
         }

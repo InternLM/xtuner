@@ -26,7 +26,6 @@ import base64
 import fnmatch
 import io
 import json
-import logging
 import os
 import re
 import tarfile
@@ -35,8 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-
-logger = logging.getLogger(__name__)
+from xtuner.v1.utils import get_logger
 
 
 _BUNDLE_SIZE_LOG = Path("/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/work_dir/bundle_sizes.jsonl")
@@ -59,7 +57,7 @@ def _log_bundle_size(size: int, extract_root: str, file_count: int) -> None:
         with _BUNDLE_SIZE_LOG.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as exc:
-        logger.warning("bundle-size log failed: %s", exc)
+        get_logger().warning(f"bundle-size log failed: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -216,7 +214,7 @@ class DownloadHook(Hook):
                 pulled[p] = blob
                 kinds[p] = kind
             except Exception as exc:
-                logger.warning("download %s failed: %s", p, exc)
+                get_logger().warning(f"download {p} failed: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -450,15 +448,15 @@ async def _run_hook(hook: Hook, client: Any, ctx: dict[str, Any], *, phase: str)
     name = getattr(hook, "name", None) or type(hook).__name__
     label = f"{phase}-hook {type(hook).__name__}({name!r})"
     tid = (ctx.get("data") and getattr(ctx["data"], "id", None)) or "?"
-    logger.debug("[%s] %s start", tid, label)
+    get_logger().debug(f"[{tid}] {label} start")
     t0 = time.monotonic()
     try:
         await hook(client, ctx)
-        logger.debug("[%s] %s done (%.2fs)", tid, label, time.monotonic() - t0)
+        get_logger().debug(f"[{tid}] {label} done ({time.monotonic() - t0:.2f}s)")
     except Exception as exc:
         import traceback as _tb
 
-        logger.error("[%s] %s failed: %s\n%s", tid, label, exc, _tb.format_exc())
+        get_logger().error(f"[{tid}] {label} failed: {exc}\n{_tb.format_exc()}")
         ctx.setdefault("hook_errors", []).append(
             {
                 "phase": phase,

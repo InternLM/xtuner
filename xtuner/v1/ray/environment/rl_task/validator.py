@@ -8,15 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import logging
 from typing import Any, Literal
 
 from xtuner.v1.ray.environment.rl_task.judgers import Judger
 from xtuner.v1.ray.environment.rl_task.sandbox import exec_in, http_upload
 from xtuner.v1.ray.environment.rl_task.schemas import AggregatedScore, JudgerResult, SandboxSpec
-
-
-logger = logging.getLogger(__name__)
+from xtuner.v1.utils import get_logger
 
 
 class JudgerValidator:
@@ -64,7 +61,7 @@ class JudgerValidator:
                 try:
                     await asyncio.to_thread(_c.close)
                 except Exception as exc:
-                    logger.warning("isolated judger teardown: %s", exc)
+                    get_logger().warning(f"isolated judger teardown: {exc}")
         return self._aggregate(results)
 
     # -- internals --
@@ -141,7 +138,7 @@ class JudgerValidator:
                 raise_on_error=False,
             )
         except Exception as exc:
-            logger.warning("isolated workspace copy for %s failed: %s", j.name, exc)
+            get_logger().warning(f"isolated workspace copy for {j.name} failed: {exc}")
 
         for hook in j.on_isolated_pre:
             await hook(client, ctx)
