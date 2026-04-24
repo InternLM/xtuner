@@ -478,6 +478,7 @@ class RolloutController:
 
         @app.post("/v1/chat/completions")
         async def chat_completions(request: LagentChatCompletionRequest):
+            print(request.messages)
             inputs = tokenize(self.tokenizer, request.messages, request.tools)
             response: RLRolloutResponseItem = await self.rollout(
                 prompt=request.messages,

@@ -12,7 +12,7 @@ own kwargs.  This lets stages evolve independently.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -46,7 +46,7 @@ class TaskData(BaseModel):
     tags: list[str] = []
 
     # Behavior.
-    instruction: str                                     # relative to task root
+    instruction: str  # relative to task root
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ class SandboxSpec(BaseModel):
 
     image: str
     ttl_seconds: int = 1800
-    workspace_path: str = "/workspace"                   # becomes $TASK_WORKSPACE
+    workspace_path: str = "/workspace"  # becomes $TASK_WORKSPACE
     env_vars: dict[str, str] = {}
     resources: dict[str, Any] = {}
 
@@ -69,18 +69,16 @@ class SandboxSpec(BaseModel):
 class AgentSpec(BaseModel):
     """One agent implementation available for the infer stage.
 
-    Paths are relative to the agent's template directory
-    (``<dataset.agent_template_root>/<name>/``) — NOT to the task dir.
-    Each agent candidate has its own template subtree; tasks only carry
-    data, never agent code.
+    Paths are relative to the agent's template directory (``<dataset.agent_template_root>/<name>/``) — NOT to the task
+    dir. Each agent candidate has its own template subtree; tasks only carry data, never agent code.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    config: str = "config.py"                            # relative to template dir
-    install: str | None = None                           # relative; optional
-    tools: str | None = None                             # relative dir; optional
+    config: str = "config.py"  # relative to template dir
+    install: str | None = None  # relative; optional
+    tools: str | None = None  # relative dir; optional
     weight: float = 1.0
 
 

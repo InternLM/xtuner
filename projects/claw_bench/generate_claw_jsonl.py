@@ -21,6 +21,7 @@ from pathlib import Path
 #     }
 # }
 
+
 def iter_task_dirs(tasks_root: Path) -> list[Path]:
     """Return sorted task directories (parents of ``task.toml``)."""
     roots: list[Path] = []
@@ -52,9 +53,7 @@ def build_record(tasks_root: Path, task_dir: Path, *, skip_junk: bool) -> dict:
         if skip_junk and _is_junk_path(p.relative_to(task_dir)):
             continue
         files.append(rel_posix(tasks_root, p))
-    return {
-        "task_dir": task_rel
-    }
+    return {"task_dir": task_rel}
 
 
 def main() -> int:
@@ -62,16 +61,16 @@ def main() -> int:
     parser.add_argument(
         "--tasks-root",
         type=Path,
-        default=Path(
-            "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/bench/claw-bench/tasks"
-        ),
+        default=Path("/mnt/shared-storage-user/llmit/user/liukuikun/workspace/bench/claw-bench/tasks"),
         help="Absolute path to the bench ``tasks`` directory.",
     )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
-        default=Path("/mnt/shared-storage-user/huanghaian/code/temp/xtuner/workspace/agent_dev/claw_tasks.jsonl"),
+        default=Path(
+            "/mnt/shared-storage-user/llmit/user/wangziyi/projs/xtuner_agent_dev/examples/demo_data/agent_dev/claw_tasks.jsonl"
+        ),
         help="Write JSONL here.  Default: stdout.",
     )
     parser.add_argument(

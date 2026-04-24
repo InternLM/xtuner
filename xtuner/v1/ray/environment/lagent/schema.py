@@ -18,9 +18,7 @@ from xtuner.v1.data_proto.rl_data import (
 class AgentMessage(BaseAgentMessage):
     """Extends the base AgentMessage to include RL model response
     conversion."""
-    
-    thinking: Optional[str] = None
-    finish_reason: Optional[str] = None
+
     content_ids: Optional[List[int]] = Field(default=None, repr=False)
     content_logprobs: Optional[List[float]] = Field(default=None, repr=False)
     thinking_ids: Optional[List[int]] = Field(default=None, repr=False)
@@ -98,8 +96,8 @@ class AgentMessage(BaseAgentMessage):
 # Extended OpenAI-compatible request / response types
 # ---------------------------------------------------------------------------
 class LagentChatCompletionMessage(ChatCompletionMessage):
-    """Extends OpenAI's ChatCompletionMessage with RL-specific fields that
-    are populated after parsing (reasoning / raw token-level info)."""
+    """Extends OpenAI's ChatCompletionMessage with RL-specific fields that are
+    populated after parsing (reasoning / raw token-level info)."""
 
     model_config = {"extra": "allow"}
 
