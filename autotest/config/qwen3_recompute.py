@@ -16,7 +16,7 @@ QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
 
 
-moe_cfg = Qwen3MoE30BA3Config(compile_cfg=False)
+moe_cfg = Qwen3MoE30BA3Config(compile_cfg=True)
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
