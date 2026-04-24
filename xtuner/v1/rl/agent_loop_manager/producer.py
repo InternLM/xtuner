@@ -267,15 +267,22 @@ class SyncProduceStrategy(ProduceStrategy):
             # 如果被过滤的数据就放到 put_to_filtered pool 中
             for task in done_tasks:
                 items = task.result()
-                if self.is_valid_sample_fn(items):
-                    completed_sample_count += 1
-                    logger.info(
-                        f"[SyncProduceStrategy] Collected {completed_sample_count}/{batch_size} valid samples for task {task_name}."
-                    )
+                is_valid = self.is_valid_sample_fn(items)
                 for item in items:
                     update_sample_version(item, model_step)
                 refresh_seq_staleness(items, train_step)
                 await replay_buffer.put(items, task_name)
+                if not is_valid:
+                    continue
+
+                completed_sample_count += 1
+                if progress.target_samples[task_name] > 0:
+                    logger.info(
+                        f"[{self.__class__.__name__}] Collected "
+                        f"{min(progress.target_samples[task_name], max(0, completed_sample_count))}/"
+                        f"{progress.target_samples[task_name]} "
+                        f"valid samples for task {task_name}."
+                    )
 
             while len(pending_tasks) + completed_sample_count < batch_size and self.should_continue_fn(
                 completed_sample_count, batch_size
@@ -361,12 +368,14 @@ class AsyncProduceStrategy(ProduceStrategy):
         task_name: str,
         current_train_step: int,
         model_step: int,
-    ) -> None:
+    ) -> bool:
         for item in items:
             update_sample_version(item, model_step)
         refresh_seq_staleness(items, current_train_step)
         items = expire_group_if_needed(items, self.stale_threshold)
+        is_valid = self.is_valid_sample_fn(items)
         await replay_buffer.put(items, task_name)
+        return is_valid
 
     async def _put_claimed_tasks(
         self,
@@ -374,17 +383,30 @@ class AsyncProduceStrategy(ProduceStrategy):
         replay_buffer: ReplayBuffer,
         task_name: str,
         progress: ProduceProgress,
-    ) -> None:
+        available_base: int | None = None,
+    ) -> int:
+        valid_completed_count = 0
         for task in claimed_tasks:
             # 每个 pending task 必须绑定调度时的模型版本；缺失说明调度状态已损坏，直接暴露。
             task_model_step = self._pending_task_model_steps.pop(task)
-            await self._put_generated_group(
+            is_valid = await self._put_generated_group(
                 task.result(),
                 replay_buffer,
                 task_name,
                 current_train_step=progress.next_consumer_step,
                 model_step=task_model_step,
             )
+            if is_valid:
+                valid_completed_count += 1
+            if is_valid and available_base is not None:
+                if progress.target_samples[task_name] > 0:
+                    logger.info(
+                        f"[{self.__class__.__name__}] Collected "
+                        f"{min(progress.target_samples[task_name], max(0, available_base + valid_completed_count))}/"
+                        f"{progress.target_samples[task_name]} "
+                        f"valid samples for task {task_name}."
+                    )
+        return valid_completed_count
 
     async def _schedule_one(
         self,
@@ -582,4 +604,5 @@ class AsyncProduceStrategy(ProduceStrategy):
                 replay_buffer,
                 task_name,
                 progress,
+                available_base=available,
             )
