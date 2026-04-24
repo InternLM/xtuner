@@ -10,8 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from sandbox import Hook, SandboxStage
-from schemas import SandboxSpec
+from xtuner.v1.ray.environment.rl_task.sandbox import Hook, SandboxStage
+from xtuner.v1.ray.environment.rl_task.schemas import SandboxSpec
 
 
 @dataclass

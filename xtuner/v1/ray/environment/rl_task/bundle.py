@@ -1,4 +1,5 @@
-"""Bundle helpers — small pure functions for file-map building + text rewriting.
+"""Bundle helpers — small pure functions for file-map building + text
+rewriting.
 
 Most upload logic now lives in :class:`sandbox.UploadHook` (glob/regex
 source matching).  This module keeps a couple of callers that still need
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sandbox import walk_files
+from xtuner.v1.ray.environment.rl_task.sandbox import walk_files
 
 
 def mirror_tree(
@@ -19,7 +20,8 @@ def mirror_tree(
     *,
     exclude: frozenset[str] | set[str] | tuple[str, ...] = (),
 ) -> dict[str, Path]:
-    """Mirror ``src_root/<rel>`` → ``dst_root/<rel>`` for every non-excluded file.
+    """Mirror ``src_root/<rel>`` → ``dst_root/<rel>`` for every non-excluded
+    file.
 
     Args:
         src_root (Path): Host directory to walk.
@@ -41,7 +43,10 @@ def mirror_tree(
 
 
 def rewrite_text(text: str, substitutions: dict[str, str]) -> str:
-    """Apply ordered string substitutions.  Later keys see already-rewritten text."""
+    """Apply ordered string substitutions.
+
+    Later keys see already-rewritten text.
+    """
     out = text
     for needle, replacement in substitutions.items():
         out = out.replace(needle, replacement)

@@ -42,9 +42,10 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from lagent.serving.sandbox.providers.gateway import GatewayProvider  # noqa: E402
-from sandbox import SandboxStage  # noqa: E402
-from schemas import TaskData  # noqa: E402
-from validator import JudgerValidator  # noqa: E402
+
+from xtuner.v1.ray.environment.rl_task.sandbox import SandboxStage  # noqa: E402
+from xtuner.v1.ray.environment.rl_task.schemas import TaskData  # noqa: E402
+from xtuner.v1.ray.environment.rl_task.validator import JudgerValidator  # noqa: E402
 
 
 logger = logging.getLogger(__name__)

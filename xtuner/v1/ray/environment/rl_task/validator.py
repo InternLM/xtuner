@@ -11,9 +11,9 @@ import base64
 import logging
 from typing import Any, Literal
 
-from judgers import Judger
-from sandbox import exec_in, http_upload
-from schemas import AggregatedScore, JudgerResult, SandboxSpec
+from xtuner.v1.ray.environment.rl_task.judgers import Judger
+from xtuner.v1.ray.environment.rl_task.sandbox import exec_in, http_upload
+from xtuner.v1.ray.environment.rl_task.schemas import AggregatedScore, JudgerResult, SandboxSpec
 
 
 logger = logging.getLogger(__name__)

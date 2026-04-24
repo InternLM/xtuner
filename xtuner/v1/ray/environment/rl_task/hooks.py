@@ -27,9 +27,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import bundle
 from pydantic import ValidationError
-from sandbox import (
+
+from xtuner.v1.ray.environment.rl_task import bundle
+from xtuner.v1.ray.environment.rl_task.sandbox import (
     Hook,
     StageResult,
     exec_in,
@@ -38,7 +39,7 @@ from sandbox import (
     upload_tar_and_extract,
     walk_files,
 )
-from schemas import AgentSpec, CriterionScore, JudgerResult
+from xtuner.v1.ray.environment.rl_task.schemas import AgentSpec, CriterionScore, JudgerResult
 
 
 logger = logging.getLogger(__name__)

@@ -25,7 +25,7 @@ from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.agent_rl_trainer import AgentRLTrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 
-from projects.claw_bench.claw_tokenize_fn import RLClawTokenizeFnConfig
+from claw_bench.claw_tokenize_fn import RLClawTokenizeFnConfig
 
 # export RL_LLM_MODEL='xtuner-qwen35-30b'
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/agent_rl_qwen35_30b_grpo.py "lmdeploy" $QWEN3P5_VL_MODEL_PATH $TRAIN_DATA_PATH
@@ -45,7 +45,7 @@ pack_max_length = 68 * 1024
 max_response_length = 64 * 1024
 
 train_ep_size = 1
-rollout_tp_size = 2
+rollout_tp_size = 4
 rollout_ep_size = 1
 enable_float8_rollout = False
 rollout_max_batch_size = 1024
@@ -68,7 +68,7 @@ evaluate_step = 5
 # 1. resources
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=2,
+    num_workers=4,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )
