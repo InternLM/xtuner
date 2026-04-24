@@ -2,17 +2,18 @@ import os
 
 from xtuner.v1.config import AdamWConfig, LRConfig
 from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
-from xtuner.v1.datasets.config import DatasetConfig, DataloaderConfig
+from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.loss import CELossConfig
 from xtuner.v1.model import Qwen3VLDense8BConfig
 from xtuner.v1.train import TrainerConfig
+
 
 MODEL_PATH = os.environ["MODEL_PATH"]
 DATA_PATH = os.environ["DATA_PATH"]
 MEDIA_ROOT = os.environ["MEDIA_ROOT"]
 
 # model config
-model_cfg = Qwen3VLDense8BConfig()
+model_cfg = Qwen3VLDense8BConfig(compile_cfg=False)
 
 
 dataset_config = [

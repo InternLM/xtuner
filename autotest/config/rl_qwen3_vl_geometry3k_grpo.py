@@ -1,5 +1,6 @@
 import os
 from copy import deepcopy
+
 from transformers import AutoTokenizer
 from xtuner.v1.config import (
     AdamWConfig,
@@ -7,17 +8,19 @@ from xtuner.v1.config import (
     LRConfig,
 )
 from xtuner.v1.data_proto.rl_data import SampleParams
+from xtuner.v1.datasets import DataloaderConfig, DatasetConfig, Qwen3VLTokenizeFnConfig, RLTokenizeFnConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense8BConfig
 from xtuner.v1.ray.base import AcceleratorResourcesConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.evaluator import EvaluatorConfig
 from xtuner.v1.ray.judger.controller import JudgerConfig
+from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.rl_trainer import RLTrainerConfig
-from xtuner.v1.datasets import RLTokenizeFnConfig, DatasetConfig, Qwen3VLTokenizeFnConfig, DataloaderConfig
-from xtuner.v1.ray.judger.geo3k import GEO3KJudgerConfig
+
+
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
@@ -54,7 +57,7 @@ rollout_config = RolloutConfig(
     tensor_parallel_size=rollout_tp_size,
     expert_parallel_size=rollout_ep_size,
     gpu_memory_utilization=0.75,
-    context_length = max_response_length + max_prompt_length,
+    context_length=max_response_length + max_prompt_length,
     # rollout_max_batch_size_per_instance=64,  # optional, will be determined automatically if not set
 )
 # sampling params
@@ -72,32 +75,29 @@ tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 tokenize_fn_cfg = Qwen3VLTokenizeFnConfig(processor_path=model_path, max_length=max_prompt_length)
 train_dataset_cfg = [
     {
-            "dataset": DatasetConfig(name="geo3k",
-                                     anno_path=data_path,
-                                     class_name='VLMJsonlDataset',
-                                     media_root=media_root,
-                                     sample_ratio=1.0),
-            "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length,
-                                              tokenize_fn_cfg=tokenize_fn_cfg),
+        "dataset": DatasetConfig(
+            name="geo3k", anno_path=data_path, class_name="VLMJsonlDataset", media_root=media_root, sample_ratio=1.0
+        ),
+        "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length, tokenize_fn_cfg=tokenize_fn_cfg),
     }
 ]
 eval_dataset_cfg = []
 if enable_evaluate:
     eval_dataset_cfg = [
         {
-            "dataset": DatasetConfig(name="geo3k",
-                                     anno_path=eval_data_path,
-                                     class_name='VLMJsonlDataset',
-                                     media_root=media_root,
-                                     sample_ratio=1.0),
-            "tokenize_fn": RLTokenizeFnConfig(max_length=max_prompt_length,
-                                              tokenize_fn_cfg=tokenize_fn_cfg,
-                                              ignore_multimodal_info=True),
+            "dataset": DatasetConfig(
+                name="geo3k",
+                anno_path=eval_data_path,
+                class_name="VLMJsonlDataset",
+                media_root=media_root,
+                sample_ratio=1.0,
+            ),
+            "tokenize_fn": RLTokenizeFnConfig(
+                max_length=max_prompt_length, tokenize_fn_cfg=tokenize_fn_cfg, ignore_multimodal_info=True
+            ),
         }
     ]
-dataloader_config = DataloaderConfig(num_workers=8,
-                                     collator="fake_collator",
-                                     pack_level="none")
+dataloader_config = DataloaderConfig(num_workers=8, collator="fake_collator", pack_level="none")
 # 3. judger
 geo3k_judger_config = GEO3KJudgerConfig()
 judger_cfg = JudgerConfig(reward_judger_configs=[geo3k_judger_config])
@@ -109,23 +109,27 @@ dataflow_config = DataFlowConfig(
     sample_params=training_sample_params,
     # max_concurrent=64,  # optional, will be determined automatically if not set
 )
-evaluator_cfg = EvaluatorConfig(
-    enable_evaluate=enable_evaluate,
-    enable_initial_evaluate=enable_initial_evaluate,
-    dataset_cfg=eval_dataset_cfg,
-    dataloader_cfg=dataloader_config,
-    tokenizer=tokenizer,
-    evaluate_step=evaluate_step,
-    compute_metric_func=None,
-    sample_params=evaluation_sample_params,
-) if enable_evaluate else None
+evaluator_cfg = (
+    EvaluatorConfig(
+        enable_evaluate=enable_evaluate,
+        enable_initial_evaluate=enable_initial_evaluate,
+        dataset_cfg=eval_dataset_cfg,
+        dataloader_cfg=dataloader_config,
+        tokenizer=tokenizer,
+        evaluate_step=evaluate_step,
+        compute_metric_func=None,
+        sample_params=evaluation_sample_params,
+    )
+    if enable_evaluate
+    else None
+)
 # replay buffer config: : 不需要修改
 replay_buffer_cfg = ReplayBufferConfig(
     dataset_cfg=train_dataset_cfg, dataloader_cfg=dataloader_config, tokenizer=tokenizer
 )
 # 5. Train worker
 # NOTE: modify model_cfg
-model_cfg = Qwen3VLDense8BConfig(freeze_vision=True, freeze_projector=True)
+model_cfg = Qwen3VLDense8BConfig(freeze_vision=True, freeze_projector=True, compile_cfg=False)
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
@@ -141,7 +145,7 @@ loss_cfg = GRPOLossConfig(
     chunk_size=512,
 )
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False)
+fsdp_cfg = FSDPConfig(cpu_offload=False)
 train_worker_cfg: WorkerConfig = WorkerConfig(
     model_cfg=model_cfg,
     load_from=model_path,

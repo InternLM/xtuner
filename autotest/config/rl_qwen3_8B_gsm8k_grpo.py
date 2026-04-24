@@ -120,6 +120,7 @@ replay_buffer_cfg = ReplayBufferConfig(
 
 # 5. Train worker
 model_cfg = get_model_config_from_hf(Path(model_path))
+model_cfg.compile_cfg = False
 optim_cfg = AdamWConfig(lr=1e-6, foreach=False)
 loss_cfg = GRPOLossConfig(
     policy_loss_cfg=dict(
@@ -135,7 +136,7 @@ loss_cfg = GRPOLossConfig(
     chunk_size=512,
 )
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
-fsdp_cfg = FSDPConfig(torch_compile=False, cpu_offload=False, ep_size=1)
+fsdp_cfg = FSDPConfig(cpu_offload=False, ep_size=1)
 train_worker_cfg: WorkerConfig = WorkerConfig(
     model_cfg=model_cfg,
     load_from=model_path,
