@@ -15,9 +15,9 @@ from xtuner.v1.float8.config import Float8Config
 from xtuner.v1.ops.comm.all_to_all import ulysses_all_to_all
 from xtuner.v1.utils import get_logger
 
-from ...ops.gated_deltanet.gen_seq_idx import gen_seq_idx
-from ...ops.gated_deltanet.chunk_gated_delta_rule import chunk_gated_delta_rule
 from ...ops.gated_deltanet.causal_conv1d import causal_conv1d_fn
+from ...ops.gated_deltanet.chunk_gated_delta_rule import chunk_gated_delta_rule
+from ...ops.gated_deltanet.gen_seq_idx import gen_seq_idx
 from ...ops.gated_deltanet.rms_norm_gated import rms_norm_gated
 from ..linear import build_linear
 from .attn_outputs import AttnOutputs
@@ -199,7 +199,7 @@ class GatedDeltaNet(nn.Module):
             bias = bias.to_local()
 
         assert seq_ctx.sequence_parallel_mesh is not None, "sequence_parallel_mesh is required for forward_for_sp"
-        sp_rank = seq_ctx.sequence_parallel_mesh.get_local_rank()
+        sp_rank = seq_ctx.sp_rank
         sp_size = seq_ctx.sequence_parallel_mesh.size()
         if seq_ctx.seq_idx is None:
             # SP restores the full packed sequence before convolution, so seq_idx uses the global length.
