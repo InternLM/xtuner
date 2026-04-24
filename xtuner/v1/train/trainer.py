@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from shutil import rmtree
-from typing import Annotated, Callable, Literal, Protocol, Sequence, Sized, cast, overload, runtime_checkable
+from typing import Any, Annotated, Callable, Literal, Protocol, Sequence, Sized, cast, overload, runtime_checkable
 
 import torch
 import torch.distributed as dist
@@ -334,6 +334,7 @@ class TrainerConfig(BaseModel):
     strict_load: bool = True
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
+    async_hf_export: bool = False
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     patch_for_dcp_finish: bool = False
     snapshot_interval: int | None = None
@@ -458,6 +459,7 @@ class Trainer:
         strict_load: bool = True,
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
+        async_hf_export: bool = False,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         patch_for_dcp_finish: bool = False,
         snapshot_interval: int | None = None,
@@ -513,15 +515,18 @@ class Trainer:
 
         if not self._can_save_hf:
             assert_info = (
-                f"`hf_interval`: {hf_interval} and `hf_max_keep`: {hf_max_keep} "
+                f"`hf_interval`: {hf_interval}, `hf_max_keep`: {hf_max_keep} and "
+                f"`async_hf_export`: {async_hf_export} "
                 f"should be None when `load_from` is not a Huggingface model path, "
             )
             if is_hf_path is False and error_info is not None:
                 assert_info += f", HF path load error Info: {error_info}"
-            assert hf_interval is None and hf_max_keep is None, assert_info
+            assert hf_interval is None and hf_max_keep is None and async_hf_export is False, assert_info
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
+        self._async_hf_export = async_hf_export
+        self._pending_async_hf = None
         self._snapshot_interval = snapshot_interval
         self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
@@ -692,6 +697,7 @@ class Trainer:
             strict_load=config.strict_load,
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
+            async_hf_export=config.async_hf_export,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             patch_for_dcp_finish=config.patch_for_dcp_finish,
             snapshot_interval=config.snapshot_interval,
@@ -782,7 +788,10 @@ class Trainer:
 
             self._lr_scheduler.step()
             self._maybe_check_health()
-            self._maybe_save_hf()
+            if self._async_hf_export:
+                self._maybe_async_save_hf()
+            else:
+                self._maybe_save_hf()
             ckpt_saved = self._maybe_save(is_snapshot=False)
             if not ckpt_saved:
                 _ = self._maybe_save(is_snapshot=True)
@@ -791,6 +800,9 @@ class Trainer:
 
             if self.cur_step % 50 == 0:
                 gc.collect()
+
+        if self._async_hf_export and self._pending_async_hf is not None:
+            self._wait_and_finalize_pending_async_hf()
 
         # TODO: Should use flush rather than close
         self._exp_tracker.close()
@@ -1606,6 +1618,148 @@ class Trainer:
                 checkpoint=save_hf_path,
                 step=self.cur_step,
                 epoch=self._cur_epoch,
+                total_step=self.total_step,
+                total_epoch=self.total_epoch,
+            )
+
+    def _maybe_async_save_hf(self):
+        if not self._async_hf_export or self._hf_interval is None:
+            return
+
+        assert self._can_save_hf, "Model does not support saving in Huggingface format."
+
+        if self.cur_step % self._hf_interval != 0 and self.cur_step != self.total_step:
+            return
+
+        if self._pending_async_hf is not None:
+            self._wait_and_finalize_pending_async_hf()
+
+        save_hf_path = self.exp_dir / f"hf-{self.cur_step}"
+        tmp_hf_path = self.exp_dir / f"hf-{self.cur_step}.incomplete"
+        latest_hf_link = self.exp_dir / "hf-latest"
+        meta_path = self.work_dir / self._META_PATH
+
+        if self.rank == 0 and tmp_hf_path.exists():
+            rmtree(tmp_hf_path)
+        dist.barrier()
+
+        self._engine.prepare_async_hf_snapshot(hf_dir=tmp_hf_path)
+        pid = os.fork()
+        if pid == 0:
+            try:
+                self._engine.write_async_hf_snapshot()
+                os._exit(0)
+            except Exception as exc:
+                print(f"async hf save child failed: checkpoint={tmp_hf_path}, error={exc}", flush=True)
+                os._exit(1)
+
+        self._pending_async_hf = {
+            "pid": pid,
+            "step": self.cur_step,
+            "epoch": self._cur_epoch,
+            "save_hf_path": save_hf_path,
+            "tmp_hf_path": tmp_hf_path,
+            "latest_hf_link": latest_hf_link,
+            "meta_path": meta_path,
+            "async_writer_status_path": self.exp_dir
+            / self._engine._async_hf_writer_status_filename(self.rank, self.world_size),
+        }
+
+    def _wait_and_finalize_pending_async_hf(self) -> None:
+        if self._pending_async_hf is None:
+            return
+
+        payload = self._pending_async_hf
+        pid = payload["pid"]
+        if pid is None:
+            raise RuntimeError("Pending async hf checkpoint is missing child pid")
+
+        local_ok = True
+        local_error = ""
+        local_weight_map: dict[str, str] = {}
+
+        _, status = os.waitpid(pid, 0)
+        exit_code = os.waitstatus_to_exitcode(status)
+        status_path: Path = payload["async_writer_status_path"]
+        if exit_code != 0:
+            local_ok = False
+            local_error = f"child_exit_code={exit_code}"
+        elif not status_path.exists():
+            local_ok = False
+            local_error = f"missing_async_hf_writer_status={status_path}"
+        else:
+            try:
+                with status_path.open("r") as f:
+                    writer_status = json.load(f)
+            except Exception as exc:
+                local_ok = False
+                local_error = f"invalid_async_hf_writer_status={status_path}, error={exc}"
+            else:
+                local_ok = bool(writer_status.get("ok", False))
+                local_error = str(writer_status.get("error", ""))
+                weight_map_obj = writer_status.get("weight_map", {})
+                if isinstance(weight_map_obj, dict):
+                    local_weight_map = {str(k): str(v) for k, v in weight_map_obj.items()}
+
+        local_status = {"rank": self.rank, "ok": local_ok, "error": local_error, "weight_map": local_weight_map}
+        all_status: list[dict[str, Any]] = [None for _ in range(self.world_size)]  # type: ignore[list-item]
+        dist.all_gather_object(all_status, local_status)
+        if not all(status["ok"] for status in all_status):
+            failed = ", ".join(
+                f"rank={status['rank']}({status['error']})" for status in all_status if not status["ok"]
+            )
+            self._pending_async_hf = None
+            raise RuntimeError(f"Async HF save global consistency check failed: {failed}")
+
+        merged_weight_map: dict[str, str] = {}
+        for status in all_status:
+            merged_weight_map.update(status["weight_map"])
+
+        payload["weight_map"] = merged_weight_map
+        self._finalize_pending_async_hf(payload)
+        self._pending_async_hf = None
+
+    def _finalize_pending_async_hf(self, payload: dict[str, Any]) -> None:
+        save_hf_path: Path = payload["save_hf_path"]
+        tmp_hf_path: Path = payload["tmp_hf_path"]
+        latest_hf_link: Path = payload["latest_hf_link"]
+        meta_path: Path = payload["meta_path"]
+        weight_map: dict[str, str] = payload["weight_map"]
+
+        if self.rank == 0:
+            self._engine.model._write_hf_index_and_config(hf_dir=tmp_hf_path, weight_map=weight_map)
+            if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+                self.tokenizer.save_pretrained(str(tmp_hf_path))
+
+        dist.barrier()
+
+        if self.rank == 0:
+            if save_hf_path.exists():
+                rmtree(save_hf_path)
+            tmp_hf_path.rename(save_hf_path)
+
+            self.meta.latest_exp.hf_checkpoint_list.append(str(save_hf_path))
+            if self._hf_max_keep is not None and len(self.meta.latest_exp.hf_checkpoint_list) > self._hf_max_keep:
+                deleted_hf_checkpoints = self.meta.latest_exp.hf_checkpoint_list[: -self._hf_max_keep]
+                self.meta.latest_exp.hf_checkpoint_list = self.meta.latest_exp.hf_checkpoint_list[-self._hf_max_keep :]
+                for hf_dir in deleted_hf_checkpoints:
+                    if Path(hf_dir).exists():
+                        rmtree(hf_dir)
+
+            latest_hf_link.unlink(missing_ok=True)
+            latest_hf_link.symlink_to(save_hf_path.absolute(), target_is_directory=True)
+
+            with meta_path.open("w") as f:
+                f.write(self.meta.model_dump_json(indent=2))
+
+        dist.barrier()
+
+        hooks = self.hooks_config.get_hooks(HookStage.AFTER_SAVE_HF)
+        for hook in hooks:
+            hook(
+                checkpoint=save_hf_path,
+                step=payload["step"],
+                epoch=payload["epoch"],
                 total_step=self.total_step,
                 total_epoch=self.total_epoch,
             )

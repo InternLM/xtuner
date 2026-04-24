@@ -1,5 +1,6 @@
 import json
 import os
+import hashlib
 import threading
 from concurrent.futures import wait
 from pathlib import Path
@@ -143,6 +144,8 @@ class TrainEngine:
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
         self.has_freeze_params = self.__has_freeze_params()
+        self._async_hf_tensor_cache = {}
+        self._last_async_hf_snapshot = None
 
     def __has_freeze_params(self) -> bool:
         has_freeze_params = False
@@ -293,6 +296,144 @@ class TrainEngine:
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
         self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+
+    @staticmethod
+    def _async_hf_writer_status_filename(rank: int, world_size: int) -> str:
+        return f"async-hf-writer-status-rank-{rank:05d}-of-{world_size:05d}.json"
+
+    @staticmethod
+    def _compute_file_hash(path: Path, chunk_size: int = 4 * 1024 * 1024) -> str:
+        hasher = hashlib.sha256()
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    @staticmethod
+    def _allocate_cpu_buffer_like(tensor: torch.Tensor) -> torch.Tensor:
+        cpu_tensor = torch.empty_like(tensor, device="cpu")
+        if tensor.is_cuda:
+            cpu_tensor = cpu_tensor.pin_memory()
+        return cpu_tensor
+
+    def _get_or_update_cpu_tensor(
+        self,
+        tensor: torch.Tensor,
+        cache: dict[tuple[Any, ...], torch.Tensor],
+        path: tuple[Any, ...],
+    ) -> torch.Tensor:
+        detached = tensor.detach()
+
+        cached = cache.get(path)
+        if cached is None or (
+            cached.shape != detached.shape
+            or cached.dtype != detached.dtype
+            or cached.layout != detached.layout
+            or cached.stride() != detached.stride()
+        ):
+            cached = self._allocate_cpu_buffer_like(detached)
+            cache[path] = cached
+
+        cached.copy_(detached, non_blocking=detached.is_cuda)
+        return cached
+
+    def prepare_async_hf_snapshot(
+        self,
+        hf_dir: Path,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+        verify_hash: bool = False,
+    ) -> None:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        status_file = hf_dir.parent / self._async_hf_writer_status_filename(rank, world_size)
+
+        hf_dir.mkdir(parents=True, exist_ok=True)
+        if dist.is_initialized():
+            dist.barrier()
+
+        file_to_names: list[tuple[str, list[str]]] = []
+        weight_map: dict[str, str] = {}
+
+        for safetensor_name, name_list, hf_tensor_list in self.model._iter_hf_save_chunks(
+            save_dtype=save_dtype,
+            safetensors_prefix=safetensors_prefix,
+            device=DEVICE,
+        ):
+            cached_names: list[str] = []
+            for name, hf_tensor in zip(name_list, hf_tensor_list):
+                cache_key = (("root", "hf"), ("name", name))
+                self._get_or_update_cpu_tensor(
+                    hf_tensor,
+                    cache=self._async_hf_tensor_cache,
+                    path=cache_key,
+                )
+                cached_names.append(name)
+                weight_map[name] = safetensor_name
+            if cached_names:
+                file_to_names.append((safetensor_name, cached_names))
+            del hf_tensor_list
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        self._last_async_hf_snapshot = {
+            "rank": rank,
+            "hf_dir": hf_dir,
+            "file_to_names": file_to_names,
+            "weight_map": weight_map,
+            "status_file": status_file,
+            "verify_hash": verify_hash,
+        }
+
+    def write_async_hf_snapshot(self) -> None:
+        if self._last_async_hf_snapshot is None:
+            raise RuntimeError("No async HF snapshot prepared")
+
+        snapshot = self._last_async_hf_snapshot
+        status_file: Path = snapshot["status_file"]
+        verify_hash = bool(snapshot.get("verify_hash", False))
+        local_status: dict[str, Any] = {
+            "rank": snapshot["rank"],
+            "ok": True,
+            "error": "",
+            "hashes": {},
+            "weight_map": {},
+        }
+
+        try:
+            hf_dir = cast(Path, snapshot["hf_dir"])
+            file_to_names = cast(list[tuple[str, list[str]]], snapshot["file_to_names"])
+            weight_map = cast(dict[str, str], snapshot["weight_map"])
+            written_files: list[str] = []
+            for filename, names in file_to_names:
+                tensors: dict[str, torch.Tensor] = {}
+                for name in names:
+                    cache_key = (("root", "hf"), ("name", name))
+                    cached_tensor = cast(torch.Tensor | None, self._async_hf_tensor_cache.get(cache_key))
+                    if cached_tensor is None:
+                        raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
+                    tensors[name] = cached_tensor
+                written_files.extend(
+                    self.model._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
+                )
+
+            local_status["weight_map"] = weight_map
+            if verify_hash:
+                for filename in written_files:
+                    local_status["hashes"][filename] = self._compute_file_hash(hf_dir / filename)
+        except Exception as exc:
+            local_status["ok"] = False
+            local_status["error"] = str(exc)
+            with status_file.open("w") as f:
+                f.write(json.dumps(local_status, indent=2))
+            raise
+
+        with status_file.open("w") as f:
+            f.write(json.dumps(local_status, indent=2))
 
     # TODO: Support async save
     def save_dcp(
