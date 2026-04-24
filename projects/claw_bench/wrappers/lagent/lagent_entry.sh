@@ -58,7 +58,7 @@ nohup "$LAGENT_PY" -m lagent.serving.sandbox.daemon start \
     --mode agent \
     --config "$CONFIG" \
     --sock "$SOCK" \
-    >>"$" 2>&1 &
+    >>"$LOG" 2>&1 &
 DAEMON_PID=$!
 
 for _ in $(seq 1 60); do
