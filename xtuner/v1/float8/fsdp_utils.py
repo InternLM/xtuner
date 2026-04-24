@@ -131,6 +131,8 @@ def precompute_tilewise_float8_scale_for_fsdp(
             and isinstance(m.weight, DTensor)
             and isinstance(m.weight._local_tensor, WeightWithDynamicTilewiseFloat8CastTensor)
         ):
+            m.weight._local_tensor._precomputed_scale = None  # reset old scale
+            m.weight._local_tensor._precomputed_w = None  # reset old fp8 weight
             weights.append(m.weight._local_tensor)
 
     if not weights:
@@ -281,6 +283,29 @@ def cast_to_per_block_fp8_devided_64_with_scales(
     return tensor_bits_fp8
 
 
+def _maybe_to_copy_like(src: Optional[torch.Tensor], ref: torch.Tensor) -> Optional[torch.Tensor]:
+    """Move cached metadata tensor (`src`) to match `ref`'s device (and dtype
+    when needed).
+
+    This is used only for value-preserving ops (e.g., `.to()/.cpu()/.cuda()`), so the cache remains valid but must
+    follow the underlying storage move.
+    """
+    if src is None:
+        return None
+    if src.device == ref.device:
+        return src
+    # Use aten._to_copy to mimic Tensor.to/cpu/cuda semantics and avoid autograd tracking.
+    return torch.ops.aten._to_copy.default(
+        src,
+        device=ref.device,
+        dtype=src.dtype,
+        layout=src.layout,
+        pin_memory=False,
+        non_blocking=False,
+        memory_format=torch.preserve_format,
+    )
+
+
 class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
     def __new__(
         cls,
@@ -328,29 +353,79 @@ class WeightWithDynamicTilewiseFloat8CastTensor(torch.Tensor):
                 args[0]._tensor,
                 args[0]._dtype,
                 args[0]._ori_shape,
+                args[0]._precomputed_scale,
+                args[0]._precomputed_w,
             )
         dtype: Optional[torch.dtype] = None  # type: ignore
-        ori_shape: Optional[tuple] = None  # type: ignore
+        ori_shape: Optional[tuple[int, int]] = None  # type: ignore
+        precomputed_scale: Optional[torch.Tensor] = None
+        precomputed_w: Optional[torch.Tensor] = None
 
         def unwrap(t):
-            nonlocal dtype
+            nonlocal dtype, ori_shape, precomputed_scale, precomputed_w
             if dtype is None:
                 dtype = t._dtype
             else:
                 assert t._dtype == dtype
-            nonlocal ori_shape
             ori_shape = t._ori_shape
+
+            # When a preserved op involves multiple wrapper inputs,
+            # assert that their cached metadata is either all None or identical/equal;
+            # otherwise the output cache would be ambiguous/incorrect.
+            if precomputed_scale is None:
+                precomputed_scale = t._precomputed_scale
+            else:
+                assert (
+                    (precomputed_scale is None and t._precomputed_scale is None)
+                    or (precomputed_scale is t._precomputed_scale)
+                    or (
+                        precomputed_scale is not None
+                        and t._precomputed_scale is not None
+                        and torch.equal(precomputed_scale, t._precomputed_scale)
+                    )
+                )
+
+            if precomputed_w is None:
+                precomputed_w = t._precomputed_w
+            else:
+                assert (
+                    (precomputed_w is None and t._precomputed_w is None)
+                    or (precomputed_w is t._precomputed_w)
+                    or (
+                        precomputed_w is not None
+                        and t._precomputed_w is not None
+                        and torch.equal(precomputed_w, t._precomputed_w)
+                    )
+                )
+
             return t._tensor
 
         args, kwargs = pytree.tree_map_only(WeightWithDynamicTilewiseFloat8CastTensor, unwrap, (args, kwargs or {}))
         out = func(*args, **kwargs)
+
+        # Do not preserve precomputed metadata for arbitrary arithmetic/transform ops
+        # (e.g., add with a regular Tensor), because the underlying values change
+        # and the cached scale becomes stale; in those cases we return a plain Tensor (no subclass),
+        # which naturally drops the cache.
         if func not in _ops_to_preserve_subclass:
             return out
-        return pytree.tree_map_only(
-            torch.Tensor,
-            lambda x: WeightWithDynamicTilewiseFloat8CastTensor(x, dtype, ori_shape),
-            out,
-        )
+
+        def rewrap(x: torch.Tensor) -> "WeightWithDynamicTilewiseFloat8CastTensor":
+            # Keep cache valid by moving it together with the underlying value-preserving op output.
+            moved_scale = _maybe_to_copy_like(precomputed_scale, x)
+            moved_w = _maybe_to_copy_like(precomputed_w, x)
+            return WeightWithDynamicTilewiseFloat8CastTensor(
+                x,
+                cast(torch.dtype, dtype),
+                cast(tuple[int, int], ori_shape),
+                moved_scale,
+                moved_w,
+            )
+
+        # Preserve _precomputed_scale / _precomputed_w only for ops in _ops_to_preserve_subclass
+        # (e.g., .cpu()/.cuda()/.to() -> aten._to_copy), because these ops do not change
+        # tensor values and thus should not invalidate precomputed metadata.
+        return pytree.tree_map_only(torch.Tensor, rewrap, out)
 
     def __tensor_flatten__(self):
         tensors = ["_tensor"]
