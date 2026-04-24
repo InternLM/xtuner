@@ -18,6 +18,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     SamplerConfig,
     SyncProduceStrategyConfig,
+    TaskSpecConfig,
 )
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
@@ -137,10 +138,13 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 )
 produce_strategy_config = SyncProduceStrategyConfig()
 agent_loop_manager_cfg = AgentLoopManagerConfig(
-    task_name="train_task",
-    agent_loop_config=agent_loop_config,
-    produce_strategy_config=produce_strategy_config,
-    sampler_config=sampler_config,
+    tasks=TaskSpecConfig(
+        task_name="train_task",
+        agent_loop_config=agent_loop_config,
+        judger_config=judger_config,
+        produce_strategy_config=produce_strategy_config,
+        sampler_config=sampler_config,
+    ),
 )
 
 # 6. eval agent loop manager
@@ -168,9 +172,12 @@ eval_agent_loop_config = SingleTurnAgentLoopConfig(
     sample_params=evaluation_sample_params,
 )
 eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
-    task_name="eval_task",
-    agent_loop_config=eval_agent_loop_config,
-    sampler_config=eval_sampler_config,
+    tasks=TaskSpecConfig(
+        task_name="eval_task",
+        agent_loop_config=eval_agent_loop_config,
+        judger_config=judger_config,
+        sampler_config=eval_sampler_config,
+    ),
 )
 
 # 7. evaluator
@@ -181,7 +188,6 @@ trainer = RLColocateTrainerConfig(
     resources=resources,
     train_worker_cfg=train_worker_cfg,  # TODO: uniform naming of cfg and config
     rollout_config=rollout_config,
-    judger_config=judger_config,
     tokenizer_path=model_path,
     replay_buffer_config=dict(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,
