@@ -393,7 +393,7 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         yield encode_sse_event("[DONE]")
 
     def _openai_message_to_canonical_message(self, message: dict[str, Any]) -> CanonicalMessage:
-        role = self._canonical_role_from_openai_role(str(message.get("role", "user")).lower())
+        role = str(message.get("role", "user"))
         content_blocks: list[Any] = []
         if role == "tool":
             content_blocks.append(
@@ -509,10 +509,3 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
             return json.loads(raw_arguments)
         except Exception:
             return {"__parse_error__": True, "raw": raw_arguments}
-
-    def _canonical_role_from_openai_role(self, role: str) -> str:
-        if role == "developer":
-            return "system"
-        if role == "function":
-            return "tool"
-        return role if role in {"system", "user", "assistant", "tool"} else "user"
