@@ -1,21 +1,11 @@
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi.responses import StreamingResponse
-from lmdeploy.serve.openai.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ChatCompletionResponseChoice,
-    ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse,
-    ChatMessage,
-    DeltaMessage,
-    UsageInfo,
-)
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -35,6 +25,109 @@ from ..core.models import (
 from .base import BaseChatAPIAdapter, coerce_content_to_text, stringify_tool_arguments
 from .streaming import build_sse_response, encode_sse_event
 from .trace import ChatTraceStore, normalize_trace_payload
+
+
+class ChatCompletionStreamOptions(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    include_usage: bool = False
+    continuous_usage_stats: bool = False
+
+
+class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    session_uid: int | str | None = None
+    session_id: int | str | None = None
+    model: str | None = None
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    parallel_tool_calls: bool | None = None
+    stream: bool = False
+    stream_options: ChatCompletionStreamOptions | None = None
+    n: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    min_tokens: int | None = None
+    stop: str | list[str] | None = None
+    stop_token_ids: list[int] | None = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    repetition_penalty: float | None = None
+    skip_special_tokens: bool | None = None
+    no_stop_trim: bool | None = None
+    seed: int | None = None
+    user: str | None = None
+    return_routed_experts: bool | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+
+
+class UsageInfo(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    role: str
+    content: str | None = None
+    reasoning_content: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+
+
+class DeltaMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    role: str | None = None
+    content: str | None = None
+    reasoning_content: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+
+
+class ChatCompletionResponseChoice(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    index: int
+    message: ChatMessage
+    finish_reason: str | None = None
+
+
+class ChatCompletionResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    object: Literal["chat.completion"] = "chat.completion"
+    created: int
+    model: str
+    choices: list[ChatCompletionResponseChoice]
+    usage: UsageInfo
+
+
+class ChatCompletionResponseStreamChoice(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    index: int
+    delta: DeltaMessage = Field(default_factory=DeltaMessage)
+    finish_reason: str | None = None
+
+
+class ChatCompletionStreamResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: list[ChatCompletionResponseStreamChoice] = Field(default_factory=list)
+    usage: UsageInfo | None = None
 
 
 class OpenAIChatAdapterError(RuntimeError):
@@ -99,6 +192,7 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         normalized_tools = normalize_trace_payload(request.tools)
         normalized_tool_choice = normalize_trace_payload(request.tool_choice)
         stop = [] if request.stop is None else [request.stop] if isinstance(request.stop, str) else list(request.stop)
+        chat_template_kwargs = request.chat_template_kwargs or {}
         return CanonicalGenerateRequest(
             request_id=f"chatcmpl_req_{uuid4().hex}",
             model=request.model or self._default_model_name or "rollout-controller",
@@ -121,6 +215,16 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
                     "n": request.n,
                     "presence_penalty": request.presence_penalty,
                     "frequency_penalty": request.frequency_penalty,
+                    "top_k": request.top_k,
+                    "repetition_penalty": request.repetition_penalty,
+                    "min_tokens": request.min_tokens,
+                    "stop_token_ids": request.stop_token_ids,
+                    "skip_special_tokens": request.skip_special_tokens,
+                    "no_stop_trim": request.no_stop_trim,
+                    "spaces_between_special_tokens": chat_template_kwargs.get("spaces_between_special_tokens"),
+                    "sampling_seed": request.seed,
+                    "user": request.user,
+                    "return_routed_experts": request.return_routed_experts,
                 }.items()
                 if value is not None
             },
@@ -289,13 +393,13 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
         yield encode_sse_event("[DONE]")
 
     def _openai_message_to_canonical_message(self, message: dict[str, Any]) -> CanonicalMessage:
-        role = str(message.get("role", "user"))
+        role = self._canonical_role_from_openai_role(str(message.get("role", "user")).lower())
         content_blocks: list[Any] = []
         if role == "tool":
             content_blocks.append(
                 CanonicalToolResultBlock(
                     tool_result=CanonicalToolResult(
-                        tool_call_id=str(message.get("tool_call_id") or ""),
+                        tool_call_id=str(message.get("tool_call_id") or message.get("name") or ""),
                         name=message.get("name"),
                         output=message.get("content"),
                         output_text=coerce_content_to_text(message.get("content")),
@@ -405,3 +509,10 @@ class OpenAIChatAdapter(BaseChatAPIAdapter[ChatCompletionRequest, ChatCompletion
             return json.loads(raw_arguments)
         except Exception:
             return {"__parse_error__": True, "raw": raw_arguments}
+
+    def _canonical_role_from_openai_role(self, role: str) -> str:
+        if role == "developer":
+            return "system"
+        if role == "function":
+            return "tool"
+        return role if role in {"system", "user", "assistant", "tool"} else "user"

@@ -112,7 +112,7 @@ class RolloutController:
         self._tool_call_parser, self._reasoning_parser = self._build_output_parsers()
         self._gateway_url: str | None = None
 
-    def start_gateway(self, config: "GatewayConfig") -> str:
+    def start_gateway(self, config: "GatewayConfig") -> str | None:
         """Start the gateway HTTP server in a daemon thread and return its URL.
 
         The gateway exposes OpenAI-compatible endpoints that forward requests to
@@ -124,8 +124,16 @@ class RolloutController:
                 the server binds; ``capture_folder`` enables per-request trace files.
 
         Returns:
-            The base URL of the gateway, e.g. ``"http://1.2.3.4:8080"``.
+            The base URL of the gateway, e.g. ``"http://1.2.3.4:8080"``, or
+            ``None`` when the configured rollout backend does not support the
+            gateway.
         """
+        if self.config.rollout_backend == "sglang":
+            self.logger.error(
+                "XTuner gateway is not supported for SGLang rollout backend yet; skip starting gateway."
+            )
+            return None
+
         from xtuner.v1.rl.gateway import build_local_gateway_app, serve_gateway_in_thread
 
         config.capture_folder = str(Path(self.config.worker_log_dir) / config._CAPTURE_PATH_FOLDER)

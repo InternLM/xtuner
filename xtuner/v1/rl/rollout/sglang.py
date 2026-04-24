@@ -8,6 +8,7 @@ import torch
 from urllib3.exceptions import NewConnectionError
 
 from transformers import AutoConfig, AutoTokenizer
+from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import XTUNER_DETERMINISTIC
 
 from .worker import RolloutConfig, RolloutWorker
@@ -39,6 +40,47 @@ class SGLangWorker(RolloutWorker):
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
+
+    def _get_request_payload(self, rollout_state: RolloutState) -> dict:
+        sample_params = rollout_state.sample_params
+        payload: dict[str, Any] = {"model": self.model_name}
+
+        if rollout_state.tools is not None:
+            payload["tools"] = rollout_state.tools
+        if rollout_state.tool_choice is not None:
+            payload["tool_choice"] = rollout_state.tool_choice
+
+        sglang_sample_params = self._transform_sample_params(sample_params.model_dump())
+        sglang_extra_params = self._transform_extra_params(sample_params.model_dump())
+        payload.update(sglang_extra_params)
+
+        if self.enable_return_routed_experts and not rollout_state.extra_fields.get("disable_routed_experts", False):
+            payload["return_routed_experts"] = True
+
+        if sample_params.return_token_ids:
+            if "image_data" in rollout_state.extra_fields:
+                assert rollout_state.tokens is not None, "input_ids is required when image_data is provided."
+                payload["image_data"] = rollout_state.extra_fields["image_data"]
+
+            if rollout_state.tokens is not None:
+                payload["input_ids"] = rollout_state.tokens
+            else:
+                text_prompt = self.tokenizer.apply_chat_template(
+                    rollout_state.message, tokenize=False, add_generation_prompt=True
+                )
+                payload["input_ids"] = self.tokenizer(text_prompt, add_special_tokens=False)["input_ids"]
+
+            payload["sampling_params"] = sglang_sample_params
+            return payload
+
+        payload["messages"] = rollout_state.message
+        payload.update(sglang_sample_params)
+        # The chat-completions API uses OpenAI-style names.
+        payload["max_tokens"] = sglang_sample_params["max_new_tokens"]
+        payload["min_tokens"] = sglang_sample_params["min_new_tokens"]
+        payload.pop("max_new_tokens", None)
+        payload.pop("min_new_tokens", None)
+        return payload
 
     async def _create_request(
         self,
@@ -248,8 +290,11 @@ class SGLangWorker(RolloutWorker):
             "stop_token_ids": sample_params["stop_token_ids"],
             "skip_special_tokens": sample_params["skip_special_tokens"],
         }
-        if XTUNER_DETERMINISTIC:
-            sglang_sample_params["sampling_seed"] = sample_params["sampling_seed"]
+        sampling_seed = sample_params.get("sampling_seed")
+        if sampling_seed is None and XTUNER_DETERMINISTIC:
+            sampling_seed = self.config.random_seed
+        if sampling_seed is not None:
+            sglang_sample_params["sampling_seed"] = sampling_seed
         return sglang_sample_params
 
     def _transform_extra_params(self, extra_params: Dict):
