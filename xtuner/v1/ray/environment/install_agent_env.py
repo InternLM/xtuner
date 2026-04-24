@@ -1,9 +1,8 @@
 import asyncio
+import importlib
 import inspect
 import os
 import traceback
-from copy import deepcopy
-import importlib
 from typing import Callable, List, Self, Tuple
 
 import ray
@@ -35,8 +34,9 @@ def check_dead_actors():
 
     return dead_actors
 
+
 DEFAULT_GATEWAY = "http://env-gateway.ailab.ailab.ai"
-DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
+DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/wangziyi/projs/lagent"
 
 
 def _import_from_path(path: str):
@@ -78,7 +78,7 @@ class InstallAgentEnvironment(BaseEnvironment):
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
     ) -> List[RLDataFlowItem]:
         sample_params = sample_params.model_dump() if sample_params else {}
-        
+
         async def _inner_agent_call(item):
             if item.env.rollout.state == RolloutState.COMPLETED:
                 get_logger().debug(f"Rollout already completed for item {item.uid.observation_id}, skip agent call.")
@@ -90,19 +90,25 @@ class InstallAgentEnvironment(BaseEnvironment):
 
             task_dir = item.data.extra_info.get("task_dir", None)
             data = item.data.extra_info.get("task_data", None)
-            uid = {"root_id": item.uid.root_id, "action_id": item.uid.action_id, "observation_id": item.uid.observation_id}
+            uid = {
+                "root_id": item.uid.root_id,
+                "action_id": item.uid.action_id,
+                "observation_id": item.uid.observation_id,
+            }
             get_logger().info(f"running task={task_dir} (dataset={data.id})")
 
             # import debugpy
             # debugpy.connect(('10.102.151.17', 5680))
             try:
                 return await pipeline.run_single(
-                        task_dir, data, uid,
-                        provider=self.provider,
-                        lagent_src_dir=DEFAULT_LAGENT_SRC,
-                        llm_base_url=None,
-                        llm_api_key=None,
-                    )
+                    task_dir,
+                    data,
+                    uid,
+                    provider=self.provider,
+                    lagent_src_dir=DEFAULT_LAGENT_SRC,
+                    llm_base_url=None,
+                    llm_api_key=None,
+                )
             except BaseException as exc:
                 get_logger().error(
                     f"[Agent Inference Error] {exc}. Dead actors: {check_dead_actors()}\n{traceback.format_exc()}"
@@ -111,21 +117,24 @@ class InstallAgentEnvironment(BaseEnvironment):
 
         results = await asyncio.gather(*[_inner_agent_call(sample) for sample in group_data_items])
         passed_data_items, completed_data_items = [], []
-        for sample, message in zip(group_data_items, results):
-            if message == "Failed":
+        for sample, result in zip(group_data_items, results):
+            if result == "Failed":
                 continue
-            if message == "Passed":
+            if result == "Passed":
                 passed_data_items.append(sample)
-            elif message.finish_reason == "abort":
-                sample.env.rollout.state = RolloutState.ABORTED
-                agent_state_dict = self.agent.state_dict(sample.uid.observation_id)
+            elif result["env"]["rollout"]["finish_reason"] == "abort":
+                # sample.env.rollout.state = RolloutState.ABORTED
+                # agent_state_dict = self.agent.state_dict(sample.uid.observation_id)
                 # remove routed_experts from message extra_info to avoid serialization issue
-                for state in agent_state_dict.values():
-                    for msg in state:
-                        msg["extra_info"].pop("routed_experts", None)
-                sample.env.rollout.extra_info["agent_state_dict"] = agent_state_dict  # type: ignore[typeddict-unknown-key]
-                passed_data_items.append(sample)
+                # for state in agent_state_dict.values():
+                #     for msg in state:
+                #         msg["extra_info"].pop("routed_experts", None)
+                # sample.env.rollout.extra_info["agent_state_dict"] = agent_state_dict  # type: ignore[typeddict-unknown-key]
+                # passed_data_items.append(sample)
+                continue
             else:
+                sample.env.agent.extra_info["message_dict"] = result["env"]["agent"]["message_dict"]
+                sample.env.judger.extra_info.update(result["env"]["judger"])
                 completed_data_items.append(sample)
         completed_data_items_result = self.postprocess_func(self, completed_data_items)  # type: ignore[arg-type]
         if inspect.iscoroutinefunction(self.postprocess_func):

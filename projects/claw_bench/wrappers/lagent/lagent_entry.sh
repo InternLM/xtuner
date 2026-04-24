@@ -22,6 +22,7 @@ CONFIG=""
 INSTRUCTION_FILE=""
 RESPONSE_OUT=""
 TRAJECTORY_OUT=""
+MESSAGE_OUT=""
 MAX_TURNS=""
 SOCK="/tmp/lagent_agent.sock"
 
@@ -31,6 +32,7 @@ while [ $# -gt 0 ]; do
         --instruction-file) INSTRUCTION_FILE="$2"; shift 2 ;;
         --response-out) RESPONSE_OUT="$2"; shift 2 ;;
         --trajectory-out) TRAJECTORY_OUT="$2"; shift 2 ;;
+        --message-out) MESSAGE_OUT="$2"; shift 2 ;;
         --max-turns) MAX_TURNS="$2"; shift 2 ;;
         --sock) SOCK="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
@@ -142,5 +144,21 @@ else:
 open(sys.argv[1], "w", encoding="utf-8").write(
     json.dumps(payload, ensure_ascii=False, default=str))
 ' "$TRAJECTORY_OUT"
+
+
+# Dump messages to MESSAGE_OUT.
+POLICY_AGENT_MESSAGES=$("$LAGENT_PY" -m lagent.serving.sandbox.daemon call \
+    --sock "$SOCK" '{"cmd": "get_messages"}' 2>>"$LOG") || {
+    echo "get_messages call failed" >&2
+    tail -n 100 "$LOG" >&2 || true
+    exit 7
+}
+
+printf '%s' "$POLICY_AGENT_MESSAGES" | "$LAGENT_PY" -c '
+import json, sys
+obj = json.loads(sys.stdin.read() or "{}")
+with open(sys.argv[1], "w", encoding="utf-8") as f:
+    json.dump(obj, f, ensure_ascii=False, indent=4, default=str)
+' "$MESSAGE_OUT"
 
 exit 0

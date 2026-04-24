@@ -26,12 +26,12 @@ from xtuner.v1.ray.environment.rl_task.runner import Runner
 from xtuner.v1.ray.environment.rl_task.sandbox import (
     DownloadHook,
     ExecHook,
+    ReadFileHook,
     SandboxStage,
     UploadHook,
 )
 from xtuner.v1.ray.environment.rl_task.schemas import AgentSpec, SandboxSpec
 from xtuner.v1.ray.environment.rl_task.validator import JudgerValidator
-
 
 HERE = Path(__file__).resolve().parent
 WRAPPERS = HERE / "wrappers"
@@ -65,6 +65,7 @@ PATHS = SimpleNamespace(
     wrappers_lagent="/tmp/wrappers/lagent",
     agent_config="/tmp/agent_config.json",
     trajectory="/tmp/trajectory.json",
+    message="/tmp/message.json",
     verifier="/tmp/verifier",
 )
 
@@ -79,13 +80,13 @@ AGENT_ENTRY = (
     f"--config {PATHS.agent_config} "
     f"--instruction-file $TASK_INSTRUCTION "
     f"--response-out /tmp/agent_response.txt "
-    f"--trajectory-out {PATHS.trajectory}"
+    f"--trajectory-out {PATHS.trajectory} "
+    f"--message-out {PATHS.message}"
 )
 
 
 SOLUTION_ENTRY = (
-    f"bash {PATHS.wrappers_bench}/pre_entry.sh && "
-    f"cd / && bash $TASK_WORKSPACE/solution/solve.sh $TASK_WORKSPACE"
+    f"bash {PATHS.wrappers_bench}/pre_entry.sh && " f"cd / && bash $TASK_WORKSPACE/solution/solve.sh $TASK_WORKSPACE"
 )
 
 
@@ -103,9 +104,7 @@ DEFAULT_AGENTS: list[AgentSpec] = [
     ),
 ]
 
-DEFAULT_SANDBOX = SandboxSpec(
-    image="ubuntu2404-v1", ttl_seconds=1800, workspace_path="/workspace",
-)
+DEFAULT_SANDBOX = SandboxSpec(image="ubuntu2404-v1", ttl_seconds=1800, workspace_path="/workspace")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -125,13 +124,15 @@ def _rule_grader(ws: str) -> Judger:
     return Judger(
         name="rule_grader",
         weight=1.0,
-        sandbox="shared",     # reuse the infer sandbox (no extra provisioning)
+        sandbox="shared",  # reuse the infer sandbox (no extra provisioning)
         stage=SandboxStage(
             pre=[
                 # Ship verifier/ tree to /tmp/verifier/rule_grader/.
-                UploadHook([
-                    {"base": "verifier", "source": "**/*", "target": f"{root}/"},
-                ]),
+                UploadHook(
+                    [
+                        {"base": "verifier", "source": "**/*", "target": f"{root}/"},
+                    ]
+                ),
             ],
             entry=f"bash {PATHS.wrappers_bench}/pytest_ctrf.sh",
             env={
@@ -165,12 +166,22 @@ def claw_pipeline(
         sandbox=sandbox,
         pre=[
             # 1. Ship wrapper scripts (bench + agent-framework) into /tmp/wrappers/.
-            UploadHook([
-                {"base": str(WRAPPERS / "claw_bench"),
-                 "source": "*", "target": PATHS.wrappers_bench + "/", "flatten": True},
-                {"base": str(WRAPPERS / "lagent"),
-                 "source": "*", "target": PATHS.wrappers_lagent + "/", "flatten": True},
-            ]),
+            UploadHook(
+                [
+                    {
+                        "base": str(WRAPPERS / "claw_bench"),
+                        "source": "*",
+                        "target": PATHS.wrappers_bench + "/",
+                        "flatten": True,
+                    },
+                    {
+                        "base": str(WRAPPERS / "lagent"),
+                        "source": "*",
+                        "target": PATHS.wrappers_lagent + "/",
+                        "flatten": True,
+                    },
+                ]
+            ),
             # 2. Install lagent library + /tmp/lagent-py python wrapper.
             InstallLagent(),
             # 3. Weighted-pick one agent; record choice + template_root in ctx.
@@ -178,13 +189,15 @@ def claw_pipeline(
             # 4. Mirror the task tree into $TASK_WORKSPACE.  Exclude oracle /
             #    judger dirs so the agent can't see them; exclude task.toml
             #    since it's metadata the agent has no use for.
-            UploadHook([
-                {"source": "**/*", "target": f"{ws}/",
-                 "exclude": [
-                     "task.toml", "task.py",
-                     "reference/**", "verifier/**", "solution/**", "agent/**",
-                 ]},
-            ]),
+            UploadHook(
+                [
+                    {
+                        "source": "**/*",
+                        "target": f"{ws}/",
+                        "exclude": ["task.toml", "task.py", "reference/**", "verifier/**", "solution/**", "agent/**"],
+                    },
+                ]
+            ),
             # 5. Overlay chosen agent's template at $TASK_WORKSPACE/agent/<name>/.
             UploadChosenAgent(target_dir=f"{ws}/agent/"),
             # 6. Ensure workspace dir exists (mirror doesn't create empty dirs).
@@ -203,7 +216,7 @@ def claw_pipeline(
             extras={"WORKSPACE": ws, "CLAW_WORKSPACE": ws},
         ),
         timeout=1800,
-        post=[DownloadHook(["/workspace", "/tmp/agent_response.txt"])],
+        post=[DownloadHook(["/workspace", "/tmp/agent_response.txt"]), ReadFileHook("/tmp/message.json", "message")],
     )
 
     return Runner(
@@ -215,7 +228,9 @@ def claw_pipeline(
 def claw_solution_pipeline() -> Runner:
     """Variant: run ``solution/solve.sh`` instead of an LLM rollout."""
     sandbox = SandboxSpec(
-        image="ubuntu2404-v2", ttl_seconds=600, workspace_path="/workspace",
+        image="ubuntu2404-v2",
+        ttl_seconds=600,
+        workspace_path="/workspace",
     )
     ws = sandbox.workspace_path
 
@@ -223,17 +238,32 @@ def claw_solution_pipeline() -> Runner:
         sandbox=sandbox,
         pre=[
             ExecHook(f"mkdir -p {ws}"),
-            UploadHook([
-                {"base": str(WRAPPERS / "claw_bench"),
-                 "source": "*", "target": PATHS.wrappers_bench + "/", "flatten": True},
-                {"base": str(WRAPPERS / "lagent"),
-                 "source": "*", "target": PATHS.wrappers_lagent + "/", "flatten": True},
-            ]),
+            UploadHook(
+                [
+                    {
+                        "base": str(WRAPPERS / "claw_bench"),
+                        "source": "*",
+                        "target": PATHS.wrappers_bench + "/",
+                        "flatten": True,
+                    },
+                    {
+                        "base": str(WRAPPERS / "lagent"),
+                        "source": "*",
+                        "target": PATHS.wrappers_lagent + "/",
+                        "flatten": True,
+                    },
+                ]
+            ),
             # Oracle may consult reference/ and solution/ — those stay in the mirror.
-            UploadHook([
-                {"source": "**/*", "target": f"{ws}/",
-                 "exclude": ["task.toml", "task.py", "verifier/**", "agent/**"]},
-            ]),
+            UploadHook(
+                [
+                    {
+                        "source": "**/*",
+                        "target": f"{ws}/",
+                        "exclude": ["task.toml", "task.py", "verifier/**", "agent/**"],
+                    },
+                ]
+            ),
         ],
         entry=SOLUTION_ENTRY,
         env=BenchEnv(

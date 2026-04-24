@@ -1,5 +1,4 @@
 import os
-import threading
 import time
 from pathlib import Path
 from typing import Annotated
@@ -10,7 +9,6 @@ from cyclopts import App, Parameter
 from cyclopts.group import Group
 
 from xtuner.v1.rl.utils import register_cleanup
-from xtuner.v1.train.rl_trainer import RLTrainer
 from xtuner.v1.train.agent_rl_trainer import AgentRLTrainer
 from xtuner.v1.utils import Config
 from xtuner.v1.utils.track_rl_mem import monitor_actor_memory

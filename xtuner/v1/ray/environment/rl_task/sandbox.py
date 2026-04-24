@@ -143,6 +143,58 @@ class UploadHook(Hook):
             await upload_tar_and_extract(client, files, "/")
 
 
+class ReadFileHook(Hook):
+    """Read a sandbox file and store its text content in ``ctx["pulled"]``.
+
+    Unlike :class:`DownloadHook` (which stores raw bytes and auto-detects
+    files vs dirs), this hook is intentionally simple: it reads a single
+    text file via ``exec_in`` and writes the decoded string into
+    ``ctx["pulled"][key]``.
+
+    Args:
+        path: Sandbox path to read.  May be a literal string or a
+            callable ``(ctx) -> str``.
+        key:  Key under which the content is stored in ``ctx["pulled"]``.
+            May be a literal string or a callable ``(ctx) -> str``.
+        encoding: Text encoding used to decode the file bytes.
+            Defaults to ``"utf-8"``.
+        errors: Error handler passed to ``bytes.decode``.
+            Defaults to ``"replace"``.
+        optional: When ``True`` a missing / unreadable file logs a warning
+            instead of raising.  Defaults to ``False``.
+    """
+
+    name = "read_file"
+
+    def __init__(
+        self,
+        path: Resolvable,
+        key: Resolvable,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "replace",
+        optional: bool = False,
+    ):
+        self.path = path
+        self.key = key
+        self.encoding = encoding
+        self.errors = errors
+        self.optional = optional
+
+    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
+        path = _resolve(self.path, ctx)
+        key = _resolve(self.key, ctx)
+        try:
+            blob = await asyncio.to_thread(client.download_file, path)
+            content = blob.decode(self.encoding, errors=self.errors)
+            ctx.setdefault("pulled", {})[key] = content
+        except Exception as exc:
+            if self.optional:
+                logger.warning("read_file %s (key=%r) failed: %s", path, key, exc)
+            else:
+                raise
+
+
 @dataclass
 class UploadMapping:
     source: str

@@ -10,7 +10,7 @@ model = dict(
     model=dict(
         model=os.environ.get(
             "RL_LLM_MODEL",
-            "sft_interns2_pre_base03_20260415a_lr2e5_128gpu",
+            "sft_interns2_pre_base03_20260413a_lr2e5_128gpu_hf5646",
         ),
         base_url=os.environ.get(
             "RL_LLM_BASE_URL",
@@ -101,3 +101,16 @@ agent_config = dict(
     compact_agent=compact_agent,
     consolidate_agent=consolidate_agent,
 )
+
+
+if __name__ == '__main__':
+    import asyncio
+
+    from lagent.utils import create_object
+
+    async def main():
+        agent = create_object(agent_config)
+        res = await agent('帮我查看下当前处于哪个目录以及当前目录下有哪些东西？')
+        print(res)
+
+    asyncio.run(main())

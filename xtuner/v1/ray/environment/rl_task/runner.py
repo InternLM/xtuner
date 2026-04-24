@@ -122,12 +122,7 @@ class Runner:
             )
             get_logger().info(f"[{tid}] validate: done total={aggregated.total:.4f} ({time.monotonic() - t2:.1f}s)")
 
-            return _mark_completed(
-                data,
-                uid,
-                metadata=_infer_metadata(ctx),
-                judge=aggregated,
-            )
+            return _mark_completed(data, uid, metadata=_infer_metadata(ctx), judge=aggregated, infer=infer_result)
         except Exception as exc:
             get_logger().error(f"[{tid}] runner failed: {exc}\n{traceback.format_exc()}")
             return _mark_failed(
@@ -230,6 +225,7 @@ def _mark_completed(
     *,
     metadata: dict[str, Any],
     judge,
+    infer,
 ) -> dict[str, Any]:
     return {
         "uid": uid,
@@ -253,6 +249,7 @@ def _mark_completed(
                 "step_rewards": [sr.model_dump() for sr in judge.step_rewards],
                 "failed": judge.failed,
             },
+            "agent": {"message_dict": json.loads(infer.pulled.get("message", "{}"))},
         },
     }
 
@@ -282,6 +279,7 @@ def _mark_failed(
                 },
             },
             "judger": None,
+            "agent": None,
         },
     }
 
@@ -292,7 +290,8 @@ def _mark_failed(
 
 
 DEFAULT_GATEWAY = "http://env-gateway.ailab.ailab.ai"
-DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
+# DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
+DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/wangziyi/projs/lagent"
 
 
 def _load_dataset_from_config(config_path: Path) -> Any:
