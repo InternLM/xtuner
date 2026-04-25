@@ -147,7 +147,8 @@ def convert_rollout_tractory_to_train(env, group_data_items):
     agent_data_items, rollout_response_items, judger_response_items = [], [], []
     for i in range(len(group_data_items)):
         messages = group_data_items[i].env.agent.extra_info['message_dict']['policy_agent.messages']
-        agent_data_items.append(RLAgentDataItem(extra_info=dict(messages=messages)))
+        tools = group_data_items[i].env.agent.extra_info['message_dict'].get('policy_agent.tools')
+        agent_data_items.append(RLAgentDataItem(extra_info=dict(messages=messages, tools=tools)))
         rollout_response_items.append(
             RLRolloutResponseItem(
                 response=messages[-1]['raw_content'],
@@ -200,10 +201,17 @@ replay_buffer_cfg = ReplayBufferConfig(
 )
 
 # # 5. Train worker
-model_cfg = Qwen3_5_VLMoE35BA3Config(freeze_vision=True, freeze_projector=True)
-model_cfg.compile_cfg = False
-model_cfg.text_config.freeze_routers = True
+model_cfg = Qwen3_5_VLMoE35BA3Config(
+    freeze_vision=True,
+    freeze_projector=True,
+)
+model_cfg.float8_cfg = None
+model_cfg.text_config.ep_size = 1
+model_cfg.text_config.z_loss_cfg = None
 model_cfg.text_config.balancing_loss_cfg = None
+model_cfg.text_config.freeze_routers = True
+model_cfg.text_config.vocab_size = 251392
+# model_cfg.text_config.embed_grad_max_token_id = 251173
 
 optim_cfg = AdamWConfig(
     lr=lr,

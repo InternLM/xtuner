@@ -530,7 +530,11 @@ class AgentRLTrainer(RLTrainer):
         def _tokenize_agent_messages(data_item):
             if "inputs" in data_item.env.agent.extra_info:
                 return data_item.env.agent.extra_info["inputs"]
-            return tokenize(self.tokenizer, data_item.env.agent.extra_info["messages"])
+            return tokenize(
+                self.tokenizer,
+                data_item.env.agent.extra_info["messages"],
+                tools=data_item.env.agent.extra_info["tools"],
+            )
 
         with ThreadPoolExecutor(max_workers=64) as executor:
             inputs_list = list(
