@@ -240,6 +240,87 @@ class BalancingLossContext(nn.Module):
 
         return loss
 
+    def update_split_aux(
+        self,
+        *,
+        layer_idx: int,
+        router_weights: torch.Tensor,
+        num_experts_per_tok: int,
+        n_routed_experts: int,
+        local_load: torch.Tensor,
+        routing_weights_sum_list: list[torch.Tensor],
+    ) -> None:
+        """Update split-aux balancing accumulators for one layer.
+
+        Args:
+            layer_idx (int): Layer index in split-aux runtime.
+            router_weights (torch.Tensor): Router weights with non-padding tokens selected.
+            num_experts_per_tok (int): Number of experts selected per token.
+            n_routed_experts (int): Number of routed experts.
+            local_load (torch.Tensor): Per-layer expert token counts accumulator.
+            routing_weights_sum_list (list[torch.Tensor]): Per-layer router-weight sums.
+        """
+        _, selected_experts = torch.topk(router_weights, num_experts_per_tok, dim=-1)
+        tokens_per_expert = torch.histc(
+            selected_experts.view(-1),
+            bins=n_routed_experts,
+            min=0,
+            max=n_routed_experts,
+        ).float()
+        local_load[layer_idx] = tokens_per_expert
+        routing_weights_sum_list.append(router_weights.sum(dim=0))
+
+    def finalize_split_aux_loss(
+        self,
+        *,
+        local_load: torch.Tensor,
+        routing_weights_sum_list: list[torch.Tensor],
+        active_layers: int,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+        non_pad_token: int,
+    ) -> torch.Tensor:
+        """Finalize balancing loss from split-aux accumulators.
+
+        Args:
+            local_load (torch.Tensor): Per-layer expert token counts accumulator.
+            routing_weights_sum_list (list[torch.Tensor]): Per-layer router-weight sums.
+            active_layers (int): Number of active MoE layers observed in this forward.
+            n_routed_experts (int): Number of routed experts.
+            num_experts_per_tok (int): Number of experts selected per token.
+            non_pad_token (int): Number of non-padding tokens.
+
+        Returns:
+            torch.Tensor: Final balancing loss.
+        """
+        if self.loss_cfg.balancing_loss_alpha == 0:
+            return torch.tensor(0.0, device=local_load.device, dtype=torch.float32)
+        if active_layers == 0 or not routing_weights_sum_list:
+            return torch.tensor(0.0, device=local_load.device, dtype=torch.float32)
+
+        local_gating_sum = torch.stack(routing_weights_sum_list, dim=0)[:active_layers]
+        active_local_load = local_load[:active_layers]
+
+        if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
+            group = dist.group.WORLD
+            assert group is not None
+            tokens_per_expert_global = all_reduce(active_local_load, "sum", group)
+            tokens_global = tokens_per_expert_global.sum(-1)
+            seqlen_global = tokens_global // num_experts_per_tok
+
+            routing_weights_sum_global = all_reduce_autograd(local_gating_sum, "sum", group)
+            routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
+            scale_global = n_routed_experts / tokens_global
+        else:
+            tokens_per_expert_global = active_local_load
+            valid_tokens = max(non_pad_token, 1)
+            scale_global = n_routed_experts / (valid_tokens * num_experts_per_tok)
+            routing_weights_mean_global = local_gating_sum / valid_tokens
+
+        loss = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1)
+        loss = loss.sum() * self.loss_cfg.balancing_loss_alpha
+        return loss / self._batch_size
+
     @property
     def batch_size(self) -> int:
         return self._batch_size
@@ -338,6 +419,67 @@ class ZLossContext(nn.Module):
         loss = loss / self._batch_size
 
         return loss
+
+    def update_split_aux(
+        self,
+        *,
+        layer_idx: int,
+        router_logits: torch.Tensor,
+        z_loss_logsum: torch.Tensor,
+        z_loss_token_count: torch.Tensor,
+    ) -> None:
+        """Update split-aux z-loss accumulators for one layer.
+
+        Args:
+            layer_idx (int): Layer index in split-aux runtime.
+            router_logits (torch.Tensor): Router logits with non-padding tokens selected.
+            z_loss_logsum (torch.Tensor): Per-layer z-loss numerator accumulator.
+            z_loss_token_count (torch.Tensor): Per-layer token-count accumulator.
+        """
+        # TODO: z-loss currently keeps autograd dependency on router_logits through logsumexp,
+        # which may retain extra graph state and increase activation memory. Unlike balancing-loss
+        # path (where sequence-wise reductions are mostly cheap to keep), this path may benefit
+        # from a memory-optimized implementation (e.g., custom autograd with recomputation/chunking).
+        z_loss_token_count[layer_idx] = router_logits.shape[0]
+        z_loss_logsum[layer_idx] = torch.logsumexp(router_logits, dim=-1).square().sum()
+
+    def finalize_split_aux_loss(
+        self,
+        *,
+        z_loss_logsum: torch.Tensor,
+        z_loss_token_count: torch.Tensor,
+        active_layers: int,
+    ) -> torch.Tensor:
+        """Finalize z-loss from split-aux accumulators.
+
+        Args:
+            z_loss_logsum (torch.Tensor): Per-layer z-loss numerator accumulator.
+            z_loss_token_count (torch.Tensor): Per-layer token-count accumulator.
+            active_layers (int): Number of active MoE layers observed in this forward.
+
+        Returns:
+            torch.Tensor: Final z-loss.
+        """
+        if self.loss_cfg.z_loss_alpha == 0:
+            return torch.tensor(0.0, device=z_loss_logsum.device, dtype=torch.float32)
+        if active_layers == 0:
+            return torch.tensor(0.0, device=z_loss_logsum.device, dtype=torch.float32)
+
+        active_token_count = z_loss_token_count[:active_layers]
+        active_logsum = z_loss_logsum[:active_layers]
+        token_count = torch.clamp(active_token_count, min=1)
+        loss = active_logsum / token_count.to(active_logsum.dtype)
+
+        if self.loss_cfg.z_loss_global_average and dist.is_initialized():
+            group = dist.group.WORLD
+            assert group is not None
+            token_count_global = all_reduce(active_token_count, "sum", group)
+            token_count_global = torch.clamp(token_count_global, min=1)
+            world_size = dist.get_world_size()
+            loss = loss * active_token_count.to(active_logsum.dtype) * world_size / token_count_global
+
+        loss = loss.sum() * self.loss_cfg.z_loss_alpha
+        return loss / self._batch_size
 
     @property
     def batch_size(self) -> int:
