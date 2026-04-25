@@ -34,6 +34,7 @@ from xtuner.v1.loss import (
     MTPLossContext,
     ZLossConfig,
 )
+from xtuner.v1.loss.aux_loss import AuxLossRuntimeState
 from xtuner.v1.loss.mtp_loss import MTPLossConfig
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
@@ -129,6 +130,20 @@ class MoELossContextDict(TypedDict):
     mtp: list[BaseLossContext] | None
 
 
+def _extract_aux_loss_ctx(
+    loss_ctx: list[MoELossContextDict] | MoELossContextDict | None,
+) -> tuple[BaseLossContext | None, BaseLossContext | None]:
+    if loss_ctx is None:
+        return None, None
+
+    if isinstance(loss_ctx, list):
+        balancing_ctx = next((ctx.get("balancing") for ctx in loss_ctx if ctx.get("balancing") is not None), None)
+        z_loss_ctx = next((ctx.get("z_loss") for ctx in loss_ctx if ctx.get("z_loss") is not None), None)
+        return balancing_ctx, z_loss_ctx
+
+    return loss_ctx.get("balancing"), loss_ctx.get("z_loss")
+
+
 class MoEConfig(TransformerConfig):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     n_routed_experts: Annotated[int, Parameter(group="moe")]
@@ -205,12 +220,10 @@ class MoE(BaseModel):
         self.offload_stream = torch.cuda.Stream()
         num_moe_layers = len(self.layers) - self.config.first_k_dense_replace
         num_mtp_layers = self.config.mtp_config.num_layers if self.config.mtp_config is not None else 0
-        aux_loss = AuxLoss.prepare(
-            self.config.aux_loss_cfg,
+        aux_loss = self.config.aux_loss_cfg.build(
             num_layers=num_moe_layers + num_mtp_layers,
             n_routed_experts=self.config.n_routed_experts,
         )
-        assert aux_loss is not None, "aux_loss_cfg must be configured."
         self.aux_loss: AuxLoss = aux_loss
 
     def _select_non_pad_router_logits(
@@ -270,6 +283,41 @@ class MoE(BaseModel):
         if dist.is_initialized():
             tokens_per_expert_global = all_reduce(tokens_per_expert_global, "sum", dist.group.WORLD)  # type: ignore
         return tokens_per_expert_global
+
+    def _build_aux_runtime_state(
+        self,
+        balancing_ctx: BaseLossContext | None,
+        z_ctx: BaseLossContext | None,
+    ) -> AuxLossRuntimeState:
+        """Build per-forward split-aux runtime state."""
+        runtime_device = self.aux_loss.loss_kwargs.device
+        return {
+            "local_load_logits": torch.zeros(
+                self.aux_loss.num_layers,
+                self.aux_loss.n_routed_experts,
+                dtype=torch.int64,
+                device=runtime_device,
+            ),
+            "local_load": (
+                torch.zeros(self.aux_loss.num_layers, self.aux_loss.n_routed_experts, device=runtime_device)
+                if balancing_ctx is not None
+                else None
+            ),
+            "routing_weights_sum_list": [],
+            "z_loss_logsum": (
+                torch.zeros(self.aux_loss.num_layers, dtype=torch.float32, device=runtime_device)
+                if z_ctx is not None
+                else None
+            ),
+            "z_loss_token_count": (
+                torch.zeros(self.aux_loss.num_layers, dtype=torch.int64, device=runtime_device)
+                if z_ctx is not None
+                else None
+            ),
+            "active_layers": 0,
+            "balancing_ctx": balancing_ctx,
+            "z_ctx": z_ctx,
+        }
 
     @torch.no_grad()
     def update_bias(self, total_expert_counts_pre_iter, expected_loads):
@@ -434,7 +482,6 @@ class MoE(BaseModel):
             raise NotImplementedError
 
         assert len(seq_ctx_list) == len(loss_ctx_list), "seq_ctx and loss_ctx must have same length"
-        self.aux_loss.reset()
 
         # Prepare input embeddings for all micro-batches
         if seq_ctx_list[0].input_ids is None:
@@ -457,7 +504,8 @@ class MoE(BaseModel):
 
         router_logits_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
         router_weights_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
-        self.aux_loss.configure_runtime(loss_ctx=loss_ctx_list)
+        balancing_ctx, z_ctx = _extract_aux_loss_ctx(loss_ctx_list)
+        aux_runtime_state = self._build_aux_runtime_state(balancing_ctx, z_ctx)
 
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
@@ -531,11 +579,14 @@ class MoE(BaseModel):
                     )
 
                 self.aux_loss.accumulate(
+                    runtime_state=aux_runtime_state,
                     layer_idx=aux_layer_idx,
                     router_weights=torch.cat(router_weights, dim=0).unsqueeze(0),
                     router_logits=torch.cat(router_logits, dim=0).unsqueeze(0),
                     num_experts_per_tok=self.config.num_experts_per_tok,
                     mask=cat_mask,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
                     dim=1,
                 )
                 aux_layer_idx += 1
@@ -557,7 +608,7 @@ class MoE(BaseModel):
         output["extra_info"] = moe_extra_info
 
         split_aux_output = self.aux_loss.finalize(
-            loss_ctx=loss_ctx_list,
+            runtime_state=aux_runtime_state,
             num_experts_per_tok=self.config.num_experts_per_tok,
             non_pad_token=int(cat_mask.sum().item()),
         )
@@ -620,8 +671,8 @@ class MoE(BaseModel):
         output["router_logits"] = {}
         output["router_weights"] = {}
         self._mark_dynamic(seq_ctx)
-        self.aux_loss.reset()
-        self.aux_loss.configure_runtime(loss_ctx=loss_ctx)
+        balancing_ctx, z_ctx = _extract_aux_loss_ctx(loss_ctx)
+        aux_runtime_state = self._build_aux_runtime_state(balancing_ctx, z_ctx)
 
         aux_layer_idx = 0
         for idx, decoder_layer in self.layers.items():
@@ -664,11 +715,14 @@ class MoE(BaseModel):
                     offload_stream=self.offload_stream,
                 )
                 self.aux_loss.accumulate(
+                    runtime_state=aux_runtime_state,
                     layer_idx=aux_layer_idx,
                     router_weights=router_weights,
                     router_logits=router_results,
                     num_experts_per_tok=self.config.num_experts_per_tok,
                     mask=seq_ctx.mask,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
                     dim=0,
                 )
                 aux_layer_idx += 1
@@ -716,11 +770,14 @@ class MoE(BaseModel):
                 output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
                 output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
                 self.aux_loss.accumulate(
+                    runtime_state=aux_runtime_state,
                     layer_idx=aux_layer_idx,
                     router_weights=mtp_router_weights,
                     router_logits=mtp_router_results,
                     num_experts_per_tok=self.config.num_experts_per_tok,
                     mask=mtp_seq_ctx.mask,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
                     dim=0,
                 )
                 aux_layer_idx += 1
@@ -737,7 +794,7 @@ class MoE(BaseModel):
         # Calculate balancing loss using loss context
         # if loss_ctx is not None:
         split_aux_output = self.aux_loss.finalize(
-            loss_ctx=loss_ctx,
+            runtime_state=aux_runtime_state,
             num_experts_per_tok=self.config.num_experts_per_tok,
             non_pad_token=non_pad_token,
         )
