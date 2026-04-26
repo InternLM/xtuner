@@ -4,7 +4,7 @@
 import torch
 import triton
 import triton.language as tl
-from torch.library import triton_op, wrap_triton
+from torch.library import wrap_triton
 
 
 @triton.jit
@@ -14,10 +14,10 @@ def _fill_seq_idx_kernel(
     num_seqs: tl.constexpr,
 ):
     """Fill output tensor with sequence indices based on cu_seq_lens.
-    
+
     For each position in the sequence, determine which sequence it belongs to
     and write the sequence index to the output.
-    
+
     Args:
         out_ptr: Pointer to output tensor, shape (1, seq_len)
         cu_seq_lens_ptr: Pointer to cumulative sequence lengths, shape (num_seqs + 1,)
@@ -25,11 +25,11 @@ def _fill_seq_idx_kernel(
     """
     # Get the position in the sequence
     pos = tl.program_id(0)
-    
+
     # Load cu_seq_lens into local memory for efficient access
     # cu_seq_lens has shape (num_seqs + 1,)
     # We need to find i such that cu_seq_lens[i] <= pos < cu_seq_lens[i+1]
-    
+
     # Since num_seqs is usually small (batch size), we do a linear search
     # Note: Triton doesn't support break, so we use tl.where for conditional assignment
     seq_idx = 0
@@ -39,7 +39,7 @@ def _fill_seq_idx_kernel(
         in_range = (pos >= start) & (pos < end)
         # Only update seq_idx if current position is in range
         seq_idx = tl.where(in_range, i, seq_idx)
-    
+
     # Write the sequence index to output
     # Output shape is (1, seq_len), so we write at position pos
     tl.store(out_ptr + pos, seq_idx)
@@ -51,7 +51,7 @@ def gen_seq_idx(
     cu_seq_lens: torch.Tensor,
 ) -> torch.Tensor:
     """Fill output tensor with sequence indices.
-    
+
     Args:
         seq_len: Length of the packed sequence (total length of all sequences)
         cu_seq_lens: Cumulative sequence lengths tensor of shape (num_seqs + 1,)
@@ -60,10 +60,10 @@ def gen_seq_idx(
     out = torch.empty((1, seq_len), dtype=torch.int32, device=cu_seq_lens.device)
     seq_len = out.shape[1]
     num_seqs = cu_seq_lens.shape[0] - 1
-    
+
     # Ensure cu_seq_lens is contiguous and on the same device
     cu_seq_lens = cu_seq_lens.contiguous()
-    
+
     # Launch kernel with one thread per position
     grid = (seq_len,)
     with torch.cuda.device(out.device.index):
@@ -74,6 +74,7 @@ def gen_seq_idx(
         )
     return out
 
+
 @gen_seq_idx.register_fake
 def gen_seq_idx_fake(
     seq_len: int,
@@ -81,5 +82,5 @@ def gen_seq_idx_fake(
 ) -> torch.Tensor:
     """Fake implementation of gen_seq_idx for non-CUDA devices."""
     # Create an output tensor of shape (1, seq_len)
-    out = torch.empty((1, seq_len), dtype=torch.int32, device=cu_seq_lens.device)  
+    out = torch.empty((1, seq_len), dtype=torch.int32, device=cu_seq_lens.device)
     return out
