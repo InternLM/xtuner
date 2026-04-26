@@ -51,7 +51,7 @@ try:
             residual: torch.Tensor | None = None,
             prenorm: bool = False,
             residual_in_fp32: bool = False,
-        ) -> torch.Tensor:
+        ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
             weight = self.weight
             if isinstance(weight, DTensor):
                 weight = weight.to_local()

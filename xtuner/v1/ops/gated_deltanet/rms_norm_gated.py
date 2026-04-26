@@ -1,27 +1,34 @@
 # modified from https://github.com/fla-org/flash-linear-attention/tree/v0.4.1/fla/modules/fused_norm_gate.py to support torch.compile
 
 import torch
-
 from fla.modules.fused_norm_gate import (
-    layer_norm_gated_fwd as origin_layer_norm_gated_fwd,
     layer_norm_gated_bwd as origin_layer_norm_gated_bwd,
 )
-from fla.utils import input_guard, get_multiprocessor_count
+from fla.modules.fused_norm_gate import (
+    layer_norm_gated_fwd as origin_layer_norm_gated_fwd,
+)
+from fla.utils import get_multiprocessor_count, input_guard
 
 
-@torch.library.custom_op("xtuner::layer_norm_gated_fwd", mutates_args={})
+@torch.library.custom_op(
+    "xtuner::layer_norm_gated_fwd",
+    mutates_args={},
+    schema="(Tensor x, Tensor g, Tensor? weight, Tensor? bias, str activation='swish', float eps=1e-05, "
+    "Tensor? residual=None, ScalarType? out_dtype=None, ScalarType? residual_dtype=None, bool is_rms_norm=False) "
+    "-> (Tensor y, Tensor? mean, Tensor rstd)",
+)
 def layer_norm_gated_fwd(
     x: torch.Tensor,
     g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = 'swish',
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    activation: str = "swish",
     eps: float = 1e-5,
     residual: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
     residual_dtype: torch.dtype | None = None,
     is_rms_norm: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     y, mean, rstd, returned_x = origin_layer_norm_gated_fwd(
         x=x,
         g=g,
@@ -37,41 +44,49 @@ def layer_norm_gated_fwd(
     # due to custom_op restriction, we cannot return the original input `x`
     return y, mean, rstd
 
+
 @layer_norm_gated_fwd.register_fake
 def layer_norm_gated_fwd_fake(
     x: torch.Tensor,
     g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = 'swish',
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    activation: str = "swish",
     eps: float = 1e-5,
     residual: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
     residual_dtype: torch.dtype | None = None,
     is_rms_norm: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
     T, _ = x.shape
     y = torch.empty_like(x)
     mean = torch.empty((T,), dtype=torch.float, device=x.device) if not is_rms_norm else None
     rstd = torch.empty((T,), dtype=torch.float, device=x.device)
     return y, mean, rstd
 
-@torch.library.custom_op("xtuner::layer_norm_gated_bwd", mutates_args={})
+
+@torch.library.custom_op(
+    "xtuner::layer_norm_gated_bwd",
+    mutates_args={},
+    schema="(Tensor dy, Tensor x, Tensor g, Tensor? weight, Tensor? bias, str activation='swish', float eps=1e-05, "
+    "Tensor? mean=None, Tensor? rstd=None, Tensor? dresidual=None, bool has_residual=False, "
+    "bool is_rms_norm=False, ScalarType? x_dtype=None) -> (Tensor dx, Tensor dg, Tensor? dw, Tensor? db, Tensor? dresidual_in)",
+)
 def layer_norm_gated_bwd(
     dy: torch.Tensor,
     x: torch.Tensor,
     g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = 'swish',
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    activation: str = "swish",
     eps: float = 1e-5,
-    mean: torch.Tensor = None,
-    rstd: torch.Tensor = None,
-    dresidual: torch.Tensor = None,
+    mean: torch.Tensor | None = None,
+    rstd: torch.Tensor | None = None,
+    dresidual: torch.Tensor | None = None,
     has_residual: bool = False,
     is_rms_norm: bool = False,
-    x_dtype: torch.dtype = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    x_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     return origin_layer_norm_gated_bwd(
         dy=dy,
         x=x,
@@ -89,42 +104,48 @@ def layer_norm_gated_bwd(
         recompute_output=False,
     )
 
+
 @layer_norm_gated_bwd.register_fake
 def layer_norm_gated_bwd_fake(
     dy: torch.Tensor,
     x: torch.Tensor,
     g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = 'swish',
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    activation: str = "swish",
     eps: float = 1e-5,
-    mean: torch.Tensor = None,
-    rstd: torch.Tensor = None,
-    dresidual: torch.Tensor = None,
+    mean: torch.Tensor | None = None,
+    rstd: torch.Tensor | None = None,
+    dresidual: torch.Tensor | None = None,
     has_residual: bool = False,
     is_rms_norm: bool = False,
-    x_dtype: torch.dtype = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    x_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     _, D = x.shape
     NS = get_multiprocessor_count(x.device.index)
     dx = torch.empty_like(x)
     dg = torch.empty_like(g)
-    dw = torch.empty((NS, D), dtype=torch.float, device=weight.device).sum(0).to(weight.dtype) if weight is not None else None
-    db = torch.empty((NS, D), dtype=torch.float, device=bias.device).sum(0).to(bias.dtype) if bias is not None else None
+    dw = (
+        torch.empty((NS, D), dtype=torch.float, device=weight.device).sum(0).to(weight.dtype)
+        if weight is not None
+        else None
+    )
+    db = (
+        torch.empty((NS, D), dtype=torch.float, device=bias.device).sum(0).to(bias.dtype) if bias is not None else None
+    )
     dres_in = torch.empty_like(x) if has_residual else None
     return dx, dg, dw, db, dres_in
 
 
 class LayerNormGatedFunction(torch.autograd.Function):
-
     @staticmethod
     @input_guard
     def forward(
         ctx,
         x: torch.Tensor,
         g: torch.Tensor,
-        weight: torch.Tensor,
-        bias: torch.Tensor,
+        weight: torch.Tensor | None,
+        bias: torch.Tensor | None,
         activation: str,
         residual: torch.Tensor | None = None,
         eps: float = 1e-6,
@@ -140,11 +161,7 @@ class LayerNormGatedFunction(torch.autograd.Function):
         if residual is not None:
             assert residual.shape == x_shape_og
             residual = residual.reshape(-1, residual.shape[-1])
-        residual_dtype = (
-            residual.dtype
-            if residual is not None
-            else (torch.float if residual_in_fp32 else None)
-        )
+        residual_dtype = residual.dtype if residual is not None else (torch.float if residual_in_fp32 else None)
         y, mean, rstd = layer_norm_gated_fwd(
             x=x,
             g=g,
@@ -171,12 +188,13 @@ class LayerNormGatedFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
-    def backward(ctx, dy, *args):
+    def backward(ctx, dy: torch.Tensor, *args: torch.Tensor | None):
         x, g, weight, bias, mean, rstd = ctx.saved_tensors
         dy = dy.reshape(-1, dy.shape[-1])
         assert dy.shape == x.shape
         if ctx.prenorm:
             dresidual = args[0]
+            assert dresidual is not None
             dresidual = dresidual.reshape(-1, dresidual.shape[-1])
             assert dresidual.shape == x.shape
         else:
@@ -196,6 +214,9 @@ class LayerNormGatedFunction(torch.autograd.Function):
             is_rms_norm=ctx.is_rms_norm,
             x_dtype=ctx.x_dtype,
         )
+        if ctx.has_residual:
+            # The fused backward always materializes a residual gradient when prenorm stores a residual path.
+            assert dres_in is not None
         return (
             dx.reshape(ctx.x_shape_og),
             dg.reshape(ctx.g_shape_og),
@@ -209,17 +230,18 @@ class LayerNormGatedFunction(torch.autograd.Function):
             None,
         )
 
+
 def rms_norm_gated(
     x: torch.Tensor,
     g: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor,
-    activation: str = 'swish',
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    activation: str = "swish",
     residual: torch.Tensor | None = None,
     prenorm: bool = False,
     residual_in_fp32: bool = False,
     eps: float = 1e-6,
-):
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     return LayerNormGatedFunction.apply(
         x,
         g,

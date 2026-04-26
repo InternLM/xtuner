@@ -1,9 +1,7 @@
 # Copyright (c) 2024, Tri Dao.
 
-import torch
-import torch.nn.functional as F
-
 import causal_conv1d_cuda
+import torch
 
 
 LIBRARY_NAME = "DaoAILab"
@@ -36,13 +34,16 @@ def _causal_conv1d_fwd_cpp(
     )
 
 
-@torch.library.custom_op(f"{LIBRARY_NAME}::_causal_conv1d_bwd_cpp", mutates_args={
-    "dfinal_states",
-    "dx",
-    "dweight",
-    "dbias",
-    "dinitial_states",
-})
+@torch.library.custom_op(
+    f"{LIBRARY_NAME}::_causal_conv1d_bwd_cpp",
+    mutates_args={
+        "dfinal_states",
+        "dx",
+        "dweight",
+        "dbias",
+        "dinitial_states",
+    },
+)
 def _causal_conv1d_bwd_cpp(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -54,7 +55,7 @@ def _causal_conv1d_bwd_cpp(
     dx: torch.Tensor,
     dweight: torch.Tensor,
     dbias: torch.Tensor | None,
-    dinitial_states: torch.Tensor,
+    dinitial_states: torch.Tensor | None,
     silu_activation: bool,
 ) -> None:
     if seq_idx is not None:
@@ -76,6 +77,7 @@ def _causal_conv1d_bwd_cpp(
         dinitial_states,
         silu_activation,
     )
+
 
 def causal_conv1d_fwd_function(
     x: torch.Tensor,
@@ -99,6 +101,7 @@ def causal_conv1d_fwd_function(
     )
     return out
 
+
 def causal_conv1d_bwd_function(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -108,9 +111,9 @@ def causal_conv1d_bwd_function(
     initial_states: torch.Tensor | None,
     dfinal_states: torch.Tensor | None,
     dx: torch.Tensor | None,
-    return_dinitial_states: torch.Tensor,
+    return_dinitial_states: bool,
     silu_activation: bool,
-) -> tuple[torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     if seq_idx is None:
         batch_size, dim = x.size()[:2]
     else:
@@ -144,8 +147,10 @@ def causal_conv1d_bwd_function(
 
     dweight = dweight.type_as(weight)
     if dbias is not None:
+        assert bias is not None
         dbias = dbias.type_as(bias)
     return dx, dweight, dbias, dinitial_states
+
 
 class CausalConv1dFn(torch.autograd.Function):
     @staticmethod
@@ -166,42 +171,26 @@ class CausalConv1dFn(torch.autograd.Function):
             x = x.contiguous()
         bias = bias.contiguous() if bias is not None else None
         if seq_idx is not None:
-            assert (
-                initial_states is None
-            ), "initial_states must be None if seq_idx is not None"
-            assert (
-                not return_final_states
-            ), "If seq_idx is not None, we don't return final_states_out"
+            assert initial_states is None, "initial_states must be None if seq_idx is not None"
+            assert not return_final_states, "If seq_idx is not None, we don't return final_states_out"
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
-        if initial_states is not None and (
-            initial_states.stride(2) != 1 and initial_states.stride(1) != 1
-        ):
+        if initial_states is not None and (initial_states.stride(2) != 1 and initial_states.stride(1) != 1):
             initial_states = initial_states.contiguous()
         if return_final_states:
-            assert (
-                x.stride(1) == 1
-            ), "Only channel-last layout support returning final_states_out"
+            assert x.stride(1) == 1, "Only channel-last layout support returning final_states_out"
             if final_states_out is not None:
-                assert (
-                    final_states_out.stride(2) == 1 or final_states_out.stride(1) == 1
-                )
+                assert final_states_out.stride(2) == 1 or final_states_out.stride(1) == 1
             else:
                 batch, dim, seqlen = x.shape
                 width = weight.shape[1]
-                final_states_out = torch.empty(
-                    batch, width - 1, dim, device=x.device, dtype=x.dtype
-                ).transpose(1, 2)
+                final_states_out = torch.empty(batch, width - 1, dim, device=x.device, dtype=x.dtype).transpose(1, 2)
         else:
             final_states_out = None
         ctx.activation = activation in ["silu", "swish"]
-        out = causal_conv1d_fwd_function(
-            x, weight, bias, seq_idx, initial_states, final_states_out, ctx.activation
-        )
+        out = causal_conv1d_fwd_function(x, weight, bias, seq_idx, initial_states, final_states_out, ctx.activation)
         ctx.save_for_backward(x, weight, bias, seq_idx, initial_states)
         ctx.return_final_states = return_final_states
-        ctx.return_dinitial_states = (
-            initial_states is not None and initial_states.requires_grad
-        )
+        ctx.return_dinitial_states = initial_states is not None and initial_states.requires_grad
         return out if not return_final_states else (out, final_states_out)
 
     @staticmethod

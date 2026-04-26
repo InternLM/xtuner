@@ -3,20 +3,23 @@
 import warnings
 
 import torch
-
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.gated_delta_rule.chunk import (
     chunk_gated_delta_rule_bwd as origin_chunk_gated_delta_rule_bwd,
+)
+from fla.ops.gated_delta_rule.chunk import (
     chunk_gated_delta_rule_fwd as origin_chunk_gated_delta_rule_fwd,
 )
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
-@torch.library.custom_op("gated_deltanet::chunk_gated_delta_rule_fwd",
-                         mutates_args=(),
-                         schema='(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, '
-                                'Tensor initial_state, bool output_final_state, Tensor? cu_seqlens=None)'
-                                ' -> (Tensor, Tensor, Tensor, Tensor?)')
+@torch.library.custom_op(
+    "gated_deltanet::chunk_gated_delta_rule_fwd",
+    mutates_args=(),
+    schema="(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, "
+    "Tensor? initial_state, bool output_final_state, Tensor? cu_seqlens=None)"
+    " -> (Tensor, Tensor, Tensor, Tensor?)",
+)
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -26,11 +29,10 @@ def chunk_gated_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor | None,
     output_final_state: bool,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    return origin_chunk_gated_delta_rule_fwd(
-        q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens
-    )
+    return origin_chunk_gated_delta_rule_fwd(q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens)
+
 
 @chunk_gated_delta_rule_fwd.register_fake
 def chunk_gated_delta_rule_fwd_fake(
@@ -42,7 +44,7 @@ def chunk_gated_delta_rule_fwd_fake(
     scale: float,
     initial_state: torch.Tensor | None,
     output_final_state: bool,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     # This fake implementation is only used for shape inference and will not be executed.
     # Returns: (g, o, A, final_state)
@@ -53,7 +55,7 @@ def chunk_gated_delta_rule_fwd_fake(
     batch_size, seq_len, num_heads, head_k_dim = q.shape
     head_v_dim = v.shape[-1]
     chunk_size = 64  # BT
-    
+
     # g is processed by chunk_local_cumsum but shape remains [B, T, H]
     g_out = torch.empty_like(g)
     # o has same shape as v: [B, T, H, V]
@@ -65,11 +67,13 @@ def chunk_gated_delta_rule_fwd_fake(
     return g_out, o, A, final_state
 
 
-@torch.library.custom_op("gated_deltanet::chunk_gated_delta_rule_bwd",
-                         mutates_args=(),
-                         schema='(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, Tensor A, float scale, '
-                                'Tensor initial_state, Tensor do, Tensor dht, Tensor? cu_seqlens=None) '
-                                '-> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)')
+@torch.library.custom_op(
+    "gated_deltanet::chunk_gated_delta_rule_bwd",
+    mutates_args=(),
+    schema="(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, Tensor A, float scale, "
+    "Tensor? initial_state, Tensor do, Tensor? dht, Tensor? cu_seqlens=None) "
+    "-> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor?)",
+)
 def chunk_gated_delta_rule_bwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -80,12 +84,10 @@ def chunk_gated_delta_rule_bwd(
     scale: float,
     initial_state: torch.Tensor | None,
     do: torch.Tensor,
-    dht: torch.Tensor,
-    cu_seqlens: torch.LongTensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    return origin_chunk_gated_delta_rule_bwd(
-        q, k, v, g, beta, A, scale, initial_state, do, dht, cu_seqlens
-    )
+    dht: torch.Tensor | None,
+    cu_seqlens: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    return origin_chunk_gated_delta_rule_bwd(q, k, v, g, beta, A, scale, initial_state, do, dht, cu_seqlens)
 
 
 @chunk_gated_delta_rule_bwd.register_fake
@@ -99,9 +101,9 @@ def chunk_gated_delta_rule_bwd_fake(
     scale: float,
     initial_state: torch.Tensor | None,
     do: torch.Tensor,
-    dht: torch.Tensor,
+    dht: torch.Tensor | None,
     cu_seqlens: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     # This fake implementation is only used for shape inference and will not be executed.
     # Returns: (dq, dk, dv, db, dg, dh0)
     # - dq: [B, T, H, K], same as q
@@ -120,7 +122,6 @@ def chunk_gated_delta_rule_bwd_fake(
 
 
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
-
     @staticmethod
     @input_guard
     @autocast_custom_fwd
@@ -134,7 +135,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor | None,
         output_final_state: bool,
-        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
         q_rstd, k_rstd = None, None
@@ -164,7 +165,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     def backward(
         ctx,
         do: torch.Tensor,
-        dht: torch.Tensor,
+        dht: torch.Tensor | None,
     ):
         q, q_rstd, k, k_rstd, v, g, beta, A, initial_state, cu_seqlens = ctx.saved_tensors
         dq, dk, dv, db, dg, dh0 = chunk_gated_delta_rule_bwd(
@@ -185,17 +186,20 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             dk = l2norm_bwd(k, k_rstd, dk)
         return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None, dh0, None, None, None
 
+
 def chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     g: torch.Tensor,
     beta: torch.Tensor,
-    scale: float = None,
+    scale: float | None = None,
     initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
-    cu_seqlens: torch.LongTensor | None = None,
+    # XTuner stores packed sequence offsets as int32 in SequenceContext to match the varlen attention path.
+    # This wrapper only forwards the tensor to the kernel, so both int32 and int64 packed offsets are valid here.
+    cu_seqlens: torch.Tensor | None = None,
     **kwargs,
 ):
     r"""
@@ -221,9 +225,9 @@ def chunk_gated_delta_rule(
             Whether to output the final state of shape `[N, H, K, V]`. Default: `False`.
         use_qk_l2norm_in_kernel (bool):
             Whether to apply L2norm to the q/k tensor internally. Default: `False`.
-        cu_seqlens (torch.LongTensor):
-            Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
-            consistent with the FlashAttention API.
+        cu_seqlens (torch.Tensor):
+            Cumulative sequence lengths of shape `[N+1]` used for variable-length training.
+            Both int32 and int64 packed offsets are accepted.
 
     Returns:
         o (torch.Tensor):
@@ -260,7 +264,7 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
-    if 'head_first' in kwargs:
+    if "head_first" in kwargs:
         warnings.warn(
             "head_first is deprecated and will be removed in a future version. "
             "Please use head_first=False for now instead.",
