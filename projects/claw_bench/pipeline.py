@@ -104,7 +104,7 @@ DEFAULT_AGENTS: list[AgentSpec] = [
     ),
 ]
 
-DEFAULT_SANDBOX = SandboxSpec(image="ubuntu2404-v1", ttl_seconds=1800, workspace_path="/workspace")
+DEFAULT_SANDBOX = SandboxSpec(image="ubuntu2404-v2", ttl_seconds=1800, workspace_path="/workspace")
 
 
 # ─────────────────────────────────────────────────────────────────

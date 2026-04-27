@@ -425,7 +425,7 @@ class SampleParams(BaseModel):
     presence_penalty: Annotated[float, Parameter(help="The parameter for presence penalty.")] = 0.0
     frequency_penalty: Annotated[float, Parameter(help="The parameter for frequency penalty.")] = 0.0
     min_tokens: Annotated[int, Parameter(help="Minimum number of tokens to generate.")] = 0
-    max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 2048
+    max_tokens: Annotated[int, Parameter(help="Maximum number of tokens to generate.")] = 64 * 1024
     stops: Annotated[list[str], Parameter(help="List of stop sequences.")] = []
     stop_token_ids: Annotated[list[int], Parameter(help="List of stop token IDs.")] = []
     skip_special_tokens: Annotated[bool, Parameter(help="Whether to skip special tokens.")] = True

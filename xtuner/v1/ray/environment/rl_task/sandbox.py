@@ -190,7 +190,7 @@ class ReadFileHook(Hook):
             ctx.setdefault("pulled", {})[key] = content
         except Exception as exc:
             if self.optional:
-                logger.warning("read_file %s (key=%r) failed: %s", path, key, exc)
+                get_logger().warning("read_file %s (key=%r) failed: %s", path, key, exc)
             else:
                 raise
 
