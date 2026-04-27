@@ -38,7 +38,7 @@ class TestMoEEngine(DeterministicDDPTestCase):
         "device,ep_size,sp_size",
         [
             ("cuda", 1, 1),
-            ("cuda", 1, 2),
+            ("cuda", 2, 2),
         ],
     )
     def test_moe_engine_train(self, device, ep_size, sp_size):

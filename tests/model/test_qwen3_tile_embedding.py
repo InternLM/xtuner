@@ -184,7 +184,7 @@ class TestQwen3Dense4B(DistributedTestBase):
         self.create_pg(device)
         with torch.device("meta"):
             cfg = Qwen3Dense4BConfig()
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             tp_size=tp_size,

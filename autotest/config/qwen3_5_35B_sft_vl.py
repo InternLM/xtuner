@@ -13,12 +13,11 @@ MODEL_PATH = os.environ["MODEL_PATH"]
 DATA_PATH = os.environ["DATA_PATH"]
 
 
-moe_cfg = Qwen3_5_VLMoE35BA3Config()
+moe_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
 
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
-    torch_compile=False,
     cpu_offload=False,
 )
 
