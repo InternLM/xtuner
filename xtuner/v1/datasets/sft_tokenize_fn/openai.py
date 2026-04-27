@@ -7,12 +7,12 @@ from cyclopts import Parameter
 from pydantic import BaseModel, ConfigDict
 
 from transformers import PreTrainedTokenizer
-from xtuner.v1.data_proto.messages import ChatMessages
+from xtuner.v1.data_proto.messages import ChatMessages, Qwen35ChatMessages
 from xtuner.v1.data_proto.templates import CHAT_TEMPLATE_MAP
 from xtuner.v1.datasets.data_item import CacheItem, DataItem
 from xtuner.v1.utils import get_logger
 
-from ..utils import CachableTokenizeFunction, tokenizer_xxhash
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
 
 
 logger = get_logger()
@@ -30,19 +30,25 @@ class OpenaiTokenizeFunction(CachableTokenizeFunction[DataItem]):
         assert chat_template in CHAT_TEMPLATE_MAP, (
             f"chat_template {chat_template} not found in {CHAT_TEMPLATE_MAP.keys()}"
         )
+        self.chat_template_name = chat_template
         self.chat_template = CHAT_TEMPLATE_MAP[chat_template]
         self._hash = hash
         self._tokenizer_hash = tokenizer_hash
         self.max_length = max_length
         super().__init__(tokenizer)
 
+    @with_proxy_attention_flops
     def __call__(self, item: dict | list, **kwargs) -> DataItem | CacheItem:
         tools = None
         if isinstance(item, dict) and "tools" in item:
             tools = item["tools"]
         if isinstance(item, dict) and "messages" in item:
             item = item["messages"]
-        messages = ChatMessages(messages=item, tools=tools)
+
+        if self.chat_template_name == "qwen3.5-vl":
+            messages = Qwen35ChatMessages(messages=item, tools=tools)
+        else:
+            messages = ChatMessages(messages=item, tools=tools)
         tokenized = messages.tokenize(self.tokenizer, self.chat_template)
 
         input_ids = tokenized["input_ids"]

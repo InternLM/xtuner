@@ -11,7 +11,6 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
-    fully_shard,
 )
 from torch.distributed.tensor import DTensor
 from tqdm import tqdm
@@ -20,7 +19,7 @@ from typing_extensions import overload, override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.loss import BaseLossContext, CELossContext
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     BaseModel,
@@ -29,7 +28,13 @@ from xtuner.v1.model.base import (
     TransformerConfig,
 )
 from xtuner.v1.model.utils import checkpoint_wrapper
-from xtuner.v1.module import LMHead, RMSNorm, RotaryEmbeddingProtocol, get_rope_embedding
+from xtuner.v1.module import (
+    GatedDeltaNetConfig,
+    LMHead,
+    MHAConfig,
+    MLAConfig,
+    RMSNorm,
+)
 from xtuner.v1.module.decoder_layer.dense_decoder_layer import DenseDecoderLayer
 from xtuner.v1.utils import (
     get_device,
@@ -53,7 +58,7 @@ class Dense(BaseModel):
     def __init__(self, config: TransformerConfig):
         super().__init__(config)
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
         self.layers = self.build_layers(config)
         self.rotary_emb = self.build_rotary_embedding(config)
@@ -71,7 +76,7 @@ class Dense(BaseModel):
     def forward(
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: CELossContext,
+        loss_ctx: dict[str, BaseLossContext | list[BaseLossContext]] | None = None,
     ) -> ModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -103,11 +108,18 @@ class Dense(BaseModel):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
-        return ModelOutputs(**output)  # type: ignore[typeddict-item]
+        if loss_ctx is None:
+            # Inference mode
+            _, (logits, _) = self.lm_head(hidden_states, None)
+            output["logits"] = logits
+        else:
+            # Training mode
+            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx["lm"])  # type: ignore[call-overload]
+            output["loss"] = loss
+            output["logits"] = logits
+            output["extra_info"] = extra_info
+
+        return ModelOutputs(**output)
 
     def build_embeddings(self, config: TransformerConfig):
         return nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
@@ -116,14 +128,27 @@ class Dense(BaseModel):
         # 让 layers 是一个 nn.ModuleDict 方便做 pipeline parallel 的参数切分，
         # 这样可以保证部分 layer 被切掉后，idx 保持不变
         layers = nn.ModuleDict()
+        attention_config: GatedDeltaNetConfig | MLAConfig | MHAConfig | None = None
         for layer_idx in range(config.num_hidden_layers):
+            if config.layers_type[layer_idx] in ["full_attention", "sliding_attention"]:
+                attention_config = config.attention
+            elif config.layers_type[layer_idx] == "linear_attention":
+                attention_config = config.linear_attention
+                assert attention_config is not None, (
+                    "linear_attention config must be provided for linear_attention layer"
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported layer type {config.layers_type[layer_idx]} at layer {layer_idx}. Only 'full_attention', 'sliding_attention' and 'linear_attention' are supported."
+                )
+
             layers[str(layer_idx)] = DenseDecoderLayer(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 mlp_bias=config.mlp_bias,
                 hidden_act=config.hidden_act,
                 rms_norm_eps=config.rms_norm_eps,
-                attention_config=config.attention,
+                attention_config=attention_config,
                 generate_config=config.generate_config,
                 rope_scaling_cfg=config.rope_scaling_cfg,
                 float8_cfg=config.float8_cfg,
@@ -131,10 +156,6 @@ class Dense(BaseModel):
                 layer_idx=layer_idx,
             )
         return layers
-
-    def build_rotary_embedding(self, config: TransformerConfig) -> RotaryEmbeddingProtocol:
-        with torch.device(DEVICE):
-            return get_rope_embedding(config=config)
 
     @property
     @override
@@ -146,15 +167,10 @@ class Dense(BaseModel):
     def __call__(  # type: ignore
         self,
         seq_ctx: SequenceContext,
-        loss_ctx: CELossContext,
+        loss_ctx: dict[str, CELossContext] | None = None,
     ) -> ModelOutputs: ...
 
     __call__ = nn.Module.__call__
-
-    def _apply(self, fn, recurse: bool = True):
-        super()._apply(fn)
-        self.rotary_emb.to(torch.float32)  # type: ignore
-        return self
 
     @override
     def from_hf(self, hf_path: str | Path, strict: bool = True) -> tuple:
@@ -203,6 +219,10 @@ class Dense(BaseModel):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
+        if self.fsdp_config.fp32_lm_head:
+            lm_head_mp_policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float32)
+        else:
+            lm_head_mp_policy = mp_policy
         num_recompute_layers = int(self.config.num_hidden_layers * self.fsdp_config.recompute_ratio)
 
         generator = torch.Generator()
@@ -222,12 +242,12 @@ class Dense(BaseModel):
                     layer.forward = torch.compile(layer.forward, fullgraph=True)
 
             self.layers[str(layer_idx)] = layer
-            fully_shard(
-                layer,
+            self._fully_shard(
                 mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
                 mp_policy=mp_policy,
                 reshard_after_forward=self.fsdp_config.reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+                module=layer,
             )
 
         for layer_cur, layer_next in zip(
@@ -236,32 +256,31 @@ class Dense(BaseModel):
         ):
             layer_cur.set_modules_to_forward_prefetch([layer_next])  # type: ignore
 
-        fully_shard(
-            self.embed_tokens,
+        self._fully_shard(
+            mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
+            mp_policy=lm_head_mp_policy if self.config.tie_word_embeddings else mp_policy,
+            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            module=self.embed_tokens,
+        )
+
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            module=self.norm,
         )
 
-        fully_shard(
-            self.norm,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
+            mp_policy=lm_head_mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
+            module=self.lm_head,
         )
 
-        fully_shard(
-            self.lm_head,
-            mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=self.fsdp_config.reshard_after_forward,
-            offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
-        )
-
-        fully_shard(
-            self,
+        self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=self.fsdp_config.reshard_after_forward,

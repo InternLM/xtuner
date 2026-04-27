@@ -1,11 +1,12 @@
 import asyncio
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from itertools import count
 from pathlib import Path
 from typing import Any, List, TypeAlias, Union
 
 import pandas as pd
+import ray
 import torch
 from pydantic import BaseModel, ConfigDict
 
@@ -19,6 +20,7 @@ from xtuner.v1.rl.utils import (
     QueryNode,
     ScalarNode,
     SetNode,
+    clear_rollout_response_for_rerun,
     parse_query,
 )
 from xtuner.v1.utils import get_logger
@@ -36,6 +38,59 @@ class StorageItem:
     task_name: str
     status: Status
     staleness: int
+
+
+@dataclass
+class SerializedRayObjectRef:
+    value: Any
+
+
+def _snapshot_nested_objectrefs(obj: Any) -> Any:
+    if isinstance(obj, ray.ObjectRef):
+        return SerializedRayObjectRef(_snapshot_nested_objectrefs(ray.get(obj)))
+    if isinstance(obj, BaseModel):
+        snapshot = obj.model_copy(deep=False)
+        for field_name in type(obj).model_fields:
+            setattr(snapshot, field_name, _snapshot_nested_objectrefs(getattr(obj, field_name)))
+        return snapshot
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return replace(
+            obj,
+            **{field.name: _snapshot_nested_objectrefs(getattr(obj, field.name)) for field in fields(obj)},
+        )
+    if isinstance(obj, list):
+        return [_snapshot_nested_objectrefs(value) for value in obj]
+    if isinstance(obj, tuple):
+        return tuple(_snapshot_nested_objectrefs(value) for value in obj)
+    if isinstance(obj, set):
+        return {_snapshot_nested_objectrefs(value) for value in obj}
+    if isinstance(obj, dict):
+        return {key: _snapshot_nested_objectrefs(value) for key, value in obj.items()}
+    return obj
+
+
+def _restore_nested_objectrefs(obj: Any) -> Any:
+    if isinstance(obj, SerializedRayObjectRef):
+        return ray.put(_restore_nested_objectrefs(obj.value))
+    if isinstance(obj, BaseModel):
+        restored = obj.model_copy(deep=False)
+        for field_name in type(obj).model_fields:
+            setattr(restored, field_name, _restore_nested_objectrefs(getattr(obj, field_name)))
+        return restored
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return replace(
+            obj,
+            **{field.name: _restore_nested_objectrefs(getattr(obj, field.name)) for field in fields(obj)},
+        )
+    if isinstance(obj, list):
+        return [_restore_nested_objectrefs(value) for value in obj]
+    if isinstance(obj, tuple):
+        return tuple(_restore_nested_objectrefs(value) for value in obj)
+    if isinstance(obj, set):
+        return {_restore_nested_objectrefs(value) for value in obj}
+    if isinstance(obj, dict):
+        return {key: _restore_nested_objectrefs(value) for key, value in obj.items()}
+    return obj
 
 
 QUERY_KEYS = [f.name for f in fields(StorageItem)]
@@ -172,13 +227,13 @@ class NaiveStorage(StorageBackend):
         max_uid = max(self._items, default=0)
         max_timestamp_id = max((item.timestamp_id for item in self._items.values()), default=0)
         return {
-            "items": list(self._items.values()),
+            "items": [_snapshot_nested_objectrefs(item) for item in self._items.values()],
             "next_uid": max_uid + 1,
             "next_timestamp_id": max_timestamp_id + 1,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        items: list[StorageItem] = state["items"]
+        items: list[StorageItem] = [_restore_nested_objectrefs(item) for item in state["items"]]
         self._items = {item.uid: item for item in items}
         self._uid_gen = count(state["next_uid"])
         self._timestamp_id_gen = count(state["next_timestamp_id"])
@@ -312,14 +367,19 @@ class PandasStorage(StorageBackend):
         self._flush_buffer()
         max_uid = int(self._df["uid"].max()) if not self._df.empty else 0
         max_timestamp_id = int(self._df["timestamp_id"].max()) if not self._df.empty else 0
+        df = self._df.copy(deep=True)
+        if not df.empty:
+            df["item"] = df["item"].map(_snapshot_nested_objectrefs)
         return {
-            "df": self._df.copy(deep=True),
+            "df": df,
             "next_uid": max_uid + 1,
             "next_timestamp_id": max_timestamp_id + 1,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         self._df = state["df"].copy(deep=True)
+        if not self._df.empty:
+            self._df["item"] = self._df["item"].map(_restore_nested_objectrefs)
         self._buffer = []
         self._uid_gen = count(state["next_uid"])
         self._timestamp_id_gen = count(state["next_timestamp_id"])
@@ -374,12 +434,16 @@ class ReplayBuffer:
     async def put(self, items: list[RolloutState], task_name: str) -> None:
         if not items:
             return
+        status = update_group_status(items)
+        if status == Status.EXPIRED:
+            for item in items:
+                clear_rollout_response_for_rerun(item)
         storage_item = StorageItem(
             item=items,
             uid=0,
             timestamp_id=0,
             task_name=task_name,
-            status=update_group_status(items),
+            status=status,
             staleness=max(item.seq_staleness for item in items),
         )
         async with self._lock:
@@ -426,6 +490,7 @@ class ReplayBuffer:
                 if should_expire:
                     # completed / aborted 样本超过 step 级阈值时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
                     for item in record.item:
+                        clear_rollout_response_for_rerun(item)
                         item.status = Status.EXPIRED
                     status = Status.EXPIRED
                     expired_count += 1
@@ -440,7 +505,7 @@ class ReplayBuffer:
 
     async def save(self, path: str | Path) -> None:
         file_path = Path(path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.mkdir(parents=True, exist_ok=True)
         replay_buffer_path = file_path / self._SAVE_PATH
         async with self._lock:
             state = {

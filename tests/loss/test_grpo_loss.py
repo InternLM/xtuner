@@ -146,7 +146,7 @@ class TestGRPOLoss(DistributedTestBase):
             if sp_size > 1:
                 seq_ctx = seq_ctx.split(sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(shifted_labels=shifted_labels_list_rank[iter_idx], advantages=advantages_list_rank[iter_idx], sp_mesh=sp_mesh)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels_list_rank[iter_idx], "advantages": advantages_list_rank[iter_idx]}, sp_mesh=sp_mesh)
             loss_ctx_list.append(loss_ctx)
         
         with torch.no_grad():

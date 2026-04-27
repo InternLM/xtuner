@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState
 
 
 class ParsedReasoningResult(BaseModel):

@@ -48,11 +48,11 @@ class TestMoEEngine(DeterministicDDPTestCase):
             ep_size=ep_size,
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
+            compile_cfg=False,
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=False,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -93,13 +93,13 @@ class TestMoEEngine(DeterministicDDPTestCase):
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+            loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -129,11 +129,11 @@ class TestMoEEngine(DeterministicDDPTestCase):
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
             freeze_routers=True,
+            compile_cfg=False,
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=False,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -184,13 +184,13 @@ class TestMoEEngine(DeterministicDDPTestCase):
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+            loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -232,10 +232,10 @@ class TestMoEEngine(DeterministicDDPTestCase):
             ep_size=ep_size,
             balancing_loss_cfg=BalancingLossConfig(),
             z_loss_cfg=ZLossConfig(),
+            compile_cfg=False,
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=False,
             cpu_offload=False,
             ep_size=ep_size,
             hsdp_sharding_size=hsdp_sharding_size,
@@ -407,14 +407,12 @@ class TestMoEEngine(DeterministicDDPTestCase):
             fsdp_cfg=fsdp_cfg,
         )
         engine2.load_dcp(model_dir=model_dir, optimizer_dir=optimizer_dir, load_args=False)
-        # print(f"len(engine.optimizer.state), len(engine2.optimizer.state): {len(engine.optimizer.state)}, {len(engine2.optimizer.state)}")
         assert len(engine.optimizer.state) == len(engine2.optimizer.state)
         assert len(engine.optimizer.state) != 0
         for param_group in engine2.optimizer.param_groups:
-            # print(f"param_group['lr']: {param_group['lr']}")
             assert param_group['lr'] == lr2
             assert param_group['eps'] == eps2
-        
+
         lr3 = 1e-1
         eps3 = 1e-3
         optim_cfg3 = AdamWConfig(lr=lr3, eps=eps3)
@@ -447,12 +445,12 @@ def create_engine_from_hf(load_from: Path, dispatcher: str | None, ep_size: int,
     moe_cfg : Qwen3MoEConfig = get_model_config_from_hf(load_from)
     moe_cfg.dispatcher = dispatcher
     moe_cfg.ep_size = ep_size
+    moe_cfg.compile_cfg = False
     if tiny:
         moe_cfg.num_hidden_layers = 2
 
     optim_cfg: AdamWConfig = AdamWConfig()
     fsdp_cfg: FSDPConfig = FSDPConfig(
-        torch_compile=False,
         cpu_offload=False,
         ep_size=ep_size,
     )

@@ -12,6 +12,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
+from xtuner.v1.utils import XTUNER_DETERMINISTIC
 from xtuner.v1.utils.logger import get_logger
 
 
@@ -63,20 +64,29 @@ class _DatasetSampler:
             self.dataloader_iter = iter(self.dataloader)
         assert self.dataloader_iter is not None
         try:
-            data = next(self.dataloader_iter)[0]
+            data = cast(RolloutState, next(self.dataloader_iter)[0])
             data = put_to_ray(data)
 
         except StopIteration:
             self.cur_epoch += 1
             self.dataloader.set_epoch(self.cur_epoch)
             self.dataloader_iter = iter(self.dataloader)
-            data = next(self.dataloader_iter)[0]
+            data = cast(RolloutState, next(self.dataloader_iter)[0])
             data = put_to_ray(data)
 
+        if XTUNER_DETERMINISTIC:
+            message_uid = self._consumed_samples
+            uid_base = self._consumed_samples * self.prompt_repeat_k
+
         group_data = []
-        for _ in range(self.prompt_repeat_k):
+        for item_idx in range(self.prompt_repeat_k):
             new_data = copy.deepcopy(data)
-            new_data.uid = uuid4().int
+            if XTUNER_DETERMINISTIC:
+                new_data.message_uid = message_uid
+                new_data.uid = uid_base + item_idx
+                new_data.session_uid = new_data.uid
+            else:
+                new_data.uid = uuid4().int
             group_data.append(new_data)
         self._consumed_samples += 1
         return cast(list[RolloutState], group_data)
@@ -104,7 +114,7 @@ class Sampler(_DatasetSampler):
     def save(self, checkpoint_path: Path | str) -> None:
         """Save the sampler's dataloader state to checkpoint."""
         checkpoint_path = Path(checkpoint_path)
-        dataloader_state = self.dataloader.get_state_dict(self._consumed_samples)
+        dataloader_state = self.dataloader.get_state_dict()
         torch.save(dataloader_state, checkpoint_path / self._DATALOADER_FILE)
 
     def resume(self, checkpoint_path: Path | str) -> None:

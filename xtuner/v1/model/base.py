@@ -1,3 +1,4 @@
+import importlib
 import json
 import math
 import pydoc
@@ -8,7 +9,7 @@ from importlib import import_module
 from itertools import chain
 from pathlib import Path
 from shutil import copy, copytree
-from typing import Annotated, Generator, Iterable, Literal, Mapping, cast
+from typing import Annotated, Any, Generator, Iterable, Literal, Mapping, Sequence, cast
 
 import torch
 import torch.distributed as dist
@@ -26,20 +27,24 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
     fully_shard,
 )
-from torch.distributed.tensor import DTensor, Placement, Shard
-from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
-from typing_extensions import NotRequired, Self, TypedDict
+from torch.distributed.tensor import DTensor, Placement, Replicate, Shard, distribute_tensor
+from torch.distributed.tensor._utils import (
+    compute_local_shape_and_global_offset as _compute_local_shape_and_global_offset,
+)
+from torch.utils import _pytree
+from typing_extensions import NotRequired, Self, TypedDict, overload
 
 from transformers.configuration_utils import PretrainedConfig
 from xtuner.v1.config import FSDPConfig, GenerateConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.config import Float8Config
+from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.float8.fsdp_utils import (
     WeightWithDynamicTensorWiseFloat8CastTensor,
     WeightWithDynamicTilewiseFloat8CastTensor,
 )
-from xtuner.v1.loss import BaseLossContext
-from xtuner.v1.module.attention import MHAConfig, MLAConfig
+from xtuner.v1.loss import BaseLossConfig, BaseLossContext, CELossConfig
+from xtuner.v1.module.attention import GatedDeltaNetConfig, MHAConfig, MLAConfig
 from xtuner.v1.module.rope import RopeScalingConfig
 from xtuner.v1.ops.comm.foreach_allgather import foreach_all_gather
 from xtuner.v1.utils import get_device, get_logger, get_torch_device_module, profile_time_and_memory
@@ -57,6 +62,24 @@ DEVICE_MODULE = get_torch_device_module()
 DEVICE = get_device()
 
 
+def compute_local_shape_and_global_offset(*args, **kwargs):
+    "wrapper of _compute_local_shape_and_global_offset avoiding meta tensor error"
+    with torch.device(DEVICE):
+        return _compute_local_shape_and_global_offset(*args, **kwargs)
+
+
+class DataBatchInfo(TypedDict):
+    step_consumed_tokens: int
+    step_consumed_img_tokens: float
+    efficient_attn_ratio: float
+    img_efficient_attn_ratio: float
+
+
+class BatchForwardInfo(TypedDict):
+    logs_info: dict[str, float]
+    extra_info: ModelForwardExtraLogInfo
+
+
 class TorchCompileOption(TypedDict):
     fullgraph: NotRequired[bool]
     dynamic: NotRequired[bool | None]
@@ -69,6 +92,12 @@ class HFSaveCfg(PydanticBaseModel):
     worker_per_rank: Annotated[int, Parameter(group="model")] = 16
     max_save_rank: Annotated[int, Parameter(group="model")] = 16
     bucket_size: Annotated[int, Parameter(group="model")] = 1024**3 * 4
+    # TODO: `XTunerBaseModel` should also be able to specify which parameters to be trained in fp32,
+    # currently it could only be specified in HFSaveCfg
+    # Each entry is a **regex** pattern (passed to `re.search`) matched against the HF parameter name.
+    # Remember to escape literal dots, e.g. use r"model\.layers\.\d+\.weight" instead of
+    # r"model.layers.\d+.weight" to avoid unintended wildcard matches.
+    fp32_keys_pattern: Annotated[list[str] | None, Parameter(group="model")] = None
 
 
 class XTunerBaseModelConfig(PydanticBaseModel):
@@ -87,6 +116,7 @@ class XTunerBaseModelConfig(PydanticBaseModel):
     ] = None
     hf_key_mapping: Annotated[dict[str, str] | None, "Remapping hf key based on the `to_hf_key_list`"] = None
     dcp_ignore_frozen_params: bool = True
+    lm_loss_cfg: BaseLossConfig = CELossConfig()
 
     @property
     def hf_config(self) -> PretrainedConfig | None:
@@ -147,9 +177,11 @@ class TransformerConfig(XTunerBaseModelConfig):
     hidden_size: Annotated[int, Parameter(group="model")]
     intermediate_size: Annotated[int, Parameter(group="model")]
     rms_norm_eps: Annotated[float, Parameter(group="model")]
+    rms_norm_type: Annotated[Literal["default", "zero_centered"], Parameter(group="model")] = "default"
     rope_theta: Annotated[float, Parameter(group="model")]  # required by transformers's build rope
     hidden_act: Annotated[str, Parameter(group="model")]  # key defined in `transformers.activations.ACT2CLS`
     attention: MLAConfig | MHAConfig
+    linear_attention: Annotated[GatedDeltaNetConfig | None, Parameter(group="model")] = None
     mlp_bias: Annotated[bool, Parameter(group="model")] = False
     tie_word_embeddings: Annotated[bool, Parameter(group="model")] = False
     model_type: Annotated[str | None, Parameter(group="model")] = None  # TODO: yehaochen maybe should be removed
@@ -182,7 +214,7 @@ class TransformerConfig(XTunerBaseModelConfig):
         return self.attention.head_dim
 
     @computed_field
-    def layers_type(self) -> list[Literal["full_attention", "sliding_attention"]]:
+    def layers_type(self) -> list[Literal["full_attention", "sliding_attention", "linear_attention"]]:
         if not self.use_sliding_window:
             return ["full_attention"] * self.num_hidden_layers
         else:
@@ -194,11 +226,119 @@ class TransformerConfig(XTunerBaseModelConfig):
             ]
 
 
-class ModelOutputs(TypedDict):
-    hidden_states: NotRequired[list[torch.Tensor]]
-    logits: NotRequired[torch.Tensor]
-    loss: torch.Tensor
-    extra_info: ModelForwardExtraLogInfo
+class ModelOutputs(PydanticBaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+    hidden_states: list[torch.Tensor] | None = None
+    logits: torch.Tensor | None = None
+    loss: torch.Tensor | None = None  # TODO: `forward_only` mode for RL
+    extra_info: ModelForwardExtraLogInfo | dict | None = None  # TODO: `forward_only` mode for RL
+
+    def free_nongrad_feature(self):
+        """Release large intermediate tensors not needed for backward or
+        logging.
+
+        This method is called immediately after forward() in the micro-batch loop.
+        It releases large tensors (logits, hidden_states) while keeping:
+        - loss: needed for backward pass
+        - extra_info: lightweight logging info needed by post_micro_batch_forward()
+        """
+        self.hidden_states = None
+        self.logits = None
+
+    # TODO: Only for avoid BC. Should be removed later.
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    # TODO: Only for avoid BC. Should be removed later.
+    def __contains__(self, key):
+        return key in self.model_fields_set
+
+    @classmethod
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Automatically register every subclass as a pytree node so that
+        # FSDP can traverse the output tensors and insert pre_backward_hooks.
+        super().__init_subclass__(**kwargs)
+        cls._register_pytree_node()
+
+    @staticmethod
+    def _model_field_names(model_type: type[PydanticBaseModel]) -> list[str]:
+        return list(model_type.model_fields)
+
+    @staticmethod
+    def _flatten_pydantic_model(
+        model: PydanticBaseModel,
+    ) -> tuple[list[Any], tuple[type[PydanticBaseModel], list[str]]]:
+        # Flatten the model into a list of field values (the "leaves") plus a
+        # context tuple that carries enough information to reconstruct it.
+        field_names = ModelOutputs._model_field_names(type(model))
+        children = [getattr(model, field_name) for field_name in field_names]
+        return children, (type(model), field_names)
+
+    @staticmethod
+    def _unflatten_pydantic_model(
+        children: Iterable[Any],
+        context: tuple[type[PydanticBaseModel], list[str]],
+    ) -> PydanticBaseModel:
+        # Reconstruct the model from the (possibly transformed) leaf values.
+        # model_construct is used to bypass Pydantic validation, which is safe
+        # here because the values were produced by the flatten step above.
+        model_type, field_names = context
+        values = dict(zip(field_names, children, strict=True))
+        return model_type.model_construct(**values)
+
+    @staticmethod
+    def _flatten_pydantic_model_with_keys(
+        model: PydanticBaseModel,
+    ) -> tuple[list[tuple[_pytree.KeyEntry, Any]], tuple[type[PydanticBaseModel], list[str]]]:
+        # Same as _flatten_pydantic_model but pairs each leaf with a KeyEntry
+        # so that pytree-aware tools (e.g. torch.export) can emit human-readable
+        # paths like "logits" instead of bare integer indices.
+        field_names = ModelOutputs._model_field_names(type(model))
+        key_children: list[tuple[_pytree.KeyEntry, Any]] = [
+            (_pytree.GetAttrKey(field_name), getattr(model, field_name)) for field_name in field_names
+        ]
+        return key_children, (type(model), field_names)
+
+    @staticmethod
+    def _to_dumpable_context(context: tuple[type[PydanticBaseModel], list[str]]) -> dict[str, Any]:
+        # Serialize the context to a JSON-compatible dict so that the pytree
+        # structure can be saved (e.g. for torch.export / torch.compile cache).
+        model_type, field_names = context
+        return {
+            "module": model_type.__module__,
+            "qualname": model_type.__qualname__,
+            "field_names": field_names,
+        }
+
+    @staticmethod
+    def _from_dumpable_context(context: dict[str, Any]) -> tuple[type[PydanticBaseModel], list[str]]:
+        # Deserialize the context produced by _to_dumpable_context by
+        # dynamically importing the model class from its module + qualname.
+        module = importlib.import_module(context["module"])
+        model_type: Any = module
+        for attr in context["qualname"].split("."):
+            model_type = getattr(model_type, attr)
+        return model_type, list(context["field_names"])
+
+    @classmethod
+    def _register_pytree_node(cls) -> None:
+        # Guard against double-registration (e.g. when the module is reloaded).
+        if cls in _pytree.SUPPORTED_NODES:
+            return
+
+        _pytree.register_pytree_node(
+            cls,
+            cls._flatten_pydantic_model,
+            cls._unflatten_pydantic_model,
+            serialized_type_name=f"{cls.__module__}.{cls.__qualname__}",
+            to_dumpable_context=cls._to_dumpable_context,
+            from_dumpable_context=cls._from_dumpable_context,
+            flatten_with_keys_fn=cls._flatten_pydantic_model_with_keys,
+        )
+
+
+# Register the base class itself; subclasses are handled by __init_subclass__.
+ModelOutputs._register_pytree_node()
 
 
 def _is_float8_available():
@@ -208,7 +348,7 @@ def _is_float8_available():
 
 class ModelItem(TypedDict):
     seq_ctx: SequenceContext
-    loss_ctx: BaseLossContext
+    loss_ctx: dict[str, BaseLossContext] | None
 
 
 def is_float8_weight(tensor):
@@ -241,6 +381,7 @@ class BaseModel(nn.Module):
         self._hf_path: Path | None = None  # type: ignore
 
         self._compile_cfg = self._resolve_compile_cfg(self.config)
+        self._float8_handler: Float8Handler | None = None
 
     def set_hf(self, hf_path: str | Path):
         self._hf_path = Path(hf_path)
@@ -276,11 +417,10 @@ class BaseModel(nn.Module):
         """Fully shard the model parameters."""
         self.fsdp_config = fsdp_config
         self.fsdp_mesh = self._init_world_mesh()
+        self._world_mesh = self.fsdp_mesh
 
         if self.fsdp_config.requires_grad:
             for name, module in self.named_modules():
-                # if "ts_model" in name:
-                #     torch.distributed.breakpoint()
                 for p_name, param in module.named_parameters(recurse=False):
                     if param.requires_grad:
                         param_fp32 = torch.nn.Parameter(param.to(dtype=torch.float32))
@@ -300,14 +440,78 @@ class BaseModel(nn.Module):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
-        fully_shard(
-            self,
+        self._fully_shard(
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
             reshard_after_forward=fsdp_config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
         )
         return self
+
+    def _fully_shard(
+        self,
+        mesh: DeviceMesh,
+        mp_policy: MixedPrecisionPolicy,
+        reshard_after_forward: bool,
+        offload_policy: CPUOffloadPolicy | None,
+        module: nn.Module | None = None,
+    ) -> None:
+        def traverse(module):
+            for name, param in module.named_parameters(recurse=False):
+                full_name = full_param_name_mapping[id(param)]
+                full_name = self._clean_param_name(full_name)
+                hf_name_list = self.to_hf_key_list(full_name)
+
+                for hf_name in hf_name_list:
+                    if any(re.search(p, hf_name) for p in patterns):  # type: ignore
+                        if not isinstance(param, DTensor):
+                            dist_param = nn.Parameter(
+                                distribute_tensor(
+                                    param, self.world_mesh, [Replicate() for _ in range(self.world_mesh.ndim)]
+                                ),
+                                requires_grad=param.requires_grad,
+                            )
+                            module.register_parameter(name, dist_param)
+                            ignored_params.add(dist_param)
+                        else:
+                            # param is already a DTensor (e.g. distributed by
+                            # MoE._replicate_other_params on ep_mesh before _fully_shard
+                            # is called). We skip re-distributing on world_mesh and just
+                            # add it to ignored_params so FSDP leaves it alone.
+                            # ASSUMPTION: fp32 distribution always happens AFTER any
+                            # prior EP distribution, so the existing placement is correct.
+                            ignored_params.add(param)
+                        break
+
+            for child in module.children():
+                traverse(child)
+
+        # Collect the parameters of `target` that match any fp32 pattern so they can be
+        # excluded from FSDP sharding (passed as `ignored_params`).
+        #
+        # We intentionally iterate over `self.named_parameters()` rather than
+        # `target.named_parameters()` so that `name` is always relative to the root model
+        # (`self`). This matters when `target` is a sub-module (e.g. `self.embed_tokens`):
+        # `target.named_parameters()` would yield bare names like `"weight"`, which
+        # `to_hf_key_list` cannot resolve correctly. By iterating from `self` we get the
+        # full path (e.g. `"embed_tokens.weight"`) and filter to `target`'s parameters
+        # using identity comparison.
+        full_param_name_mapping = {id(param): name for name, param in self.named_parameters()}
+        ignored_params: set[nn.Parameter] = set()
+        patterns = self.config.hf_save_cfg.fp32_keys_pattern
+
+        target = module or self
+        if patterns:
+            traverse(target)
+
+        fully_shard(
+            target,
+            mesh=mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=reshard_after_forward,
+            offload_policy=offload_policy,
+            ignored_params=ignored_params if ignored_params else None,
+        )
 
     def save_hf(self, hf_dir: Path | str, save_dtype: torch.dtype = torch.bfloat16, safetensors_prefix: str = "model"):
         with profile_time_and_memory(f"[Saving HF to [{safetensors_prefix}]{hf_dir} cost]"):
@@ -360,6 +564,12 @@ class BaseModel(nn.Module):
         return torch.device(DEVICE)
 
     @property
+    def world_mesh(self) -> DeviceMesh | None:
+        if not hasattr(self, "_world_mesh"):
+            self._world_mesh = self._init_world_mesh()
+        return self._world_mesh
+
+    @property
     def default_compile_cfg(self) -> dict[str, TorchCompileOption]:
         return {}
 
@@ -373,6 +583,19 @@ class BaseModel(nn.Module):
 
         return _compile_cfg
 
+    @property
+    def float8_handler(self):
+        if (
+            self.config.float8_cfg is not None
+            and self.config.float8_cfg.enable_float8
+            and self._float8_handler is None
+        ):
+            self._float8_handler = self.config.float8_cfg.build()
+
+            if self.fsdp_mesh is not None:
+                self._float8_handler.build_reduce_mesh(self, self.fsdp_mesh)
+        return self._float8_handler
+
     @torch.no_grad()
     def init_weights(self):
         # TODO: HardCode here. The initialization method should be module specific. All module in model
@@ -382,6 +605,26 @@ class BaseModel(nn.Module):
         initialized_params = default_init_weights(self)
         if missing := {self._clean_param_name(name) for name, _ in self.named_parameters()} - initialized_params:
             raise RuntimeError(f"{missing} is not initialized")
+
+    def build_rotary_embedding(self, config):
+        # NOTE: XTuner initializes the entire model on meta device to avoid the overhead of allocating and
+        # initializing real tensors upfront — weights will either be loaded from a HuggingFace checkpoint or
+        # initialized from scratch afterward. However, rotary embedding must be initialized on CPU even when the
+        # rest of the model is on meta device, for the following reasons:
+        #
+        # 1. Its buffers (e.g. `inv_freq`) require real arithmetic and cannot be computed on meta device.
+        # 2. Its buffers are not model parameters, so the HuggingFace weight-loading path does not populate them.
+        #    After `.to_empty()`, these buffers remain garbage-initialized, which would silently corrupt training.
+        #
+        # CPU is chosen specifically (rather than CUDA) to keep the computation numerically aligned with inference
+        # engines (e.g. lmdeploy) during RL-phase training.
+        #
+        # To avoid repeating this error-prone logic in every subclass, the construction is encapsulated in
+        # get_rope_embedding, and this default build_rotary_embedding in BaseModel enforces CPU initialization.
+        from xtuner.v1.module.rope import get_rope_embedding
+
+        with torch.device("cpu"):
+            return get_rope_embedding(config=config)
 
     def _init_load_spec(self) -> None:
         # NOTE: (yehaochen) This is a workaround to distinguish between different parameter HF loading methods
@@ -546,6 +789,162 @@ class BaseModel(nn.Module):
             name_list_new.extend([name, f"{name}_scale_inv"])
         return gathered_tensor_list_new, name_list_new
 
+    def build_loss_ctx_batch(
+        self,
+        data_batch: list[dict],
+        sp_mesh: DeviceMesh | None = None,
+    ) -> list[dict[str, dict]]:
+        """Build and calibrate loss contexts for the entire batch.
+
+        For Dense model, only LM loss is needed.
+
+        Args:
+            data_batch (list[dict]): All microbatch data
+            sp_mesh (DeviceMesh | None): Sequence parallel mesh
+            cu_seq_lens_list (list[torch.IntTensor] | None): For calibration
+
+        Returns:
+            list[dict[str, BaseLossContext]]: Loss context dict for each microbatch
+        """
+        cu_seq_lens_list = [data["seq_ctx"].cu_seq_lens_k for data in data_batch]
+        res: list[dict] = [{} for _ in range(len(data_batch))]
+
+        lm_loss_ctx_list = self._build_loss_ctx(self.config.lm_loss_cfg, data_batch, sp_mesh)
+
+        if lm_loss_ctx_list is not None:
+            loss_ctx_cls = lm_loss_ctx_list[0].__class__
+            lm_loss_ctx_list = loss_ctx_cls.build_batches(
+                lm_loss_ctx_list, cu_seq_lens_list=cu_seq_lens_list, sp_mesh=sp_mesh
+            )
+
+            if lm_loss_ctx_list is not None:
+                for i, lm_loss_ctx in enumerate(lm_loss_ctx_list):
+                    res[i]["lm"] = lm_loss_ctx
+
+        return res
+
+    def _add_auxiliary_loss(
+        self,
+        loss_name: str,
+        loss_cfg: Any,
+        data_batch: list[dict],
+        res: list[dict],
+    ) -> None:
+        """Add auxiliary loss contexts to result.
+
+        This helper builds loss contexts, calibrates them across the batch,
+        and adds them to the result dictionary. If loss_cfg is None, does nothing.
+
+        Args:
+            loss_name (str): Name of the loss (e.g., "balancing", "z_loss").
+            loss_cfg (Any): Loss configuration with a build() method. If None, skipped.
+            data_batch (list[dict]): Batch data.
+            res (list[dict]): Result dictionary to populate. Modified in-place.
+
+        Example:
+            def build_loss_ctx_batch(self, data_batch, sp_mesh):
+                res = super().build_loss_ctx_batch(data_batch, sp_mesh)
+
+                # One line per auxiliary loss
+                self._add_auxiliary_loss("balancing", self.config.balancing_loss_cfg, data_batch, res)
+                self._add_auxiliary_loss("z_loss", self.config.z_loss_cfg, data_batch, res)
+
+                return res
+        """
+        if loss_cfg is None:
+            return
+
+        # Build loss contexts for all microbatches
+        ctx_list = [loss_cfg.build() for _ in data_batch]
+
+        # Calibrate across batch
+        ctx_cls = ctx_list[0].__class__
+        ctx_list = ctx_cls.build_batches(ctx_list)
+
+        # Add to result
+        for i, ctx in enumerate(ctx_list):
+            res[i][loss_name] = ctx  # type: ignore
+
+    def pre_micro_batch_forward(self, data_batches: Sequence[ModelItem]) -> DataBatchInfo:
+        step_consumed_tokens = torch.tensor(0, device=DEVICE)
+        step_consumed_img_tokens = torch.tensor(0.0, device=DEVICE)
+        efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        img_efficient_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+        img_total_forward_tokens = torch.tensor(0, device=DEVICE, dtype=torch.long)
+
+        for data in data_batches:
+            seq_ctx = data["seq_ctx"]
+            step_consumed_tokens += seq_ctx.mask.sum()
+            num_tokens = seq_ctx.cu_seq_lens_k[1:] - seq_ctx.cu_seq_lens_k[:-1]
+            efficient_forward_tokens += (num_tokens.long() ** 2).sum()
+            total_forward_tokens += (num_tokens.long().sum()) ** 2
+
+            if seq_ctx.num_img_tokens is not None:
+                for num_img_token in seq_ctx.num_img_tokens:  # list[list]
+                    step_consumed_img_tokens += sum(num_img_token)
+                    num_img_tokens_ = torch.tensor(num_img_token)  # list[int]
+                    img_efficient_forward_tokens += (num_img_tokens_.long() ** 2).sum()
+                    img_total_forward_tokens += (num_img_tokens_.long().sum()) ** 2
+
+        efficient_attn_ratio = efficient_forward_tokens.float() / total_forward_tokens.float()
+        img_efficient_attn_ratio = img_efficient_forward_tokens.float() / (img_total_forward_tokens.float() + 1e-8)
+
+        if len(data_batches) > 0 and seq_ctx.sequence_parallel_mesh:
+            step_consumed_img_tokens /= seq_ctx.sequence_parallel_mesh.size()
+
+        batch_info: DataBatchInfo = {
+            "step_consumed_tokens": cast(int, step_consumed_tokens.item()),
+            "step_consumed_img_tokens": cast(float, step_consumed_img_tokens.item()),
+            "efficient_attn_ratio": cast(float, efficient_attn_ratio.item()),
+            "img_efficient_attn_ratio": cast(float, img_efficient_attn_ratio.item()),
+        }
+        return batch_info
+
+    def post_micro_batch_forward(self, batch_outputs: Sequence[ModelOutputs]) -> BatchForwardInfo:
+        train_engine_extra_info = ModelForwardExtraLogInfo()
+
+        local_total_loss = torch.tensor(0.0, device=DEVICE)
+        reduced_other_losses: dict[str, float] = {}
+
+        for output in batch_outputs:
+            output_copy = output.model_copy()
+            for name in output_copy.model_fields:
+                obj = getattr(output_copy, name)
+                if "loss" in name and isinstance(obj, torch.Tensor):
+                    loss_item = obj.item()
+                    local_total_loss += loss_item
+                    reduced_name = f"reduced_{name}"
+
+                    if reduced_name not in reduced_other_losses:
+                        reduced_other_losses[reduced_name] = loss_item
+                    else:
+                        reduced_other_losses[reduced_name] += loss_item
+
+            if "extra_info" in output_copy:
+                extra_info = output["extra_info"]
+                train_engine_extra_info.append(extra_info)
+
+        for name, loss in reduced_other_losses.items():
+            tensor_loss = torch.tensor(loss, device=DEVICE)
+            dist.all_reduce(tensor_loss.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
+            reduced_other_losses[name] = tensor_loss.item()
+
+        if "reduced_loss" in reduced_other_losses:
+            reduced_other_losses["reduced_llm_loss"] = reduced_other_losses.pop("reduced_loss")
+
+        ret = BatchForwardInfo(
+            logs_info=reduced_other_losses,
+            extra_info=train_engine_extra_info,
+        )
+        return ret
+
+    def _get_save_dtype(self, name: str, dtype: torch.dtype) -> torch.dtype:
+        patterns = self.config.hf_save_cfg.fp32_keys_pattern
+        if patterns and any(re.search(p, name) for p in patterns):
+            return torch.float32
+        return dtype
+
     def _get_shard_hf_param(
         self,
         params: list[tuple[torch.Tensor, LoadSpec]],
@@ -555,6 +954,16 @@ class BaseModel(nn.Module):
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
+
+        ignored_params, params = self._split_ignored_params(params)
+        if ignored_params:
+            name_list: list[str] = [load_spec.hf_keys[0] for _, load_spec in ignored_params]
+            hf_params = [param._local_tensor if isinstance(param, DTensor) else param for param, _ in ignored_params]
+            yield name_list, hf_params
+
+        if not params:
+            return
+
         if dtype != torch.bfloat16:
             raise NotImplementedError
 
@@ -572,7 +981,7 @@ class BaseModel(nn.Module):
             # Get unsharded params
             _unsharded_tensor_list = foreach_all_gather(fsdp_unsharded_tensor_list, load_spec0.group)
             unsharded_tensor_list = [
-                torch.cat([i.to(dtype) for i in tensors], dim=load_spec0.dim) for tensors in _unsharded_tensor_list
+                torch.cat(list(tensors), dim=load_spec0.dim) for tensors in _unsharded_tensor_list
             ]
             name_list = [spec.hf_keys[0] for _, spec in fsdp_tensor_list]
             unsharded_tensor_list = [
@@ -587,11 +996,11 @@ class BaseModel(nn.Module):
 
         safetensor_size = 0
         tensor_list: list[tuple[torch.Tensor, LoadSpec]] = []
-        name_list: list[str] = []
+        name_list = []
 
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
-            local_tensor = local_tensor.to(dtype=dtype)
+            local_tensor = local_tensor.to(dtype=self._get_save_dtype(load_spec.hf_keys[0], torch.bfloat16))
             tensor_size = self._get_tensor_size(param, dtype)
             if safetensor_size + tensor_size > bucket_size and tensor_list:
                 hf_params = _get_hf_params(tensor_list)
@@ -619,6 +1028,12 @@ class BaseModel(nn.Module):
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
+
+        ignored_params, params = self._split_ignored_params(params)
+        if ignored_params:
+            fp32_name_list: list[str] = [load_spec.hf_keys[0] for _, load_spec in ignored_params]
+            fp32_params = [param._local_tensor if isinstance(param, DTensor) else param for param, _ in ignored_params]
+            yield fp32_name_list, fp32_params
 
         def _get_hf_params(
             fsdp_tensor_list: list[tuple[torch.Tensor, LoadSpec]],
@@ -743,7 +1158,7 @@ class BaseModel(nn.Module):
 
         for param, load_spec in params:
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
-            local_tensor = local_tensor.bfloat16()
+            local_tensor = local_tensor.to(dtype=self._get_save_dtype(load_spec.hf_keys[0], torch.bfloat16))
             tensor_size = self._get_tensor_size(param, dtype)
             if safetensor_size + tensor_size > bucket_size and tensor_list:
                 hf_params, name_list = _get_hf_params(tensor_list, name_list)
@@ -769,6 +1184,15 @@ class BaseModel(nn.Module):
     ) -> Generator[tuple[list[str], list[torch.Tensor]], None, None]:
         if not params:
             return
+
+        ignored_params, params = self._split_ignored_params(params)
+        if ignored_params:
+            fp32_name_list: list[str] = [load_spec.hf_keys[0] for _, load_spec in ignored_params]
+            fp32_tensor_list: list[torch.Tensor] = [
+                param._local_tensor if isinstance(param, DTensor) else param for param, _ in ignored_params
+            ]
+            yield fp32_name_list, fp32_tensor_list
+
         if bucket_size is None:
             bucket_size = self.config.hf_save_cfg.bucket_size
         safetensor_size = 0
@@ -785,8 +1209,24 @@ class BaseModel(nn.Module):
                 buffer_name_list.append(load_spec.hf_keys[0])
                 continue
             local_tensor = param._local_tensor if isinstance(param, DTensor) else param
-            local_tensor = local_tensor.bfloat16()
-            tensor_size = self._get_tensor_size(param, dtype)
+            if (
+                self.fsdp_config is not None
+                and self.fsdp_config.fp32_lm_head
+                and load_spec.hf_keys[0] == "lm_head.weight"
+            ):
+                logger.info(f"handling same hf param: {load_spec.hf_keys} separately")
+                lm_head_tensor_list = self._fsdp_foreach_allgather([local_tensor], [load_spec])
+                lm_head_tensor_list = [
+                    self.param_to_safetensor(safetensor, name)
+                    for safetensor, name in zip(lm_head_tensor_list, load_spec.hf_keys.copy())
+                ]
+                lm_head_tensor_list = [t.to(device=device) for t in lm_head_tensor_list]
+                yield load_spec.hf_keys.copy(), lm_head_tensor_list
+                del lm_head_tensor_list, local_tensor
+                continue
+            else:
+                local_tensor = local_tensor.to(dtype=self._get_save_dtype(load_spec.hf_keys[0], torch.bfloat16))
+                tensor_size = self._get_tensor_size(param, dtype)
             if safetensor_size + tensor_size > bucket_size and tensor_list:
                 if self.fsdp_mesh is not None:
                     gathered_tensor_list = self._fsdp_foreach_allgather(tensor_list, load_spec_list)
@@ -828,6 +1268,21 @@ class BaseModel(nn.Module):
 
         if buffer_tensor_list:
             yield buffer_name_list, buffer_tensor_list
+
+    def _is_ignored_params(self, key: str):
+        patterns = self.config.hf_save_cfg.fp32_keys_pattern
+        if patterns is None:
+            return False
+        return any(re.search(p, key) for p in patterns)
+
+    def _split_ignored_params(
+        self, params: list[tuple[torch.Tensor, LoadSpec]]
+    ) -> tuple[list[tuple[torch.Tensor, LoadSpec]], list[tuple[torch.Tensor, LoadSpec]]]:
+        if not self.config.hf_save_cfg.fp32_keys_pattern:
+            return [], params
+        ignored_params = [(p, l) for p, l in params if self._is_ignored_params(l.hf_keys[0])]
+        remaining = [(p, l) for p, l in params if not self._is_ignored_params(l.hf_keys[0])]
+        return ignored_params, remaining
 
     # TODO: Using `xtuenr.v1.utils.misc.clean_param_name`
     def _clean_param_name(self, name: str) -> str:
@@ -1106,7 +1561,12 @@ class BaseModel(nn.Module):
 
         loaded_tensor = loaded_tensor.to(local_tensor.device)
 
-        if self.fsdp_mesh is not None and isinstance(param, nn.Parameter):
+        if (
+            self.fsdp_mesh is not None
+            and isinstance(param, nn.Parameter)
+            and isinstance(param, DTensor)
+            and any(isinstance(p, Shard) for p in param.placements)
+        ):
             shape_before_fsdp = load_spec.shape
             _, _offset = compute_local_shape_and_global_offset(
                 shape_before_fsdp, self.fsdp_mesh, [Shard(self.FSDP_SHARD_DIM)]
@@ -1137,6 +1597,7 @@ class BaseModel(nn.Module):
         #    by FSDP will only have 128/8/16 = 1 `hf-keys`
         # 3. Calculating the `offset` and `size` of FSDP param base on the ep sharded params, and fill
         #    the FSDP param with the loaded tensor.
+
         hf_keys = load_spec.hf_keys
         local_tensor = param._local_tensor if isinstance(param, DTensor) else param
 
@@ -1192,6 +1653,9 @@ class BaseModel(nn.Module):
                 continue
             _loaded_tensor.append(weight.to(local_tensor.device))
 
+        if not _loaded_tensor:
+            return missing_keys
+
         if not hf_keys:
             # fp8 pad
             assert self.config.float8_cfg is not None
@@ -1199,6 +1663,9 @@ class BaseModel(nn.Module):
             #     "Only support fp8 pad for MoE with ep_size == 1"
             # )
             local_tensor.zero_()  # type: ignore  # padded part must be set to 0
+            return missing_keys
+
+        if missing_keys:
             return missing_keys
 
         self.safetensors_to_params(
@@ -1527,3 +1994,35 @@ class BaseModel(nn.Module):
                 param = param.full_tensor()
             ret[name] = param
         return ret
+
+    def _build_loss_ctx(
+        self, loss_ctx_cfg: BaseLossConfig | None, data_batch: list[dict], sp_mesh: DeviceMesh | None
+    ) -> list[BaseLossContext] | None:
+        if loss_ctx_cfg is None:
+            return None
+
+        first_loss_ctx = loss_ctx_cfg.build(data=data_batch[0], sp_mesh=sp_mesh)
+        # If first build returns None, assume all data in the batch have the same schema
+        # and will also return None (e.g., missing required fields like shifted_labels)
+        if first_loss_ctx is None:
+            return None
+        else:
+            ret = [first_loss_ctx] + [loss_ctx_cfg.build(data=data, sp_mesh=sp_mesh) for data in data_batch[1:]]
+            return ret  # type: ignore[return-value]
+
+    # NOTE: Add this overload for inferring the return type for easier type checking and using
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        seq_ctx: SequenceContext,
+        loss_ctx: dict[str, BaseLossContext] | None,
+    ) -> ModelOutputs: ...
+
+    @overload  # type: ignore
+    def __call__(  # type: ignore
+        self,
+        seq_ctx: list[SequenceContext],
+        loss_ctx: list[dict[str, BaseLossContext]],
+    ) -> ModelOutputs: ...
+
+    __call__ = nn.Module.__call__

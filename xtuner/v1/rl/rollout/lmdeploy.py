@@ -1,16 +1,21 @@
 import os
 from argparse import Namespace
 from itertools import chain
-from typing import List
+from typing import Any, Dict, List
 
 import ray
 import requests
+import torch
 from ray.util.placement_group import placement_group_table
 
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 
 from .worker import RolloutConfig, RolloutWorker
+
+
+SHARED_STORE = "shared_store"
+SHARED_STORE_NAMESPACE = "lmdeploy"
 
 
 def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
@@ -73,6 +78,7 @@ class LMDeployWorker(RolloutWorker):
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
+        self.lmdeploy_actor = None
 
     def offload(self):
         """Offloads the model weights and KV cache."""
@@ -171,6 +177,14 @@ class LMDeployWorker(RolloutWorker):
         assert response.status_code == 200, response.status_code
         return response.text
 
+    def _decode_routed_experts(self, routed_experts: Any) -> Any:
+        if isinstance(routed_experts, str):
+            if self.lmdeploy_actor is None:
+                self.lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
+            assert self.lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
+            return self.lmdeploy_actor.get.remote(routed_experts)
+        return torch.tensor(routed_experts)
+
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         """Transform the RolloutConfig into a Namespace suitable for the
         LMDeploy server.
@@ -205,9 +219,17 @@ class LMDeployWorker(RolloutWorker):
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
 
-        extra_engine_config = {}
+        extra_engine_config: Dict[str, Any] = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
+        if backend == "pytorch" and self.config.router_n_groups:
+            hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
+            hf_overrides.update(router_n_groups=self.config.router_n_groups)
+        if backend == "pytorch" and self.config.fp32_lm_head:
+            hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
+            hf_overrides.update(fp32_lm_head=self.config.fp32_lm_head)
+        if backend == "pytorch" and self.config.max_prefill_token_num:
+            extra_engine_config["max_prefill_token_num"] = self.config.max_prefill_token_num
 
         dp_rank = 0
         if backend == "pytorch":
@@ -304,6 +326,11 @@ class LMDeployWorker(RolloutWorker):
                     {
                         "LMDEPLOY_DP_MASTER_ADDR": dist_addr,
                         "LMDEPLOY_DP_MASTER_PORT": dist_port,
+                        # DEEPEP_MAX_TOKENS_PER_RANK is required by DLBlas's DeepEP
+                        # token dispatcher used in lmdeploy EP mode. Without it,
+                        # lmdeploy will fail during warmup.
+                        # Ref: https://github.com/DeepLink-org/DLBlas/blob/aae23445/dlblas/layers/moe/token_dispatcher.py#L81
+                        # Ref: https://github.com/InternLM/lmdeploy/blob/81627e3d/lmdeploy/utils.py#L375
                         "DEEPEP_MAX_TOKENS_PER_RANK": str(max_batch_size),
                     }
                 )

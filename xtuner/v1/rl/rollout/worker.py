@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Union
 import httpx
 import ray
 import requests  # type: ignore[import-untyped]
-import torch
 from cyclopts import Group, Parameter
 from packaging.version import Version
 from pydantic import BaseModel, ConfigDict, PrivateAttr
@@ -166,6 +165,13 @@ class RolloutConfig(BaseModel):
             help="Number of GPUs allocated for each inference engine in the rollout worker.",
         ),
     ] = 1
+    data_parallel_size: Annotated[
+        int,
+        Parameter(
+            group=infer_group,
+            help="Number of GPUs allocated for processing data batches in parallel (Data Parallelism).",
+        ),
+    ] = 1
     expert_parallel_size: Annotated[
         int,
         Parameter(
@@ -265,6 +271,27 @@ class RolloutConfig(BaseModel):
             help="Maximum number of retries per sample before marking it as failed.",
         ),
     ] = 1
+    max_prefill_token_num: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="The number of tokens each iteration during prefill.",
+        ),
+    ] = None
+    router_n_groups: Annotated[
+        Optional[int],
+        Parameter(
+            group=infer_group,
+            help="The number of groups in MoE model with group router, e.g. Intern-S1-Pro.",
+        ),
+    ] = None
+    fp32_lm_head: Annotated[
+        bool,
+        Parameter(
+            group=infer_group,
+            help="Use float32 for language model head.",
+        ),
+    ] = False
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
     health_check_interval_seconds: Annotated[
         float,
@@ -544,6 +571,9 @@ class RolloutWorker(SingleAcceleratorWorker):
         except requests.RequestException as e:
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False
+
+    def _decode_routed_experts(self, routed_experts: Any) -> Any:
+        return routed_experts
 
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
         # TODO(@duanyanhui):
@@ -829,13 +859,8 @@ class RolloutWorker(SingleAcceleratorWorker):
                     )
                     routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
                     if routed_experts is not None:
-                        if isinstance(routed_experts, str):
-                            import base64
-
-                            data = base64.b64decode(routed_experts)
-                            routed_experts = ray.cloudpickle.loads(data)
-                        else:
-                            routed_experts = torch.tensor(routed_experts)  # n,layer,expert
+                        routed_experts = self._decode_routed_experts(routed_experts)
+                        if not isinstance(routed_experts, ray.ObjectRef):
                             routed_experts = ray.put(routed_experts)
 
                 # 获取 status

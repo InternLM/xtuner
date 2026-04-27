@@ -28,6 +28,8 @@ from .collator import (
 from .dataloader import BaseDataloader, Dataloader
 from .jsonl import JsonlDataset
 from .packing import ExpandSoftPackDataset, HardPackDataset, MLLMPretrainHybridPackDataset, _LegacySoftPackDataset
+from .preset_pack import PresetPackDataset
+from .preset_sampler import PresetSampler
 from .sampler import LengthGroupedSampler, ParallelSampler
 from .utils import CachableTokenizeFunction, tokenizer_xxhash
 from .vlm_jsonl import VLMJsonlDataset
@@ -46,7 +48,9 @@ class DatasetConfig(BaseModel):
     class_name: Annotated[str, Parameter(group="dataset")] = "JsonlDataset"
     sample_ratio: Annotated[float, Parameter(group="dataset")] = 1.0
     enable_sequential_sampler: Annotated[bool, Parameter(group="dataset")] = False
+    enable_mmap_shared: Annotated[bool, Parameter(group="dataset")] = False
     media_root: Annotated[str | None, Parameter(group="dataset")] = ""
+    disable_filter: Annotated[bool, Parameter(group="dataset")] = False
 
     def build(
         self,
@@ -58,9 +62,11 @@ class DatasetConfig(BaseModel):
                 anno_path=self.anno_path,
                 sample_ratio=self.sample_ratio,
                 enable_sequential_sampler=self.enable_sequential_sampler,
+                enable_mmap_shared=self.enable_mmap_shared,
                 name=self.name,
                 cache_dir=self.cache_dir,
                 cache_tag=self.cache_tag,
+                disable_filter=self.disable_filter,
             )
         elif self.class_name == "VLMJsonlDataset":
             return VLMJsonlDataset(
@@ -145,9 +151,11 @@ def build_dataloader(
     shuffle: bool = True,
 ) -> Iterable[list[ColateItem]]:
     assert isinstance(datasets, list), "datasets must be a list of datasets."
+    dp_size = dp_mesh.size() if dp_mesh is not None else 1
+    assert global_batch_size % dp_size == 0, "global_batch_size must be divisible by dp_size."
 
     if dataloader_config.pack_level != "none" and get_rank == 0:
-        num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
+        num_tokens = sum(dset.num_tokens.sum() for dset in datasets if dset.num_tokens is not None)
         logger.debug(f"[Dataset] {num_tokens} tokens.")
 
     dataset: (
@@ -277,12 +285,17 @@ class DataloaderConfig(BaseDataloaderConfig):
     ] = "sft_llm_collator"
     pack_to_max_length: Annotated[bool, Parameter(help="whether to pack to max length")] = True
     pack_level: Annotated[
-        Literal["soft", "none", "__legacy", "hard", "mllm_hybrid"], Parameter(help="__legacy is only for debug")
+        Literal["soft", "none", "__legacy", "hard", "mllm_hybrid", "preset"],
+        Parameter(help="__legacy is only for debug; preset requires pack_config_path and sampler_config_path"),
     ] = "soft"
     pack_max_length: Annotated[int, Parameter(help="pack max length")] = 32768
     pack_chunk_size: Annotated[int, Parameter(help="pack chunk size")] = 10000
     pack_workers: Annotated[int, Parameter(help="pack workers")] = 8
     global_pack: Annotated[bool, Parameter(help="enable or disable global pack mode")] = True
+    sampler_type: Annotated[
+        Literal["none", "preset"],
+        Parameter(help="none means using group_by_length, preset means use preset sampler"),
+    ] = "none"
     group_by_length: Annotated[bool, Parameter(help="enable or disable group by length mode")] = True
     pack_extra_buffer_size: Annotated[
         int, Parameter(help="pack extra buffer size when pack_level is expand_soft model")
@@ -290,6 +303,49 @@ class DataloaderConfig(BaseDataloaderConfig):
     num_workers: Annotated[int, Parameter(help="dataloader num workers")] = 0
     pad_token_id: Annotated[int | None, Parameter(help="padding token id")] = None
     tokenizer_hash: Annotated[str | None, Parameter(help="tokenizer hash")] = None
+    pack_config_path: Annotated[
+        str | None,
+        Parameter(help="path to preset pack config directory (NPY-CSR); required when pack_level='preset'"),
+    ] = None
+    sampler_config_path: Annotated[
+        str | None,
+        Parameter(help="path to sampler order .npy (mmap read); required when pack_level='preset'"),
+    ] = None
+    round_up: Annotated[bool, Parameter(help="enable or disable round up mode")] = True
+
+    @staticmethod
+    def _force_preset_pack_settings(dataset_config_list: "DatasetConfigList") -> "DatasetConfigList":
+        """Return a copy of dataset_config_list with settings required by
+        pack_level='preset' forced.
+
+        Forces sample_ratio=1.0, enable_sequential_sampler=True, and disable_filter=True on every
+        DatasetConfig, logging a warning for each field that is overridden from a non-default value.
+
+        Args:
+            dataset_config_list (DatasetConfigList): Original dataset config list.
+
+        Returns:
+            DatasetConfigList: New list with forced settings applied.
+        """
+        result: DatasetConfigList = []
+        for config in dataset_config_list:
+            dc = copy.deepcopy(config["dataset"])
+            if dc.sample_ratio != 1.0:
+                logger.warning(
+                    f"pack_level='preset': overriding sample_ratio {dc.sample_ratio} -> 1.0 "
+                    f"for dataset '{dc.anno_path}'."
+                )
+                dc.sample_ratio = 1.0
+            if not dc.enable_sequential_sampler:
+                logger.warning(
+                    f"pack_level='preset': forcing enable_sequential_sampler=True for dataset '{dc.anno_path}'."
+                )
+                dc.enable_sequential_sampler = True
+            if not dc.disable_filter:
+                logger.warning(f"pack_level='preset': forcing disable_filter=True for dataset '{dc.anno_path}'.")
+                dc.disable_filter = True
+            result.append({"dataset": dc, "tokenize_fn": config["tokenize_fn"]})
+        return result
 
     def build_collator(self):
         if self.collator == "sft_llm_collator":
@@ -310,7 +366,7 @@ class DataloaderConfig(BaseDataloaderConfig):
     @classmethod
     def _infer_group_by_length(cls, data) -> None:
         if "pack_level" in data and "group_by_length" not in data:
-            if data["pack_level"] == "none":
+            if data["pack_level"] in ("none",):
                 data["group_by_length"] = False
             else:
                 data["group_by_length"] = True
@@ -334,12 +390,17 @@ class DataloaderConfig(BaseDataloaderConfig):
             raise ValueError("dataset_config_list is required.")
 
         with profile_time("[Build Datasets]"):
-            datasets = build_datasets(self.dataset_config_list, tokenizer, tokenizer_hash=self.tokenizer_hash)
+            effective_config_list = (
+                self._force_preset_pack_settings(self.dataset_config_list)
+                if self.pack_level == "preset"
+                else self.dataset_config_list
+            )
+            datasets = build_datasets(effective_config_list, tokenizer, tokenizer_hash=self.tokenizer_hash)
 
         assert isinstance(datasets, list), "datasets must be a list of datasets."
 
         if self.pack_level != "none" and get_rank == 0:
-            num_tokens = sum(dset.num_tokens.sum() for dset in datasets)
+            num_tokens = sum(dset.num_tokens.sum() for dset in datasets if dset.num_tokens is not None)
             logger.debug(f"[Dataset] {num_tokens} tokens.")
 
         with profile_time("[Pack Datasets]"):
@@ -349,6 +410,7 @@ class DataloaderConfig(BaseDataloaderConfig):
                 | ConcatDataset
                 | HardPackDataset
                 | MLLMPretrainHybridPackDataset
+                | PresetPackDataset
             )
             if self.pack_level == "soft":
                 logger.info("[Dataset] Start packing data of ExpandSoftPackDataset.")
@@ -377,6 +439,8 @@ class DataloaderConfig(BaseDataloaderConfig):
                 dataset = HardPackDataset(
                     datasets,
                     pack_max_length=self.pack_max_length,
+                    pack_chunk_size=self.pack_chunk_size,
+                    pack_workers=self.pack_workers,
                     global_pack=self.global_pack,
                     seed=seed,
                 )
@@ -390,6 +454,17 @@ class DataloaderConfig(BaseDataloaderConfig):
                     global_pack=self.global_pack,
                     seed=seed,
                 )
+            elif self.pack_level == "preset":
+                if self.pack_config_path is None or self.sampler_config_path is None:
+                    raise ValueError(
+                        "pack_level='preset' requires both 'pack_config_path' and 'sampler_config_path' to be set."
+                    )
+                logger.info("[Dataset] Start loading PresetPackDataset.")
+                dataset = PresetPackDataset(
+                    datasets,
+                    pack_config_path=self.pack_config_path,
+                    pack_max_length=self.pack_max_length,
+                )
             else:
                 raise NotImplementedError(f"Unsupported pack level: {self.pack_level}")
 
@@ -399,19 +474,47 @@ class DataloaderConfig(BaseDataloaderConfig):
             logger.info(f"[Dataset] (Original) {ori_samples} samples.")
             logger.info(f"[Dataset] (Packed) {packed_samples} samples.")
 
-        sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler
-        if self.group_by_length:
+        sampler: LengthGroupedSampler | ParallelSampler | RandomSampler | SequentialSampler | PresetSampler
+        if self.sampler_type == "preset":
+            assert isinstance(dataset, PresetPackDataset)
+            assert self.sampler_config_path is not None
+            sampler = PresetSampler(
+                dataset=dataset,
+                sampler_config_path=self.sampler_config_path,
+                global_batch_size=global_batch_size,
+                dp_mesh=dp_mesh,
+                round_up=self.round_up,
+            )
+        elif self.group_by_length:
             assert shuffle, "Currently only shuffling is supported for LengthGroupedSampler."
-            assert isinstance(dataset, (ExpandSoftPackDataset, _LegacySoftPackDataset, HardPackDataset)), (
-                "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset or _LegacySoftPackDataset, "
-                f"but got {type(dataset)}"
+            assert isinstance(
+                dataset,
+                (
+                    ExpandSoftPackDataset,
+                    _LegacySoftPackDataset,
+                    HardPackDataset,
+                    MLLMPretrainHybridPackDataset,
+                    PresetPackDataset,
+                ),
+            ), (
+                "Internal Error, LengthGroupedSampler requires ExpandSoftPackDataset, _LegacySoftPackDataset, "
+                f"HardPackDataset, MLLMPretrainHybridPackDataset, or PresetPackDataset, but got {type(dataset)}"
             )
             sampler = LengthGroupedSampler(
-                dataset=dataset, dp_mesh=dp_mesh, global_batch_size=global_batch_size, seed=seed
+                dataset=dataset,
+                dp_mesh=dp_mesh,
+                global_batch_size=global_batch_size,
+                seed=seed,
+                round_up=self.round_up,
             )
         else:
             sampler = ParallelSampler(
-                dataset=dataset, dp_mesh=dp_mesh, global_batch_size=global_batch_size, shuffle=shuffle, seed=seed
+                dataset=dataset,  # type: ignore[arg-type]
+                dp_mesh=dp_mesh,
+                global_batch_size=global_batch_size,
+                shuffle=shuffle,
+                seed=seed,
+                round_up=self.round_up,
             )
 
         ctx = torch.multiprocessing.get_context("fork")
@@ -441,5 +544,6 @@ class DataloaderConfig(BaseDataloaderConfig):
             collate_fn=collator,
             multiprocessing_context=ctx if self.num_workers > 0 else None,
             persistent_workers=self.num_workers > 0,
+            dp_mesh=dp_mesh,
         )
         return dataloader

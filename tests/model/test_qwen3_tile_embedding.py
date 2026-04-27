@@ -19,7 +19,6 @@ from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense4BConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.config import FSDPConfig, LRConfig, AdamWConfig
 from xtuner.v1.engine.train_engine import TrainEngine
-from xtuner.v1.engine.vision_compose_train_engine import VisionComposeTrainEngine
 from torch.optim.lr_scheduler import LambdaLR
 from xtuner.v1.utils import pad_to_max_length
 from xtuner.v1.utils.device import get_device
@@ -45,7 +44,6 @@ class TestQwen3Dense4B(DistributedTestBase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig(lr_min=1e-3)
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             tp_size=tp_size
         )
@@ -80,13 +78,13 @@ class TestQwen3Dense4B(DistributedTestBase):
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+            engine.train_step(engine_input)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -114,11 +112,10 @@ class TestQwen3Dense4B(DistributedTestBase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig(lr_min=1e-3)
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             tp_size=tp_size
         )
-        engine = VisionComposeTrainEngine(
+        engine = TrainEngine(
             model_cfg=dense_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg
         )
         engine.from_hf(hf_path=QWEN3_VL_DENSE_PATH)
@@ -156,13 +153,13 @@ class TestQwen3Dense4B(DistributedTestBase):
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+            engine.train_step(engine_input)
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()

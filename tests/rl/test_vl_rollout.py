@@ -113,7 +113,10 @@ class TestVLMRollout(unittest.IsolatedAsyncioTestCase):
         result_refs = []
 
         # Test Case 1: 纯文本
-        rollout_state = self.tokenize_fn({'prompt':[{"role": "user", "content": "Hello!"}]})
+        rollout_state = self.tokenize_fn({
+            "prompt": [{"role": "user", "content": "Hello!"}],
+            "data_source": "test/text",
+        })
         result1_ref = rollout_controller.generate.remote(rollout_state=rollout_state)
         result_refs.append(result1_ref)
         

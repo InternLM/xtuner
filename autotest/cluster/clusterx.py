@@ -35,7 +35,7 @@ class ClusterTaskExecutor:
             all_command.append(f"export {env}")
 
         all_command.append(command)
-        run_command = "\n".join(all_command)
+        run_command = "; ".join(all_command)
 
         try:
             job_name = "-".join([task_config["type"], task_config["case_name"], task_config["run_id"]])
@@ -50,6 +50,7 @@ class ClusterTaskExecutor:
                 num_nodes=resource.get("num_nodes", 1),
                 image=resource.get("image", None),
                 no_env=resource.get("no_env", True),
+                image_pull_policy=resource.get("image_pull_policy","Always"),
             )
 
             job_schema = self.cluster.run(params)
@@ -58,11 +59,18 @@ class ClusterTaskExecutor:
             raise RuntimeError(f"clusterx job {job_name} start fail, task config is {task_config}, exception is: {e}")
 
         start_time = time.time()
+        run_start_time = None
 
         while True:
             status = self.get_task_status(job_schema.job_id)
+            if status in [JobStatus.RUNNING] and run_start_time is None:
+                run_start_time = time.time()
             if status in [JobStatus.SUCCEEDED]:
-                return True, "Task succeeded"
+                run_time = time.time() - run_start_time
+                if run_time >= timeout:
+                    return False, f'Task succeeded, but run time is {run_time}, exceeding then {timeout}'
+                else:
+                    return True, "Task succeeded"
             elif status in [JobStatus.FAILED, JobStatus.STOPPED]:
                 if status in [JobStatus.FAILED]:
                     time.sleep(10)

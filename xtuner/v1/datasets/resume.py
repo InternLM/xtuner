@@ -23,7 +23,7 @@ def get_dataloader_state(dataloader: DataLoader, consumed_samples: int) -> Datal
     if not hasattr(sampler, "load_state_dict") or not hasattr(sampler, "get_state_dict"):
         logger.warning(f"Resuming from {type(sampler)} is risky.")
     else:
-        dataloader_state["sampler"].update(sampler.get_state_dict(step=consumed_samples))
+        dataloader_state["sampler"].update(sampler.get_state_dict(total_consumed_steps=consumed_samples))
 
     if not hasattr(dataset, "load_state_dict") or not hasattr(dataset, "get_state_dict"):
         logger.warning(f"Resuming from {type(dataset)} is risky.")

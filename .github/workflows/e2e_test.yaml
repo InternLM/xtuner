@@ -5,9 +5,6 @@ permissions:
   pages: write
 
 on:
-  pull_request:
-    branches:
-      - "rl_design"
   workflow_dispatch:
     inputs:
       repo_org:
@@ -20,28 +17,41 @@ on:
         description: 'Set branch or tag or commit id. Default is "main"'
         type: string
         default: 'main'
+      run_case:
+        required: false
+        description: 'Run a specific test case, e.g., "qwen3-rl-lmdeploy", as defined in autotest/config.yaml.'
+        type: string
+        default: 'all'
   schedule:
     - cron:  '00 22 * * 0-4'
+env:
+  CI_GPU_IMAGE_REGISTRY: ${{ secrets.CI_GPU_IMAGE_REGISTRY }}
 
 jobs:
   ete_test:
     if: ${{!cancelled() }}
     runs-on: [h_cluster_ete]
+    timeout-minutes: 720
     steps:
       - name: Clean workdir
         run: sudo git clean -ffdx
       - name: Clone repository
         uses: actions/checkout@v2
-          #with:
-          #repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
-          #ref: ${{github.event.inputs.repo_ref || 'main'}}
+        with:
+          repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
+          ref: ${{github.event.inputs.repo_ref || 'main'}}
       - name: run-test
         run: |
           source /mnt/shared-storage-user/opencompass-shared/qa-llm-cicd/miniconda3/bin/activate
           conda activate clusterx 
           conda env list
           unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
-          pytest autotest/test_all.py::test_all[qwen3-rl-lmdeploy] -m all -n 1 -vv --run_id ${{ github.run_id }}
+          CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
+          if [ "$CASE_NAME" = "all" ]; then
+            pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+          else
+            pytest autotest/test_all.py::test_all[$CASE_NAME] -m all -n 1 -vv --run_id ${{ github.run_id }}
+          fi
 
       - name: Upload Artifacts
         if: ${{ !cancelled() }}
@@ -53,8 +63,9 @@ jobs:
           name: xtuner-e2e-${{ github.run_id }}
 
       - name: Copy deploy action
+        if: ${{ !cancelled() }}
         run: cp -r ../JamesIves ./
-
+          
       - name: Deploy to GitHub Pages
         if: ${{ !cancelled() }}
         uses: ./JamesIves/github-pages-deploy-action/v4

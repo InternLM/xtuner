@@ -33,6 +33,13 @@ def get_config():
         env_config = yaml.load(f.read(), Loader=yaml.SafeLoader)
 
     default_config = env_config["default_config"]
+    registry = (
+        os.environ.get("CI_NPU_IMAGE_REGISTRY")
+        if device == "npu"
+        else os.environ.get("CI_GPU_IMAGE_REGISTRY")
+    )
+    image = default_config["train"]["resource"]["image"]
+    default_config["train"]["resource"]["image"] = f"{registry}/{image}"
     case_config = env_config["case"]
 
     for case, steps in case_config.items():

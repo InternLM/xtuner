@@ -22,7 +22,12 @@ class _FakeJsonlDataset:
         self.input_ids_list = [[random.randint(0, 10000) for _ in range(length)] for _ in range(1000)]
         self.labels_list = self.input_ids_list.copy()
         self.num_tokens = np.array(list(len(i) for i in self.input_ids_list))
-
+        self._meta = {'num_tokens': self.num_tokens,'proxy_attn_flops': self.num_tokens}
+    
+    @property
+    def proxy_attn_flops(self):
+        return self._meta['proxy_attn_flops']
+    
     def __getitem__(self, index: int) -> dict:
         return {
             "input_ids": self.input_ids_list[index],
@@ -56,7 +61,7 @@ def test_hard_pack_dataset(random_length, global_pack):
 
     total_input_ids = list(chain(*input_ids_list))
 
-    random_gen = random.Random(10)
+    random_gen = np.random.RandomState(10)
     if global_pack:
         expected_sample = [[i["input_ids"] for i in d] for d in datasets]
         expected_sample = list(chain.from_iterable(expected_sample))

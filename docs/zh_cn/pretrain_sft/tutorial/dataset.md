@@ -11,7 +11,7 @@
 
 事实上，这个加载过程主要是对数据集进行预处理，对训练样本进行一些长度统计，方便控制训练时的采样顺序，提升训练阶段的效率。具体流程如下：
 
-```{figure} ../../../assets/images/flowchart/dataflow.png
+```{figure} ../../../assets/images/flowchart/tutorial_dataflow.png
 
 数据预处理
 ```

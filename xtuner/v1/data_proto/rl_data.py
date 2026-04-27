@@ -13,7 +13,6 @@ from typing_extensions import NotRequired, TypedDict
 # ====== DataFlow 数据流 ==============
 # ====================================
 from xtuner.v1.data_proto.utils import calculate_seq_staleness
-from xtuner.v1.utils.cache import CacheObj
 from xtuner.v1.utils.logger import get_logger
 
 
@@ -39,6 +38,7 @@ class SampleParams(BaseModel):
     stops: list[str] = []
     stop_token_ids: list[int] = []
     skip_special_tokens: bool = True
+    sampling_seed: int | None = None
     stream: bool = False
     return_logprob: bool = True
     top_logprobs: int = 1
@@ -47,6 +47,7 @@ class SampleParams(BaseModel):
     no_stop_trim: bool = True
     spaces_between_special_tokens: bool = False
     return_routed_experts: bool = False
+    sampling_seed: int | None = None
 
 
 class Status(Enum):
@@ -82,13 +83,15 @@ class RolloutToolCall(BaseModel):
     function: RolloutFunctionCall
 
 
-class RolloutState(CacheObj, BaseModel):
+class RolloutState(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     # --- 数据 ---
     message_uid: int | None = None  # 通过计算原始的message的哈希值得到的id，一组的数据为同一个prompt_id
     message: list[dict[str, Any]]  # dataset输出，需要在AgentLoop中转换成input_ids
     prompt_ids: list[int] | None = None  # 原始 prompt的token ids
+    num_tokens: int | None = None
+    proxy_attn_flops: float | None = None
     data_source: dict[str, Any] | str | None = None
     mm_info: MultimodalInfo | None = None
     reward_model: dict[str, Any] | None = None

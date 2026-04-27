@@ -1,6 +1,6 @@
 from typing import cast
 
-from xtuner.v1.data_proto import RolloutState
+from xtuner.v1.data_proto.rl_data import RolloutState
 
 from ...data_proto.rl_data import MultimodalInfo
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwen3VLTokenizeFunction, QwenVL3DataItem
@@ -21,19 +21,29 @@ def remove_consecutive_img_context_tokens(tokens: list[int], img_context_id: int
 
 
 class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
-    def __init__(self, *args, ignore_multimodal_info: bool = False, **kwargs):
+    def __init__(self, *args, ignore_multimodal_info: bool = False, data_judger_mapping: dict | None = None, **kwargs):
         self.ignore_multimodal_info = ignore_multimodal_info
+        self.data_judger_mapping = data_judger_mapping
         super().__init__(*args, **kwargs)
 
     # TODO: tool call
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> RolloutState:
         extra_info = item.get("extra_info", {})
         message = item["prompt"]
+        system_prompt = getattr(self, "system_prompt", None)
+        if system_prompt:
+            if message[0]["role"] == "system":
+                message = message[1:]
+            message = [{"role": "system", "content": system_prompt}] + message
 
         data = super().__call__({"messages": message}, media_root=media_root)
 
         if self.state == "cache":
-            return RolloutState(message=message, num_tokens=data["num_tokens"])
+            return RolloutState(
+                message=message,
+                num_tokens=data["num_tokens"],
+                proxy_attn_flops=data.get("proxy_attn_flops", float(data["num_tokens"])),
+            )
         else:
             data = cast(QwenVL3DataItem, data)
             image_data, _ = replace_image_context_and_collect_media_data(message, media_root, True)
@@ -57,16 +67,30 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                     mm_info["pixel_values"] = data["pixel_values"].numpy()  # for ray put into shared memory
                 if "image_grid_thw" in data:
                     mm_info["image_grid_thw"] = data["image_grid_thw"]
+
+            data_source = item.get("data_source")
+            assert data_source is not None, "data_source is required in item"
+            extra_info["origin_data_source"] = data_source
+            data_judger_mapping = getattr(self, "data_judger_mapping", None)
+            if data_judger_mapping is not None:
+                mapped_judger_name_and_weight = data_judger_mapping.get(data_source)
+            else:
+                mapped_judger_name_and_weight = {data_source: 1.0}
+
             return RolloutState(
                 message=message,
                 num_tokens=data["num_tokens"],
+                proxy_attn_flops=data.get("proxy_attn_flops", float(data["num_tokens"])),
                 prompt_ids=prompt_token_ids,
                 position_ids=data["position_ids"],
-                data_source=item.get("data_source", "default"),
+                data_source=mapped_judger_name_and_weight,
                 reward_model=item.get("reward_model", {}),
                 mm_info=mm_info,
                 extra_fields=extra_info,
             )
+
+    def hash(self) -> str:
+        return "RLQwen3VLTokenizeFunction"
 
 
 class RLQwen3VLTokenizeFnConfig(Qwen3VLTokenizeFnConfig):
@@ -79,6 +103,7 @@ class RLQwen3VLTokenizeFnConfig(Qwen3VLTokenizeFnConfig):
             tokenizer,
             self.processor_path,
             anno_name,
+            chat_template=self.chat_template,
             min_pixels=self.min_pixels,
             max_pixels=self.max_pixels,
             oss_loader_cfg=self.oss_loader_cfg,

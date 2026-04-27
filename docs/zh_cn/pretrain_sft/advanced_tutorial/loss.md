@@ -63,15 +63,15 @@ print(f"Chunk mode Time taken: {time.time() - t1:.2f} seconds")
 Eager mode Loss: 12.125
 Eager mode hidden_states grad norm: 0.0031890869140625
 Eager mode lm_head weight grad norm: 0.353515625
-Eager mode Max memory allocated: 38.53 GB
-Eager mode Max memory reserved: 38.54 GB
-Eager mode Time taken: 0.57 seconds
-Chunk mode Loss: 12.096513748168945
+Eager mode Max memory allocated: 38.57 GB
+Eager mode Max memory reserved: 47.81 GB
+Eager mode Time taken: 0.42 seconds
+Chunk mode Loss: 12.094674110412598
 Chunk mode hidden_states grad norm: 0.0031890869140625
 Chunk mode lm_head weight grad norm: 0.353515625
-Chunk mode Max memory allocated: 8.32 GB
-Chunk mode Max memory reserved: 8.40 GB
-Chunk mode Time taken: 0.40 seconds
+Chunk mode Max memory allocated: 6.87 GB
+Chunk mode Max memory reserved: 9.56 GB
+Chunk mode Time taken: 0.26 seconds
 ```
 
 (global-average)=
@@ -91,7 +91,7 @@ loss 全局校准是指，无论使用多少张显卡，无论使用什么并行
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem, CELossContext
+from xtuner.v1.loss.ce_loss import CELossConfig, CELossContext
 from mmengine.dist import infer_launcher, init_dist
 import torch.distributed as dist
 
@@ -131,10 +131,10 @@ hidden_states = torch.chunk(hidden_states, world_size, dim=0)[rank]
 shifted_labels = torch.chunk(shifted_labels_gt, world_size, dim=0)[rank]
 hidden_states = hidden_states.unsqueeze(0)
 shifted_labels = shifted_labels.unsqueeze(0)
-loss_ctx_input_list = [CELossContextInputItem(shifted_labels=shifted_labels)]
 loss_cfg = CELossConfig(mode='chunk', chunk_size=1024, loss_reduction="token")
-batches_loss_kwargs = CELossContext.build_batches_loss_kwargs(loss_ctx_input_list, loss_cfg)
-loss_ctx = CELossContext(loss_cfg, batches_loss_kwargs[0])
+loss_ctx = loss_cfg.build(shifted_labels)
+loss_ctx_list = CELossContext.build_batches([loss_ctx])
+loss_ctx = loss_ctx_list[0]
 loss, _ = loss_ctx.forward(hidden_states, lm_head.weight)
 loss.backward()
 
@@ -198,7 +198,7 @@ XTuner 中所有的 loss 计算均涉及两个核心组件 `LossConfig` 和 `Los
 ```python
 import torch
 import torch.nn as nn
-from xtuner.v1.loss.ce_loss import CELossConfig, CELossContextInputItem, CELossContext
+from xtuner.v1.loss.ce_loss import CELossConfig, CELossContext
 
 emb = nn.Embedding(4, 2)
 head = nn.Linear(2, 4, bias=False)
@@ -210,8 +210,9 @@ hidden_states = emb(input_ids)
 
 loss_ctx_input_list = [CELossContextInputItem(shifted_labels=shifted_labels)]
 loss_cfg = CELossConfig(mode='chunk', chunk_size=1024, loss_reduction="token")
-batches_loss_kwargs = CELossContext.build_batches_loss_kwargs(loss_ctx_input_list, loss_cfg)
-loss_ctx = CELossContext(loss_cfg, batches_loss_kwargs[0])
+loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"])
+loss_ctx_list = CELossContext.build_batches([loss_ctx])
+loss_ctx = loss_ctx_list[0]
 loss, _ = loss_ctx.forward(hidden_states, head.weight)
 loss.backward()
 ```
@@ -235,14 +236,13 @@ class CELossConfig:
 
 ### CELossContext
 
-在 `CELossContext` 中我们引入了额外的两个数据结构：[`CELossKwargs`](xtuner.v1.loss.ce_loss.CELossKwargs) 和 [`CELossContextInputItem`](xtuner.v1.loss.ce_loss.CELossContextInputItem)。
+在 `CELossContext` 中我们引入了额外的一个数据结构：[`CELossKwargs`](xtuner.v1.loss.ce_loss.CELossKwargs)。
 
 - `CELossKwargs` 表示 CE Loss 实际计算的时候需要用到哪些参数，即：`shifted_labels` 和 `loss_weight` 两项，注意此时的 `loss_weight` 已经经历过全局校准的处理了，详细实现请参考 `xtuner/v1/loss/ce_loss.py`。
-- `CELossContextInputItem` 则表示计算出 `CELossKwargs` 需要哪些信息，即：`shifted_labels`
 
 我们在 `CELossContext` 中只需要实现两个接口：
 
-1. 为了做 loss 全局校准，classmethod `build_batches_loss_kwargs` 输入梯度累积范围内每一条数据对应的 `CELossContextInputItem` ，并计算出每一个 iter 的 `CELossKwargs`。
+1. 为了做 loss 全局校准，staticmethod `build_batches` 计算全局校准对应的loss weight。
 2. `loss_fn` 根据 `CELossKwargs` 计算出当前 iter 的 loss。
 
 对于其他功能（如：chunk loss），不同 loss 都是通用的，我们统一放到 `BaseLossContext` 里实现。
@@ -281,25 +281,22 @@ class CustomLossKwargs(BaseLossKwargs):
     ...
 ```
 
-第二步，继承 `BaseLossContext` 并实现 `CustomLossContext` 中的 classmethod `build_batches_loss_kwargs` 和 `loss_fn`：
+第二步，继承 `BaseLossContext` 并实现 `CustomLossContext` 中的 classmethod `build_batches` 和 `loss_fn`：
 
 ```python
 from xtuner.v1.loss import BaseLossContext, BaseLossKwargs
-from xtuner.v1.loss.ce_loss import CELossContextInputItem
 
-class CustomLossContext(BaseLossContext[CELossContextInputItem]):
+class CustomLossContext(BaseLossContext):
     loss_cfg: CustomLossConfig
     loss_kwargs: CustomLossKwargs
 
-    @classmethod
-    def build_batches_loss_kwargs(
-        cls,
-        data_batches: list[RLLossContextInputItem],
-        loss_cfg: CustomLossConfig,
+    @staticmethod
+    def build_batches(
+        loss_ctx_list: list["CELossContext"],
         # 为了提高计算效率，XTuner 会将多条短数据 pack 成一条长数据进行训练
         # 若在计算 CustomLossKwargs 的过程中需要解 pack 成若干短数据，则需要传入 cu_seq_lens_list
         # 默认为 None 即可。
-        cu_seq_lens_list: list[torch.Tensor] | None = None,
+        cu_seq_lens_list: Sequence[torch.IntTensor] | None = None,
         # 若开启了序列并行 (sp) 且计算 CustomLossKwargs 的过程中需要 sp 切分前的数据，则需要传入 cu_seq_lens_list
         # 默认为 None 即可。
         sp_mesh: DeviceMesh | None = None,

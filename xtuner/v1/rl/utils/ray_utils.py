@@ -1,9 +1,10 @@
 import atexit
 import signal
 import subprocess
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Optional, cast
 
 import ray
+from ray import ObjectRef
 
 from xtuner.v1.utils.logger import get_logger
 
@@ -11,6 +12,8 @@ from .misc import find_free_ports
 
 
 if TYPE_CHECKING:
+    from xtuner.v1.data_proto.rl_data import RolloutState
+
     from .ray_worker import AcceleratorType
 
 
@@ -18,7 +21,9 @@ logger = get_logger()
 
 
 @ray.remote
-def find_master_addr_and_port(nums=1, start_port=None, end_port=None):
+def find_master_addr_and_port(
+    nums: int = 1, start_port: Optional[int] = None, end_port: Optional[int] = None
+) -> tuple[str, int] | tuple[str, list[int]]:
     """Finds an available master address and a specified number of ports.
 
     This remote function gets the node's IP address and binds to one or more
@@ -85,6 +90,34 @@ def get_ray_accelerator() -> "AcceleratorType":
         )
 
     return cast("AcceleratorType", accelerator)
+
+
+def free_object_refs(refs: list[ObjectRef]) -> None:
+    valid_refs = [ref for ref in refs if isinstance(ref, ObjectRef)]
+    if not valid_refs:
+        return
+
+    try:
+        ray._private.internal_api.free(valid_refs, local_only=False)
+    except Exception:
+        ray.internal.free(valid_refs, local_only=False)
+
+
+def clear_rollout_response_for_rerun(rollout_state: "RolloutState") -> "RolloutState":
+    routed_experts = getattr(rollout_state, "routed_experts", None)
+    if isinstance(routed_experts, ObjectRef):
+        free_object_refs([routed_experts])
+    rollout_state.tokens = getattr(rollout_state, "prompt_ids", None)
+    rollout_state.response = None
+    rollout_state.response_ids = []
+    rollout_state.logprobs = []
+    rollout_state.routed_experts = None
+    rollout_state.finish_reason = None
+    rollout_state.response_mask = []
+    rollout_state.response_model_steps = []
+    rollout_state.reward = None
+    rollout_state.error_msg = None
+    return rollout_state
 
 
 def close_ray():

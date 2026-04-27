@@ -51,6 +51,7 @@ dependencies = [
   "mathruler",
   "pylatexenc",
   "py-libnuma",
+  "pyarrow",
 ]
 
 [project.urls]
@@ -88,7 +89,8 @@ all = [
   "liger-kernel",
   "parametrize",
   "mathruler",
-  "pylatexenc"
+  "pylatexenc",
+  "flash-linear-attention"
 ]
 
 [tool.mypy]

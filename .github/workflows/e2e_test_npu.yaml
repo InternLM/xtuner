@@ -1,0 +1,69 @@
+name: ete_test_npu
+
+permissions:
+  contents: write
+  pages: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_org:
+        required: false
+        description: 'Tested repository organization name. Default is InternLM'
+        type: string
+        default: 'InternLM/xtuner'
+      repo_ref:
+        required: false
+        description: 'Set branch or tag or commit id. Default is "main"'
+        type: string
+        default: 'main'
+      run_case:
+        required: false
+        description: 'Run a specific test case, e.g., "npu-qwen3-sft", as defined in autotest/config-npu.yaml.'
+        type: string
+        default: 'all'
+  schedule:
+    - cron:  '00 21 * * 0-4'
+env:
+  CI_NPU_IMAGE_REGISTRY: ${{ secrets.CI_NPU_IMAGE_REGISTRY }}
+
+jobs:
+  ete_test:
+    if: ${{!cancelled() }}
+    runs-on: [d_cluster]
+    steps:
+      - name: Clean workdir
+        run: sudo git clean -ffdx
+      - name: Clone repository
+        uses: actions/checkout@v2
+        with:
+          repository: ${{ github.event.inputs.repo_org || 'InternLM/xtuner' }}
+          ref: ${{github.event.inputs.repo_ref || 'main'}}
+      - name: run-test
+        run: |
+          source activate npuci
+          unset HTTP_PROXY;unset HTTPS_PROXY;unset http_proxy;unset https_proxy;
+          CASE_NAME="${{ github.event.inputs.run_case || 'all' }}"
+          if [ "$CASE_NAME" = "all" ]; then
+            export DEVICE=npu && pytest autotest/test_all.py -m all -n 1 -vv --run_id ${{ github.run_id }}
+          else
+            export DEVICE=npu && pytest autotest/test_all.py::test_all[$CASE_NAME] -m all -n 1 -vv --run_id ${{ github.run_id }}
+          fi
+
+      - name: Upload Artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ github.workspace }}/${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+          name: npu-e2e-${{ github.run_id }}
+
+      - name: Deploy to GitHub Pages
+        if: ${{ !cancelled() }}
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          token: ${{ github.token }}
+          branch: gh-pages
+          folder: ./${{ github.run_id }}
+          target-folder: ${{ github.run_id }}

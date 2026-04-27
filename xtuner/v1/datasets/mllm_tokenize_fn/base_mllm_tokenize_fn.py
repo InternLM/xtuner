@@ -9,10 +9,10 @@ from pydantic import BaseModel, ConfigDict
 
 from xtuner.v1.data_proto.messages import ChatMessages
 from xtuner.v1.data_proto.templates import ChatTemplate, HybridChatTemplate
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger, trim_memory
 
 from ..data_item import BaseMLLMDataItem, CacheItem
-from ..utils import CachableTokenizeFunction, tokenizer_xxhash
+from ..utils import CachableTokenizeFunction, tokenizer_xxhash, with_proxy_attention_flops
 
 
 logger = get_logger()
@@ -31,10 +31,11 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
             content = msg["content"]
             if isinstance(content, list):
                 for c in content:
-                    if c["type"] == "image_url":
-                        image_paths.append(c["image_url"]["url"])
-                        if "image_wh" in c["image_url"]:
-                            image_wh = c["image_url"]["image_wh"]
+                    if c["type"] in ("image_url", "image"):
+                        key = "image_url" if "image_url" in c else "image"
+                        image_paths.append(c[key]["url"])
+                        if "image_wh" in c[key]:
+                            image_wh = c[key]["image_wh"]
                             if isinstance(image_wh[0], (list, tuple)):
                                 assert len(image_wh) == 1, (
                                     f"Only one image size is supported for each image. but got {image_wh}"
@@ -42,10 +43,10 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                                 image_wh = image_wh[0]
                             image_wh_list.append(image_wh)
                             assert len(image_wh) == 2, f"image_wh should be [width, height], but got {image_wh}"
-                    if c["type"] == "video_url":
-                        video_paths.append(c["video_url"]["url"])
-
-                        video_wh = c["video_url"].get("image_wh")
+                    if c["type"] in ("video_url", "video"):
+                        key = "video_url" if "video_url" in c else "video"
+                        video_paths.append(c[key]["url"])
+                        video_wh = c[key].get("image_wh")
                         if video_wh is not None:
                             if isinstance(video_wh[0], (list, tuple)):
                                 assert len(video_wh) == 1, (
@@ -56,16 +57,17 @@ def collect_image_video_paths_and_extra(messages: list[dict]):
                             assert len(video_wh) == 2, f"video_wh should be [width, height], but got {video_wh}"
 
                         video_extra_dict = {}
-                        if "origin_video_length" in c["video_url"]:
-                            video_extra_dict["origin_video_length"] = c["video_url"]["origin_video_length"]
-                        if "origin_fps" in c["video_url"]:
-                            video_extra_dict["origin_fps"] = c["video_url"]["origin_fps"]
-                        if "processed_video_length" in c["video_url"]:
-                            video_extra_dict["processed_video_length"] = c["video_url"]["processed_video_length"]
-                        if "processed_fps" in c["video_url"]:
-                            video_extra_dict["processed_fps"] = c["video_url"]["processed_fps"]
-                        if "frames_timestamp" in c["video_url"]:
-                            video_extra_dict["frames_timestamp"] = c["video_url"]["frames_timestamp"]
+
+                        if "origin_video_length" in c[key]:
+                            video_extra_dict["origin_video_length"] = c[key]["origin_video_length"]
+                        if "origin_fps" in c[key]:
+                            video_extra_dict["origin_fps"] = c[key]["origin_fps"]
+                        if "processed_video_length" in c[key]:
+                            video_extra_dict["processed_video_length"] = c[key]["processed_video_length"]
+                        if "processed_fps" in c[key]:
+                            video_extra_dict["processed_fps"] = c[key]["processed_fps"]
+                        if "frames_timestamp" in c[key]:
+                            video_extra_dict["frames_timestamp"] = c[key]["frames_timestamp"]
                         if len(video_extra_dict) > 0:
                             video_extra_info_list.append(video_extra_dict)
 
@@ -118,7 +120,8 @@ def replace_image_token(
 
 
 def load_image(image_path: str):
-    return Image.open(image_path).convert("RGB")
+    with Image.open(image_path) as img:
+        return img.convert("RGB")
 
 
 def get_image_path(image_path: str, media_root: str):
@@ -142,6 +145,9 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         hash: str | None = None,
         hash_str: str = "",
         data_name: str | None = None,
+        llm_pack_weight: float = 1.0,
+        visual_pack_weight: float = 0.0,
+        trim_memory_interval: int = 1,
     ):
         self.max_length = max_length
         self._tokenizer_hash = tokenizer_hash
@@ -155,7 +161,12 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         self._image_wh_list: list[list] = []
         self._video_wh_list: list[list] = []
         self._video_extra_info_list: list[dict] = []
-        super().__init__(tokenizer)
+
+        self._trim_memory_interval = trim_memory_interval
+        self._trim_memory_counter = 0
+
+        self._hash_str += f"llm_pack_weight:{llm_pack_weight}_visual_pack_weight:{visual_pack_weight}"
+        super().__init__(tokenizer, llm_pack_weight=llm_pack_weight, visual_pack_weight=visual_pack_weight)
 
     def calc_num_tokens_multi_modal_get_item(self, data_item: dict) -> CacheItem:
         raise NotImplementedError
@@ -175,7 +186,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         input_ids = tokenized["input_ids"]
         labels = tokenized["labels"]
         input_ids, _ = self._truncated_input_and_labels(input_ids, labels)
-        return {"num_tokens": len(input_ids)}
+        return {"num_tokens": len(input_ids), "num_img_tokens": [0]}
 
     def pure_text_get_item(self, data_item: Any) -> BaseMLLMDataItem:
         raise NotImplementedError
@@ -190,6 +201,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 labels = labels[: self.max_length]
         return input_ids, labels
 
+    @with_proxy_attention_flops
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> T | CacheItem:  # type: ignore[override]
         try:
             self._image_path, self._video_path, extra_info = collect_image_video_paths_and_extra(item["messages"])
@@ -199,7 +211,7 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
         except RuntimeError as e:
             if self.state == "cache":
                 print(f"!!!! RuntimeError: {e} of {self.data_name} when tokenize cache item. skip {item}!")
-                ret = CacheItem(num_tokens=0)
+                ret = CacheItem(num_tokens=0, num_img_tokens=[0])
                 return ret
             else:
                 raise RuntimeError(f"!!!! RuntimeError: {e} of {self.data_name}")
@@ -208,16 +220,23 @@ class BaseMLLMTokenizeFunction(CachableTokenizeFunction[T]):
                 ret = self.calc_num_tokens_multi_modal_get_item(item)
             else:
                 ret = self.multi_modal_get_item(item, media_root)
+                if self._trim_memory_counter % self._trim_memory_interval == 0:
+                    trim_memory()
+                self._trim_memory_counter += 1
         elif len(self._video_path) > 0:
             if self.state == "cache":
                 ret = self.calc_num_tokens_video_get_item(item)
             else:
                 ret = self.video_get_item(item, media_root)
+                if self._trim_memory_counter % self._trim_memory_interval == 0:
+                    trim_memory()
+                self._trim_memory_counter += 1
         else:
             if self.state == "cache":
                 ret = self.calc_num_tokens_pure_text_get_item(item)
             else:
                 ret = self.pure_text_get_item(item)
+
         return ret
 
     def hash(self) -> str:
@@ -243,6 +262,7 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
         extra="forbid",
         protected_namespaces=(),
     )
+    chat_template: str
     system_message: str | None = None
     max_length: int | None = None
     hash: str | None = None
@@ -250,6 +270,9 @@ class BaseMLLMTokenizeFnConfig(BaseModel):
     oss_time_log_thr: int = 10  # 10s
     add_eos_token: bool = True  # for mllm pretrain
     add_bos_token: bool = False  # for mllm pretrain
+    llm_pack_weight: float = 1.0
+    visual_pack_weight: float = 0.0
+    trim_memory_interval: int = 1
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs

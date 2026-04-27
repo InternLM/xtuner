@@ -49,6 +49,34 @@ def apply_rotary_pos_emb_cuda(
     return q_embed, k_embed
 
 
+# Note: Although this function is compatible with apply_rotary_pos_emb_cuda,
+# it is still recommended to separate them into two for efficiency considerations.
+def apply_rotary_pos_emb_cuda_for_partial_rotary(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    position_ids: torch.Tensor | None = None,
+    unsqueeze_dim: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+
+    # Keep half or full tensor for later concatenation
+    rotary_dim = cos.shape[-1]
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+    # Apply rotary embeddings on the first half or full tensor
+    q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
+    k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+
+    # Concatenate back to full shape
+    q_embed = torch.cat([q_embed, q_pass], dim=-1)
+    k_embed = torch.cat([k_embed, k_pass], dim=-1)
+    return q_embed, k_embed
+
+
 def apply_rotary_pos_emb_sep_cuda(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -76,6 +104,25 @@ def apply_rotary_pos_emb_sep_cuda(
     sin_rep = repeat_kv(sin, num_groups)
     q_embed = (q * cos_rep) + (rotate_half(q) * sin_rep)
     k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+# Note: Replace manual trigonometric operations with torch_npu.npu_rotary_mul operator.
+def apply_rotary_pos_emb_sep_npu(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    position_ids: torch.Tensor | None = None,
+    unsqueeze_dim: int = 1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    import torch_npu
+
+    num_groups = int(q.shape[unsqueeze_dim] // cos.shape[unsqueeze_dim])
+    cos_rep = repeat_kv(cos, num_groups)
+    sin_rep = repeat_kv(sin, num_groups)
+    q_embed = torch_npu.npu_rotary_mul(q, cos_rep, sin_rep)
+    k_embed = torch_npu.npu_rotary_mul(k, cos, sin)
     return q_embed, k_embed
 
 
@@ -120,16 +167,25 @@ class ApplyRotaryEmbProtocol(Protocol):
     ) -> Tuple[torch.Tensor, torch.Tensor]: ...
 
 
-def get_apply_rotary_emb(fope_sep_head: bool | None = False) -> ApplyRotaryEmbProtocol:
+def get_apply_rotary_emb(
+    fope_sep_head: bool | None = False, enable_partial_rotary: bool = False
+) -> ApplyRotaryEmbProtocol:
     from xtuner.v1.utils.device import get_device
 
     device = get_device()
     if device == "npu":
-        assert fope_sep_head is None or not fope_sep_head, "FoPE with sep head is not supported on NPU yet."
-        return apply_rotary_pos_emb_npu
+        assert not enable_partial_rotary, "Partial rotary is not supported on NPU yet."
+        if fope_sep_head:
+            return apply_rotary_pos_emb_sep_npu
+        else:
+            return apply_rotary_pos_emb_npu
     else:
         if fope_sep_head:
             logger.debug("Using FoPE with fope_sep_head")
+            assert not enable_partial_rotary, "Partial rotary is not supported when using FoPE with sep head."
             return apply_rotary_pos_emb_sep_cuda
         else:
-            return apply_rotary_pos_emb_cuda
+            if enable_partial_rotary:
+                return apply_rotary_pos_emb_cuda_for_partial_rotary
+            else:
+                return apply_rotary_pos_emb_cuda

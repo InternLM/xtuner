@@ -6,7 +6,7 @@ from ..rollout_is import (
     merge_rollout_is_metrics,
 )
 from .controller import ColateItem, TrainingController
-from .worker import RLOtherLog, TrainingWorker, WorkerConfig, WorkerInputItem, WorkerLogItem, WorkerTrainLogItem
+from .worker import TrainingWorker, WorkerConfig, WorkerInputItem, WorkerLogItem, WorkerTrainLogItem
 
 
 __all__ = [
@@ -19,7 +19,6 @@ __all__ = [
     "merge_rollout_is_metrics",
     "WorkerConfig",
     "WorkerInputItem",
-    "RLOtherLog",
     "WorkerTrainLogItem",
     "WorkerLogItem",
     "TrainingWorker",

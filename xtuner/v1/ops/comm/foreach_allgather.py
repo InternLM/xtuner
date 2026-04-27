@@ -1,5 +1,3 @@
-from typing import cast
-
 import torch
 import torch.distributed as dist
 
@@ -10,6 +8,10 @@ def foreach_all_gather(
     params: list[torch.Tensor],
     group: dist.ProcessGroup | None,
 ) -> list[list[torch.Tensor]]:
+    """Perform a fused all-gather on a list of tensors.
+
+    All ranks must contribute tensors with identical numels and shapes.
+    """
     if group is None:
         group = dist.group.WORLD
 
@@ -18,29 +20,23 @@ def foreach_all_gather(
 
     input_tensor_numels = [param.numel() for param in params]
     input_tensor_shapes = [param.shape for param in params]
+    world_size = dist.get_world_size(group)
+    local_tensor_size = sum(input_tensor_numels)
+    global_tensor_size = local_tensor_size * world_size
 
-    flatten_copyin_tensor = torch.empty((sum(input_tensor_numels),), dtype=param0.dtype, device=param0.device)
+    # prepare flatten tensor
+    flatten_copyin_tensor = torch.empty((local_tensor_size,), dtype=param0.dtype, device=param0.device)
     splits_copyin_tensor = torch.split(flatten_copyin_tensor, input_tensor_numels)
     torch._foreach_copy_(splits_copyin_tensor, [p.flatten() for p in params])
+    flatten_copyout_tensor = torch.empty((global_tensor_size,), dtype=param0.dtype, device=param0.device)
 
-    input_tensor_numels_tensor = torch.tensor(input_tensor_numels, dtype=torch.int64, device=param0.device)
-    global_input_tensor_numels = [
-        torch.zeros_like(input_tensor_numels_tensor) for _ in range(dist.get_world_size(group))
-    ]
-
-    dist.all_gather(global_input_tensor_numels, input_tensor_numels_tensor, group=group)
-    copyout_size = int(sum(sum(i) for i in global_input_tensor_numels))
-    flatten_copyout_tensor = torch.empty((copyout_size,), dtype=param0.dtype, device=param0.device)
-
+    # allgather global flatten tensor
     dist.all_gather_into_tensor(flatten_copyout_tensor, flatten_copyin_tensor, group=group)
-    copyout_split_size: list[int] = sum([i.tolist() for i in global_input_tensor_numels], [])
+    copyout_split_size: list[int] = input_tensor_numels * world_size
     splits_copyout_tensor = torch.split(flatten_copyout_tensor, copyout_split_size)
+    global_input_tensor_shapes = input_tensor_shapes * world_size
 
-    _global_input_tensor_shapes: list[None] | list[list[tuple]] = [None for _ in range(dist.get_world_size(group))]
-    dist.all_gather_object(_global_input_tensor_shapes, input_tensor_shapes, group=group)
-    _global_input_tensor_shapes = cast(list[list[tuple]], _global_input_tensor_shapes)
-    global_input_tensor_shapes: list[tuple] = sum(_global_input_tensor_shapes, [])
-
+    # gathered_params: [[params1/p, params1/p,...], [params2/p, params2/p,...], ...]
     gathered_params: list[list[torch.Tensor]] = []
     for i in range(len(params)):
         single_gathered_params: list[torch.Tensor] = []

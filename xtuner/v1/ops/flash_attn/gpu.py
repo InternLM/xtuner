@@ -5,7 +5,14 @@ import torch
 
 
 try:
-    from flash_attn_interface import flash_attn_3_cuda
+    # flash_attn_interface renamed its v3 entrypoint in newer releases:
+    # - old: flash_attn_3_cuda
+    # - new: flash_attn_3_gpu
+    # Keep the rest of this file stable by aliasing whichever exists to `flash_attn_3_cuda`.
+    try:
+        from flash_attn_interface import flash_attn_3_gpu as flash_attn_3_cuda
+    except ImportError:
+        from flash_attn_interface import flash_attn_3_cuda as flash_attn_3_cuda
     from flash_attn_interface import maybe_contiguous as maybe_contiguous_v3
 
     @torch.library.custom_op("flash_attn::_flash_attn_varlen_forward_v3", mutates_args=(), device_types="cuda")
@@ -522,8 +529,7 @@ try:
             return_softmax,
             None,
         )
-        # if out.isnan().any() or softmax_lse.isnan().any():
-        #     breakpoint()
+
         return out, softmax_lse, S_dmask, rng_state
 
     @torch.library.register_fake("flash_attn::_flash_attn_varlen_forward_v2")

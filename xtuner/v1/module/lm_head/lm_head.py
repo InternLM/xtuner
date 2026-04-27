@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from typing_extensions import overload
 
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.loss.ce_loss import LMHeadLossContext
 
 
 Loss: TypeAlias = torch.Tensor
@@ -25,11 +25,11 @@ class LMHead(nn.Linear):
 
     @overload  # type: ignore[override]
     def forward(
-        self, hidden_states: HiddenStates, loss_ctx: CELossContext
+        self, hidden_states: HiddenStates, loss_ctx: LMHeadLossContext
     ) -> tuple[Loss, tuple[Logits | None, dict[str, Any]]]: ...
 
     def forward(  # type: ignore[override]
-        self, hidden_states: torch.Tensor, loss_ctx: CELossContext | None = None
+        self, hidden_states: torch.Tensor, loss_ctx: LMHeadLossContext | None = None
     ) -> tuple[Loss | None, tuple[Logits | None, dict[str, Any]]]:
         """Forward pass of the language model head."""
         if isinstance(self.weight, DTensor):
@@ -55,7 +55,7 @@ class LMHead(nn.Linear):
 
     @overload  # type: ignore
     def __call__(
-        self, hidden_states: HiddenStates, loss_ctx: CELossContext
+        self, hidden_states: HiddenStates, loss_ctx: LMHeadLossContext
     ) -> tuple[Loss, tuple[Logits | None, dict[str, Any]]]: ...
 
     __call__ = nn.Module.__call__

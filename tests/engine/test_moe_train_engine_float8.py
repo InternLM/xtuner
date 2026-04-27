@@ -49,7 +49,6 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=8,
@@ -88,13 +87,13 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+            loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -130,7 +129,6 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -167,13 +165,13 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             seq_ctx.num_padding = pack_len
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+            loss_log = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
@@ -217,7 +215,6 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
         optim_cfg: AdamWConfig = AdamWConfig()
         lr_cfg: LRConfig = LRConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
             # hsdp_sharding_size=hsdp_sharding_size,
@@ -267,17 +264,17 @@ class TestMoEEngineFloat8(DeterministicDDPTestCase):
             seq_ctx.to('cuda')
             seq_ctx_list = [seq_ctx]
             LossContext = loss_cfg.loss_ctx_cls
-            loss_ctx = loss_cfg.build(shifted_labels=labels, sp_mesh=None)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": labels}, sp_mesh=None)
             loss_ctx_list = [loss_ctx]
             loss_ctx_list = LossContext.build_batches(loss_ctx_list)
             loss_ctx = loss_ctx_list[0]
             seq_ctx = seq_ctx_list[0]
-            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)]
-            loss_log, _ = engine.train_step(engine_input)
+            engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+            logs_info = engine.train_step(engine_input)["logs_info"]
             grad_norm = engine.clip_grad_norm()
             engine.step_optimizer(grad_norm)
             lr_scheduler.step()
-            losses.append(loss_log["reduced_llm_loss"])
+            losses.append(logs_info["reduced_llm_loss"])
         losses_ref = torch.tensor([2.41, 2.41, 2.47, 2.42, 2.44, 2.44, 2.42, 2.38, 2.31, 2.30])
         losses = torch.tensor(losses)
         self._check_loss_curve(losses, losses_ref)
@@ -323,7 +320,6 @@ class TestMoEEngineFloat8Case2(DeterministicDDPTestCase):
         )
         optim_cfg: AdamWConfig = AdamWConfig()
         fsdp_cfg: FSDPConfig = FSDPConfig(
-            torch_compile=True,
             cpu_offload=False,
             ep_size=ep_size,
             hsdp_sharding_size=hsdp_sharding_size,

@@ -29,20 +29,18 @@ from xtuner.v1.config.optim import LRConfig, OptimConfig
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.datasets.config import DataloaderConfig
 from xtuner.v1.datasets.dataloader import Dataloader
-from xtuner.v1.engine.train_engine import LossLog, OtherLog, TrainEngine
-from xtuner.v1.engine.vision_compose_train_engine import (
-    VisionComposeTrainEngine,
-)
+from xtuner.v1.engine.train_engine import TrainEngine, TrainStepInfo
 from xtuner.v1.float8.float8_handler import Float8Handler
-from xtuner.v1.loss import CELossConfig
+from xtuner.v1.loss import CELossConfig, LogProbConfig
 from xtuner.v1.loss.ce_loss import CELossContext
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
+from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
 from xtuner.v1.rl.rollout.worker import RolloutConfig
-from xtuner.v1.rl.utils import SingleAcceleratorWorker, gather_logprobs
+from xtuner.v1.rl.utils import SingleAcceleratorWorker
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
     XTUNER_DETERMINISTIC,
@@ -199,19 +197,10 @@ class WorkerInputItem(TypedDict):
     rollout_logprobs: torch.Tensor | None
 
 
-class RLOtherLog(TypedDict):
-    maxvio: NotRequired[float]
+class WorkerTrainLogItem(TypedDict, total=False):
     step_consumed_tokens: int
-    step_consumed_img_tokens: NotRequired[float]
     efficient_attn_ratio: float
-    max_ratio: NotRequired[float]
-    loss: NotRequired[float]
-    grad_norm: NotRequired[float]
-
-
-class WorkerTrainLogItem(TypedDict):
-    loss_log: LossLog
-    rl_other_log: RLOtherLog
+    grad_norm: float
 
 
 class WorkerLogItem(TypedDict):
@@ -281,6 +270,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_cfg_info: dict = dict()
         self.endpoints: dict[str, str] = dict()
         self.endpoints["update_weights"] = "update_weights"
+        if worker_cfg.loss_cfg.chunk_size is not None:
+            mode = "chunk"
+        else:
+            mode = "eager"
+        self.logprob_cfg = LogProbConfig(chunk_size=worker_cfg.loss_cfg.chunk_size, mode=mode)
 
     def _init_sft(self, worker_cfg: WorkerConfig):
         self._sft_dataloader_config = worker_cfg.sft_dataloader_cfg
@@ -291,7 +285,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         self._rollout_step = 0
         self._sft_cur_epoch = 0
-        self._sft_total_consumed_samples = 0
         self._sft_total_consumed_tokens = 0
 
         if self._sft_dataloader_config is not None:
@@ -321,20 +314,12 @@ class TrainingWorker(SingleAcceleratorWorker):
     def _set_random_seed(self, seed: None | int):
         set_random_seed(seed)
 
-    def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine | VisionComposeTrainEngine:
-        if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
-            engine = VisionComposeTrainEngine(
-                optim_cfg=worker_cfg.optim_cfg,
-                fsdp_cfg=worker_cfg.fsdp_cfg,
-                model_cfg=worker_cfg.model_cfg,
-            )
-        else:
-            engine = TrainEngine(  # type: ignore
-                optim_cfg=worker_cfg.optim_cfg,
-                fsdp_cfg=worker_cfg.fsdp_cfg,
-                model_cfg=worker_cfg.model_cfg,
-            )
-
+    def _build_engine(self, worker_cfg: WorkerConfig) -> TrainEngine:
+        engine = TrainEngine(  # type: ignore
+            optim_cfg=worker_cfg.optim_cfg,
+            fsdp_cfg=worker_cfg.fsdp_cfg,
+            model_cfg=worker_cfg.model_cfg,
+        )
         if worker_cfg.load_from is not None:
             engine.from_hf(worker_cfg.load_from)
 
@@ -410,12 +395,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         shifted_labels_list: list[torch.Tensor],
     ) -> list[torch.Tensor]:
         # precompute float8 dynamic scale only once
-        self._engine.maybe_precompute_float8_dynamic_scale_for_fsdp()
+        self._engine._maybe_precompute_float8_dynamic_scale_for_fsdp()
         old_logprobs_list: list[torch.Tensor] = []
         for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
-            output = self._engine.forward_only(seq_ctx=seq_ctx)
-            old_logprobs = gather_logprobs(output["logits"], shifted_labels)
-            old_logprobs_list.append(old_logprobs)
+            loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
+            assert loss_ctx is not None
+            output = self._engine.forward_only(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+            old_logprobs_list.append(output["loss"])
         return old_logprobs_list
 
     def compute_ref_logprobs(
@@ -426,35 +412,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         ref_logprobs_list: list[torch.Tensor] = []
         for seq_ctx, shifted_labels in zip(seq_ctx_list, shifted_labels_list):
             with torch.no_grad():
-                ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx=None)
-            ref_logprobs = gather_logprobs(ref_output["logits"], shifted_labels)
-            ref_logprobs_list.append(ref_logprobs)
+                loss_ctx = self.logprob_cfg.build(data={"shifted_labels": shifted_labels})
+                assert loss_ctx is not None
+                ref_output = self._ref_model(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+                ref_logprobs_list.append(ref_output["loss"])
         self._ref_model.to_device("cpu")
         return ref_logprobs_list
-
-    def _get_rl_other_log(self, other_log: OtherLog) -> RLOtherLog:
-        from xtuner.v1.model.utils import ModelForwardExtraLogInfo
-
-        extra_info: ModelForwardExtraLogInfo | dict = other_log.get("extra_info", {})
-        if isinstance(extra_info, ModelForwardExtraLogInfo):
-            extra_info_dict = extra_info.get()
-        else:
-            extra_info_updated = ModelForwardExtraLogInfo(extra_info)
-            extra_info_dict = extra_info_updated.get()
-
-        for k, v in extra_info_dict.items():
-            if isinstance(v, torch.Tensor):
-                extra_info_dict[k] = v.item()
-
-        rl_other_log: RLOtherLog = {
-            "maxvio": other_log.get("maxvio", 0.0),
-            "step_consumed_tokens": other_log["step_consumed_tokens"],
-            "step_consumed_img_tokens": float(other_log.get("step_consumed_img_tokens", 0.0)),
-            "efficient_attn_ratio": other_log["efficient_attn_ratio"],
-            "max_ratio": extra_info_dict.get("max_ratio", 0.0),
-            "loss": extra_info_dict.get("loss", 0.0),
-        }
-        return rl_other_log
 
     def _add_rollout_routed_experts(
         self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
@@ -486,12 +449,16 @@ class TrainingWorker(SingleAcceleratorWorker):
                     rollout_routed_expert = ray.get(rollout_routed_expert_refs)
                     # free obj store explicitly
                     if self.sp_mesh is None or self.sp_mesh.size() == 1:
-                        ray._private.internal_api.free(rollout_routed_expert_refs)
+                        ray.internal.free(rollout_routed_expert_refs, local_only=False)
                     else:
                         if self.sp_mesh.get_local_rank() == 0:
                             # only free once of sp mesh
                             to_free_routed_expert_refs.append(rollout_routed_expert_refs)
-                    out_rollout_routed_expert.append(torch.as_tensor(rollout_routed_expert, dtype=torch.long))
+                    rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
+                    rollout_routed_expert = rollout_routed_expert.reshape(
+                        -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
+                    )
+                    out_rollout_routed_expert.append(rollout_routed_expert)
 
             seq_ctx.rollout_routed_experts = torch.cat(out_rollout_routed_expert, dim=0)  # max_len,l,e
         else:
@@ -515,7 +482,7 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.sp_mesh is not None and self.sp_mesh.size() > 1:
             dist.barrier()
             for free_routed_expert_refs in to_free_routed_expert_refs:
-                ray._private.internal_api.free(free_routed_expert_refs)
+                ray.internal.free(free_routed_expert_refs, local_only=False)
             del to_free_routed_expert_refs
 
     @ray_method
@@ -564,10 +531,16 @@ class TrainingWorker(SingleAcceleratorWorker):
             rollout_logprobs = data.get("rollout_logprobs", None)
             rollout_logprobs = rollout_logprobs.to(DEVICE) if rollout_logprobs is not None else None
             loss_ctx = loss_cfg.build(
-                self.sp_mesh, shifted_labels=shifted_labels, advantages=advantages, rollout_logprobs=rollout_logprobs
+                data={
+                    "shifted_labels": shifted_labels,
+                    "advantages": advantages,
+                    "rollout_logprobs": rollout_logprobs,
+                },
+                sp_mesh=self.sp_mesh,
             )
 
             seq_ctx_list.append(seq_ctx)
+            assert loss_ctx is not None
             loss_ctx_list.append(loss_ctx)
 
         del data_batches
@@ -659,8 +632,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         LossContext = loss_cfg.loss_ctx_cls
         for i in range(0, len(loss_ctx_list), iters_per_step):
             batches_loss_ctx = loss_ctx_list[i : i + iters_per_step]
-            batches_loss_ctx = LossContext.build_batches(batches_loss_ctx)
-            batched_loss_ctx_list.extend(batches_loss_ctx)
+            batched_loss_ctx_list.extend(
+                LossContext.build_batches(batches_loss_ctx)  # type: ignore[arg-type]
+            )
 
         # train optimizer steps
         for i in range(0, len(seq_ctx_list), iters_per_step):
@@ -668,31 +642,52 @@ class TrainingWorker(SingleAcceleratorWorker):
             batches_loss_ctx = batched_loss_ctx_list[i : i + iters_per_step]
 
             engine_input = [
-                ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx)
+                ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
                 for seq_ctx, loss_ctx in zip(batches_seq_ctx, batches_loss_ctx)
             ]
 
-            loss_log, other_log = self._engine.train_step(
+            train_step_info = self._engine.train_step(
                 data_batches=engine_input,
             )
             grad_norm = self._engine.clip_grad_norm()
             self._engine.step_optimizer(grad_norm)
-            rl_other_log = self._get_rl_other_log(other_log)  # type: ignore[arg-type]
-            rl_other_log["grad_norm"] = grad_norm.item()
-            worker_log_item["train_metrics"].append(WorkerTrainLogItem(loss_log=loss_log, rl_other_log=rl_other_log))
 
-            log_info = {**loss_log, **rl_other_log}
+            engine_logs_info = cast(dict[str, float], train_step_info.pop("logs_info"))  # type: ignore[misc]
+            engine_extra_info = train_step_info.pop("extra_info")  # type: ignore[misc]
+
+            if isinstance(engine_extra_info, ModelForwardExtraLogInfo):
+                extra_info_dict = engine_extra_info.get()
+            else:
+                extra_info_dict = cast(dict, engine_extra_info)
+
+            extra_info_dict = {k: v.item() for k, v in extra_info_dict.items() if isinstance(v, torch.Tensor)}
+            train_step_info.pop("total_loss")  # type: ignore[misc]
+
+            train_log_item = WorkerTrainLogItem(
+                **engine_logs_info,  # type: ignore[typeddict-item]
+                **train_step_info,
+                **extra_info_dict,
+                grad_norm=grad_norm.item(),
+            )
+            worker_log_item["train_metrics"].append(train_log_item)
+
+            # Extract logs_info for logging
             log_str = ", ".join(
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
-                for key, value in log_info.items()
+                for key, value in train_log_item.items()
             )
             log_str = f"Rank{self.rank} Rollout {rollout_idx} Step {i}: " + log_str
             self.logger.info(log_str)
 
         self._rollout_step += 1
         if self._sft_dataloader is not None and self._rollout_step % self._rollout_steps_per_sft == 0:
-            loss_log = self._fit_sft()
-            worker_log_item["sft_train_metrics"] = loss_log
+            train_step_info = self._fit_sft()
+            engine_logs_info = train_step_info["logs_info"]
+            worker_log_item["sft_train_metrics"] = {
+                **engine_logs_info,
+                **train_step_info["extra_info"].get(),
+                "efficient_attn_ratio": train_step_info["efficient_attn_ratio"],
+            }
 
         return worker_log_item
 
@@ -706,36 +701,27 @@ class TrainingWorker(SingleAcceleratorWorker):
         time_before_train_step = time.time()
         data_time = time_before_train_step - time_before_get_data
         DEVICE_MODULE.reset_peak_memory_stats()
-        cur_sample_num = len(data_batch)
 
-        loss_log, other_log, grad_norm = self._train_one_step_sft(data_batch)
+        train_step_info, grad_norm = self._train_one_step_sft(data_batch)
 
         time_after_train_step = time.time()
         step_time = time_after_train_step - time_before_train_step
-        step_consumed_tokens = other_log["step_consumed_tokens"]
+        step_consumed_tokens = train_step_info["step_consumed_tokens"]
 
-        self._sft_total_consumed_samples += self._reduce_number_across_rank(cur_sample_num)
         reduced_step_consumed_tokens = self._reduce_number_across_rank(step_consumed_tokens)
         self._sft_total_consumed_tokens += reduced_step_consumed_tokens
 
         self._sft_log_step(
-            loss_log=loss_log,
+            train_step_info=train_step_info,
             local_step_consumed_tokens=step_consumed_tokens,
             step_consumed_tokens=reduced_step_consumed_tokens,
             total_consumed_tokens=self._sft_total_consumed_tokens,
             data_time=data_time,
             step_time=step_time,
             grad_norm=grad_norm,
-            efficient_attn_ratio=other_log["efficient_attn_ratio"],
         )
 
-        # to return sft log
-        loss_log["grad_norm"] = grad_norm.item()
-        loss_log["data_time"] = data_time
-        loss_log["step_time"] = step_time
-        loss_log["tgs"] = step_consumed_tokens / step_time
-        loss_log["efficient_attn_ratio"] = other_log["efficient_attn_ratio"]
-        return loss_log
+        return train_step_info
 
     def _next_sft_data_batch(self):
         try:
@@ -756,7 +742,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             if self.sp_mesh.size() > 1:
                 seq_ctx = seq_ctx.split(sequence_parallel_mesh=self.sp_mesh)
             seq_ctx_list.append(seq_ctx)
-            loss_ctx = loss_cfg.build(shifted_labels=data["shifted_labels"], sp_mesh=self.sp_mesh)
+            loss_ctx = loss_cfg.build(data={"shifted_labels": data["shifted_labels"]}, sp_mesh=self.sp_mesh)
             loss_ctx_list.append(loss_ctx)
 
         del data_batch
@@ -767,28 +753,30 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         engine_input = [
-            ModelItem(seq_ctx=seq_ctx, loss_ctx=loss_ctx) for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
+            ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})
+            for seq_ctx, loss_ctx in zip(seq_ctx_list, loss_ctx_list)
         ]
 
-        loss_log, other_log = self._engine.train_step(engine_input)
+        train_step_info = self._engine.train_step(engine_input)
         grad_norm = self._engine.clip_grad_norm()
         self._engine.step_optimizer(grad_norm)
-        return loss_log, other_log, grad_norm
+        return train_step_info, grad_norm
 
     def _sft_log_step(
         self,
-        loss_log: LossLog,
+        train_step_info: TrainStepInfo,
         local_step_consumed_tokens: int,
         step_consumed_tokens: int,
         total_consumed_tokens: int,
         data_time: float,
         step_time: float,
-        grad_norm: float,
-        efficient_attn_ratio: float,
+        grad_norm: torch.Tensor,
     ):
         tgs = local_step_consumed_tokens / step_time
-        loss_log_list = [f"{k}: {v:.8f}" for k, v in loss_log.items()]
-        loss_log_str = ", ".join(loss_log_list)
+        logs_info = train_step_info.get("logs_info", {})
+        log_items = [f"{k}: {v:.8f}" for k, v in logs_info.items() if "loss" in k]
+        log_items.append(f"total_loss: {train_step_info['total_loss']:.8f}")
+        loss_log_str = ", ".join(log_items)
 
         max_memory = DEVICE_MODULE.max_memory_allocated()  # type: ignore[attr-defined]
         reserved_memory = DEVICE_MODULE.max_memory_reserved()  # type: ignore[attr-defined]
@@ -798,12 +786,12 @@ class TrainingWorker(SingleAcceleratorWorker):
             f"text_tokens: {local_step_consumed_tokens} "
             f"step_consumed_tokens: {step_consumed_tokens} "
             f"total_consumed_tokens: {total_consumed_tokens} "
-            f"efficient_attn_ratio: {efficient_attn_ratio:.4f} "
+            f"efficient_attn_ratio: {train_step_info['efficient_attn_ratio']:.4f} "
             f"{loss_log_str} "
             f"grad_norm: {grad_norm:.8f} "
             f"max_memory: {max_memory / (1024**3):.2f} GB "
             f"reserved_memory: {reserved_memory / (1024**3):.2f} GB "
-            f"tgs: {tgs:.1f} "
+            f"tgs: {tgs:.4f}"
         )
 
     def _reduce_number_across_rank(self, rank_number: int) -> int:
@@ -882,6 +870,8 @@ class TrainingWorker(SingleAcceleratorWorker):
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
         if os.environ.get("XTUNER_USE_SGLANG", "0") == "1":
             self.rollout_cfg_info["backend"] = "sglang"
+        elif os.environ.get("XTUNER_USE_VLLM", "0") == "1":
+            self.rollout_cfg_info["backend"] = "vllm"
         else:
             self.rollout_cfg_info["backend"] = (rollout_config.extra_rollout_config or dict()).get(
                 "lmdeploy_backend", "pytorch"
@@ -966,7 +956,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             self.request_update_params(state_dict, finished=False)
             del state_dict, name_list, param_list
 
-        if self.rollout_cfg_info["backend"] == "pytorch" and final_update:
+        if self.rollout_cfg_info["backend"] in ("pytorch", "vllm") and final_update:
             self.request_update_params({}, finished=True)
 
         dist.barrier()
@@ -1071,7 +1061,7 @@ class TrainingWorker(SingleAcceleratorWorker):
             state_dict = dict(zip(name_list, fsdp_unshard_tensor_list))
             self.request_update_params(state_dict)
 
-        if self.rollout_cfg_info["backend"] == "pytorch":
+        if self.rollout_cfg_info["backend"] in ("pytorch", "vllm"):
             self.request_update_params({}, finished=True)
 
         dist.barrier()
@@ -1274,6 +1264,42 @@ class TrainingWorker(SingleAcceleratorWorker):
         if self.rollout_url is None:
             self.logger.error(f"rank {self.rank} url in None, cannot update weights and skip")
             return
+
+        if self.rollout_cfg_info["backend"] == "vllm":
+
+            def serialize_state_dict(state_dict: dict) -> str:
+                import base64
+                from io import BytesIO
+                from multiprocessing.reduction import ForkingPickler
+
+                from torch.multiprocessing.reductions import reduce_tensor
+
+                data = [(k, reduce_tensor(v)) for k, v in state_dict.items()]
+                buf = BytesIO()
+                ForkingPickler(buf).dump(data)
+                buf.seek(0)
+                return base64.b64encode(buf.read()).decode("utf-8")
+
+            serialized_data = [None] * self.rollout_cfg_info["tp"]
+            dist.gather_object(
+                serialize_state_dict(state_dict),
+                serialized_data if dist.get_rank() == head_rank else None,
+                dst=head_rank,
+                group=cpu_group,
+            )
+            if dist.get_rank() == head_rank:
+                headers = {
+                    "Content-Type": "application/json",
+                }
+                data_ = json.dumps(dict(serialized_named_tensors=serialized_data, finished=finished))
+                data = dict(method="update_weight_npu_ipc", args=[data_])
+                response = requests.post(f"{self.rollout_url}/collective_rpc", headers=headers, json=data)
+                assert response.status_code == 200, f"response.status_code = {response.status_code}"
+
+            if finished:
+                dist.barrier(group=cpu_group)
+            return
+
         if self.rollout_cfg_info["backend"] == "pytorch":
             # TODO(chenchiyu): remove lmdeploy related code
             from lmdeploy.utils import serialize_state_dict
@@ -1431,9 +1457,13 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         # Save sft dataloader
-        if self.rank == 0 and self._sft_dataloader is not None:
+        if self._sft_dataloader is not None:
             sft_dataloader_path = checkpoint_path / self._SAVE_SFT_DATALOADER_DIR
-            dataloader_state = self._sft_dataloader.get_state_dict(self._sft_total_consumed_samples)
+            dataloader_state = self._sft_dataloader.get_state_dict()
+            total_consumed_samples = dataloader_state["total_consumed_samples"]
+            if self.rank != 0:
+                return
+
             torch.save(dataloader_state, sft_dataloader_path)
 
             train_state_path = checkpoint_path / self._SAVE_SFT_TRAIN_STATE_PATH
@@ -1443,7 +1473,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                         {
                             "cur_step": self._rollout_step,
                             "cur_epoch": self._sft_cur_epoch,
-                            "total_consumed_samples": self._sft_total_consumed_samples,
+                            "total_consumed_samples": total_consumed_samples,
                             "total_consumed_tokens": self._sft_total_consumed_tokens,
                         }
                     )
@@ -1477,24 +1507,23 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         # Resume sft dataloader
-        sft_dataloader_path = resume_from / self._SAVE_SFT_DATALOADER_DIR
         if self._sft_dataloader is not None:
-            if not sft_dataloader_path.exists():
-                raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
-            dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
-            self._sft_dataloader.load_state_dict(dataloader_state)
-            self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
-
             train_state_path = resume_from / self._SAVE_SFT_TRAIN_STATE_PATH
             if not train_state_path.exists():
                 raise FileNotFoundError(f"Train state path {train_state_path} does not exist.")
             with train_state_path.open("r") as f:
                 train_state = json.loads(f.read())
-                self._rollout_step = train_state["cur_step"]
-                self._sft_cur_epoch = train_state["cur_epoch"]
-                self._sft_total_consumed_samples = train_state["total_consumed_samples"]
-                self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
-                self.logger.info(f"Resume sft train state from {train_state_path}")
+            self._rollout_step = train_state["cur_step"]
+            self._sft_cur_epoch = train_state["cur_epoch"]
+            self._sft_total_consumed_tokens = train_state["total_consumed_tokens"]
+            self.logger.info(f"Resume sft train state from {train_state_path}")
+
+            sft_dataloader_path = resume_from / self._SAVE_SFT_DATALOADER_DIR
+            if not sft_dataloader_path.exists():
+                raise FileNotFoundError(f"Dataloader path {sft_dataloader_path} does not exist.")
+            dataloader_state = torch.load(sft_dataloader_path, map_location=DEVICE)
+            self._sft_dataloader.load_state_dict(dataloader_state)
+            self.logger.info(f"Resume sft dataloader from {sft_dataloader_path}")
 
     @ray_method
     def ready(self) -> bool:

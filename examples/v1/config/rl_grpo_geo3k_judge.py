@@ -7,7 +7,8 @@
 import os
 
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
-from xtuner.v1.data_proto import SampleParams
+from xtuner.v1.data_proto.rl_data import SampleParams
+from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense8BConfig
@@ -215,6 +216,7 @@ trainer = RLColocateTrainerConfig(
     load_from=model_path,
     total_train_steps=total_train_steps,
     train_batch_size=train_batch_size,
+    advantage_estimator_config=GRPOAdvantageConfig(eps=1e-8),
     enable_evaluate=True,
     enable_initial_evaluate=False,
     evaluate_step=evaluate_step,

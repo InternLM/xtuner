@@ -1,9 +1,10 @@
 import re
 
 import torch
+import torch.nn.functional as F
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.loss import CELossContext
+from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model.base import ModelOutputs
 
 from .qwen3 import Qwen3Dense, Qwen3Dense4BConfig, Qwen3Dense8BConfig
@@ -34,10 +35,10 @@ class Qwen3VLTextDense(Qwen3Dense):
         hidden_states[visual_pos_masks, :] = local_this
         return hidden_states
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         seq_ctx: SequenceContext,  # todo(@yehaochen): support intra layer micro-batch
-        loss_ctx: CELossContext,
+        loss_ctx: dict[str, BaseLossContext | list[BaseLossContext]] | None = None,
     ) -> ModelOutputs:
         input_ids = seq_ctx.input_ids
         position_ids = seq_ctx.position_ids
@@ -78,11 +79,18 @@ class Qwen3VLTextDense(Qwen3Dense):
 
         hidden_states = self.norm(hidden_states)
 
-        loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx)
-        output["loss"] = loss
-        output["logits"] = logits
-        output["extra_info"] = extra_info
-        return ModelOutputs(**output)  # type: ignore[typeddict-item]
+        if loss_ctx is None:
+            # Inference mode
+            logits = F.linear(hidden_states, self.lm_head.weight, self.lm_head.bias)
+            output["logits"] = logits
+        else:
+            # Training mode
+            loss, (logits, extra_info) = self.lm_head(hidden_states, loss_ctx["lm"])  # type: ignore[call-overload]
+            output["loss"] = loss
+            output["logits"] = logits
+            output["extra_info"] = extra_info
+
+        return ModelOutputs(**output)
 
 
 class Qwen3VLTextDense4BConfig(Qwen3Dense4BConfig):

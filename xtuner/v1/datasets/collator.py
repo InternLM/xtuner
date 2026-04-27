@@ -4,7 +4,6 @@ import torch
 from typing_extensions import TypedDict
 
 from xtuner.v1.data_proto import SequenceContext
-from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import IGNORE_INDEX, get_logger
 from xtuner.v1.utils.pad import pad_to_max_length
 
@@ -19,7 +18,15 @@ class ColateItem(TypedDict):
     shifted_labels: torch.Tensor
 
 
-def fake_collator(instances: list[RolloutState], **kwargs):
+def split_to_chunks(n: int, chunk_size: int) -> list[int]:
+    full, remainder = divmod(n, chunk_size)
+    result = [chunk_size] * full
+    if remainder > 0:
+        result.append(remainder)
+    return result
+
+
+def fake_collator(instances: list[DataItem], **kwargs):
     return instances
 
 
@@ -28,7 +35,8 @@ def build_text_ctx_labels(
     pack_max_length: int,
     padding_token_idx: int,
     pack_to_max_length: bool,
-) -> tuple[SequenceContext, torch.Tensor]:
+    pad_chunk_size: int,
+) -> tuple[SequenceContext, torch.Tensor, Sequence[DataItem]]:
     if isinstance(instance, dict):
         instance = [instance]
 
@@ -73,7 +81,8 @@ def build_text_ctx_labels(
     if pad_len > 0:
         input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
         shifted_labels = pad_to_max_length(shifted_labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
-        num_tokens = [0] + num_tokens + [pad_len]
+        pad_chunk_tokens = split_to_chunks(pad_len, pad_chunk_size)
+        num_tokens = [0] + num_tokens + pad_chunk_tokens
 
     elif pad_len < 0:
         raise ValueError(
@@ -93,20 +102,25 @@ def build_text_ctx_labels(
         max_length_k=max(num_tokens),
         num_padding=pad_len,
     )
-    return seq_ctx, shifted_labels
+    return seq_ctx, shifted_labels, instance
 
 
 def sft_llm_collator(
-    instances: list[list[DataItem]], pack_max_length: int, padding_token_idx: int, pack_to_max_length: bool = True
+    instances: list[list[DataItem]],
+    pack_max_length: int,
+    padding_token_idx: int,
+    pack_to_max_length: bool = True,
+    pad_chunk_size: int = 256,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
         # If the token number of the packed sample is larger than the packed_max_length
-        seq_ctx, shifted_labels = build_text_ctx_labels(
+        seq_ctx, shifted_labels, _ = build_text_ctx_labels(
             instance,
             pack_max_length,
             padding_token_idx,
             pack_to_max_length,
+            pad_chunk_size,
         )
         ret.append(
             {
@@ -123,6 +137,7 @@ def intern_s1_vl_sft_collator(
     pack_max_length: int,
     padding_token_idx: int,
     pack_to_max_length: bool = True,
+    pad_chunk_size: int = 256,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
@@ -163,7 +178,8 @@ def intern_s1_vl_sft_collator(
         if pad_len > 0:
             input_ids = pad_to_max_length(input_ids, padding_token_idx, max_length=pack_max_length, dim=-1)
             shifted_labels = pad_to_max_length(shifted_labels, IGNORE_INDEX, max_length=pack_max_length, dim=-1)
-            num_tokens = [0] + num_tokens + [pad_len]
+            pad_chunk_tokens = split_to_chunks(pad_len, pad_chunk_size)
+            num_tokens = [0] + num_tokens + pad_chunk_tokens
 
         elif pad_len < 0:
             raise ValueError(
@@ -175,9 +191,9 @@ def intern_s1_vl_sft_collator(
 
         cu_seq_lens = torch.cumsum(torch.IntTensor(num_tokens), dim=0).int()
 
-        num_img_tokens: list[int] = []
+        num_img_tokens: list[list] = []
         for data in instance:
-            num_img_tokens.extend(data.get("num_img_tokens", [0]))
+            num_img_tokens.append(data.get("num_img_tokens", [0]))
 
         pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
@@ -211,15 +227,17 @@ def qwen3_vl_sft_collator(
     pack_max_length: int,
     padding_token_idx: int,
     pack_to_max_length: bool = True,
+    pad_chunk_size: int = 256,
 ) -> list[ColateItem]:
     ret: list[ColateItem] = []
     for instance in instances:
         # If the token number of the packed sample is larger than the packed_max_length
-        seq_ctx, shifted_labels = build_text_ctx_labels(
+        seq_ctx, shifted_labels, instance = build_text_ctx_labels(  # type: ignore
             instance,
             pack_max_length,
             padding_token_idx,
             pack_to_max_length,
+            pad_chunk_size,
         )
 
         all_position_ids_none = all(
@@ -230,7 +248,8 @@ def qwen3_vl_sft_collator(
         if not all_position_ids_none:
             for _instance in instance:
                 if "position_ids" in _instance and _instance["position_ids"] is not None:
-                    position_ids_list.append(_instance["position_ids"])
+                    position_ids_ = _instance["position_ids"][..., :pack_max_length]
+                    position_ids_list.append(position_ids_)
                 else:
                     position_ids_ = (
                         torch.arange(len(_instance["input_ids"]))
@@ -248,10 +267,12 @@ def qwen3_vl_sft_collator(
         if len(position_ids_list) > 0:
             position_ids = torch.cat(position_ids_list, dim=-1)
             position_ids = position_ids[:, :, :-1]
+            if pack_to_max_length and pack_max_length - position_ids.shape[-1] > 0:
+                position_ids = pad_to_max_length(position_ids, 0, max_length=pack_max_length, dim=-1)
 
-        num_img_tokens: list[int] = []
+        num_img_tokens: list[list[int]] = []
         for data in instance:
-            num_img_tokens.extend(data.get("num_img_tokens", [0]))
+            num_img_tokens.append(data.get("num_img_tokens", [0]))
 
         pixel_values: list | torch.Tensor | None
         pixel_values = [i["pixel_values"] for i in instance if "pixel_values" in i]
@@ -272,6 +293,11 @@ def qwen3_vl_sft_collator(
         seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.num_img_tokens = num_img_tokens
 
+        if position_ids is not None:
+            assert seq_ctx.input_ids is not None, "input_ids should not be None"
+            assert position_ids.shape[-1] == seq_ctx.input_ids.shape[-1], (
+                f"position_ids length {position_ids.shape[-1]} != input_ids length {seq_ctx.input_ids.shape[-1]}"
+            )
         ret.append(
             {
                 "seq_ctx": seq_ctx,

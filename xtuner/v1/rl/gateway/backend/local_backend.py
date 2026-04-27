@@ -8,7 +8,7 @@ import ray
 from ray.actor import ActorHandle
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
-from xtuner.v1.data_proto import RolloutState, RolloutToolCall, SampleParams, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, RolloutToolCall, SampleParams, Status
 from xtuner.v1.rl.rollout.parser.factory import build_tool_call_parser
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 
@@ -308,8 +308,17 @@ class LocalRolloutBackend:
                     "max_tokens": max_tokens if max_tokens is not None else canonical_request.max_tokens,
                     "temperature": canonical_request.temperature,
                     "top_p": canonical_request.top_p,
+                    "top_k": canonical_request.metadata.get("top_k"),
+                    "repetition_penalty": canonical_request.metadata.get("repetition_penalty"),
                     "presence_penalty": canonical_request.metadata.get("presence_penalty"),
                     "frequency_penalty": canonical_request.metadata.get("frequency_penalty"),
+                    "min_tokens": canonical_request.metadata.get("min_tokens"),
+                    "stop_token_ids": canonical_request.metadata.get("stop_token_ids"),
+                    "skip_special_tokens": canonical_request.metadata.get("skip_special_tokens"),
+                    "no_stop_trim": canonical_request.metadata.get("no_stop_trim"),
+                    "spaces_between_special_tokens": canonical_request.metadata.get("spaces_between_special_tokens"),
+                    "sampling_seed": canonical_request.metadata.get("sampling_seed"),
+                    "return_routed_experts": canonical_request.metadata.get("return_routed_experts"),
                 }.items()
                 if value is not None
             },

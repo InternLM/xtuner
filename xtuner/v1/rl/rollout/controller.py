@@ -13,7 +13,7 @@ from ray.util.placement_group import PlacementGroup
 from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 
 from .parser.factory import build_reasoning_parser, build_tool_call_parser
 from .parser.reasoning_parser import ReasoningParser
@@ -112,7 +112,7 @@ class RolloutController:
         self._tool_call_parser, self._reasoning_parser = self._build_output_parsers()
         self._gateway_url: str | None = None
 
-    def start_gateway(self, config: "GatewayConfig") -> str:
+    def start_gateway(self, config: "GatewayConfig") -> str | None:
         """Start the gateway HTTP server in a daemon thread and return its URL.
 
         The gateway exposes OpenAI-compatible endpoints that forward requests to
@@ -124,8 +124,16 @@ class RolloutController:
                 the server binds; ``capture_folder`` enables per-request trace files.
 
         Returns:
-            The base URL of the gateway, e.g. ``"http://1.2.3.4:8080"``.
+            The base URL of the gateway, e.g. ``"http://1.2.3.4:8080"``, or
+            ``None`` when the configured rollout backend does not support the
+            gateway.
         """
+        if self.config.rollout_backend == "sglang":
+            self.logger.error(
+                "XTuner gateway is not supported for SGLang rollout backend yet; skip starting gateway."
+            )
+            return None
+
         from xtuner.v1.rl.gateway import build_local_gateway_app, serve_gateway_in_thread
 
         config.capture_folder = str(Path(self.config.worker_log_dir) / config._CAPTURE_PATH_FOLDER)
@@ -181,7 +189,14 @@ class RolloutController:
         }
 
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
-        session_id = rollout_state.session_uid if rollout_state.session_uid else uuid4().int
+        if XTUNER_DETERMINISTIC:
+            sample_params = rollout_state.sample_params.model_copy(deep=True)
+            sample_params.sampling_seed = self.config.random_seed + (
+                (rollout_state.uid or 0) - (rollout_state.message_uid or 0)
+            )
+            rollout_state.sample_params = sample_params
+
+        session_id = rollout_state.session_uid if rollout_state.session_uid is not None else uuid4().int
         worker = await self.router.get_worker(session_id)
         if worker is None:
             rollout_state.status = Status.FAILED

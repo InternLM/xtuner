@@ -11,7 +11,7 @@ from typing import Any, List, Literal, Union
 
 import torch.nn.functional as F
 
-from xtuner.v1.data_proto import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.data_proto.utils import calculate_seq_staleness as calculate_seq_staleness
 from xtuner.v1.utils.logger import get_logger
 
@@ -114,6 +114,15 @@ def gather_logprobs(logits, shifted_labels):
     logprobs = F.log_softmax(logits, dim=-1)
     logprobs = logprobs.gather(dim=-1, index=shifted_labels.clip(min=0).unsqueeze(-1)).squeeze(-1)
     return logprobs
+
+
+def sort_rollout_state_for_deterministic(data_groups: list[list[RolloutState]]) -> list[list[RolloutState]]:
+    def sort_key(sample: RolloutState) -> tuple[int, int]:
+        return (sample.message_uid or 0, sample.uid or 0)
+
+    sorted_groups = [sorted(group, key=sort_key) for group in data_groups]
+    sorted_groups.sort(key=lambda group: min((sort_key(item) for item in group), default=(-1, -1)))
+    return sorted_groups
 
 
 def load_function(path):

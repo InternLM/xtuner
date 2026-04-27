@@ -26,7 +26,6 @@ from xtuner.v1.train.trainer import HooksConfig, Trainer, ResumeConfig, HookStag
 from xtuner.v1.datasets import FTDPTokenizeFnConfig
 from xtuner.v1.datasets.sft_tokenize_fn import OpenaiTokenizeFunctionConfig
 from xtuner.v1.train.trainer import TrainerConfig
-from xtuner.v1.engine.train_engine import LossLog, OtherLog
 from xtuner.v1.loss import CELossConfig
 from xtuner._testing import DeterministicDDPTestCase
 from unittest import TestCase
@@ -34,6 +33,7 @@ from xtuner.v1.train.trainer import XTunerMeta, ExpInfo, ExpHistory, GitInfo
 from xtuner.v1.utils.device import get_device
 from xtuner.v1.datasets.dataloader import Dataloader
 from torch.optim.lr_scheduler import SequentialLR
+from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 
 
 DEVICE = get_device()
@@ -55,10 +55,8 @@ class FakeEngine:
 
     def train_step(self, *args, **kwargs):
         self.train_step_calls += 1
-        return (
-            {"local_loss": 1.0, "reduced_llm_loss": 0.8},
-            {"step_consumed_tokens": 100, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5}
-        )
+        return {"total_loss": 1.8, "step_consumed_tokens": 100, "step_consumed_img_tokens": 0.0, "grad_norm": torch.tensor(1.0), "efficient_attn_ratio": 0.5, "img_efficient_attn_ratio": 0.0, "logs_info": {"local_loss": 1.0, "reduced_llm_loss": 0.8}, "extra_info": ModelForwardExtraLogInfo()}
+        
 
     def save_hf(self, hf_path):
         self.save_hf_calls.append(hf_path)
@@ -114,6 +112,7 @@ class TestTrainerSaveHF(DistributedTestBase):
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
+    @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
     @prepare
     def test_save_hf_interval(self):
         """Test save_hf is called at correct intervals during training."""
@@ -186,6 +185,7 @@ class TestTrainerSaveHF(DistributedTestBase):
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
+    @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
     @prepare
     def test_save_checkpoint_interval(self):
         self.create_pg(DEVICE)
@@ -260,6 +260,7 @@ class TestTrainerSaveHF(DistributedTestBase):
 
     @patch("xtuner.v1.train.trainer.is_hf_model_path", Mock(return_value=True))
     @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
+    @patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
     @prepare
     def test_resume(self):
         self.create_pg(DEVICE)
@@ -408,7 +409,7 @@ class TestTrainerConfig(DeterministicDDPTestCase):
 
         self.optim_cfg = AdamWConfig(lr=0.1, weight_decay=0.1)
         self.lr_cfg = LRConfig(lr_type="cosine", lr_min=0.001, warmup_ratio=0.03)
-        self.fsdp_cfg = FSDPConfig(torch_compile=True)
+        self.fsdp_cfg = FSDPConfig()
         temp_dir = tempfile.TemporaryDirectory()
         if dist.get_rank() == 0:
             temp_dir = [temp_dir.name]
@@ -647,14 +648,12 @@ class TestHooksConfig(DeterministicDDPTestCase):
         self.create_pg(DEVICE)
         checkpoint_function_call_times = 0
         train_step_function_call_times = 0
-        losslog_adapater = TypeAdapter(LossLog)
-        otherlog_adapter = TypeAdapter(OtherLog)
 
         def checkpoint_hook(checkpoint, step, epoch, total_step, total_epoch):
             nonlocal checkpoint_function_call_times
             checkpoint_function_call_times += 1
 
-        def train_step_hook(loss_log, other_log, step, epoch, total_step, total_epoch):
+        def train_step_hook(train_step_info, step, epoch, total_step, total_epoch):
             nonlocal train_step_function_call_times
             train_step_function_call_times += 1
 
@@ -673,10 +672,7 @@ class TestHooksConfig(DeterministicDDPTestCase):
             def __init__(self) -> None:
                 self.count = 0
 
-            def __call__(self, loss_log, other_log, step, epoch, total_step, total_epoch):
-                losslog_adapater.validate_python(loss_log)
-                otherlog_adapter.validate_python(other_log)
-
+            def __call__(self, train_step_info, step, epoch, total_step, total_epoch):
                 assert self.trainer().cur_step == step
                 assert self.trainer().cur_epoch == epoch
                 assert self.trainer().total_step == total_step
@@ -745,6 +741,7 @@ class TestHooksConfig(DeterministicDDPTestCase):
         assert len(loaded.get_hooks(HookStage.AFTER_SAVE_DCP)) == 1
 
 
+@patch("xtuner.v1.train.trainer.Trainer._prepare_model_input", Mock(return_value=[]))
 @patch("xtuner.v1.train.trainer.Trainer.build_engine", Mock(side_effect=lambda *args, **kwargs: FakeEngine()))
 def test_resume_and_load_checkpoint_cfg(tmp_path: Path):
     # 0. prepare environment

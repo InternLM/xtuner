@@ -9,14 +9,15 @@ import ray
 import torch
 from mmengine.dist import get_rank
 from mmengine.runner import set_random_seed
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Literal, TypedDict
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto import RolloutState, Status
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
+from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
     AgentLoopManagerStatus,
@@ -31,9 +32,15 @@ from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run, create_task
+from xtuner.v1.rl.utils import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    asyncio_run,
+    create_task,
+    sort_rollout_state_for_deterministic,
+)
 from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
-from xtuner.v1.utils import get_logger, is_hf_model_path, set_deterministic, timer
+from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
@@ -53,6 +60,23 @@ def check_fa3():
         get_flash_attn_varlen()
     except RuntimeError as e:
         raise RuntimeError(f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0.")
+
+
+def force_set_tokenize_workers(logger):
+    # To avoid segmentation faults when setting num_workers for the dataloader
+    # The root cause is the incompatibility between fork start method and ray's grpc.
+    # The most fundamental solution is that all processes started in ray should
+    # use spawn start method.
+    tokenize_workers = os.environ.get("XTUNER_TOKENIZE_WORKERS", None)
+    os.environ["XTUNER_TOKENIZE_WORKERS"] = "1"
+    if tokenize_workers is not None and int(tokenize_workers) > 1:
+        logger.warning(
+            f"XTUNER_TOKENIZE_WORKERS is set to {tokenize_workers}, which may cause segmentation faults. Force set XTUNER_TOKENIZE_WORKERS to 1 to avoid this."
+        )
+    else:
+        logger.info(
+            f"Set XTUNER_TOKENIZE_WORKERS to {os.environ['XTUNER_TOKENIZE_WORKERS']} for safe tokenization in dataloader workers."
+        )
 
 
 def bind_train_rollout(
@@ -183,8 +207,10 @@ class BaseRLTrainerConfig(BaseModel):
     eval_agent_loop_manager_cfg: AgentLoopManagerConfig
     evaluator_config: EvaluatorConfig
     load_from: str | Path
-    total_train_steps: int
+    total_train_steps: int | None = None
+    total_epochs: int | None = None
     train_batch_size: int
+    advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
     sync_weights_interval: int = 1
     gateway_config: GatewayConfig | None = None
 
@@ -207,6 +233,12 @@ class BaseRLTrainerConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_sync_intervals(self):
+        if self.total_train_steps is None and self.total_epochs is None:
+            raise ValueError("Either total_train_steps or total_epochs must be provided.")
+        if self.total_train_steps is not None and self.total_train_steps <= 0:
+            raise ValueError(f"total_train_steps must be positive, got {self.total_train_steps}.")
+        if self.total_epochs is not None and self.total_epochs <= 0:
+            raise ValueError(f"total_epochs must be positive, got {self.total_epochs}.")
         _validate_sync_intervals(
             sync_weights_interval=self.sync_weights_interval,
             checkpoint_interval=self.checkpoint_interval,
@@ -251,6 +283,7 @@ class BaseRLTrainer:
         self._init_train_worker_config(cfg, log_dir)
         self._init_rollout_config(cfg, log_dir)
         self._init_runtime_flags(cfg)
+        self._advantage_estimator = cfg.advantage_estimator_config.build()
 
         self._exp_tracker = get_writer(writer_type=cfg.exp_tracker, log_dir=log_dir / self._EXP_TRACKING_PATH)
         self._display_all_workers_log = False
@@ -281,13 +314,15 @@ class BaseRLTrainer:
     def _init_logger(self, cfg: BaseRLTrainerConfig, logger_tag: str) -> Path:
         log_dir = self.exp_dir / "logs"
         self.logger = get_logger(log_dir=log_dir, tag=logger_tag)
+        force_set_tokenize_workers(self.logger)
 
         if cfg.skip_checkpoint_validation:
             patch_default_save_plan()
         return log_dir
 
     def _init_train_state(self, cfg: BaseRLTrainerConfig) -> None:
-        self._total_train_steps = cfg.total_train_steps
+        self._total_train_steps = cfg.total_train_steps or 0
+        self._total_epochs = cfg.total_epochs
         self._cur_step = 0
         self._global_train_step = 0
         self._seed = cfg.seed
@@ -345,6 +380,21 @@ class BaseRLTrainer:
 
         total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
         self.evaluator = cfg.evaluator_config.build(total_eval_samples=total_eval_samples)
+        self._resolve_total_train_steps(cfg)
+
+    def _resolve_total_train_steps(self, cfg: BaseRLTrainerConfig) -> None:
+        if cfg.total_train_steps is not None:
+            self._total_train_steps = cfg.total_train_steps
+            return
+
+        assert cfg.total_epochs is not None
+        dataset_size = len(self.agent_loop_manager.data_sampler)
+        self._total_train_steps = dataset_size // cfg.train_batch_size * cfg.total_epochs
+        self.logger.info(
+            "Resolved total_train_steps from total_epochs: "
+            f"dataset_size={dataset_size}, train_batch_size={cfg.train_batch_size}, "
+            f"total_epochs={cfg.total_epochs}, total_train_steps={self._total_train_steps}"
+        )
 
     @property
     def exp_dir(self) -> Path:
@@ -452,6 +502,10 @@ class BaseRLTrainer:
             train_step=1,
             model_step=0,
         )
+        if XTUNER_DETERMINISTIC:
+            eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                eval_produce_result.rollout_states
+            )
         eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
         self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
         tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
@@ -504,6 +558,10 @@ class BaseRLTrainer:
             train_step=1,
             model_step=0,
         )
+        if XTUNER_DETERMINISTIC:
+            eval_produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                eval_produce_result.rollout_states
+            )
         eval_batch = eval_produce_result.rollout_states
         eval_metrics = self.evaluator.run(eval_batch)
         eval_trajectory_dir = self.exp_dir / "eval_rollout"
@@ -545,7 +603,7 @@ class BaseRLTrainer:
 
             rewards_list.extend(rewards)
             rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
-            advantages = (rewards_tensor - rewards_tensor.mean(0)) / (rewards_tensor.std(0) + 1e-8)
+            advantages = self._advantage_estimator.compute(rewards_tensor, group)
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
@@ -627,7 +685,8 @@ class BaseRLTrainer:
                 seq_ctx.rollout_routed_experts = group[i].routed_experts  # n,layer*expert
 
                 data_batches.append(data_dict)
-        random.shuffle(data_batches)
+        if not XTUNER_DETERMINISTIC:
+            random.shuffle(data_batches)
 
         rewards_t = torch.tensor(rewards_list).float() if rewards_list else torch.tensor([0.0]).float()
         advantages_t = torch.tensor(advantages_list).float() if advantages_list else torch.tensor([0.0]).float()
@@ -697,8 +756,7 @@ class BaseRLTrainer:
                     break
                 mini_batch_metrics: dict[str, List[float]] = {}
                 for mini_batch_log in log_item["train_metrics"]:
-                    rl_worker_log = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
-                    for k, v in rl_worker_log.items():
+                    for k, v in mini_batch_log.items():
                         mini_batch_metrics.setdefault(k, []).append(cast(float, v))
 
                 for key, value in mini_batch_metrics.items():
@@ -787,8 +845,7 @@ class BaseRLTrainer:
                     break
                 current_global_step = train_start_step + step_idx
 
-                metrics: dict[str, Any] = dict(mini_batch_log["loss_log"])
-                metrics.update(mini_batch_log["rl_other_log"])
+                metrics: dict[str, Any] = dict(mini_batch_log)
 
                 self._exp_tracker.add_scalars(
                     tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": float(v) for k, v in metrics.items()},
@@ -862,6 +919,8 @@ class RLColocateTrainer(BaseRLTrainer):
                         model_step=model_step,
                     )
                 )
+                if XTUNER_DETERMINISTIC:
+                    produce_result.rollout_states = sort_rollout_state_for_deterministic(produce_result.rollout_states)
                 train_batch = produce_result.rollout_states
                 assert train_batch, (
                     "RLColocateTrainer expects agent_loop_manager.produce_batch() to return non-empty rollout_states."
@@ -1020,6 +1079,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     produce_result = await self.agent_loop_manager.get_batch(
                         self.train_batch_size, train_step=train_step
                     )
+                    if XTUNER_DETERMINISTIC:
+                        produce_result.rollout_states = sort_rollout_state_for_deterministic(
+                            produce_result.rollout_states
+                        )
                     need_sync = (
                         produce_result.status == ProduceBatchStatus.EXPIRED_BATCH
                         or train_step % self._sync_weights_interval == 0

@@ -152,7 +152,7 @@ class RolloutHealthChecker:
         logger.info("RolloutHealthChecker restarted.")
 
     def run_once(self) -> None:
-        logger.info("RolloutHealthChecker running health checks for all workers.")
+        logger.debug("RolloutHealthChecker running health checks for all workers.")
         if self._worker_infos_lock is None:
             workers_snapshot = {
                 rank: (info.actor, info.url, info.is_active) for rank, info in self._workers_info.items()
@@ -194,7 +194,7 @@ class RolloutHealthChecker:
                     continue
                 inactive_workers.append((rank, inactive_worker))
             else:
-                logger.info(f"[RolloutHealthChecker] Worker {rank} passed health check.")
+                logger.debug(f"[RolloutHealthChecker] Worker {rank} passed health check.")
 
         for rank, inactive_worker in inactive_workers:
             try:
