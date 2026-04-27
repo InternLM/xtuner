@@ -33,6 +33,7 @@ class TestGptOss(DeterministicDDPTestCase):
     @parametrize.parametrize(
         "device,dispatcher,ep_size,compile,tol,loss_class",
         [
+            # TODO(chenchiyu): The tolerance is relatively high, need to investigate the reason.
             ("cuda", "all2all", 8, False, 3e-2, "cross_entropy"),
             ("cuda", None, 1, False, 3e-2, "cross_entropy"),
             # ("cuda", None, 1, False, 1e-2, "chunk_cross_entropy"),
