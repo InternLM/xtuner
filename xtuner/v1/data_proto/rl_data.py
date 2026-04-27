@@ -47,7 +47,6 @@ class SampleParams(BaseModel):
     no_stop_trim: bool = True
     spaces_between_special_tokens: bool = False
     return_routed_experts: bool = False
-    sampling_seed: int | None = None
 
 
 class Status(Enum):
