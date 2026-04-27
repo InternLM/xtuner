@@ -17,6 +17,11 @@ from .native import NativeJudgerConfig
 PG_READY_TIMEOUT = 30
 
 
+async def _await_ref(ref):
+    """Await a ray ObjectRef so it can be wrapped as an asyncio.Future."""
+    return await ref
+
+
 class JudgerConfig(BaseModel):
     """Judger configuration for XTuner.
 
@@ -159,17 +164,31 @@ class JudgerController:
             List[RLJudgerResponseItem]: A list of RLJudgerResponseItem containing
                 calculated rewards for each sample.
         """
-        tasks = []
-        judger_input_data = (
-            [group_data_item] if self.judger_config.enable_batch_reward else [[item] for item in group_data_item]
-        )
-
         if self.judger_config.enable_batch_reward:
-            # Randomly pick a judger instance for batch evaluation to balance the load.
-            tasks.append(random.choice(judger).judge.remote(group_data_item))
-        else:
-            tasks.extend([judger[idx % len(judger)].judge.remote(item) for idx, item in enumerate(judger_input_data)])
-        return tasks
+            # Batch mode: one remote call evaluates the whole group. Fan the
+            # single batched list out into N per-item awaitables so the caller
+            # sees the same task/result shape as the per-item branch (N tasks
+            # each yielding a length-1 list), keeping downstream slicing and
+            # assertions uniform.
+            batch_ref = random.choice(judger).judge.remote(group_data_item)
+            shared_batch = asyncio.ensure_future(_await_ref(batch_ref))
+
+            async def _pick(idx: int, expected_len: int):
+                batch = await shared_batch
+                assert len(batch) == expected_len, (
+                    f"Batch judger returned {len(batch)} items, "
+                    f"expected {expected_len}"
+                )
+                return [batch[idx]]
+
+            n = len(group_data_item)
+            return [_pick(i, n) for i in range(n)]
+
+        judger_input_data = [[item] for item in group_data_item]
+        return [
+            judger[idx % len(judger)].judge.remote(item)
+            for idx, item in enumerate(judger_input_data)
+        ]
 
     async def _call_custom_reward_judger(
         self,
