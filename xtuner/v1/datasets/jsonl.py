@@ -625,7 +625,10 @@ class JsonlDataset(torch.utils.data.Dataset[T | CacheItem]):
         line = data.decode()
         tokenized = tokenize_fn(json.loads(line))
         if isinstance(tokenized, dict):
-            return cast(dict, tokenized)
+            res = {"num_tokens": tokenized["num_tokens"], "proxy_attn_flops": tokenized["proxy_attn_flops"]}
+            if "chunks" in tokenized:
+                res["chunks"] = tokenized["chunks"]
+            return res
         if isinstance(tokenized, BaseModel):
             # RL tokenize functions return RolloutState, a Pydantic model,
             # during cache building. Extract cache metadata here so those
