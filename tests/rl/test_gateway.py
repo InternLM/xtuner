@@ -34,12 +34,12 @@ class TestGatewayProtocolChain(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ["XTUNER_USE_FA3"] = "1"
-        os.environ["LMD_SKIP_WARMUP"] = "1"
+        os.environ["LMDEPLOY_SKIP_WARMUP"] = "1"
 
     @classmethod
     def tearDownClass(cls) -> None:
         del os.environ["XTUNER_USE_FA3"]
-        del os.environ["LMD_SKIP_WARMUP"]
+        del os.environ["LMDEPLOY_SKIP_WARMUP"]
 
     def setUp(self):
         ray.init(address="local", ignore_reinit_error=True)
@@ -313,10 +313,16 @@ class TestGatewayProtocolChain(unittest.TestCase):
         openai_body = openai_response.json()
         self._write_json_output(self.openai_body_output_path, openai_body)
         self.assertEqual(openai_body["model"], rollout_config.model_name)
-        self.assertEqual(openai_body["choices"][0]["message"]["role"], "assistant")
-        self.assertIn(openai_body["choices"][0]["finish_reason"], {"stop", "length"})
+        openai_choice = openai_body["choices"][0]
+        openai_message = openai_choice["message"]
+        self.assertEqual(openai_message["role"], "assistant")
+        if openai_message.get("tool_calls"):
+            self.assertEqual(openai_choice["finish_reason"], "tool_calls")
+            self.assertIsNone(openai_message.get("content"))
+        else:
+            self.assertIn(openai_choice["finish_reason"], {"stop", "length"})
+            self.assertTrue(openai_message.get("content") or openai_message.get("reasoning_content"))
         self.assertGreater(openai_body["usage"]["prompt_tokens"], 0)
-        self.assertTrue(openai_body["choices"][0]["message"].get("content"))
 
         anthropic_response = self._post_json(
             base_url,

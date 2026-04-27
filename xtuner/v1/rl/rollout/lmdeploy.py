@@ -302,6 +302,8 @@ class LMDeployWorker(RolloutWorker):
                 "LMDEPLOY_RAY_EXTERNAL_PG_NAME": current_pg_name,
                 "LMDEPLOY_RAY_EXTERNAL_PG_BUNDLES": ",".join(map(str, self.engine_bundle_idxs)),
             }
+            if "LMDEPLOY_SKIP_WARMUP" in os.environ:
+                env["LMDEPLOY_SKIP_WARMUP"] = os.environ["LMDEPLOY_SKIP_WARMUP"]
 
             if self.accelerator == "NPU":
                 env.update(

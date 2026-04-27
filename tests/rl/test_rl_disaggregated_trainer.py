@@ -13,6 +13,12 @@ from xtuner.v1.rl.agent_loop_manager import (
 from xtuner.v1.train.rl_trainer import RLDisaggregatedTrainer, _validate_sync_intervals
 
 
+class _FakeRolloutState:
+    def __init__(self, uid: int):
+        self.message_uid = uid
+        self.uid = uid
+
+
 class _FakeManager:
     def __init__(self, get_batch_results):
         self._results = list(get_batch_results)
@@ -124,7 +130,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
     def test_fit_runs_eval_before_reset_and_stops_producer(self):
         manager = _FakeManager(
-            [ProduceBatchResult(rollout_states=[["sample"]], status=ProduceBatchStatus.NORMAL)]
+            [ProduceBatchResult(rollout_states=[[_FakeRolloutState(1)]], status=ProduceBatchStatus.NORMAL)]
         )
         trainer = self._make_trainer(manager)
         trainer._enable_evaluate = True
@@ -135,7 +141,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
         async def eval_produce_batch(batch_size: int, train_step: int, model_step: int):
             events.append("eval")
-            return ProduceBatchResult(rollout_states=[["eval"]])
+            return ProduceBatchResult(rollout_states=[[_FakeRolloutState(2)]])
 
         def continue_produce(model_step: int):
             events.append("continue_produce")

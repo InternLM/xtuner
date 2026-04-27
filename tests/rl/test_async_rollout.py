@@ -142,7 +142,7 @@ class TestOversampling(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ.setdefault("XTUNER_USE_FA3", "1")
-        os.environ.setdefault("LMD_SKIP_WARMUP", "1")
+        os.environ.setdefault("LMDEPLOY_SKIP_WARMUP", "1")
 
     def setUp(self):
         ray.init(num_cpus=32, ignore_reinit_error=True)
@@ -293,7 +293,7 @@ class TestPartialRollout(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ.setdefault("XTUNER_USE_FA3", "1")
-        os.environ.setdefault("LMD_SKIP_WARMUP", "1")
+        os.environ.setdefault("LMDEPLOY_SKIP_WARMUP", "1")
 
     def setUp(self):
         ray.init(num_cpus=32, ignore_reinit_error=True)
@@ -571,7 +571,7 @@ class TestTailBatch(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls) -> None:
         os.environ.setdefault("XTUNER_USE_FA3", "1")
-        os.environ.setdefault("LMD_SKIP_WARMUP", "1")
+        os.environ.setdefault("LMDEPLOY_SKIP_WARMUP", "1")
 
     def setUp(self):
         ray.init(num_cpus=32, ignore_reinit_error=True)

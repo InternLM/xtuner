@@ -15,7 +15,8 @@ from xtuner.v1.train.rl_trainer import RLColocateTrainer
 class _FakeRolloutState:
     def __init__(self, uid: int):
         self.id = uid
-        self.uid = str(uid)
+        self.message_uid = uid
+        self.uid = uid
         self.status = Status.INIT
         self.seq_staleness = 0
         self.response_ids = []
@@ -185,7 +186,7 @@ class TestRLColocateTrainer(unittest.TestCase):
 
         async def _produce_batch(batch_size, train_step, *, model_step):
             produce_calls.append((batch_size, train_step, model_step))
-            return ProduceBatchResult(rollout_states=[[f"sample-{train_step}"]])
+            return ProduceBatchResult(rollout_states=[[_FakeRolloutState(train_step)]])
 
         trainer = self._make_trainer(
             SimpleNamespace(produce_batch=_produce_batch),

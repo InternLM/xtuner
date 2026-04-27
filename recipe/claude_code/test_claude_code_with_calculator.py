@@ -32,7 +32,7 @@ async def test_claude_code_with_calculator(model_path: str) -> list[RolloutState
     import ray
 
     os.environ.setdefault("XTUNER_USE_FA3", "1")
-    os.environ.setdefault("LMD_SKIP_WARMUP", "1")
+    os.environ.setdefault("LMDEPLOY_SKIP_WARMUP", "1")
     os.environ.pop("RAY_ADDRESS", None)
     ray.init(address="local", ignore_reinit_error=True)
 
