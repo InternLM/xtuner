@@ -8,6 +8,7 @@ from typing_extensions import Self
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.auto import AutoConfig
 from transformers.models.qwen3_moe import Qwen3MoeConfig as HFQwen3MoeConfig
+from xtuner.v1.loss import AuxLossConfig
 from xtuner.v1.model.moe.moe import BalancingLossConfig, MoEConfig, ZLossConfig
 from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.rope import RopeParametersConfig
@@ -203,6 +204,8 @@ class Qwen3MoE235BA22Config(Qwen3MoEConfig):
     )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
+    router_async_offload: bool = False
+    aux_loss_cfg: AuxLossConfig = AuxLossConfig()
 
 
 class Qwen3MoEFoPEConfig(Qwen3MoEConfig):
