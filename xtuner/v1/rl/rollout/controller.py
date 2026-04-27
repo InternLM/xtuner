@@ -129,9 +129,7 @@ class RolloutController:
             gateway.
         """
         if self.config.rollout_backend == "sglang":
-            self.logger.error(
-                "XTuner gateway is not supported for SGLang rollout backend yet; skip starting gateway."
-            )
+            self.logger.error("XTuner gateway is not supported for SGLang rollout backend yet; skip starting gateway.")
             return None
 
         from xtuner.v1.rl.gateway import build_local_gateway_app, serve_gateway_in_thread
