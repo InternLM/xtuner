@@ -1,12 +1,8 @@
-from typing import TYPE_CHECKING
+from typing import Any
 
 import torch
 
 from xtuner.v1.rl.advantage.base import AdvantageEstimator
-
-
-if TYPE_CHECKING:
-    from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 
 
 class OPOEstimator(AdvantageEstimator):
@@ -33,9 +29,9 @@ class OPOEstimator(AdvantageEstimator):
     def __init__(self, eps: float = 1e-8) -> None:
         self.eps = eps
 
-    def compute(self, rewards: torch.Tensor, group: list["RLDataFlowItem"]) -> torch.Tensor:
+    def compute(self, rewards: torch.Tensor, group: list[Any]) -> torch.Tensor:
         lengths = torch.tensor(
-            [len(d.env.rollout.response_ids) for d in group],  # type: ignore
+            [_response_len(data) for data in group],
             dtype=torch.float32,
             device=rewards.device,
         )
@@ -44,3 +40,9 @@ class OPOEstimator(AdvantageEstimator):
 
     def __repr__(self) -> str:
         return "OPOEstimator()"
+
+
+def _response_len(data: Any) -> int:
+    if hasattr(data, "response_ids"):
+        return len(data.response_ids or [])
+    return len(data.env.rollout.response_ids or [])

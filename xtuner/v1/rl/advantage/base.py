@@ -19,13 +19,9 @@ Example:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import Any
 
 import torch
-
-
-if TYPE_CHECKING:
-    from xtuner.v1.data_proto.rl_data import RLDataFlowItem
 
 
 class AdvantageEstimator(ABC):
@@ -46,7 +42,7 @@ class AdvantageEstimator(ABC):
     """
 
     @abstractmethod
-    def compute(self, rewards: torch.Tensor, group: list[RLDataFlowItem]) -> torch.Tensor:
+    def compute(self, rewards: torch.Tensor, group: list[Any]) -> torch.Tensor:
         """Compute advantages from rewards for a single prompt group.
 
         Args:
