@@ -330,6 +330,14 @@ class TransformerConfig(XTunerBaseModelConfig):
         # This method is for compatibility with transformers 5.x rope_utils
         # XTuner now use rope_parameters_cfg as the single source of truth for all RoPE-related settings.
         # No need to standardize rope parameters
+
+        # function call stack(typical path):
+        # xtuner.v1.model.base.build_rotary_embedding ->
+        # xtuner.v1.module.rope.get_rope_embedding ->
+        # xtuner.v1.module.rope.RotaryEmbedding.__init__ ->
+        # self.rope_type != "default", self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type] ->
+        # transformers.modeling_rope_utils._compute_yarn_parameters ->
+        # config.standardize_rope_params(), here config is a TransformerConfig in xtuner
         pass
 
     @computed_field  # type: ignore[misc]

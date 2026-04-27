@@ -213,16 +213,6 @@ class GptOssConfig(MoEConfig):
             o_bias=True,
             dtype=torch.bfloat16,
             swiglu_limit=self.moe_act_fn_cfg.clip_limit,
-            rope_scaling={
-                "rope_type": self.rope_scaling_cfg.type,
-                "beta_fast": self.rope_scaling_cfg.beta_fast,
-                "beta_slow": self.rope_scaling_cfg.beta_slow,
-                "factor": self.rope_scaling_cfg.factor,
-                "original_max_position_embeddings": self.rope_scaling_cfg.original_max_position_embeddings,
-                "truncate": self.rope_scaling_cfg.truncate,
-            }
-            if self.rope_scaling_cfg is not None
-            else None,
         )
 
 
