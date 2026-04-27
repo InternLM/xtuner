@@ -85,6 +85,7 @@ class RLTB2RLTokenizeFn(RLTokenizeFn):
             "ability": toml.get("domain", None),
             "data_source": {"tb2-rl": 1.0},
             "extra_info": {
+                "sandbox_spec": {"image": item["image"], "ttl_seconds": 1800, "workspace_path": "/app"},
                 "task_data": task_data,
                 "task_dir": task_dir.as_posix(),
                 "pipeline": "tb2_rl.pipeline.tb2_rl_pipeline",

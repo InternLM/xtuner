@@ -7,6 +7,7 @@ from copy import deepcopy
 import ray
 
 from projects.claw_bench.claw_tokenize_fn import RLClawTokenizeFnConfig
+from projects.tb2_rl.tb2_rl_tokenize_fn import RLTB2RLTokenizeFnConfig
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import (
     RLAgentDataItem,
@@ -116,6 +117,13 @@ def parse_xpuyu_json_cfg(path, max_prompt_length):
     converted_cfg = []
     for ds_name, ds_cfg in json_cfg.items():
         annotation = ds_cfg["annotation"]
+        tokenize_fn = ds_cfg["tokenize_fn"]
+
+        if tokenize_fn == "RLClawTokenizeFnConfig":
+            tokenize_fn_cfg = RLClawTokenizeFnConfig
+        elif tokenize_fn == "RLTB2RLTokenizeFnConfig":
+            tokenize_fn_cfg = RLTB2RLTokenizeFnConfig
+
         if isinstance(annotation, str):
             annotation = [annotation]
         for ann in annotation:
@@ -127,7 +135,7 @@ def parse_xpuyu_json_cfg(path, max_prompt_length):
                         sample_ratio=ds_cfg["sample_ratio"],
                         class_name='JsonlDataset',
                     ),
-                    "tokenize_fn": RLClawTokenizeFnConfig(
+                    "tokenize_fn": tokenize_fn_cfg(
                         root_path=ds_cfg.get("root_path", None), max_length=max_prompt_length
                     ),
                 }
