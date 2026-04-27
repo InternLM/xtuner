@@ -6,6 +6,7 @@ from ..rollout_is import (
     merge_rollout_is_metrics,
 )
 from .controller import ColateItem, TrainingController
+from .update_weighter import UpdateWeighter
 from .worker import RLOtherLog, TrainingWorker, WorkerConfig, WorkerInputItem, WorkerLogItem, WorkerTrainLogItem
 
 
@@ -17,6 +18,7 @@ __all__ = [
     "compute_is_metrics",
     "compute_mismatch_metrics",
     "merge_rollout_is_metrics",
+    "UpdateWeighter",
     "WorkerConfig",
     "WorkerInputItem",
     "RLOtherLog",
