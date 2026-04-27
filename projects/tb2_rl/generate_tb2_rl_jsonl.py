@@ -43,13 +43,27 @@ def iter_task_dirs(tasks_root: Path) -> list[Path]:
         roots.append(parent)
     return roots
 
+image_mapping = {
+    "data_processing": "t-data-processing-v1",
+    "data_querying": "t-data-querying-v1",
+    "data_science": "t-data-science-v1",
+    "debugging": "t-debugging-v1",
+    "dependency_management": "t-dependency-management-v1",
+    "file_operations": "t-file-operations-v1",
+    "scientific_computing": "t-scientific-computing-v1",
+    "security": "t-security-v1",
+    "software_engineering": "t-data-science-v1",
+    "system_administration": "t-data-science-v1",
+}
+
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--tasks-root",
         type=Path,
-        default=Path("/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/data/data_process"),
+        default=Path("/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/data/terminalbench2_rl_data"),
         help="Absolute path to the bench tasks directory.",
     )
     parser.add_argument(
@@ -70,7 +84,7 @@ def main() -> int:
     with open(output, "w", encoding="utf-8") as fp:
         for task_dir in iter_task_dirs(tasks_root):
             rel = task_dir.relative_to(tasks_root).as_posix()
-            fp.write(json.dumps({"task_dir": rel}, ensure_ascii=False) + "\n")
+            fp.write(json.dumps({"task_dir": rel, "image": image_mapping[rel.split("/")[0]]}, ensure_ascii=False) + "\n")
     print(f"wrote: {output}")
     return 0
 

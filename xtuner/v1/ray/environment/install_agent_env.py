@@ -7,6 +7,7 @@ from typing import Callable, List, Self, Tuple
 
 import ray
 from lagent.serving.sandbox.providers.gateway import GatewayProvider
+from xtuner.v1.ray.environment.rl_task.schemas import SandboxSpec
 
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
@@ -50,11 +51,14 @@ def _import_from_path(path: str):
     return getattr(module, attr)
 
 
-def _resolve_pipeline(pipeline_spec):
+def _resolve_pipeline(pipeline_spec, sandbox_spec: dict | None = None):
     """Resolve pipeline spec into a Runner-like object with run_single()."""
     obj = _import_from_path(pipeline_spec)
     # Most configs point to a factory function (e.g., claw_pipeline()).
-    return obj() if callable(obj) else obj
+    if sandbox_spec is not None:
+        return obj(sandbox=SandboxSpec(**sandbox_spec))
+    else:
+        return obj()
 
 
 @ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))  # type: ignore[call-overload]
@@ -86,7 +90,8 @@ class InstallAgentEnvironment(BaseEnvironment):
 
             # agent_inputs = self.preprocess_func(self, deepcopy(item))
             pipeline = item.data.extra_info.get("pipeline", None)
-            pipeline = _resolve_pipeline(pipeline)
+            sandbox_spec = item.data.extra_info.get("sandbox_spec", None)
+            pipeline = _resolve_pipeline(pipeline, sandbox_spec)
 
             task_dir = item.data.extra_info.get("task_dir", None)
             data = item.data.extra_info.get("task_data", None)
