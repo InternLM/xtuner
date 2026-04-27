@@ -184,7 +184,10 @@ class RopeParametersConfig(BaseModel):
 
     def to_rope_parameters_dict(self) -> dict | None:
         """Convert to rope_parameters dict format for HF compatibility."""
-        return self.model_dump()
+        if not self.use_fope:
+            return self.model_dump(exclude={"fope_init_factor", "fope_sep_head", "num_inv_freq"})
+        else:
+            return self.model_dump()
 
     @classmethod
     def from_hf_config(cls, hf_config, default_value_dict=None) -> Optional["RopeParametersConfig"]:

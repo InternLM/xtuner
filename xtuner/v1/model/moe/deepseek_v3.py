@@ -172,8 +172,8 @@ class DeepSeekV3Config(MoEConfig):
             intermediate_size=self.intermediate_size,
             moe_intermediate_size=self.moe_intermediate_size,
             rms_norm_eps=self.rms_norm_eps,
-            rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling_cfg.model_dump() if self.rope_scaling_cfg is not None else None,
+            # this breaks old HF compatibility in save_hf
+            rope_parameters=self.rope_parameters,
             hidden_act=self.hidden_act,
             num_attention_heads=self.attention.num_attention_heads,
             kv_lora_rank=self.attention.kv_lora_rank,

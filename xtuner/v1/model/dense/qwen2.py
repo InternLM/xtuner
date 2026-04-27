@@ -89,7 +89,8 @@ class Qwen2DenseConfig(TransformerConfig):
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
             rms_norm_eps=self.rms_norm_eps,
-            rope_theta=self.rope_theta,
+            # this breaks old HF compatibility in save_hf
+            rope_parameters=self.rope_parameters,
             hidden_act=self.hidden_act,
             num_attention_heads=self.attention.num_attention_heads,
             num_key_value_heads=self.attention.num_key_value_heads,
