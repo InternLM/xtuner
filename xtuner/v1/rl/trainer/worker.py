@@ -32,6 +32,7 @@ from xtuner.v1.loss.ce_loss import CELossContext
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
+from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
 from xtuner.v1.rl.utils import SingleAcceleratorWorker, gather_logprobs
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -228,7 +229,11 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
             )
 
         self._optimizer_steps = worker_cfg.optimizer_steps
-
+        if worker_cfg.loss_cfg.chunk_size is not None:
+            mode = "chunk"
+        else:
+            mode = "eager"
+        self.logprob_cfg = LogProbConfig(chunk_size=worker_cfg.loss_cfg.chunk_size, mode=mode)
         self._init_update_weighter()
 
     def _init_sft(self, worker_cfg: WorkerConfig):
