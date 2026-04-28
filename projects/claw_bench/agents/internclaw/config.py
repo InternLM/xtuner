@@ -46,7 +46,7 @@ CONSOLIDATION_PROMPT = (
 )
 
 policy_agent = dict(
-    type="lagent.agents.internclaw_agent.AsyncPolicyAgent",
+    type="lagent.agents.AsyncAgent",
     llm=model,
     aggregator=dict(
         type="lagent.agents.aggregator.context.InternClawContextBuilder",
@@ -79,7 +79,7 @@ compact_agent = dict(
 consolidate_agent = dict(
     type="lagent.agents.internclaw_agent.InternClawAgent",
     policy_agent=dict(
-        type="lagent.agents.internclaw_agent.AsyncPolicyAgent",
+        type="lagent.agents.AsyncAgent",
         name="consolidate_policy",
         llm=model,
         template=CONSOLIDATION_PROMPT,
