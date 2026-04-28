@@ -905,13 +905,14 @@ class RLColocateTrainer(BaseRLTrainer):
                 self.logger.info(
                     f"[Step {train_step}] start to generate rollout experience for train step {train_step} with model step {model_step}"
                 )
-                produce_result: ProduceBatchResult = asyncio_run(
-                    self.agent_loop_manager.produce_batch(
-                        self.train_batch_size,
-                        train_step=train_step,
-                        model_step=model_step,
+                with timer("produce_batch", step_timer_dict):
+                    produce_result: ProduceBatchResult = asyncio_run(
+                        self.agent_loop_manager.produce_batch(
+                            self.train_batch_size,
+                            train_step=train_step,
+                            model_step=model_step,
+                        )
                     )
-                )
                 if XTUNER_DETERMINISTIC:
                     produce_result.rollout_states = sort_rollout_state_for_deterministic(produce_result.rollout_states)
                 train_batch = produce_result.rollout_states
@@ -1066,9 +1067,10 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 train_log_info = {}
                 eval_log_info = {}
                 with timer("step", step_timer_dict):
-                    produce_result = await self.agent_loop_manager.get_batch(
-                        self.train_batch_size, train_step=train_step
-                    )
+                    with timer("get_batch", step_timer_dict):
+                        produce_result = await self.agent_loop_manager.get_batch(
+                            self.train_batch_size, train_step=train_step
+                        )
                     if XTUNER_DETERMINISTIC:
                         produce_result.rollout_states = sort_rollout_state_for_deterministic(
                             produce_result.rollout_states
