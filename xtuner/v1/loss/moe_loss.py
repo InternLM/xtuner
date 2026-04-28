@@ -245,7 +245,7 @@ class BalancingLossContext(nn.Module):
 
         return loss
 
-    def update_split_aux(
+    def accumulate(
         self,
         *,
         router_weights: torch.Tensor,
@@ -263,7 +263,7 @@ class BalancingLossContext(nn.Module):
         self.local_load_list.append(tokens_per_expert)
         self.routing_weights_sum_list.append(router_weights.sum(dim=0))
 
-    def finalize_split_aux_loss(
+    def finalize(
         self,
         *,
         n_routed_experts: int,
@@ -421,7 +421,7 @@ class ZLossContext(nn.Module):
 
         return loss
 
-    def update_split_aux(
+    def accumulate(
         self,
         *,
         router_logits: torch.Tensor,
@@ -438,7 +438,7 @@ class ZLossContext(nn.Module):
         self.z_loss_token_count_list.append(torch.tensor(router_logits.shape[0], device=router_logits.device))
         self.z_loss_logsum_list.append(torch.logsumexp(router_logits, dim=-1).square().sum())
 
-    def finalize_split_aux_loss(self) -> torch.Tensor:
+    def finalize(self) -> torch.Tensor:
         """Finalize z-loss from split-aux accumulators.
 
         Returns:
