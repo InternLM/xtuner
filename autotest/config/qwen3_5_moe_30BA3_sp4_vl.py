@@ -5,7 +5,7 @@ from xtuner.v1.datasets import Qwen3VLTokenizeFnConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.loss.ce_loss import CELossConfig
 from xtuner.v1.model import Qwen3_5_VLMoE35BA3Config
-from xtuner.v1.train import ResumeConfig,rainerConfig
+from xtuner.v1.train import ResumeConfig, TrainerConfig
 
 
 MEDIA_ROOT = os.environ["MEDIA_ROOT"]
