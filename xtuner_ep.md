@@ -57,15 +57,21 @@ B3 -> [3, 1]
 
 先把每个 token 复制 `K=2` 份，所以每个 source rank 都从 `[4, D_h]` 变成 `[8, D_h]`。
 
+`grouped_gemm.backend.permute` 内部使用 **topk-slot-first** 展开：先列出所有 N 个 token 的
+第 0 号 topk copy，再列出第 1 号 topk copy，依此类推。`row_id_map[i] = j` 表示源 flat 空间
+（topk-slot-first）第 `i` 个位置的 token copy 排序后落在第 `j` 个位置（scatter 语义）；
+同 expert 时按 token index 升序排列。
+
 对 `ep0`，flatten 后的 copy 是：
 
 ```text
-flat row:          0   1   2   3   4   5   6   7
-token copy:        A0  A0  A1  A1  A2  A2  A3  A3
-global expert id:  0   4   3   1   2   5   4   0
+flat pos:          0   1   2   3   4   5   6   7
+token copy:        A0  A1  A2  A3  A0  A1  A2  A3
+global expert id:  0   3   2   4   4   1   5   0
+topk slot:         0   0   0   0   1   1   1   1
 ```
 
-按 global expert id 稳定排序后：
+按 `(expert, token index)` 排序后：
 
 ```text
 pre row:           0   1   2   3   4   5   6   7
@@ -74,23 +80,37 @@ global expert id:  0   0   1   2   3   4   4   5
 row_id_map:        0   4   3   6   5   2   7   1
 ```
 
+将上面两组放到一起看`row_id_map`映射关系
+
+```text
+flat pos:          0   1   2   3   4   5   6   7
+token copy:        A0  A1  A2  A3  A0  A1  A2  A3
+row_id_map:        0   4   3   6   5   2   7   1
+
+pre row:           0   1   2   3   4   5   6   7
+token copy:        A0  A3  A1  A2  A1  A0  A3  A2
+global expert id:  0   0   1   2   3   4   4   5
+```
+
+
+
 所以：
 
 ```text
-pre_dispatched["hidden_states"]: [N*K, D_h] = [8, D_h]
-pre_dispatched["row_id_map"]:    [N*K]      = [8]
+pre_dispatched[“hidden_states”]: [N*K, D_h] = [8, D_h]
+pre_dispatched[“row_id_map”]:    [N*K]      = [8]
 ```
 
-这里的 `row_id_map` 是 `permute` 返回、后续 `unpermute` 消费的还原 map。当前 `grouped_gemm`
-backend 下它不是简单的 “pre row j 对应原始 topK flatten 空间里的哪个位置”，不要把它当成普通
-`index_put` 的下标表来手算。
+`backend.unpermute(combined, row_id_map, probs)` 对应的逆操作是 gather：
+`output[i] = combined[row_id_map[i]]`，输出按 topk-slot-first 排布后乘以 `probs` 再沿 K 方向求和。
 
 对 `ep1` 同理：
 
 ```text
-flat row:          0   1   2   3   4   5   6   7
-token copy:        B0  B0  B1  B1  B2  B2  B3  B3
-global expert id:  1   3   4   2   5   0   3   1
+flat pos:          0   1   2   3   4   5   6   7
+token copy:        B0  B1  B2  B3  B0  B1  B2  B3
+global expert id:  1   4   5   3   3   2   0   1
+topk slot:         0   0   0   0   1   1   1   1
 
 pre row:           0   1   2   3   4   5   6   7
 token copy:        B2  B0  B3  B1  B0  B3  B1  B2
@@ -367,8 +387,14 @@ router_weights: [N, E]
 ## 核心总结
 
 第一次 `row_id_map [N*K]` 是 source rank 上 `permute` 产生、最后由 `unpermute(..., probs=topk_weights)`
-消费的还原 map，负责加权合并回 `[N, D_h]`。
+消费的还原 map，负责加权合并回 `[N, D_h]`。其精确语义：
+
+- **scatter**：`row_id_map[i] = j` 表示 topk-slot-first 源 flat 空间第 `i` 个位置的 token copy
+  排序后落在 sorted 空间第 `j` 个位置。
+- **unpermute 逆操作**：gather，`output[i] = combined[row_id_map[i]]`，输出按 topk-slot-first
+  排布后乘 `probs` 再沿 K 求和，得到 `[N, D_h]`。
+- `grouped_gemm.backend.permute` 内部使用 topk-slot-first 展开，同 expert 时按 token index 升序；
+  手动从 token-first flat 展开推导会得到不同的值，两者不可混用。
 
 第二次 `post_dispatched["row_ids_map"] [M_recv]` 是 destination EP rank 上第二次 `permute` 产生的还原 map，
-只负责 expert 计算后恢复 source-block 顺序，方便反向 all2all。两个 map 都应当按 backend opaque map 理解，
-不要按普通排序下标手算。
+语义相同（scatter，1D indices 无 topk 展开），只负责 expert 计算后恢复 source-block 顺序，方便反向 all2all。

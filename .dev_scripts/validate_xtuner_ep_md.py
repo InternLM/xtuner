@@ -46,6 +46,7 @@ class RankExpected:
     post_hidden: tuple[float, ...]
     post_row_ids_map: tuple[int, ...]
     tokens_per_expert: tuple[float, ...]
+    experts_out: tuple[float, ...]
     pre_combine_hidden: tuple[float, ...]
     combine_hidden: tuple[float, ...]
     post_combine_hidden: tuple[float, ...]
@@ -87,6 +88,7 @@ EXPECTED: dict[int, RankExpected] = {
         post_hidden=(10.0, 13.0, 22.0, 11.0, 20.0, 23.0, 12.0, 21.0),
         post_row_ids_map=(0, 1, 3, 6, 2, 4, 5, 7),
         tokens_per_expert=(3.0, 3.0, 2.0),
+        experts_out=(10.0, 13.0, 22.0, 111.0, 120.0, 123.0, 212.0, 221.0),
         pre_combine_hidden=(10.0, 13.0, 111.0, 212.0, 22.0, 120.0, 123.0, 221.0),
         combine_hidden=(10.0, 13.0, 111.0, 212.0, 311.0, 410.0, 413.0, 512.0),
         post_combine_hidden=(310.0, 191.0, 302.0, 333.0),
@@ -103,6 +105,7 @@ EXPECTED: dict[int, RankExpected] = {
         post_hidden=(11.0, 20.0, 23.0, 10.0, 13.0, 21.0, 12.0, 22.0),
         post_row_ids_map=(0, 3, 4, 6, 1, 2, 5, 7),
         tokens_per_expert=(3.0, 3.0, 2.0),
+        experts_out=(311.0, 320.0, 323.0, 410.0, 413.0, 421.0, 512.0, 522.0),
         pre_combine_hidden=(311.0, 410.0, 413.0, 512.0, 320.0, 323.0, 421.0, 522.0),
         combine_hidden=(22.0, 120.0, 123.0, 221.0, 320.0, 323.0, 421.0, 522.0),
         post_combine_hidden=(280.0, 321.0, 472.0, 193.0),
@@ -231,6 +234,7 @@ def _run_xtuner_ep_case(parallel_info: ParallelInfo) -> dict[str, Any]:
         "post_hidden": post_dispatched["hidden_states"],
         "post_row_ids_map": post_dispatched["row_ids_map"],
         "tokens_per_expert": post_dispatched["tokens_per_expert"],
+        "experts_out": experts_out,
         "pre_combine_hidden": pre_combined["hidden_states"],
         "combine_hidden": combined["hidden_states"],
         "post_combine_hidden": post_combined["hidden_states"],
@@ -276,6 +280,7 @@ def _validate(parallel_info: ParallelInfo, snapshots: dict[str, Any]) -> None:
         _assert_tensor_close(parallel_info, "post_hidden", snapshots["post_hidden"], expected.post_hidden, first_col=True)
         _assert_tensor_close(parallel_info, "post_row_ids_map", snapshots["post_row_ids_map"], expected.post_row_ids_map)
         _assert_tensor_close(parallel_info, "tokens_per_expert", snapshots["tokens_per_expert"], expected.tokens_per_expert)
+        _assert_tensor_close(parallel_info, "experts_out", snapshots["experts_out"], expected.experts_out, first_col=True)
         _assert_tensor_close(
             parallel_info,
             "pre_combine_hidden",
@@ -360,6 +365,7 @@ def _print_snapshots(parallel_info: ParallelInfo, snapshots: dict[str, Any]) -> 
         "pre_hidden",
         "dispatch_hidden",
         "post_hidden",
+        "experts_out",
         "pre_combine_hidden",
         "combine_hidden",
         "post_combine_hidden",
