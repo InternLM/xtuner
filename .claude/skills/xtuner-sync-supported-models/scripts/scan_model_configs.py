@@ -6,31 +6,12 @@ import re
 import sys
 from pathlib import Path
 
-# We care about configs that are part of the supported model hierarchy
-RELEVANT_BASES = {
-    "TransformerConfig",
-    "MoEConfig",
-    "BaseComposeConfig",
-    "XTunerBaseModelConfig",
-    # Known intermediate/family bases
-    "Qwen2DenseConfig",
-    "Qwen3DenseConfig",
-    "Qwen3MoEConfig",
-    "Qwen3_5_VLTextMoEConfig",
-    "GptOssConfig",
-    "DeepSeekV3Config",
-    "Qwen3VLBaseConfig",
-    "Qwen3_5_BaseConfig",
-    "InternVLBaseConfig",
-    "InternS1BaseConfig",
-}
 
-
-def scan_file(path: Path):
+def scan_file(path: Path) -> list[dict[str, str | list[str]]]:
     text = path.read_text()
     # Match class definitions like: class FooConfig(BarConfig):
     pattern = r"^class\s+(\w+Config)\s*\(([^)]+)\):"
-    results = []
+    results: list[dict[str, str | list[str]]] = []
     for m in re.finditer(pattern, text, re.MULTILINE):
         class_name = m.group(1)
         parents = [p.strip() for p in m.group(2).split(",")]
@@ -38,7 +19,7 @@ def scan_file(path: Path):
     return results
 
 
-def main():
+def main() -> None:
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(".")
     model_dir = root / "xtuner" / "v1" / "model"
     if not model_dir.exists():
@@ -53,7 +34,7 @@ def main():
     children: dict[str, list[str]] = {}
     for cfg in all_configs:
         for p in cfg["parents"]:
-            if p in RELEVANT_BASES or p.endswith("Config"):
+            if p.endswith("Config"):
                 children.setdefault(p, []).append(cfg["class"])
 
     # Deduplicate

@@ -106,22 +106,21 @@ autodoc_mock_imports = [
     "loguru",
     "datasets",
     "scikit-image",
-    "scipy"
+    "scipy",
     "torchvision",
     "xxhash",
     "timm",
     "imageio",
-    "torchvision",
     "httpx",
     "cv2",
     "addict",
-    "torchvision",
     "PIL",
     "uvicorn",
     "fastapi",
     "huggingface_hub",
     "more_itertools",
     "pyarrow",
+    "fla",
 ]
 
 
