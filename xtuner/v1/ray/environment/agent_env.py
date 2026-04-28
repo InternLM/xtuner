@@ -51,7 +51,7 @@ class AgentEnvironment(BaseEnvironment):
     ):
         super().__init__(environment, None, None, judger_pg, judger_cfg)
         self.rollout_controller = rollout_controller
-        self.agent = create_object(agent_cfg)
+        self.agent_cfg = agent_cfg
         self.preprocess_func = preprocess_func
         self.postprocess_func = postprocess_func
 
@@ -64,20 +64,23 @@ class AgentEnvironment(BaseEnvironment):
             if item.env.rollout.state == RolloutState.COMPLETED:
                 get_logger().debug(f"Rollout already completed for item {item.uid.observation_id}, skip agent call.")
                 return "Passed"
-            self.agent.reset(session_id=item.uid.observation_id, recursive=True)
-            if "agent_state_dict" in item.env.rollout.extra_info:  # type: ignore[operator]
-                self.agent.load_state_dict(
-                    item.env.rollout.extra_info.pop("agent_state_dict"),
-                    session_id=item.uid.observation_id,  # type: ignore[arg-type]
-                )
-            agent_inputs = self.preprocess_func(self, deepcopy(item))
+            agent = create_object(self.agent_cfg)
+            if item.env.rollout.state == RolloutState.ABORTED:
+                agent.load_state_dict(item.env.rollout.extra_info["agent_state_dict"])  # type: ignore[operator]
+
+            _item = deepcopy(item)
+            _item.env.agent.extra_info["agent"] = agent
+            agent_inputs = self.preprocess_func(self, _item)
             try:
-                return await self.agent(*agent_inputs, session_id=item.uid.observation_id, **sample_params)
+                return await agent(*agent_inputs, **sample_params)
             except BaseException as exc:
                 get_logger().error(
                     f"[Agent Inference Error] {exc}. Dead actors: {check_dead_actors()}\n{traceback.format_exc()}"
                 )
                 return "Failed"
+            finally:
+                item.env.rollout.extra_info["agent_state_dict"] = agent.state_dict()  # type: ignore[typeddict-unknown-key]
+                item.env.rollout.extra_info["agent_message_dict"] = agent.get_messages()  # type: ignore[typeddict-unknown-key]
 
         results = await asyncio.gather(*[_inner_agent_call(sample) for sample in group_data_items])
         passed_data_items, completed_data_items = [], []
@@ -88,12 +91,6 @@ class AgentEnvironment(BaseEnvironment):
                 passed_data_items.append(sample)
             elif message.finish_reason == "abort":
                 sample.env.rollout.state = RolloutState.ABORTED
-                agent_state_dict = self.agent.state_dict(sample.uid.observation_id)
-                # remove routed_experts from message extra_info to avoid serialization issue
-                for state in agent_state_dict.values():
-                    for msg in state:
-                        msg["extra_info"].pop("routed_experts", None)
-                sample.env.rollout.extra_info["agent_state_dict"] = agent_state_dict  # type: ignore[typeddict-unknown-key]
                 passed_data_items.append(sample)
             else:
                 completed_data_items.append(sample)
