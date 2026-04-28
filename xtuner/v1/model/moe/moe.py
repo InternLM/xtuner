@@ -138,6 +138,7 @@ class MoEConfig(TransformerConfig):
     hidden_factor: Annotated[float, Parameter(group="moe")] = 1.0
     moe_intermediate_size: Annotated[int, Parameter(group="moe")]
     ep_size: Annotated[int, Parameter(group="moe")] = 1
+    tp_size: Annotated[int, Parameter(group="moe")] = 1
     dispatcher: Annotated[Literal["deepep", "all2all", "agrs"] | None, Parameter(group="moe")] = None
     router: GreedyRouterConfig | NoAuxRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
@@ -171,18 +172,37 @@ class MoE(BaseModel):
 
     config: MoEConfig
     ep_mesh: DeviceMesh | None = None
+    tp_mesh: DeviceMesh | None = None
 
     def __init__(self, config: MoEConfig):
         super().__init__(config)
         if config.ep_size is not None and config.ep_size > 1:
             world_size = dist.get_world_size()
-            self.ep_mesh = init_device_mesh(
-                DEVICE,
-                (world_size // config.ep_size, config.ep_size),
-                mesh_dim_names=(f"{self.config.mesh_prefix}.dp", f"{self.config.mesh_prefix}.ep"),
-            )[f"{self.config.mesh_prefix}.ep"]
+            tp_size = config.tp_size if config.tp_size > 1 else 1
+            fsdp_size = world_size // (config.ep_size * tp_size)
+            if tp_size > 1:
+                _init_mesh = init_device_mesh(
+                    DEVICE,
+                    (fsdp_size, config.ep_size, tp_size),
+                    mesh_dim_names=(
+                        f"{self.config.mesh_prefix}.dp",
+                        f"{self.config.mesh_prefix}.ep",
+                        f"{self.config.mesh_prefix}.tp",
+                    ),
+                )
+                self.ep_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep"]
+                self.tp_mesh = _init_mesh[f"{self.config.mesh_prefix}.tp"]
+            else:
+                _init_mesh = init_device_mesh(
+                    DEVICE,
+                    (fsdp_size, config.ep_size),
+                    mesh_dim_names=(f"{self.config.mesh_prefix}.dp", f"{self.config.mesh_prefix}.ep"),
+                )
+                self.ep_mesh = _init_mesh[f"{self.config.mesh_prefix}.ep"]
+                self.tp_mesh = None
         else:
             self.ep_mesh = None
+            self.tp_mesh = None
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, type=config.rms_norm_type)
         self.lm_head = LMHead(config.hidden_size, config.vocab_size, bias=False)
@@ -819,6 +839,7 @@ class MoE(BaseModel):
                     layer_idx=layer_idx,
                     dispatcher=config.dispatcher,
                     ep_mesh=self.ep_mesh,
+                    tp_mesh=self.tp_mesh,
                 )
                 if self.config.freeze_routers:
                     layers[str(layer_idx)].gate.requires_grad_(False)
@@ -883,6 +904,7 @@ class MoE(BaseModel):
                 layer_idx=config.num_hidden_layers + i,
                 dispatcher=config.dispatcher,
                 ep_mesh=self.ep_mesh,
+                tp_mesh=self.tp_mesh,
             )
 
             # Wrap decoder layer in MTPLayer
@@ -920,6 +942,7 @@ class MoE(BaseModel):
     ) -> Self:
         self.fsdp_config = fsdp_config
         assert self.fsdp_config.ep_size == self.config.ep_size
+        assert self.fsdp_config.tp_size == self.config.tp_size
         self.mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
@@ -1075,9 +1098,16 @@ class MoE(BaseModel):
                 continue
 
             ep_enabled = self.ep_mesh is not None and self.ep_mesh.size() > 1
+            tp_enabled = self.tp_mesh is not None and self.tp_mesh.size() > 1
             # Scale moe parameters
             if ep_enabled and ".experts" in name:
                 param.grad.div_(self.ep_mesh.size())  # type: ignore
+                # Each TP replica computes an identical expert gradient (redundant computation).
+                # Average across TP replicas so the effective update matches single-GPU.
+                if tp_enabled:
+                    grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+                    dist.all_reduce(grad, op=ReduceOp.SUM, group=self.tp_mesh.get_group())  # type: ignore
+                    grad.div_(self.tp_mesh.size())  # type: ignore
                 continue
 
             if isinstance(param, DTensor):
@@ -1105,14 +1135,26 @@ class MoE(BaseModel):
 
         device = DEVICE
         world_size = dist.get_world_size()
-        experts_fsdp_size = world_size // self.fsdp_config.ep_size
+        tp_size = self.config.tp_size if self.config.tp_size > 1 else 1
+        experts_fsdp_size = world_size // (self.fsdp_config.ep_size * tp_size)
 
         if self.fsdp_config.hsdp_sharding_size is None:
-            model_mesh = init_device_mesh(
-                device,
-                (experts_fsdp_size, self.fsdp_config.ep_size),
-                mesh_dim_names=(f"{self.config.mesh_prefix}.fsdp", f"{self.config.mesh_prefix}.ep"),
-            )
+            if tp_size > 1:
+                model_mesh = init_device_mesh(
+                    device,
+                    (experts_fsdp_size, self.fsdp_config.ep_size, tp_size),
+                    mesh_dim_names=(
+                        f"{self.config.mesh_prefix}.fsdp",
+                        f"{self.config.mesh_prefix}.ep",
+                        f"{self.config.mesh_prefix}.tp",
+                    ),
+                )
+            else:
+                model_mesh = init_device_mesh(
+                    device,
+                    (experts_fsdp_size, self.fsdp_config.ep_size),
+                    mesh_dim_names=(f"{self.config.mesh_prefix}.fsdp", f"{self.config.mesh_prefix}.ep"),
+                )
             self._world_mesh = model_mesh
             if self.ep_mesh is not None:
                 # WARN: This assertion is **VERY** important.
@@ -1174,10 +1216,13 @@ class MoE(BaseModel):
             self.fsdp_mesh = self.hsdp_mesh[f"{self.config.mesh_prefix}.hsdp_shard"]
 
     def _replicate_other_params(self, model: nn.Module):
-        def traverse(module):
+        def traverse(module: nn.Module) -> None:
             if isinstance(module, MoEBlock):
+                # Expert params are already Shard(0) on ep_mesh (from build_grouped_linear).
+                # Gradient averaging across TP replicas is handled in scale_and_reduce_grad.
                 return
             for name, param in module.named_parameters(recurse=False):
+                assert self.ep_mesh is not None
                 dist_param = nn.Parameter(
                     distribute_tensor(param, self.ep_mesh, [Replicate()]), requires_grad=param.requires_grad
                 )

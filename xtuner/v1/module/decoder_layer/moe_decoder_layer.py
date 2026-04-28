@@ -215,6 +215,7 @@ class MoEDecoderLayer(nn.Module):
         layer_idx: int = 0,
         dispatcher: Literal["deepep", "all2all", "agrs"] | None,
         ep_mesh: DeviceMesh | None = None,
+        tp_mesh: DeviceMesh | None = None,
     ):
         super().__init__()
         self.ep_mesh = ep_mesh
@@ -273,10 +274,12 @@ class MoEDecoderLayer(nn.Module):
         )
         # TODO: (yehaochen) Maybe should be replaced by build_dispatcher
         process_group = ep_mesh.get_group() if ep_mesh is not None else None
+        tp_group = tp_mesh.get_group() if tp_mesh is not None else None
         self.dispatcher = build_dispatcher(
             dispatcher=dispatcher,
             n_routed_experts=n_routed_experts,
             ep_group=process_group,
+            tp_group=tp_group,
             training_dtype="fp8" if float8_cfg is not None else "bf16",
             generate_dtype=generate_config.dtype if generate_config is not None else "bf16",
         )
