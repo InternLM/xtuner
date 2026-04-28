@@ -170,7 +170,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         trainer.rollout_controller.onload_weights.remote.assert_not_called()
         trainer.rollout_controller.onload_kvcache.remote.assert_not_called()
 
-    def test_resume_from_checkpoint_syncs_weights_then_resets_manager(self):
+    def test_resume_from_checkpoint_updates_weights_then_resets_manager(self):
         trainer = RLDisaggregatedTrainer.__new__(RLDisaggregatedTrainer)
         trainer.logger = MagicMock()
         trainer._load_checkpoint_cfg = SimpleNamespace(checkpoint_path=Path(self.temp_dir.name))
@@ -194,20 +194,14 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         train_state_path = Path(self.temp_dir.name) / trainer._SAVE_TRAIN_STATE_PATH
         train_state_path.write_text('{"cur_step": 3}')
 
-        with (
-            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj),
-            patch(
-                "xtuner.v1.train.rl_trainer.bind_train_rollout",
-                side_effect=lambda train_controller, rollout_controller: events.append("bind"),
-            ),
-        ):
+        with patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj, timeout=None: obj):
             trainer._resume_from_checkpoint(self.temp_dir.name)
 
         trainer.train_controller.resume.assert_called_once_with(trainer._load_checkpoint_cfg)
         self.assertEqual(trainer._cur_step, 3)
         trainer.agent_loop_manager.resume.assert_called_once_with(Path(self.temp_dir.name))
         self.assertTrue(events[0].startswith("manager_resume:"))
-        self.assertEqual(events[1:], ["bind", "fake_update", "continue_produce:3"])
+        self.assertEqual(events[1:], ["fake_update", "continue_produce:3"])
 
     def test_validate_sync_schedule_accepts_multiples(self):
         _validate_sync_intervals(sync_weights_interval=2, checkpoint_interval=4, hf_interval=6)
