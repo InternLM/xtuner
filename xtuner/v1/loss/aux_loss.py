@@ -83,8 +83,8 @@ class AuxLossContext(nn.Module):
         router_logits: torch.Tensor,
         num_experts_per_tok: int,
         mask: torch.Tensor,
-        balancing_ctx: BalancingLossContext | None = None,
-        z_ctx: ZLossContext | None = None,
+        balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None = None,
+        z_ctx: list[ZLossContext] | ZLossContext | None = None,
         dim: int = 1,
     ) -> None:
         """Accumulate routing statistics for one layer."""
@@ -100,17 +100,30 @@ class AuxLossContext(nn.Module):
         ).to(torch.long)
 
         if balancing_ctx is not None:
-            balancing_ctx.update_split_aux(
-                router_weights=selected_router_weights,
-                tokens_per_expert=tokens_per_expert_per_layer,
-            )
+            if isinstance(balancing_ctx, list):
+                for balancing_ctx_item in balancing_ctx:
+                    balancing_ctx_item.accumulate(
+                        router_weights=selected_router_weights,
+                        tokens_per_expert=tokens_per_expert_per_layer,
+                    )
+            else:
+                balancing_ctx.accumulate(
+                    router_weights=selected_router_weights,
+                    tokens_per_expert=tokens_per_expert_per_layer,
+                )
 
         self._local_load_logits_list.append(tokens_per_expert_per_layer)
 
         if z_ctx is not None:
-            z_ctx.update_split_aux(
-                router_logits=selected_router_logits,
-            )
+            if isinstance(z_ctx, list):
+                for z_ctx_item in z_ctx:
+                    z_ctx_item.accumulate(
+                        router_logits=selected_router_logits,
+                    )
+            else:
+                z_ctx.accumulate(
+                    router_logits=selected_router_logits,
+                )
 
     def _cal_tokens_per_expert(self) -> torch.Tensor:
         """Get tokens-per-expert tensor for logging/bias update."""
@@ -133,8 +146,8 @@ class AuxLossContext(nn.Module):
     def finalize(
         self,
         *,
-        balancing_ctx: BalancingLossContext | None,
-        z_ctx: ZLossContext | None,
+        balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None,
+        z_ctx: list[ZLossContext] | ZLossContext | None,
         num_experts_per_tok: int,
         non_pad_token: int,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor] | None:
@@ -142,15 +155,33 @@ class AuxLossContext(nn.Module):
         state."""
         balancing_loss = None
         if balancing_ctx is not None:
-            balancing_loss = balancing_ctx.finalize_split_aux_loss(
-                n_routed_experts=self.n_routed_experts,
-                num_experts_per_tok=num_experts_per_tok,
-                non_pad_token=non_pad_token,
-            )
+            if isinstance(balancing_ctx, list):
+                balancing_loss = torch.sum(
+                    torch.stack(
+                        [
+                            ctx.finalize(
+                                n_routed_experts=self.n_routed_experts,
+                                num_experts_per_tok=num_experts_per_tok,
+                                non_pad_token=non_pad_token,
+                            )
+                            for ctx in balancing_ctx
+                        ]
+                    ),
+                    dim=0,
+                )
+            else:
+                balancing_loss = balancing_ctx.finalize(
+                    n_routed_experts=self.n_routed_experts,
+                    num_experts_per_tok=num_experts_per_tok,
+                    non_pad_token=non_pad_token,
+                )
 
         z_loss = None
         if z_ctx is not None:
-            z_loss = z_ctx.finalize_split_aux_loss()
+            if isinstance(z_ctx, list):
+                z_loss = torch.sum(torch.stack([ctx.finalize() for ctx in z_ctx]), dim=0)
+            else:
+                z_loss = z_ctx.finalize()
 
         tokens_per_expert_global = self._cal_tokens_per_expert()
         return balancing_loss, z_loss, tokens_per_expert_global

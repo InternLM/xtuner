@@ -131,20 +131,6 @@ class MoELossContextDict(TypedDict):
     mtp: list[BaseLossContext] | None
 
 
-def _extract_aux_loss_ctx(
-    loss_ctx: list[MoELossContextDict] | MoELossContextDict | None,
-) -> tuple[BalancingLossContext | None, ZLossContext | None]:
-    if loss_ctx is None:
-        return None, None
-
-    if isinstance(loss_ctx, list):
-        balancing_ctx = next((ctx.get("balancing") for ctx in loss_ctx if ctx.get("balancing") is not None), None)
-        z_loss_ctx = next((ctx.get("z_loss") for ctx in loss_ctx if ctx.get("z_loss") is not None), None)
-        return balancing_ctx, z_loss_ctx
-
-    return loss_ctx.get("balancing"), loss_ctx.get("z_loss")
-
-
 class MoEConfig(TransformerConfig):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
     n_routed_experts: Annotated[int, Parameter(group="moe")]
@@ -224,6 +210,30 @@ class MoE(BaseModel):
             n_routed_experts=self.config.n_routed_experts,
         )
         self.aux_loss: AuxLoss = aux_loss
+
+    def _extract_aux_loss_ctx(
+        self,
+        loss_ctx: list[MoELossContextDict] | MoELossContextDict | None,
+    ) -> tuple[
+        list[BalancingLossContext] | BalancingLossContext | None,
+        list[ZLossContext] | ZLossContext | None,
+    ]:
+        if loss_ctx is None:
+            return None, None
+
+        if isinstance(loss_ctx, list):
+            balancing_ctx: list[BalancingLossContext] = []
+            z_ctx: list[ZLossContext] = []
+            for ctx in loss_ctx:
+                ctx_bal = ctx.get("balancing")
+                if ctx_bal is not None:
+                    balancing_ctx.append(ctx_bal)
+                ctx_z = ctx.get("z_loss")
+                if ctx_z is not None:
+                    z_ctx.append(ctx_z)
+            return balancing_ctx, z_ctx
+
+        return loss_ctx.get("balancing"), loss_ctx.get("z_loss")
 
     def _select_non_pad_router_logits(
         self,
@@ -468,7 +478,7 @@ class MoE(BaseModel):
 
         router_logits_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
         router_weights_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
-        balancing_ctx, z_ctx = _extract_aux_loss_ctx(loss_ctx_list)
+        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx_list)
 
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
@@ -541,13 +551,13 @@ class MoE(BaseModel):
                     )
 
                 self.aux_loss.accumulate(
-                    router_weights=torch.cat(router_weights, dim=0).unsqueeze(0),
-                    router_logits=torch.cat(router_logits, dim=0).unsqueeze(0),
+                    router_weights=torch.cat(router_weights, dim=0),
+                    router_logits=torch.cat(router_logits, dim=0),
                     num_experts_per_tok=self.config.num_experts_per_tok,
                     mask=cat_mask,
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
-                    dim=1,
+                    dim=0,
                 )
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
@@ -631,7 +641,7 @@ class MoE(BaseModel):
         output["router_logits"] = {}
         output["router_weights"] = {}
         self._mark_dynamic(seq_ctx)
-        balancing_ctx, z_ctx = _extract_aux_loss_ctx(loss_ctx)
+        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
