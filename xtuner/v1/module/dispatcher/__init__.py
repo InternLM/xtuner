@@ -20,6 +20,7 @@ from .base import (
     PreDispatchResult,
 )
 from .torch_all2all import TorchAll2AllDispatcher
+from .torch_all2all_tpep import TorchAll2AllTPEPDispatcher
 
 
 logger = get_logger()
@@ -31,6 +32,7 @@ def build_dispatcher(
     dispatcher: Literal["deepep", "all2all", "agrs"] | None,
     n_routed_experts: int,
     ep_group: dist.ProcessGroup | None = None,
+    tp_group: dist.ProcessGroup | None = None,
     training_dtype: Literal["bf16", "fp8"] = "bf16",
     generate_dtype: Literal["bf16", "fp8"] = "bf16",
 ) -> DispacherInterface:
@@ -60,7 +62,15 @@ def build_dispatcher(
             generate_dtype=generate_dtype,
         )  # type: ignore
     elif dispatcher == "all2all":
-        assert ep_group is not None, "DeepEPDispatcher requires a non-null process group."
+        assert ep_group is not None, "TorchAll2AllDispatcher requires a non-null ep_group."
+        if tp_group is not None and tp_group.size() > 1:
+            return TorchAll2AllTPEPDispatcher(
+                n_routed_experts=n_routed_experts,
+                ep_group=ep_group,
+                tp_group=tp_group,
+                training_dtype=training_dtype,
+                generate_dtype=generate_dtype,
+            )  # type: ignore[return-value]
         return TorchAll2AllDispatcher(
             n_routed_experts=n_routed_experts,
             process_group=ep_group,
@@ -83,6 +93,7 @@ __all__ = [
     "DispacherInterface",
     "NaiveDispatcher",
     "TorchAll2AllDispatcher",
+    "TorchAll2AllTPEPDispatcher",
     "MoEAGRSDispatcher",
     "build_dispatcher",
     "PreDispatchResult",
