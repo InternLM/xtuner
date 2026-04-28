@@ -45,7 +45,7 @@ from lagent.serving.sandbox.providers.gateway import GatewayProvider  # noqa: E4
 from xtuner.v1.ray.environment.rl_task.sandbox import SandboxStage  # noqa: E402
 from xtuner.v1.ray.environment.rl_task.schemas import TaskData  # noqa: E402
 from xtuner.v1.ray.environment.rl_task.validator import JudgerValidator  # noqa: E402
-from xtuner.v1.utils import get_logger
+from xtuner.v1.utils import get_logger  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────────────────

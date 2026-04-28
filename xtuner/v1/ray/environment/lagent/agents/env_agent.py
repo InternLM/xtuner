@@ -43,9 +43,9 @@ class EnvAgent(BaseEnvAgent):
         self.lower_tool_turn_bound = lower_tool_turn_bound
         self.enable_repeated_tool_call_penalty = enable_repeated_tool_call_penalty
 
-    async def forward(self, assistant_message: AgentMessage, session_id: str, **kwargs):
+    async def forward(self, assistant_message: AgentMessage, **kwargs):
         extra_info = {}
-        current_turn = len(self.memory.get_memory(session_id)) // 2
+        current_turn = len(self.memory.get_memory()) // 2
         if assistant_message.stream_state == AgentStatusCode.SESSION_OUT_OF_LIMIT:
             extra_info["finish"] = True
             return AgentMessage(
@@ -62,11 +62,11 @@ class EnvAgent(BaseEnvAgent):
             if "<tool_call>" in (assistant_message.raw_content or ""):
                 return AgentMessage(sender=self.name, content="Format Error", extra_info=extra_info, reward=-1.0)
             # assume the first message contains meta info to help judge
-            set_env_message = self.memory.get_memory(session_id)[0]
-            message = (
-                await self.judger(assistant_message, set_env_message, session_id=session_id, **kwargs)
-            ).model_copy(update={"sender": self.name}, deep=True)
-            self.judger.reset(session_id, recursive=True)
+            set_env_message = self.memory.get_memory()[0]
+            message = (await self.judger(assistant_message, set_env_message, **kwargs)).model_copy(
+                update={"sender": self.name}, deep=True
+            )
+            self.judger.reset(recursive=True)
             if isinstance(message.extra_info, dict):
                 message.extra_info.update(extra_info)
             else:
@@ -86,7 +86,7 @@ class EnvAgent(BaseEnvAgent):
         # 惩罚冗余工具调用
         if self.enable_repeated_tool_call_penalty:
             previous_tool_calls = set()
-            for msg in self.memory.get_memory(session_id)[:-1]:
+            for msg in self.memory.get_memory()[:-1]:
                 for call in msg.tool_calls or []:
                     try:
                         if isinstance(call["arguments"], str):
@@ -110,10 +110,7 @@ class EnvAgent(BaseEnvAgent):
                     continue
 
         tool_responses = await asyncio.gather(
-            *[
-                self._retry_mechanism(self.execute_tool)(tool_call, session_id)
-                for tool_call in assistant_message.tool_calls
-            ]
+            *[self._retry_mechanism(self.execute_tool)(tool_call) for tool_call in assistant_message.tool_calls]
         )
         for i, tool_response in enumerate(tool_responses):
             if tool_response.valid != ActionValidCode.OPEN:

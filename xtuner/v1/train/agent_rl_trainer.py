@@ -533,7 +533,7 @@ class AgentRLTrainer(RLTrainer):
             return tokenize(
                 self.tokenizer,
                 data_item.env.agent.extra_info["messages"],
-                tools=data_item.env.agent.extra_info["tools"],
+                tools=data_item.env.agent.extra_info.get("tools"),
             )
 
         with ThreadPoolExecutor(max_workers=64) as executor:

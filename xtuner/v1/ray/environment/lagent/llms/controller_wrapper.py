@@ -48,20 +48,18 @@ class ControllerWrapper:
         )
         self.tool_call_parser = tool_call_parser and create_object(tool_call_parser) or Qwen3FunctionCallParser()
 
-    async def chat(self, messages, session_id=None, tools: Optional[List[Dict]] = None, **kwargs):
+    async def chat(self, messages, tools: Optional[List[Dict]] = None, **kwargs):
         sample_params = self.sample_params.model_copy(update=kwargs)
         inputs = tokenize(self.tokenizer, messages, tools)
         if len(inputs["input_ids"]) >= self.rollout_cfg.context_length:
             response = RLRolloutResponseItem(finish_reason="length")
         else:
-            extra_info = {"action_id": session_id}
-            if inputs["routed_experts"] is not None:
-                extra_info["routed_experts"] = inputs["routed_experts"]
             response = await self.rollout_controller.rollout.remote(  # type: ignore[no-redef, attr-defined]
                 input_ids=inputs["input_ids"],
                 sample_params=sample_params,
-                session_id=session_id,
-                extra_info=extra_info,
+                extra_info=(
+                    {"routed_experts": inputs["routed_experts"]} if inputs["routed_experts"] is not None else {}
+                ),
             )
             if (
                 response.finish_reason != "abort"
