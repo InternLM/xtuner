@@ -393,6 +393,7 @@ class BaseRLTrainer:
 
     def _resume_train_controller_and_state(self, checkpoint_path: Path | str) -> Path:
         # 子类只复用训练 worker 和 train_state 恢复，权重同步流程各自维护。
+        self.logger.info(f"Resume train controller and state from {checkpoint_path}")
         checkpoint_path = Path(checkpoint_path)
         self.train_controller.resume(self._load_checkpoint_cfg)
 
@@ -401,6 +402,12 @@ class BaseRLTrainer:
             train_state = json.load(f)
         self._cur_step = train_state["cur_step"]
         return checkpoint_path
+
+    def _resume_agent_loop_manager(self, checkpoint_path: Path | str) -> int:
+        self.logger.info(f"Resume agent_loop_manager from {checkpoint_path}")
+        checkpoint_path = Path(checkpoint_path)
+        saved_model_step = self.agent_loop_manager.resume(checkpoint_path)
+        return saved_model_step
 
     def _maybe_save_checkpoint(self, cur_step: int) -> None:
         """Save checkpoint if interval condition is met."""
@@ -845,30 +852,34 @@ class RLColocateTrainer(BaseRLTrainer):
 
         self._pg = AutoAcceleratorWorkers.build_placement_group(cfg.resources)
         self.train_controller = self._train_worker_cfg.build(self._pg)
+
+        checkpoint_path = self._load_checkpoint_cfg.checkpoint_path
+        if checkpoint_path is not None:
+            checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
+        # Free trainer-side GPU memory before bringing up colocated rollout workers.
+        # Backends like sglang may size KV cache against their own target utilization
+        # instead of the trainer's transient footprint, which can cause init-time OOM.
+        self.train_controller.offload(target="all")
+
         self.rollout_controller = self._rollout_config.build(self._pg)
         self._maybe_start_gateway(cfg)
+        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)
+        if checkpoint_path is not None:
+            self._resume_agent_loop_manager(checkpoint_path)
 
-        if self._load_checkpoint_cfg.checkpoint_path is not None:
-            self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
-        else:
-            self.train_controller.offload(target="all")
+        if self._rollout_config.skip_load_weights:
+            self._sync_weights_from_train_workers()
 
         if self._debug_rollout:
             self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
 
-    def _resume_from_checkpoint(self, checkpoint_path: Path | str) -> None:
-        checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
-
-        self.logger.info(f"Resume sampler from {checkpoint_path}")
-        self.agent_loop_manager.resume(checkpoint_path)
-
-        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+    def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
-        self.train_controller.offload(target="optimizer")
         ray.get(self.rollout_controller.offload.remote())
+        self.train_controller.onload(target="model")
         ray.get(self.rollout_controller.onload_weights.remote())
         self.train_controller.update_weights()
         self.train_controller.offload(target="model")
@@ -986,6 +997,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                     "In disaggregated mode, should_continue_fn must be default, "
                     "because it does not allow early stopping in production."
                 )
+        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
@@ -1022,13 +1034,9 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
     def _resume_from_checkpoint(self, checkpoint_path: Path | str) -> None:
         checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
-
-        self.logger.info(f"Resume sampler from {checkpoint_path}")
-        saved_model_step = self.agent_loop_manager.resume(checkpoint_path)
+        saved_model_step = self._resume_agent_loop_manager(checkpoint_path)
         assert self._cur_step == saved_model_step
 
-        bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
-        self.logger.info("Rollout workers skip load weights, update weights from train workers.")
         self.fake_update_weights()
         self.agent_loop_manager.continue_produce(model_step=saved_model_step)
 
