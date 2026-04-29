@@ -138,11 +138,10 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
 
         return special_visual_mask, visual_features, deepstack_visual_embeds
 
-    def forward(
+    def _prepare_llm_inputs(
             self,
             seq_ctx: SequenceContext,
-            loss_ctx: dict[str, CELossContext] | None = None
-    ) -> MoEModelOutputs:
+    ) -> tuple[torch.FloatTensor, list[torch.Tensor] | None, torch.Tensor | None]:
         input_ids = seq_ctx.input_ids
         pixel_values = seq_ctx.pixel_values
         image_grid_thw = seq_ctx.image_grid_thw
@@ -196,14 +195,31 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
             )
             deepstack_visual_embeds = None
             visual_pos_masks = None
+        return inputs_embeds, deepstack_visual_embeds, visual_pos_masks
 
-        # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据
-        lang_seq_ctx = seq_ctx.copy(
-            input_ids=None,
-            inputs_embeds=inputs_embeds,
-            deepstack_visual_embeds=deepstack_visual_embeds,
-            visual_pos_masks=visual_pos_masks,
-        )
+    def forward(self, seq_ctx: SequenceContext | list[SequenceContext], loss_ctx: dict[str, CELossContext] | None = None) -> MoEModelOutputs:
+        lang_seq_ctx: SequenceContext | list[SequenceContext]
+        if isinstance(seq_ctx, list):
+            lang_seq_ctx_list: list[SequenceContext] = []
+            for single_seq_ctx in seq_ctx:
+                inputs_embeds, deepstack_visual_embeds, visual_pos_masks = self._prepare_llm_inputs(single_seq_ctx)
+                lang_seq_ctx_list.append(
+                    single_seq_ctx.copy(
+                        input_ids=None,
+                        inputs_embeds=inputs_embeds,
+                        deepstack_visual_embeds=deepstack_visual_embeds,
+                        visual_pos_masks=visual_pos_masks,
+                    )
+                )
+            lang_seq_ctx = lang_seq_ctx_list
+        elif isinstance(seq_ctx, SequenceContext):
+            inputs_embeds, deepstack_visual_embeds, visual_pos_masks = self._prepare_llm_inputs(seq_ctx)
+            lang_seq_ctx = seq_ctx.copy(
+                input_ids=None,
+                inputs_embeds=inputs_embeds,
+                deepstack_visual_embeds=deepstack_visual_embeds,
+                visual_pos_masks=visual_pos_masks,
+            )
         outputs = self.language_model(
             lang_seq_ctx,
             loss_ctx
