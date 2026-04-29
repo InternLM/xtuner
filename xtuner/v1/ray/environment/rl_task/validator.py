@@ -6,7 +6,6 @@ Judgers are self-contained: each one's stage declares everything it needs
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from typing import Any, Literal
 
@@ -59,9 +58,13 @@ class JudgerValidator:
         finally:
             for _name, (_c, env_id) in owned.items():
                 try:
-                    await asyncio.to_thread(_c.close)
+                    await provider.delete(env_id)
                 except Exception as exc:
-                    get_logger().warning(f"isolated judger teardown: {exc}")
+                    get_logger().warning(f"isolated judger gateway delete: {exc}")
+                try:
+                    await _c.aclose()
+                except Exception as exc:
+                    get_logger().warning(f"isolated judger client aclose: {exc}")
         return self._aggregate(results)
 
     # -- internals --
@@ -115,8 +118,7 @@ class JudgerValidator:
             return infer_client, infer_workspace
 
         assert isinstance(j.sandbox, SandboxSpec)
-        client, env_id = await asyncio.to_thread(
-            provider.create,
+        client, env_id = await provider.create(
             image_tag=j.sandbox.image,
             ttl_seconds=j.sandbox.ttl_seconds,
         )
@@ -126,7 +128,7 @@ class JudgerValidator:
         ws = j.sandbox.workspace_path
         await exec_in(client, f"mkdir -p {ws}")
         try:
-            blob = await asyncio.to_thread(infer_client.download_file, infer_workspace)
+            blob = await infer_client.download_file(infer_workspace)
             await http_upload(
                 client,
                 f"/tmp/_ws_{j.name}.tar.gz",

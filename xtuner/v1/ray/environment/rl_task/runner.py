@@ -132,11 +132,16 @@ class Runner:
                 metadata=_infer_metadata(ctx),
             )
         finally:
-            if client:
+            if env_id is not None:
                 try:
-                    await asyncio.to_thread(client.close)
+                    await provider.delete(env_id)
                 except Exception as exc:
-                    get_logger().warning(f"[{tid}] teardown failed: {exc}")
+                    get_logger().warning(f"[{tid}] gateway delete failed: {exc}")
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception as exc:
+                    get_logger().warning(f"[{tid}] client aclose failed: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -154,17 +159,17 @@ def _infer_metadata(ctx: dict[str, Any]) -> dict[str, Any]:
 
 async def _dump_daemon_log(client) -> None:
     try:
-        data = await asyncio.to_thread(client.download_file, "/tmp/agent_daemon.log")
+        data = await client.download_file("/tmp/agent_daemon.log")
         get_logger().error(f"agent daemon log tail:\n{data.decode(errors='replace')[-4000:]}")
     except Exception as exc:
         get_logger().warning(f"could not download daemon log: {exc}")
 
 
 _ACQUIRE_MAX_ATTEMPTS = 3
-# Sandbox cold-start can take 30-60s under load.  Give it a generous
-# window; gateway.py used to loop 300×2s = 10 min (overkill), 30s was
-# too tight.  60s is a reasonable middle ground.
-_HEALTH_MAX_WAIT_SEC = 30
+# Sandbox cold-start can take 30-60s under load; pathological boots run
+# longer.  With async waits this budget is cheap (no thread tied up), so
+# stay generous to avoid spurious "unhealthy" → delete → recreate churn.
+_HEALTH_MAX_WAIT_SEC = 600
 _HEALTH_POLL_INTERVAL_SEC = 2
 
 
@@ -172,16 +177,22 @@ async def _acquire_ready_sandbox(provider: Any, spec: Any) -> tuple[Any, str]:
     """Create a sandbox + wait for /health to respond before returning.
 
     Retries on create-fail or /health-never-becomes-ok (up to
-    :data:`_ACQUIRE_MAX_ATTEMPTS` times).  Gateway-level concurrency is
-    bounded by the provider's urllib3 ``pool_maxsize`` — no separate
-    asyncio semaphore needed.
+    :data:`_ACQUIRE_MAX_ATTEMPTS` times).  Burst protection is enforced
+    inside ``provider.create`` via a token-bucket rate limiter.
+
+    Args:
+        provider (Any): Async sandbox provider exposing ``create`` /
+            ``delete``.
+        spec (Any): Sandbox spec with ``image`` and ``ttl_seconds``.
+
+    Returns:
+        tuple[Any, str]: Client and env_id of a healthy sandbox.
     """
 
     last_err: Exception | None = None
     for attempt in range(1, _ACQUIRE_MAX_ATTEMPTS + 1):
         try:
-            client, env_id = await asyncio.to_thread(
-                provider.create,
+            client, env_id = await provider.create(
                 image_tag=spec.image,
                 ttl_seconds=spec.ttl_seconds,
             )
@@ -196,9 +207,13 @@ async def _acquire_ready_sandbox(provider: Any, spec: Any) -> tuple[Any, str]:
 
         get_logger().warning(f"sandbox {env_id} never became healthy; deleting and retrying")
         try:
-            await asyncio.to_thread(client.stop_heartbeat)
+            await provider.delete(env_id)
         except Exception as exc:
-            get_logger().warning(f"cleanup of unhealthy {env_id}: {exc}")
+            get_logger().warning(f"delete of unhealthy {env_id} failed: {exc}")
+        try:
+            await client.aclose()
+        except Exception as exc:
+            get_logger().warning(f"aclose of unhealthy {env_id} failed: {exc}")
         last_err = RuntimeError(f"sandbox {env_id} unhealthy")
 
     raise RuntimeError(f"could not acquire a healthy sandbox after {_ACQUIRE_MAX_ATTEMPTS} attempts: {last_err}")
@@ -210,7 +225,7 @@ async def _wait_healthy(client: Any) -> bool:
     deadline = time.monotonic() + _HEALTH_MAX_WAIT_SEC
     while time.monotonic() < deadline:
         try:
-            h = await asyncio.to_thread(client.health_check)
+            h = await client.health_check()
             if h.get("ok"):
                 return True
         except Exception as exc:

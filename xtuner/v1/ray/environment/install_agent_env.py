@@ -7,7 +7,6 @@ from typing import Callable, List, Self, Tuple
 
 import ray
 from lagent.serving.sandbox.providers.gateway import GatewayProvider
-from xtuner.v1.ray.environment.rl_task.schemas import SandboxSpec
 
 from xtuner.v1.data_proto.rl_data import (
     RLDataFlowItem,
@@ -16,6 +15,7 @@ from xtuner.v1.data_proto.rl_data import (
     update_dataflow_item,
 )
 from xtuner.v1.ray.environment.lagent.schema import AgentMessage
+from xtuner.v1.ray.environment.rl_task.schemas import SandboxSpec
 from xtuner.v1.utils import get_logger
 
 from .base_env import BaseEnvironment
@@ -37,7 +37,8 @@ def check_dead_actors():
 
 
 DEFAULT_GATEWAY = "http://env-gateway.ailab.ailab.ai"
-DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/wangziyi/projs/lagent"
+# DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/wangziyi/projs/lagent"
+DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
 
 
 def _import_from_path(path: str):
@@ -127,6 +128,11 @@ class InstallAgentEnvironment(BaseEnvironment):
                 continue
             if result == "Passed":
                 passed_data_items.append(sample)
+            elif result["env"]["rollout"]["finish_reason"] == "failed":
+                # run_single's defensive mark_failed path — env.agent/env.judger
+                # are None. Same treatment as the top-level "Failed" string:
+                # drop the sample.
+                continue
             elif result["env"]["rollout"]["finish_reason"] == "abort":
                 # sample.env.rollout.state = RolloutState.ABORTED
                 # agent_state_dict = self.agent.state_dict(sample.uid.observation_id)
