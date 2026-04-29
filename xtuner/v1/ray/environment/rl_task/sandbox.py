@@ -185,7 +185,7 @@ class ReadFileHook(Hook):
         path = _resolve(self.path, ctx)
         key = _resolve(self.key, ctx)
         try:
-            blob = await asyncio.to_thread(client.download_file, path)
+            blob = await client.download_file(path)
             content = blob.decode(self.encoding, errors=self.errors)
             ctx.setdefault("pulled", {})[key] = content
         except Exception as exc:
@@ -378,7 +378,7 @@ async def exec_in(
         command = _expand_vars(command, env)
         prefix = " ".join(f'{k}="{v}"' for k, v in env.items())
         command = f"{prefix} {command}"
-    result = await asyncio.to_thread(client.execute, command, cwd, timeout_sec)
+    result = await client.execute(command, cwd, timeout_sec)
     rc = _result_code(result)
     if raise_on_error and rc != 0:
         raise RuntimeError(f"command failed (return_code={rc}): {command}\nstderr: {result.get('stderr', '')[:1000]}")
@@ -386,14 +386,7 @@ async def exec_in(
 
 
 async def http_upload(client: Any, target_path: str, content_b64: str) -> None:
-    def _post() -> None:
-        resp = client.session.post(
-            f"{client.url}/upload",
-            json={"target_path": target_path, "content_b64": content_b64},
-        )
-        resp.raise_for_status()
-
-    await asyncio.to_thread(_post)
+    await client.upload_bytes(target_path, base64.b64decode(content_b64))
 
 
 async def upload_tar_and_extract(
@@ -433,7 +426,7 @@ async def download_path(client: Any, remote_path: str) -> tuple[bytes, str]:
     is_dir = "DIR" in (check.get("stdout") or "")
 
     if not is_dir:
-        blob = await asyncio.to_thread(client.download_file, remote_path)
+        blob = await client.download_file(remote_path)
         return blob, "file"
 
     # Tar the dir into /tmp, download, remove the tmp.
@@ -446,7 +439,7 @@ async def download_path(client: Any, remote_path: str) -> tuple[bytes, str]:
         f'cd "{parent}" && tar czf {tar_remote} "{name}"',
     )
     try:
-        blob = await asyncio.to_thread(client.download_file, tar_remote)
+        blob = await client.download_file(tar_remote)
     finally:
         await exec_in(client, f"rm -f {tar_remote}", raise_on_error=False)
     return blob, "dir"
