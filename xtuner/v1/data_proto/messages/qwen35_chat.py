@@ -138,8 +138,12 @@ def qwen35_tokenize_fn_fastspeed(
     add_generation_prompt=False,
     add_vision_id=False,
     return_labels=True,
+    enable_thinking=None,
 ):
-    enable_thinking = any("reasoning_content" in msg for msg in messages)
+    if enable_thinking is None:
+        enable_thinking = any("reasoning_content" in msg for msg in messages)
+    else:
+        enable_thinking = enable_thinking
 
     image_count = 0
     video_count = 0
@@ -391,7 +395,13 @@ class Qwen35ChatMessages(BaseModel):
     tools: Optional[List[Dict]] = None
 
     def tokenize(
-        self, tokenizer: PreTrainedTokenizer, chat_template: HybridChatTemplate, add_vision_id=False, **kwargs
+        self,
+        tokenizer: PreTrainedTokenizer,
+        chat_template: HybridChatTemplate,
+        add_vision_id=False,
+        add_generation_prompt=False,
+        enable_thinking=None,
+        **kwargs,
     ) -> Dict:
         is_pretrain = False
         if len(self.messages) == 1 and self.messages[0]["role"] == "pretrain":
@@ -416,6 +426,12 @@ class Qwen35ChatMessages(BaseModel):
                     self.messages.insert(0, {"role": "system", "content": chat_template.default_system})
 
             token_ids, label_ids = qwen35_tokenize_fn_fastspeed(
-                self.messages, tokenizer, self.tools, add_vision_id=add_vision_id, return_labels=True
+                self.messages,
+                tokenizer,
+                self.tools,
+                add_vision_id=add_vision_id,
+                return_labels=True,
+                add_generation_prompt=add_generation_prompt,
+                enable_thinking=enable_thinking,
             )
         return {"input_ids": token_ids, "labels": label_ids}

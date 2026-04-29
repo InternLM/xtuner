@@ -26,27 +26,33 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
         self.data_judger_mapping = data_judger_mapping
         super().__init__(*args, **kwargs)
 
-    # TODO: tool call
     def __call__(self, item: dict, media_root: str = "", **kwargs) -> RolloutState:
         extra_info = item.get("extra_info", {})
-        message = item["prompt"]
+        if isinstance(item["prompt"], dict):
+            assert "messages" in item["prompt"], "When prompt is a dict, it must contain 'messages' key"
+            assert "tools" in item["prompt"], "When prompt is a dict, it must contain 'tools' key"
+            messages = item["prompt"]["messages"]
+            tools = item["prompt"]["tools"]
+        else:
+            messages = item["prompt"]
+            tools = None
         system_prompt = getattr(self, "system_prompt", None)
         if system_prompt:
-            if message[0]["role"] == "system":
-                message = message[1:]
-            message = [{"role": "system", "content": system_prompt}] + message
+            if messages[0]["role"] == "system":
+                messages = messages[1:]
+            messages = [{"role": "system", "content": system_prompt}] + messages
 
-        data = super().__call__({"messages": message}, media_root=media_root)
+        data = super().__call__({"messages": messages, "tools": tools}, media_root=media_root)
 
         if self.state == "cache":
             return RolloutState(
-                message=message,
+                message=messages,
                 num_tokens=data["num_tokens"],
                 proxy_attn_flops=data.get("proxy_attn_flops", float(data["num_tokens"])),
             )
         else:
             data = cast(QwenVL3DataItem, data)
-            image_data, _ = replace_image_context_and_collect_media_data(message, media_root, True)
+            image_data, _ = replace_image_context_and_collect_media_data(messages, media_root, True)
             if image_data:
                 extra_info["image_data"] = image_data
 
@@ -78,7 +84,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
                 mapped_judger_name_and_weight = {data_source: 1.0}
 
             return RolloutState(
-                message=message,
+                message=messages,
                 num_tokens=data["num_tokens"],
                 proxy_attn_flops=data.get("proxy_attn_flops", float(data["num_tokens"])),
                 prompt_ids=prompt_token_ids,
@@ -119,4 +125,6 @@ class RLQwen3VLTokenizeFnConfig(Qwen3VLTokenizeFnConfig):
             system_message=self.system_message,
             tokenizer_hash=tokenizer_hash,
             ignore_multimodal_info=self.ignore_multimodal_info,
+            add_generation_prompt=self.add_generation_prompt,
+            enable_thinking=self.enable_thinking,
         )
