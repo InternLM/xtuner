@@ -93,7 +93,7 @@ class PartialRolloutHandler:
             response_ids = rollout_state.response_ids or []
             expect_tokens_num = len(prompt_ids) + len(response_ids) - 1
             assert len(concat_routed_experts) == expect_tokens_num, (
-                f"After concatenation, routed_experts len: {len(concat_routed_experts)}, expected tokens num: {expect_tokens_num}"
+                f"After concatenation, routed_experts len: {len(concat_routed_experts)}, expected tokens num: {expect_tokens_num}, prompt len: {len(prompt_ids)}, response len: {len(response_ids)}, history routed_experts len: {history_routed_experts_len}, current routed_experts len: {cur_routed_experts_len}"
             )
             logger.info(
                 f"[PartialRolloutHandler] Postprocess rollout {rollout_state.uid}: "
@@ -110,7 +110,17 @@ class PartialRolloutHandler:
                 f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"
             )
         elif history_routed_experts_ref is None and cur_routed_experts_ref is not None:
-            rollout_state.routed_experts = cur_routed_experts_ref
+            prompt_ids = rollout_state.prompt_ids or []
+            response_ids = rollout_state.response_ids or []
+            expect_tokens_num = len(prompt_ids) + len(response_ids) - 1
+            cur_routed_experts_data = ray.get(cur_routed_experts_ref)
+            if cur_routed_experts_data.shape[0] != expect_tokens_num:
+                logger.warning(
+                    f"Routed experts shape {cur_routed_experts_data.shape} does not match total tokens {expect_tokens_num}, maybe due to some error in the model side. We will try to truncate the routed experts to match the tokens, but please check if there is any error in the model side."
+                )
+                cur_routed_experts_data = cur_routed_experts_data[:expect_tokens_num, :, :]
+            routed_experts = ray.put(cur_routed_experts_data)
+            rollout_state.routed_experts = routed_experts
         elif history_routed_experts_ref is not None and cur_routed_experts_ref is None:
             rollout_state.routed_experts = history_routed_experts_ref
 
