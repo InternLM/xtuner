@@ -271,10 +271,16 @@ class SyncProduceStrategy(ProduceStrategy):
             # 如果被过滤的数据就放到 put_to_filtered pool 中
             for task in done_tasks:
                 items = task.result()
-                is_valid = self.is_valid_sample_fn(items)
+
                 for item in items:
                     update_sample_version(item, model_step)
                 refresh_seq_staleness(items, train_step)
+
+                is_valid = self.is_valid_sample_fn(items)
+                if not is_valid:
+                    for item in items:
+                        item.status = Status.FILTERED
+
                 await replay_buffer.put(items, task_name)
                 if not is_valid:
                     continue
@@ -377,10 +383,12 @@ class AsyncProduceStrategy(ProduceStrategy):
             update_sample_version(item, model_step)
         refresh_seq_staleness(items, current_train_step)
         items = expire_group_if_needed(items, self.stale_threshold)
+
         is_valid = self.is_valid_sample_fn(items)
         if not is_valid:
             for item in items:
                 item.status = Status.FILTERED
+
         await replay_buffer.put(items, task_name)
         return is_valid
 
