@@ -25,6 +25,8 @@ class MTPConfig(BaseModel):
             Default: False.
         detach_mtp_lm_head_weight (bool): Whether to detach the LM head weight.
             This is used in RL training. Default is False.
+        detach_mtp_inputs (bool): Whether to detach the input embeddings and hidden states.
+            This is used in RL training. Default is False.
         loss_scaling_factor (float): Scaling factor for MTP loss. The total MTP loss
             is computed as the average of losses across all depths, multiplied by
             this factor. Default: 0.1.
@@ -46,4 +48,5 @@ class MTPConfig(BaseModel):
     num_layers: Annotated[int, Parameter(group="model")]
     share_weights: Annotated[bool, Parameter(group="model")] = False
     detach_mtp_lm_head_weight: Annotated[bool, Parameter(group="model")] = False
+    detach_mtp_inputs: Annotated[bool, Parameter(group="model")] = False
     loss_scaling_factor: Annotated[float, Parameter(group="model")] = 0.1
