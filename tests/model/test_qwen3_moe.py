@@ -347,6 +347,149 @@ class TestQwen3MoE(DeterministicDDPTestCase):
 
                 self.assertListEqual(safetensor_keys, model_index_keys)
         dist.barrier()
+
+    @parametrize.parametrize(
+        "device,dispatcher,ep_size",
+        [
+            ("cuda", None, 1),
+            ("cuda", "all2all", 4),
+            ("cuda", "all2all", 8),
+        ],
+    )
+    def test_async_save_hf(self, device, dispatcher, ep_size):
+        self.create_pg(device)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            syncdir = [tmpdir]
+            if self.world_size > 1:
+                dist.broadcast_object_list(syncdir, src=0)
+            tmpdir = Path(syncdir[0])
+            saved_hf_path = tmpdir / "hf-1"
+            origin_hf_path = Path(QWEN3_MOE_PATH)
+            origin_index_path = origin_hf_path / "model.safetensors.index.json"
+            saved_index_path = saved_hf_path / "model.safetensors.index.json"
+
+            with torch.device("meta"):
+                cfg = get_model_config_from_hf(QWEN3_MOE_PATH)
+                cfg.compile_cfg = False
+                cfg.dispatcher = dispatcher
+                cfg.ep_size = ep_size
+                qwen_model = cfg.build().to(torch.bfloat16)
+
+            fsdp_config = FSDPConfig(
+                ep_size=ep_size,
+                cpu_offload=False,
+            )
+            qwen_model.fully_shard(fsdp_config=fsdp_config)
+            qwen_model.from_hf(QWEN3_MOE_PATH)
+
+            tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
+
+            qwen_model.async_save_hf(hf_dir=saved_hf_path)
+            qwen_model.wait_async_hf()
+
+            if dist.get_rank() == 0:
+                tokenizer.save_pretrained(str(saved_hf_path))
+
+            dist.barrier()
+
+            self.assertTrue(saved_hf_path.exists())
+            self.assertTrue(saved_index_path.exists())
+
+            dist.barrier()
+
+            if dist.get_rank() == 0:
+                with open(origin_index_path, "r") as f:
+                    origin_index = json.load(f)
+                with open(saved_index_path, "r") as f:
+                    saved_index = json.load(f)
+                with open(origin_hf_path / "config.json", "r") as f:
+                    origin_config = json.load(f)
+                with open(saved_hf_path / "config.json", "r") as f:
+                    saved_config = json.load(f)
+
+                self.assertTrue(check_dict_equal(origin_config, saved_config))
+                self.assertListEqual(
+                    sorted(origin_index["weight_map"].keys()),
+                    sorted(saved_index["weight_map"].keys()),
+                )
+
+                cache_fh = {}
+                for key in origin_index["weight_map"].keys():
+                    origin_safetensor_name = origin_index["weight_map"][key]
+                    saved_safetensor_name = saved_index["weight_map"][key]
+
+                    if origin_safetensor_name not in cache_fh:
+                        cache_fh[origin_safetensor_name] = safe_open(
+                            str(origin_hf_path / origin_safetensor_name), framework="pt"
+                        )
+                    if saved_safetensor_name not in cache_fh:
+                        cache_fh[saved_safetensor_name] = safe_open(
+                            str(saved_hf_path / saved_safetensor_name), framework="pt"
+                        )
+
+                    origin_tensor = cache_fh[origin_safetensor_name].get_tensor(key)
+                    saved_tensor = cache_fh[saved_safetensor_name].get_tensor(key)
+                    self.assertTrue(torch.equal(origin_tensor, saved_tensor), f"tensor {key} is not equal")
+
+                safetensor_keys = []
+                for safetensor_path in saved_hf_path.glob("*.safetensors"):
+                    fh = cache_fh[safetensor_path.name]
+                    safetensor_keys.extend(fh.keys())
+                    safetensor_keys.sort()
+                model_index_keys = list(saved_index["weight_map"].keys())
+                model_index_keys.sort()
+                self.assertListEqual(safetensor_keys, model_index_keys)
+
+            dist.barrier()
+
+            del qwen_model
+            torch.cuda.empty_cache()
+
+            input_ids = tokenizer("吃葡萄不吐葡萄皮", return_tensors="pt").input_ids.to("cuda")
+            labels = input_ids.clone()
+
+            hf_origin_model = AutoModelForCausalLM.from_pretrained(
+                origin_hf_path,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                device_map="cuda",
+            )
+            patch_hf_rms_norm(hf_origin_model)
+            hf_origin_model.eval()
+            with torch.no_grad():
+                origin_output = hf_origin_model(input_ids=input_ids, labels=labels)
+            origin_loss = origin_output.loss.detach().cpu()
+            origin_logits = origin_output.logits.detach().cpu()
+
+            del hf_origin_model
+            del origin_output
+            torch.cuda.empty_cache()
+
+            hf_saved_model = AutoModelForCausalLM.from_pretrained(
+                saved_hf_path,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                device_map="cuda",
+            )
+            patch_hf_rms_norm(hf_saved_model)
+            hf_saved_model.eval()
+            with torch.no_grad():
+                saved_output = hf_saved_model(input_ids=input_ids, labels=labels)
+            saved_loss = saved_output.loss.detach().cpu()
+            saved_logits = saved_output.logits.detach().cpu()
+
+            self.assertTrue(
+                torch.allclose(origin_loss, saved_loss, rtol=1e-2, atol=1e-2),
+                f"origin_loss={origin_loss.item()}, saved_loss={saved_loss.item()}",
+            )
+            self.assertTrue(torch.equal(origin_logits.argmax(dim=-1), saved_logits.argmax(dim=-1)))
+
+            del hf_saved_model
+            del saved_output
+            torch.cuda.empty_cache()
+
+            dist.barrier()
     
     def test_fope_auto_config_with_remote_code(self):
         self.create_pg('cuda')
@@ -462,6 +605,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
 def create_model_from_hf(load_from: Path, dispatcher: str, ep_size: int):
     with torch.device("meta"):
         cfg : Qwen3MoEConfig = get_model_config_from_hf(load_from)
+        cfg.compile_cfg = False
         cfg.dispatcher = dispatcher
         cfg.ep_size = ep_size
         qwen_model = cfg.build()
