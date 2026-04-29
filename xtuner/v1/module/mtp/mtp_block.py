@@ -100,7 +100,7 @@ class MTPBlock(nn.Module):
                 - outputs[k]: Outputs for predicting token at position (i+k+1)
         """
         mtp_outputs = []
-        current_hidden_states = hidden_states
+        current_hidden_states = hidden_states.detach() if self.mtp_config.detach_mtp_inputs else hidden_states
         current_seq_ctx = seq_ctx
 
         num_steps = self.mtp_config.num_layers
@@ -115,6 +115,8 @@ class MTPBlock(nn.Module):
                 future_embeddings = embed_tokens_fn(current_seq_ctx.input_ids)  # type: ignore[arg-type]
             else:
                 future_embeddings = current_seq_ctx.inputs_embeds
+            if self.mtp_config.detach_mtp_inputs:
+                future_embeddings = future_embeddings.detach()
 
             # Forward through MTP layer
             current_hidden_states, router_results, router_weights = layer(
