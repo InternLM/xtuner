@@ -34,7 +34,7 @@ from .trace import ChatTraceStore, normalize_trace_payload
 
 
 class ResponsesRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     session_uid: int | None = None
     model: str | None = None
@@ -53,7 +53,7 @@ class ResponsesRequest(BaseModel):
 
 
 class ResponsesUsage(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     input_tokens: int
     output_tokens: int
@@ -61,7 +61,7 @@ class ResponsesUsage(BaseModel):
 
 
 class ResponsesResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     object: Literal["response"] = "response"
