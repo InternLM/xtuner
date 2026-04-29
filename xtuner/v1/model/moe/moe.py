@@ -26,6 +26,8 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import (
+    AuxLoss,
+    AuxLossConfig,
     BalancingLossConfig,
     BalancingLossContext,
     BaseLossContext,
@@ -62,6 +64,7 @@ from xtuner.v1.utils import (
     get_logger,
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
+from xtuner.v1.utils.router_offload import maybe_offload_tensor
 
 
 if TYPE_CHECKING:
@@ -149,6 +152,8 @@ class MoEConfig(TransformerConfig):
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
     mtp_config: MTPConfig | None = None
     freeze_routers: bool = False
+    router_async_offload: bool = False
+    aux_loss_cfg: AuxLossConfig = AuxLossConfig()
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -201,6 +206,34 @@ class MoE(BaseModel):
         self._maybe_enable_compile(self.compile_cfg)
 
         self.offload_stream = torch.cuda.Stream()
+        aux_loss = self.config.aux_loss_cfg.build(
+            n_routed_experts=self.config.n_routed_experts,
+        )
+        self.aux_loss: AuxLoss = aux_loss
+
+    def _extract_aux_loss_ctx(
+        self,
+        loss_ctx: list[MoELossContextDict] | MoELossContextDict | None,
+    ) -> tuple[
+        list[BalancingLossContext] | BalancingLossContext | None,
+        list[ZLossContext] | ZLossContext | None,
+    ]:
+        if loss_ctx is None:
+            return None, None
+
+        if isinstance(loss_ctx, list):
+            balancing_ctx: list[BalancingLossContext] = []
+            z_ctx: list[ZLossContext] = []
+            for ctx in loss_ctx:
+                ctx_bal = ctx.get("balancing")
+                if ctx_bal is not None:
+                    balancing_ctx.append(ctx_bal)
+                ctx_z = ctx.get("z_loss")
+                if ctx_z is not None:
+                    z_ctx.append(ctx_z)
+            return balancing_ctx, z_ctx
+
+        return loss_ctx.get("balancing"), loss_ctx.get("z_loss")
 
     def _select_non_pad_router_logits(
         self,
@@ -439,12 +472,14 @@ class MoE(BaseModel):
                 cat_position_embeddings[1].chunk(len(seq_ctx_list), dim=1),
             )
         )
+        cat_mask = torch.cat([ctx.mask for ctx in seq_ctx_list], dim=1)
 
         # Initialize output containers
         output: dict = {}
 
         router_logits_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
         router_weights_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
+        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx_list)
 
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
@@ -505,9 +540,26 @@ class MoE(BaseModel):
                 # Update hidden states and collect router results
                 for i, hidden_states in enumerate(hidden_states):
                     hidden_states_list[i] = hidden_states
-                    router_logits_list[i][f"layer{idx}"] = router_logits[i]
-                    router_weights_list[i][f"layer{idx}"] = router_weights[i]
+                    router_logits_list[i][f"layer{idx}"] = maybe_offload_tensor(
+                        router_logits[i],
+                        enable_async_offload=self.config.router_async_offload,
+                        offload_stream=self.offload_stream,
+                    )
+                    router_weights_list[i][f"layer{idx}"] = maybe_offload_tensor(
+                        router_weights[i],
+                        enable_async_offload=self.config.router_async_offload,
+                        offload_stream=self.offload_stream,
+                    )
 
+                self.aux_loss.accumulate(
+                    router_weights=torch.cat(router_weights, dim=0),
+                    router_logits=torch.cat(router_logits, dim=0),
+                    num_experts_per_tok=self.config.num_experts_per_tok,
+                    mask=cat_mask,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
+                    dim=0,
+                )
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
         cat_hidden_states = self.norm(cat_hidden_states)
@@ -525,64 +577,19 @@ class MoE(BaseModel):
             moe_extra_info.append(extra_info)
         output["extra_info"] = moe_extra_info
 
-        # Handle router results for all micro-batches
-        all_router_logits = []
-        all_router_weights = []
-
-        for micro_batch_idx, (micro_batch_router_logits, micro_batch_router_weights) in enumerate(
-            zip(router_logits_list, router_weights_list)
-        ):
-            if micro_batch_router_logits:
-                _router_logits_list = list(micro_batch_router_logits.values())
-                _router_weights_list = list(micro_batch_router_weights.values())
-
-                attn_mask = seq_ctx_list[micro_batch_idx].mask
-                router_logits = self._select_non_pad_router_logits(_router_logits_list, attn_mask)
-                router_weights = self._select_non_pad_router_logits(_router_weights_list, attn_mask)
-                all_router_logits.append(router_logits)
-                all_router_weights.append(router_weights)
-
-        if all_router_logits:
-            # Concatenate router logits from all micro-batches
-            combined_router_logits = torch.cat(all_router_logits, dim=1)  # [num_layers, total_seq, num_experts]
-            combined_router_weights = torch.cat(all_router_weights, dim=1)
-
-            # Build balancing loss contexts
-            balancing_loss_ctx_list: list[BalancingLossContext] = []
-            for loss_ctx_dict in loss_ctx_list:
-                bal_ctx = loss_ctx_dict.get("balancing")
-                if bal_ctx is not None:
-                    balancing_loss_ctx_list.append(bal_ctx)
-
-            if balancing_loss_ctx_list:
-                # Compute balancing loss by passing all parameters to forward
-                balancing_loss = sum(
-                    ctx(
-                        combined_router_weights,
-                        self.config.n_routed_experts,
-                        self.config.num_experts_per_tok,
-                    )
-                    for ctx in balancing_loss_ctx_list
-                )
-                output["balancing_loss"] = balancing_loss
-
-            # Calculate z-loss across all micro-batches using loss context
-            z_loss_ctx_list: list[ZLossContext] = []
-            for loss_ctx_dict in loss_ctx_list:
-                z_ctx = loss_ctx_dict.get("z_loss")
-                if z_ctx is not None:
-                    z_loss_ctx_list.append(z_ctx)
-
-            if z_loss_ctx_list:
-                # Compute z-loss by passing router_logits to forward
-                z_loss = sum(ctx(combined_router_logits) for ctx in z_loss_ctx_list)
-                output["z_loss"] = z_loss
-
-            # Calculate tokens per expert for bias update (if applicable)
-            tokens_per_expert_global = self._cal_tokens_per_expert(combined_router_logits)
-            output["tokens_per_expert_global"] = tokens_per_expert_global
-
-            del combined_router_logits
+        split_aux_output = self.aux_loss.finalize(
+            balancing_ctx=balancing_ctx,
+            z_ctx=z_ctx,
+            num_experts_per_tok=self.config.num_experts_per_tok,
+            non_pad_token=int(cat_mask.sum().item()),
+        )
+        assert split_aux_output is not None
+        balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
+        if balancing_loss is not None:
+            output["balancing_loss"] = balancing_loss
+        if z_loss is not None:
+            output["z_loss"] = z_loss
+        output["tokens_per_expert_global"] = tokens_per_expert_global
 
         if self.config.return_router_results or return_router_logits:
             # raise NotImplementedError
@@ -634,8 +641,8 @@ class MoE(BaseModel):
 
         output["router_logits"] = {}
         output["router_weights"] = {}
-
         self._mark_dynamic(seq_ctx)
+        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
@@ -666,8 +673,25 @@ class MoE(BaseModel):
                         seq_ctx=seq_ctx,
                     )
                 hidden_states, router_results, router_weights = layer_results
-                output["router_logits"][f"layer{idx}"] = router_results
-                output["router_weights"][f"layer{idx}"] = router_weights
+                output["router_logits"][f"layer{idx}"] = maybe_offload_tensor(
+                    router_results,
+                    enable_async_offload=self.config.router_async_offload,
+                    offload_stream=self.offload_stream,
+                )
+                output["router_weights"][f"layer{idx}"] = maybe_offload_tensor(
+                    router_weights,
+                    enable_async_offload=self.config.router_async_offload,
+                    offload_stream=self.offload_stream,
+                )
+                self.aux_loss.accumulate(
+                    router_weights=router_weights,
+                    router_logits=router_results,
+                    num_experts_per_tok=self.config.num_experts_per_tok,
+                    mask=seq_ctx.mask,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
+                    dim=0,
+                )
 
             if self.config.return_hidden_states:
                 output["hidden_states"].append(hidden_states)
@@ -711,6 +735,15 @@ class MoE(BaseModel):
 
                 output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
                 output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
+                self.aux_loss.accumulate(
+                    router_weights=mtp_router_weights,
+                    router_logits=mtp_router_results,
+                    num_experts_per_tok=self.config.num_experts_per_tok,
+                    mask=mtp_seq_ctx.mask,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
+                    dim=0,
+                )
 
             # Average MTP losses across depths and scale
             mtp_losses = mtp_losses / len(mtp_loss_ctx_list)
@@ -719,35 +752,23 @@ class MoE(BaseModel):
             # Add to total loss
             output["mtp_loss"] = scaled_mtp_loss
 
-        router_logits_list = list(output["router_logits"].values())  # type: ignore
-        router_weights_list = list(output["router_weights"].values())  # type: ignore
-        router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
-        router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
+        non_pad_token = int(seq_ctx.mask.sum().item())
 
         # Calculate balancing loss using loss context
-        if loss_ctx is not None:
-            balancing_ctx = loss_ctx.get("balancing")
-            if balancing_ctx is not None:
-                # Compute balancing loss by passing all parameters to forward
-                balancing_loss = balancing_ctx(
-                    router_weights,
-                    self.config.n_routed_experts,
-                    self.config.num_experts_per_tok,
-                )
-                output["balancing_loss"] = balancing_loss
-
-        # Calculate z-loss using loss context
-        if loss_ctx is not None:
-            z_loss_ctx = loss_ctx.get("z_loss")
-            if z_loss_ctx is not None:
-                # Compute z-loss by passing router_logits to forward
-                z_loss = z_loss_ctx(router_logits)
-                output["z_loss"] = z_loss
-
-        tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
+        # if loss_ctx is not None:
+        split_aux_output = self.aux_loss.finalize(
+            balancing_ctx=balancing_ctx,
+            z_ctx=z_ctx,
+            num_experts_per_tok=self.config.num_experts_per_tok,
+            non_pad_token=non_pad_token,
+        )
+        assert split_aux_output is not None
+        balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
+        if balancing_loss is not None:
+            output["balancing_loss"] = balancing_loss
+        if z_loss is not None:
+            output["z_loss"] = z_loss
         output["tokens_per_expert_global"] = tokens_per_expert_global
-
-        del router_logits
 
         if self.config.return_router_results or return_router_logits:
             # raise NotImplementedError

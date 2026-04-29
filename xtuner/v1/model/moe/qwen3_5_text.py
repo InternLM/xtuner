@@ -5,6 +5,7 @@ import torch
 from pydantic import Field, computed_field
 from typing_extensions import override
 
+from xtuner.v1.loss import AuxLossConfig
 from xtuner.v1.model.base import (
     DEFAULT_FLOAT8_CFG,
     HFSaveCfg,
@@ -270,3 +271,5 @@ class Qwen3_5_VLTextMoE35BA3BConfig(Qwen3_5_VLTextMoEConfig):
     )
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
     z_loss_cfg: ZLossConfig | None = None
+    aux_loss_cfg: AuxLossConfig = AuxLossConfig()
+    router_async_offload: bool = False
