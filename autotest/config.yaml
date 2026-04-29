@@ -656,21 +656,20 @@ case:
                 command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume-vl sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
             timeout: 10800
 
-    qwen3-5-sft-mtp:
+    qwen3-5-sft-mtp-vl:
         -
             type: sft
             parameters:
-                config: autotest/config/qwen3_5_mtp.py
+                config: autotest/config/qwen3_5_mtp_vl.py
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
-                num_nodes: 1
-                cpus_per_task: 80
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
-                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
                     - XTUNER_DETERMINISTIC=true
             assert_info:
-                base_metric: qwen3-5-sft-mtp/00f7e16/tracker.jsonl
+                base_metric: qwen3-5-sft-mtp-vl/00f7e16/tracker.jsonl
                 check_metrics:
                     grad_norm: 0.000001
                     loss/local_loss: 0.000001
