@@ -75,7 +75,9 @@ def main() -> int:
     parser.add_argument(
         "--tasks-root",
         type=Path,
-        default=Path("/mnt/shared-storage-user/llmit/user/liukuikun/workspace/bench/terminal-bench-2"),
+        default=Path(
+            "/mnt/shared-storage-user/llmit/user/wangziyi/projs/terminalbench2-harbor-p-cluster/terminal-bench-2"
+        ),
         help="Absolute path to the eval tasks directory.",
     )
     parser.add_argument(
