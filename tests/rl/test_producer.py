@@ -1,7 +1,8 @@
-import unittest
 import asyncio
+import unittest
 from unittest.mock import AsyncMock, MagicMock
 
+from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop_manager import (
     AsyncProduceStrategyConfig,
     ProduceBatchStatus,
@@ -10,7 +11,6 @@ from xtuner.v1.rl.agent_loop_manager import (
     SyncProduceStrategyConfig,
 )
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
-from xtuner.v1.data_proto.rl_data import Status
 
 
 class MockRolloutState:
@@ -130,7 +130,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
     async def test_async_produce_strategy(self):
         # 这个async_produce_strategy的测试主要验证超发逻辑 + staleness 优先get的逻辑
-        # 异步的其他功能如 partial_rollout, tail_batch不在这里进行验证 
+        # 异步的其他功能如 partial_rollout, tail_batch不在这里进行验证
         mock_agent_loop = MagicMock()
         mock_agent_loop.pause = AsyncMock()
         mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
@@ -141,7 +141,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             call_count += 1
             for r in rs:
                 if r.id == 999:
-                    r.seq_staleness = 5  
+                    r.seq_staleness = 5
                 else:
                     r.seq_staleness = call_count
                 r.status = Status.COMPLETED
@@ -206,7 +206,6 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             task_name=task_name,
             train_step=2,
             model_step=1,
-            target_cumulative=2,
             progress=progress,
         )
 
@@ -303,18 +302,17 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 task_name=task_name,
                 train_step=1,
                 model_step=0,
-                target_cumulative=1,
                 progress=missing_consumed,
             )
 
-        mismatched_target = ProduceProgress(
+        missing_target = ProduceProgress(
             next_consumer_step=1,
             producer_future_step=1,
             consumed_samples={task_name: 0},
-            target_samples={task_name: 2},
+            target_samples={},
             target_upto_future_step=1,
         )
-        with self.assertRaisesRegex(ValueError, "target_cumulative"):
+        with self.assertRaisesRegex(KeyError, "target_samples"):
             await strategy.produce_batch(
                 mock_agent_loop,
                 sampler,
@@ -323,8 +321,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
                 task_name=task_name,
                 train_step=1,
                 model_step=0,
-                target_cumulative=1,
-                progress=mismatched_target,
+                progress=missing_target,
             )
 
     async def test_async_produce_strategy_records_sample_version_before_staleness_refresh(self):

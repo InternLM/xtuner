@@ -160,7 +160,6 @@ async def _produce_single_task_to_buffer(
     model_step: int,
     update_event: asyncio.Event | None,
     progress: ProduceProgress,
-    target_cumulative: int | None = None,
 ) -> ProduceBatchStatus:
     return await task_runner.produce_strategy.produce_batch(
         task_runner.agent_loop,
@@ -172,7 +171,6 @@ async def _produce_single_task_to_buffer(
         model_step=model_step,
         update_event=update_event,
         progress=progress,
-        target_cumulative=target_cumulative,
     )
 
 
@@ -603,10 +601,12 @@ class AgentLoopManager:
         result.leftover_completed = completed_sample_count
         result.leftover_aborted = aborted_sample_count
         result.leftover_expired = expired_sample_count
-        self.logger.info(f"[AgentLoopManager][{self.name}] get_batch from buffer for task {task_runner.task_name}: "
-                         f"requested={batch_size}, retrieved={len(batch_rollout_states)}, "
-                         f"leftover_completed={completed_sample_count}, leftover_aborted={aborted_sample_count}, "
-                         f"leftover_expired={expired_sample_count}")
+        self.logger.info(
+            f"[AgentLoopManager][{self.name}] get_batch from buffer for task {task_runner.task_name}: "
+            f"requested={batch_size}, retrieved={len(batch_rollout_states)}, "
+            f"leftover_completed={completed_sample_count}, leftover_aborted={aborted_sample_count}, "
+            f"leftover_expired={expired_sample_count}"
+        )
         return result
 
     async def _get_batch_from_buffer(
