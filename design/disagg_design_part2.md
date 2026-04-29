@@ -492,9 +492,6 @@ async def _schedule_one(..., update_event: asyncio.Event | None):
             )
         )
         self._pending_tasks.add(task)
-        # 绑定 task 发起时的模型版本。partial rollout 可能已有更早版本的 prefix；
-        # put 前只为本次新增 token 补这个版本，不能用 task 完成时 manager 的最新版本。
-        self._pending_task_model_steps[task] = model_rollout_step
         return True
 ```
 
@@ -502,7 +499,9 @@ async def _schedule_one(..., update_event: asyncio.Event | None):
 
 `update_event` 是 manager 级暂停信号。`AsyncProduceStrategy` 不再维护 `_pausing` 作为第二套暂停状态；pause drain 只依赖 pending snapshot / claim helper。
 
-`_pending_task_model_steps` 是必要状态：它记录每个 pending rollout task 发起时使用的 `model_rollout_step`。partial rollout 样本的 `response_rollout_steps` 可能已经包含旧 prefix 的更早模型版本；task 完成后只为新增 token 追加该 task 发起时的版本，最终 staleness 仍按 `min(response_rollout_steps)` 计算。这个版本不能从 task 完成时的 manager `_model_rollout_step` 读取。
+不再为 pending task 额外维护 `task -> model_step` 映射。当前约束是：无论共卡还是非共卡，权重更新前都必须先通过 `pause_produce` 清空 `_pending_tasks`，随后才允许 `continue_produce(model_step=...)` 更新 manager 的 `_model_step`。因此一个 `_pending_tasks` 生命周期只对应一个 model step；strategy 在回收 pending 结果时使用本次 `produce_batch` / `pause_produce` 显式传入的 `model_step` 即可。
+
+partial rollout 样本可能已有更早版本的 prefix；`update_sample_version` 只会为新增 token 补当前 model step，最终 staleness 仍按 `min(response_model_steps)` 计算。
 
 ### pause
 
@@ -515,6 +514,7 @@ async def pause_produce(
     replay_buffer,
     task_name: str,
     *,
+    model_step: int,
     progress: ProduceProgress,
 ) -> float:
     ...
@@ -529,7 +529,7 @@ Manager 侧按 `use_global_progress` 选择 progress：
 `AsyncProduceStrategy.pause_produce` 的收尾逻辑为：
 
 ```python
-async def pause_produce(..., *, progress: ProduceProgress) -> float:
+async def pause_produce(..., *, model_step: int, progress: ProduceProgress) -> float:
     pause_start = time.perf_counter()
 
     if await self._pending_count() == 0:
@@ -550,13 +550,12 @@ async def pause_produce(..., *, progress: ProduceProgress) -> float:
         )
         claimed_done = await self._claim_done(done)
         for task in claimed_done:
-            task_model_rollout_step = self._pending_task_model_steps.pop(task)
             await self._put_generated_group(
                 task.result(),
                 replay_buffer,
                 task_name,
                 current_rollout_step=progress.next_consumer_step,
-                model_rollout_step=task_model_rollout_step,
+                model_rollout_step=model_step,
             )
 
         if await self._pending_count() > 0:
@@ -806,6 +805,7 @@ pause_time_s += await strategy.pause_produce(
     task.agent_loop,
     self.replay_buffer,
     task.task_name,
+    model_step=self._model_step,
     progress=pause_progress,
 )
 ```
@@ -880,6 +880,7 @@ def continue_produce(self, model_rollout_step: int) -> None:
 - 所有 `self._pending_tasks = set(pending_tasks)`。
 - strategy 中基于 `previously_completed_count = replay_buffer.count(COMPLETED)` 的局部 batch 判断。
 - strategy 内 `progress=None` 时构造 local progress 的兜底逻辑。
+- `AsyncProduceStrategy._pending_task_model_steps`；pending 生命周期与 manager 当前 `_model_step` 周期一致，回收时由调用方显式传入 `model_step`。
 - `AsyncProduceStrategy._current_rollout_step` 以及 `pause_produce` 中基于它的 fallback。
 - `AsyncProduceStrategy.produce_batch(..., model_rollout_step=None)` 的 fallback；调用方必须显式传入合法 `model_rollout_step`。
 - `AgentLoopManager.produce_loop(start_rollout_step=...)` 覆盖入口；producer 起点只来自 `progress.producer_future_step`。
