@@ -201,21 +201,15 @@ class MTPLossContext(LMHeadLossContext):
         rollout_logprobs = loss_kwargs.logprobs
 
         assert rollout_logprobs is not None
+        assert loss_weight is not None, "loss_weight can not be None"
 
         mtp_logprobs = gather_logprobs(logits, shifted_labels)
-
-        # Use loss_weight from build_batches (globally calibrated) if available,
-        # otherwise fall back to local mask normalization.
-        if loss_weight is not None:
-            kl_weight = loss_weight.flatten()
-        else:
-            mask = (shifted_labels != -100).float()
-            kl_weight = (mask / mask.sum().clamp(min=1)).flatten()
+        loss_weight = loss_weight.flatten()
 
         kl_loss = kl_penalty(
             mtp_logprobs.flatten(),
             rollout_logprobs.flatten(),
-            kl_weight,
+            loss_weight,
             "low_var_kl",
         )
 
