@@ -9,8 +9,7 @@ XTuner 中所有的 loss 计算均涉及两个核心组件 `LossConfig` 和 `Los
 ```python
 import torch
 import torch.nn as nn
-from xtuner.v1.rl.grpo import GRPOLossConfig, GRPOLossContext
-from xtuner.v1.rl.base import RLLossContextInputItem
+from xtuner.v1.rl.loss import GRPOLossConfig, GRPOLossContext, RLLossContextInputItem
 from xtuner.v1.data_proto import SequenceContext
 
 def gather_logprobs(logits, shifted_labels):

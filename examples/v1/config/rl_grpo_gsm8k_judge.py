@@ -12,17 +12,14 @@ from xtuner.v1.data_proto import SampleParams
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.ray.base import AcceleratorResourcesConfig
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
-from xtuner.v1.rl.base.replay_buffer import SyncReplayBufferConfig
-from xtuner.v1.rl.base import WorkerConfig
-from xtuner.v1.rl.base.agent_loop import SingleTurnAgentLoopConfig
-from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
-from xtuner.v1.rl.base.producer import SyncProduceStrategyConfig
-from xtuner.v1.rl.base.sampler import SamplerConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.judger import GSM8KJudgerConfig
+from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.trainer import WorkerConfig
+from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, TaskSpecConfig, SingleTurnAgentLoopConfig, SyncProduceStrategyConfig, SamplerConfig
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.rl.grpo import GRPOLossConfig
+from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.train.rl_colocate_trainer import RLColocateTrainerConfig
 
 # env
@@ -31,7 +28,7 @@ model_path = os.environ["MODEL_PATH"]
 data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ["EVAL_DATA_PATH"]
 enable_return_routed_experts = os.environ.get("ENABLE_RETURN_ROUTED_EXPERTS", "0")
-WORLD_SIZE = int(os.environ.get("WORLD_SIZE", "1"))
+NNODE = int(os.environ.get("WORLD_SIZE", "1"))
 
 # basic settings
 experimental_name = "grpo_gsm8k"
@@ -49,7 +46,7 @@ pack_max_length = 32 * 1024
 # 1. resources
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=8 * WORLD_SIZE,
+    num_workers=8 * NNODE,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )
@@ -68,7 +65,7 @@ rollout_config = RolloutConfig(
 )
 
 # 3. judger
-judger_config = GSM8KRouterJudgerConfig(judger_name="openai/gsm8k")
+judger_config = GSM8KJudgerConfig(judger_name="openai/gsm8k", num_ray_actors=1)
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)
@@ -134,10 +131,13 @@ agent_loop_config = SingleTurnAgentLoopConfig(
 )
 produce_strategy_config = SyncProduceStrategyConfig()
 agent_loop_manager_cfg = AgentLoopManagerConfig(
-    task_name="train_task",
-    agent_loop_config=agent_loop_config,
-    produce_strategy_config=produce_strategy_config,
-    sampler_config=sampler_config,
+    tasks=TaskSpecConfig(
+        task_name="train_task",
+        agent_loop_config=agent_loop_config,
+        judger_config=judger_config,
+        produce_strategy_config=produce_strategy_config,
+        sampler_config=sampler_config,
+    ),
 )
 
 # 6. eval agent loop manager
@@ -167,9 +167,12 @@ eval_agent_loop_config = SingleTurnAgentLoopConfig(
     sample_params=evaluation_sample_params,
 )
 eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
-    task_name="eval_task",
-    agent_loop_config=eval_agent_loop_config,
-    sampler_config=eval_sampler_config,
+    tasks=TaskSpecConfig(
+        task_name="eval_task",
+        agent_loop_config=eval_agent_loop_config,
+        judger_config=judger_config,
+        sampler_config=eval_sampler_config,
+    ),
 )
 
 # 7. evaluator
@@ -180,7 +183,6 @@ trainer = RLColocateTrainerConfig(
     resources=resources,
     train_worker_cfg=train_worker_cfg,  # TODO: uniform naming of cfg and config
     rollout_config=rollout_config,
-    judger_config=judger_config,
     tokenizer_path=model_path,
     replay_buffer_config=SyncReplayBufferConfig(),
     agent_loop_manager_cfg=agent_loop_manager_cfg,

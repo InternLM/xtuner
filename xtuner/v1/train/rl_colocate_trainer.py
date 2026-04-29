@@ -1,37 +1,32 @@
-import asyncio
+import json
 import os
 import random
 from pathlib import Path
+from shutil import rmtree
 from typing import Any, List, Union, cast
 
 import ray
 import torch
 from mmengine.dist import get_rank
+from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict
 from typing_extensions import Literal, TypedDict
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1._writer import get_writer
-from xtuner.v1.data_proto import RolloutState, SampleParams, Status
+from xtuner.v1.data_proto import RolloutState, Status
 from xtuner.v1.data_proto.sequence_context import SequenceContext
-from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
-from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.patch import patch_default_save_plan
-from xtuner.v1.ray.base import AcceleratorResourcesConfig, AutoAcceleratorWorkers
-from xtuner.v1.ray.config.worker import RolloutConfig
-from xtuner.v1.ray.judger.gsm8k import GSM8KRouterJudgerConfig
-from xtuner.v1.ray.judger.native import RouterJudgerConfig, NativeJudgerConfig
-from xtuner.v1.ray.rollout.controller import RolloutController, RolloutControllerProxy
-from xtuner.v1.rl.base import (
-    TrainingControllerProxy,
-    WorkerConfig,
-    WorkerLogItem,
-)
-from xtuner.v1.rl.base.agent_loop_manager import AgentLoopManagerConfig
-from xtuner.v1.rl.base.replay_buffer import ReplayBuffer, SyncReplayBufferConfig, AsyncReplayBufferConfig
+from xtuner.v1.rl.agent_loop import AgentLoopManagerConfig, ProduceBatchResult
 from xtuner.v1.rl.evaluator import EvaluatorConfig
-from xtuner.v1.train.trainer import XTunerMeta
-from xtuner.v1.utils import get_logger, timer
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
+from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
+from xtuner.v1.rl.rollout.worker import RolloutConfig
+from xtuner.v1.rl.trainer.controller import TrainingControllerProxy
+from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers, asyncio_run
+from xtuner.v1.train.trainer import LoadCheckpointConfig, XTunerMeta
+from xtuner.v1.utils import get_logger, is_hf_model_path, set_deterministic, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
 
 
@@ -54,6 +49,23 @@ def check_fa3():
         raise RuntimeError(f"Flash attention v3 runtime error {e}, Please install it first or set XTUNER_USE_FA3=0.")
 
 
+def force_set_tokenize_workers(logger):
+    # To avoid segmentation faults when setting num_workers for the dataloader
+    # The root cause is the incompatibility between fork start method and ray's grpc.
+    # The most fundamental solution is that all processes started in ray should
+    # use spawn start method.
+    tokenize_workers = os.environ.get("XTUNER_TOKENIZE_WORKERS", None)
+    os.environ["XTUNER_TOKENIZE_WORKERS"] = "1"
+    if tokenize_workers is not None and int(tokenize_workers) > 1:
+        logger.warning(
+            f"XTUNER_TOKENIZE_WORKERS is set to {tokenize_workers}, which may cause segmentation faults. Force set XTUNER_TOKENIZE_WORKERS to 1 to avoid this."
+        )
+    else:
+        logger.info(
+            f"Set XTUNER_TOKENIZE_WORKERS to {os.environ['XTUNER_TOKENIZE_WORKERS']} for safe tokenization in dataloader workers."
+        )
+
+
 def bind_train_rollout(
     train_controller: TrainingControllerProxy,
     rollout_controller: RolloutControllerProxy,
@@ -70,20 +82,23 @@ class TrainInfo(TypedDict, total=False):
 
 
 def get_train_seq_ctx(
-    input_ids: torch.LongTensor, multimodal_train_info: dict | None = None, len_response_ids: int = 0
+    input_ids: torch.LongTensor,
+    position_ids: torch.Tensor | None = None,
+    multimodal_train_info: dict | None = None,
+    len_response_ids: int = 0,
 ):
     seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
-    if multimodal_train_info and len(multimodal_train_info) > 0:
-        position_ids = multimodal_train_info.get("position_ids")  # (1,n) or (3,1,n)
-        if position_ids is not None and len(position_ids.shape) == 3:
-            # qwen3vl 需要特殊处理，其余的不需要额外处理
-            max_value = position_ids.max(dim=-1).values  # (3,1)
-            response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
-                1, len_response_ids + 1, device=max_value.device
-            )
-            position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
-            seq_ctx.position_ids = position_ids  # type: ignore[assignment]
-            assert position_ids.size(-1) == input_ids.size(-1)
+    if position_ids is not None and len(position_ids.shape) == 3:
+        # qwen3vl 需要特殊处理，其余的不需要额外处理
+        max_value = position_ids.max(dim=-1).values  # (3,1)
+        response_position_ids = max_value.unsqueeze(-1).expand(-1, -1, len_response_ids) + torch.arange(
+            1, len_response_ids + 1, device=max_value.device
+        )
+        position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
+        seq_ctx.position_ids = position_ids  # type: ignore[assignment]
+        assert position_ids.size(-1) == input_ids.size(-1)
+
+    if multimodal_train_info:
         seq_ctx.pixel_values = multimodal_train_info.get("pixel_values")
         seq_ctx.image_grid_thw = multimodal_train_info.get("image_grid_thw")
     return seq_ctx
@@ -140,7 +155,6 @@ class RLColocateTrainerConfig(BaseModel):
     resources: AcceleratorResourcesConfig
     train_worker_cfg: WorkerConfig
     rollout_config: RolloutConfig
-    judger_config: NativeJudgerConfig | RouterJudgerConfig
     tokenizer_path: Union[str, Path]
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
     agent_loop_manager_cfg: AgentLoopManagerConfig
@@ -155,6 +169,12 @@ class RLColocateTrainerConfig(BaseModel):
     evaluate_step: int = 1
     work_dir: Union[Path, str, None] = None
     auto_resume: bool = False
+    load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig()
+    checkpoint_interval: int | None = -1
+    checkpoint_maxkeep: int | None = -1
+    hf_interval: int | None = -1
+    hf_max_keep: int | None = -1
+    checkpoint_no_save_optimizer: bool = False
     log_dir: Union[Path, str, None] = None
     seed: int = 66
     debug_rollout: bool = False
@@ -166,7 +186,6 @@ class RLColocateTrainerConfig(BaseModel):
             resources=self.resources,
             train_worker_cfg=self.train_worker_cfg,
             rollout_config=self.rollout_config,
-            judger_config=self.judger_config,
             tokenizer_path=self.tokenizer_path,
             replay_buffer_config=self.replay_buffer_config,
             agent_loop_manager_cfg=self.agent_loop_manager_cfg,
@@ -177,6 +196,12 @@ class RLColocateTrainerConfig(BaseModel):
             evaluate_step=self.evaluate_step,
             work_dir=self.work_dir,
             auto_resume=self.auto_resume,
+            load_checkpoint_cfg=self.load_checkpoint_cfg,
+            checkpoint_interval=self.checkpoint_interval,
+            checkpoint_maxkeep=self.checkpoint_maxkeep,
+            checkpoint_no_save_optimizer=self.checkpoint_no_save_optimizer,
+            hf_interval=self.hf_interval,
+            hf_max_keep=self.hf_max_keep,
             load_from=self.load_from,
             log_dir=self.log_dir,
             seed=self.seed,
@@ -191,6 +216,9 @@ class RLColocateTrainerConfig(BaseModel):
 class RLColocateTrainer:
     _META_PATH = ".xtuner_rl_colocate_trainer"
     _EXP_TRACKING_PATH = "exp_tracking"
+    _CHECKPOINT_DIR = "checkpoints"
+    _HF_DIR = "hf"
+    _SAVE_TRAIN_STATE_PATH = "train_state.json"
 
     # 弱化Trainer：Trainer中代码尽量少，尽量用componet来组织代码。
     # 目标是像torch一样，让用户自己写init 和 train loop，我们只提供组件。
@@ -200,7 +228,6 @@ class RLColocateTrainer:
         resources: AcceleratorResourcesConfig,
         train_worker_cfg: WorkerConfig,
         rollout_config: RolloutConfig,
-        judger_config: RouterJudgerConfig,
         # Sampler config
         # sampler_config: SamplerConfig,
         tokenizer_path: str | Path,
@@ -219,6 +246,12 @@ class RLColocateTrainer:
         # work_dir and resume
         work_dir: Path | str | None = None,
         auto_resume: bool = False,
+        load_checkpoint_cfg: LoadCheckpointConfig = LoadCheckpointConfig(),
+        checkpoint_interval: int | None = -1,
+        checkpoint_maxkeep: int | None = -1,
+        checkpoint_no_save_optimizer: bool = False,
+        hf_interval: int | None = None,
+        hf_max_keep: int | None = None,
         # others
         load_from: str | Path,
         log_dir: Path | str | None = None,
@@ -239,9 +272,27 @@ class RLColocateTrainer:
             work_dir.mkdir(parents=True, exist_ok=True)
         self._meta = XTunerMeta.build(work_dir, self._META_PATH, auto_resume)
 
+        # hf checkpoint config
+        self._load_from = Path(load_from) if isinstance(load_from, str) else load_from
+        is_hf_path, error_info = is_hf_model_path(load_from) if load_from is not None else (False, "")
+        self._load_from_hf = is_hf_path
+
+        if not self._load_from_hf:
+            raise NotImplementedError(error_info)
+        self._hf_max_keep = hf_max_keep
+        self._hf_interval = hf_interval
+
+        # checkpoint config
+        self._checkpoint_interval = checkpoint_interval
+        self._checkpoint_maxkeep = checkpoint_maxkeep
+        self._checkpoint_no_save_optimizer = checkpoint_no_save_optimizer
+        self._load_checkpoint_cfg = self._resolve_load_checkpoint_cfg(auto_resume, load_checkpoint_cfg)
+
         # log
         log_dir = self.exp_dir / "logs"
         self.logger = get_logger(log_dir=log_dir, tag="RLTrainer")
+
+        force_set_tokenize_workers(self.logger)
 
         if skip_checkpoint_validation:
             patch_default_save_plan()
@@ -251,6 +302,9 @@ class RLColocateTrainer:
         # self._total_epochs = total_epochs  # TODO
         self._cur_step = 0
         self._global_train_step = 0
+        self._seed = seed
+        set_deterministic()
+        set_random_seed(seed)
         self.global_batch_size = global_batch_size
 
         # main components
@@ -267,30 +321,42 @@ class RLColocateTrainer:
         # override rollout config
         rollout_config.worker_log_dir = log_dir
 
+        # If resuming from checkpoint, skip loading weights in rollout workers
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            rollout_config.skip_load_weights = True
+            self.logger.info(
+                f"Skip load rollout weights due to resume from checkpoint {self._load_checkpoint_cfg.checkpoint_path}"
+            )
+
         # build train controller and rollout controller
         self.train_controller = train_worker_cfg.build(self._pg)
 
-        self.rollout_controller = rollout_config.build(self._pg)
+        # Resume train worker if checkpoint exists
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            ray.get(self.train_controller.resume.remote(self._load_checkpoint_cfg))
+            train_state_path = Path(self._load_checkpoint_cfg.checkpoint_path) / self._SAVE_TRAIN_STATE_PATH
+            with train_state_path.open("r") as f:
+                train_state = json.load(f)
+                self._cur_step = train_state["cur_step"]
 
-        # build judger
-        judger = judger_config.build()
+        self.rollout_controller = rollout_config.build(self._pg)
 
         replay_buffer = replay_buffer_config.build()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         # build agnet_loop_manager
         self.agent_loop_manager = agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
-            judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
+            logger=self.logger,
         )
 
         # build eval agent loop manager
         self.eval_agent_loop_manager = eval_agent_loop_manager_cfg.build(
             rollout_controller=self.rollout_controller,
-            judger=judger,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
+            logger=self.logger,
         )
 
         self._enable_evaluate = enable_evaluate
@@ -298,8 +364,25 @@ class RLColocateTrainer:
         self._evaluate_step = evaluate_step
 
         # build evaluator
-        total_eval_samples = len(self.eval_agent_loop_manager._data_sampler)
+        total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
         self.evaluator = evaluator_config.build(total_eval_samples=total_eval_samples)
+
+        # Resume sampler and sync weights if checkpoint exists
+        if self._load_checkpoint_cfg.checkpoint_path is not None:
+            self.logger.info(f"Resume sampler from {self._load_checkpoint_cfg.checkpoint_path}")
+            self.agent_loop_manager.resume(self._load_checkpoint_cfg.checkpoint_path)
+
+            bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
+            self.logger.info("Rollout workers skip load weights, update weights from train workers.")
+            ray.get(self.train_controller.offload.remote(target="optimizer"))
+            ray.get(self.rollout_controller.offload.remote())
+            ray.get(self.rollout_controller.onload_weights.remote())
+            ray.get(self.train_controller.update_weights.remote())
+            ray.get(self.train_controller.offload.remote(target="model"))
+            ray.get(self.rollout_controller.onload_kvcache.remote())
+            self.logger.info("Rollout workers updated weights from train workers.")
+        else:
+            ray.get(self.train_controller.offload.remote(target="all"))
 
         # others
         if debug_rollout:
@@ -312,6 +395,91 @@ class RLColocateTrainer:
     def exp_dir(self) -> Path:
         return Path(self._meta.latest_exp.exp_dir)
 
+    def _resolve_load_checkpoint_cfg(
+        self, auto_resume: bool, load_checkpoint_cfg: LoadCheckpointConfig
+    ) -> LoadCheckpointConfig:
+        """Resolve checkpoint path for auto-resume."""
+        latest_checkpoint = self._meta.latest_exp.latest_checkpoint
+        if latest_checkpoint is not None and auto_resume:
+            load_checkpoint_cfg.checkpoint_path = Path(latest_checkpoint)
+        return load_checkpoint_cfg
+
+    def _maybe_save_checkpoint(self, cur_step: int) -> None:
+        """Save checkpoint if interval condition is met."""
+        ckp_interval = self._checkpoint_interval
+        if ckp_interval is None or ckp_interval == -1:
+            return
+        if cur_step % ckp_interval != 0:
+            return
+
+        checkpoint_path = self.exp_dir / self._CHECKPOINT_DIR / f"ckpt-step-{cur_step}"
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+        # 1. Save sampler (dataloader) state
+        self.logger.info(f"Saving sampler state to {checkpoint_path}")
+        self.agent_loop_manager.save(checkpoint_path)
+
+        # 2. Save DCP checkpoint (model + optimizer)
+        self.logger.info(f"Saving DCP checkpoint to {checkpoint_path}")
+        ray.get(self.train_controller.save.remote(str(checkpoint_path), self._checkpoint_no_save_optimizer))
+
+        # 3. Save train state JSON
+        train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+        with train_state_path.open("w") as f:
+            json.dump({"cur_step": cur_step}, f)
+
+        # 4. Update meta
+        current_exp = self._meta.latest_exp
+        current_exp.checkpoint_list.append(str(checkpoint_path))
+
+        # 5. Prune old checkpoints
+        ckp_maxkeep = self._checkpoint_maxkeep
+        ckp_list = current_exp.checkpoint_list
+        if ckp_maxkeep is not None and ckp_maxkeep > 0 and len(ckp_list) > ckp_maxkeep:
+            for deleted in ckp_list[:-ckp_maxkeep]:
+                if Path(deleted).exists():
+                    rmtree(deleted, ignore_errors=True)
+            current_exp.checkpoint_list = ckp_list[-ckp_maxkeep:]
+
+        # 6. Persist meta to disk
+        meta_path = self.exp_dir.parent / self._META_PATH
+        with meta_path.open("w") as f:
+            f.write(self._meta.model_dump_json(indent=2))
+
+    def _maybe_save_hf(self, cur_step: int):
+        if self._hf_interval is None or self._hf_interval == -1:
+            return
+
+        if not self._load_from_hf:
+            raise RuntimeError(
+                "Only support saving to Huggingface format when loading from Huggingface! "
+                "You meet this error means `load_from` of trainer is not a Huggingface model path."
+            )
+
+        if cur_step % self._hf_interval != 0 and cur_step != self._rollout_steps:
+            return
+
+        save_hf_path = self.exp_dir / self._HF_DIR / f"hf-step-{cur_step}"
+        save_hf_path.mkdir(parents=True, exist_ok=True)
+
+        # update meta
+        current_exp = self._meta.latest_exp
+        current_exp.hf_checkpoint_list.append(str(save_hf_path))
+
+        # save hf
+        self.logger.info(f"Saving Huggingface checkpoint to {save_hf_path}")
+        hf_list = self._meta.latest_exp.hf_checkpoint_list
+        if self._hf_max_keep is not None and self._hf_max_keep > 0 and len(hf_list) > self._hf_max_keep:
+            for deleted in hf_list[: -self._hf_max_keep]:
+                if Path(deleted).exists():
+                    rmtree(deleted, ignore_errors=True)
+            current_exp.hf_checkpoint_list = hf_list[-self._hf_max_keep :]
+        ray.get(self.train_controller.save_hf.remote(str(save_hf_path)), timeout=TRAINER_RAY_GET_TIMEOUT)
+
+        # save tokenizer
+        if isinstance(self.tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
+            self.tokenizer.save_pretrained(str(save_hf_path))
+
     def fit(self):
         self.logger.info("Start RL training")
         if self._cur_step >= self._rollout_steps:
@@ -319,12 +487,10 @@ class RLColocateTrainer:
             return
 
         if self._enable_initial_evaluate and not self._debug_rollout:
-            # TODO: ray.get(self.rollout_controller.update_active_workers.remote())
-            # TODO: ray.get(self.rollout_controller.restart.remote())
-            eval_batch: list[list[RolloutState]] = asyncio.run(
-                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
+            eval_produce_result = asyncio_run(
+                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size, rollout_step=0)
             )
-            eval_metrics = self.evaluator.run(eval_batch)
+            eval_metrics = self.evaluator.run(eval_produce_result.rollout_states)
             self.logger.info(f"Initial rollout evaluate scores {eval_metrics} and start training")
 
             tb_scores = {f"eval/{k}": v for k, v in eval_metrics.items()}
@@ -338,14 +504,18 @@ class RLColocateTrainer:
             step_timer_dict = {}
             with timer("step", step_timer_dict):
                 # 1. Rollout to generate experience
-                # TODO: ray.get(self.rollout_controller.check_health.remote())
-                train_batch: list[list[RolloutState]] = asyncio.run(
-                    self.agent_loop_manager.produce_batch(self.global_batch_size)
+                self.logger.info("start to generate rollout experience for training")
+                produce_result: ProduceBatchResult = asyncio_run(
+                    self.agent_loop_manager.produce_batch(self.global_batch_size, rollout_step=rollout_idx)
                 )
-                rollout_info = {}  # TODO: rollout info?
-                # TODO: save train trajectory
+                train_batch = produce_result.rollout_states
+                self.logger.info(f"generate {len(train_batch) * len(train_batch[0])} samples for training")
+                train_trajectory_dir = self.exp_dir / "train_rollout"
+                train_trajectory_dir.mkdir(parents=True, exist_ok=True)
+                train_trajectory_path = train_trajectory_dir / f"train_rollout_{rollout_idx}.jsonl"
+                self._save_trajectories(train_batch, train_trajectory_path)
+                self.logger.info(f"Rollout {rollout_idx} train trajectories saved to {train_trajectory_path}")
                 if not self._debug_rollout:
-                    # TODO: ray.get(self.rollout_controller.pause_generation.remote())
                     ray.get(self.rollout_controller.offload.remote())
 
                 if not self._debug_rollout:
@@ -382,18 +552,26 @@ class RLColocateTrainer:
                     eval_log_info = {}
                     if self._enable_evaluate and rollout_idx % self._evaluate_step == 0:
                         with timer("evaluation", step_timer_dict):
-                            # TODO: ray.get(self.rollout_controller.restart.remote())
-                            eval_batch: list[list[RolloutState]] = asyncio.run(
-                                self.eval_agent_loop_manager.produce_batch(self.evaluator.eval_batch_size)
+                            eval_produce_result = asyncio_run(
+                                self.eval_agent_loop_manager.produce_batch(
+                                    self.evaluator.eval_batch_size, rollout_step=rollout_idx
+                                )
                             )
+                            eval_batch = eval_produce_result.rollout_states
                             eval_metrics = self.evaluator.run(eval_batch)
-                            # TODO: save eval trajectory
+                            eval_trajectory_dir = self.exp_dir / "eval_rollout"
+                            eval_trajectory_dir.mkdir(parents=True, exist_ok=True)
+                            eval_trajectory_path = eval_trajectory_dir / f"eval_rollout_{rollout_idx}.jsonl"
+                            self._save_trajectories(eval_batch, eval_trajectory_path)
+                            self.logger.info(
+                                f"Rollout {rollout_idx} eval trajectories saved to {eval_trajectory_path}"
+                            )
                             eval_log_info.update(eval_metrics)
                 else:
                     train_log_info = {}
                     eval_log_info = {}
 
-            self._log_step(rollout_idx, step_timer_dict, rollout_info, train_log_info, eval_log_info)
+            self._log_step(rollout_idx, step_timer_dict, produce_result, train_log_info, eval_log_info)
             self._cur_step = rollout_idx
 
     # TODO: simplify with Packer.pack_pad_dispatch()
@@ -410,55 +588,100 @@ class RLColocateTrainer:
                 self.logger.error(f"Skip one data group {group} due to rollout failed or empty response.")
                 continue
 
-            prompt_ids = group[0].prompt_ids
-            rewards = [data.reward["score"] for data in group]
+            is_vlm_model = "train_prompt_ids" in group[0].extra_fields
+            if is_vlm_model:
+                # TODO(hha): VLM, 不好的设计，后续要去掉
+                prompt_ids = group[0].extra_fields["train_prompt_ids"]
+            else:
+                prompt_ids = group[0].prompt_ids
+            assert prompt_ids is not None and len(prompt_ids) > 0, (
+                f"Prompt ids cannot be None or empty in data: {group[0]}"
+            )
+            rewards = []
+            for data in group:
+                assert data.reward is not None and "score" in data.reward, (
+                    f"Reward is missing or does not contain 'score' key in data: {data}"
+                )
+                rewards.append(data.reward["score"])
+
             rewards_list.extend(rewards)
-            rewards = torch.tensor(rewards, dtype=torch.float32)
-            advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
+            rewards_tensor = torch.tensor(rewards, dtype=torch.float32)
+            advantages = (rewards_tensor - rewards_tensor.mean(0)) / (rewards_tensor.std(0) + 1e-8)
 
             prompt_repeat_k = len(group)
             for i in range(prompt_repeat_k):
                 item = group[i].response
                 logprobs: list[float] | None = None
+
+                response_ids: List[int] = []
                 if group[i].response_ids is not None:
-                    response_ids = group[i].response_ids
-                    if isinstance(response_ids, torch.Tensor):
-                        response_ids = response_ids.flatten().tolist()
+                    resp_ids_raw = group[i].response_ids
+                    if isinstance(resp_ids_raw, torch.Tensor):
+                        response_ids = resp_ids_raw.flatten().tolist()
+                    else:
+                        response_ids = cast(List[int], resp_ids_raw)
+
                     logprobs = group[i].logprobs
                     if logprobs is not None:
-                        assert len(logprobs) == len(response_ids), f"{len(logprobs)} vs {len(response_ids)}"
+                        assert len(logprobs) == len(response_ids), (
+                            f"{len(logprobs)} vs {len(response_ids)}, data: {group[i]}"
+                        )
                         # 只有 response 部分有 logprobs, 需要前面追加
-                        logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs
-                    else:
-                        logprobs = None
+                        logprobs = [0.0] * (len(prompt_ids) - 1) + logprobs  # type: ignore[arg-type]
                 else:
+                    assert item is not None, "response item cannot be None"
                     response_ids = self.tokenizer(item, return_tensors="pt")["input_ids"].flatten().tolist()
+
                 # 返回的 routed_experts 不包括 eos 的值，实际上也不需要，需要减一
+                # TODO: verl tool agent loop 是否需要？
                 input_ids = prompt_ids + response_ids[:-1]
 
                 prompt_len_list.append(len(prompt_ids))
                 response_len_list.append(len(response_ids))
-                advantages_list.extend([advantages[i]] * len(response_ids))
 
-                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_ids
+                # 根据 response_mask 计算 response_ids 对应的shifted_labels
+                if not group[i].response_mask:
+                    response_mask = [1] * len(response_ids)
+                    response_labels = response_ids
+                else:
+                    assert len(group[i].response_mask) == len(response_ids), (  # type: ignore[arg-type]
+                        f"{len(group[i].response_mask)} vs {len(response_ids)}"  # type: ignore[arg-type]
+                    )
+                    response_mask = cast(list[int], group[i].response_mask)
+                    response_labels = [
+                        response_id if mask_id != 0 else -100
+                        for response_id, mask_id in zip(response_ids, response_mask)
+                    ]
+                shifted_labels = [-100] * (len(prompt_ids) - 1) + response_labels
+                shifted_labels_t = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+
+                # 根据 response_mask 计算新的 advantages
+                advatnages_val = advantages[i].item()
+                actual_advantages = [advatnages_val] * len(prompt_ids) + [
+                    0.0 if mask == 0 else advatnages_val for mask in response_mask
+                ]
+                advantages_list.extend(actual_advantages[:-1])
+
                 assert len(input_ids) <= pack_max_length, f"{len(input_ids)} vs {pack_max_length}"
-                input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
-                shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
+                input_ids_t = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
 
                 if logprobs is not None:
                     rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
-                    assert rollout_logprobs.size() == shifted_labels.size(), (
-                        f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
+                    assert rollout_logprobs.size() == shifted_labels_t.size(), (
+                        f"{rollout_logprobs.size()} vs {shifted_labels_t.size()}"
                     )
                 else:
                     rollout_logprobs = None
 
+                position_ids = group[i].position_ids
                 multimodal_train_info = group[i].mm_info
-                seq_ctx = get_train_seq_ctx(input_ids, multimodal_train_info, len(response_ids) - 1)
+                multi_info_cast = cast(dict | None, multimodal_train_info)
+                seq_ctx = get_train_seq_ctx(input_ids_t, position_ids, multi_info_cast, len(response_ids) - 1)  # type: ignore[arg-type]
+
                 data_dict = {
                     "seq_ctx": seq_ctx,
-                    "shifted_labels": shifted_labels,
-                    "advantage": advantages[i].item(),
+                    "shifted_labels": shifted_labels_t,
+                    "advantage": actual_advantages,
                     "rollout_logprobs": rollout_logprobs,
                 }
 
@@ -494,10 +717,10 @@ class RLColocateTrainer:
         """Synchronizes weights and saves checkpoints."""
         with timer("save_ckpt", step_timer_dict):
             ray.get(self.train_controller.offload.remote(target="optimizer"))
-            # TODO:
-            # self._maybe_save_hf()
-            # self._maybe_save_checkpoint()
+            self._maybe_save_checkpoint(rollout_idx)
+            self._maybe_save_hf(rollout_idx)
 
+        ray.get(self.rollout_controller.recover_failed_workers.remote())
         with timer("sync_weight", step_timer_dict):
             bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
             ray.get(self.rollout_controller.onload_weights.remote())
@@ -510,7 +733,7 @@ class RLColocateTrainer:
         self,
         rollout_idx: int,
         step_timer_dict: dict,
-        rollout_info: dict,  # RolloutInfo,  # TODO
+        produce_result: ProduceBatchResult,
         train_info: TrainInfo,
         eval_info: dict[str, float],
     ):
@@ -523,9 +746,16 @@ class RLColocateTrainer:
             log_time_str = f"\nRollout {rollout_idx} finished and timing listed:\n"
             log_time_str += "\n".join([f" - {k:<25}: {v:.2f}s" for k, v in step_timer_dict.items()])
 
-        if rollout_info:
-            all_scalars.update(rollout_info.get("task_time", {}))
-            all_scalars.update({f"async/{k}": v for k, v in rollout_info.get("replay_buffer_info", {}).items()})
+        if produce_result.group_gen_count is not None:
+            all_scalars["timing/task_n"] = produce_result.group_gen_count
+            all_scalars["timing/task_mean_s"] = produce_result.group_gen_mean_s
+            all_scalars["timing/task_p50_s"] = produce_result.group_gen_p50_s
+            all_scalars["timing/task_p99_s"] = produce_result.group_gen_p99_s
+            all_scalars["timing/task_p99_p50_ratio"] = produce_result.group_gen_p99_p50_ratio
+            all_scalars["timing/pause_s"] = produce_result.group_gen_pause_time_s
+        all_scalars["async/completed_samples"] = produce_result.leftover_completed
+        all_scalars["async/aborted_samples"] = produce_result.leftover_aborted
+        all_scalars["async/expired_samples"] = produce_result.leftover_expired
 
         if train_info:
             all_scalars.update({f"response/{k}": v for k, v in train_info.get("data_info", {}).items()})
@@ -567,6 +797,65 @@ class RLColocateTrainer:
             self.logger.info(f"Eval: {eval_str}")
         self._exp_tracker.add_scalars(tag_scalar_dict=all_scalars, global_step=rollout_idx)
 
+    def _save_trajectories(self, data_groups: list[list[RolloutState]], save_path: Path) -> None:
+        rewards = []
+        response_len_list = []
+
+        for group in data_groups:
+            if not is_valid_for_training(group, self.logger):
+                continue
+            for data in group:
+                assert data.reward is not None
+                rewards.append(data.reward["score"])
+                if data.response_ids is not None:
+                    if isinstance(data.response_ids, torch.Tensor):
+                        response_ids = data.response_ids.flatten().tolist()
+                    else:
+                        response_ids = data.response_ids
+                    response_len_list.append(len(response_ids))
+                elif data.response is not None:
+                    response_ids = self.tokenizer.encode(data.response, add_special_tokens=False)
+                    response_len_list.append(len(response_ids))
+
+        rewards_tensor = torch.tensor(rewards).float() if rewards else torch.tensor([0.0]).float()
+        response_lens = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
+
+        _count = 0
+        with open(save_path, "w", encoding="utf-8") as f:
+            summary = {
+                "reward_mean": rewards_tensor.mean().item(),
+                "reward_std": rewards_tensor.std().item(),
+                "reward_max": rewards_tensor.max().item(),
+                "reward_min": rewards_tensor.min().item(),
+                "response_len_mean": response_lens.mean().item(),
+                "response_len_std": response_lens.std().item(),
+                "response_len_max": response_lens.max().item(),
+                "response_len_min": response_lens.min().item(),
+                "total_len": len(rewards),
+            }
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            for group in data_groups:
+                if not is_valid_for_training(group, self.logger):
+                    continue
+                for data in group:
+                    assert data.reward is not None
+                    ground_truth = None
+                    if data.reward_model is not None:
+                        ground_truth = data.reward_model.get("ground_truth")
+                    item = {
+                        "prompt": data.message,
+                        "raw_prompt": data.extra_fields.get("raw_prompt", None),
+                        "response": data.response,
+                        "response_len": response_len_list[_count],
+                        "label": ground_truth,
+                        "reward": data.reward["score"],
+                        "finish_reason": data.finish_reason,
+                    }
+                    json.dump(item, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+                    _count += 1
+
     def _log_mini_batch_metrics(self, workers_log_item: List[WorkerLogItem]):
         train_start_step = self._global_train_step + 1
         for worker_idx, log_item in enumerate(workers_log_item):
@@ -574,7 +863,9 @@ class RLColocateTrainer:
                 if not self._display_all_workers_log and worker_idx > 0:
                     break
                 current_global_step = train_start_step + step_idx
-                metrics: dict[str, Any] = mini_batch_log["loss_log"] | mini_batch_log["rl_other_log"]
+
+                metrics: dict[str, Any] = dict(mini_batch_log["loss_log"])
+                metrics.update(mini_batch_log["rl_other_log"])
 
                 self._exp_tracker.add_scalars(
                     tag_scalar_dict={f"train_metrics/worker_{worker_idx}/{k}": float(v) for k, v in metrics.items()},
