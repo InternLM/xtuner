@@ -13,6 +13,7 @@ import torch.distributed as dist
 import tqdm
 from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict
+from ray import cloudpickle
 from ray.actor import ActorClass, ActorProxy
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
@@ -427,7 +428,7 @@ class TrainingWorker(SingleAcceleratorWorker):
                     )
                     out_rollout_routed_expert.append(rollout_routed_experts_tensor)
                 else:
-                    rollout_routed_expert_refs = rollout_routed_expert
+                    rollout_routed_expert_refs = cloudpickle.loads(rollout_routed_expert)
                     rollout_routed_expert = ray.get(rollout_routed_expert_refs)
                     # free obj store explicitly
                     if self.sp_mesh is None or self.sp_mesh.size() == 1:

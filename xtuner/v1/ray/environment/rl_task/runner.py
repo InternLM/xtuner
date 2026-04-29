@@ -305,8 +305,8 @@ def _mark_failed(
 
 
 DEFAULT_GATEWAY = "http://env-gateway.ailab.ailab.ai"
-# DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
-DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/wangziyi/projs/lagent"
+DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent"
+# DEFAULT_LAGENT_SRC = "/mnt/shared-storage-user/llmit/user/wangziyi/projs/lagent"
 
 
 def _load_dataset_from_config(config_path: Path) -> Any:

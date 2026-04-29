@@ -48,7 +48,7 @@ train_optimizer_steps = 1  # mini batch steps
 max_concurrent_groups = 512
 
 max_prompt_length = 4096
-pack_max_length = 68 * 1024
+pack_max_length = 256 * 1024
 max_response_length = 64 * 1024
 
 train_ep_size = 1
@@ -66,7 +66,7 @@ skip_load_weights = False
 lr = 1e-6
 hf_interval = 5
 total_epochs = 10
-sp_size = 1
+sp_size = 4
 # evaluation settings
 enable_evaluate = False
 enable_initial_evaluate = False
@@ -218,8 +218,14 @@ model_cfg.text_config.ep_size = 1
 model_cfg.text_config.z_loss_cfg = None
 model_cfg.text_config.balancing_loss_cfg = None
 model_cfg.text_config.freeze_routers = True
+# model_cfg.text_config.mtp_config = MTPConfig(
+#     num_layers=1, 
+#     loss_scaling_factor=1.0,
+#     detach_mtp_lm_head_weight=True,
+#     detach_mtp_inputs=True,
+#     share_weights=False,
+# )
 model_cfg.text_config.vocab_size = 251392
-# model_cfg.text_config.embed_grad_max_token_id = 251173
 
 optim_cfg = AdamWConfig(
     lr=lr,

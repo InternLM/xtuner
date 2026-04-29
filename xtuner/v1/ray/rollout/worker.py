@@ -14,7 +14,7 @@ import numpy as np
 import ray
 import requests  # type: ignore[import-untyped]
 from packaging.version import Version
-from ray import ObjectRef
+from ray import ObjectRef, cloudpickle
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from transformers import AutoTokenizer
@@ -589,12 +589,24 @@ class RolloutWorker(SingleAcceleratorWorker):
                         routed_experts = self._decode_routed_experts(routed_experts)
                         if isinstance(routed_experts, ObjectRef):
                             cur_routed_experts = await routed_experts  # n,layer,expert
-                            ray.internal.free(routed_experts, local_only=False)
+                            ray.internal.free([routed_experts], local_only=False)
                         else:
                             cur_routed_experts = routed_experts
 
-                        history_routed_experts = await input_extra_info["routed_experts"]  # n, layer, expert
-                        ray.internal.free(input_extra_info["routed_experts"], local_only=False)
+                        history_routed_experts_key = input_extra_info["routed_experts"]
+                        if isinstance(history_routed_experts_key, ObjectRef):
+                            history_routed_experts = await history_routed_experts_key  # n, layer, expert
+                        elif isinstance(history_routed_experts_key, (bytes, bytearray)):
+                            # controller.py serializes the ObjectRef as base64(cloudpickle(...)).decode();
+                            # tokenize.py base64-decodes it back to bytes before forwarding here.
+                            history_routed_experts_key = cloudpickle.loads(history_routed_experts_key)
+                            history_routed_experts = await history_routed_experts_key
+                        else:
+                            raise TypeError(
+                                f"Unexpected type for input_extra_info['routed_experts']: "
+                                f"{type(history_routed_experts_key)}"
+                            )
+                        ray.internal.free([history_routed_experts_key], local_only=False)
                         del input_extra_info
 
                         assert (history_routed_experts.shape[0] - 1) > 0 and history_routed_experts.shape[
