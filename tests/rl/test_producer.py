@@ -460,6 +460,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             mock_agent_loop,
             self.replay_buffer,
             task_name,
+            model_step=0,
             progress=progress,
         )
 
@@ -494,11 +495,11 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             mock_agent_loop,
             self.replay_buffer,
             task_name,
+            model_step=0,
             progress=progress,
         )
 
         self.assertEqual(len(strategy._pending_tasks), 0)
-        self.assertEqual(len(strategy._pending_task_model_steps), 0)
         completed = await self.replay_buffer.count(task_name, Status.COMPLETED)
         aborted = await self.replay_buffer.count(task_name, Status.ABORTED)
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
@@ -561,6 +562,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             mock_agent_loop,
             self.replay_buffer,
             task_name,
+            model_step=0,
             progress=progress,
         )
         self.assertEqual(len(strategy._pending_tasks), 0)

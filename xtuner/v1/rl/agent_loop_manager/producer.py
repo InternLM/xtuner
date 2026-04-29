@@ -214,6 +214,7 @@ class ProduceStrategy(ABC):
         replay_buffer: ReplayBuffer,
         task_name: str,
         *,
+        model_step: int,
         progress: ProduceProgress,
     ) -> float:
         return 0.0
@@ -331,7 +332,6 @@ class AsyncProduceStrategy(ProduceStrategy):
         self.stale_threshold = calculate_stale_threshold(max_staleness, sync_weights_interval)
         self.tail_batch_trigger_size = tail_batch_trigger_size
         self._pending_tasks: set[asyncio.Task] = set()
-        self._pending_task_model_steps: dict[asyncio.Task, int] = {}
         self._pending_lock = asyncio.Lock()
         self.cleanup_task_time = 5 * 60  # 5 minutes
 
@@ -395,18 +395,17 @@ class AsyncProduceStrategy(ProduceStrategy):
         replay_buffer: ReplayBuffer,
         task_name: str,
         progress: ProduceProgress,
+        model_step: int,
         available_base: int | None = None,
     ) -> None:
         valid_completed_count = 0
         for task in claimed_tasks:
-            # 每个 pending task 必须绑定调度时的模型版本；缺失说明调度状态已损坏，直接暴露。
-            task_model_step = self._pending_task_model_steps.pop(task)
             is_valid = await self._put_generated_group(
                 task.result(),
                 replay_buffer,
                 task_name,
                 current_train_step=progress.next_consumer_step,
-                model_step=task_model_step,
+                model_step=model_step,
             )
             if is_valid:
                 valid_completed_count += 1
@@ -426,7 +425,6 @@ class AsyncProduceStrategy(ProduceStrategy):
         desired_pending: int,
         sample_from_expired: bool,
         task_name: str,
-        model_step: int,
         update_event: asyncio.Event | None,
     ) -> bool:
         async with self._pending_lock:
@@ -445,7 +443,6 @@ class AsyncProduceStrategy(ProduceStrategy):
                 )
             )
             self._pending_tasks.add(task)
-            self._pending_task_model_steps[task] = model_step
             return True
 
     async def _schedule_tasks_until(
@@ -455,7 +452,6 @@ class AsyncProduceStrategy(ProduceStrategy):
         task_name: str,
         desired_pending: int,
         sample_from_expired: bool,
-        model_step: int,
         update_event: asyncio.Event | None,
     ) -> None:
         while await self._schedule_one(
@@ -464,7 +460,6 @@ class AsyncProduceStrategy(ProduceStrategy):
             desired_pending=desired_pending,
             sample_from_expired=sample_from_expired,
             task_name=task_name,
-            model_step=model_step,
             update_event=update_event,
         ):
             pass
@@ -475,6 +470,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         replay_buffer: ReplayBuffer,
         task_name: str,
         *,
+        model_step: int,
         progress: ProduceProgress,
     ) -> float:
         pause_start = time.perf_counter()
@@ -493,7 +489,6 @@ class AsyncProduceStrategy(ProduceStrategy):
                     f"Forcefully cancelling {len(tasks_to_cancel)} remaining tasks."
                 )
                 for task in tasks_to_cancel:
-                    self._pending_task_model_steps.pop(task, None)
                     task.cancel()
                 await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
                 break
@@ -510,8 +505,6 @@ class AsyncProduceStrategy(ProduceStrategy):
             claimed_done = await self._claim_done(done_tasks)
             for task in claimed_done:
                 paused_items = task.result()
-                # pause 可能发生在权重同步之后，但这里仍要使用 task 发起时绑定的模型版本。
-                task_model_step = self._pending_task_model_steps.pop(task)
                 for item in paused_items:
                     logger.debug(
                         f"[{self.__class__.__name__}] Task {task_name} | "
@@ -523,7 +516,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                     replay_buffer,
                     task_name,
                     current_train_step=progress.next_consumer_step,
-                    model_step=task_model_step,
+                    model_step=model_step,
                 )
             if await self._pending_count() > 0:
                 await pause_generation(rollout_ctl)
@@ -562,6 +555,7 @@ class AsyncProduceStrategy(ProduceStrategy):
             replay_buffer,
             task_name,
             progress,
+            model_step=model_step,
         )
 
         if update_event.is_set():
@@ -607,7 +601,6 @@ class AsyncProduceStrategy(ProduceStrategy):
                     task_name=task_name,
                     desired_pending=desired_pending,
                     sample_from_expired=sample_from_expired,
-                    model_step=model_step,
                     update_event=update_event,
                 )
                 if update_event.is_set():
@@ -631,5 +624,6 @@ class AsyncProduceStrategy(ProduceStrategy):
                 replay_buffer,
                 task_name,
                 progress,
+                model_step=model_step,
                 available_base=available,
             )

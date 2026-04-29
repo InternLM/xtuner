@@ -76,8 +76,9 @@ class _FakeProduceStrategy:
         self.called_progresses.append(progress)
         return self.status
 
-    async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, progress) -> float:
+    async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, model_step: int, progress) -> float:
         self.cleanup_call_count += 1
+        self.cleanup_model_steps.append(model_step)
         self.cleanup_progresses.append(progress)
         return self.cleanup_pause_time_s
 
@@ -115,8 +116,9 @@ class _FakeStatusProduceStrategy:
         self.called_progresses.append(progress)
         return self.status
 
-    async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, progress) -> float:
+    async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, model_step: int, progress) -> float:
         self.cleanup_call_count += 1
+        self.cleanup_model_steps.append(model_step)
         self.cleanup_progresses.append(progress)
         return self.pause_time_s
 
@@ -479,6 +481,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.cleanup_call_count, 1)
         self.assertEqual(len(strategy.cleanup_progresses), 1)
         self.assertIsNotNone(strategy.cleanup_progresses[0])
+        self.assertEqual(strategy.cleanup_model_steps, [6])
         self.assertEqual(strategy.cleanup_progresses[0].consumed_samples["task_a"], 2)
         self.assertEqual(manager._model_step, 6)
         self.assertEqual(strategy.called_train_steps, [7])
@@ -532,6 +535,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pause_time_s, 2.5)
         self.assertEqual(strategy.cleanup_call_count, 1)
         self.assertEqual(len(strategy.cleanup_progresses), 1)
+        self.assertEqual(strategy.cleanup_model_steps, [0])
         self.assertIs(strategy.cleanup_progresses[0], manager._produce_progress)
         self.assertTrue(manager._update_event.is_set())
         self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
