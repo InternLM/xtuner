@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     AgentLoopManager,
     AgentLoopManagerConfig,
@@ -13,7 +14,6 @@ from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     _TaskRunner,
 )
 from xtuner.v1.rl.agent_loop_manager.producer import GROUP_GENERATE_TIME_KEY, ProduceBatchStatus
-from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.utils import calculate_seq_staleness
 
 
@@ -51,7 +51,6 @@ class _FakeProduceStrategy:
         self.called_update_events: list[object | None] = []
         self.called_update_event_states: list[bool | None] = []
         self.called_progresses: list[object] = []
-        self.called_target_cumulatives: list[int | None] = []
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
         self.cleanup_call_count = 0
@@ -68,7 +67,6 @@ class _FakeProduceStrategy:
         *,
         model_step: int,
         progress,
-        target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
         self.called_batch_sizes.append(batch_size)
         self.called_train_steps.append(train_step)
@@ -76,7 +74,6 @@ class _FakeProduceStrategy:
         self.called_update_events.append(update_event)
         self.called_update_event_states.append(None if update_event is None else update_event.is_set())
         self.called_progresses.append(progress)
-        self.called_target_cumulatives.append(target_cumulative)
         return self.status
 
     async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, model_step: int, progress) -> float:
@@ -96,7 +93,6 @@ class _FakeStatusProduceStrategy:
         self.called_update_events: list[object | None] = []
         self.called_update_event_states: list[bool | None] = []
         self.called_progresses: list[object] = []
-        self.called_target_cumulatives: list[int | None] = []
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
 
@@ -112,14 +108,12 @@ class _FakeStatusProduceStrategy:
         *,
         model_step: int,
         progress,
-        target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
         self.called_train_steps.append(train_step)
         self.called_model_steps.append(model_step)
         self.called_update_events.append(update_event)
         self.called_update_event_states.append(None if update_event is None else update_event.is_set())
         self.called_progresses.append(progress)
-        self.called_target_cumulatives.append(target_cumulative)
         return self.status
 
     async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, model_step: int, progress) -> float:
@@ -159,7 +153,6 @@ class _SequencedProduceStrategy(_FakeProduceStrategy):
         *,
         model_step: int,
         progress,
-        target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
         self.called_batch_sizes.append(batch_size)
         self.called_train_steps.append(train_step)
@@ -167,7 +160,6 @@ class _SequencedProduceStrategy(_FakeProduceStrategy):
         self.called_update_events.append(update_event)
         self.called_update_event_states.append(None if update_event is None else update_event.is_set())
         self.called_progresses.append(progress)
-        self.called_target_cumulatives.append(target_cumulative)
         return self._statuses.pop(0) if self._statuses else ProduceBatchStatus.NORMAL
 
 

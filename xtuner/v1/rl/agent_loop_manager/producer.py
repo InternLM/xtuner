@@ -133,19 +133,11 @@ def expire_group_if_needed(group: list[RolloutState], stale_threshold: int) -> l
 def _validate_progress_for_task(
     progress: ProduceProgress,
     task_name: str,
-    target_cumulative: int | None,
 ) -> None:
     if task_name not in progress.consumed_samples:
         raise KeyError(f"ProduceProgress.consumed_samples missing task_name={task_name!r}")
     if task_name not in progress.target_samples:
         raise KeyError(f"ProduceProgress.target_samples missing task_name={task_name!r}")
-
-    if target_cumulative is not None and target_cumulative != progress.target_samples[task_name]:
-        raise ValueError(
-            "target_cumulative must match progress.target_samples when progress is provided, "
-            f"got target_cumulative={target_cumulative}, "
-            f"progress.target_samples[{task_name!r}]={progress.target_samples[task_name]}"
-        )
 
 
 @runtime_checkable
@@ -214,7 +206,6 @@ class ProduceStrategy(ABC):
         *,
         model_step: int,
         progress: ProduceProgress,
-        target_cumulative: int | None = None,
     ) -> ProduceBatchStatus: ...
 
     async def pause_produce(
@@ -242,7 +233,6 @@ class SyncProduceStrategy(ProduceStrategy):
         *,
         model_step: int,
         progress: ProduceProgress,
-        target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
         pending_tasks = set()
         completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
@@ -545,11 +535,10 @@ class AsyncProduceStrategy(ProduceStrategy):
         *,
         model_step: int,
         progress: ProduceProgress,
-        target_cumulative: int | None = None,
     ) -> ProduceBatchStatus:
         if update_event is None:
             update_event = asyncio.Event()
-        _validate_progress_for_task(progress, task_name, target_cumulative)
+        _validate_progress_for_task(progress, task_name)
 
         if progress.target_samples[task_name] <= 0:
             return ProduceBatchStatus.NORMAL
