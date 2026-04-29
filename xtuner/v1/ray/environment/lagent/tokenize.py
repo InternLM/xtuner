@@ -4,7 +4,6 @@ import re
 from typing import Any, Dict, List
 
 import ray
-from ray import cloudpickle
 
 from xtuner.v1.utils import get_logger
 
@@ -101,7 +100,7 @@ def tokenize(
                         f"Expected routed_experts_ref to be a base64 string, but got {type(routed_experts_ref)}"
                     )
                     ref_bytes = base64.b64decode(routed_experts_ref.encode("utf-8"))
-                    routed_experts = cloudpickle.loads(ref_bytes)
+                    routed_experts = ref_bytes
             else:
                 routed_experts = None
 

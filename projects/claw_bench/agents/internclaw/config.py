@@ -2,7 +2,7 @@
 
 import os
 
-workspace = os.environ.get("TASK_WORKSPACE", "/workspace")
+workspace = os.environ.get("TASK_WORKSPACE", "")
 skills_root = f"{workspace}/skills"
 
 model = dict(
@@ -10,7 +10,7 @@ model = dict(
     model=dict(
         model=os.environ.get(
             "RL_LLM_MODEL",
-            "sft_interns2_pre_base03_20260413a_lr2e5_128gpu_hf5646",
+            "train_lkk_test",
         ),
         base_url=os.environ.get(
             "RL_LLM_BASE_URL",
