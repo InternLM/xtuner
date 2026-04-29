@@ -116,7 +116,7 @@ class RLDatasetItem(BaseModel):
 
 
 class RolloutExtraInfo(TypedDict):
-    routed_experts: NotRequired[list[int] | str | RayObjectRef]  # type: ignore[valid-type]
+    routed_experts: NotRequired[list[int] | RayObjectRef]  # type: ignore[valid-type]
     partial_rollout_input_ids: NotRequired[list[int]]
 
 

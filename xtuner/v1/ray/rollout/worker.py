@@ -18,7 +18,7 @@ from ray import ObjectRef
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from transformers import AutoTokenizer
-from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem, RolloutExtraInfo, RolloutState
+from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem, RolloutState
 from xtuner.v1.ray import find_master_addr_and_port
 from xtuner.v1.ray.base import AutoAcceleratorWorkers, SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
@@ -155,80 +155,6 @@ class RolloutWorker(SingleAcceleratorWorker):
 
     def _decode_routed_experts(self, routed_experts: Any) -> Any:
         return routed_experts
-
-    def _concat_partial_routed_experts(
-        self,
-        root_id: Any,
-        action_id: Any,
-        response: dict,
-        history_routed_experts: Any,
-        cur_routed_experts: Any,
-    ) -> Any:
-        assert (history_routed_experts.shape[0] - 1) > 0 and history_routed_experts.shape[
-            0
-        ] - 1 <= cur_routed_experts.shape[0], (
-            f"Existing routed_experts shape: {history_routed_experts.shape}, current routed_experts shape: {cur_routed_experts.shape}"
-        )
-        init_cur_roued_experts = cur_routed_experts.shape[0]
-        cur_routed_experts = cur_routed_experts[history_routed_experts.shape[0] :, :, :]
-        concat_routed_experts = np.concatenate((history_routed_experts, cur_routed_experts), axis=0)
-        prompt_tokens = response["meta_info"].get("prompt_tokens", 0)
-        response_tokens = response["meta_info"].get("completion_tokens", 0)
-        assert concat_routed_experts.shape[0] == prompt_tokens + response_tokens - 1, (
-            f"Routed experts shape {concat_routed_experts.shape[0]} does not match total tokens {prompt_tokens + response_tokens - 1}"
-        )
-        self.logger.debug(
-            f"[{root_id}/{action_id}] Partial Rollout Stats: "
-            f"Tokens(prompt={prompt_tokens}, response={response_tokens}, total={prompt_tokens + response_tokens}) | "
-            f"Experts(exist={history_routed_experts.shape}, init_cur={init_cur_roued_experts}, cur={cur_routed_experts.shape}, concat={concat_routed_experts.shape})"
-        )
-        return concat_routed_experts
-
-    async def _handle_routed_experts_response(
-        self,
-        root_id: Any,
-        action_id: Any,
-        response: dict,
-        input_extra_info: RolloutExtraInfo,
-        extra_info: RolloutExtraInfo,
-        finish_reason: str,
-    ) -> None:
-        exist_history_routed_experts = (
-            "routed_experts" in input_extra_info and input_extra_info["routed_experts"] is not None
-        )
-        routed_experts = response["meta_info"].pop("routed_experts")  # token[layer[expert]]
-        if routed_experts is not None and not exist_history_routed_experts:
-            routed_experts = self._decode_routed_experts(routed_experts)
-            assert not isinstance(routed_experts, str), (
-                "String routed_experts keys must be handled by the backend-specific rollout worker."
-            )
-            if not isinstance(routed_experts, ObjectRef):
-                routed_experts = ray.put(routed_experts)
-            extra_info["routed_experts"] = routed_experts
-        elif routed_experts is not None and exist_history_routed_experts:
-            routed_experts = self._decode_routed_experts(routed_experts)
-            if isinstance(routed_experts, ObjectRef):
-                cur_routed_experts = await routed_experts  # n, layer, expert
-                ray.internal.free(routed_experts, local_only=False)
-            else:
-                cur_routed_experts = routed_experts
-
-            history_routed_experts_ref = input_extra_info["routed_experts"]
-            assert isinstance(history_routed_experts_ref, ObjectRef), (
-                "Base rollout worker expects history routed_experts to be a Ray ObjectRef."
-            )
-            history_routed_experts = await history_routed_experts_ref  # n, layer, expert
-            ray.internal.free(history_routed_experts_ref, local_only=False)
-            concat_routed_experts = self._concat_partial_routed_experts(
-                root_id, action_id, response, history_routed_experts, cur_routed_experts
-            )
-            extra_info["routed_experts"] = ray.put(concat_routed_experts)
-            del history_routed_experts
-            del cur_routed_experts
-        else:
-            assert finish_reason == "abort", (
-                f"routed_experts is None, but finish_reason is {finish_reason}, expected abort. response: {response}"
-            )
 
     def set_engine_rank_mesh_array(self, engine_rank_mesh_array: list[list[int]]):
         self.engine_rank_mesh_array = engine_rank_mesh_array
@@ -616,7 +542,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         if "return_token_ids" in extra_params and extra_params["return_token_ids"]:
             last_logprobs: list[float] = []
             try:
-                extra_info: RolloutExtraInfo = {}
+                extra_info = {}
                 finish_reason = response["meta_info"]["finish_reason"]["type"]
                 if finish_reason == "abort" and self.receive_abort_request.is_set() is False:
                     self.receive_abort_request.set()
@@ -639,14 +565,54 @@ class RolloutWorker(SingleAcceleratorWorker):
                     assert "routed_experts" in response["meta_info"], (
                         "enable_return_routed_experts is True, but routed_experts is not in meta_info"
                     )
-                    await self._handle_routed_experts_response(
-                        root_id=root_id,
-                        action_id=action_id,
-                        response=response,
-                        input_extra_info=input_extra_info,
-                        extra_info=extra_info,
-                        finish_reason=finish_reason,
+                    exist_history_routed_experts = (
+                        "routed_experts" in input_extra_info and input_extra_info["routed_experts"] is not None
                     )
+                    routed_experts = response["meta_info"].pop("routed_experts")  # token[layer[expert]]
+                    if routed_experts is not None and not exist_history_routed_experts:
+                        # 不存在历史专家，先把当前专家存起来
+                        routed_experts = self._decode_routed_experts(routed_experts)
+                        if not isinstance(routed_experts, ObjectRef):  # 全部转为ray.objectref存储
+                            routed_experts = ray.put(routed_experts)
+                        extra_info["routed_experts"] = routed_experts
+                    elif routed_experts is not None and exist_history_routed_experts:
+                        # 存在历史专家，则不进行put 操作，直接进行concat
+                        routed_experts = self._decode_routed_experts(routed_experts)
+                        if isinstance(routed_experts, ObjectRef):
+                            cur_routed_experts = await routed_experts  # n,layer,expert
+                            ray.internal.free(routed_experts, local_only=False)
+                        else:
+                            cur_routed_experts = routed_experts
+
+                        history_routed_experts = await input_extra_info["routed_experts"]  # n, layer, expert
+                        ray.internal.free(input_extra_info["routed_experts"], local_only=False)
+                        del input_extra_info
+
+                        assert (history_routed_experts.shape[0] - 1) > 0 and history_routed_experts.shape[
+                            0
+                        ] - 1 <= cur_routed_experts.shape[0], (
+                            f"Existing routed_experts shape: {history_routed_experts.shape}, current routed_experts shape: {cur_routed_experts.shape}"
+                        )
+                        init_cur_roued_experts = cur_routed_experts.shape[0]
+                        cur_routed_experts = cur_routed_experts[history_routed_experts.shape[0] :, :, :]
+                        concat_routed_experts = np.concatenate((history_routed_experts, cur_routed_experts), axis=0)
+                        prompt_tokens = response["meta_info"].get("prompt_tokens", 0)
+                        response_tokens = response["meta_info"].get("completion_tokens", 0)
+                        assert concat_routed_experts.shape[0] == prompt_tokens + response_tokens - 1, (
+                            f"Routed experts shape {concat_routed_experts.shape[0]} does not match total tokens {prompt_tokens + response_tokens - 1}"
+                        )
+                        self.logger.debug(
+                            f"[{root_id}/{action_id}] Partial Rollout Stats: "
+                            f"Tokens(prompt={prompt_tokens}, response={response_tokens}, total={prompt_tokens + response_tokens}) | "
+                            f"Experts(exist={history_routed_experts.shape}, init_cur={init_cur_roued_experts}, cur={cur_routed_experts.shape}, concat={concat_routed_experts.shape})"
+                        )
+                        extra_info["routed_experts"] = ray.put(concat_routed_experts)
+                        del history_routed_experts
+                        del cur_routed_experts
+                    else:
+                        assert finish_reason == "abort", (
+                            f"routed_experts is None, but finish_reason is {finish_reason}, expected abort. response: {response}"
+                        )
                 # NOTE: When set return_token_ids = True, the response must contain valid token_ids/logprobs.
                 # If not, we consider it as an invalid response and retry it.
                 # NOTE: !!! When finish_reason is abort, some queries may not return token_ids or logprobs. !!!
