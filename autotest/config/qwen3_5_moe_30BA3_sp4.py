@@ -20,7 +20,6 @@ moe_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
-    torch_compile=True,
     cpu_offload=False,
     tp_size=2,
 )
@@ -28,7 +27,7 @@ fsdp_cfg = FSDPConfig(
 dataset_config = [
     {
         "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template='qwen3', max_length=16384),
+        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template="qwen3", max_length=16384),
     },
 ]
 
@@ -53,4 +52,6 @@ trainer = TrainerConfig(
     work_dir=f"{os.environ['WORK_DIR']}",
     seed=0,
     resume_cfg=ResumeConfig(auto_resume=True),
+    checkpoint_interval=10,
+    checkpoint_maxkeep=2,
 )

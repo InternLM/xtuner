@@ -84,6 +84,9 @@ class TestMLLMTokenizeFn(TestCase):
             tokenize=True,
             add_generation_prompt=False,
         )
+        # transformers 5.2.0+ returns BatchEncoding (dict-like) instead of list
+        if 'input_ids' in input_ids_ref:
+            input_ids_ref = input_ids_ref['input_ids']
         input_ids = tokenize_fn(messages)['input_ids']
         self.assertEqual(input_ids, input_ids_ref)
 

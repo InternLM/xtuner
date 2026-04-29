@@ -177,7 +177,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             model_cfg = Qwen3VLDense4BConfig(compile_cfg=False)
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+            qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         qwen3vl_model.from_hf(QWEN3_VL_DENSE_PATH)
         qwen3vl_model.eval()
@@ -209,7 +209,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
 
         with torch.device("meta"):
             model_cfg = Qwen3VLDense4BConfig(compile_cfg=compile)
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+            qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(cpu_offload=False)
         fsdp_mesh = init_world_mesh()
@@ -235,7 +235,7 @@ class TestQwen3VL(DeterministicDDPTestCase):
         self.create_pg(device)
         with torch.device("meta"):
             model_cfg = Qwen3VLMoE30BA3Config()
-            qwen3vl_model = model_cfg.build().to(torch.bfloat16)
+            qwen3vl_model = model_cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             tp_size=tp_size,

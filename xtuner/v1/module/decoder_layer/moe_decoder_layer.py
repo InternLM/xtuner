@@ -98,9 +98,11 @@ class MoEGate(nn.Module):
         num_experts_per_tok: int,
         router_config: GreedyRouterConfig | NoAuxRouterConfig,
         gate_bias: bool = False,
+        router_compute_dtype: Literal["float32", "native"] = "float32",
     ):
         super().__init__()
         self.n_routed_experts = n_routed_experts
+        self.router_compute_dtype = router_compute_dtype
 
         self.gating_dim = hidden_size
         self.weight = nn.Parameter(torch.empty((self.n_routed_experts, self.gating_dim)))
@@ -129,9 +131,12 @@ class MoEGate(nn.Module):
         bias = None
         if self.gate_bias:
             bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
-            bias = bias.float()
 
-        logits = F.linear(hidden_states.float(), weight.float(), bias)
+        if self.router_compute_dtype == "native":
+            logits = F.linear(hidden_states, weight, bias)
+        else:
+            bias = bias.float() if bias is not None else None
+            logits = F.linear(hidden_states.float(), weight.float(), bias)
         return self.router(logits, rollout_routed_experts)
 
         # Debug for aligning with hf implementation.
@@ -210,6 +215,7 @@ class MoEDecoderLayer(nn.Module):
         layer_type: Literal["full_attention", "sliding_attention"] | None = None,
         generate_config: GenerateConfig | None = None,
         router_config: GreedyRouterConfig | NoAuxRouterConfig,
+        router_compute_dtype: Literal["float32", "native"] = "float32",
         moe_act_fn_cfg: MoEActFnConfig,
         float8_cfg: Float8Config | None = None,
         layer_idx: int = 0,
@@ -261,6 +267,7 @@ class MoEDecoderLayer(nn.Module):
             num_experts_per_tok=num_experts_per_tok,
             router_config=router_config,
             gate_bias=gate_bias,
+            router_compute_dtype=router_compute_dtype,
         )
         self.experts = MoEBlock(
             hidden_size=hidden_size,
@@ -692,15 +699,6 @@ class _BackwardSync(Function):
     def backward(ctx, grad_output: torch.Tensor):
         current_stream = torch.cuda.current_stream()
 
-        # if ctx.name == "pre_dispatched":
-        #     torch.cuda.synchronize()
-        #
-        # if ctx.name == "dispatched":
-        #     torch.cuda.synchronize()
-        #
-        # if ctx.name == "pre_combined":
-        #     torch.cuda.synchronize()
-        #
         if ctx.previous_backward_event is not None:
             current_stream.wait_event(ctx.previous_backward_event)
         if ctx.finished_backward_event is not None:
@@ -710,19 +708,3 @@ class _BackwardSync(Function):
 
 
 backward_sync = _BackwardSync.apply
-
-
-# class _DebugBackward(Function):
-#     @staticmethod
-#     def forward(
-#         ctx,
-#         input_tensor: torch.Tensor,
-#         name: str
-#     ) -> torch.Tensor:
-#         ctx.name = name
-#         return input_tensor
-#
-#     @staticmethod
-#     def backward(ctx, grad_output: torch.Tensor):
-#         print(ctx.name)
-#         return grad_output, None

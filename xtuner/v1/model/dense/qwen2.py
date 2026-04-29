@@ -2,11 +2,13 @@ import re
 from pathlib import Path
 
 import torch
+from pydantic import Field
 from typing_extensions import Self
 
 from transformers.models.qwen2 import Qwen2Config as HFQwen2DenseConfig
 from xtuner.v1.model.base import TransformerConfig
 from xtuner.v1.module.attention import MHAConfig
+from xtuner.v1.module.rope import RopeParametersConfig
 
 from .dense import Dense
 
@@ -44,6 +46,7 @@ class Qwen2DenseConfig(TransformerConfig):
 
         assert isinstance(hf_config, HFConfig)
 
+        rope_parameters_cfg = RopeParametersConfig.from_hf_config(hf_config)
         config = cls(
             vocab_size=hf_config.vocab_size,
             max_position_embeddings=hf_config.max_position_embeddings,
@@ -55,7 +58,7 @@ class Qwen2DenseConfig(TransformerConfig):
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
             rms_norm_eps=hf_config.rms_norm_eps,
-            rope_theta=hf_config.rope_theta,
+            rope_parameters_cfg=rope_parameters_cfg,
             hidden_act=hf_config.hidden_act,
             attention=MHAConfig(
                 num_attention_heads=hf_config.num_attention_heads,
@@ -86,7 +89,8 @@ class Qwen2DenseConfig(TransformerConfig):
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size,
             rms_norm_eps=self.rms_norm_eps,
-            rope_theta=self.rope_theta,
+            # this breaks old HF compatibility in save_hf
+            rope_parameters=self.rope_parameters,
             hidden_act=self.hidden_act,
             num_attention_heads=self.attention.num_attention_heads,
             num_key_value_heads=self.attention.num_key_value_heads,
@@ -109,7 +113,7 @@ class Qwen2Dense7BConfig(Qwen2DenseConfig):
     hidden_size: int = 3584
     intermediate_size: int = 18944
     rms_norm_eps: float = 1e-06
-    rope_theta: float = 10000
+    rope_parameters_cfg: RopeParametersConfig = Field(default_factory=lambda: RopeParametersConfig(rope_theta=10000.0))
     hidden_act: str = "silu"
     attention: MHAConfig = MHAConfig(
         num_attention_heads=28,
