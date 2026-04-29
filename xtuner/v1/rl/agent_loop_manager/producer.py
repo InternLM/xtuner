@@ -121,6 +121,10 @@ def expire_group_if_needed(group: list[RolloutState], stale_threshold: int) -> l
         return group
     if any(getattr(sample, "seq_staleness", 0) >= stale_threshold for sample in group):
         # completed / aborted 只要组内任一样本过期，就整组转为 EXPIRED。
+        group_stalenss = [getattr(sample, "seq_staleness", 0) for sample in group]
+        logger.info(
+            f"Expiring group of {len(group)} samples due to sample staleness {group_stalenss} exceeding threshold {stale_threshold}. "
+        )
         for sample in group:
             sample.status = Status.EXPIRED
     return group
@@ -374,6 +378,9 @@ class AsyncProduceStrategy(ProduceStrategy):
         refresh_seq_staleness(items, current_train_step)
         items = expire_group_if_needed(items, self.stale_threshold)
         is_valid = self.is_valid_sample_fn(items)
+        if not is_valid:
+            for item in items:
+                item.status = Status.FILTERED
         await replay_buffer.put(items, task_name)
         return is_valid
 
@@ -384,7 +391,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         task_name: str,
         progress: ProduceProgress,
         available_base: int | None = None,
-    ) -> int:
+    ) -> None:
         valid_completed_count = 0
         for task in claimed_tasks:
             # 每个 pending task 必须绑定调度时的模型版本；缺失说明调度状态已损坏，直接暴露。
@@ -406,7 +413,6 @@ class AsyncProduceStrategy(ProduceStrategy):
                         f"{progress.target_samples[task_name]} "
                         f"valid samples for task {task_name}."
                     )
-        return valid_completed_count
 
     async def _schedule_one(
         self,
@@ -558,7 +564,10 @@ class AsyncProduceStrategy(ProduceStrategy):
         target_abs = progress.target_samples[task_name]
         oversample_budget = 0 if sample_from_expired else math.ceil(self.over_sample_threshold * batch_size)
         scheduled_target = target_abs + oversample_budget
-
+        logger.info(
+            f"Starting produce_batch for task {task_name} with target_abs={target_abs}, "
+            f"oversample_budget={oversample_budget}, scheduled_target={scheduled_target}."
+        )
         while True:
             if update_event.is_set():
                 return ProduceBatchStatus.UPDATE_ABORT
