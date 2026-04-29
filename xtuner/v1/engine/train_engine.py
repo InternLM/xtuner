@@ -134,6 +134,7 @@ class TrainEngine:
         optim_cfg: OptimConfig,
         fsdp_cfg: FSDPConfig,
         intra_layer_micro_batch: int = 1,
+        async_hf_export: bool = False,
     ) -> None:
         self.model_cfg = model_cfg
         self.optim_cfg = optim_cfg
@@ -143,6 +144,7 @@ class TrainEngine:
         self.intra_layer_micro_batch = intra_layer_micro_batch
         self._count = 0
         self.has_freeze_params = self.__has_freeze_params()
+        self._async_hf_export = async_hf_export
 
     def __has_freeze_params(self) -> bool:
         has_freeze_params = False
@@ -285,14 +287,19 @@ class TrainEngine:
             name = name.replace("_orig_mod.", "")
         return name
 
-    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16):
+    def save_hf(self, hf_dir: str, save_dtype: torch.dtype = torch.bfloat16) -> Path | None:
         """Save the hf model to the given directory.
 
         Args:
             hf_dir (str): The directory to save the model.
             save_dtype (torch.dtype): The dtype to save the model parameters, bfloat16 or float8.
         """
-        self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+        if self._async_hf_export:
+            return self.model.async_save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+        return self.model.save_hf(hf_dir=hf_dir, save_dtype=save_dtype)
+
+    def wait_async_hf(self) -> Path | None:
+        return self.model.wait_async_hf()
 
     # TODO: Support async save
     def save_dcp(
