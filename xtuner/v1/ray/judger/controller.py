@@ -175,20 +175,14 @@ class JudgerController:
 
             async def _pick(idx: int, expected_len: int):
                 batch = await shared_batch
-                assert len(batch) == expected_len, (
-                    f"Batch judger returned {len(batch)} items, "
-                    f"expected {expected_len}"
-                )
+                assert len(batch) == expected_len, f"Batch judger returned {len(batch)} items, expected {expected_len}"
                 return [batch[idx]]
 
             n = len(group_data_item)
             return [_pick(i, n) for i in range(n)]
 
         judger_input_data = [[item] for item in group_data_item]
-        return [
-            judger[idx % len(judger)].judge.remote(item)
-            for idx, item in enumerate(judger_input_data)
-        ]
+        return [judger[idx % len(judger)].judge.remote(item) for idx, item in enumerate(judger_input_data)]
 
     async def _call_custom_reward_judger(
         self,
