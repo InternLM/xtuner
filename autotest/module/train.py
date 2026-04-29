@@ -27,7 +27,10 @@ class Train:
             config["work_dir"] = work_dir
 
             # this patch is for torch 2.9.1 Conv3d memory issue fix
-            cudnn_patch = """TORCH_VERSION=$(python -c "import torch;print(torch.__version__.split('+')[0])"); if [[ $TORCH_VERSION == "2.9.1" ]]; then pip install nvidia-cudnn-cu12==9.15.1.9; fi; """
+            cudnn_patch = (
+                "TORCH_VERSION=$(python -c 'import torch;print(torch.__version__.split(chr(43))[0])'); "
+                "if [[ $TORCH_VERSION == 2.9.1 ]]; then pip install nvidia-cudnn-cu12==9.15.1.9; fi; "
+            )
 
             if train_type == "sft":
                 command = (
