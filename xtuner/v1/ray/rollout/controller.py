@@ -12,9 +12,10 @@ import ray
 import uvicorn
 from fastapi import FastAPI
 from ray.util.placement_group import PlacementGroup
-
 from transformers import AutoTokenizer
+
 from xtuner.v1.data_proto.rl_data import (
+    RLRolloutRequestItem,
     RLRolloutResponseItem,
     RolloutExtraParams,
     SampleParams,
@@ -24,7 +25,6 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
-
 
 ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
@@ -136,9 +136,7 @@ class RolloutController:
         self.num_workers = 0
         self.workers_info: Dict[str, WorkerInfo] = {}  # url -> WorkerInfo
         self.active_rollout_workers: List[RolloutWorker] = []
-        tokenizer_path = infer_config.tokenizer_path
-        assert tokenizer_path is not None, "tokenizer_path must be set before creating RolloutController"
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(infer_config.tokenizer_path, trust_remote_code=True)
         self.workers, self.rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
             self._get_worker_cls(), infer_config, placement_group
         )
@@ -171,7 +169,7 @@ class RolloutController:
             Qwen3TokenReasonParser,
         )
 
-        self.reasoning_parser = Qwen3TokenReasonParser(tokenizer_path)
+        self.reasoning_parser = Qwen3TokenReasonParser(infer_config.tokenizer_path)
         self.tool_call_parser = Qwen3_5FunctionCallParser()
 
     def _get_worker_status_for_router(self) -> Dict[RolloutWorker, bool]:
@@ -486,23 +484,30 @@ class RolloutController:
 
         @app.post("/v1/chat/completions")
         async def chat_completions(request: LagentChatCompletionRequest):
+            import base64
+
+            from ray import cloudpickle
+
             inputs = tokenize(self.tokenizer, request.messages, request.tools)
             response: RLRolloutResponseItem = await self.rollout(
                 prompt=request.messages,
-                input_ids=inputs["input_ids"],
+                input_ids=inputs['input_ids'],
                 tools=request.tools,
                 tool_choice=request.tool_choice,
                 sample_params=request.sample_params,
                 extra_params=request.extra_params,
                 extra_info=(
-                    {"routed_experts": inputs["routed_experts"]} if inputs["routed_experts"] is not None else {}
+                    {'routed_experts': inputs['routed_experts']} if inputs['routed_experts'] is not None else {}
                 ),
             )
-            message = AgentMessage.from_model_response(response, "assistant")
+            if isinstance(response.extra_info.get('routed_experts'), ray.ObjectRef):
+                response.extra_info['routed_experts'] = base64.b64encode(
+                    cloudpickle.dumps(response.extra_info['routed_experts'])
+                ).decode('utf-8')
+            message = AgentMessage.from_model_response(response, 'assistant')
             message = self.reasoning_parser.parse_response(message)
             message = self.tool_call_parser.parse_response(message)
             completion_message = LagentChatCompletionMessage.from_agent_message(message)
-            completion_tokens = response.num_return_tokens or 0
             return LagentChatCompletion(
                 model=request.model,
                 choices=[
@@ -515,9 +520,9 @@ class RolloutController:
                     )
                 ],
                 usage=CompletionUsage(
-                    prompt_tokens=len(inputs["input_ids"]),
-                    completion_tokens=completion_tokens,
-                    total_tokens=len(inputs["input_ids"]) + completion_tokens,
+                    prompt_tokens=len(inputs['input_ids']),
+                    completion_tokens=response.num_return_tokens,
+                    total_tokens=len(inputs['input_ids']) + response.num_return_tokens,
                 ),
             ).model_dump()
 
