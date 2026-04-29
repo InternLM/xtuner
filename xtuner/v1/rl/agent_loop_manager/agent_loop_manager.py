@@ -42,9 +42,12 @@ class ProduceBatchResult:
         group_gen_p99_s (float | None): 99th percentile generate-group time, in seconds.
         group_gen_p99_p50_ratio (float | None): Ratio of p99 to p50, indicating tail-latency skew.
         group_gen_pause_time_s (float | None): Time spent in pause/cleanup phase (async strategy only), in seconds.
+        leftover_init (int): Number of init groups remaining in the replay buffer after this batch.
         leftover_completed (int): Number of completed groups remaining in the replay buffer after this batch.
         leftover_aborted (int): Number of aborted groups remaining in the replay buffer.
         leftover_expired (int): Number of expired groups remaining in the replay buffer.
+        leftover_failed (int): Number of failed groups remaining in the replay buffer.
+        leftover_filtered (int): Number of filtered groups remaining in the replay buffer.
     """
 
     rollout_states: list[list[RolloutState]]
@@ -57,9 +60,12 @@ class ProduceBatchResult:
     group_gen_p99_p50_ratio: float | None = None
     group_gen_pause_time_s: float | None = None
     # leftover samples remaining in replay buffer after batch retrieval
+    leftover_init: int = 0
     leftover_completed: int = 0
     leftover_aborted: int = 0
     leftover_expired: int = 0
+    leftover_failed: int = 0
+    leftover_filtered: int = 0
     task_batch_sizes: dict[str, int] | None = None
     task_results: dict[str, "ProduceBatchResult"] | None = None
 
@@ -437,9 +443,12 @@ class AgentLoopManager:
         ordered_tasks: list[_TaskRunner], task_results: dict[str, ProduceBatchResult]
     ) -> ProduceBatchResult:
         rollout_states: list[list[RolloutState]] = []
+        leftover_init = 0
         leftover_completed = 0
         leftover_aborted = 0
         leftover_expired = 0
+        leftover_failed = 0
+        leftover_filtered = 0
         total_group_count = 0
         weighted_group_mean_sum = 0.0
         weighted_group_p50_sum = 0.0
@@ -450,9 +459,12 @@ class AgentLoopManager:
         for task in ordered_tasks:
             result = task_results[task.task_name]
             rollout_states.extend(result.rollout_states)
+            leftover_init += result.leftover_init
             leftover_completed += result.leftover_completed
             leftover_aborted += result.leftover_aborted
             leftover_expired += result.leftover_expired
+            leftover_failed += result.leftover_failed
+            leftover_filtered += result.leftover_filtered
             if result.group_gen_count is not None and result.group_gen_mean_s is not None:
                 total_group_count += result.group_gen_count
                 weighted_group_mean_sum += result.group_gen_count * result.group_gen_mean_s
@@ -463,9 +475,12 @@ class AgentLoopManager:
 
         aggregated = ProduceBatchResult(
             rollout_states=rollout_states,
+            leftover_init=leftover_init,
             leftover_completed=leftover_completed,
             leftover_aborted=leftover_aborted,
             leftover_expired=leftover_expired,
+            leftover_failed=leftover_failed,
+            leftover_filtered=leftover_filtered,
             task_results={task.task_name: task_results[task.task_name] for task in ordered_tasks},
         )
         if total_group_count > 0:
@@ -593,19 +608,33 @@ class AgentLoopManager:
         if consume_progress is not None:
             # get 已从 buffer 删除样本，立刻更新 consumed，避免 producer 短暂误判缺口。
             consume_progress.consumed_samples[task_runner.task_name] += len(batch_rollout_states)
-        completed_sample_count, aborted_sample_count, expired_sample_count = await asyncio.gather(
+        (
+            init_count,
+            completed_count,
+            aborted_count,
+            expired_count,
+            failed_count,
+            filtered_count,
+        ) = await asyncio.gather(
+            self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.INIT),
             self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.COMPLETED),
             self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.ABORTED),
             self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.EXPIRED),
+            self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.FAILED),
+            self.replay_buffer.count(task_name=task_runner.task_name, group_status=Status.FILTERED),
         )
-        result.leftover_completed = completed_sample_count
-        result.leftover_aborted = aborted_sample_count
-        result.leftover_expired = expired_sample_count
+        result.leftover_init = init_count
+        result.leftover_completed = completed_count
+        result.leftover_aborted = aborted_count
+        result.leftover_expired = expired_count
+        result.leftover_failed = failed_count
+        result.leftover_filtered = filtered_count
         self.logger.info(
             f"[AgentLoopManager][{self.name}] get_batch from buffer for task {task_runner.task_name}: "
             f"requested={batch_size}, retrieved={len(batch_rollout_states)}, "
-            f"leftover_completed={completed_sample_count}, leftover_aborted={aborted_sample_count}, "
-            f"leftover_expired={expired_sample_count}"
+            f"leftover_init={init_count}, leftover_completed={completed_count}, "
+            f"leftover_aborted={aborted_count}, leftover_expired={expired_count}, "
+            f"leftover_failed={failed_count}, leftover_filtered={filtered_count}"
         )
         return result
 
