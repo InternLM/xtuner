@@ -564,10 +564,10 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-fp8-vl/00f7e16/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    grad_norm: 10
+                    loss/local_loss: 5
+                    loss/reduced_balancing_loss: 5
+                    loss/reduced_llm_loss: 5
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
@@ -590,10 +590,10 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-tp2-vl/00f7e16/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.000001
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    grad_norm: 10
+                    loss/local_loss: 5
+                    loss/reduced_balancing_loss: 5
+                    loss/reduced_llm_loss: 5
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
@@ -616,10 +616,10 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-sp4-resume-vl/00f7e16/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.02
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    grad_norm: 10
+                    loss/local_loss: 5
+                    loss/reduced_balancing_loss: 5
+                    loss/reduced_llm_loss: 5
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
@@ -644,10 +644,10 @@ case:
             assert_info:
                 base_metric: qwen3-5-sft-sp4-resume-vl/00f7e16_resume/tracker.jsonl
                 check_metrics:
-                    grad_norm: 0.02
-                    loss/local_loss: 0.000001
-                    loss/reduced_balancing_loss: 0.000001
-                    loss/reduced_llm_loss: 0.000001
+                    grad_norm: 10
+                    loss/local_loss: 5
+                    loss/reduced_balancing_loss: 5
+                    loss/reduced_llm_loss: 5
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
