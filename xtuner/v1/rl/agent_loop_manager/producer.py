@@ -339,6 +339,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         self._pending_tasks: set[asyncio.Task] = set()
         self._pending_task_model_steps: dict[asyncio.Task, int] = {}
         self._pending_lock = asyncio.Lock()
+        self.cleanup_task_time = 5 * 60  # 5 minutes
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         staleness = calculate_seq_staleness(model_step, train_step)
@@ -366,6 +367,12 @@ class AsyncProduceStrategy(ProduceStrategy):
             done = {task for task in self._pending_tasks if task.done()}
             self._pending_tasks.difference_update(done)
             return done
+
+    async def _claim_all_pending(self) -> set[asyncio.Task]:
+        async with self._pending_lock:
+            claimed = set(self._pending_tasks)
+            self._pending_tasks.clear()
+            return claimed
 
     async def _put_generated_group(
         self,
@@ -483,7 +490,21 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
         await pause_generation(rollout_ctl)
+        cleanup_start_time = time.perf_counter()
         while True:
+            elapsed_time = time.perf_counter() - cleanup_start_time
+            if elapsed_time > self.cleanup_task_time:
+                tasks_to_cancel = await self._claim_all_pending()
+                logger.warning(
+                    f"Cleanup timeout of {self.cleanup_task_time}s reached. "
+                    f"Forcefully cancelling {len(tasks_to_cancel)} remaining tasks."
+                )
+                for task in tasks_to_cancel:
+                    self._pending_task_model_steps.pop(task, None)
+                    task.cancel()
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                break
+
             pending_snapshot = await self._snapshot_pending()
             if not pending_snapshot:
                 break
