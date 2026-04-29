@@ -603,6 +603,10 @@ class AgentLoopManager:
         result.leftover_completed = completed_sample_count
         result.leftover_aborted = aborted_sample_count
         result.leftover_expired = expired_sample_count
+        self.logger.info(f"[AgentLoopManager][{self.name}] get_batch from buffer for task {task_runner.task_name}: "
+                         f"requested={batch_size}, retrieved={len(batch_rollout_states)}, "
+                         f"leftover_completed={completed_sample_count}, leftover_aborted={aborted_sample_count}, "
+                         f"leftover_expired={expired_sample_count}")
         return result
 
     async def _get_batch_from_buffer(
