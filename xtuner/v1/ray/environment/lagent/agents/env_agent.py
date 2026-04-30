@@ -66,7 +66,7 @@ class EnvAgent(BaseEnvAgent):
             # attach trace data directly on assistant_message.extra_info.
             assistant_message.extra_info.update(
                 {
-                    'agent_trace': [msg.model_dump() for msg in self.memory.get_memory(session_id)],
+                    'agent_trace': [msg.model_dump() for msg in self.memory.get_memory()],
                     'num_turns': num_turns,
                 }
             )
