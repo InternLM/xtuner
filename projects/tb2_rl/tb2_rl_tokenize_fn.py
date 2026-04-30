@@ -3,14 +3,13 @@ import tomllib
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
-
 from transformers import PreTrainedTokenizer
-from xtuner.v1.data_proto.rl_data import RLDatasetItem
-from xtuner.v1.utils import get_logger
 
-from xtuner.v1.datasets.utils import CachableTokenizeFunction
+from xtuner.v1.data_proto.rl_data import RLDatasetItem
 from xtuner.v1.datasets.rl_tokenize_fn.rl_tokenize_fn import RLTokenizeFn
+from xtuner.v1.datasets.utils import CachableTokenizeFunction
 from xtuner.v1.ray.environment.rl_task.schemas import TaskData
+from xtuner.v1.utils import get_logger
 
 logger = get_logger()
 
@@ -89,6 +88,7 @@ class RLTB2RLTokenizeFn(RLTokenizeFn):
                 "task_data": task_data,
                 "task_dir": task_dir.as_posix(),
                 "pipeline": "tb2_rl.pipeline.tb2_rl_pipeline",
+                "origin_data_source": 'tb2-rl',
             },
         }
         return rl_out_data  # type: ignore
