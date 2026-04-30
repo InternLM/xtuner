@@ -15,9 +15,9 @@ from mmengine.dist import get_rank
 from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
 from ray.util.placement_group import PlacementGroup
+from transformers import AutoTokenizer
 from typing_extensions import Self
 
-from transformers import AutoTokenizer
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
@@ -35,7 +35,6 @@ from .rl_trainer import (
     RLTrainerConfig,
     bind_train_rollout,
 )
-
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
@@ -476,19 +475,27 @@ class AgentRLTrainer(RLTrainer):
         def compute_reward(data_groups):
             total_groups = len(data_groups)
             zero_count = one_count = 0
+            all_rewards, all_rewards_by_source = [], defaultdict(list)
             for group in data_groups:
-                rewards = [data.env.judger.reward["score"] for data in group]
+                rewards = []
+                for item in group:
+                    rewards.append(item.env.judger.reward["score"])
+                    all_rewards_by_source[item.data.extra_info.get('origin_data_source', 'none')].append(
+                        item.env.judger.reward["score"]
+                    )
                 if all(r == 0 for r in rewards):
                     zero_count += 1
                 elif all(r == 1 for r in rewards):
                     one_count += 1
+                all_rewards.extend(rewards)
 
-                zero_ratio = zero_count / total_groups if total_groups > 0 else 0
-                one_ratio = one_count / total_groups if total_groups > 0 else 0
-
-            all_rewards = [d.env.judger.reward["score"] for group in data_groups for d in group]
-            avg_reward = sum(all_rewards) / len(all_rewards)
-            return avg_reward, zero_ratio, one_ratio
+            zero_ratio = zero_count / total_groups if total_groups > 0 else 0
+            one_ratio = one_count / total_groups if total_groups > 0 else 0
+            avg_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0
+            avg_reward_by_source = {
+                source: (sum(rews) / len(rews) if rews else 0) for source, rews in all_rewards_by_source.items()
+            }
+            return avg_reward, zero_ratio, one_ratio, avg_reward_by_source
 
         def compute_tool_turns(data_groups):
             tool_turns = []
@@ -500,10 +507,14 @@ class AgentRLTrainer(RLTrainer):
             avg_tool_turns = sum(tool_turns) / len(tool_turns) if tool_turns else 0
             return avg_tool_turns
 
-        avg_reward, zero_ratio, one_ratio = compute_reward(data_groups)
+        avg_reward, zero_ratio, one_ratio, avg_reward_by_source = compute_reward(data_groups)
         tool_turns = compute_tool_turns(data_groups)
         metrics_results = dict(
-            avg_reward=avg_reward, all_zero_ratio=zero_ratio, all_one_ratio=one_ratio, avg_tool_turns=tool_turns
+            avg_reward=avg_reward,
+            all_zero_ratio=zero_ratio,
+            all_one_ratio=one_ratio,
+            avg_tool_turns=tool_turns,
+            **{f"avg_reward_{source}": avg for source, avg in avg_reward_by_source.items()},
         )
         return metrics_results
 
@@ -547,10 +558,32 @@ class AgentRLTrainer(RLTrainer):
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
+
+        # Detailed reward components for logging
+        detailed_rewards = {}
+
+        def _extract_score(value, default=0.0):
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, dict):
+                score_val = value.get("score", default)
+                if isinstance(score_val, (int, float)):
+                    return float(score_val)
+            return float(default)
+
         offset = 0
         for group in agent_data_groups:
-            rewards = [data.env.judger.reward["score"] for data in group]
+            rewards = [_extract_score(data.env.judger.reward) for data in group]
             rewards_list.extend(rewards)
+            # Collect detailed reward components
+            for idx, data in enumerate(group):
+                reward_dict = data.env.judger.reward
+                for key in reward_dict.keys():
+                    if key != "score":  # Skip 'score' as it's already logged separately
+                        value = reward_dict[key]
+                        if isinstance(value, (int, float)):
+                            detailed_rewards.setdefault(key, []).append(float(value))
+
             rewards = torch.tensor(rewards, dtype=torch.float32)
 
             prompt_repeat_k = len(group)
@@ -599,15 +632,15 @@ class AgentRLTrainer(RLTrainer):
                 response_len_list.append(len(rollout.response_ids))
                 prompt_len_list.append(len(input_ids) - len(rollout.response_ids))
                 advantages_list.extend([advantages[i]] * len(rollout.response_ids))
-                assert len(input_ids) <= pack_max_length, (
-                    f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
-                )
+                assert (
+                    len(input_ids) <= pack_max_length
+                ), f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
                 rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
-                assert rollout_logprobs.size() == shifted_labels.size(), (
-                    f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
-                )
+                assert (
+                    rollout_logprobs.size() == shifted_labels.size()
+                ), f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
 
                 seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
                 seq_ctx.rollout_routed_experts = inputs["routed_experts"]

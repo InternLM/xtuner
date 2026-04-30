@@ -23,7 +23,7 @@ class AgentMessage(BaseAgentMessage):
     content_logprobs: Optional[List[float]] = Field(default=None, repr=False)
     thinking_ids: Optional[List[int]] = Field(default=None, repr=False)
     thinking_logprobs: Optional[List[float]] = Field(default=None, repr=False)
-    reward: Optional[float] = None
+    reward: Optional[float | dict] = None
     raw_content: Optional[str] = None
     raw_content_ids: Optional[List[int]] = Field(default=None, repr=False)
     raw_content_logprobs: Optional[List[float]] = Field(default=None, repr=False)

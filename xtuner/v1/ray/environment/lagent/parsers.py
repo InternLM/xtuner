@@ -89,6 +89,9 @@ class Qwen3FunctionCallParser:
 
 
 class Qwen3_5FunctionCallParser:
+    def __init__(self, argument_type: dict[str, callable] | None = None):
+        self.argument_type = argument_type or {}
+
     def parse_response(self, data: AgentMessage) -> AgentMessage:
         tool_call_blocks = re.findall(r"<tool_call>(.*?)</tool_call>", data.content, flags=re.DOTALL)
         tool_calls, error_message = [], None
@@ -111,6 +114,14 @@ class Qwen3_5FunctionCallParser:
                     parsed_value = ast.literal_eval(p_value)
                 except (ValueError, SyntaxError):
                     parsed_value = p_value
+                if p_name in self.argument_type:
+                    try:
+                        parsed_value = self.argument_type[p_name](parsed_value)
+                    except Exception as e:
+                        print(
+                            f"Failed to convert parameter '{p_name}' with value '{parsed_value}'"
+                            f" using {self.argument_type[p_name]}: {e}"
+                        )
                 parameters[p_name] = parsed_value
 
             tool_calls.append({"name": func_name, "arguments": parameters})

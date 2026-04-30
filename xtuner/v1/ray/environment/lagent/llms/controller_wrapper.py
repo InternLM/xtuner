@@ -26,9 +26,9 @@ class ControllerWrapper:
         reasoning_parser: Optional[ResponseParser] = None,
         tool_call_parser: Optional[ResponseParser] = None,
     ):
-        assert rollout_controller is not None or (placement_group and rollout_cfg), (
-            "Either rollout_controller or placement_group and rollout_cfg must be provided."
-        )
+        assert rollout_controller is not None or (
+            placement_group and rollout_cfg
+        ), "Either rollout_controller or placement_group and rollout_cfg must be provided."
         if rollout_controller:
             self.rollout_controller = rollout_controller
             self.rollout_cfg = ray.get(rollout_controller.get_rollout_info.remote())["rollout_config"]  # type: ignore[call-overload, attr-defined]
@@ -62,7 +62,8 @@ class ControllerWrapper:
                 ),
             )
             if (
-                response.finish_reason != "abort"
+                response.state == "completed"
+                and response.finish_reason != "abort"
                 and self.rollout_cfg.enable_return_routed_experts
                 and "routed_experts" not in response.extra_info
             ):
