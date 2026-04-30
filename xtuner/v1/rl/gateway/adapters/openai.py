@@ -28,14 +28,14 @@ from .trace import ChatTraceStore, normalize_trace_payload
 
 
 class ChatCompletionStreamOptions(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     include_usage: bool = False
     continuous_usage_stats: bool = False
 
 
 class ChatCompletionRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     session_uid: int | str | None = None
     session_id: int | str | None = None
@@ -67,7 +67,7 @@ class ChatCompletionRequest(BaseModel):
 
 
 class UsageInfo(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -75,7 +75,7 @@ class UsageInfo(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     role: str
     content: str | None = None
@@ -84,7 +84,7 @@ class ChatMessage(BaseModel):
 
 
 class DeltaMessage(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     role: str | None = None
     content: str | None = None
@@ -93,7 +93,7 @@ class DeltaMessage(BaseModel):
 
 
 class ChatCompletionResponseChoice(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     index: int
     message: ChatMessage
@@ -101,7 +101,7 @@ class ChatCompletionResponseChoice(BaseModel):
 
 
 class ChatCompletionResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     object: Literal["chat.completion"] = "chat.completion"
@@ -112,7 +112,7 @@ class ChatCompletionResponse(BaseModel):
 
 
 class ChatCompletionResponseStreamChoice(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     index: int
     delta: DeltaMessage = Field(default_factory=DeltaMessage)
@@ -120,7 +120,7 @@ class ChatCompletionResponseStreamChoice(BaseModel):
 
 
 class ChatCompletionStreamResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     object: Literal["chat.completion.chunk"] = "chat.completion.chunk"

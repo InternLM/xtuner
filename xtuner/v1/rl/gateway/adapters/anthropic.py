@@ -29,7 +29,7 @@ from .trace import ChatTraceStore, normalize_trace_payload
 
 
 class AnthropicTextContent(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     type: str = "text"
     text: str
@@ -39,14 +39,14 @@ AnthropicContentBlock = dict[str, Any]
 
 
 class AnthropicMessage(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     role: Literal["user", "assistant"]
     content: str | list[AnthropicContentBlock]
 
 
 class AnthropicMessagesRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     session_uid: int | None = None
     model: str | None = None
@@ -62,7 +62,7 @@ class AnthropicMessagesRequest(BaseModel):
 
 
 class AnthropicCountTokensRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     model: str | None = None
     system: str | list[dict[str, Any]] | None = None
@@ -71,20 +71,20 @@ class AnthropicCountTokensRequest(BaseModel):
 
 
 class AnthropicCountTokensResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     input_tokens: int
 
 
 class AnthropicUsage(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     input_tokens: int
     output_tokens: int
 
 
 class AnthropicMessagesResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     id: str
     type: Literal["message"] = "message"
