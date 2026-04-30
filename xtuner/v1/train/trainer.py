@@ -6,11 +6,14 @@ import os
 import pickle
 import sys
 import time
+from concurrent.futures import Future, TimeoutError
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from shutil import rmtree
-from typing import Annotated, Callable, Literal, Protocol, Sequence, Sized, cast, overload, runtime_checkable
+from typing import (
+    Annotated, Callable, Literal, NamedTuple, Protocol, Sequence, Sized, cast, overload, runtime_checkable,
+)
 
 import torch
 import torch.distributed as dist
@@ -93,6 +96,22 @@ class PerformanceStatistics(TypedDict):
     eta_seconds: float
     eta_hms: str
     e2e_train_time: float
+
+
+class _CheckpointFinalize(TypedDict):
+    checkpoint_path: Path
+    meta_path: Path
+    train_state_path: Path
+    is_snapshot: bool
+    cur_step: int
+    cur_epoch: int
+    total_consumed_tokens: int
+    train_time_offset: float
+
+
+class _PendingCheckpoint(NamedTuple):
+    future: Future
+    finalize: _CheckpointFinalize
 
 
 class ExpInfo(BaseModel):
@@ -334,8 +353,10 @@ class TrainerConfig(BaseModel):
     strict_load: bool = True
     checkpoint_interval: int | None = -1
     checkpoint_maxkeep: int | None = -1
+    checkpoint_save_optimizer: bool = True
     skip_checkpoint_validation: bool = False  # Suggest enabled if fsdp_size is larger than 512
     patch_for_dcp_finish: bool = False
+    async_checkpoint: bool = False
     snapshot_interval: int | None = None
     check_health_interval: int | None = None
     hf_interval: int | None = None
@@ -427,8 +448,7 @@ class Trainer:
     _EXP_TRACKING_PATH = "exp_tracking"
     _CHECKPOINT_DIR = "checkpoints"
 
-    _SAVE_OPTIMIZER_DIR = "optimizer"
-    _SAVE_MODEL_DIR = "model"
+    _SAVE_WEIGHTS_DIR = "weights"
     _SAVE_DATALOADER_DIR = "dataloader"
     _SAVE_SCHEDULER_DIR = "lr_scheduler"
     _SAVE_TRAIN_STATE_PATH = "train_state.json"
@@ -458,8 +478,10 @@ class Trainer:
         strict_load: bool = True,
         checkpoint_interval: int | None = -1,
         checkpoint_maxkeep: int | None = -1,
+        checkpoint_save_optimizer: bool = True,
         skip_checkpoint_validation: bool = False,  # Suggest enabled if fsdp_size is larger than 512
         patch_for_dcp_finish: bool = False,
+        async_checkpoint: bool = False,
         snapshot_interval: int | None = None,
         check_health_interval: int | None = None,
         hf_interval: int | None = None,
@@ -522,6 +544,9 @@ class Trainer:
 
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_maxkeep = checkpoint_maxkeep
+        self._checkpoint_save_optimizer = checkpoint_save_optimizer
+        self._async_checkpoint = async_checkpoint
+        self._pending_checkpoint: _PendingCheckpoint | None = None
         self._snapshot_interval = snapshot_interval
         self._check_health_interval = check_health_interval
         self._hf_max_keep = hf_max_keep
@@ -634,6 +659,7 @@ class Trainer:
             load_checkpoint_path=self._load_checkpoint_cfg.checkpoint_path,
             strict=strict_load,
             intra_layer_micro_batch=intra_layer_micro_batch,
+            async_checkpoint=self._async_checkpoint,
         )
         self._lr_cfg = lr_cfg
         self._lr_scheduler = self.build_lr_scheduler(lr_cfg, self.total_step)
@@ -692,8 +718,10 @@ class Trainer:
             strict_load=config.strict_load,
             checkpoint_interval=config.checkpoint_interval,
             checkpoint_maxkeep=config.checkpoint_maxkeep,
+            checkpoint_save_optimizer=config.checkpoint_save_optimizer,
             skip_checkpoint_validation=config.skip_checkpoint_validation,
             patch_for_dcp_finish=config.patch_for_dcp_finish,
+            async_checkpoint=config.async_checkpoint,
             snapshot_interval=config.snapshot_interval,
             check_health_interval=config.check_health_interval,
             hf_interval=config.hf_interval,
@@ -793,10 +821,13 @@ class Trainer:
                 gc.collect()
 
         # TODO: Should use flush rather than close
+        self._wait_for_pending_checkpoint()
+        self._engine.destroy_async_checkpoint_pg()
         self._exp_tracker.close()
         if self._metrics_recorder:
             self._metrics_recorder.close()
         self.logger.info(f"Training finished in {time.time() - train_begin:.2f} seconds")
+        dist.barrier()
 
     def _prepare_model_input(self, data_batch) -> list[ModelItem]:
         seq_ctx_list: list[SequenceContext] = []
@@ -1005,6 +1036,7 @@ class Trainer:
         load_checkpoint_path: str | Path | None,
         intra_layer_micro_batch: int = 1,
         strict: bool = True,
+        async_checkpoint: bool = False,
     ):
         """Build the training engine for the transformer model.
 
@@ -1016,6 +1048,7 @@ class Trainer:
             resume_cfg (ResumeConfig | None): Resume configuration for continuing training.
             intra_layer_micro_batch (int): Intra-layer micro batch size for gradient accumulation.
             strict (bool): Whether to strictly load model weights.
+            async_checkpoint (bool): Whether to create a dedicated gloo process group for async checkpoint.
 
         Returns:
             TrainEngine: Initialized training engine.
@@ -1025,6 +1058,7 @@ class Trainer:
             fsdp_cfg=fsdp_config,
             model_cfg=model_config,
             intra_layer_micro_batch=intra_layer_micro_batch,
+            async_checkpoint=async_checkpoint,
         )
         if model_path is not None and (model_config.dcp_ignore_frozen_params or load_checkpoint_path is None):
             engine.from_hf(hf_path=model_path, strict=strict)
@@ -1092,77 +1126,49 @@ class Trainer:
                 raise RuntimeError("Health check failed, exit training")
             logger.info(f"Health check passed at step {self.cur_step}")
 
-    def _maybe_save(self, is_snapshot: bool = False) -> bool:
-        ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
-        if ckp_interval is None:
-            return False
+    def _wait_for_pending_checkpoint(self, timeout: int = 300) -> None:
+        if self._pending_checkpoint is None:
+            return
 
-        if ckp_interval == -1:  # only save at the end of training
-            if self._cur_step != self.total_step:
-                return False
-        else:
-            if self.cur_step % ckp_interval != 0 and (is_snapshot or self._cur_step != self.total_step):
-                # if is_snapshot, only save at interval
-                # else save at interval or at the end of training
-                return False
+        t0 = time.time()
+        pending = self._pending_checkpoint
+        self._pending_checkpoint = None
 
-        checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step, is_snapshot=is_snapshot)
-        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        try:
+            pending.future.result(timeout=timeout)
+        except TimeoutError:
+            pending.future.cancel()
+            ckpt_path = pending.finalize["checkpoint_path"]
+            raise TimeoutError(f"Async checkpoint {ckpt_path} timed out after {timeout}s")
 
-        meta_path = self.work_dir / self._META_PATH
+        wait_time = time.time() - t0
+        logger.info(f"[Async Checkpoint] waited {wait_time:.2f}s for previous checkpoint")
 
-        optimizer_path = checkpoint_path / self._SAVE_OPTIMIZER_DIR
-        model_path = checkpoint_path / self._SAVE_MODEL_DIR
-        dataloader_path = checkpoint_path / self._SAVE_DATALOADER_DIR
-        scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
-        train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+        t0 = time.time()
+        self._finalize_checkpoint_metadata(**pending.finalize)
+        logger.info(f"[Async Checkpoint Finalize] metadata={time.time() - t0:.2f}s")
 
-        if self.cur_step % ckp_interval == 0:
-            DEVICE_MODULE.empty_cache()
-
-        # Save model and optimizer
-        self._engine.save_dcp(
-            model_dir=model_path,
-            optimizer_dir=optimizer_path,
-        )
-
-        total_consumed_tokens = (
-            self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
-        )
-
-        # Save dataloader
-        self._save_dataloader(dataloader_path)
-
-        DEVICE_MODULE.empty_cache()
-
-        # Save scheduler
-        if self.rank == 0:
-            lr_scheduler_state = self._lr_scheduler.state_dict()
-            torch.save(lr_scheduler_state, scheduler_path)
-
-        # Save trainer config
-        if self._trainer_cfg is not None and self.rank == 0:
-            # TODO: Maybe we need a better way to serialize and deserialize config, rather than using pickle
-            config_path = checkpoint_path / "trainer_config.json"
-            config_bin = checkpoint_path / "trainer_config.bin"
-            with config_path.open("w") as f:
-                f.write(self._trainer_cfg.model_dump_json(indent=2))
-
-            with config_bin.open("wb") as f:
-                pickle.dump(self._trainer_cfg, f)
-
-        dist.barrier()
-
+    def _finalize_checkpoint_metadata(
+        self,
+        checkpoint_path: Path,
+        meta_path: Path,
+        train_state_path: Path,
+        is_snapshot: bool,
+        cur_step: int,
+        cur_epoch: int,
+        total_consumed_tokens: int,
+        train_time_offset: float,
+    ) -> None:
         # Save train state
         if self.rank == 0:
             with train_state_path.open("w") as f:
                 f.write(
                     json.dumps(
                         {
-                            "cur_step": self.cur_step,
-                            "cur_epoch": self._cur_epoch,
+                            "cur_step": cur_step,
+                            "cur_epoch": cur_epoch,
                             "total_consumed_tokens": total_consumed_tokens,
-                            "train_time_offset": self._train_time + self._train_time_offset,
+                            "train_time_offset": train_time_offset,
                         }
                     )
                 )
@@ -1171,10 +1177,10 @@ class Trainer:
         current_exp = self.meta.latest_exp
         ckp_list = current_exp.checkpoint_list if not is_snapshot else current_exp.snap_checkpoint_list
         ckp_list.append(str(checkpoint_path))
-        current_exp.cur_step = self.cur_step
-        current_exp.cur_epoch = self._cur_epoch
+        current_exp.cur_step = cur_step
+        current_exp.cur_epoch = cur_epoch
         current_exp.consumed_tokens = int(total_consumed_tokens)
-        current_exp.history[-1]["end"] = self.cur_step
+        current_exp.history[-1]["end"] = cur_step
 
         # Delete checkpoints and update meta's checkpoint_list
         ckp_maxkeep = self._checkpoint_maxkeep if not is_snapshot else 1
@@ -1200,11 +1206,119 @@ class Trainer:
         for hook in hooks:
             hook(
                 checkpoint=checkpoint_path,
-                step=self.cur_step,
-                epoch=self._cur_epoch,
+                step=cur_step,
+                epoch=cur_epoch,
                 total_step=self.total_step,
                 total_epoch=self.total_epoch,
             )
+
+    def _maybe_save(self, is_snapshot: bool = False) -> bool:
+        ckp_interval = self._checkpoint_interval if not is_snapshot else self._snapshot_interval
+        if ckp_interval is None:
+            return False
+
+        if ckp_interval == -1:  # only save at the end of training
+            if self._cur_step != self.total_step:
+                return False
+        else:
+            if self.cur_step % ckp_interval != 0 and (is_snapshot or self._cur_step != self.total_step):
+                # if is_snapshot, only save at interval
+                # else save at interval or at the end of training
+                return False
+
+        checkpoint_path = self._get_checkpoint_path(epoch=self._cur_epoch, step=self.cur_step, is_snapshot=is_snapshot)
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+        t_wait = time.time()
+        self._wait_for_pending_checkpoint()
+        t_wait = time.time() - t_wait
+
+        meta_path = self.work_dir / self._META_PATH
+
+        weights_path = checkpoint_path / self._SAVE_WEIGHTS_DIR
+        dataloader_path = checkpoint_path / self._SAVE_DATALOADER_DIR
+        scheduler_path = checkpoint_path / self._SAVE_SCHEDULER_DIR
+        train_state_path = checkpoint_path / self._SAVE_TRAIN_STATE_PATH
+
+        total_consumed_tokens = (
+            self._reduce_number_across_rank(self._local_total_consumed_tokens) + self._init_total_tokens
+        )
+
+        if self.cur_step % ckp_interval == 0:
+            DEVICE_MODULE.empty_cache()
+
+        # Save model and optimizer
+        save_optimizer = self._checkpoint_save_optimizer
+        dcp_label = "save_dcp"
+        if self._async_checkpoint and not is_snapshot:
+            t_dcp = time.time()
+            dcp_label = "async_save_dcp"
+            future = self._engine.async_save_dcp(weights_dir=weights_path, save_optimizer=save_optimizer)
+            t_dcp = time.time() - t_dcp
+            # Defer metadata save until async save completes.
+            self._pending_checkpoint = _PendingCheckpoint(
+                future=future,
+                finalize=_CheckpointFinalize(
+                    checkpoint_path=checkpoint_path,
+                    meta_path=meta_path,
+                    train_state_path=train_state_path,
+                    is_snapshot=is_snapshot,
+                    cur_step=self.cur_step,
+                    cur_epoch=self._cur_epoch,
+                    total_consumed_tokens=total_consumed_tokens,
+                    train_time_offset=self._train_time + self._train_time_offset,
+                ),
+            )
+        else:
+            t_dcp = time.time()
+            self._engine.save_dcp(weights_dir=weights_path, save_optimizer=save_optimizer)
+            t_dcp = time.time() - t_dcp
+
+        # Save dataloader
+        t_misc = time.time()
+        self._save_dataloader(dataloader_path)
+
+        DEVICE_MODULE.empty_cache()
+
+        # Save scheduler
+        if self.rank == 0:
+            lr_scheduler_state = self._lr_scheduler.state_dict()
+            torch.save(lr_scheduler_state, scheduler_path)
+
+        # Save trainer config
+        if self._trainer_cfg is not None and self.rank == 0:
+            # TODO: Maybe we need a better way to serialize and deserialize config, rather than using pickle
+            config_path = checkpoint_path / "trainer_config.json"
+            config_bin = checkpoint_path / "trainer_config.bin"
+            with config_path.open("w") as f:
+                f.write(self._trainer_cfg.model_dump_json(indent=2))
+
+            with config_bin.open("wb") as f:
+                pickle.dump(self._trainer_cfg, f)
+        t_misc = time.time() - t_misc
+
+        logger.info(
+            f"[Checkpoint Breakdown] step {self.cur_step}: "
+            f"wait_prev={t_wait:.2f}s, {dcp_label}={t_dcp:.2f}s, "
+            f"save_dataloader+scheduler+config={t_misc:.2f}s"
+        )
+
+        if self._async_checkpoint and not is_snapshot:
+            # Metadata save will be done in _wait_for_pending_checkpoint.
+            return True
+
+        dist.barrier()
+
+        self._finalize_checkpoint_metadata(
+            checkpoint_path=checkpoint_path,
+            meta_path=meta_path,
+            train_state_path=train_state_path,
+            is_snapshot=is_snapshot,
+            cur_step=self.cur_step,
+            cur_epoch=self._cur_epoch,
+            total_consumed_tokens=total_consumed_tokens,
+            train_time_offset=self._train_time + self._train_time_offset,
+        )
 
         return True
 
@@ -1784,16 +1898,12 @@ class Trainer:
         if not resume_from.exists():
             raise FileNotFoundError(f"Checkpoint path {resume_from} does not exist.")
 
-        model_path = resume_from / self._SAVE_MODEL_DIR
-        optimizer_path = (
-            resume_from / self._SAVE_OPTIMIZER_DIR
-            if load_checkpoint_cfg.load_optimizer_states or load_checkpoint_cfg.load_optimizer_args
-            else None
-        )
+        weights_path = resume_from / self._SAVE_WEIGHTS_DIR
+        if not weights_path.exists():
+            raise FileNotFoundError(f"Checkpoint at {resume_from} has no '{self._SAVE_WEIGHTS_DIR}/' directory.")
 
         self._engine.load_dcp(
-            model_dir=model_path,
-            optimizer_dir=optimizer_path,
+            weights_dir=weights_path,
             load_states=load_checkpoint_cfg.load_optimizer_states,
             load_args=load_checkpoint_cfg.load_optimizer_args,
         )
