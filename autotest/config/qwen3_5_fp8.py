@@ -21,18 +21,17 @@ float8_cfg = Float8Config(
     scaling_granularity_grouped_gemm=ScalingGranularity.TILEWISE,
 )
 
-moe_cfg = Qwen3_5_VLMoE35BA3Config(float8_cfg=float8_cfg)
+moe_cfg = Qwen3_5_VLMoE35BA3Config(float8_cfg=float8_cfg, compile_cfg=False)
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
-    torch_compile=False,
     cpu_offload=False,
 )
 
 dataset_config = [
     {
         "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template='qwen3', max_length=16384),
+        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template="qwen3", max_length=16384),
     },
 ]
 

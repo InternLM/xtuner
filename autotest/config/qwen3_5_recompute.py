@@ -1,5 +1,4 @@
 import os
-import torch
 
 from xtuner.v1.config import (
     AdamWConfig,
@@ -17,19 +16,18 @@ QWEN3_MOE_PATH = os.environ["QWEN3_MOE_PATH"]
 ALPACA_PATH = os.environ["ALPACA_PATH"]
 
 
-moe_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=True)
+moe_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
 optim_cfg = AdamWConfig(lr=6e-05)
 lr_cfg = LRConfig(lr_type="cosine", lr_min=1e-6)
 fsdp_cfg = FSDPConfig(
-    torch_compile=True,
-    cpu_offload=False, # qwen3.5 don't support True
+    cpu_offload=False,  # qwen3.5 don't support True
     recompute_ratio=0.25,
 )
 
 dataset_config = [
     {
         "dataset": DatasetConfig(name="alpaca", anno_path=ALPACA_PATH, sample_ratio=1.0),
-        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template='qwen3', max_length=16384),
+        "tokenize_fn": OpenaiTokenizeFunctionConfig(chat_template="qwen3", max_length=16384),
     },
 ]
 

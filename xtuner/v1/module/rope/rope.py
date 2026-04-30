@@ -1,10 +1,11 @@
+from functools import lru_cache
 from typing import Callable, Literal, Optional, Protocol, cast
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pydantic import BaseModel, ConfigDict, computed_field
-from typing_extensions import Self, overload
+from pydantic import BaseModel, ConfigDict
+from typing_extensions import Self, deprecated, overload
 
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from xtuner.v1.utils import get_logger
@@ -16,7 +17,18 @@ DEVICE = get_device()
 logger = get_logger()
 
 
+@deprecated(
+    "RopeScalingConfig is deprecated and will be removed in a future version. "
+    "Use RopeParametersConfig from xtuner.v1.model.base instead.",
+    category=FutureWarning,
+)
 class RopeScalingConfig(BaseModel):
+    """Deprecated: Use RopeParametersConfig from xtuner.v1.model.base instead.
+
+    This class is kept for backward compatibility. New code should use RopeParametersConfig
+    which provides a unified interface for all RoPE configurations.
+    """
+
     model_config = ConfigDict(extra="forbid")
     type: Literal["default", "linear", "dynamic", "yarn", "longrope", "llama3", "qwen3_vl"] = "default"
 
@@ -43,9 +55,190 @@ class RopeScalingConfig(BaseModel):
     fope_sep_head: bool | None = None
     num_inv_freq: int | None = None
 
-    @computed_field
+    @property
     def use_fope(self) -> bool:
         return self.fope_init_factor is not None or self.fope_sep_head is not None or self.num_inv_freq is not None
+
+
+class RopeParametersConfig(BaseModel):
+    """Unified RoPE (Rotary Position Embedding) parameters configuration.
+
+    This class consolidates all rope-related parameters and serves as the primary
+    configuration for RoPE. It is compatible with both transformers 4.57.0 and 5.2.0+.
+
+    For backward compatibility:
+    - Old configs with rope_theta + rope_scaling_cfg will be automatically converted
+    - The computed fields rope_theta and rope_scaling provide backward compatible access
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    # Core rope parameters (transformers 5.2.0+ style)
+    rope_theta: float = 10000.0
+    rope_type: Literal["default", "linear", "dynamic", "yarn", "longrope", "llama3", "qwen3_vl"] = "default"
+
+    # Position embeddings
+    # chenchiyu: remove max_position_embeddings since no one use it, no value fill into it,
+    # And hf origin rope_scaling doesn't include it either.
+    original_max_position_embeddings: int | None = None
+
+    # Scaling parameters for yarn/llama3/longrope
+    factor: float | None = None
+    beta_fast: float | None = None
+    beta_slow: float | None = None
+    short_factor: list[float] | None = None
+    long_factor: list[float] | None = None
+    low_freq_factor: float | None = None
+    high_freq_factor: float | None = None
+    mscale: float | None = None
+    mscale_all_dim: float | None = None
+    truncate: bool = False
+
+    # For Qwen3VL
+    mrope_section: list[int] | None = None  # e.g. [24, 20, 20]
+    partial_rotary_factor: float = 1.0
+
+    # For FoPE
+    fope_init_factor: float | None = None
+    fope_sep_head: bool | None = None
+    num_inv_freq: int | None = None
+
+    @property
+    def use_fope(self) -> bool:
+        """Check if FoPE is enabled."""
+        return self.fope_init_factor is not None or self.fope_sep_head is not None or self.num_inv_freq is not None
+
+    @classmethod
+    @lru_cache(maxsize=None)
+    def _get_rope_scaling_to_parameters_mapping(cls) -> dict[str, str]:
+        """Dynamically build mapping from RopeScalingConfig field names to
+        RopeParametersConfig field names.
+
+        Based on RopeParametersConfig.model_fields, excluding rope_theta. rope_type maps to 'type' for backward
+        compatibility with RopeScalingConfig.
+
+        Result is cached since model_fields is static after class definition.
+        """
+        mapping: dict[str, str] = {}
+        for field_name in cls.model_fields.keys():
+            if field_name == "rope_theta":
+                continue
+            elif field_name == "rope_type":
+                mapping["type"] = "rope_type"
+            else:
+                mapping[field_name] = field_name
+        return mapping
+
+    @classmethod
+    @lru_cache(maxsize=None)
+    def get_rope_scaling_field_names(cls) -> tuple[str, ...]:
+        """Return field names in RopeParametersConfig that correspond to
+        rope_scaling fields.
+
+        Excludes rope_theta and rope_type themselves.
+        """
+        return tuple(v for v in cls._get_rope_scaling_to_parameters_mapping().values() if v != "rope_type")
+
+    @classmethod
+    def from_legacy_cfg(
+        cls,
+        rope_theta: float | None = None,
+        rope_scaling_cfg=None,  # type: ignore  # RopeScalingConfig type
+    ) -> "RopeParametersConfig":
+        """Create RopeParametersConfig from legacy rope_theta and
+        rope_scaling_cfg.
+
+        This method provides backward compatibility for old configs that use separate rope_theta and rope_scaling_cfg
+        fields.
+        """
+        kwargs: dict = {}
+
+        # Set rope_theta only if explicitly provided (otherwise use RopeParametersConfig default)
+        if rope_theta is not None:
+            kwargs["rope_theta"] = rope_theta
+
+        # Copy fields from rope_scaling_cfg if provided
+        if rope_scaling_cfg is not None:
+            for src_field, dst_field in cls._get_rope_scaling_to_parameters_mapping().items():
+                if hasattr(rope_scaling_cfg, src_field):
+                    value = getattr(rope_scaling_cfg, src_field)
+                    if value is not None:
+                        kwargs[dst_field] = value
+
+        return cls(**kwargs)
+
+    def to_rope_scaling_dict(self) -> dict | None:
+        """Convert to rope_scaling dict format for HF compatibility."""
+        if self.rope_type == "default" and not self.use_fope:
+            return None
+
+        result: dict = {"type": self.rope_type}
+
+        # Add all non-None scaling parameters dynamically
+        for field_name in self.get_rope_scaling_field_names():
+            value = getattr(self, field_name)
+            if value is not None:
+                result[field_name] = value
+
+        return result
+
+    def to_rope_parameters_dict(self) -> dict | None:
+        """Convert to rope_parameters dict format for HF compatibility."""
+        if not self.use_fope:
+            return self.model_dump(exclude={"fope_init_factor", "fope_sep_head", "num_inv_freq"})
+        else:
+            return self.model_dump()
+
+    @classmethod
+    def from_hf_config(cls, hf_config, default_value_dict=None) -> Optional["RopeParametersConfig"]:
+        """Create RopeParametersConfig from HF config with version
+        compatibility."""
+        # TODO: remove default_value_dict, it's used for DeepseekV3Config in some cases for now.
+        kwargs: dict = default_value_dict or {}
+        default_rope_theta = kwargs["rope_theta"] if "rope_theta" in kwargs else 10000.0
+
+        hf_rope_parameters = getattr(hf_config, "rope_parameters", None)
+        hf_rope_scaling = getattr(hf_config, "rope_scaling", None)
+        hf_rope_theta = getattr(hf_config, "rope_theta", None)
+        if isinstance(hf_rope_parameters, dict):
+            # Try rope_parameters dict (transformers 5.2.0)
+            # In 5.2.0, all rope params are consolidated into rope_parameters
+            rope_theta = hf_rope_parameters.get("rope_theta", default_rope_theta)
+            if "rope_type" in hf_rope_parameters:
+                kwargs["rope_type"] = hf_rope_parameters["rope_type"]
+
+            # Copy other parameters dynamically from scaling field names
+            for field_name in cls.get_rope_scaling_field_names():
+                if field_name in hf_rope_parameters:
+                    kwargs[field_name] = hf_rope_parameters[field_name]
+
+            kwargs["rope_theta"] = rope_theta
+
+            return cls(**kwargs)
+
+        elif hf_rope_theta is not None or hf_rope_scaling is not None:
+            # Try rope_scaling dict (transformers 4.57.0)
+            # In 4.57.0, scaling params are in rope_scaling dict and rope_theta is a separate attribute of hf_config
+
+            if isinstance(hf_rope_scaling, dict):
+                # Note: rope_theta should NOT be in rope_scaling dict in standard transformers format.
+                # It is obtained from hf_config.rope_theta (4.57.0) or rope_parameters (5.2.0) above.
+                # Copy scaling parameters from rope_scaling
+                for key in list(cls._get_rope_scaling_to_parameters_mapping().keys()) + ["max_position_embeddings"]:
+                    if key in hf_rope_scaling:
+                        assert key != "max_position_embeddings", (
+                            "hf_config.rope_scaling should not include max_position_embeddings. "
+                            "This value should be obtained from hf_config.max_position_embeddings."
+                        )
+                        kwargs[cls._get_rope_scaling_to_parameters_mapping()[key]] = hf_rope_scaling[key]
+
+            kwargs["rope_theta"] = hf_rope_theta or default_rope_theta
+
+            return cls(**kwargs)
+
+        else:
+            # no rope related parameters found, return None
+            return None
 
 
 class RotaryEmbeddingProtocol(Protocol):
@@ -65,12 +258,27 @@ def compute_default_rope_parameters(
     config,
     device: Optional["torch.device"] = None,
 ) -> tuple["torch.Tensor", float]:
-    base = config.rope_theta
-    if config.rope_scaling_cfg is not None:
-        rope_scaling_cfg: RopeScalingConfig = config.rope_scaling_cfg
-        partial_rotary_factor = getattr(rope_scaling_cfg, "partial_rotary_factor", 1.0)
+    """Compute default RoPE parameters with compatibility for both old and new
+    config formats.
+
+    Supports:
+    - New format: config.rope_parameters_cfg (RopeParametersConfig from base.py)
+    - Old format: config.rope_theta + config.rope_scaling_cfg
+    """
+    from xtuner.v1.model.base import TransformerConfig
+
+    config = cast(TransformerConfig, config)
+
+    # Try new format first: rope_parameters_cfg
+    if config.rope_parameters_cfg is not None:
+        rope_parameters_cfg = config.rope_parameters_cfg
+        base = getattr(rope_parameters_cfg, "rope_theta", 10000.0)
+        partial_rotary_factor = getattr(rope_parameters_cfg, "partial_rotary_factor", 1.0)
     else:
-        partial_rotary_factor = 1.0
+        # Fall back to old format
+        base = getattr(config, "rope_theta", 10000.0)
+        partial_rotary_factor = getattr(config.rope_scaling_cfg, "partial_rotary_factor", 1.0)
+
     head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
     dim = int(head_dim * partial_rotary_factor)
 
@@ -96,9 +304,12 @@ class RotaryEmbedding(nn.Module):
         self.rope_type = "default"
         self.config = config
 
-        rope_scaling_cfg = config.rope_scaling_cfg
-        if rope_scaling_cfg is not None:
-            self.rope_type = rope_scaling_cfg.type
+        # Get rope_type from rope_parameters_cfg (new format) or rope_scaling_cfg (old format)
+        if config.rope_parameters_cfg is not None:
+            self.rope_type = config.rope_parameters_cfg.rope_type
+        elif config.rope_scaling_cfg is not None:
+            self.rope_type = config.rope_scaling_cfg.type
+
         assert self.rope_type in ["default", "linear", "yarn", "llama3"], (
             f"Unsupported rope_type: {self.rope_type}. Supported types are: 'default', 'linear', 'yarn', 'llama3'."
         )
@@ -322,8 +533,14 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = self.inv_freq
 
-        self.mrope_section = config.rope_scaling_cfg.mrope_section
-        assert self.mrope_section is not None
+        # Get mrope_section from rope_parameters_cfg (new format) or rope_scaling_cfg (old format)
+        if config.rope_parameters_cfg is not None:
+            self.mrope_section = config.rope_parameters_cfg.mrope_section
+        elif config.rope_scaling_cfg is not None:
+            self.mrope_section = config.rope_scaling_cfg.mrope_section
+        else:
+            self.mrope_section = None
+        assert self.mrope_section is not None, "mrope_section is required for Qwen3VLTextRotaryEmbedding"
 
     def apply_interleaved_mrope(self, freqs, mrope_section):
         """Apply interleaved MRoPE to 3D rotary embeddings.

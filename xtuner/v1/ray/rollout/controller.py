@@ -162,6 +162,7 @@ class RolloutController:
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
+        self.cancel_response_timeout = 5.0
 
         from xtuner.v1.ray.environment.lagent.parsers import (
             Qwen3_5FunctionCallParser,
@@ -412,7 +413,7 @@ class RolloutController:
         try:
             selected_worker_info = self.workers_info[server_url]
             response = await asyncio.wait_for(
-                response_ref, timeout=self.config.rollout_timeout * self.timeout_multiplier
+                asyncio.shield(response_ref), timeout=self.config.rollout_timeout * self.timeout_multiplier
             )
             selected_worker_info.success_count += 1
             if response.state == "failed" or response.state == "skipped":
@@ -420,7 +421,14 @@ class RolloutController:
                 self.logger.error(f"Get failed/skipped response from rollout worker {worker}, deactivate it.")
                 self.deactivate_worker_by_url(server_url)
             return response
+        except asyncio.CancelledError as exc:
+            ray.cancel(response_ref, recursive=True)
+            try:
+                return await asyncio.wait_for(asyncio.shield(response_ref), timeout=self.cancel_response_timeout)
+            except BaseException:
+                raise exc
         except asyncio.TimeoutError:
+            ray.cancel(response_ref, recursive=True)
             selected_worker_info.failure_count += 1
             self.logger.error(f"Get response from rollout worker {worker} timeout and return skip this sample.")
             self.deactivate_worker_by_url(server_url)

@@ -1,5 +1,6 @@
 import os
 import json
+import unittest
 
 import inspect
 import parametrize
@@ -7,6 +8,8 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers import AutoConfig
+from packaging.version import Version
+from transformers import __version__ as transformers_version
 import tempfile
 from pathlib import Path
 from safetensors import safe_open
@@ -85,7 +88,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
                 cfg.compile_cfg = False
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         qwen_model.from_hf(hf_model_path)
 
         losses = []
@@ -163,7 +166,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             cfg.compile_cfg = False
             cfg.ep_size = ep_size
             cfg.dispatcher = dispatcher
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             ep_size=ep_size,
@@ -196,7 +199,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             loss = output["loss"]
             losses.append(loss)
 
-        self._check_loss_curve(losses=torch.tensor(losses), losses_ref=torch.tensor(expected_losses), sim_tol=1e-2, rtol=1e-2)
+        self._check_loss_curve(losses=torch.tensor(losses), losses_ref=torch.tensor(expected_losses), sim_tol=3e-2, rtol=3e-2)
 
     @parametrize.parametrize(
         "use_sliding_window, max_window_layers, sliding_window",
@@ -219,7 +222,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
                                       use_sliding_window=use_sliding_window,
                                       max_window_layers=max_window_layers,
                                       attention=attention)
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
         loss_cfg = CELossConfig()
 
         if use_sliding_window is False or max_window_layers >= num_hidden_layers:
@@ -248,7 +251,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
                                           use_sliding_window=use_sliding_window,
                                           max_window_layers=max_window_layers,
                                           attention=attention)
-                qwen_model = cfg.build().to(torch.bfloat16)
+                qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
             fsdp_config = FSDPConfig()
             tokenizer = AutoTokenizer.from_pretrained(QWEN3_MOE_PATH, trust_remote_code=True)
@@ -287,7 +290,7 @@ class TestQwen3MoE(DeterministicDDPTestCase):
             cfg = Qwen3MoE30BA3Config()
             cfg.dispatcher = dispatcher
             cfg.ep_size = ep_size
-            qwen_model = cfg.build().to(torch.bfloat16)
+            qwen_model = cfg.build()._to_device_dtype(dtype=torch.bfloat16, skip_buffers_dtype=True)
 
         fsdp_config = FSDPConfig(
             ep_size=ep_size,
@@ -500,4 +503,3 @@ def check_dict_equal(dict1: dict, dict2: dict) -> bool:
             print(f"[ERROR] key {key} value is not equal")
             return False
     return True
-

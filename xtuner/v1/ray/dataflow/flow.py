@@ -12,7 +12,11 @@ from ray.actor import ActorProxy
 from tqdm.auto import tqdm
 from typing_extensions import Annotated
 
-from xtuner.v1.data_proto.rl_data import MultimodalTrainInfo, RLDataFlowItem, RolloutState
+from xtuner.v1.data_proto.rl_data import (
+    MultimodalTrainInfo,
+    RLDataFlowItem,
+    RolloutState,
+)
 from xtuner.v1.ray.environment import SingleTurnEnvironment
 from xtuner.v1.ray.rollout.controller import SampleParams
 from xtuner.v1.ray.utils import create_task
@@ -180,6 +184,7 @@ class RawDataFlow:
             )
         self.logger.info(f"DataFlowConfig:\n{self.config.model_dump_json(indent=2)}")
         self.cleanup_task_time = 5 * 60  # 5 minutes
+        self.cancel_response_timeout = 5.0
 
     def _reset_internal_states(
         self,
@@ -253,11 +258,22 @@ class RawDataFlow:
         assert len(group_data_items) > 0, "Sampled empty group data items from replay buffer."
         action_id = group_data_items[0].uid.action_id
         # step 2: env generate
-        group_data_items = await self.env_controller.run.remote(  # type: ignore[attr-defined]
+        env_run_ref = self.env_controller.run.remote(  # type: ignore[attr-defined]
             group_data_items,
             sample_params=self.sample_params,
             extra_params=self.extra_params,
         )
+        try:
+            group_data_items = await asyncio.shield(env_run_ref)
+        except asyncio.CancelledError as exc:
+            ray.cancel(env_run_ref, recursive=True)
+            try:
+                group_data_items = await asyncio.wait_for(
+                    asyncio.shield(env_run_ref),
+                    timeout=self.cancel_response_timeout,
+                )
+            except BaseException:
+                raise exc
 
         # Step 3: Determine the sample's state and act accordingly.
         group_state = determine_group_state(group_data_items)
