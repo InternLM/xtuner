@@ -1,10 +1,10 @@
-from typing import cast
+import os
+from typing import Any, cast
 
 from xtuner.v1.data_proto.rl_data import RolloutState
 
 from ...data_proto.rl_data import MultimodalInfo
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwen3VLTokenizeFunction, QwenVL3DataItem
-from ..utils import replace_image_context_and_collect_media_data
 
 
 def remove_consecutive_img_context_tokens(tokens: list[int], img_context_id: int) -> list[int]:
@@ -18,6 +18,39 @@ def remove_consecutive_img_context_tokens(tokens: list[int], img_context_id: int
         else:
             new_tokens.append(tokens[i])
     return new_tokens
+
+
+def replace_image_context_and_collect_media_data(
+    prompt: str | list[dict[str, Any]], media_root: str, replace_image_ctx: bool
+) -> tuple:
+    """Collect image data from the prompt and extra_info.
+
+    Args:
+        prompt (str): The input prompt containing image placeholders.
+        media_root (str): The root directory of the media files.
+        replace_image_ctx (bool): Whether to replace the image context in the prompt.
+
+    Returns:
+        List[dict]: A list of image data dictionaries.
+    """
+    if not isinstance(prompt, list):
+        return [], []
+
+    image_paths = []
+    video_paths = []
+    for msg in prompt:
+        if msg["role"] == "user":
+            content = msg["content"]
+            if isinstance(content, list):
+                for c in content:
+                    if c["type"] in ("image_url", "image"):
+                        key = "image_url" if "image_url" in c else "image"
+                        image_paths.append(os.path.join(media_root, c[key]["url"]))
+                    elif c["type"] in ("video_url", "video"):
+                        key = "video_url" if "video_url" in c else "video"
+                        video_paths.append(os.path.join(media_root, c[key]["url"]))
+
+    return image_paths, video_paths
 
 
 class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
@@ -101,6 +134,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
 
 class RLQwen3VLTokenizeFnConfig(Qwen3VLTokenizeFnConfig):
     ignore_multimodal_info: bool = False  # eval is True
+    data_judger_mapping: dict | None = None  # {origin_data_source: mapped_judger_name_and_weight}
 
     def build(
         self, tokenizer, tokenizer_hash: str | None = None, anno_name: str = "", **kwargs
@@ -127,4 +161,5 @@ class RLQwen3VLTokenizeFnConfig(Qwen3VLTokenizeFnConfig):
             ignore_multimodal_info=self.ignore_multimodal_info,
             add_generation_prompt=self.add_generation_prompt,
             enable_thinking=self.enable_thinking,
+            data_judger_mapping=self.data_judger_mapping,
         )
