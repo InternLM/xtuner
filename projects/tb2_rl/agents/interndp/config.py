@@ -43,7 +43,7 @@ model = dict(
     model=dict(
         model=os.environ.get(
             "RL_LLM_MODEL",
-            "train_lkk_test",
+            "",
         ),
         base_url=os.environ.get(
             "RL_LLM_BASE_URL",
@@ -52,7 +52,7 @@ model = dict(
         api_key=os.environ.get("RL_LLM_API_KEY", "sk-admin"),
     ),
     sample_params=dict(temperature=0.7, top_p=1.0, top_k=50),
-    timeout=600,
+    timeout=900,
     max_retry=1,
     sleep_interval=5,
     extra_body=dict(spaces_between_special_tokens=False),

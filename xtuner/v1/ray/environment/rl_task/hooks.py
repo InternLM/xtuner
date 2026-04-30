@@ -39,6 +39,7 @@ from xtuner.v1.ray.environment.rl_task.sandbox import (
     walk_files,
 )
 from xtuner.v1.ray.environment.rl_task.schemas import AgentSpec, CriterionScore, JudgerResult
+from xtuner.v1.utils import get_logger
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -52,7 +53,7 @@ class PickAgent(Hook):
     Selection is deterministic on ``ctx["uid"]["root_id"]`` so the same
     rollout always picks the same agent.  Also stores ``template_root`` in
     ``ctx["agent_template_root"]`` so downstream hooks
-    (:class:`UploadChosenAgent`, :class:`WriteAgentConfig`,
+    (:class:`UploadChosenAgent`, :class:`UploadAgentConfigSource`,
     :class:`RunAgentInstallDeps`) know where the agent's files live on
     the host.
     """
@@ -204,30 +205,33 @@ class RenderInstruction(Hook):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Agent config: exec config.py on host, upload as JSON
+# Agent config: upload config.py source (daemon execs it in-sandbox)
 # ─────────────────────────────────────────────────────────────────
 
 
-class WriteAgentConfig(Hook):
-    """Exec the chosen agent's ``config.py`` on the host; upload the resulting
-    ``agent_config`` dict as JSON to ``dst``.
+class UploadAgentConfigSource(Hook):
+    """Upload the chosen agent's ``config.py`` source file to ``dst``.
+
+    The lagent daemon exec's this file in the sandbox to build the agent
+    dict — so ``os.environ`` lookups inside ``config.py`` resolve against
+    the sandbox's own env (populated by :class:`BenchEnv`), not the host's.
 
     Agent template lives at ``ctx["agent_template_root"] / chosen.name /``
     (populated by :class:`PickAgent`).
     """
 
-    name = "write_agent_config"
+    name = "upload_agent_config_source"
 
-    def __init__(self, dst: str = "/tmp/agent_config.json"):
+    def __init__(self, dst: str = "/tmp/agent_config.py"):
         self.dst = dst
 
     async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
         chosen: AgentSpec = ctx["chosen_agent"]
         template_root: Path = ctx["agent_template_root"]
         cfg_path = template_root / chosen.name / chosen.config
-        cfg = _exec_python_ns(cfg_path, "agent_config")
-        blob = json.dumps(cfg, ensure_ascii=False).encode()
-        await http_upload(client, self.dst, base64.b64encode(blob).decode())
+        if not cfg_path.is_file():
+            raise FileNotFoundError(f"agent config {cfg_path!r} not found")
+        await upload_tar_and_extract(client, {self.dst: cfg_path}, "/")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -316,13 +320,82 @@ class BenchEnv:
             "TASK_WORKSPACE": self.workspace,
             "TASK_INSTRUCTION": f"{self.workspace}/{data.instruction}",
         }
-        if runtime.get("llm_base_url"):
-            env["RL_LLM_BASE_URL"] = runtime["llm_base_url"]
-        if runtime.get("llm_api_key"):
-            env["RL_LLM_API_KEY"] = runtime["llm_api_key"]
+        for env_key, runtime_key in (
+            ("RL_LLM_MODEL", "llm_model"),
+            ("RL_LLM_BASE_URL", "llm_base_url"),
+            ("RL_LLM_API_KEY", "llm_api_key"),
+        ):
+            val = runtime.get(runtime_key)
+            if val:
+                env[env_key] = val
         env.update(self.extras)
         ctx["env_vars_for_instruction"] = env
         return env
+
+
+# ─────────────────────────────────────────────────────────────────
+# Daemon log retrieval (post-hook)
+# ─────────────────────────────────────────────────────────────────
+
+
+class DumpDaemonLogOnFailure(Hook):
+    """Post-hook: pull ``/tmp/agent_daemon.log`` and log its tail on failure.
+
+    Two triggers:
+      - Stage's entry returned non-zero (``rc != 0``) — usual sandbox error.
+      - Silent-pass: ``rc == 0`` but the pulled ``message_key`` contents show
+        the last ``policy_agent.messages`` entry lacks ``raw_content_ids``
+        (LLM call somehow produced no token ids — typically an exception
+        swallowed by the agent layer).  Disable by passing ``message_key=None``.
+
+    Always stores the full daemon log at ``ctx["pulled"][key]`` for
+    downstream consumers regardless of whether we log.
+    """
+
+    name = "dump_daemon_log_on_failure"
+
+    def __init__(
+        self,
+        path: str = "/tmp/agent_daemon.log",
+        *,
+        tail_lines: int = 500,
+        key: str = "daemon_log",
+        message_key: str | None = "message",
+    ):
+        self.path = path
+        self.tail_lines = tail_lines
+        self.key = key
+        self.message_key = message_key
+
+    async def __call__(self, client: Any, ctx: dict[str, Any]) -> None:
+        try:
+            blob = await client.download_file(self.path)
+        except Exception as exc:
+            get_logger().warning(f"could not download daemon log at {self.path}: {exc}")
+            return
+        text = blob.decode(errors="replace")
+        ctx.setdefault("pulled", {})[self.key] = text
+
+        result = ctx.get("result")
+        rc = getattr(result, "return_code", 0) if result else 0
+
+        should_dump = rc != 0
+        reason = f"rc={rc}"
+        if not should_dump and self.message_key:
+            raw = (ctx.get("pulled") or {}).get(self.message_key) or ""
+            try:
+                msgs = json.loads(raw).get("policy_agent.messages", []) if raw else []
+            except Exception:
+                msgs = []
+            last = msgs[-1] if msgs else {}
+            if not last.get("raw_content_ids"):
+                should_dump = True
+                reason = "silent-pass (last message missing raw_content_ids)"
+
+        if should_dump:
+            lines = text.splitlines()
+            tail = "\n".join(lines[-self.tail_lines :]) if len(lines) > self.tail_lines else text
+            get_logger().error(f"daemon log tail [{reason}] ({self.path}):\n{tail}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -351,14 +424,6 @@ class ParseJudgerStdout(Hook):
 # ─────────────────────────────────────────────────────────────────
 # Internals
 # ─────────────────────────────────────────────────────────────────
-
-
-def _exec_python_ns(path: Path, expected_name: str) -> Any:
-    ns: dict[str, Any] = {}
-    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), ns)
-    if expected_name not in ns:
-        raise KeyError(f"{expected_name!r} not defined in {path}")
-    return ns[expected_name]
 
 
 def _parse_stage_stdout(name: str, result: StageResult) -> JudgerResult:

@@ -52,7 +52,7 @@ export TRAIN_OPTIMIZER_STEPS=8
 
 current_time=$(date "+%m%d%H")
 
-export CONFIG_PATH='/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/examples/v1/config/interns2-35ba3-base03-20260413a-websearch-rl0415rc1_local.py'
+export CONFIG_PATH='/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/examples/v1/config/interns2-35ba3-base05-20260424a-rl-data260426rc1-56k-agentrl-tb0429rc0.py'
 export WORK_DIR='/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0429'
 
 
