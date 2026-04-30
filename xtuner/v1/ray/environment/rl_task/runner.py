@@ -68,6 +68,7 @@ class Runner:
         *,
         provider: Any,
         lagent_src_dir: str | Path | None = None,
+        llm_model: str | None = None,
         llm_base_url: str | None = None,
         llm_api_key: str | None = None,
     ) -> dict[str, Any]:
@@ -81,10 +82,12 @@ class Runner:
             "uid": uid,
             "runtime": {
                 "lagent_src_dir": lagent_src_dir,
+                "llm_model": llm_model,
                 "llm_base_url": llm_base_url,
                 "llm_api_key": llm_api_key,
             },
             "workspace": self.infer.sandbox.workspace_path,
+            "sandbox_image": self.infer.sandbox.image,
         }
 
         client = None
@@ -104,7 +107,6 @@ class Runner:
             infer_result = await self.infer.run(client, ctx)
             get_logger().info(f"[{tid}] infer: done rc={infer_result.return_code} ({time.monotonic() - t1:.1f}s)")
             if not infer_result.ok:
-                await _dump_daemon_log(client)
                 return _mark_failed(
                     data,
                     uid,
@@ -155,14 +157,6 @@ def _infer_metadata(ctx: dict[str, Any]) -> dict[str, Any]:
     if chosen is not None:
         md["agent_name"] = chosen.name
     return md
-
-
-async def _dump_daemon_log(client) -> None:
-    try:
-        data = await client.download_file("/tmp/agent_daemon.log")
-        get_logger().error(f"agent daemon log tail:\n{data.decode(errors='replace')[-4000:]}")
-    except Exception as exc:
-        get_logger().warning(f"could not download daemon log: {exc}")
 
 
 _ACQUIRE_MAX_ATTEMPTS = 3
@@ -338,6 +332,7 @@ async def _run_one(
     *,
     uid: dict[str, int],
     lagent_src_dir: str | None,
+    llm_model: str | None,
     llm_base_url: str | None,
     llm_api_key: str | None,
 ) -> dict[str, Any]:
@@ -350,6 +345,7 @@ async def _run_one(
         uid,
         provider=provider,
         lagent_src_dir=lagent_src_dir,
+        llm_model=llm_model,
         llm_base_url=llm_base_url,
         llm_api_key=llm_api_key,
     )
@@ -406,6 +402,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 provider,
                 uid=uid,
                 lagent_src_dir=lagent_src,
+                llm_model=args.llm_model,
                 llm_base_url=args.llm_base_url,
                 llm_api_key=args.llm_api_key,
             )
@@ -586,6 +583,7 @@ def main() -> int:
         default=DEFAULT_LAGENT_SRC,
         help="Local path to lagent source.  Pass '' to skip upload.",
     )
+    parser.add_argument("--llm-model", default=None)
     parser.add_argument("--llm-base-url", default=None)
     parser.add_argument("--llm-api-key", default=None)
     parser.add_argument(
