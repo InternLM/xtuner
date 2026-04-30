@@ -3,11 +3,8 @@ import time
 import ray
 
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.utils import clear_rollout_response_for_rerun, free_object_refs
+from xtuner.v1.rl.utils import clear_rollout_response_for_rerun
 from xtuner.v1.utils import get_logger
-
-
-logger = get_logger()
 
 
 def _resolve_routed_experts(routed_experts: list[int] | ray.ObjectRef) -> list[int]:
@@ -24,6 +21,7 @@ class PartialRolloutHandler:
     continuation."""
 
     def __init__(self, max_tokens: int) -> None:
+        self.logger = get_logger(self.__class__.__name__)
         self.max_tokens = max_tokens
 
     def preprocess(self, rollout_state: RolloutState, enable_partial_rollout: bool = False) -> RolloutState:
@@ -50,7 +48,7 @@ class PartialRolloutHandler:
         remaining_tokens = self.max_tokens - response_len  # compute remaining max_tokens budget
         rollout_state.sample_params = rollout_state.sample_params.copy(update={"max_tokens": remaining_tokens})
 
-        logger.debug(
+        self.logger.debug(
             f"[PartialRolloutHandler] Sample {rollout_state.uid} continue rollout | Remaining tokens allowed: {remaining_tokens} | Status: {rollout_state.status} | Prompt len: {prompt_len} | Response len: {response_len} | Staleness: {rollout_state.seq_staleness} | Total tokens: {len(rollout_state.tokens)}"
         )
         # TODO: handle routed_experts
@@ -88,39 +86,16 @@ class PartialRolloutHandler:
             )
             cur_routed_experts = cur_routed_experts[history_routed_experts_len:]
             concat_routed_experts = history_routed_experts + cur_routed_experts
-
-            prompt_ids = rollout_state.prompt_ids or []
-            response_ids = rollout_state.response_ids or []
-            expect_tokens_num = len(prompt_ids) + len(response_ids) - 1
-            assert len(concat_routed_experts) == expect_tokens_num, (
-                f"After concatenation, routed_experts len: {len(concat_routed_experts)}, expected tokens num: {expect_tokens_num}, prompt len: {len(prompt_ids)}, response len: {len(response_ids)}, history routed_experts len: {history_routed_experts_len}, current routed_experts len: {cur_routed_experts_len}"
-            )
-            logger.info(
-                f"[PartialRolloutHandler] Postprocess rollout {rollout_state.uid}: "
-                f"concat routed_experts len={len(concat_routed_experts)} "
-                f"(history={history_routed_experts_len}, new={cur_routed_experts_len}), "
-                f"prompt={len(prompt_ids)}, response={len(response_ids)}"
-            )
             rollout_state.routed_experts = ray.put(concat_routed_experts)
-            free_object_refs(
-                [ref for ref in (history_routed_experts_ref, cur_routed_experts_ref) if isinstance(ref, ray.ObjectRef)]
-            )
+            # free_object_refs(
+            #     [ref for ref in (history_routed_experts_ref, cur_routed_experts_ref) if isinstance(ref, ray.ObjectRef)]
+            # )
             end_time = time.time()
-            logger.info(
+            self.logger.info(
                 f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"
             )
         elif history_routed_experts_ref is None and cur_routed_experts_ref is not None:
-            prompt_ids = rollout_state.prompt_ids or []
-            response_ids = rollout_state.response_ids or []
-            expect_tokens_num = len(prompt_ids) + len(response_ids) - 1
-            cur_routed_experts_data = ray.get(cur_routed_experts_ref)
-            if cur_routed_experts_data.shape[0] != expect_tokens_num:
-                logger.warning(
-                    f"Routed experts shape {cur_routed_experts_data.shape} does not match total tokens {expect_tokens_num}, maybe due to some error in the model side. We will try to truncate the routed experts to match the tokens, but please check if there is any error in the model side."
-                )
-                cur_routed_experts_data = cur_routed_experts_data[:expect_tokens_num, :, :]
-            routed_experts = ray.put(cur_routed_experts_data)
-            rollout_state.routed_experts = routed_experts
+            rollout_state.routed_experts = cur_routed_experts_ref
         elif history_routed_experts_ref is not None and cur_routed_experts_ref is None:
             rollout_state.routed_experts = history_routed_experts_ref
 

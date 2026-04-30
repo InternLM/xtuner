@@ -182,7 +182,8 @@ class LMDeployWorker(RolloutWorker):
             if self.lmdeploy_actor is None:
                 self.lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
             assert self.lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
-            return self.lmdeploy_actor.get.remote(routed_experts)
+            routed_experts_data = ray.get(self.lmdeploy_actor.get.remote(routed_experts))
+            return ray.put(routed_experts_data)
         return torch.tensor(routed_experts)
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
