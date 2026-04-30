@@ -374,11 +374,6 @@ class MoE(BaseModel):
             )
             if loss_ctx is None:
                 raise NotImplementedError("loss_ctx must be provided for intra-layer bsz > 1")
-            if self.mtp_block is not None:
-                raise NotImplementedError(
-                    "MTP is not supported in micro-batch forward mode (intra_layer_micro_batch > 1). "
-                    "Please set intra_layer_micro_batch=1 when using MTP."
-                )
 
             return self._micro_batch_forward(
                 seq_ctx_list=seq_ctx,
@@ -447,6 +442,7 @@ class MoE(BaseModel):
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
 
+        hidden_states_list: list[torch.Tensor] = []
         moe_forward = False
 
         for seq_ctx in seq_ctx_list:
@@ -474,6 +470,7 @@ class MoE(BaseModel):
                     # should be optimized in the future.
                     hidden_states_list = [i.clone() for i in cat_hidden_states.chunk(len(seq_ctx_list), dim=1)]
                     moe_forward = True
+                assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
 
                 if int(os.getenv("XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
                     with async_save_on_cpu(
@@ -505,6 +502,51 @@ class MoE(BaseModel):
                     hidden_states_list[i] = hidden_states
                     router_logits_list[i][f"layer{idx}"] = router_logits[i]
                     router_weights_list[i][f"layer{idx}"] = router_weights[i]
+
+        assert hidden_states_list, "XTuner Internal Error, found empty hidden states for domino EP"
+
+        if self.mtp_block is not None:
+            assert self.config.mtp_config is not None
+            mtp_losses = torch.tensor(0.0, device=DEVICE)
+            has_mtp_loss = False
+
+            for micro_batch_idx, (seq_ctx, loss_ctx_dict, layer_hidden_states, position_embeddings) in enumerate(
+                zip(seq_ctx_list, loss_ctx_list, hidden_states_list, position_embeddings_list)
+            ):
+                mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
+                if mtp_loss_ctx_list is None:
+                    continue
+
+                assert seq_ctx.position_ids is not None
+                mtp_seq_ctx = seq_ctx.copy(
+                    input_ids=seq_ctx.input_ids.clone() if seq_ctx.input_ids is not None else None,
+                    position_ids=seq_ctx.position_ids.clone(),
+                    inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
+                )
+
+                # Match single-batch forward: MTP consumes the pre-final-norm
+                # decoder output and contributes router stats to auxiliary losses.
+                mtp_outputs = self.mtp_block(
+                    hidden_states=layer_hidden_states,
+                    embed_tokens_fn=self.embed_tokens,
+                    position_embeddings=position_embeddings,
+                    seq_ctx=mtp_seq_ctx,
+                )
+
+                micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
+                for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
+                    mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
+                    mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                    micro_batch_mtp_losses += mtp_loss
+
+                    router_logits_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_results
+                    router_weights_list[micro_batch_idx][f"mtp_layer{mtp_idx}"] = mtp_router_weights
+
+                mtp_losses += micro_batch_mtp_losses / len(mtp_loss_ctx_list)
+                has_mtp_loss = True
+
+            if has_mtp_loss:
+                output["mtp_loss"] = mtp_losses * self.config.mtp_config.loss_scaling_factor
 
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
@@ -1008,7 +1050,7 @@ class MoE(BaseModel):
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=lm_head_mp_policy,
-            reshard_after_forward=self.fsdp_config.reshard_after_forward if self.mtp_block is None else False,
+            reshard_after_forward=False,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.lm_head,
         )
