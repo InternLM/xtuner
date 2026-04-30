@@ -45,7 +45,7 @@ progress: ProduceProgress
 Opus 方案使用：
 
 ```python
-desired_window = ceil((1 + over_sample) * target_cumulative)
+desired_window = ceil((1 + over_sample) * target_abs)
 ```
 
 这会把已经消费过的历史目标也一起放大。假设 batch size = `B`，当前在预取 batch10，前 9 个 batch 都已消费，`over_sample=0.5`：
@@ -140,7 +140,6 @@ required(task) = max(0, progress.target_samples[task] - available(task))
   - 不使用 `dict.get(task_name, 0)` 这类兜底，避免把初始化或 checkpoint 漂移问题隐藏成“目标为 0 / 已消费为 0”。
   - 除了本轮 `target_abs` / `scheduled_target` 这种语义上需要冻结的调度目标，不把 `progress` 字段先复制到局部标量或局部 dict 再使用，例如不要写 `current_rollout_step = progress.next_consumer_step` 或 `target_by_task = dict(progress.target_samples)`；需要字段值时直接读 `progress.xxx`，让并发更新能尽早生效。
   - `progress = self._produce_progress` 这类对象引用别名可以保留；它不复制字段值。
-- `target_cumulative` 只作为过渡期的一致性校验参数；strategy 不用它构造或修复 `progress`。
 - 所有 strategy 调用都必须显式传入已经初始化好的 `progress`，不再支持 `progress=None` 的本地兜底。
 
 ### Colocate 路径的 progress 约束
@@ -193,7 +192,7 @@ def _ensure_target_upto(self, batch_size: int, current_future_step: int) -> None
     progress.target_upto_future_step = current_future_step
 ```
 
-Manager 把该 task 从 step 1 到当前 future step 的绝对累计目标维护在 `progress.target_samples[task_name]` 中；strategy 直接从 `progress` 读取，不通过局部 `target_cumulative` 快照驱动生产。
+Manager 把该 task 从 step 1 到当前 future step 的绝对累计目标维护在 `progress.target_samples[task_name]` 中；strategy 直接从 `progress` 读取，不通过第二份 target 快照驱动生产。
 
 `progress.target_samples` 需要 checkpoint。这样即使后续自定义的 `get_task_batch_sizes` 不是纯函数，也不会在 resume 后因为重算历史分配而漂移。
 
@@ -226,7 +225,6 @@ async def produce_batch(
     *,
     model_rollout_step: int,
     progress: ProduceProgress,
-    target_cumulative: int | None = None,
 ) -> ProduceBatchStatus:
 ```
 
@@ -238,8 +236,6 @@ if task_name not in progress.consumed_samples:
     raise KeyError(...)
 if task_name not in progress.target_samples:
     raise KeyError(...)
-if target_cumulative is not None and target_cumulative != progress.target_samples[task_name]:
-    raise ValueError(...)
 ```
 
 ### 主循环
@@ -251,7 +247,7 @@ async def produce_batch(...):
     current_future_step = rollout_step
     if update_event is None:
         update_event = asyncio.Event()
-    _validate_progress_for_task(progress, task_name, target_cumulative)
+    _validate_progress_for_task(progress, task_name)
     if progress.target_samples[task_name] <= 0:
         return ProduceBatchStatus.NORMAL
 

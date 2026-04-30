@@ -724,9 +724,12 @@ class BaseRLTrainer:
             all_scalars["timing/task_p99_s"] = produce_result.group_gen_p99_s
             all_scalars["timing/task_p99_p50_ratio"] = produce_result.group_gen_p99_p50_ratio
             all_scalars["timing/pause_s"] = produce_result.group_gen_pause_time_s
+        all_scalars["async/init_samples"] = produce_result.leftover_init
         all_scalars["async/completed_samples"] = produce_result.leftover_completed
         all_scalars["async/aborted_samples"] = produce_result.leftover_aborted
         all_scalars["async/expired_samples"] = produce_result.leftover_expired
+        all_scalars["async/failed_samples"] = produce_result.leftover_failed
+        all_scalars["async/filtered_samples"] = produce_result.leftover_filtered
 
         if train_info:
             all_scalars.update({f"response/{k}": v for k, v in train_info.get("data_info", {}).items()})

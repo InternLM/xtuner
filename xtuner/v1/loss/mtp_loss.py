@@ -191,7 +191,7 @@ class MTPLossContext(LMHeadLossContext):
 
         Called per-chunk in chunk mode, so tensors here may be a slice of the full sequence.
         """
-        from xtuner.v1.rl.loss_fn import kl_penalty
+        from xtuner.v1.rl.loss import kl_penalty
         from xtuner.v1.rl.utils import gather_logprobs
 
         logits = F.linear(hidden_states, head_weight, head_bias).float()
