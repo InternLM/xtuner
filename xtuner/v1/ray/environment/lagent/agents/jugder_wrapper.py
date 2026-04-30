@@ -21,12 +21,12 @@ class JudgerWrapper(AsyncAgent):
         placement_group=None,
         judger_controller=None,
         itemgetter: Callable[[AgentMessage], RLDataFlowItem] = lambda m: m.content,  # type: ignore[assignment,return-value]
-        reward_key: str = "score",
+        reward_key: str | None = "score",
         name: Optional[str] = None,
     ):
-        assert judger_controller is not None or (judger_cfg and placement_group), (
-            "Either judger_controller or judger_cfg and placement_group must be provided."
-        )
+        assert judger_controller is not None or (
+            judger_cfg and placement_group
+        ), "Either judger_controller or judger_cfg and placement_group must be provided."
         self.judger_controller = judger_controller or JudgerController.remote(judger_cfg, placement_group)  # type: ignore[attr-defined]
         self.itemgetter = itemgetter
         self.reward_key = reward_key
@@ -36,6 +36,11 @@ class JudgerWrapper(AsyncAgent):
         item = deepcopy(self.itemgetter(meta_message))
         if isinstance(item, dict):
             item = RLDataFlowItem.model_validate(item)
+        rollout_extra_info = {}
+        # Keep all lightweight reward-related fields from agent side.
+        for key in ["num_turns", "agent_trace", "messages", "state"]:
+            if key in message.extra_info:
+                rollout_extra_info[key] = message.extra_info[key]
         item = update_dataflow_item(
             [item],
             "env.rollout",
@@ -49,5 +54,7 @@ class JudgerWrapper(AsyncAgent):
                 )
             ],
         )[0]
+        item.env.rollout.extra_info.update(rollout_extra_info)
         judger_response: RLJudgerResponseItem = await self.judger_controller.run.remote(item)
-        return AgentMessage(sender=self.name, content=None, reward=judger_response.reward[self.reward_key])
+        reward_payload = judger_response.reward if self.reward_key is None else judger_response.reward[self.reward_key]
+        return AgentMessage(sender=self.name, content=None, reward=reward_payload)

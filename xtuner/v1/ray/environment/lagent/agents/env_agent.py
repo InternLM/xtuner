@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 from dataclasses import asdict
 from typing import Dict, List, Literal, Optional, Union
@@ -46,6 +47,7 @@ class EnvAgent(BaseEnvAgent):
     async def forward(self, assistant_message: AgentMessage, **kwargs):
         extra_info = {}
         current_turn = len(self.memory.get_memory()) // 2
+        num_turns = current_turn * 2
         if assistant_message.stream_state == AgentStatusCode.SESSION_OUT_OF_LIMIT:
             extra_info["finish"] = True
             return AgentMessage(
@@ -59,6 +61,15 @@ class EnvAgent(BaseEnvAgent):
             return AgentMessage(sender=self.name, content="Format Error", extra_info=extra_info, reward=0.0)
         if not assistant_message.tool_calls:
             extra_info["finish"] = True
+            # Preserve full in-session trace for judger/reward preprocessing.
+            # This path runs before AgentEnvironment postprocess_func, so we must
+            # attach trace data directly on assistant_message.extra_info.
+            assistant_message.extra_info.update(
+                {
+                    'agent_trace': [msg.model_dump() for msg in self.memory.get_memory(session_id)],
+                    'num_turns': num_turns,
+                }
+            )
             if "<tool_call>" in (assistant_message.raw_content or ""):
                 return AgentMessage(sender=self.name, content="Format Error", extra_info=extra_info, reward=-1.0)
             # assume the first message contains meta info to help judge
@@ -67,13 +78,13 @@ class EnvAgent(BaseEnvAgent):
                 update={"sender": self.name}, deep=True
             )
             self.judger.reset(recursive=True)
-            if isinstance(message.extra_info, dict):
-                message.extra_info.update(extra_info)
-            else:
-                message.extra_info = extra_info
+            message.extra_info.update(extra_info)
             # 惩罚工具调用轮数低于下限的样本
             if self.lower_tool_turn_bound is not None and current_turn < self.lower_tool_turn_bound:
-                message.reward = min(message.reward, 0.0)
+                if isinstance(message.reward, (int, float)):
+                    message.reward = min(message.reward, 0.0)
+                elif isinstance(message.reward, dict) and "score" in message.reward:
+                    message.reward["score"] = min(message.reward["score"], 0.0)
             return message
         if (
             self.max_tool_calls_per_turn is not None
