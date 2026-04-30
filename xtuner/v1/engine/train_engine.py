@@ -156,6 +156,10 @@ class TrainEngine:
         with torch.device("meta"):
             model = self.model_cfg.build()
 
+        for module in model.modules():
+            if isinstance(module, BaseModel):
+                module._init_load_spec()
+
         model = model.fully_shard(self.fsdp_cfg)
 
         if dist.get_rank() == 0:
