@@ -15,15 +15,16 @@ from mmengine.dist import get_rank
 from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
 from ray.util.placement_group import PlacementGroup
-from transformers import AutoTokenizer
 from typing_extensions import Self
 
+from transformers import AutoTokenizer
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment.lagent.tokenize import tokenize
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.rl.base import WorkerConfig
+from xtuner.v1.rl.config.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import is_hf_model_path, timer
 from xtuner.v1.utils.device import get_device, get_torch_device_module
@@ -35,6 +36,7 @@ from .rl_trainer import (
     RLTrainerConfig,
     bind_train_rollout,
 )
+
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
@@ -70,6 +72,7 @@ class AgentRLTrainerConfig(BaseModel):
     exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
     display_all_workers_log: bool = False
     skip_load_weights: bool = False
+    advantage_estimator_config: BaseAdvantageConfig = GRPOAdvantageConfig()
 
     @model_validator(mode="after")
     def _convert_work_dir(self):
@@ -130,6 +133,7 @@ class AgentRLTrainer(RLTrainer):
         display_all_workers_log: bool = False,
         trainer_cfg: RLTrainerConfig | None = None,
         skip_load_weights: bool = False,
+        advantage_estimator_config: BaseAdvantageConfig = GRPOAdvantageConfig(),
     ):
         """Initialize the RL training system."""
         if os.environ.get("XTUNER_USE_FA3", "0") == "1":
@@ -314,6 +318,8 @@ class AgentRLTrainer(RLTrainer):
         self._train_results: dict = defaultdict(list)
         self._eval_results: dict = defaultdict(list)
 
+        self._advantage_estimator = advantage_estimator_config.build()
+
     @classmethod
     def from_config(cls, config: AgentRLTrainerConfig) -> Self:  # type: ignore[override]
         """Create a Trainer instance from a TrainerConfig.
@@ -352,6 +358,7 @@ class AgentRLTrainer(RLTrainer):
             display_all_workers_log=config.display_all_workers_log,
             trainer_cfg=config,  # type: ignore[arg-type]
             skip_load_weights=config.skip_load_weights,
+            advantage_estimator_config=config.advantage_estimator_config,
         )
         return self
 
@@ -475,27 +482,19 @@ class AgentRLTrainer(RLTrainer):
         def compute_reward(data_groups):
             total_groups = len(data_groups)
             zero_count = one_count = 0
-            all_rewards, all_rewards_by_source = [], defaultdict(list)
             for group in data_groups:
-                rewards = []
-                for item in group:
-                    rewards.append(item.env.judger.reward["score"])
-                    all_rewards_by_source[item.data.extra_info.get('origin_data_source', 'none')].append(
-                        item.env.judger.reward["score"]
-                    )
+                rewards = [data.env.judger.reward["score"] for data in group]
                 if all(r == 0 for r in rewards):
                     zero_count += 1
                 elif all(r == 1 for r in rewards):
                     one_count += 1
-                all_rewards.extend(rewards)
 
-            zero_ratio = zero_count / total_groups if total_groups > 0 else 0
-            one_ratio = one_count / total_groups if total_groups > 0 else 0
-            avg_reward = sum(all_rewards) / len(all_rewards) if all_rewards else 0
-            avg_reward_by_source = {
-                source: (sum(rews) / len(rews) if rews else 0) for source, rews in all_rewards_by_source.items()
-            }
-            return avg_reward, zero_ratio, one_ratio, avg_reward_by_source
+                zero_ratio = zero_count / total_groups if total_groups > 0 else 0
+                one_ratio = one_count / total_groups if total_groups > 0 else 0
+
+            all_rewards = [d.env.judger.reward["score"] for group in data_groups for d in group]
+            avg_reward = sum(all_rewards) / len(all_rewards)
+            return avg_reward, zero_ratio, one_ratio
 
         def compute_tool_turns(data_groups):
             tool_turns = []
@@ -507,14 +506,10 @@ class AgentRLTrainer(RLTrainer):
             avg_tool_turns = sum(tool_turns) / len(tool_turns) if tool_turns else 0
             return avg_tool_turns
 
-        avg_reward, zero_ratio, one_ratio, avg_reward_by_source = compute_reward(data_groups)
+        avg_reward, zero_ratio, one_ratio = compute_reward(data_groups)
         tool_turns = compute_tool_turns(data_groups)
         metrics_results = dict(
-            avg_reward=avg_reward,
-            all_zero_ratio=zero_ratio,
-            all_one_ratio=one_ratio,
-            avg_tool_turns=tool_turns,
-            **{f"avg_reward_{source}": avg for source, avg in avg_reward_by_source.items()},
+            avg_reward=avg_reward, all_zero_ratio=zero_ratio, all_one_ratio=one_ratio, avg_tool_turns=tool_turns
         )
         return metrics_results
 
@@ -558,70 +553,17 @@ class AgentRLTrainer(RLTrainer):
         advantages_list = []
         prompt_len_list = []
         response_len_list = []
-
-        # Detailed reward components for logging
-        detailed_rewards = {}
-
-        def _extract_score(value, default=0.0):
-            if isinstance(value, (int, float)):
-                return float(value)
-            if isinstance(value, dict):
-                score_val = value.get("score", default)
-                if isinstance(score_val, (int, float)):
-                    return float(score_val)
-            return float(default)
-
         offset = 0
         for group in agent_data_groups:
-            rewards = [_extract_score(data.env.judger.reward) for data in group]
+            rewards = [data.env.judger.reward["score"] for data in group]
             rewards_list.extend(rewards)
-            # Collect detailed reward components
-            for idx, data in enumerate(group):
-                reward_dict = data.env.judger.reward
-                for key in reward_dict.keys():
-                    if key != "score":  # Skip 'score' as it's already logged separately
-                        value = reward_dict[key]
-                        if isinstance(value, (int, float)):
-                            detailed_rewards.setdefault(key, []).append(float(value))
-
             rewards = torch.tensor(rewards, dtype=torch.float32)
 
             prompt_repeat_k = len(group)
             group_inputs = inputs_list[offset : offset + prompt_repeat_k]
             offset += prompt_repeat_k
 
-            # GRPO
-            # advantages = (rewards - rewards.mean(0)) / (rewards.std(0) + 1e-8)
-
-            # RLOO
-            if prompt_repeat_k > 1:
-                baseline = (rewards.sum(0) - rewards) / (prompt_repeat_k - 1)
-                advantages = rewards - baseline
-            else:
-                advantages = rewards
-
-            sum_entropy = None
-            total_tokens = 0
-            for i in range(prompt_repeat_k):
-                # messages = group[i].env.agent.extra_info['messages']
-                # assert messages[-1]['role'] == 'assistant'
-                inputs = group_inputs[i]
-                logprobs_tensor = torch.tensor(inputs["logprobs"], dtype=torch.float32)
-                entropy = -(logprobs_tensor).sum()
-                sum_entropy = entropy if sum_entropy is None else sum_entropy + entropy
-                total_tokens += (logprobs_tensor != 0).sum().item()
-            avg_entropy = sum_entropy / max(total_tokens, 1)
-            entropy_upper_bound = 0.65
-            entropy_lower_bound = 0.25
-            _tau_upper = 0.0  # noqa: F841
-            _tau_lower = 0.0  # noqa: F841  # 越大scale下降的越慢
-            coeff_min_upper = 0.2  # 熵高分支的最小缩放
-            coeff_min_lower = 0.5  # 熵低分支的最小缩放
-            if avg_entropy > entropy_upper_bound:
-                advantages = torch.where(advantages < 0, advantages * coeff_min_upper, advantages)
-            elif avg_entropy < entropy_lower_bound:
-                # 熵低：减弱正优势，保留负优势
-                advantages = torch.where(advantages > 0, advantages * coeff_min_lower, advantages)
+            advantages = self._advantage_estimator.compute(rewards, group)
 
             for i in range(prompt_repeat_k):
                 rollout = group[i].env.rollout
@@ -632,15 +574,15 @@ class AgentRLTrainer(RLTrainer):
                 response_len_list.append(len(rollout.response_ids))
                 prompt_len_list.append(len(input_ids) - len(rollout.response_ids))
                 advantages_list.extend([advantages[i]] * len(rollout.response_ids))
-                assert (
-                    len(input_ids) <= pack_max_length
-                ), f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
+                assert len(input_ids) <= pack_max_length, (
+                    f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
+                )
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
                 rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
-                assert (
-                    rollout_logprobs.size() == shifted_labels.size()
-                ), f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
+                assert rollout_logprobs.size() == shifted_labels.size(), (
+                    f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
+                )
 
                 seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
                 seq_ctx.rollout_routed_experts = inputs["routed_experts"]
