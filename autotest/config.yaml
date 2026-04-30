@@ -619,7 +619,7 @@ case:
                     grad_norm: 10
                     loss/local_loss: 5
                     loss/reduced_balancing_loss: 5
-                    loss/reduced_llm_loss: 5
+                    loss/reduced_llm_loss: 10
                     lr: 0
                     memory/max_memory_GB: 0.2
                     runtime_info/tgs: 0.05
