@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Callable, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -12,7 +13,10 @@ from .native import Judger, JudgerConfig
 
 SelectedJudgerKeys: TypeAlias = str | list[str] | None
 JudgerSelectFn: TypeAlias = Callable[[RolloutState, dict[str, Judger]], SelectedJudgerKeys]
-JudgerMergeFn: TypeAlias = Callable[[RolloutState, dict[str, RolloutState]], RolloutState]
+JudgerMergeFn: TypeAlias = Callable[
+    [RolloutState | list[RolloutState], dict[str, RolloutState | list[RolloutState]]],
+    RolloutState | list[RolloutState],
+]
 
 
 def default_select_fn(rollout_state: RolloutState, branches: dict[str, Judger]) -> SelectedJudgerKeys:
@@ -32,7 +36,10 @@ def default_select_fn(rollout_state: RolloutState, branches: dict[str, Judger]) 
     return None
 
 
-def default_merge_fn(original: RolloutState, judged: dict[str, RolloutState]) -> RolloutState:
+def default_merge_fn(
+    original: RolloutState | list[RolloutState],
+    judged: dict[str, RolloutState | list[RolloutState]],
+) -> RolloutState | list[RolloutState]:
     """Default merger for ``ComposedJudgerConfig``.
 
     This merger intentionally does not combine multiple judger scores into a single aggregated value.
@@ -40,18 +47,50 @@ def default_merge_fn(original: RolloutState, judged: dict[str, RolloutState]) ->
     key from ``ComposedJudgerConfig.branches`` and ``score`` is taken from each child judger's
     ``reward["score"]``.
 
+    Supports both single ``RolloutState`` and batched ``list[RolloutState]`` inputs. In the batch
+    case, each element in the list represents a different response to the same prompt, and each
+    branch's judged result must be a list of the same length.
+
     Users who need weighted sums, richer reward payloads, or custom post-processing should provide
     their own ``merge_fn``.
     """
-    merged = original.model_copy(deep=True)
-    merged.reward = {}
-
-    for name, state in judged.items():
-        if state.reward is None or "score" not in state.reward:
-            raise KeyError(f"Default merge_fn requires reward['score'] for branch {name!r}.")
-        merged.reward[name] = state.reward["score"]
-
-    return merged
+    if isinstance(original, list):
+        for name, state in judged.items():
+            if not isinstance(state, list):
+                raise TypeError(
+                    f"default_merge_fn: branch {name!r} returned a single RolloutState "
+                    "but original is a list. All branches must return lists when input is a list."
+                )
+            if len(state) != len(original):
+                raise ValueError(
+                    f"default_merge_fn: branch {name!r} returned {len(state)} states "
+                    f"but original has {len(original)} states."
+                )
+        results: list[RolloutState] = []
+        for i, orig in enumerate(original):
+            merged = orig.model_copy(deep=True)
+            merged.reward = {}
+            for name, states in judged.items():
+                assert isinstance(states, list)
+                state_i: RolloutState = states[i]
+                reward = state_i.reward
+                if reward is None or "score" not in reward:
+                    raise KeyError(f"Default merge_fn requires reward['score'] for branch {name!r}.")
+                merged.reward[name] = reward["score"]
+            results.append(merged)
+        return results
+    else:
+        merged = original.model_copy(deep=True)
+        merged.reward = {}
+        for name, state in judged.items():
+            if isinstance(state, list):
+                raise TypeError(
+                    f"default_merge_fn: branch {name!r} returned a list but original is a single RolloutState."
+                )
+            if state.reward is None or "score" not in state.reward:
+                raise KeyError(f"Default merge_fn requires reward['score'] for branch {name!r}.")
+            merged.reward[name] = state.reward["score"]
+        return merged
 
 
 class ComposedJudger(Judger):
@@ -69,8 +108,11 @@ class ComposedJudger(Judger):
         self.merge_fn = merge_fn
         self.default_key = default_key
 
-    def _resolve_selected_keys(self, rollout_state: RolloutState) -> list[str]:
-        selected = self.select_fn(rollout_state, self.branches)
+    def _resolve_selected_keys(self, rollout_state: RolloutState | list[RolloutState]) -> list[str]:
+        if isinstance(rollout_state, list):
+            selected = self.select_fn(rollout_state[0], self.branches)
+        else:
+            selected = self.select_fn(rollout_state, self.branches)
 
         if selected is None:
             selected_keys: list[str] = []
@@ -84,20 +126,21 @@ class ComposedJudger(Judger):
                 return [self.default_key]
             if len(self.branches) == 1:
                 return [next(iter(self.branches))]
+            state = rollout_state[0] if isinstance(rollout_state, list) else rollout_state
             raise KeyError(
-                f"ComposedJudger could not select a branch for task_name={rollout_state.task_name!r}, "
-                f"data_source={rollout_state.data_source!r}, available={sorted(self.branches)}"
+                f"ComposedJudger could not select a branch for task_name={state.task_name!r}, "
+                f"data_source={state.data_source!r}, available={sorted(self.branches)}"
             )
         return selected_keys
 
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:
+    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:  # type: ignore[override]
         selected_keys = self._resolve_selected_keys(rollout_state)
 
-        judged: dict[str, RolloutState] = {}
+        judged: dict[str, RolloutState | list[RolloutState]] = {}
         for key in selected_keys:
             if key not in self.branches:
                 raise KeyError(f"Unknown judger branch: {key}, available={sorted(self.branches)}")
-            judged[key] = await self.branches[key].judge(rollout_state.model_copy(deep=True))
+            judged[key] = await self.branches[key].judge(deepcopy(rollout_state))
         return self.merge_fn(rollout_state, judged)
 
 

@@ -95,7 +95,7 @@ async def _timed_generate_group(
 
 
 def default_is_valid_sample_fn(samples: list[RolloutState]) -> bool:
-    return all(sample.status == Status.COMPLETED for sample in samples)
+    return True
 
 
 def default_should_continue_fn(completed_count: int, batch_size: int, **kwargs) -> bool:

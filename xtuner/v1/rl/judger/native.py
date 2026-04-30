@@ -1,9 +1,69 @@
+"""
+Judger 体系关系图
+=================
+
+                        ┌─────────────────┐
+                        │   Judger (ABC)  │  ← 所有 judger 的统一接口
+                        │   judge(state)  │
+                        └────────┬────────┘
+                                 │ 继承
+              ┌──────────────────┼───────────────────┐
+              │                  │                   │
+     ┌────────▼───────┐  ┌───────▼──────┐  ┌────────▼────────┐
+     │  NativeJudger  │  │ RemoteJudger │  │   JudgerPool    │
+     │                │  │              │  │                 │
+     │ 本地执行        │  │ Ray Actor 代理│  │ 多副本负载均衡   │
+     │ 调用 reward_fn │  │ 调用.remote() │  │ round-robin 分发│
+     └────────────────┘  └───────┬──────┘  └────────┬────────┘
+                                 │ 包含              │ 包含多个
+                         ┌───────▼──────┐   ┌───────▼──────┐
+                         │  JudgerActor │   │ RemoteJudger │
+                         │  (Ray Actor) │   │  (同左)       │
+                         │ 包装NativeJ  │   └──────────────┘
+                         └───────┬──────┘
+                                 │ 内部调用
+                         ┌───────▼──────┐
+                         │ NativeJudger │
+                         └──────────────┘
+
+     ┌──────────────────────────────────────┐
+     │         ComposedJudger               │
+     │                                      │
+     │  select_fn → 选 branch → judge       │
+     │  merge_fn  → 合并多个 branch 的结果  │
+     │                                      │
+     │  branches: dict[str, Judger]         │
+     │  (每个 branch 可以是上面任意一种)      │
+     └──────────────────────────────────────┘
+
+三种构建模式（由 JudgerConfig.num_ray_actors 决定）
+--------------------------------------------------
+num_ray_actors = 0   →  NativeJudger                     （纯本地，无 Ray）
+
+num_ray_actors = 1   →  RemoteJudger
+                            └─► JudgerActor (Ray Worker)
+                                    └─► NativeJudger
+
+num_ray_actors > 1   →  JudgerPool
+                            ├─► RemoteJudger → JudgerActor → NativeJudger
+                            ├─► RemoteJudger → JudgerActor → NativeJudger
+                            └─► RemoteJudger → JudgerActor → NativeJudger
+
+调用链示例（remote 模式，单条打分）
+------------------------------------
+AgentLoop
+  └─► RemoteJudger.judge(state)
+        └─► JudgerActor.judge.remote(state)   ← Ray 跨进程/机器调用
+              └─► NativeJudger.judge(state)
+                    └─► reward_handler(response, label)
+"""
+
 from __future__ import annotations
 
 import asyncio
 import inspect
 from abc import ABC, abstractmethod
-from typing import Callable, TypeAlias, cast
+from typing import Callable, TypeAlias, cast, overload
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -20,8 +80,12 @@ logger = get_logger()
 
 
 class Judger(ABC):
-    @abstractmethod
+    @overload
     async def judge(self, rollout_state: RolloutState) -> RolloutState: ...
+    @overload
+    async def judge(self, rollout_state: list[RolloutState]) -> list[RolloutState]: ...
+    @abstractmethod
+    async def judge(self, rollout_state): ...
 
 
 class NativeJudger(Judger):
@@ -84,7 +148,7 @@ class RemoteJudger(Judger):
         self._judger_name = judger_name
 
     @ray_method
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:  # type: ignore[override]
+    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:  # type: ignore[override]
         return await self.actor.judge.remote(rollout_state)
 
     def get_judger_name(self) -> str:
@@ -115,7 +179,7 @@ class JudgerPool(Judger):
             self._worker_loads[replica_idx] -= 1
 
     @ray_method
-    async def judge(self, rollout_state: RolloutState) -> RolloutState:  # type: ignore[override]
+    async def judge(self, rollout_state: RolloutState | list[RolloutState]) -> RolloutState | list[RolloutState]:  # type: ignore[override]
         replica_idx, replica = await self._pick_replica()
         try:
             return await replica.judge(rollout_state)
