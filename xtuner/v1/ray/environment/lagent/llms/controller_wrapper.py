@@ -1,7 +1,9 @@
+import base64
 from typing import Any, Dict, List, Optional
 
 import ray
 from lagent.utils import create_object
+from ray import cloudpickle
 from ray.actor import ActorClass
 
 from xtuner.v1.data_proto.rl_data import RLRolloutResponseItem, SampleParams
@@ -25,6 +27,7 @@ class ControllerWrapper:
         sample_params: Optional[SampleParams] = None,
         reasoning_parser: Optional[ResponseParser] = None,
         tool_call_parser: Optional[ResponseParser] = None,
+        encode_routed_experts_ref: bool = True,
     ):
         assert rollout_controller is not None or (
             placement_group and rollout_cfg
@@ -40,6 +43,7 @@ class ControllerWrapper:
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.rollout_cfg.tokenizer_path, trust_remote_code=True)
         self.sample_params = sample_params or SampleParams()
+        self.encode_routed_experts_ref = encode_routed_experts_ref
         # default parsers
         self.reasoning_parser = (
             reasoning_parser
@@ -68,6 +72,10 @@ class ControllerWrapper:
                 and "routed_experts" not in response.extra_info
             ):
                 raise ValueError("Routed experts expected in response extra_info but not found.")
+            if isinstance(response.extra_info.get('routed_experts'), ray.ObjectRef) and self.encode_routed_experts_ref:
+                response.extra_info['routed_experts'] = base64.b64encode(
+                    cloudpickle.dumps(response.extra_info['routed_experts'])
+                ).decode('utf-8')
 
         response = AgentMessage.from_model_response(response, "")
         return self.parse_response(response)
