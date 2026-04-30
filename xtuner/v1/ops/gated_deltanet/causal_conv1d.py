@@ -4,7 +4,7 @@ import causal_conv1d_cuda
 import torch
 
 
-LIBRARY_NAME = "DaoAILab"
+LIBRARY_NAME = "xtuner"
 
 
 @torch.library.custom_op(f"{LIBRARY_NAME}::_causal_conv1d_fwd_cpp", mutates_args={"out", "final_states_out"})
