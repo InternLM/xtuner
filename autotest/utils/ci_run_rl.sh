@@ -20,6 +20,7 @@ if [ "$ACCELERATOR" = "NPU" ]; then
   yum install dnsutils -y
   source /usr/local/Ascend/ascend-toolkit/set_env.sh
   source /usr/local/Ascend/nnal/atb/set_env.sh --cxx_abi=1
+  git config --global --add safe.directory "$PWD"
   export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver
   export CPU_AFFINITY_CONF=0
   export HF_HOME=/workspace
