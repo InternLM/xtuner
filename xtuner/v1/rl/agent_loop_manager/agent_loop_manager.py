@@ -276,8 +276,7 @@ class AgentLoopManager:
         self._finish_event = asyncio.Event()
 
         # 非共卡 producer 读取的 model_step：rollout 侧当前使用的是哪个 train_step 同步后的模型。
-        # consumer 完成权重同步后通过 continue_produce 更新；已 schedule 的 pending task
-        # 必须在 strategy 内绑定发起时的 model_step，不能在 task 完成时再读取最新值。
+        # 权重更新前必须先 pause 并清空 pending task，因此一个 pending 生命周期内只对应一个 model_step。
         self._model_step = 0
 
         # 非共卡 producer / consumer 共享的控制状态。produce_loop / get_batch 应直接读取
@@ -588,6 +587,7 @@ class AgentLoopManager:
                 task.agent_loop,
                 self.replay_buffer,
                 task.task_name,
+                model_step=self._model_step,
                 progress=pause_progress,
             )
         self._pause_time_s = pause_time_s
