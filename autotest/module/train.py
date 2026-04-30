@@ -57,10 +57,11 @@ class Train:
                 return command, config
             elif train_type == "rl":
                 infer_type = config.get("parameters", {}).get("infer_backend", "lmdeploy")
+                acceleator = config.get("parameters", {}).get("acceleator", "GPU")
                 command = (
                     f"cd {current_dir}; pwd; pip install tilelang==0.1.9; export GITHUB_RUN_ID={config.get('run_id')}; export WORK_DIR={work_dir}; "
                     + cudnn_patch
-                    + f"bash -x examples/v1/scripts/run_rl.sh {config_path} {infer_type} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
+                    + f"bash -x autotest/utils/ci_run_rl.sh {acceleator} {infer_type} {config_path} ${{MODEL_PATH}} ${{DATA_PATH}} ${{EVAL_DATA_PATH}}"
                 )
                 return command, config
         else:

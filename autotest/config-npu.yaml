@@ -210,6 +210,7 @@ case:
             parameters:
                 config: autotest/config/rl_qwen3_30B_grpo_gpu_vs_npu.py
                 infer_backend: vllm
+                acceleator: NPU
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:rl_s1_vllm
@@ -221,6 +222,10 @@ case:
                     - XTUNER_USE_LMDEPLOY=0
                     - XTUNER_USE_VLLM=1
                     - XTUNER_USE_SGLANG=0
+                    - XTUNER_USE_FA3=0
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - VLLM_VERSION=0.11.0
+                    - VLLM_USE_V1=1
             assert_info:
                 base_metric: npu-qwen3-rl-vllm-vs-gpu/00f7e16/tracker.jsonl
                 check_metrics:
