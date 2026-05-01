@@ -585,8 +585,11 @@ class ReplayBufferStorage:
                     data_item.data.multimodal_train_info["pixel_values"] = pixel_values_ref  # type: ignore[index]
         # convert rollout.extra_info.router_experts to ray.ObjectRef
         if "routed_experts" in data_item.env.rollout.extra_info:
-            if not isinstance(data_item.env.rollout.extra_info["routed_experts"], ray.ObjectRef):
-                routed_experts_ref = ray.put(data_item.env.rollout.extra_info["routed_experts"])
+            val = data_item.env.rollout.extra_info["routed_experts"]
+            # str = uuid key into RoutedExpertStore; ObjectRef = legacy path.
+            # Either is left untouched; only raw tensors get ray.put'd.
+            if not isinstance(val, (ray.ObjectRef, str)):
+                routed_experts_ref = ray.put(val)
                 del data_item.env.rollout.extra_info["routed_experts"]
                 data_item.env.rollout.extra_info["routed_experts"] = routed_experts_ref
 

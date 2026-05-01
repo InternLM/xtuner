@@ -37,6 +37,7 @@ from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.ray.base import SingleAcceleratorWorker
 from xtuner.v1.ray.config import RolloutConfig
+from xtuner.v1.ray.rollout.routed_expert_store import get_store
 from xtuner.v1.rl.base.loss import BaseRLLossContext
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
@@ -412,6 +413,11 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         to_free_routed_expert_refs: list[ray.ObjectRef] = []
+        # NOTE: store-keyed pins are intentionally NOT released here.  A single
+        # rollout's routed_experts can be touched by multiple data_batches in
+        # one train step (packing reuse, repeat_k duplicates, partial-rollout
+        # ancestors, etc.).  Releasing eagerly causes the second consumer to
+        # see KeyError.  We rely on the store's TTL GC for cleanup instead.
         if isinstance(rollout_routed_experts, list):
             # list[n,l,e]
             out_rollout_routed_expert = []
@@ -427,7 +433,21 @@ class TrainingWorker(SingleAcceleratorWorker):
                         ),
                     )
                     out_rollout_routed_expert.append(rollout_routed_experts_tensor)
+                elif isinstance(rollout_routed_expert, str):
+                    # New path: uuid key → RoutedExpertStore.  Owner is the
+                    # store actor, so ray.get is reliable regardless of
+                    # lmdeploy worker state.  Release deferred to TTL GC.
+                    store = get_store()
+                    pin_key = rollout_routed_expert
+                    pin_ref = ray.get(store.get_ref.remote(pin_key))
+                    rollout_routed_expert = ray.get(pin_ref)
+                    rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
+                    rollout_routed_expert = rollout_routed_expert.reshape(
+                        -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
+                    )
+                    out_rollout_routed_expert.append(rollout_routed_expert)
                 else:
+                    # Legacy path: bytes (base64-decoded cloudpickle of ObjectRef).
                     rollout_routed_expert_refs = cloudpickle.loads(rollout_routed_expert)
                     rollout_routed_expert = ray.get(rollout_routed_expert_refs)
                     # free obj store explicitly

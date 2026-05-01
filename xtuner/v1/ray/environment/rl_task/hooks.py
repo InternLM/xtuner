@@ -388,9 +388,11 @@ class DumpDaemonLogOnFailure(Hook):
             except Exception:
                 msgs = []
             last = msgs[-1] if msgs else {}
-            if not last.get("raw_content_ids"):
+            required = ("raw_content", "raw_content_ids", "raw_content_logprobs")
+            missing = [k for k in required if not last.get(k)]
+            if missing:
                 should_dump = True
-                reason = "silent-pass (last message missing raw_content_ids)"
+                reason = f"silent-pass (last message missing {missing})"
 
         if should_dump:
             lines = text.splitlines()

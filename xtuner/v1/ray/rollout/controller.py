@@ -12,10 +12,9 @@ import ray
 import uvicorn
 from fastapi import FastAPI
 from ray.util.placement_group import PlacementGroup
-from transformers import AutoTokenizer
 
+from transformers import AutoTokenizer
 from xtuner.v1.data_proto.rl_data import (
-    RLRolloutRequestItem,
     RLRolloutResponseItem,
     RolloutExtraParams,
     SampleParams,
@@ -25,6 +24,7 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
+
 
 ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
@@ -491,20 +491,24 @@ class RolloutController:
             inputs = tokenize(self.tokenizer, request.messages, request.tools)
             response: RLRolloutResponseItem = await self.rollout(
                 prompt=request.messages,
-                input_ids=inputs['input_ids'],
+                input_ids=inputs["input_ids"],
                 tools=request.tools,
                 tool_choice=request.tool_choice,
                 sample_params=request.sample_params,
                 extra_params=request.extra_params,
                 extra_info=(
-                    {'routed_experts': inputs['routed_experts']} if inputs['routed_experts'] is not None else {}
+                    {"routed_experts": inputs["routed_experts"]} if inputs["routed_experts"] is not None else {}
                 ),
             )
-            if isinstance(response.extra_info.get('routed_experts'), ray.ObjectRef):
-                response.extra_info['routed_experts'] = base64.b64encode(
-                    cloudpickle.dumps(response.extra_info['routed_experts'])
-                ).decode('utf-8')
-            message = AgentMessage.from_model_response(response, 'assistant')
+            # Rollout worker now returns a uuid str key (into RoutedExpertStore)
+            # rather than an ObjectRef.  Legacy ObjectRef path kept as a
+            # defensive fallback and encoded the same way as before so older
+            # clients still decode correctly.
+            if isinstance(response.extra_info.get("routed_experts"), ray.ObjectRef):
+                response.extra_info["routed_experts"] = base64.b64encode(
+                    cloudpickle.dumps(response.extra_info["routed_experts"])
+                ).decode("utf-8")
+            message = AgentMessage.from_model_response(response, "assistant")
             message = self.reasoning_parser.parse_response(message)
             message = self.tool_call_parser.parse_response(message)
             completion_message = LagentChatCompletionMessage.from_agent_message(message)
@@ -520,9 +524,9 @@ class RolloutController:
                     )
                 ],
                 usage=CompletionUsage(
-                    prompt_tokens=len(inputs['input_ids']),
+                    prompt_tokens=len(inputs["input_ids"]),
                     completion_tokens=response.num_return_tokens,
-                    total_tokens=len(inputs['input_ids']) + response.num_return_tokens,
+                    total_tokens=len(inputs["input_ids"]) + response.num_return_tokens,
                 ),
             ).model_dump()
 

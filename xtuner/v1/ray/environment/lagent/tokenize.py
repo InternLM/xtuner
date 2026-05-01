@@ -1,4 +1,3 @@
-import base64
 import os
 import re
 from typing import Any, Dict, List
@@ -87,20 +86,25 @@ def tokenize(
             ):
                 routed_experts_ref = msg[0]["extra_info"]["routed_experts"]
                 if isinstance(routed_experts_ref, ray.ObjectRef):
-                    if routed_experts_ref.hex() in previous_routed_experts_tasks:
-                        logger.warning(
-                            "[tokenize_fn] Detected repeated routed_experts_ref, setting routed_experts to None to avoid errors."
-                        )
-                        routed_experts = None
-                    else:
-                        routed_experts = routed_experts_ref
-                        previous_routed_experts_tasks.add(routed_experts_ref.hex())
+                    dedup_key = routed_experts_ref.hex()
+                    passthrough: Any = routed_experts_ref
+                elif isinstance(routed_experts_ref, str):
+                    # New path: uuid key into RoutedExpertStore — forward as-is.
+                    # Legacy path (base64(cloudpickle(ObjectRef))) is also a str;
+                    # we forward it unchanged and let the rollout worker detect
+                    # the shape via isinstance checks downstream.
+                    dedup_key = routed_experts_ref
+                    passthrough = routed_experts_ref
                 else:
-                    assert isinstance(routed_experts_ref, str), (
-                        f"Expected routed_experts_ref to be a base64 string, but got {type(routed_experts_ref)}"
+                    raise TypeError(f"Unexpected type for routed_experts_ref: {type(routed_experts_ref)}")
+                if dedup_key in previous_routed_experts_tasks:
+                    logger.warning(
+                        "[tokenize_fn] Detected repeated routed_experts_ref, setting routed_experts to None to avoid errors."
                     )
-                    ref_bytes = base64.b64decode(routed_experts_ref.encode("utf-8"))
-                    routed_experts = ref_bytes
+                    routed_experts = None
+                else:
+                    routed_experts = passthrough
+                    previous_routed_experts_tasks.add(dedup_key)
             else:
                 routed_experts = None
 

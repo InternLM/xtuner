@@ -145,17 +145,22 @@ class InstallAgentEnvironment(BaseEnvironment):
                 # passed_data_items.append(sample)
                 continue
             else:
-                # Defend against silent-pass: rc=0 but agent produced no usable
-                # last message (LLM exception swallowed upstream, empty loop,
-                # max_turn=0, etc.).  Same heuristic as DumpDaemonLogOnFailure
-                # so log signal + filter decision are consistent.
+                # Defend against silent-pass / truncated trajectory: rc=0 but
+                # last message in policy_agent.messages lacks the fields
+                # postprocess will read.  Same heuristic as
+                # DumpDaemonLogOnFailure so log signal + filter stay
+                # consistent.
                 msg_dict = (result["env"]["agent"] or {}).get("message_dict") or {}
                 messages = msg_dict.get("policy_agent.messages") or []
                 last = messages[-1] if messages else {}
-                if not last.get("raw_content_ids"):
+                required = ("raw_content", "raw_content_ids", "raw_content_logprobs")
+                missing = [k for k in required if not last.get(k)]
+                if missing:
                     get_logger().warning(
-                        f"silent-pass rollout skipped: uid={sample.uid.observation_id} "
-                        f"task_id={result.get('data', {}).get('extra_info', {}).get('task_id')}"
+                        f"silent-pass rollout skipped: "
+                        f"uid={sample.uid.observation_id} "
+                        f"task_id={result.get('data', {}).get('extra_info', {}).get('task_id')} "
+                        f"missing={missing}"
                     )
                     continue
                 sample.env.agent.extra_info["message_dict"] = msg_dict
