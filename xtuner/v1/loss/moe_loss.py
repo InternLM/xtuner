@@ -168,7 +168,8 @@ class BalancingLossContext(nn.Module):
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
         self._batch_size = 1
-        self.local_load_list: list[torch.Tensor] = []
+        # Per-layer differentiable accumulator. tokens_per_expert is owned by AuxLossContext
+        # and passed in at finalize() time to avoid duplicate storage / duplicate all_reduce.
         self.routing_weights_sum_list: list[torch.Tensor] = []
 
     @staticmethod
@@ -249,71 +250,64 @@ class BalancingLossContext(nn.Module):
         self,
         *,
         router_weights: torch.Tensor,
-        tokens_per_expert: torch.Tensor,
     ) -> None:
-        """Update split-aux balancing accumulators for one layer.
+        """Update the per-layer differentiable accumulator for balancing loss.
 
         Args:
-            router_weights (torch.Tensor): Router weights with non-padding tokens selected.
-            tokens_per_expert (torch.Tensor): Per-layer expert token counts.
+            router_weights (torch.Tensor): Router weights with non-padding tokens already selected.
+                Shape: ``(non_pad, n_routed_experts)``.
         """
-        # TODO: Consider merging `local_load_list` with the aux-loss-side
-        # `_local_load_logits_list` so tokens-per-expert statistics are stored only
-        # once and reused by both finalize paths.
-        self.local_load_list.append(tokens_per_expert)
+        # router_weights.sum(dim=0) is [n_routed_experts]; sum's backward does not save the input
+        # tensor, so the [non_pad, n_routed_experts] activation is not pinned by this accumulator.
         self.routing_weights_sum_list.append(router_weights.sum(dim=0))
 
     def finalize(
         self,
         *,
+        tokens_per_expert_local: torch.Tensor,
+        tokens_per_expert_global: torch.Tensor,
         n_routed_experts: int,
         num_experts_per_tok: int,
         non_pad_token: int,
     ) -> torch.Tensor:
-        """Finalize balancing loss from split-aux accumulators.
+        """Finalize balancing loss from accumulators.
 
         Args:
-            local_load (torch.Tensor): Per-layer expert token counts accumulator.
-            routing_weights_sum_list (list[torch.Tensor]): Per-layer router-weight sums.
-            active_layers (int): Number of active MoE layers observed in this forward.
+            tokens_per_expert_local (torch.Tensor): Per-layer expert token counts on this rank,
+                ``(num_layers, n_routed_experts)``. Used by the non-global-average branch.
+            tokens_per_expert_global (torch.Tensor): All-reduced ``tokens_per_expert``,
+                ``(num_layers, n_routed_experts)``. Used by the global-average branch.
             n_routed_experts (int): Number of routed experts.
             num_experts_per_tok (int): Number of experts selected per token.
-            non_pad_token (int): Number of non-padding tokens.
+            non_pad_token (int): Number of non-padding tokens on this rank.
 
         Returns:
             torch.Tensor: Final balancing loss.
         """
-        local_load = self.local_load_list
         routing_weights_sum_list = self.routing_weights_sum_list
-        self.local_load_list = []
         self.routing_weights_sum_list = []
-        if self.loss_cfg.balancing_loss_alpha == 0:
-            device = local_load[0].device if local_load else DEVICE
-            return torch.tensor(0.0, device=device, dtype=torch.float32)
-        if not local_load or not routing_weights_sum_list:
-            device = routing_weights_sum_list[0].device if routing_weights_sum_list else DEVICE
-            return torch.tensor(0.0, device=device, dtype=torch.float32)
+        if self.loss_cfg.balancing_loss_alpha == 0 or not routing_weights_sum_list:
+            return torch.tensor(0.0, device=tokens_per_expert_local.device, dtype=torch.float32)
 
         local_gating_sum = torch.stack(routing_weights_sum_list, dim=0)
-        active_local_load = torch.stack(local_load, dim=0)
 
         if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
             group = dist.group.WORLD
             assert group is not None
-            tokens_per_expert_global = all_reduce(active_local_load, "sum", group)
             tokens_global = tokens_per_expert_global.sum(-1)
             seqlen_global = tokens_global // num_experts_per_tok
 
             routing_weights_sum_global = all_reduce_autograd(local_gating_sum, "sum", group)
             routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
             scale_global = n_routed_experts / tokens_global
+            tokens_per_expert_for_loss = tokens_per_expert_global
         else:
-            tokens_per_expert_global = active_local_load
             valid_tokens = max(non_pad_token, 1)
             scale_global = n_routed_experts / (valid_tokens * num_experts_per_tok)
             routing_weights_mean_global = local_gating_sum / valid_tokens
+            tokens_per_expert_for_loss = tokens_per_expert_local
 
-        loss = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1)
+        loss = scale_global * (tokens_per_expert_for_loss * routing_weights_mean_global).sum(-1)
         loss = loss.sum() * self.loss_cfg.balancing_loss_alpha
         return loss / self._batch_size
 

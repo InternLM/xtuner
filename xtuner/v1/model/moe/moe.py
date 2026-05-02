@@ -208,6 +208,7 @@ class MoE(BaseModel):
         self.offload_stream = torch.cuda.Stream()
         aux_loss = self.config.aux_loss_cfg.build(
             n_routed_experts=self.config.n_routed_experts,
+            num_experts_per_tok=self.config.num_experts_per_tok,
         )
         self.aux_loss: AuxLoss = aux_loss
 
@@ -473,6 +474,10 @@ class MoE(BaseModel):
             )
         )
         cat_mask = torch.cat([ctx.mask for ctx in seq_ctx_list], dim=1)
+        # Hoisted out of the per-layer accumulate path: mask is constant across layers,
+        # so the non-pad index lookup runs once per forward instead of once per (layer, ctx).
+        nonpad_indices = torch.nonzero(cat_mask, as_tuple=True)[1]
+        non_pad_token = nonpad_indices.numel()
 
         # Initialize output containers
         output: dict = {}
@@ -551,14 +556,17 @@ class MoE(BaseModel):
                         offload_stream=self.offload_stream,
                     )
 
+                cat_router_weights = torch.cat(router_weights, dim=0)
+                cat_router_logits = torch.cat(router_logits, dim=0)
                 self.aux_loss.accumulate(
-                    router_weights=torch.cat(router_weights, dim=0),
-                    router_logits=torch.cat(router_logits, dim=0),
-                    num_experts_per_tok=self.config.num_experts_per_tok,
-                    mask=cat_mask,
+                    selected_router_weights=cat_router_weights.index_select(0, nonpad_indices)
+                    .contiguous()
+                    .float(),
+                    selected_router_logits=cat_router_logits.index_select(0, nonpad_indices)
+                    .contiguous()
+                    .float(),
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
-                    dim=0,
                 )
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
@@ -580,10 +588,8 @@ class MoE(BaseModel):
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
             z_ctx=z_ctx,
-            num_experts_per_tok=self.config.num_experts_per_tok,
-            non_pad_token=int(cat_mask.sum().item()),
+            non_pad_token=non_pad_token,
         )
-        assert split_aux_output is not None
         balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
         if balancing_loss is not None:
             output["balancing_loss"] = balancing_loss
@@ -643,6 +649,9 @@ class MoE(BaseModel):
         output["router_weights"] = {}
         self._mark_dynamic(seq_ctx)
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
+        # Hoisted out of the per-layer accumulate path: mask is constant across layers.
+        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
+        non_pad_token = nonpad_indices.numel()
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
@@ -684,13 +693,10 @@ class MoE(BaseModel):
                     offload_stream=self.offload_stream,
                 )
                 self.aux_loss.accumulate(
-                    router_weights=router_weights,
-                    router_logits=router_results,
-                    num_experts_per_tok=self.config.num_experts_per_tok,
-                    mask=seq_ctx.mask,
+                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
-                    dim=0,
                 )
 
             if self.config.return_hidden_states:
@@ -717,6 +723,8 @@ class MoE(BaseModel):
                 position_ids=position_ids.clone(),
                 inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
             )
+            # MTP uses its own mask; main mask's non-pad indices do not apply.
+            mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
 
             # Forward through MTP block
             mtp_outputs = self.mtp_block(
@@ -736,13 +744,14 @@ class MoE(BaseModel):
                 output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
                 output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
                 self.aux_loss.accumulate(
-                    router_weights=mtp_router_weights,
-                    router_logits=mtp_router_results,
-                    num_experts_per_tok=self.config.num_experts_per_tok,
-                    mask=mtp_seq_ctx.mask,
+                    selected_router_weights=mtp_router_weights.index_select(0, mtp_nonpad_indices)
+                    .contiguous()
+                    .float(),
+                    selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices)
+                    .contiguous()
+                    .float(),
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
-                    dim=0,
                 )
 
             # Average MTP losses across depths and scale
@@ -752,17 +761,11 @@ class MoE(BaseModel):
             # Add to total loss
             output["mtp_loss"] = scaled_mtp_loss
 
-        non_pad_token = int(seq_ctx.mask.sum().item())
-
-        # Calculate balancing loss using loss context
-        # if loss_ctx is not None:
         split_aux_output = self.aux_loss.finalize(
             balancing_ctx=balancing_ctx,
             z_ctx=z_ctx,
-            num_experts_per_tok=self.config.num_experts_per_tok,
             non_pad_token=non_pad_token,
         )
-        assert split_aux_output is not None
         balancing_loss, z_loss, tokens_per_expert_global = split_aux_output
         if balancing_loss is not None:
             output["balancing_loss"] = balancing_loss
