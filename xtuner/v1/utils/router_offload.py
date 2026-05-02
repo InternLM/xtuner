@@ -4,9 +4,11 @@ import torch
 from torch.utils._pytree import tree_map_only
 
 
-def _is_view_op(func: Any) -> bool:
-    """Check whether an aten op is view-like and can stay lazy."""
-    view_op_names = {
+# Names of view-like aten ops whose results share storage with their input. For these ops the
+# wrapper can stay lazy (no sync) because no real data movement happened. Non-aten or unknown
+# ops fall through to the safe path that triggers a wait.
+_VIEW_OP_NAMES = frozenset(
+    {
         "view",
         "_unsafe_view",
         "reshape",
@@ -22,8 +24,20 @@ def _is_view_op(func: Any) -> bool:
         "as_strided",
         "t",
     }
-    func_name = getattr(func, "__name__", "")
-    return any(name in func_name for name in view_op_names)
+)
+
+
+def _is_view_op(func: Any) -> bool:
+    """Check whether an aten op is view-like and can stay lazy.
+
+    Matches the op base name (e.g. ``"view"`` for ``aten.view.default``) exactly against
+    ``_VIEW_OP_NAMES``; substring matching would over-match (``"select"`` would match
+    ``"select_backward"``, ``"t"`` would match every op whose name ends in ``t``).
+    """
+    packet = getattr(func, "overloadpacket", None)
+    if packet is None:
+        return False
+    return getattr(packet, "__name__", "") in _VIEW_OP_NAMES
 
 
 class AsyncOffloadedTensor(torch.Tensor):
@@ -147,15 +161,22 @@ def async_offload_to_cpu(tensor: torch.Tensor, stream: torch.cuda.Stream) -> Asy
     tensor_cpu = torch.empty(detached_tensor.shape, dtype=detached_tensor.dtype, device="cpu", pin_memory=True)
     event = torch.cuda.Event()
     current_stream = torch.cuda.current_stream()
-    is_slice_tensor = detached_tensor.storage().size() != detached_tensor.numel()
+    # Storage-level memcpy is faster than the strided element-wise path, but only correct when the
+    # source tensor is contiguous and owns its full storage at offset 0; otherwise the raw storage
+    # bytes do not correspond to a logical row-major layout and tensor_cpu would receive garbage.
+    use_storage_copy = (
+        detached_tensor.is_contiguous()
+        and detached_tensor.storage_offset() == 0
+        and detached_tensor.untyped_storage().nbytes() == detached_tensor.numel() * detached_tensor.element_size()
+    )
 
     with torch.no_grad():
         with torch.cuda.stream(stream):
             stream.wait_stream(current_stream)
-            if is_slice_tensor:
-                tensor_cpu.copy_(detached_tensor, non_blocking=True)
+            if use_storage_copy:
+                tensor_cpu.untyped_storage().copy_(detached_tensor.untyped_storage(), non_blocking=True)
             else:
-                tensor_cpu.storage().copy_(detached_tensor.storage(), non_blocking=True)
+                tensor_cpu.copy_(detached_tensor, non_blocking=True)
             detached_tensor.record_stream(stream)
             event.record(stream)
 
