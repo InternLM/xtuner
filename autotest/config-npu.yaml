@@ -203,3 +203,55 @@ case:
                     loss/reduced_llm_loss: 0.01
                     lr: 0.01
             timeout: 10800
+
+    npu-qwen3-rl-vllm-vs-gpu:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_qwen3_30B_grpo_gpu_vs_npu.py
+                infer_backend: vllm
+                acceleator: NPU
+                output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
+            resource:
+                image: ccr-hw/910c:rl_s1_vllm
+                envs:
+                    - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
+                    - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/gsm8k/test.jsonl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_USE_LMDEPLOY=0
+                    - XTUNER_USE_VLLM=1
+                    - XTUNER_USE_SGLANG=0
+                    - XTUNER_USE_FA3=0
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - VLLM_VERSION=0.11.0
+                    - VLLM_USE_V1=1
+            assert_info:
+                base_metric: npu-qwen3-rl-vllm-vs-gpu/00f7e16/tracker.jsonl
+                check_metrics:
+                    - 
+                       metric:  eval/accuracy
+                       threshold: 0.05
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0001
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.12
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 10
+                       method: absolute
+                       operator: <
+            timeout: 5500

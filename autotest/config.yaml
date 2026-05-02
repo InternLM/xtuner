@@ -632,3 +632,96 @@ case:
                        method: absolute
                        operator: <
             timeout: 4200
+
+    qwen3-rl-sglang:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_qwen3_30B_gsm8k_grpo.py
+                infer_backend: sglang
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3-30B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
+                    - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_USE_LMDEPLOY=0
+                    - XTUNER_USE_VLLM=0
+                    - XTUNER_USE_SGLANG=1
+                    - TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0
+                    - XTUNER_USE_FA3=0
+            assert_info:
+                base_metric: qwen3-rl-sglang/cf46114/tracker.jsonl
+                check_metrics:
+                    - 
+                       metric:  eval/accuracy
+                       threshold: 0.05
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0001
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.12
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 10
+                       method: absolute
+                       operator: <
+            timeout: 4500
+
+    qwen3-5-rl-vl-lmdeploy:
+        -
+            type: rl
+            parameters:
+                config: autotest/config/rl_qwen3_5_vl_dapo.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - PYTHONPATH=/mnt/shared-storage-user/llmrazor-share/qa-caif-cicd/lmdeploy:$PYTHONPATH
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-5-rl-vl-lmdeploy/00f7e16/tracker.jsonl
+                check_metrics:
+                    - 
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0002
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 10
+                       method: absolute
+                       operator: <
+            timeout: 7200
