@@ -26,8 +26,8 @@ from xtuner.v1.config import FSDPConfig
 from xtuner.v1.data_proto import SequenceContext
 from xtuner.v1.float8.float8_handler import Float8Handler
 from xtuner.v1.loss import (
-    AuxLoss,
     AuxLossConfig,
+    AuxLossContext,
     BalancingLossConfig,
     BalancingLossContext,
     BaseLossContext,
@@ -206,11 +206,10 @@ class MoE(BaseModel):
         self._maybe_enable_compile(self.compile_cfg)
 
         self.offload_stream = torch.cuda.Stream()
-        aux_loss = self.config.aux_loss_cfg.build(
+        self.aux_loss: AuxLossContext = self.config.aux_loss_cfg.build(
             n_routed_experts=self.config.n_routed_experts,
             num_experts_per_tok=self.config.num_experts_per_tok,
         )
-        self.aux_loss: AuxLoss = aux_loss
 
     def _extract_aux_loss_ctx(
         self,

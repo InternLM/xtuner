@@ -5,10 +5,6 @@ from torch import distributed as dist
 from torch.distributed._functional_collectives import all_reduce
 
 from xtuner.v1.loss.moe_loss import BalancingLossContext, ZLossContext
-from xtuner.v1.utils import get_torch_device_module
-
-
-DEVICE_MODULE = get_torch_device_module()
 
 
 class AuxLossConfig(BaseModel):
@@ -17,15 +13,13 @@ class AuxLossConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     n_routed_experts: int | None = None
     num_experts_per_tok: int | None = None
-    device: torch.device | str | int | None = None
 
     def build(
         self,
         *,
         n_routed_experts: int | None = None,
         num_experts_per_tok: int | None = None,
-        device: torch.device | str | int | None = None,
-    ) -> "AuxLoss":
+    ) -> "AuxLossContext":
         """Build a layer-wise MoE auxiliary loss context."""
         resolved_n_routed_experts = n_routed_experts if n_routed_experts is not None else self.n_routed_experts
         assert resolved_n_routed_experts is not None, "n_routed_experts must be provided either in config or build()."
@@ -37,22 +31,12 @@ class AuxLossConfig(BaseModel):
             "num_experts_per_tok must be provided either in config or build()."
         )
 
-        resolved_device = device if device is not None else self.device
-        if resolved_device is None:
-            resolved_device = DEVICE_MODULE.current_device()
-
-        return AuxLoss(
-            n_routed_experts=resolved_n_routed_experts,
-            num_experts_per_tok=resolved_num_experts_per_tok,
-            device=resolved_device,
+        return AuxLossContext(
+            AuxLossConfig(
+                n_routed_experts=resolved_n_routed_experts,
+                num_experts_per_tok=resolved_num_experts_per_tok,
+            )
         )
-
-
-class AuxLossKwargs(BaseModel):
-    """Keyword arguments for layer-wise split MoE auxiliary loss context."""
-
-    model_config = ConfigDict(title="layer moe loss keyword arguments", extra="forbid", arbitrary_types_allowed=True)
-    device: torch.device | str | int | None
 
 
 class AuxLossContext(nn.Module):
@@ -63,10 +47,9 @@ class AuxLossContext(nn.Module):
     logsum / token_count for z-loss) live inside their respective contexts.
     """
 
-    def __init__(self, loss_cfg: AuxLossConfig, loss_kwargs: AuxLossKwargs):
+    def __init__(self, loss_cfg: AuxLossConfig):
         super().__init__()
         self.loss_cfg = loss_cfg
-        self.loss_kwargs = loss_kwargs
         n_routed_experts = self.loss_cfg.n_routed_experts
         num_experts_per_tok = self.loss_cfg.num_experts_per_tok
         assert n_routed_experts is not None, "n_routed_experts must be resolved before creating AuxLossContext."
@@ -170,19 +153,6 @@ class AuxLossContext(nn.Module):
         else:
             tokens_per_expert_global = tokens_per_expert_local
         return tokens_per_expert_local, tokens_per_expert_global
-
-
-class AuxLoss(AuxLossContext):
-    """Unified MoE auxiliary loss wrapper."""
-
-    def __init__(self, n_routed_experts: int, num_experts_per_tok: int, device: torch.device | str | int):
-        cfg = AuxLossConfig(
-            n_routed_experts=n_routed_experts,
-            num_experts_per_tok=num_experts_per_tok,
-            device=device,
-        )
-        kwargs = AuxLossKwargs(device=device)
-        super().__init__(cfg, kwargs)
 
 
 def _as_list(
