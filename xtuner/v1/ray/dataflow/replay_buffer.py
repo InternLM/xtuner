@@ -22,12 +22,10 @@ from xtuner.v1.data_proto.rl_data import (
     RLEnvDataItem,
     RLExtraDataItem,
     RLUIDItem,
-    RolloutExtraInfo,
     RolloutState,
     is_valid_for_replaybuffer,
 )
 from xtuner.v1.datasets.config import DataloaderConfig
-from xtuner.v1.ray.rollout.lmdeploy import get_lmdeploy_routed_experts_ref
 from xtuner.v1.ray.utils import free_object_refs
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 from xtuner.v1.utils.device import get_device
@@ -375,24 +373,6 @@ class ReplayBufferStorage:
         self.sample_from_aborted_count = 0
         self.sample_from_expired_count = 0
 
-    def _pop_routed_experts_from_extra_info(
-        self, extra_info: RolloutExtraInfo, *, free_ref: bool = False
-    ) -> ObjectRef | None:
-        if "routed_experts" not in extra_info:
-            return None
-
-        routed_experts = extra_info["routed_experts"]
-        if isinstance(routed_experts, str):
-            routed_experts = get_lmdeploy_routed_experts_ref(routed_experts)
-        elif not isinstance(routed_experts, ObjectRef):
-            routed_experts = ray.put(routed_experts)
-
-        del extra_info["routed_experts"]
-        if free_ref:
-            free_object_refs([routed_experts])
-            return None
-        return routed_experts
-
     def _update_replay_meta_state(self, replay_meta: ReplayMeta, new_state: RolloutState):
         for observation_id in replay_meta.observation_ids:
             old_state = self._observations2states.get(observation_id)
@@ -408,10 +388,6 @@ class ReplayBufferStorage:
         reused."""
         old_obs_refs = [ref for ref in replay_meta.observation_refs if ref is not None]
         if old_obs_refs:
-            for old_obs_ref in old_obs_refs:
-                old_env = ray.get(old_obs_ref)
-                if hasattr(old_env, "rollout"):
-                    self._pop_routed_experts_from_extra_info(old_env.rollout.extra_info, free_ref=True)
             ray.internal.free(old_obs_refs, local_only=False)
         replay_meta.observation_refs = [ray.put(RLEnvDataItem()) for _ in replay_meta.observation_ids]
         self._update_replay_meta_state(replay_meta, new_state)
@@ -590,6 +566,33 @@ class ReplayBufferStorage:
             return obj
         return obj
 
+    def convert_to_ray_objref(self, data_item: RLDataFlowItem):
+        """Converts large tensors in RLDataFlowItem to ray.ObjectRefs.
+
+        Args:
+            data_item (RLDataFlowItem): The data item containing large tensors.
+        Returns:
+            RLDataFlowItem: The data item with large tensors converted to ray.ObjectRefs.
+        """
+        # convert data.multimodal_train_info to ray.ObjectRef
+        if hasattr(data_item.data, "multimodal_train_info"):
+            multimodal_info = data_item.data.multimodal_train_info
+            if multimodal_info and "pixel_values" in multimodal_info:
+                # 一组数据共享同一个data_item.data，所以只需要转换一次
+                if not isinstance(multimodal_info["pixel_values"], ray.ObjectRef):
+                    pixel_values_ref = ray.put(multimodal_info["pixel_values"])
+                    del multimodal_info["pixel_values"]
+                    data_item.data.multimodal_train_info["pixel_values"] = pixel_values_ref  # type: ignore[index]
+        # convert rollout.extra_info.router_experts to ray.ObjectRef
+        if "routed_experts" in data_item.env.rollout.extra_info:
+            val = data_item.env.rollout.extra_info["routed_experts"]
+            # str = uuid key into RoutedExpertStore; ObjectRef = legacy path.
+            # Either is left untouched; only raw tensors get ray.put'd.
+            if not isinstance(val, (ray.ObjectRef, str)):
+                routed_experts_ref = ray.put(val)
+                del data_item.env.rollout.extra_info["routed_experts"]
+                data_item.env.rollout.extra_info["routed_experts"] = routed_experts_ref
+
     def has_objectref(self, item: RLDataFlowItem) -> bool:
         def check(obj):
             if isinstance(obj, ray.ObjectRef):
@@ -718,7 +721,9 @@ class ReplayBufferStorage:
 
         for sample in group_samples:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
-            self._pop_routed_experts_from_extra_info(sample.env.rollout.extra_info, free_ref=True)
+            if "routed_experts" in sample.env.rollout.extra_info:
+                ray.internal.free(sample.env.rollout.extra_info["routed_experts"], local_only=False)
+                del sample.env.rollout.extra_info["routed_experts"]
             del sample.env
             sample.env = RLEnvDataItem()  # 重置env数据
             sample.uid.action_id = action_id
@@ -754,7 +759,9 @@ class ReplayBufferStorage:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
             if not self.enable_partial_rollout:
                 # 清除上次的response_ids等env数据
-                self._pop_routed_experts_from_extra_info(sample.env.rollout.extra_info, free_ref=True)
+                if "routed_experts" in sample.env.rollout.extra_info:
+                    ray.internal.free(sample.env.rollout.extra_info["routed_experts"], local_only=False)
+                    del sample.env.rollout.extra_info["routed_experts"]
                 del sample.env
                 sample.env = RLEnvDataItem()
                 sample.uid.version = 0

@@ -2,6 +2,8 @@ import os
 import re
 from typing import Any, Dict, List
 
+import ray
+
 from xtuner.v1.utils import get_logger
 
 
@@ -25,6 +27,7 @@ def tokenize(
     thinking_start_ids = tokenizer.encode("<think>", add_special_tokens=False)
     thinking_end_ids = tokenizer.encode("</think>", add_special_tokens=False)
     routed_experts = None
+    previous_routed_experts_tasks = set()
 
     def get_content_index(content_ids) -> int:
         content_ids_str = " ".join([str(content_id) for content_id in content_ids])
@@ -81,7 +84,27 @@ def tokenize(
                 and "routed_experts" in msg[0]["extra_info"]
                 and msg[0]["extra_info"]["routed_experts"] is not None
             ):
-                routed_experts = msg[0]["extra_info"]["routed_experts"]
+                routed_experts_ref = msg[0]["extra_info"]["routed_experts"]
+                if isinstance(routed_experts_ref, ray.ObjectRef):
+                    dedup_key = routed_experts_ref.hex()
+                    passthrough: Any = routed_experts_ref
+                elif isinstance(routed_experts_ref, str):
+                    # New path: uuid key into RoutedExpertStore — forward as-is.
+                    # Legacy path (base64(cloudpickle(ObjectRef))) is also a str;
+                    # we forward it unchanged and let the rollout worker detect
+                    # the shape via isinstance checks downstream.
+                    dedup_key = routed_experts_ref
+                    passthrough = routed_experts_ref
+                else:
+                    raise TypeError(f"Unexpected type for routed_experts_ref: {type(routed_experts_ref)}")
+                if dedup_key in previous_routed_experts_tasks:
+                    logger.warning(
+                        "[tokenize_fn] Detected repeated routed_experts_ref, setting routed_experts to None to avoid errors."
+                    )
+                    routed_experts = None
+                else:
+                    routed_experts = passthrough
+                    previous_routed_experts_tasks.add(dedup_key)
             else:
                 routed_experts = None
 

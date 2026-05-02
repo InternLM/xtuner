@@ -112,8 +112,9 @@ class InstallAgentEnvironment(BaseEnvironment):
                     uid,
                     provider=self.provider,
                     lagent_src_dir=DEFAULT_LAGENT_SRC,
-                    llm_base_url=None,
-                    llm_api_key=None,
+                    llm_model=os.environ.get("RL_LLM_MODEL"),
+                    llm_base_url=os.environ.get("RL_LLM_BASE_URL"),
+                    llm_api_key=os.environ.get("RL_LLM_API_KEY"),
                 )
             except BaseException as exc:
                 get_logger().error(
@@ -144,7 +145,26 @@ class InstallAgentEnvironment(BaseEnvironment):
                 # passed_data_items.append(sample)
                 continue
             else:
-                sample.env.agent.extra_info["message_dict"] = result["env"]["agent"]["message_dict"]
+                # Defend against silent-pass / truncated trajectory: rc=0 but
+                # last message in policy_agent.messages lacks the fields
+                # postprocess will read.  Same heuristic as
+                # DumpDaemonLogOnFailure so log signal + filter stay
+                # consistent.
+                msg_dict = (result["env"]["agent"] or {}).get("message_dict") or {}
+                messages = msg_dict.get("policy_agent.messages") or []
+                last = messages[-1] if messages else {}
+                required = ("raw_content", "raw_content_ids", "raw_content_logprobs")
+                missing = [k for k in required if not last.get(k)]
+                if missing:
+                    get_logger().warning(
+                        f"silent-pass rollout skipped: "
+                        f"uid={sample.uid.observation_id} "
+                        f"task_id={result.get('data', {}).get('extra_info', {}).get('task_id')} "
+                        f"missing={missing}"
+                    )
+                    continue
+                sample.env.agent.extra_info["message_dict"] = msg_dict
+                sample.env.agent.extra_info["daemon_log"] = result["env"]["agent"].get("daemon_log", "")
                 sample.env.judger.extra_info.update(result["env"]["judger"])
                 completed_data_items.append(sample)
         completed_data_items_result = self.postprocess_func(self, completed_data_items)  # type: ignore[arg-type]

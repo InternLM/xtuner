@@ -24,12 +24,13 @@ from types import SimpleNamespace
 
 from xtuner.v1.ray.environment.rl_task.hooks import (
     BenchEnv,
+    DumpDaemonLogOnFailure,
     InstallLagent,
     ParseJudgerStdout,
     PickAgent,
     RunAgentInstallDeps,
+    UploadAgentConfigSource,
     UploadChosenAgent,
-    WriteAgentConfig,
 )
 from xtuner.v1.ray.environment.rl_task.judgers import Judger
 from xtuner.v1.ray.environment.rl_task.runner import Runner
@@ -55,7 +56,7 @@ AGENT_TEMPLATES = HERE / "agents"
 PATHS = SimpleNamespace(
     wrappers_bench="/tmp/wrappers/tb2_rl",
     wrappers_lagent="/tmp/wrappers/lagent",
-    agent_config="/tmp/agent_config.json",
+    agent_config="/tmp/agent_config.py",
     trajectory="/tmp/trajectory.json",
     message="/tmp/message.json",
     tests="/tests",
@@ -87,7 +88,7 @@ DEFAULT_AGENTS: list[AgentSpec] = [
     ),
 ]
 
-DEFAULT_SANDBOX = SandboxSpec(image="t-data-processing-v1", ttl_seconds=1800, workspace_path="/app")
+DEFAULT_SANDBOX = SandboxSpec(image="t-data-processing-v1", ttl_seconds=5400, workspace_path="/app")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -201,8 +202,8 @@ def tb2_rl_pipeline(
             UploadChosenAgent(target_dir=f"{ws}/agent/"),
             # 7. Ensure workspace dir exists.
             ExecHook(f"mkdir -p {ws}"),
-            # 8. Exec chosen agent's config.py on host → upload resulting JSON.
-            WriteAgentConfig(dst=PATHS.agent_config),
+            # 8. Upload chosen agent's config.py — daemon execs it in-sandbox.
+            UploadAgentConfigSource(dst=PATHS.agent_config),
             # 9. Run install-deps.sh if the chosen agent template has one.
             RunAgentInstallDeps(workspace=ws),
         ],
@@ -211,10 +212,11 @@ def tb2_rl_pipeline(
             workspace=ws,
             extras={"WORKSPACE": ws},
         ),
-        timeout=900,
+        timeout=3600,
         post=[
             DownloadHook([ws, "/tmp/agent_response.txt"]),
             ReadFileHook("/tmp/message.json", "message"),
+            DumpDaemonLogOnFailure(),
         ],
     )
 

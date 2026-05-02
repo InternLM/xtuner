@@ -11,7 +11,8 @@ export TRANSFORMERS_OFFLINE=1
 export HF_EVALUATE_OFFLINE=1
 export HF_HUB_OFFLINE=1
 
-lmdeploy_dir=/mnt/shared-storage-user/llmit/user/lvchengqi/projects/interns2_rl/mtp_rl_dev/lmdeploy
+# lmdeploy_dir=/mnt/shared-storage-user/llmit/user/lvchengqi/projects/interns2_rl/mtp_rl_dev/lmdeploy
+lmdeploy_dir=/mnt/shared-storage-user/llmit/user/wangziyi/projs/lmdeploy
 xtuner_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner
 intern_s2_delivery_dir=/mnt/shared-storage-user/llmit/user/lvchengqi/projects/interns2_rl/crg_rl_projects/src
 lagent_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent
@@ -29,7 +30,7 @@ export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
 export XTUNER_USE_SGLANG=0
 export XTUNER_USE_LMDEPLOY=1
 export XTUNER_USE_VLLM=0
-export RL_LLM_MODEL=train_lkk_test_0429rc1
+export RL_LLM_MODEL=train_lkk_test_$(date "+%m%d%H%M%S")
 export MASTER_PORT=6000
 export WORLD_SIZE=1
 export LMD_SKIP_WARMUP=1
@@ -51,7 +52,7 @@ export TRAIN_OPTIMIZER_STEPS=8
 
 current_time=$(date "+%m%d%H")
 
-export CONFIG_PATH='/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/examples/v1/config/interns2-35ba3-base03-20260413a-websearch-rl0415rc1_local.py'
+export CONFIG_PATH='/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/examples/v1/config/interns2-35ba3-base05-20260424a-rl-data260426rc1-56k-agentrl-tb0429rc0.py'
 export WORK_DIR='/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0429'
 
 
