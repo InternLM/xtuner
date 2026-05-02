@@ -15,9 +15,9 @@ from mmengine.dist import get_rank
 from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
 from ray.util.placement_group import PlacementGroup
+from transformers import AutoTokenizer
 from typing_extensions import Self
 
-from transformers import AutoTokenizer
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
@@ -36,7 +36,6 @@ from .rl_trainer import (
     RLTrainerConfig,
     bind_train_rollout,
 )
-
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
@@ -251,9 +250,9 @@ class AgentRLTrainer(RLTrainer):
             "accept": "application/json",
             "Content-Type": "application/json",
         }
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        print("register model success", resp.json())
+        # resp = requests.post(url, json=payload, headers=headers, timeout=30)
+        # resp.raise_for_status()
+        # print("register model success", resp.json())
 
         # import time
 
@@ -469,6 +468,7 @@ class AgentRLTrainer(RLTrainer):
                         "response_len": len(data.env.rollout.response_ids or []),
                         # "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
+                        "data_source": data.data.extra_info.get('origin_data_source')
                         # "round": sum(msg['role'] == 'assistant' for msg in data.env.agent.extra_info['messages'][:-1]),
                         # "judger_response": data.env.judger.extra_info,
                     }

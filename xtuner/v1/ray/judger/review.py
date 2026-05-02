@@ -216,6 +216,7 @@ def init_clients():
                 model_name=_MODEL_NAME,
                 max_length=131072,
                 max_response_length=8192,
+                # tokenizer_path='/mnt/shared-storage-user/llmit1/user/wangziyi/exp/mindcopilot_rl/work_dirs/ckpt/POLAR-7B',
             )
         )
 
