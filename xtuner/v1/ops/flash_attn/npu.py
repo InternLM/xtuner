@@ -20,7 +20,6 @@ def npu_flash_varlen_attn(
     return_attn_probs=False,
     block_table=None,
 ):
-    # print(f"rank:{torch.distributed.get_rank()}, cu_seqlens_k:{cu_seqlens_q.type}")
     if not causal:
         fa_out = torch_npu.npu_fusion_attention(
             q,

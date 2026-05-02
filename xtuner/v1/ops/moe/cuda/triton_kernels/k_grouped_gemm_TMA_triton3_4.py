@@ -278,7 +278,7 @@ if __name__ == "__main__":
         # post-process, row normalization
         out_triton = row_max_normalization(out_triton)
         out_ref = row_max_normalization(out_ref)
-        # breakpoint()
+
         torch.testing.assert_close(out_triton, out_ref, rtol=0.001, atol=0.01)
 
         print(f"{m = }, {n = }, {K = }")

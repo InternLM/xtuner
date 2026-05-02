@@ -285,6 +285,7 @@ class LMDeployWorker(RolloutWorker):
             Namespace: A namespace object containing the server configuration.
         """
         from lmdeploy import PytorchEngineConfig, TurbomindEngineConfig
+        from lmdeploy.messages import SpeculativeConfig
 
         accelerator_to_device_type = {
             "GPU": "cuda",
@@ -306,6 +307,18 @@ class LMDeployWorker(RolloutWorker):
         lmdeploy_config_kwargs["log_level"] = lmdeploy_config_kwargs.pop("log_level", "WARNING")
         lmdeploy_config_kwargs["uvicorn_log_level"] = lmdeploy_config_kwargs.pop("uvicorn_log_level", "ERROR")
         lmdeploy_config_kwargs["tm_log_level"] = lmdeploy_config_kwargs.pop("tm_log_level", "ERROR")
+
+        speculative_config = None
+        speculative_algorithm = lmdeploy_config_kwargs.pop("speculative_algorithm", None)
+        speculative_num_draft_tokens = lmdeploy_config_kwargs.pop("speculative_num_draft_tokens", None)
+        if speculative_algorithm is not None:
+            assert speculative_num_draft_tokens is not None, (
+                "lmdeploy_speculative_num_draft_tokens is required when speculative_algorithm is set"
+            )
+            speculative_config = SpeculativeConfig(
+                method=speculative_algorithm,
+                num_speculative_tokens=speculative_num_draft_tokens,
+            )
 
         extra_engine_config: Dict[str, Any] = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
@@ -445,6 +458,7 @@ class LMDeployWorker(RolloutWorker):
             api_keys=self.api_keys,
             ray_runtime_env={"env_vars": env},
             enable_abort_handling=True,
+            speculative_config=speculative_config,
             **lmdeploy_config_kwargs,
         )
 

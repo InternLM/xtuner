@@ -28,7 +28,7 @@ dependencies = [
   "datasets<4.0.0",
   "einops",
   "loguru",
-  "mmengine==0.11.0rc0",
+  "mmengine==0.11.0rc2",
   "openpyxl",
   "peft>=0.14.0",
   "scikit-image",
@@ -37,7 +37,7 @@ dependencies = [
   "tiktoken",
   "torch>=2.6.0",
   "torchvision",
-  "transformers==4.57.0",
+  "transformers==5.2.0",
   "cyclopts",
   "transformers_stream_generator",
   "opencv-python-headless<=4.12.0.88",
@@ -90,7 +90,7 @@ all = [
   "parametrize",
   "mathruler",
   "pylatexenc",
-  "flash-linear-attention"
+  "flash-linear-attention==0.4.2"
 ]
 
 [tool.mypy]

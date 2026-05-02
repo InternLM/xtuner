@@ -10,11 +10,13 @@ export DEEP_EP_URL=https://github.com/deepseek-ai/DeepEP@9af0e0d0e74f3577af1979c
 export DEEP_GEMM_URL=https://github.com/deepseek-ai/DeepGEMM@c9f8b34dcdacc20aa746b786f983492c51072870 # v2.1.1.post3
 export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a919967f14d3fd031da1288ad5025 # v1.6.0
 
-export TORCH_VERSION=${TORCH_VERSION:-"2.8.0"}
-export LMDEPLOY_VERSION="0.11.0"
-# export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@a9a24fbd8985374cb01ecb6021d1ce9668253c9c
+export TORCH_VERSION=${TORCH_VERSION:-"2.9.0"}
+export LMDEPLOY_VERSION="0.12.2"
+# export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@9a50f1f4eaf1e4fbe45892bc8017a7359237160c
 export PPA_SOURCE="https://mirrors.aliyun.com"
-export SGLANG_VERSION="0.5.3"
+export DEFAULT_PYPI_URL=${DEFAULT_PYPI_URL:-"https://mirrors.aliyun.com/pypi/simple"}
+# mirror https://download.pytorch.org/whl
+export PYTORCH_WHEELS_URL=${PYTORCH_WHEELS_URL:-"https://download.pytorch.org/whl"}
 
 image_name=${IMAGE_NAME:-"xtuner"}
 image_tag=${IMAGE_TAG:-"pt$(echo ${TORCH_VERSION} | awk -F. '{print $1$2}')_$(date +%Y%m%d)_${XTUNER_COMMIT:0:7}"}
@@ -22,10 +24,13 @@ image_tag=${IMAGE_TAG:-"pt$(echo ${TORCH_VERSION} | awk -F. '{print $1$2}')_$(da
 docker build . \
   -t "$image_name:$image_tag" \
   --secret id=HTTPS_PROXY \
+  --secret id=NO_PROXY \
   --build-arg TORCH_VERSION=$TORCH_VERSION\
   --build-arg BASE_IMAGE=$BASE_IMAGE \
-  --build-arg PPA_SOURCE=$PPA_SOURCE \
-  --build-arg ADAPTIVE_GEMM_URL=$ADAPTIVE_GEMM_URL \
+  --build-arg PPA_SOURCE="$PPA_SOURCE" \
+  --build-arg DEFAULT_PYPI_URL="$DEFAULT_PYPI_URL" \
+  --build-arg PYTORCH_WHEELS_URL="$PYTORCH_WHEELS_URL" \
+  --build-arg ADAPTIVE_GEMM_URL="$ADAPTIVE_GEMM_URL" \
   --build-arg FLASH_ATTN_URL=$FLASH_ATTN_URL \
   --build-arg GROUPED_GEMM_URL=$GROUPED_GEMM_URL \
   --build-arg CAUSAL_CONV1D_URL=$CAUSAL_CONV1D_URL \
@@ -34,8 +39,6 @@ docker build . \
   --build-arg XTUNER_URL=$XTUNER_URL \
   --build-arg XTUNER_COMMIT=$XTUNER_COMMIT \
   --build-arg LMDEPLOY_VERSION=$LMDEPLOY_VERSION \
-  --build-arg LMDEPLOY_URL=$LMDEPLOY_URL \
-  --build-arg SGLANG_VERSION=$SGLANG_VERSION \
   --progress=plain \
   --label "BASE_IMAGE=$BASE_IMAGE" \
   --label "XTUNER_URL=${XTUNER_URL/@/\/tree\/}" \
@@ -46,5 +49,4 @@ docker build . \
   --label "CAUSAL_CONV1D_URL=${CAUSAL_CONV1D_URL/@/\/tree\/}" \
   --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
   --label "DEEP_GEMM_URL=${DEEP_GEMM_URL/@/\/tree\/}" \
-  --label "LMDEPLOY_VERSION=$LMDEPLOY_VERSION" \
-  --label "SGLANG_VERSION=$SGLANG_VERSION"
+  --label "LMDEPLOY_VERSION=$LMDEPLOY_VERSION"

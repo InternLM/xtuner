@@ -405,6 +405,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.check_flag = False
 
     async def _safe_post_request(self, url, headers, payload) -> HttpRequestResult:
+        send_task = None
         try:
             if self.receive_abort_request.is_set():
                 self.logger.debug(f"Request to {url} was cancelled before sending due to an abort signal.")
@@ -415,10 +416,18 @@ class RolloutWorker(SingleAcceleratorWorker):
                 headers=headers,
                 json=payload,
             )
-            r = await self.client.send(req)
+            send_task = asyncio.create_task(self.client.send(req))
+            r = await send_task
             r.raise_for_status()
             return HttpRequestResult(response=r)
 
+        except asyncio.CancelledError:
+            self.logger.debug(f"Request to {url} was cancelled while waiting for the response.")
+            if send_task is not None and not send_task.done():
+                send_task.cancel()
+                await asyncio.gather(send_task, return_exceptions=True)
+            self.receive_abort_request.set()
+            return HttpRequestResult(error_type=HttpRequestErrorType.REQUEST_ABORTED, url=url, payload=payload)
         except Exception as e:
             error_type = HttpRequestErrorType.from_exception(e)
             result = HttpRequestResult(error_type=error_type, exception=e, url=url, payload=payload)

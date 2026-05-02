@@ -406,7 +406,6 @@ if __name__ == "__main__":
                 # with record_function(f"Cutlass_record"):
                 #     backend.gmm(a, b, out_cutlass, batch_sizes, False, trans_b)
                 prof.step()
-        # breakpoint()
         # post-process, row normalization
         out_triton = row_max_normalization(out_triton)
         # out_cublas = row_max_normalization(out_cublas)

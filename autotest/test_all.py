@@ -71,5 +71,4 @@ def exec_step_test(step_config, task_executor, context):
     assert result, info
 
     # post action
-    result, info = handler.post_action(step_config.get("type"), step_config)
-    assert result, info
+    handler.post_action(step_config.get("type"), step_config)

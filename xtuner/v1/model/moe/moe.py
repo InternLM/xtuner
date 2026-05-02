@@ -144,6 +144,7 @@ class MoEConfig(TransformerConfig):
     z_loss_cfg: ZLossConfig | None = None
     return_router_results: bool = False
     gate_bias: bool = False
+    router_compute_dtype: Literal["float32", "native"] = "float32"
     moe_bias: bool = False
     moe_act_fn_cfg: MoEActFnConfig = MoEActFnConfig()
     mtp_config: MTPConfig | None = None
@@ -328,6 +329,7 @@ class MoE(BaseModel):
                 mtp_loss_cfg = MTPLossConfig(
                     **self.config.lm_loss_cfg.model_dump(),
                     mtp_depth=mtp_idx + 1,
+                    detach_mtp_lm_head_weight=self.config.mtp_config.detach_mtp_lm_head_weight,
                 )
                 mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, _data_batch, sp_mesh)
                 if mtp_loss_ctx_list is not None:
@@ -814,6 +816,7 @@ class MoE(BaseModel):
                     rope_scaling_cfg=config.rope_scaling_cfg,
                     generate_config=config.generate_config,
                     router_config=config.router,
+                    router_compute_dtype=config.router_compute_dtype,
                     moe_act_fn_cfg=config.moe_act_fn_cfg,
                     float8_cfg=config.float8_cfg,
                     layer_idx=layer_idx,
@@ -878,6 +881,7 @@ class MoE(BaseModel):
                 rope_scaling_cfg=config.rope_scaling_cfg,
                 generate_config=config.generate_config,
                 router_config=config.router,
+                router_compute_dtype=config.router_compute_dtype,
                 moe_act_fn_cfg=config.moe_act_fn_cfg,
                 float8_cfg=config.float8_cfg,
                 layer_idx=config.num_hidden_layers + i,
@@ -1092,7 +1096,14 @@ class MoE(BaseModel):
                     # `_flatten()` collapses all Replicate dims into a 1D mesh whose
                     # process group covers every rank across those dimensions, allowing
                     # a single all_reduce regardless of how many Replicate dims exist.
-                    flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
+                    if len(replicate_dim_names) > 1:
+                        flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
+                    else:
+                        # In the case that only one replicate dim, in pt2.8 _flatten is worked due to a bug.
+                        # in pt2.9.1 this bug is fixed and _flatten will raise error when the mesh is already 1D,
+                        # which means replicate_dim_names represents an existing single mesh dimension
+                        # so we directly get the submesh without flatten in this case.
+                        flat_mesh = param.device_mesh[replicate_dim_names[0]]
                     grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
                     dist.all_reduce(
                         grad.div_(flat_mesh.size()),  # type: ignore
