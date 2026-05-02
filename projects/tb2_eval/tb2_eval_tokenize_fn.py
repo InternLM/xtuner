@@ -90,6 +90,7 @@ class RLTB2EvalTokenizeFn(RLTokenizeFn):
                 "task_data": task_data,
                 "task_dir": task_dir.as_posix(),
                 "pipeline": "tb2_eval.pipeline.tb2_eval_pipeline",
+                "origin_data_source": 'tb2-eval',
             },
         }
         return rl_out_data  # type: ignore
