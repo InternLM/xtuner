@@ -141,6 +141,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
         nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
         non_pad_token = nonpad_indices.numel()
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
 
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds
@@ -179,11 +180,15 @@ class Qwen3VLTextMoE(Qwen3MoE):
 
                 output["router_logits"][f"layer{idx}"] = router_results
                 output["router_weights"][f"layer{idx}"] = router_weights
-                self.aux_loss.accumulate(
+                hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
                     selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    hidden_states=hidden_states,
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
+                    num_tokens_local=non_pad_token,
+                    num_tokens_global=num_tokens_global,
+                    world_size=z_world_size,
                 )
 
             if deepstack_visual_embeds is not None and ((idx := int(idx)) in range(len(deepstack_visual_embeds))):

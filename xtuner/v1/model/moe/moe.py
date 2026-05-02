@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from cyclopts import Parameter
 from pydantic import ConfigDict
 from torch import nn
+from torch.distributed._functional_collectives import all_reduce
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.distributed_c10d import ReduceOp
@@ -209,6 +210,30 @@ class MoE(BaseModel):
             n_routed_experts=self.config.n_routed_experts,
             num_experts_per_tok=self.config.num_experts_per_tok,
         )
+
+    def _z_loss_dist_token_count(
+        self,
+        z_ctx: list[ZLossContext] | ZLossContext | None,
+        num_tokens_local: int,
+        device: torch.device | str | int,
+    ) -> tuple[torch.Tensor | None, int]:
+        """Compute the cross-rank non-padding token count needed by the z-loss
+        inline path.
+
+        Returns ``(num_tokens_global, world_size)``. ``num_tokens_global`` is ``None`` (i.e. skip
+        global averaging) when there is no z-loss context, when the configured z-loss is not
+        global-average, or when no process group is initialized.
+        """
+        if z_ctx is None:
+            return None, 1
+        first = z_ctx[0] if isinstance(z_ctx, list) else z_ctx
+        if not first.loss_cfg.z_loss_global_average or not dist.is_initialized():
+            return None, 1
+        n = torch.tensor(num_tokens_local, device=device, dtype=torch.int64)
+        group = dist.group.WORLD
+        assert group is not None
+        n_global = all_reduce(n, "sum", group)
+        return n_global, dist.get_world_size()
 
     def _extract_aux_loss_ctx(
         self,
@@ -425,6 +450,7 @@ class MoE(BaseModel):
         router_logits_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
         router_weights_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx_list)
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, cat_mask.device)
 
         # Process through layers
         cat_seq_ctx: SequenceContext | None = None
@@ -498,15 +524,18 @@ class MoE(BaseModel):
 
                 cat_router_weights = torch.cat(router_weights, dim=0)
                 cat_router_logits = torch.cat(router_logits, dim=0)
-                self.aux_loss.accumulate(
-                    selected_router_weights=cat_router_weights.index_select(0, nonpad_indices)
-                    .contiguous()
-                    .float(),
-                    selected_router_logits=cat_router_logits.index_select(0, nonpad_indices)
-                    .contiguous()
-                    .float(),
+                # Pin the per-layer z-loss to MB0's hidden_states stream. With multiple MBs, only
+                # one carrier may be chosen — all MBs converge into the same total_loss backward,
+                # so MB0's path traverses every aux-loss node exactly once.
+                hidden_states_list[0] = self.aux_loss.accumulate(
+                    selected_router_weights=cat_router_weights.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_router_logits=cat_router_logits.index_select(0, nonpad_indices).contiguous().float(),
+                    hidden_states=hidden_states_list[0],
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
+                    num_tokens_local=non_pad_token,
+                    num_tokens_global=num_tokens_global,
+                    world_size=z_world_size,
                 )
         # Apply final norm to all micro-batches
         cat_hidden_states = torch.cat(hidden_states_list, dim=1)
@@ -589,6 +618,7 @@ class MoE(BaseModel):
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
         nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
         non_pad_token = nonpad_indices.numel()
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
 
         for idx, decoder_layer in self.layers.items():
             if int(idx) < self.config.first_k_dense_replace:
@@ -629,11 +659,15 @@ class MoE(BaseModel):
                     enable_async_offload=self.config.router_async_offload,
                     offload_stream=self.offload_stream,
                 )
-                self.aux_loss.accumulate(
+                hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
                     selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    hidden_states=hidden_states,
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
+                    num_tokens_local=non_pad_token,
+                    num_tokens_global=num_tokens_global,
+                    world_size=z_world_size,
                 )
 
             if self.config.return_hidden_states:
@@ -662,6 +696,10 @@ class MoE(BaseModel):
             )
             # MTP uses its own mask; main mask's non-pad indices do not apply.
             mtp_nonpad_indices = torch.nonzero(mtp_seq_ctx.mask, as_tuple=True)[1]
+            mtp_non_pad_token = mtp_nonpad_indices.numel()
+            mtp_num_tokens_global, mtp_z_world_size = self._z_loss_dist_token_count(
+                z_ctx, mtp_non_pad_token, mtp_seq_ctx.mask.device
+            )
 
             # Forward through MTP block
             mtp_outputs = self.mtp_block(
@@ -675,21 +713,25 @@ class MoE(BaseModel):
             mtp_losses = torch.tensor(0.0, device=DEVICE)
             for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
                 mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
-                mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
-                mtp_losses += mtp_loss
 
                 output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
                 output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
-                self.aux_loss.accumulate(
+                # Inject this MTP layer's z-loss before lm_head so backward through mtp_loss
+                # traverses the AuxLossScaler node and releases this layer's logsumexp activations.
+                mtp_hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=mtp_router_weights.index_select(0, mtp_nonpad_indices)
                     .contiguous()
                     .float(),
-                    selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices)
-                    .contiguous()
-                    .float(),
+                    selected_router_logits=mtp_router_results.index_select(0, mtp_nonpad_indices).contiguous().float(),
+                    hidden_states=mtp_hidden_states,
                     balancing_ctx=balancing_ctx,
                     z_ctx=z_ctx,
+                    num_tokens_local=mtp_non_pad_token,
+                    num_tokens_global=mtp_num_tokens_global,
+                    world_size=mtp_z_world_size,
                 )
+                mtp_loss, _ = self.lm_head(mtp_hidden_states, cast(MTPLossContext, mtp_ctx))
+                mtp_losses += mtp_loss
 
             # Average MTP losses across depths and scale
             mtp_losses = mtp_losses / len(mtp_loss_ctx_list)

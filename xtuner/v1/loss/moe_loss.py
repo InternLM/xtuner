@@ -215,8 +215,11 @@ class ZLossContext(nn.Module):
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
         self._batch_size = 1
-        self.z_loss_logsum_list: list[torch.Tensor] = []
-        self.z_loss_token_count_list: list[torch.Tensor] = []
+        # Z-loss is folded into a running detached scalar for logging only. The differentiable
+        # per-layer scalar is injected back into the main forward graph via AuxLossScaler at
+        # accumulate() time, so we never need to keep per-layer logsum tensors around. This is
+        # the memory-saving pattern adapted from Megatron's MoEAuxLossAutoScaler.
+        self._running_loss_for_log: torch.Tensor | None = None
 
     @staticmethod
     def build_batches(
@@ -240,50 +243,69 @@ class ZLossContext(nn.Module):
         self,
         *,
         router_logits: torch.Tensor,
-    ) -> None:
-        """Update z-loss accumulators for one layer.
+        num_tokens_local: int,
+        num_tokens_global: torch.Tensor | None,
+        world_size: int,
+    ) -> torch.Tensor:
+        """Compute z-loss for one layer and return it as a scalar with autograd
+        attached.
+
+        The caller is expected to inject the returned scalar back into the main forward graph
+        via :class:`AuxLossScaler`; the autograd graph behind this scalar (logsumexp -> square ->
+        sum -> scaling) is then released as soon as the corresponding layer is reached during
+        backward, instead of being pinned until a global ``finalize()``.
 
         Args:
-            router_logits (torch.Tensor): Router logits with non-padding tokens selected.
-        """
-        # TODO: z-loss currently keeps autograd dependency on router_logits through logsumexp,
-        # which may retain extra graph state and increase activation memory. Unlike balancing-loss
-        # path (where sequence-wise reductions are mostly cheap to keep), this path may benefit
-        # from a memory-optimized implementation (e.g., custom autograd with recomputation/chunking).
-        self.z_loss_token_count_list.append(torch.tensor(router_logits.shape[0], device=router_logits.device))
-        self.z_loss_logsum_list.append(torch.logsumexp(router_logits, dim=-1).square().sum())
-
-    def finalize(self) -> torch.Tensor:
-        """Finalize z-loss from split-aux accumulators.
+            router_logits (torch.Tensor): Router logits with non-padding tokens already selected.
+                Shape ``(non_pad, n_routed_experts)``.
+            num_tokens_local (int): Number of non-padding tokens on this rank for the current
+                forward (constant across MoE layers in a single forward).
+            num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
+                ranks, as an int64 scalar tensor. ``None`` when ``z_loss_global_average`` is off
+                or the process group is not initialized.
+            world_size (int): Number of ranks contributing to ``num_tokens_global``. Ignored when
+                ``num_tokens_global`` is ``None``.
 
         Returns:
-            torch.Tensor: Final z-loss.
+            torch.Tensor: Per-layer z-loss as a 0-d tensor with autograd graph back to
+            ``router_logits``.
         """
-        z_loss_logsum = self.z_loss_logsum_list
-        z_loss_token_count = self.z_loss_token_count_list
-        self.z_loss_logsum_list = []
-        self.z_loss_token_count_list = []
         if self.loss_cfg.z_loss_alpha == 0:
-            device = z_loss_logsum[0].device if z_loss_logsum else DEVICE
-            return torch.tensor(0.0, device=device, dtype=torch.float32)
-        if not z_loss_logsum:
+            zero = torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
+            self._update_running(zero)
+            return zero
+
+        denom_local = max(num_tokens_local, 1)
+        loss = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
+
+        if self.loss_cfg.z_loss_global_average and num_tokens_global is not None:
+            # Equivalent to scaling each layer's local loss by num_tokens_local * world_size /
+            # num_tokens_global, matching the original list-based finalize formula.
+            denom_global = torch.clamp(num_tokens_global, min=1)
+            loss = loss * num_tokens_local * world_size / denom_global
+
+        loss = loss * self.loss_cfg.z_loss_alpha / self._batch_size
+        self._update_running(loss.detach())
+        return loss
+
+    def finalize(self) -> torch.Tensor:
+        """Return the accumulated z-loss as a detached scalar for logging only.
+
+        The differentiable contribution has already been injected into the main forward graph at
+        each ``accumulate()`` call, so this value carries no autograd graph; it exists purely to
+        populate the logging field on the model output.
+        """
+        value = self._running_loss_for_log
+        self._running_loss_for_log = None
+        if value is None:
             return torch.tensor(0.0, device=DEVICE, dtype=torch.float32)
+        return value
 
-        active_token_count = torch.stack(z_loss_token_count, dim=0)
-        active_logsum = torch.stack(z_loss_logsum, dim=0)
-        token_count = torch.clamp(active_token_count, min=1)
-        loss = active_logsum / token_count.to(active_logsum.dtype)
-
-        if self.loss_cfg.z_loss_global_average and dist.is_initialized():
-            group = dist.group.WORLD
-            assert group is not None
-            token_count_global = all_reduce(active_token_count, "sum", group)
-            token_count_global = torch.clamp(token_count_global, min=1)
-            world_size = dist.get_world_size()
-            loss = loss * active_token_count.to(active_logsum.dtype) * world_size / token_count_global
-
-        loss = loss.sum() * self.loss_cfg.z_loss_alpha
-        return loss / self._batch_size
+    def _update_running(self, value: torch.Tensor) -> None:
+        if self._running_loss_for_log is None:
+            self._running_loss_for_log = value.clone()
+        else:
+            self._running_loss_for_log = self._running_loss_for_log + value
 
     @property
     def batch_size(self) -> int:

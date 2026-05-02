@@ -7,6 +7,29 @@ from torch.distributed._functional_collectives import all_reduce
 from xtuner.v1.loss.moe_loss import BalancingLossContext, ZLossContext
 
 
+class AuxLossScaler(torch.autograd.Function):
+    """Inject an auxiliary loss into the main forward graph as a passthrough.
+
+    ``apply(carrier, aux_loss)`` returns ``carrier`` unchanged in the forward, but registers
+    ``aux_loss`` in autograd so that when the main loss backward traverses this node it injects
+    ``ones_like(aux_loss)`` into the aux_loss subgraph. This triggers the per-layer aux_loss
+    backward inline with the main backward at the corresponding layer, instead of holding all
+    layers' aux_loss saved tensors alive until a global ``finalize`` node fires.
+
+    Adapted from Megatron-LM's ``MoEAuxLossAutoScaler``.
+    """
+
+    @staticmethod
+    def forward(ctx, output: torch.Tensor, aux_loss: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        ctx.save_for_backward(aux_loss)
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:  # type: ignore[override]
+        (aux_loss,) = ctx.saved_tensors
+        return grad_output, torch.ones_like(aux_loss)
+
+
 class AuxLossConfig(BaseModel):
     """Configuration for layer-wise split MoE auxiliary loss."""
 
@@ -63,20 +86,39 @@ class AuxLossContext(nn.Module):
         *,
         selected_router_weights: torch.Tensor,
         selected_router_logits: torch.Tensor,
+        hidden_states: torch.Tensor,
         balancing_ctx: list[BalancingLossContext] | BalancingLossContext | None = None,
         z_ctx: list[ZLossContext] | ZLossContext | None = None,
-    ) -> None:
-        """Accumulate routing statistics for one layer.
+        num_tokens_local: int = 0,
+        num_tokens_global: torch.Tensor | None = None,
+        world_size: int = 1,
+    ) -> torch.Tensor:
+        """Accumulate routing statistics for one layer and inject z-loss into
+        the main graph.
 
         Args:
             selected_router_weights (torch.Tensor): Router weights with non-padding tokens already
                 selected. Shape: ``(non_pad, n_routed_experts)``.
             selected_router_logits (torch.Tensor): Router logits with non-padding tokens already
                 selected. Shape: ``(non_pad, n_routed_experts)``.
+            hidden_states (torch.Tensor): A carrier tensor on the main forward path. Z-loss is
+                attached to it via :class:`AuxLossScaler` so that backward through the main loss
+                releases this layer's logsumexp saved tensor inline.
             balancing_ctx (list[BalancingLossContext] | BalancingLossContext | None): Balancing loss
                 context(s) to fan-out to. ``None`` to skip.
             z_ctx (list[ZLossContext] | ZLossContext | None): Z-loss context(s) to fan-out to.
                 ``None`` to skip.
+            num_tokens_local (int): Non-padding token count on this rank for the current forward.
+                Required when any z-loss context is provided.
+            num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
+                ranks (int64 scalar). Pass ``None`` when ``z_loss_global_average`` is off or no
+                process group is initialized.
+            world_size (int): World size that produced ``num_tokens_global``.
+
+        Returns:
+            torch.Tensor: ``hidden_states`` augmented with the per-layer z-loss autograd hook.
+            Identical in value to the input; the caller must replace its handle so the hook is
+            preserved on the main forward graph.
         """
         # tokens_per_expert is non-differentiable (topk + histc) and shared between
         # logging output and BalancingLossContext.finalize. Owned here as the single source of truth.
@@ -93,7 +135,15 @@ class AuxLossContext(nn.Module):
             ctx.accumulate(router_weights=selected_router_weights)
 
         for ctx in _as_list(z_ctx):
-            ctx.accumulate(router_logits=selected_router_logits)
+            z_loss_l = ctx.accumulate(
+                router_logits=selected_router_logits,
+                num_tokens_local=num_tokens_local,
+                num_tokens_global=num_tokens_global,
+                world_size=world_size,
+            )
+            hidden_states = AuxLossScaler.apply(hidden_states, z_loss_l)
+
+        return hidden_states
 
     def finalize(
         self,
