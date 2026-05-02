@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Parse a CTRF JSON report + test log → emit a ``JudgerResult`` line to stdout.
+"""Emit a ``JudgerResult`` line to stdout that matches official TB2 scoring.
 
-Honors ``@pytest.mark.weight(N)`` via pytest-json-ctrf's ``extra``/``metadata``
-section.  Tests with no explicit weight get 1.0.
+The bench's ``tests/test.sh`` writes the authoritative binary outcome to
+``/logs/verifier/reward.txt`` (``1`` iff every pytest invocation in that
+script exited 0, else ``0``) — including the multi-pytest case in tasks
+like ``fix-code-vulnerability``. We read that file as the source of truth
+for ``total``. CTRF is parsed only for per-test observability in the
+``criteria`` field and never used for scoring.
 """
 
 from __future__ import annotations
@@ -13,26 +17,6 @@ import sys
 from pathlib import Path
 
 
-def _extract_weight(test: dict) -> float:
-    for section in ("extra", "metadata"):
-        extras = test.get(section) or []
-        if isinstance(extras, list):
-            for e in extras:
-                if isinstance(e, dict) and e.get("key") == "weight":
-                    try:
-                        return float(e.get("value", 1.0))
-                    except (TypeError, ValueError):
-                        return 1.0
-        elif isinstance(extras, dict):
-            w = extras.get("weight")
-            if w is not None:
-                try:
-                    return float(w)
-                except (TypeError, ValueError):
-                    return 1.0
-    return 1.0
-
-
 def _log_tail(path: Path, bytes_: int = 800) -> str:
     try:
         return path.read_text(errors="replace")[-bytes_:]
@@ -40,60 +24,81 @@ def _log_tail(path: Path, bytes_: int = 800) -> str:
         return ""
 
 
+def _read_reward(path: Path) -> float | None:
+    try:
+        raw = path.read_text().strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _parse_criteria(ctrf_path: Path) -> tuple[dict[str, dict[str, float]], int, str | None]:
+    """Parse CTRF into per-test criteria for observability only.
+
+    Returns:
+        tuple[dict[str, dict[str, float]], int, str | None]: ``(criteria, test_count,
+        error)``. ``criteria`` maps test name to ``{"score": 0.0|1.0}``. ``error`` is
+        ``None`` on success or a message describing why CTRF was unreadable.
+    """
+    try:
+        data = json.loads(ctrf_path.read_text())
+    except Exception as exc:
+        return {}, 0, f"ctrf missing/parse failed: {exc}"
+    tests = (data.get("results", {}) or {}).get("tests", []) or []
+    criteria: dict[str, dict[str, float]] = {}
+    for t in tests:
+        name = t.get("name", "unknown")
+        passed = t.get("status") == "passed"
+        criteria[name] = {"score": 1.0 if passed else 0.0}
+    return criteria, len(tests), None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ctrf", required=True)
     ap.add_argument("--log", required=True)
+    ap.add_argument("--reward-file", required=True)
     ap.add_argument("--pytest-rc", type=int, required=True)
     ap.add_argument("--judger-name", default="rule_grader")
     args = ap.parse_args()
 
     ctrf_path = Path(args.ctrf)
     log_path = Path(args.log)
+    reward_path = Path(args.reward_file)
 
-    try:
-        data = json.loads(ctrf_path.read_text())
-    except Exception as exc:
-        print(
-            json.dumps(
-                {
-                    "judger_name": args.judger_name,
-                    "total": 0.0,
-                    "error": f"ctrf missing/parse failed: {exc}. log tail: {_log_tail(log_path)}",
-                },
-                ensure_ascii=False,
-            )
-        )
-        return 0
+    reward = _read_reward(reward_path)
+    criteria, test_count, ctrf_error = _parse_criteria(ctrf_path)
 
-    tests = (data.get("results", {}) or {}).get("tests", []) or []
-    criteria: dict[str, dict[str, float]] = {}
-    for t in tests:
-        name = t.get("name", "unknown")
-        passed = t.get("status") == "passed"
-        weight = _extract_weight(t)
-        criteria[name] = {"score": 1.0 if passed else 0.0, "weight": weight}
+    result: dict = {
+        "judger_name": args.judger_name,
+        "criteria": criteria,
+        "metadata": {
+            "pytest_rc": args.pytest_rc,
+            "test_count": test_count,
+            "reward_source": "reward.txt" if reward is not None else "pytest_rc",
+        },
+    }
 
-    total_w = sum(c["weight"] for c in criteria.values())
-    if total_w <= 0:
-        total = 0.0
+    if reward is not None:
+        result["total"] = round(reward, 4)
     else:
-        total = sum(c["score"] * c["weight"] for c in criteria.values()) / total_w
-
-    print(
-        json.dumps(
-            {
-                "judger_name": args.judger_name,
-                "total": round(total, 4),
-                "criteria": criteria,
-                "metadata": {
-                    "pytest_rc": args.pytest_rc,
-                    "test_count": len(tests),
-                },
-            },
-            ensure_ascii=False,
+        # reward.txt missing/unreadable: fall back to test.sh exit code.
+        result["total"] = 1.0 if args.pytest_rc == 0 else 0.0
+        result["error"] = (
+            f"reward file unreadable at {reward_path}; fell back to pytest_rc. "
+            f"log tail: {_log_tail(log_path)}"
         )
-    )
+
+    if ctrf_error is not None:
+        # CTRF is observability-only; surface the parse error but don't change total.
+        result.setdefault("error", ctrf_error)
+
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

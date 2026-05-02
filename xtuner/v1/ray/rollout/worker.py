@@ -581,14 +581,20 @@ class RolloutWorker(SingleAcceleratorWorker):
                     routed_experts = response["meta_info"].pop("routed_experts")  # token[layer[expert]]
                     store = get_store()
                     if routed_experts is not None and not exist_history_routed_experts:
-                        # Turn 1: materialize tensor and hand ownership to the store.
+                        # Turn 1: materialize tensor locally, then register its
+                        # ref with the store.  Using ray.put here (in the
+                        # worker) keeps the tensor in THIS node's plasma so
+                        # traffic doesn't funnel to the store actor's node.
+                        # The [local_ref] wrapper bypasses Ray's auto-deref
+                        # so the store receives the ref itself.
                         decoded = self._decode_routed_experts(routed_experts)
                         if isinstance(decoded, ObjectRef):
                             tensor = await decoded
                             ray.internal.free([decoded], local_only=False)
                         else:
                             tensor = decoded
-                        key = await store.put_tensor.remote(tensor)
+                        local_ref = ray.put(tensor)
+                        key = await store.put_ref.remote([local_ref])
                         extra_info["routed_experts"] = key
                     elif routed_experts is not None and exist_history_routed_experts:
                         # Turn 2+: concat history (in store) with new decoded chunk, re-put.
@@ -640,7 +646,10 @@ class RolloutWorker(SingleAcceleratorWorker):
                             f"Tokens(prompt={prompt_tokens}, response={response_tokens}, total={prompt_tokens + response_tokens}) | "
                             f"Experts(exist={history_routed_experts.shape}, init_cur={init_cur_roued_experts}, cur={cur_routed_experts.shape}, concat={concat_routed_experts.shape})"
                         )
-                        key = await store.put_tensor.remote(concat_routed_experts)
+                        # Same local-put pattern as turn 1 — keep concat tensor
+                        # in this worker's node plasma, store only registers.
+                        local_ref = ray.put(concat_routed_experts)
+                        key = await store.put_ref.remote([local_ref])
                         extra_info["routed_experts"] = key
                         del history_routed_experts
                         del cur_routed_experts

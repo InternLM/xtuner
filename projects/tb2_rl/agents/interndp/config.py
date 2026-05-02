@@ -71,6 +71,8 @@ env_agent = dict(
     type="lagent.agents.env_agent.RLEnvAgent",
     actions=base_actions,
     max_turn=100,
+    max_tool_response_length=8192,
+    tool_response_truncate_side="middle",
     enable_no_thinking_penalty=False,
 )
 

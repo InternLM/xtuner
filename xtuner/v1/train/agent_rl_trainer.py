@@ -42,6 +42,24 @@ DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
 
 
+_COMPACT_MSG_KEYS = ("reasoning_content", "thinking", "content", "tool_calls", "raw_content", "name", "tool_call_id")
+
+
+def _compact_message(msg: dict) -> dict:
+    """Project a memory message dict to the fields worth inspecting in a
+    trajectory.
+
+    Keeps role, reasoning (under either schema name), content, tool_calls, raw_content (for debugging parser failures),
+    and tool identifiers. Drops token ids / logprobs / session metadata that would bloat the jsonl.
+    """
+    out: dict = {"role": msg.get("role", "assistant")}
+    for key in _COMPACT_MSG_KEYS:
+        val = msg.get(key)
+        if val not in (None, "", [], {}):
+            out[key] = val
+    return out
+
+
 class AgentRLTrainerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -455,24 +473,15 @@ class AgentRLTrainer(RLTrainer):
             f.write("\n")
             for group in data_groups:
                 for data in group:
+                    messages = data.env.agent.extra_info.get("messages", [])
                     entry = {
-                        # "raw_prompt": data.data.extra_info["raw_prompt"],
-                        "prompt": [
-                            {
-                                "role": msg["role"],
-                                "content": msg["raw_content"] if "raw_content" in msg else msg["content"],
-                            }
-                            for msg in data.env.agent.extra_info.get("messages", [])[:-1]
-                        ],
-                        "response": data.env.rollout.response,
+                        "prompt": [_compact_message(msg) for msg in messages[:-1]],
+                        "response": _compact_message(messages[-1]) if messages else None,
                         "response_len": len(data.env.rollout.response_ids or []),
-                        # "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
-                        # "round": sum(msg['role'] == 'assistant' for msg in data.env.agent.extra_info['messages'][:-1]),
-                        # "judger_response": data.env.judger.extra_info,
                     }
-                    # if "completions" in data.env.agent.extra_info:
-                    # entry["completions"] = data.env.agent.extra_info["completions"]
+                    if is_eval:
+                        entry["daemon_log"] = data.env.agent.extra_info.get("daemon_log", "")
 
                     json.dump(entry, f, ensure_ascii=False, indent=2)
                     f.write("\n")

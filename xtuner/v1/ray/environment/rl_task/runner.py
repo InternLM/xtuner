@@ -258,7 +258,10 @@ def _mark_completed(
                 "step_rewards": [sr.model_dump() for sr in judge.step_rewards],
                 "failed": judge.failed,
             },
-            "agent": {"message_dict": json.loads(infer.pulled.get("message", "{}"))},
+            "agent": {
+                "message_dict": json.loads(infer.pulled.get("message", "{}")),
+                "daemon_log": infer.pulled.get("daemon_log", ""),
+            },
         },
     }
 

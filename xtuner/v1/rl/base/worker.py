@@ -413,11 +413,12 @@ class TrainingWorker(SingleAcceleratorWorker):
         )
 
         to_free_routed_expert_refs: list[ray.ObjectRef] = []
-        # NOTE: store-keyed pins are intentionally NOT released here.  A single
-        # rollout's routed_experts can be touched by multiple data_batches in
-        # one train step (packing reuse, repeat_k duplicates, partial-rollout
-        # ancestors, etc.).  Releasing eagerly causes the second consumer to
-        # see KeyError.  We rely on the store's TTL GC for cleanup instead.
+        # Store keys to release AFTER consumption.  Training is 1:1 — each
+        # rollout's final key appears in this train step exactly once —
+        # so releasing here is safe (no double-consume from training side).
+        # SP-mesh: multiple ranks see the same data; only rank-0 releases,
+        # gated by dist.barrier() so other ranks finish their ray.get first.
+        to_release_pin_keys: list[str] = []
         if isinstance(rollout_routed_experts, list):
             # list[n,l,e]
             out_rollout_routed_expert = []
@@ -436,11 +437,15 @@ class TrainingWorker(SingleAcceleratorWorker):
                 elif isinstance(rollout_routed_expert, str):
                     # New path: uuid key → RoutedExpertStore.  Owner is the
                     # store actor, so ray.get is reliable regardless of
-                    # lmdeploy worker state.  Release deferred to TTL GC.
+                    # lmdeploy worker state.
                     store = get_store()
                     pin_key = rollout_routed_expert
                     pin_ref = ray.get(store.get_ref.remote(pin_key))
                     rollout_routed_expert = ray.get(pin_ref)
+                    if self.sp_mesh is None or self.sp_mesh.size() == 1:
+                        store.release.remote(pin_key)
+                    elif self.sp_mesh.get_local_rank() == 0:
+                        to_release_pin_keys.append(pin_key)
                     rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
                     rollout_routed_expert = rollout_routed_expert.reshape(
                         -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
@@ -486,7 +491,10 @@ class TrainingWorker(SingleAcceleratorWorker):
             dist.barrier()
             for free_routed_expert_refs in to_free_routed_expert_refs:
                 ray.internal.free(free_routed_expert_refs, local_only=False)
+            if to_release_pin_keys:
+                get_store().release_many.remote(to_release_pin_keys)
             del to_free_routed_expert_refs
+            del to_release_pin_keys
 
     @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:

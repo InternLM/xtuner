@@ -164,6 +164,7 @@ class InstallAgentEnvironment(BaseEnvironment):
                     )
                     continue
                 sample.env.agent.extra_info["message_dict"] = msg_dict
+                sample.env.agent.extra_info["daemon_log"] = result["env"]["agent"].get("daemon_log", "")
                 sample.env.judger.extra_info.update(result["env"]["judger"])
                 completed_data_items.append(sample)
         completed_data_items_result = self.postprocess_func(self, completed_data_items)  # type: ignore[arg-type]

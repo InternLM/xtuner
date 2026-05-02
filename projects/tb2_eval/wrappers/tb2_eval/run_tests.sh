@@ -5,10 +5,13 @@
 # The bench ships its own test harness at /tests/test.sh which:
 #   - installs pytest + pytest-json-ctrf + /tests/test_requirements.txt
 #   - runs /tests/test_outputs.py with --ctrf /logs/verifier/ctrf.json
+#   - writes the authoritative 0/1 outcome to /logs/verifier/reward.txt
+#     (for multi-pytest tasks like fix-code-vulnerability, this is the
+#     AND of all pytest exit codes — matching official TB2 scoring)
 #
-# We invoke it and hand the resulting CTRF to our shared emitter so
-# the stage's stdout is a single JudgerResult JSON line (what
-# ParseJudgerStdout expects).
+# We invoke it and hand both reward.txt and the resulting CTRF to our
+# shared emitter. reward.txt drives the JudgerResult `total`; CTRF is
+# parsed for per-test observability only.
 #
 # Env:
 #   $TESTS_DIR    tests directory inside the sandbox (default: /tests)
@@ -36,5 +39,6 @@ fi
 "$PY" "$WRAPPER_DIR/emit_judger_result_from_ctrf.py" \
     --ctrf /logs/verifier/ctrf.json \
     --log "$TEST_LOG" \
+    --reward-file /logs/verifier/reward.txt \
     --pytest-rc "$TEST_RC" \
     --judger-name "$JUDGER_NAME"

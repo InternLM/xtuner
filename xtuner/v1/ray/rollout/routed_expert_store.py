@@ -55,11 +55,53 @@ class RoutedExpertStore:
         self._ttl = ttl_sec
         self._gc_interval = gc_interval_sec
         self._last_gc = time.monotonic()
+        # Diagnostic counters — help locate double-consume / leak symptoms
+        # after the fact without changing runtime behaviour.
+        self._n_put = 0
+        self._n_get = 0
+        self._n_release = 0
+        self._n_missing_get = 0
+        self._n_missing_release = 0
 
     def put_tensor(self, tensor: Any) -> str:
-        """Take ownership of a tensor via ray.put; return a uuid key."""
+        """Take ownership of a tensor via ray.put; return a uuid key.
+
+        NOTE: this places the tensor in the STORE actor's local plasma —
+        under heavy traffic this can cause one-node plasma saturation (all
+        rollouts across the cluster funnel to whichever node this actor
+        runs on).  Prefer ``put_ref`` + worker-side ``ray.put`` for
+        multi-node scale.
+        """
         self._maybe_gc()
         ref = ray.put(tensor)
+        self._n_put += 1
+        return self._stash(ref)
+
+    def put_ref(self, wrapped: list) -> str:
+        """Register an externally-owned ObjectRef, return a uuid key.
+
+        The caller must wrap the ref in a single-element list.  Ray
+        auto-dereferences bare ObjectRef args; the list wrapper bypasses
+        that so the store receives the ref itself (not the materialized
+        tensor).
+
+        Ownership stays with the original ``ray.put`` caller (typically
+        the rollout worker); data lives in that caller's node plasma.
+        The store just holds a Python-level strong reference so Ray's
+        distributed refcount keeps the object alive across consumers.
+
+        This distributes plasma pressure across all rollout nodes instead
+        of funneling it to the store's node.  Trade-off: if the owner
+        worker dies, the ref's object is lost; with ``put_tensor`` only
+        the store dying would lose data.
+        """
+        self._maybe_gc()
+        if not (isinstance(wrapped, list) and len(wrapped) == 1):
+            raise TypeError(f"put_ref expects [ObjectRef] to bypass auto-deref, got {type(wrapped)}")
+        ref = wrapped[0]
+        if not isinstance(ref, ObjectRef):
+            raise TypeError(f"put_ref expects [ObjectRef], got [{type(ref)}]")
+        self._n_put += 1
         return self._stash(ref)
 
     def get_ref(self, key: str) -> ObjectRef:
@@ -67,19 +109,32 @@ class RoutedExpertStore:
         materialize."""
         entry = self._store.get(key)
         if entry is None:
+            self._n_missing_get += 1
             raise KeyError(f"RoutedExpertStore: key not found: {key}")
         self._store[key] = (entry[0], time.monotonic())
+        self._n_get += 1
         return entry[0]
 
     def release(self, key: str) -> None:
-        self._store.pop(key, None)
+        if self._store.pop(key, None) is None:
+            self._n_missing_release += 1
+        else:
+            self._n_release += 1
 
     def release_many(self, keys: list[str]) -> None:
         for k in keys:
-            self._store.pop(k, None)
+            self.release(k)
 
     def stats(self) -> dict:
-        return {"count": len(self._store), "ttl_sec": self._ttl}
+        return {
+            "live": len(self._store),
+            "ttl_sec": self._ttl,
+            "n_put": self._n_put,
+            "n_get": self._n_get,
+            "n_release": self._n_release,
+            "n_missing_get": self._n_missing_get,
+            "n_missing_release": self._n_missing_release,
+        }
 
     def _stash(self, ref: ObjectRef) -> str:
         key = uuid.uuid4().hex
