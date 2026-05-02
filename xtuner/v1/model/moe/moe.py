@@ -538,10 +538,7 @@ class MoE(BaseModel):
         output["tokens_per_expert_global"] = tokens_per_expert_global
 
         if self.config.return_router_results or return_router_logits:
-            # raise NotImplementedError
-
-            # TODO: Return router logits is costy
-
+            # TODO: Returning router logits is costly.
             router_logits_dict: dict[str, torch.Tensor] = {}
             layer_names = list(router_logits_list[0].keys())
 
@@ -714,8 +711,7 @@ class MoE(BaseModel):
         output["tokens_per_expert_global"] = tokens_per_expert_global
 
         if self.config.return_router_results or return_router_logits:
-            # raise NotImplementedError
-            # TODO: Move router logits to CPU is cost
+            # TODO: Moving router logits to CPU is costly.
             for layer_name, router_logits in output["router_logits"].items():
                 output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
         else:

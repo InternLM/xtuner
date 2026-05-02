@@ -214,7 +214,7 @@ class Qwen3VLTextMoE(Qwen3MoE):
         output["tokens_per_expert_global"] = tokens_per_expert_global
 
         if self.config.return_router_results or return_router_logits:
-            # TODO: Move router logits to CPU is cost
+            # TODO: Moving router logits to CPU is costly.
             for layer_name, router_logits in output["router_logits"].items():
                 output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
         else:
