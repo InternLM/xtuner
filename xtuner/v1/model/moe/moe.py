@@ -545,31 +545,35 @@ class MoE(BaseModel):
 
         if self.mtp_block is not None:
             assert self.config.mtp_config is not None
+
+            # Build a per-microbatch SequenceContext clone for MTP. We always run the MTP
+            # block on every micro-batch so domino EP can overlap dispatch/combine across
+            # micro-batches at each MTP depth; per-microbatch loss aggregation below skips
+            # the ones whose loss context is absent.
+            mtp_seq_ctx_list: list[SequenceContext] = []
+            for seq_ctx in seq_ctx_list:
+                assert seq_ctx.position_ids is not None
+                mtp_seq_ctx_list.append(
+                    seq_ctx.copy(
+                        input_ids=seq_ctx.input_ids.clone() if seq_ctx.input_ids is not None else None,
+                        position_ids=seq_ctx.position_ids.clone(),
+                        inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
+                    )
+                )
+
+            mtp_outputs_per_mb = self.mtp_block(
+                *hidden_states_list,
+                embed_tokens_fn=self.embed_tokens,
+                position_embeddings=position_embeddings_list,
+                seq_ctx=mtp_seq_ctx_list,
+            )
+
             mtp_losses = torch.tensor(0.0, device=DEVICE)
             has_mtp_loss = False
-
-            for micro_batch_idx, (seq_ctx, loss_ctx_dict, layer_hidden_states, position_embeddings) in enumerate(
-                zip(seq_ctx_list, loss_ctx_list, hidden_states_list, position_embeddings_list)
-            ):
+            for micro_batch_idx, (loss_ctx_dict, mtp_outputs) in enumerate(zip(loss_ctx_list, mtp_outputs_per_mb)):
                 mtp_loss_ctx_list = loss_ctx_dict.get("mtp")
                 if mtp_loss_ctx_list is None:
                     continue
-
-                assert seq_ctx.position_ids is not None
-                mtp_seq_ctx = seq_ctx.copy(
-                    input_ids=seq_ctx.input_ids.clone() if seq_ctx.input_ids is not None else None,
-                    position_ids=seq_ctx.position_ids.clone(),
-                    inputs_embeds=seq_ctx.inputs_embeds.clone() if seq_ctx.inputs_embeds is not None else None,
-                )
-
-                # Match single-batch forward: MTP consumes the pre-final-norm
-                # decoder output and contributes router stats to auxiliary losses.
-                mtp_outputs = self.mtp_block(
-                    hidden_states=layer_hidden_states,
-                    embed_tokens_fn=self.embed_tokens,
-                    position_embeddings=position_embeddings,
-                    seq_ctx=mtp_seq_ctx,
-                )
 
                 micro_batch_mtp_losses = torch.tensor(0.0, device=DEVICE)
                 for mtp_idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
@@ -753,7 +757,7 @@ class MoE(BaseModel):
 
             # Forward through MTP block
             mtp_outputs = self.mtp_block(
-                hidden_states=layer_hidden_states,
+                layer_hidden_states,
                 embed_tokens_fn=self.embed_tokens,
                 position_embeddings=position_embeddings,
                 seq_ctx=mtp_seq_ctx,
