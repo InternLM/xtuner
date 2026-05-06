@@ -13,13 +13,14 @@ from types import SimpleNamespace
 
 from xtuner.v1.ray.environment.rl_task.hooks import (
     BenchEnv,
+    DumpDaemonLogOnFailure,
     InstallLagent,
     ParseJudgerStdout,
     PickAgent,
     RenderInstruction,
     RunAgentInstallDeps,
+    UploadAgentConfigSource,
     UploadChosenAgent,
-    WriteAgentConfig,
 )
 from xtuner.v1.ray.environment.rl_task.judgers import Judger
 from xtuner.v1.ray.environment.rl_task.runner import Runner
@@ -63,7 +64,7 @@ CLAW_INSTRUCTION_REWRITES: dict[str, str] = {
 PATHS = SimpleNamespace(
     wrappers_bench="/tmp/wrappers/claw_bench",
     wrappers_lagent="/tmp/wrappers/lagent",
-    agent_config="/tmp/agent_config.json",
+    agent_config="/tmp/agent_config.py",
     trajectory="/tmp/trajectory.json",
     message="/tmp/message.json",
     verifier="/tmp/verifier",
@@ -204,8 +205,8 @@ def claw_pipeline(
             ExecHook(f"mkdir -p {ws}"),
             # 7. Render instruction.md: `workspace/` → abs path + {{KEY}} → env.
             # RenderInstruction(rewrites=CLAW_INSTRUCTION_REWRITES),
-            # 8. Exec chosen agent's config.py on host → upload resulting JSON.
-            WriteAgentConfig(dst=PATHS.agent_config),
+            # 8. Upload chosen agent's config.py — daemon execs it in-sandbox.
+            UploadAgentConfigSource(dst=PATHS.agent_config),
             # 9. Run install-deps.sh if the chosen agent template has one.
             RunAgentInstallDeps(workspace=ws),
         ],
@@ -216,7 +217,7 @@ def claw_pipeline(
             extras={"WORKSPACE": ws, "CLAW_WORKSPACE": ws},
         ),
         timeout=1800,
-        post=[DownloadHook(["/workspace", "/tmp/agent_response.txt"]), ReadFileHook("/tmp/message.json", "message")],
+        post=[DownloadHook(["/workspace", "/tmp/agent_response.txt"]), ReadFileHook("/tmp/message.json", "message"), DumpDaemonLogOnFailure()],
     )
 
     return Runner(

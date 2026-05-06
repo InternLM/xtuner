@@ -15,9 +15,9 @@ from mmengine.dist import get_rank
 from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
 from ray.util.placement_group import PlacementGroup
-from transformers import AutoTokenizer
 from typing_extensions import Self
 
+from transformers import AutoTokenizer
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
@@ -38,9 +38,28 @@ from .rl_trainer import (
     bind_train_rollout,
 )
 
+
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
+
+
+_COMPACT_MSG_KEYS = ("reasoning_content", "thinking", "content", "tool_calls", "raw_content", "name", "tool_call_id")
+
+
+def _compact_message(msg: dict) -> dict:
+    """Project a memory message dict to the fields worth inspecting in a
+    trajectory.
+
+    Keeps role, reasoning (under either schema name), content, tool_calls, raw_content (for debugging parser failures),
+    and tool identifiers. Drops token ids / logprobs / session metadata that would bloat the jsonl.
+    """
+    out: dict = {"role": msg.get("role", "assistant")}
+    for key in _COMPACT_MSG_KEYS:
+        val = msg.get(key)
+        if val not in (None, "", [], {}):
+            out[key] = val
+    return out
 
 
 class AgentRLTrainerConfig(BaseModel):
@@ -456,24 +475,15 @@ class AgentRLTrainer(RLTrainer):
             f.write("\n")
             for group in data_groups:
                 for data in group:
+                    messages = data.env.agent.extra_info.get("messages", [])
                     entry = {
-                        # "raw_prompt": data.data.extra_info["raw_prompt"],
-                        "prompt": [
-                            {
-                                "role": msg["role"],
-                                "content": msg["raw_content"] if "raw_content" in msg else msg["content"],
-                            }
-                            for msg in data.env.agent.extra_info.get("messages", [])[:-1]
-                        ],
-                        "response": data.env.rollout.response,
+                        "prompt": [_compact_message(msg) for msg in messages[:-1]],
+                        "response": _compact_message(messages[-1]) if messages else None,
                         "response_len": len(data.env.rollout.response_ids or []),
-                        # "label": data.data.reward_model["ground_truth"],
                         "reward": data.env.judger.reward["score"],
-                        # "round": sum(msg['role'] == 'assistant' for msg in data.env.agent.extra_info['messages'][:-1]),
-                        # "judger_response": data.env.judger.extra_info,
                     }
-                    # if "completions" in data.env.agent.extra_info:
-                    # entry["completions"] = data.env.agent.extra_info["completions"]
+                    if is_eval:
+                        entry["daemon_log"] = data.env.agent.extra_info.get("daemon_log", "")
 
                     json.dump(entry, f, ensure_ascii=False, indent=2)
                     f.write("\n")
@@ -487,7 +497,7 @@ class AgentRLTrainer(RLTrainer):
                 rewards = []
                 for item in group:
                     rewards.append(item.env.judger.reward["score"])
-                    all_rewards_by_source[item.data.extra_info.get('origin_data_source', 'none')].append(
+                    all_rewards_by_source[item.data.extra_info.get("origin_data_source", "none")].append(
                         item.env.judger.reward["score"]
                     )
                 if all(r == 0 for r in rewards):
@@ -608,15 +618,15 @@ class AgentRLTrainer(RLTrainer):
                 response_len_list.append(len(rollout.response_ids))
                 prompt_len_list.append(len(input_ids) - len(rollout.response_ids))
                 advantages_list.extend([advantages[i]] * len(rollout.response_ids))
-                assert (
-                    len(input_ids) <= pack_max_length
-                ), f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
+                assert len(input_ids) <= pack_max_length, (
+                    f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
+                )
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
                 rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
-                assert (
-                    rollout_logprobs.size() == shifted_labels.size()
-                ), f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
+                assert rollout_logprobs.size() == shifted_labels.size(), (
+                    f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
+                )
 
                 seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
                 routed_experts = inputs["routed_experts"]
