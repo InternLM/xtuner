@@ -26,7 +26,6 @@ from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, DataFlowProxy, Repl
 from xtuner.v1.ray.environment import SingleTurnEnvironment, SingleTurnEnvironmentProxy
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.ray.judger import JudgerConfig
-from xtuner.v1.ray.rollout.lmdeploy import get_lmdeploy_routed_experts_ref
 from xtuner.v1.rl.base import (
     TrainingController,
     TrainingControllerProxy,
@@ -822,8 +821,6 @@ class RLTrainer:
 
                 if "routed_experts" in group[i].env.rollout.extra_info:
                     routed_experts = group[i].env.rollout.extra_info.pop("routed_experts")  # n,layer*expert
-                    if isinstance(routed_experts, str):
-                        routed_experts = get_lmdeploy_routed_experts_ref(routed_experts)
                     seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
 
                 data_batches.append(data_dict)

@@ -27,7 +27,6 @@ from xtuner.v1.data_proto.rl_data import (
     is_valid_for_replaybuffer,
 )
 from xtuner.v1.datasets.config import DataloaderConfig
-from xtuner.v1.ray.rollout.lmdeploy import get_lmdeploy_routed_experts_ref
 from xtuner.v1.ray.utils import free_object_refs
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 from xtuner.v1.utils.device import get_device
@@ -378,20 +377,18 @@ class ReplayBufferStorage:
     def _pop_routed_experts_from_extra_info(
         self, extra_info: RolloutExtraInfo, *, free_ref: bool = False
     ) -> ObjectRef | None:
+        """Pop ``routed_experts`` from ``extra_info``.
+
+        Routed experts now travel as in-cluster ``np.ndarray`` (or HTTP wire
+        dict).  This helper used to manage Ray ObjectRef lifetimes; with the
+        codec-based design the field is just dropped from the dict and the
+        Python GC reclaims memory.  ``free_ref`` is retained for call-site
+        compatibility but no longer triggers Ray plasma frees.
+        """
         if "routed_experts" not in extra_info:
             return None
-
-        routed_experts = extra_info["routed_experts"]
-        if isinstance(routed_experts, str):
-            routed_experts = get_lmdeploy_routed_experts_ref(routed_experts)
-        elif not isinstance(routed_experts, ObjectRef):
-            routed_experts = ray.put(routed_experts)
-
         del extra_info["routed_experts"]
-        if free_ref:
-            free_object_refs([routed_experts])
-            return None
-        return routed_experts
+        return None
 
     def _update_replay_meta_state(self, replay_meta: ReplayMeta, new_state: RolloutState):
         for observation_id in replay_meta.observation_ids:

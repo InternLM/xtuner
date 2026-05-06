@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
+import numpy as np
 import ray
 import uvicorn
 from fastapi import FastAPI
@@ -483,6 +484,7 @@ class RolloutController:
             LagentChoice,
         )
         from xtuner.v1.ray.environment.lagent.tokenize import tokenize
+        from xtuner.v1.ray.rollout.routed_experts_codec import to_wire
 
         @app.post("/v1/chat/completions")
         async def chat_completions(request: LagentChatCompletionRequest):
@@ -498,6 +500,14 @@ class RolloutController:
                     {"routed_experts": inputs["routed_experts"]} if inputs["routed_experts"] is not None else {}
                 ),
             )
+            # HTTP boundary: rollout worker keeps routed_experts as np.ndarray
+            # for in-cluster zero-copy.  FastAPI cannot serialize ndarray, so
+            # encode to a JSON-friendly wire dict; the agent client carries
+            # this dict back in the next turn's message and worker.py decodes
+            # via ``from_wire`` for concat.
+            re_val = response.extra_info.get("routed_experts")
+            if isinstance(re_val, np.ndarray):
+                response.extra_info["routed_experts"] = to_wire(re_val)
             message = AgentMessage.from_model_response(response, "assistant")
             message = self.reasoning_parser.parse_response(message)
             message = self.tool_call_parser.parse_response(message)

@@ -6,6 +6,7 @@ from itertools import chain
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
 
+import numpy as np
 import ray
 import requests
 import torch
@@ -402,15 +403,18 @@ class TrainingWorker(SingleAcceleratorWorker):
         return ref_logprobs_list
 
     def _add_rollout_routed_experts(
-        self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
+        self,
+        seq_ctx: SequenceContext,
+        rollout_routed_experts: torch.Tensor | list[torch.Tensor | np.ndarray | dict],
     ):
+        from xtuner.v1.ray.rollout.routed_experts_codec import from_wire, is_wire
+
         language_cfg = (
             self.config.model_cfg.text_config
             if isinstance(self.config.model_cfg, BaseComposeConfig)
             else self.config.model_cfg
         )
 
-        to_free_routed_expert_refs: list[ray.ObjectRef] = []
         if isinstance(rollout_routed_experts, list):
             # list[n,l,e]
             out_rollout_routed_expert = []
@@ -427,15 +431,8 @@ class TrainingWorker(SingleAcceleratorWorker):
                     )
                     out_rollout_routed_expert.append(rollout_routed_experts_tensor)
                 else:
-                    rollout_routed_expert_refs = rollout_routed_expert
-                    rollout_routed_expert = ray.get(rollout_routed_expert_refs)
-                    # free obj store explicitly
-                    if self.sp_mesh is None or self.sp_mesh.size() == 1:
-                        ray.internal.free(rollout_routed_expert_refs, local_only=False)
-                    else:
-                        if self.sp_mesh.get_local_rank() == 0:
-                            # only free once of sp mesh
-                            to_free_routed_expert_refs.append(rollout_routed_expert_refs)
+                    if is_wire(rollout_routed_expert):
+                        rollout_routed_expert = from_wire(rollout_routed_expert)
                     rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
                     rollout_routed_expert = rollout_routed_expert.reshape(
                         -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
@@ -460,12 +457,6 @@ class TrainingWorker(SingleAcceleratorWorker):
 
         assert seq_ctx.input_ids is not None, "input_ids is None"
         assert seq_ctx.rollout_routed_experts.size(0) == seq_ctx.input_ids.size(1)
-
-        if self.sp_mesh is not None and self.sp_mesh.size() > 1:
-            dist.barrier()
-            for free_routed_expert_refs in to_free_routed_expert_refs:
-                ray.internal.free(free_routed_expert_refs, local_only=False)
-            del to_free_routed_expert_refs
 
     @ray_method
     def fit(self, data_batches: list[WorkerInputItem], rollout_idx: int) -> WorkerLogItem:

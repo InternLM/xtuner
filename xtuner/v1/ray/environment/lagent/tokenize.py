@@ -81,7 +81,12 @@ def tokenize(
                 and "routed_experts" in msg[0]["extra_info"]
                 and msg[0]["extra_info"]["routed_experts"] is not None
             ):
-                routed_experts = msg[0]["extra_info"]["routed_experts"]
+                from xtuner.v1.ray.rollout.routed_experts_codec import from_wire, is_wire
+
+                payload = msg[0]["extra_info"]["routed_experts"]
+                # Agent client carries the HTTP wire dict between turns; decode
+                # back to ndarray here so the rollout worker sees a uniform type.
+                routed_experts = from_wire(payload) if is_wire(payload) else payload
             else:
                 routed_experts = None
 
