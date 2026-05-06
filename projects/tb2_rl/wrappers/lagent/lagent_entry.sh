@@ -14,7 +14,8 @@
 # state_dict → kills daemon.  Exits 0 on success, non-zero on failure.
 #
 # Relies on /tmp/lagent-py wrapper (shared conda python + PYTHONPATH), which
-# runner bootstrap writes.  Agent config JSON is what daemon consumes.
+# runner bootstrap writes.  --config is a Python file defining agent_config;
+# daemon execs it in-sandbox so os.environ lookups resolve here, not on host.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -54,6 +55,26 @@ fi
 
 LOG=/tmp/agent_daemon.log
 : > "$LOG"
+
+# If a daemon call returned {"error": "..."} over socket (exception during
+# dispatch — e.g. LLM 4xx/5xx, timeout), exit non-zero so the host side's
+# _dump_daemon_log fires and the traceback surfaces in xtuner logs.
+_die_on_daemon_error() {
+    local resp="$1" phase="$2" code="$3"
+    local err
+    err=$(printf '%s' "$resp" | "$LAGENT_PY" -c '
+import json, sys
+try:
+    print(json.loads(sys.stdin.read() or "{}").get("error", ""))
+except Exception:
+    pass
+')
+    if [ -n "$err" ]; then
+        echo "daemon error in ${phase}: ${err}" >&2
+        tail -n 500 "$LOG" >&2 || true
+        exit "$code"
+    fi
+}
 
 # ── 1. Start AgentDaemon ──────────────────────────────────────────────
 nohup "$LAGENT_PY" -m lagent.serving.sandbox.daemon start \
@@ -102,6 +123,7 @@ CHAT_RESP=$("$LAGENT_PY" -m lagent.serving.sandbox.daemon call \
     tail -n 100 "$LOG" >&2 || true
     exit 5
 }
+_die_on_daemon_error "$CHAT_RESP" chat 5
 
 # Extract final response content (plain text) to RESPONSE_OUT.
 printf '%s' "$CHAT_RESP" | "$LAGENT_PY" -c '
@@ -121,6 +143,7 @@ STATE_RESP=$("$LAGENT_PY" -m lagent.serving.sandbox.daemon call \
     tail -n 100 "$LOG" >&2 || true
     exit 6
 }
+_die_on_daemon_error "$STATE_RESP" state_dict 6
 
 # Wrap lagent's native state into {"trajectory": [...]} if it isn't already.
 printf '%s' "$STATE_RESP" | "$LAGENT_PY" -c '
@@ -153,6 +176,7 @@ POLICY_AGENT_MESSAGES=$("$LAGENT_PY" -m lagent.serving.sandbox.daemon call \
     tail -n 100 "$LOG" >&2 || true
     exit 7
 }
+_die_on_daemon_error "$POLICY_AGENT_MESSAGES" get_messages 7
 
 printf '%s' "$POLICY_AGENT_MESSAGES" | "$LAGENT_PY" -c '
 import json, sys

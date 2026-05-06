@@ -10,7 +10,6 @@ import torch
 from ray.util.placement_group import placement_group_table
 
 from transformers import AutoTokenizer
-from xtuner.v1.data_proto.rl_data import RolloutExtraInfo
 from xtuner.v1.ray.config import RolloutConfig
 
 from .worker import RolloutWorker
@@ -18,27 +17,6 @@ from .worker import RolloutWorker
 
 SHARED_STORE = "shared_store"
 SHARED_STORE_NAMESPACE = "lmdeploy"
-_LMDEPLOY_ACTOR = None
-
-
-def get_lmdeploy_routed_experts_ref(routed_experts: Any):
-    global _LMDEPLOY_ACTOR
-    if isinstance(routed_experts, str):
-        if _LMDEPLOY_ACTOR is None:
-            _LMDEPLOY_ACTOR = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
-        return _LMDEPLOY_ACTOR.get.remote(routed_experts)
-    if isinstance(routed_experts, ray.ObjectRef):
-        return routed_experts
-    return ray.put(torch.as_tensor(routed_experts))
-
-
-def put_lmdeploy_routed_experts_ref(routed_experts: Any, return_key: bool):
-    global _LMDEPLOY_ACTOR
-    if return_key:
-        if _LMDEPLOY_ACTOR is None:
-            _LMDEPLOY_ACTOR = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
-        return ray.get(_LMDEPLOY_ACTOR.put.remote(routed_experts))
-    return ray.put(routed_experts)
 
 
 def run_lmdeploy_server_wrapper(lmdeploy_config_namespace: Namespace):
@@ -101,7 +79,7 @@ class LMDeployWorker(RolloutWorker):
         self.api_keys = self.config.api_key
         self.model_name = self.config.model_name
         self.enable_return_routed_experts = self.config.enable_return_routed_experts
-        self.return_routed_experts_key = self.config.return_routed_experts_key
+        self.lmdeploy_actor = None
 
     async def _create_request(
         self,
@@ -236,42 +214,14 @@ class LMDeployWorker(RolloutWorker):
         """It will implemented for LMDeploy worker in the future."""
         pass
 
-    async def _handle_routed_experts_response(
-        self,
-        root_id: Any,
-        action_id: Any,
-        response: dict,
-        input_extra_info: RolloutExtraInfo,
-        extra_info: RolloutExtraInfo,
-        finish_reason: str,
-    ) -> None:
-        exist_history_routed_experts = (
-            "routed_experts" in input_extra_info and input_extra_info["routed_experts"] is not None
-        )
-        routed_experts = response["meta_info"].pop("routed_experts")  # token[layer[expert]]
-        if routed_experts is not None and not exist_history_routed_experts:
-            if isinstance(routed_experts, str) and self.return_routed_experts_key:
-                extra_info["routed_experts"] = routed_experts
-            else:
-                extra_info["routed_experts"] = get_lmdeploy_routed_experts_ref(routed_experts)
-        elif routed_experts is not None and exist_history_routed_experts:
-            cur_routed_experts_ref = get_lmdeploy_routed_experts_ref(routed_experts)
-            history_routed_experts_ref = get_lmdeploy_routed_experts_ref(input_extra_info["routed_experts"])
-            cur_routed_experts = await cur_routed_experts_ref  # n, layer, expert
-            history_routed_experts = await history_routed_experts_ref  # n, layer, expert
-            ray.internal.free([cur_routed_experts_ref, history_routed_experts_ref], local_only=False)
-            concat_routed_experts = self._concat_partial_routed_experts(
-                root_id, action_id, response, history_routed_experts, cur_routed_experts
-            )
-            extra_info["routed_experts"] = put_lmdeploy_routed_experts_ref(
-                concat_routed_experts, self.return_routed_experts_key
-            )
-            del history_routed_experts
-            del cur_routed_experts
-        else:
-            assert finish_reason == "abort", (
-                f"routed_experts is None, but finish_reason is {finish_reason}, expected abort. response: {response}"
-            )
+    def _decode_routed_experts(self, routed_experts: Any):
+        if isinstance(routed_experts, str):
+            if self.lmdeploy_actor is None:
+                self.lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
+            assert self.lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
+            routed_experts_ref = self.lmdeploy_actor.get.remote(routed_experts)
+            return routed_experts_ref
+        return torch.tensor(routed_experts)
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:
         """Transform the RolloutConfig into a Namespace suitable for the
@@ -323,8 +273,6 @@ class LMDeployWorker(RolloutWorker):
         extra_engine_config: Dict[str, Any] = {}
         if backend == "pytorch" and self.config.enable_return_routed_experts:
             extra_engine_config["enable_return_routed_experts"] = True
-            if self.config.return_routed_experts_key:
-                extra_engine_config["enable_transfer_obj_ref"] = True
         if backend == "pytorch" and self.config.router_n_groups:
             hf_overrides = extra_engine_config.setdefault("hf_overrides", {})
             hf_overrides.update(router_n_groups=self.config.router_n_groups)

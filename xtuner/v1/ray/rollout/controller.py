@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
+import numpy as np
 import ray
 import uvicorn
 from fastapi import FastAPI
@@ -136,9 +137,7 @@ class RolloutController:
         self.num_workers = 0
         self.workers_info: Dict[str, WorkerInfo] = {}  # url -> WorkerInfo
         self.active_rollout_workers: List[RolloutWorker] = []
-        tokenizer_path = infer_config.tokenizer_path
-        assert tokenizer_path is not None, "tokenizer_path must be set before creating RolloutController"
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(infer_config.tokenizer_path, trust_remote_code=True)
         self.workers, self.rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
             self._get_worker_cls(), infer_config, placement_group
         )
@@ -171,7 +170,7 @@ class RolloutController:
             Qwen3TokenReasonParser,
         )
 
-        self.reasoning_parser = Qwen3TokenReasonParser(tokenizer_path)
+        self.reasoning_parser = Qwen3TokenReasonParser(infer_config.tokenizer_path)
         self.tool_call_parser = Qwen3_5FunctionCallParser()
 
     def _get_worker_status_for_router(self) -> Dict[RolloutWorker, bool]:
@@ -486,6 +485,10 @@ class RolloutController:
 
         @app.post("/v1/chat/completions")
         async def chat_completions(request: LagentChatCompletionRequest):
+            import base64
+
+            from ray import cloudpickle
+
             inputs = tokenize(self.tokenizer, request.messages, request.tools)
             response: RLRolloutResponseItem = await self.rollout(
                 prompt=request.messages,
@@ -498,11 +501,28 @@ class RolloutController:
                     {"routed_experts": inputs["routed_experts"]} if inputs["routed_experts"] is not None else {}
                 ),
             )
+            # HTTP boundary needs JSON-serializable response.  In-cluster flow
+            # uses inline numpy (zero-copy via Ray RPC) but FastAPI's
+            # jsonable_encoder can't handle ndarray.  Round-trip via xtuner's
+            # RoutedExpertStore: register the numpy, carry the str key over HTTP,
+            # and the client's next-turn request returns it through worker.py's
+            # `isinstance(history, str)` branch.
+            re_val = response.extra_info.get("routed_experts")
+            if isinstance(re_val, np.ndarray):
+                from xtuner.v1.ray.rollout.routed_expert_store import get_store
+
+                store = get_store()
+                local_ref = ray.put(re_val)
+                key = await store.put_ref.remote([local_ref])
+                response.extra_info["routed_experts"] = key
+            elif isinstance(re_val, ray.ObjectRef):
+                # Legacy path kept as a defensive fallback — encode the same
+                # way as before so older clients still decode correctly.
+                response.extra_info["routed_experts"] = base64.b64encode(cloudpickle.dumps(re_val)).decode("utf-8")
             message = AgentMessage.from_model_response(response, "assistant")
             message = self.reasoning_parser.parse_response(message)
             message = self.tool_call_parser.parse_response(message)
             completion_message = LagentChatCompletionMessage.from_agent_message(message)
-            completion_tokens = response.num_return_tokens or 0
             return LagentChatCompletion(
                 model=request.model,
                 choices=[
@@ -516,8 +536,8 @@ class RolloutController:
                 ],
                 usage=CompletionUsage(
                     prompt_tokens=len(inputs["input_ids"]),
-                    completion_tokens=completion_tokens,
-                    total_tokens=len(inputs["input_ids"]) + completion_tokens,
+                    completion_tokens=response.num_return_tokens,
+                    total_tokens=len(inputs["input_ids"]) + response.num_return_tokens,
                 ),
             ).model_dump()
 

@@ -17,11 +17,14 @@ from xtuner.v1.utils.logger import get_logger
 
 
 if TYPE_CHECKING:
+    import numpy as np
     import ray
 
     RayObjectRef = ray.ObjectRef
+    NumpyArray = np.ndarray
 else:
     RayObjectRef: TypeAlias = Any
+    NumpyArray: TypeAlias = Any
 
 logger = get_logger()
 
@@ -116,7 +119,7 @@ class RLDatasetItem(BaseModel):
 
 
 class RolloutExtraInfo(TypedDict):
-    routed_experts: NotRequired[list[int] | str | RayObjectRef]  # type: ignore[valid-type]
+    routed_experts: NotRequired[list[int] | RayObjectRef | NumpyArray]  # type: ignore[valid-type]
     partial_rollout_input_ids: NotRequired[list[int]]
 
 

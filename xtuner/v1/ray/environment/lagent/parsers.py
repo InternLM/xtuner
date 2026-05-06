@@ -109,11 +109,21 @@ class Qwen3_5FunctionCallParser:
             parameters = {}
             for p_match in param_matches:
                 p_name = p_match.group(1).strip()
-                p_value = p_match.group(2).strip()
+                # Strip exactly one leading and one trailing newline — those
+                # are the formatting newlines inserted by the chat template
+                # around the value.  Preserving additional newlines lets the
+                # model express trailing whitespace when it matters (e.g. a
+                # '\n' at the end of terminal keystrokes that triggers bash
+                # to execute the command).
+                p_raw = p_match.group(2)
+                if p_raw.startswith("\n"):
+                    p_raw = p_raw[1:]
+                if p_raw.endswith("\n"):
+                    p_raw = p_raw[:-1]
                 try:
-                    parsed_value = ast.literal_eval(p_value)
+                    parsed_value = ast.literal_eval(p_raw)
                 except (ValueError, SyntaxError):
-                    parsed_value = p_value
+                    parsed_value = p_raw
                 if p_name in self.argument_type:
                     try:
                         parsed_value = self.argument_type[p_name](parsed_value)

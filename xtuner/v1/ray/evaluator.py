@@ -203,7 +203,29 @@ class RawEvaluator:
         group_sample = await self.env_controller.run.remote(
             [sample], sample_params=self.sample_params, extra_params=extra_params
         )  # type: ignore[attr-defined]
-        self.return_list.append(group_sample[0])
+        if not group_sample:
+            # Rollout failed upstream (HTTP 500 / actor death / cancellation);
+            # skip instead of IndexError'ing the append path.
+            return
+        sample_out = group_sample[0]
+        # Avoid `return_list` accumulation.  _save_trajectories only reads:
+        #   env.agent.extra_info["messages"]          (keep — needed for jsonl)
+        #   env.agent.extra_info["daemon_log"]        (keep — eval-only)
+        #   env.rollout.response_ids / .response      (keep)
+        #   env.judger.reward                         (keep)
+        # Everything else in extra_info is trainer-side state (per-turn lagent
+        # memory / routed_experts bookkeeping) and at MB-per-sample scale.
+        # Popping here prevents a single eval round from pushing the actor's
+        # Python heap into the 100+GB range (observed: 318GB per actor) and
+        # triggering node-level OOM on the rollout head node.
+        if sample_out.env.agent.extra_info:
+            sample_out.env.agent.extra_info.pop("state", None)
+            sample_out.env.agent.extra_info.pop("agent", None)
+        if sample_out.env.rollout.extra_info:
+            sample_out.env.rollout.extra_info.pop("agent_state_dict", None)
+            sample_out.env.rollout.extra_info.pop("agent_message_dict", None)
+            sample_out.env.rollout.extra_info.pop("routed_experts", None)
+        self.return_list.append(sample_out)
 
     async def concurrent_eval_task_runner(self):
         """Runs evaluation tasks concurrently to generate a batch of samples.

@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from typing import Any, Dict, List, Literal, Tuple, TypeVar
 
 import ray
@@ -246,9 +247,15 @@ class SingleAcceleratorWorker:
         else:
             raise ValueError(f"Unsupported accelerator architecture: {self.accelerator}")
         # 使用环境变量初始化
+        # NCCL watchdog aborts collectives after this timeout.  The default
+        # (10 min) is too tight for long-context MoE RL jobs where a single
+        # slow rank on a heavy allgather can burn 15+ min.  Override via
+        # XTUNER_DIST_TIMEOUT_MIN env var.
+        timeout_min = int(os.environ.get("XTUNER_DIST_TIMEOUT_MIN", 60))
         dist.init_process_group(
             backend=backend,
             init_method="env://",  # 这告诉 PyTorch 从环境变量读取配置
+            timeout=timedelta(minutes=timeout_min),
         )
 
     def test_all_reduce(self):
