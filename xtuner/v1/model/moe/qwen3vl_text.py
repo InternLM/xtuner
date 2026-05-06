@@ -133,8 +133,15 @@ class Qwen3VLTextMoE(Qwen3MoE):
         if self.config.return_hidden_states:
             output["hidden_states"] = []
 
-        output["router_logits"] = {}
-        output["router_weights"] = {}
+        # Mirror MoE._forward: only allocate the per-layer router dicts when a
+        # downstream consumer actually asked for them.
+        keep_router = self.config.return_router_results or return_router_logits
+        if keep_router:
+            output["router_logits"] = {}
+            output["router_weights"] = {}
+        else:
+            output["router_logits"] = None
+            output["router_weights"] = None
 
         self._mark_dynamic(seq_ctx)
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
@@ -178,8 +185,9 @@ class Qwen3VLTextMoE(Qwen3MoE):
                         seq_ctx=seq_ctx,
                     )
 
-                output["router_logits"][f"layer{idx}"] = router_results
-                output["router_weights"][f"layer{idx}"] = router_weights
+                if keep_router:
+                    output["router_logits"][f"layer{idx}"] = router_results
+                    output["router_weights"][f"layer{idx}"] = router_weights
                 hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
                     selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
@@ -218,12 +226,10 @@ class Qwen3VLTextMoE(Qwen3MoE):
             output["z_loss"] = z_loss
         output["tokens_per_expert_global"] = tokens_per_expert_global
 
-        if self.config.return_router_results or return_router_logits:
+        if keep_router:
             # TODO: Moving router logits to CPU is costly.
             for layer_name, router_logits in output["router_logits"].items():
                 output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
-        else:
-            output["router_logits"] = None
 
         return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 

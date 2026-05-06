@@ -447,8 +447,12 @@ class MoE(BaseModel):
         # Initialize output containers
         output: dict = {}
 
-        router_logits_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
-        router_weights_list: list[dict[str, torch.Tensor]] = [{} for _ in range(len(seq_ctx_list))]
+        # Only the logits side is ever exposed to callers in the micro-batch path; the
+        # weights side is not part of the returned schema, so we never accumulate it.
+        keep_router = self.config.return_router_results or return_router_logits
+        router_logits_list: list[dict[str, torch.Tensor]] = (
+            [{} for _ in range(len(seq_ctx_list))] if keep_router else []
+        )
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx_list)
         num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, cat_mask.device)
 
@@ -508,19 +512,17 @@ class MoE(BaseModel):
                 router_logits = layer_results[len(hidden_states_list) : len(hidden_states_list) * 2]
                 router_weights = layer_results[len(hidden_states_list) * 2 :]
 
-                # Update hidden states and collect router results
+                # Update hidden states and (optionally) collect router logits.
+                # router_weights are only consumed by aux_loss.accumulate below, so we
+                # never stash them per-MB the way we do for logits.
                 for i, hidden_states in enumerate(hidden_states):
                     hidden_states_list[i] = hidden_states
-                    router_logits_list[i][f"layer{idx}"] = maybe_offload_tensor(
-                        router_logits[i],
-                        enable_async_offload=self.config.router_async_offload,
-                        offload_stream=self.offload_stream,
-                    )
-                    router_weights_list[i][f"layer{idx}"] = maybe_offload_tensor(
-                        router_weights[i],
-                        enable_async_offload=self.config.router_async_offload,
-                        offload_stream=self.offload_stream,
-                    )
+                    if keep_router:
+                        router_logits_list[i][f"layer{idx}"] = maybe_offload_tensor(
+                            router_logits[i],
+                            enable_async_offload=self.config.router_async_offload,
+                            offload_stream=self.offload_stream,
+                        )
 
                 cat_router_weights = torch.cat(router_weights, dim=0)
                 cat_router_logits = torch.cat(router_logits, dim=0)
@@ -566,7 +568,7 @@ class MoE(BaseModel):
             output["z_loss"] = z_loss
         output["tokens_per_expert_global"] = tokens_per_expert_global
 
-        if self.config.return_router_results or return_router_logits:
+        if keep_router:
             # TODO: Returning router logits is costly.
             router_logits_dict: dict[str, torch.Tensor] = {}
             layer_names = list(router_logits_list[0].keys())
@@ -611,8 +613,16 @@ class MoE(BaseModel):
         if self.config.return_hidden_states:
             output["hidden_states"] = []
 
-        output["router_logits"] = {}
-        output["router_weights"] = {}
+        # Router logits / weights are only retained when a downstream consumer
+        # (config flag or per-call kwarg) asked for them; otherwise we skip the
+        # per-layer dict population and the optional D2H offload entirely.
+        keep_router = self.config.return_router_results or return_router_logits
+        if keep_router:
+            output["router_logits"] = {}
+            output["router_weights"] = {}
+        else:
+            output["router_logits"] = None
+            output["router_weights"] = None
         self._mark_dynamic(seq_ctx)
         balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
         # Hoisted out of the per-layer accumulate path: mask is constant across layers.
@@ -649,16 +659,17 @@ class MoE(BaseModel):
                         seq_ctx=seq_ctx,
                     )
                 hidden_states, router_results, router_weights = layer_results
-                output["router_logits"][f"layer{idx}"] = maybe_offload_tensor(
-                    router_results,
-                    enable_async_offload=self.config.router_async_offload,
-                    offload_stream=self.offload_stream,
-                )
-                output["router_weights"][f"layer{idx}"] = maybe_offload_tensor(
-                    router_weights,
-                    enable_async_offload=self.config.router_async_offload,
-                    offload_stream=self.offload_stream,
-                )
+                if keep_router:
+                    output["router_logits"][f"layer{idx}"] = maybe_offload_tensor(
+                        router_results,
+                        enable_async_offload=self.config.router_async_offload,
+                        offload_stream=self.offload_stream,
+                    )
+                    output["router_weights"][f"layer{idx}"] = maybe_offload_tensor(
+                        router_weights,
+                        enable_async_offload=self.config.router_async_offload,
+                        offload_stream=self.offload_stream,
+                    )
                 hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
                     selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
@@ -714,8 +725,9 @@ class MoE(BaseModel):
             for idx, (mtp_hidden, mtp_ctx) in enumerate(zip(mtp_outputs, mtp_loss_ctx_list)):
                 mtp_hidden_states, mtp_router_results, mtp_router_weights = mtp_hidden
 
-                output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
-                output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
+                if keep_router:
+                    output["router_logits"][f"mtp_layer{idx}"] = mtp_router_results
+                    output["router_weights"][f"mtp_layer{idx}"] = mtp_router_weights
                 # Inject this MTP layer's z-loss before lm_head so backward through mtp_loss
                 # traverses the AuxLossScaler node and releases this layer's logsumexp activations.
                 mtp_hidden_states = self.aux_loss.accumulate(
@@ -752,12 +764,10 @@ class MoE(BaseModel):
             output["z_loss"] = z_loss
         output["tokens_per_expert_global"] = tokens_per_expert_global
 
-        if self.config.return_router_results or return_router_logits:
+        if keep_router:
             # TODO: Moving router logits to CPU is costly.
             for layer_name, router_logits in output["router_logits"].items():
                 output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
-        else:
-            output["router_logits"] = None
 
         return MoEModelOutputs(**output)
 
