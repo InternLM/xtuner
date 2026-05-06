@@ -51,18 +51,18 @@ jobs:
             IMAGE_TAG="pt$(echo ${TORCH_VERSION} | awk -F. '{print $1$2}')_${DATE_TODAY}_${COMMIT_SHA}"
             echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
           fi
-          echo "DOCKER_TAG=${{ secrets.IMAGE_REGISTRY }}/${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "DOCKER_TAG=${{ secrets.CI_GPU_IMAGE_REGISTRY }}/${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
           echo "SHORT_DOCKER_TAG=${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
       - name: Build image
         run: |
           cat ${{vars.EXTRA_DOCKERFILE}} >> ${{ github.workspace }}/Dockerfile
           echo "IMAGE_NAME: ${IMAGE_NAME}, IMAGE_TAG: ${IMAGE_TAG}"
-          export IMAGE_NAME=${{ secrets.IMAGE_REGISTRY }}/${IMAGE_NAME}
+          export IMAGE_NAME=${{ secrets.CI_GPU_IMAGE_REGISTRY }}/${IMAGE_NAME}
           bash ${{ github.workspace }}/image_build.sh
           echo "Built image with tag: ${SHORT_DOCKER_TAG}"
       - name: Push to cluster
         if: ${{ !inputs.build_only }}
         run: |
           echo "pushing $SHORT_DOCKER_TAG ..."
-          docker login ${{ secrets.IMAGE_REGISTRY }} -p ${{ secrets.CLUSTER_DOCKERHUB_TOKEN }} -u ${{ secrets.CLUSTER_DOCKERHUB_USERNAME }}
+          docker login ${{ secrets.CI_GPU_IMAGE_REGISTRY }} -p ${{ secrets.CLUSTER_DOCKERHUB_TOKEN }} -u ${{ secrets.CLUSTER_DOCKERHUB_USERNAME }}
           docker push $DOCKER_TAG
