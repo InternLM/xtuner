@@ -585,7 +585,7 @@ class Trainer:
         self.sp_mesh = self.data_mesh["sp"]
 
         if global_batch_size is None:
-            global_batch_size = self.data_mesh["dp"].size()
+            global_batch_size = self.data_mesh["dp"].size() * intra_layer_micro_batch
         self._global_batch_size = global_batch_size
 
         self._resolve_model_loss_cfg(model_cfg, loss_cfg)

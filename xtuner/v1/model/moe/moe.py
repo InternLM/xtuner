@@ -329,6 +329,7 @@ class MoE(BaseModel):
                 mtp_loss_cfg = MTPLossConfig(
                     **self.config.lm_loss_cfg.model_dump(),
                     mtp_depth=mtp_idx + 1,
+                    detach_mtp_lm_head_weight=self.config.mtp_config.detach_mtp_lm_head_weight,
                 )
                 mtp_loss_ctx_list = self._build_loss_ctx(mtp_loss_cfg, _data_batch, sp_mesh)
                 if mtp_loss_ctx_list is not None:

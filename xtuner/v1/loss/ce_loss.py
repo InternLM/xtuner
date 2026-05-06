@@ -114,7 +114,10 @@ class LMHeadLossContext(BaseLossContext):
                 LigerFusedLinearCrossEntropyLoss,
             )
 
-            self.liger_loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="sum")
+            self.liger_loss_fct = LigerFusedLinearCrossEntropyLoss(
+                reduction="sum",
+                accum_dtype=torch.float32,
+            )
         else:
             self.liger_loss_fct = None
 
