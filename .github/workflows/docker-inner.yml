@@ -10,9 +10,9 @@ on:
         default: auto
       torch_version:
         required: true
-        description: 'Set docker torch version. Default is "2.8.0"'
+        description: 'Set docker torch version. Default is "2.9.1"'
         type: string
-        default: '2.8.0'
+        default: '2.9.1'
       image_repo_short:
         required: true
         description: 'Set target repository for pushing the docker image. Default is "xtuner"'
@@ -33,10 +33,10 @@ jobs:
   publish_docker_image:
     runs-on: [docker-inner]
     env:
-      IMAGE_NAME: registry.h.pjlab.org.cn/ailab-llmrazor/${{ inputs.image_repo_short || 'xtuner' }}
+      IMAGE_NAME: ailab-llmrazor/${{ inputs.image_repo_short || 'xtuner' }}
       IMAGE_TAG: ${{ inputs.image_tag || 'auto' }}
-      TORCH_VERSION: ${{ inputs.torch_version || '2.8.0' }}
-      SCHEDULE_TAG: 'pt28_latest'
+      TORCH_VERSION: ${{ inputs.torch_version || '2.9.1' }}
+      SCHEDULE_TAG: 'pt29_latest'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -51,16 +51,18 @@ jobs:
             IMAGE_TAG="pt$(echo ${TORCH_VERSION} | awk -F. '{print $1$2}')_${DATE_TODAY}_${COMMIT_SHA}"
             echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
           fi
-          echo "DOCKER_TAG=${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "DOCKER_TAG=${{ secrets.IMAGE_REGISTRY }}/${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "SHORT_DOCKER_TAG=${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_ENV
       - name: Build image
         run: |
           cat ${{vars.EXTRA_DOCKERFILE}} >> ${{ github.workspace }}/Dockerfile
           echo "IMAGE_NAME: ${IMAGE_NAME}, IMAGE_TAG: ${IMAGE_TAG}"
+          export IMAGE_NAME=${{ secrets.IMAGE_REGISTRY }}/${IMAGE_NAME}
           bash ${{ github.workspace }}/image_build.sh
-          echo "Built image with tag: ${DOCKER_TAG}"
+          echo "Built image with tag: ${SHORT_DOCKER_TAG}"
       - name: Push to cluster
         if: ${{ !inputs.build_only }}
         run: |
-          echo "$DOCKER_TAG"
-          docker login registry.h.pjlab.org.cn -p ${{ secrets.CLUSTER_DOCKERHUB_TOKEN }} -u ${{ secrets.CLUSTER_DOCKERHUB_USERNAME }}
+          echo "pushing $SHORT_DOCKER_TAG ..."
+          docker login ${{ secrets.IMAGE_REGISTRY }} -p ${{ secrets.CLUSTER_DOCKERHUB_TOKEN }} -u ${{ secrets.CLUSTER_DOCKERHUB_USERNAME }}
           docker push $DOCKER_TAG
