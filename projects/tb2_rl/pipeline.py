@@ -88,7 +88,7 @@ DEFAULT_AGENTS: list[AgentSpec] = [
     ),
 ]
 
-DEFAULT_SANDBOX = SandboxSpec(image="t-data-processing-v1", ttl_seconds=5400, workspace_path="/app")
+DEFAULT_SANDBOX = SandboxSpec(image="t-data-processing-v1", ttl_seconds=11700, workspace_path="/app")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -212,7 +212,7 @@ def tb2_rl_pipeline(
             workspace=ws,
             extras={"WORKSPACE": ws},
         ),
-        timeout=3600,
+        timeout=10800,
         post=[
             DownloadHook([ws, "/tmp/agent_response.txt"]),
             ReadFileHook("/tmp/message.json", "message"),

@@ -722,7 +722,9 @@ class ReplayBufferStorage:
         for sample in group_samples:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
             if "routed_experts" in sample.env.rollout.extra_info:
-                ray.internal.free(sample.env.rollout.extra_info["routed_experts"], local_only=False)
+                val = sample.env.rollout.extra_info["routed_experts"]
+                if isinstance(val, ray.ObjectRef):
+                    ray.internal.free(val, local_only=False)
                 del sample.env.rollout.extra_info["routed_experts"]
             del sample.env
             sample.env = RLEnvDataItem()  # 重置env数据
@@ -760,7 +762,9 @@ class ReplayBufferStorage:
             if not self.enable_partial_rollout:
                 # 清除上次的response_ids等env数据
                 if "routed_experts" in sample.env.rollout.extra_info:
-                    ray.internal.free(sample.env.rollout.extra_info["routed_experts"], local_only=False)
+                    val = sample.env.rollout.extra_info["routed_experts"]
+                    if isinstance(val, ray.ObjectRef):
+                        ray.internal.free(val, local_only=False)
                     del sample.env.rollout.extra_info["routed_experts"]
                 del sample.env
                 sample.env = RLEnvDataItem()

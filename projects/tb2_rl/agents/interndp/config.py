@@ -52,7 +52,7 @@ model = dict(
         api_key=os.environ.get("RL_LLM_API_KEY", "sk-admin"),
     ),
     sample_params=dict(temperature=0.7, top_p=1.0, top_k=50),
-    timeout=900,
+    timeout=1800,
     max_retry=1,
     sleep_interval=5,
     extra_body=dict(spaces_between_special_tokens=False),
@@ -71,8 +71,8 @@ env_agent = dict(
     type="lagent.agents.env_agent.RLEnvAgent",
     actions=base_actions,
     max_turn=100,
-    max_tool_response_length=8192,
-    tool_response_truncate_side="middle",
+    max_tool_response_length=4096,
+    tool_response_truncate_side="left",
     enable_no_thinking_penalty=False,
 )
 

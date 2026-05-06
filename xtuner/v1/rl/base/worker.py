@@ -6,6 +6,7 @@ from itertools import chain
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
 
+import numpy as np
 import ray
 import requests
 import torch
@@ -404,7 +405,9 @@ class TrainingWorker(SingleAcceleratorWorker):
         return ref_logprobs_list
 
     def _add_rollout_routed_experts(
-        self, seq_ctx: SequenceContext, rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef]
+        self,
+        seq_ctx: SequenceContext,
+        rollout_routed_experts: torch.Tensor | list[torch.Tensor | ray.ObjectRef | np.ndarray | str | bytes],
     ):
         language_cfg = (
             self.config.model_cfg.text_config
@@ -434,8 +437,29 @@ class TrainingWorker(SingleAcceleratorWorker):
                         ),
                     )
                     out_rollout_routed_expert.append(rollout_routed_experts_tensor)
+                elif isinstance(rollout_routed_expert, np.ndarray):
+                    # Inline path: numpy array carried directly in extra_info.
+                    rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
+                    rollout_routed_expert = rollout_routed_expert.reshape(
+                        -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
+                    )
+                    out_rollout_routed_expert.append(rollout_routed_expert)
+                elif isinstance(rollout_routed_expert, ray.ObjectRef):
+                    # Inline + replay_buffer wrap: ray.put(numpy) → ObjectRef.  Owner is the
+                    # replay_buffer actor (long-lived), so ray.get is safe.
+                    rollout_routed_expert_ref = rollout_routed_expert
+                    rollout_routed_expert = ray.get(rollout_routed_expert_ref)
+                    if self.sp_mesh is None or self.sp_mesh.size() == 1:
+                        ray.internal.free([rollout_routed_expert_ref], local_only=False)
+                    elif self.sp_mesh.get_local_rank() == 0:
+                        to_free_routed_expert_refs.append(rollout_routed_expert_ref)
+                    rollout_routed_expert = torch.as_tensor(rollout_routed_expert, dtype=torch.long)
+                    rollout_routed_expert = rollout_routed_expert.reshape(
+                        -1, language_cfg.num_hidden_layers, language_cfg.num_experts_per_tok
+                    )
+                    out_rollout_routed_expert.append(rollout_routed_expert)
                 elif isinstance(rollout_routed_expert, str):
-                    # New path: uuid key → RoutedExpertStore.  Owner is the
+                    # Legacy path: uuid key → RoutedExpertStore.  Owner is the
                     # store actor, so ray.get is reliable regardless of
                     # lmdeploy worker state.
                     store = get_store()

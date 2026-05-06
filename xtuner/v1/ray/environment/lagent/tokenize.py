@@ -2,6 +2,7 @@ import os
 import re
 from typing import Any, Dict, List
 
+import numpy as np
 import ray
 
 from xtuner.v1.utils import get_logger
@@ -85,11 +86,17 @@ def tokenize(
                 and msg[0]["extra_info"]["routed_experts"] is not None
             ):
                 routed_experts_ref = msg[0]["extra_info"]["routed_experts"]
-                if isinstance(routed_experts_ref, ray.ObjectRef):
-                    dedup_key = routed_experts_ref.hex()
+                if isinstance(routed_experts_ref, np.ndarray):
+                    # Inline path: numpy array carried directly.  Same array object
+                    # across turns → same id(); dedup on id avoids re-submitting the
+                    # identical history on rollout retries.
+                    dedup_key = id(routed_experts_ref)
                     passthrough: Any = routed_experts_ref
+                elif isinstance(routed_experts_ref, ray.ObjectRef):
+                    dedup_key = routed_experts_ref.hex()
+                    passthrough = routed_experts_ref
                 elif isinstance(routed_experts_ref, str):
-                    # New path: uuid key into RoutedExpertStore — forward as-is.
+                    # Legacy path: uuid key into RoutedExpertStore — forward as-is.
                     # Legacy path (base64(cloudpickle(ObjectRef))) is also a str;
                     # we forward it unchanged and let the rollout worker detect
                     # the shape via isinstance checks downstream.

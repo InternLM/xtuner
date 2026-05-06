@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import os
+import pickle
 import traceback
 from copy import deepcopy
 from typing import Callable, List, Self, Tuple
@@ -20,6 +21,11 @@ from xtuner.v1.utils import get_logger
 from .base_env import BaseEnvironment
 
 
+# Memory diagnostics thresholds (bytes). Set via env var to disable (0).
+_ITEM_SIZE_LOG_THRESHOLD = int(os.environ.get("XTUNER_ITEM_SIZE_LOG_MB", "1")) * 1024 * 1024
+_RSS_MONITOR_INTERVAL = int(os.environ.get("XTUNER_RSS_MONITOR_SEC", "60"))
+
+
 def check_dead_actors():
     # 获取所有 Actor 的列表
     from ray.util.state import list_actors
@@ -33,6 +39,38 @@ def check_dead_actors():
             dead_actors.append(actor_info)
 
     return dead_actors
+
+
+def _log_item_size_if_large(item) -> None:
+    """Diagnostic: pickle-measure item + per-field breakdown when total exceeds threshold.
+
+    Runs on every ``_inner_agent_call`` iteration; on fresh samples the total is a few KB
+    so the early-exit keeps steady-state overhead negligible.  On resume / abort paths the
+    item carries ``agent_state_dict`` / ``agent_message_dict`` from prior turns — we want
+    visibility into which field dominates.
+    """
+    try:
+        total_size = len(pickle.dumps(item))
+    except Exception as exc:
+        get_logger().debug(f"[item-size] pickle.dumps failed: {exc}")
+        return
+    if total_size < _ITEM_SIZE_LOG_THRESHOLD:
+        return
+    field_sizes: dict = {}
+    try:
+        for key, val in item.env.rollout.extra_info.items():
+            try:
+                field_sizes[key] = len(pickle.dumps(val))
+            except Exception:
+                field_sizes[key] = -1  # type: ignore[assignment]
+    except Exception:
+        pass
+    get_logger().warning(
+        f"[item-size] sample={getattr(item.uid, 'observation_id', '?')} "
+        f"total={total_size / 1e6:.1f}MB "
+        f"state={item.env.rollout.state} "
+        f"fields={ {k: f'{v / 1e6:.1f}MB' for k, v in field_sizes.items()} }"
+    )
 
 
 @ray.remote(max_concurrency=int(os.environ.get("XTUNER_MAX_CONCURRENCY", 2000)))  # type: ignore[call-overload]
@@ -54,6 +92,24 @@ class AgentEnvironment(BaseEnvironment):
         self.agent_cfg = agent_cfg
         self.preprocess_func = preprocess_func
         self.postprocess_func = postprocess_func
+        if _RSS_MONITOR_INTERVAL > 0:
+            self._rss_task = asyncio.get_event_loop().create_task(self._rss_monitor())
+
+    async def _rss_monitor(self):
+        """Diagnostic: periodically log this actor's RSS so cross-sample leaks surface."""
+        try:
+            import psutil
+        except ImportError:
+            get_logger().warning("[actor-rss] psutil not available, disabling RSS monitor")
+            return
+        proc = psutil.Process()
+        while True:
+            try:
+                rss_gb = proc.memory_info().rss / 1e9
+                get_logger().info(f"[actor-rss] env={self.environment} pid={proc.pid} rss={rss_gb:.2f}GB")
+            except Exception as exc:
+                get_logger().warning(f"[actor-rss] read failed: {exc}")
+            await asyncio.sleep(_RSS_MONITOR_INTERVAL)
 
     async def generate(  # type: ignore[override]
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
@@ -68,6 +124,8 @@ class AgentEnvironment(BaseEnvironment):
             if item.env.rollout.state == RolloutState.ABORTED:
                 agent.load_state_dict(item.env.rollout.extra_info["agent_state_dict"])  # type: ignore[operator]
 
+            if _ITEM_SIZE_LOG_THRESHOLD > 0:
+                _log_item_size_if_large(item)
             _item = deepcopy(item)
             _item.env.agent.extra_info["agent"] = agent
             agent_inputs = self.preprocess_func(self, _item)

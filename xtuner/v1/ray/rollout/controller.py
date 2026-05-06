@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
+import numpy as np
 import ray
 import uvicorn
 from fastapi import FastAPI
@@ -500,14 +501,24 @@ class RolloutController:
                     {"routed_experts": inputs["routed_experts"]} if inputs["routed_experts"] is not None else {}
                 ),
             )
-            # Rollout worker now returns a uuid str key (into RoutedExpertStore)
-            # rather than an ObjectRef.  Legacy ObjectRef path kept as a
-            # defensive fallback and encoded the same way as before so older
-            # clients still decode correctly.
-            if isinstance(response.extra_info.get("routed_experts"), ray.ObjectRef):
-                response.extra_info["routed_experts"] = base64.b64encode(
-                    cloudpickle.dumps(response.extra_info["routed_experts"])
-                ).decode("utf-8")
+            # HTTP boundary needs JSON-serializable response.  In-cluster flow
+            # uses inline numpy (zero-copy via Ray RPC) but FastAPI's
+            # jsonable_encoder can't handle ndarray.  Round-trip via xtuner's
+            # RoutedExpertStore: register the numpy, carry the str key over HTTP,
+            # and the client's next-turn request returns it through worker.py's
+            # `isinstance(history, str)` branch.
+            re_val = response.extra_info.get("routed_experts")
+            if isinstance(re_val, np.ndarray):
+                from xtuner.v1.ray.rollout.routed_expert_store import get_store
+
+                store = get_store()
+                local_ref = ray.put(re_val)
+                key = await store.put_ref.remote([local_ref])
+                response.extra_info["routed_experts"] = key
+            elif isinstance(re_val, ray.ObjectRef):
+                # Legacy path kept as a defensive fallback — encode the same
+                # way as before so older clients still decode correctly.
+                response.extra_info["routed_experts"] = base64.b64encode(cloudpickle.dumps(re_val)).decode("utf-8")
             message = AgentMessage.from_model_response(response, "assistant")
             message = self.reasoning_parser.parse_response(message)
             message = self.tool_call_parser.parse_response(message)

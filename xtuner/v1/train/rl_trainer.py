@@ -571,8 +571,7 @@ class RLTrainer:
                 except Exception as exc:
                     self.logger.warning(f"ray.cancel of dataflow task failed: {exc}")
                 raise RuntimeError(
-                    f"dataflow.run hung for 12h at rollout_idx={rollout_idx}; "
-                    f"check ray dashboard for dead actors"
+                    f"dataflow.run hung for 12h at rollout_idx={rollout_idx}; check ray dashboard for dead actors"
                 ) from None
 
         if XTUNER_DETERMINISTIC:
