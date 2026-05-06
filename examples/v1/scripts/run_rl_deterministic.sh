@@ -69,7 +69,6 @@ export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
-total_cpus=$((node_count * 128))
 
 WORK_DIR=$(realpath "$WORK_DIR")
 if [ "$RAY_RANK" -eq 0 ]; then
@@ -84,7 +83,6 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --dashboard-port=$RAY_DASHBOARD_PORT \
     --include-dashboard=true \
     --disable-usage-stats \
-    --num-cpus=$total_cpus \
     --temp-dir="/tmp/ray_log/"
 else
   while true; do

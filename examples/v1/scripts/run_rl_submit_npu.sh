@@ -79,7 +79,6 @@ fi
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${WORLD_SIZE:-1}
-total_cpus=$((node_count * 256))
 
 if [ "$RAY_RANK" -eq 0 ]; then
   RAY_memory_monitor_refresh_ms=0 ray start --head \
@@ -88,8 +87,7 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --dashboard-host=0.0.0.0 \
     --dashboard-port=$RAY_DASHBOARD_PORT \
     --include-dashboard=true \
-    --disable-usage-stats \
-    --num-cpus=$total_cpus
+    --disable-usage-stats
 else
   RAY_RESOLVED_IP=$(nslookup $MASTER_ADDR | awk '/^Address: / { addr=$2 } END { print addr }')
   if [ -z "$RAY_RESOLVED_IP" ]; then

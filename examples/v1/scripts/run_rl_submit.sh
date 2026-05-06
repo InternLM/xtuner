@@ -81,11 +81,6 @@ fi
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
-if [ "$ACCELERATOR" = "GPU" ]; then
-  total_cpus=$((node_count * 128))
-elif [ "$ACCELERATOR" = "NPU" ]; then
-  total_cpus=$((node_count * 256))
-fi
 
 if [ "$RAY_RANK" -eq 0 ]; then
   rm -rf /tmp/ray_log
@@ -99,7 +94,6 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --dashboard-port=$RAY_DASHBOARD_PORT \
     --include-dashboard=true \
     --disable-usage-stats \
-    --num-cpus=$total_cpus \
     --temp-dir="/tmp/ray_log/"
 else
   while true; do
