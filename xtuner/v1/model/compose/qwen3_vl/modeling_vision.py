@@ -1,7 +1,9 @@
+import os
 from typing import List, Callable
 from xtuner.v1.ops.act_fn import get_act_fn
 import torch.nn as nn
 import torch
+from xtuner.v1.utils.activation_offload import async_save_on_cpu
 from typing_extensions import override
 from .qwen3_vl_config import Qwen3VLVisionConfig
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_device, get_torch_device_module, init_params
@@ -248,6 +250,7 @@ class Qwen3VLVisionModel(BaseModel):
         self.rotary_pos_emb = self.build_rotary_embedding(config)
 
         self.blocks = nn.ModuleList([Qwen3VLVisionLayer(config) for _ in range(config.depth)])
+        self.offload_stream = torch.cuda.Stream()
 
         self.deepstack_visual_indexes = config.deepstack_visual_indexes
 
@@ -504,13 +507,29 @@ class Qwen3VLVisionModel(BaseModel):
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
-            hidden_states = blk(
-                hidden_states,
-                cu_seqlens,
-                max_seqlen,
-                position_embeddings,
-                sequence_parallel_mesh
-            )
+            if int(os.getenv("VL_XTUNER_ACTIVATION_OFFLOAD", "0")) == 1:
+                with async_save_on_cpu(
+                    h2d_stream=self.offload_stream,
+                    d2h_stream=self.offload_stream,
+                    block_idx=int(layer_num),
+                    group="vision",
+                    custom_check_fn=lambda x: x.data_ptr() == hidden_states.data_ptr(),
+                ):
+                    hidden_states = blk(
+                        hidden_states,
+                        cu_seqlens,
+                        max_seqlen,
+                        position_embeddings,
+                        sequence_parallel_mesh,
+                    )
+            else:
+                hidden_states = blk(
+                    hidden_states,
+                    cu_seqlens,
+                    max_seqlen,
+                    position_embeddings,
+                    sequence_parallel_mesh,
+                )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_feature = hidden_states
                 deepstack_feature_lists.append(deepstack_feature)
