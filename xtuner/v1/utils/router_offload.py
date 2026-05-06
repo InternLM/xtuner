@@ -183,18 +183,6 @@ def async_offload_to_cpu(tensor: torch.Tensor, stream: torch.cuda.Stream) -> Asy
     return AsyncOffloadedTensor(tensor_cpu, event)
 
 
-def maybe_offload_tensor(
-    tensor: torch.Tensor,
-    *,
-    enable_async_offload: bool,
-    offload_stream: torch.cuda.Stream,
-) -> torch.Tensor:
-    """Optionally offload a tensor while preserving tensor-like behavior."""
-    if enable_async_offload:
-        return async_offload_to_cpu(tensor, offload_stream)
-    return tensor
-
-
 def wait_async_offload(offloaded_tensor: torch.Tensor) -> torch.Tensor:
     """Wait for an async D2H copy and return the ready CPU tensor."""
     if isinstance(offloaded_tensor, AsyncOffloadedTensor):

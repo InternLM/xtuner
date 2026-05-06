@@ -64,7 +64,7 @@ from xtuner.v1.utils import (
     get_logger,
 )
 from xtuner.v1.utils.activation_offload import async_save_on_cpu
-from xtuner.v1.utils.router_offload import maybe_offload_tensor
+from xtuner.v1.utils.router_offload import async_offload_to_cpu
 
 
 if TYPE_CHECKING:
@@ -210,6 +210,11 @@ class MoE(BaseModel):
             n_routed_experts=self.config.n_routed_experts,
             num_experts_per_tok=self.config.num_experts_per_tok,
         )
+
+    def _maybe_offload_router(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self.config.router_async_offload:
+            return async_offload_to_cpu(tensor, self.offload_stream)
+        return tensor
 
     def _z_loss_dist_token_count(
         self,
@@ -518,11 +523,7 @@ class MoE(BaseModel):
                 for i, hidden_states in enumerate(hidden_states):
                     hidden_states_list[i] = hidden_states
                     if keep_router:
-                        router_logits_list[i][f"layer{idx}"] = maybe_offload_tensor(
-                            router_logits[i],
-                            enable_async_offload=self.config.router_async_offload,
-                            offload_stream=self.offload_stream,
-                        )
+                        router_logits_list[i][f"layer{idx}"] = self._maybe_offload_router(router_logits[i])
 
                 cat_router_weights = torch.cat(router_weights, dim=0)
                 cat_router_logits = torch.cat(router_logits, dim=0)
@@ -660,16 +661,8 @@ class MoE(BaseModel):
                     )
                 hidden_states, router_results, router_weights = layer_results
                 if keep_router:
-                    output["router_logits"][f"layer{idx}"] = maybe_offload_tensor(
-                        router_results,
-                        enable_async_offload=self.config.router_async_offload,
-                        offload_stream=self.offload_stream,
-                    )
-                    output["router_weights"][f"layer{idx}"] = maybe_offload_tensor(
-                        router_weights,
-                        enable_async_offload=self.config.router_async_offload,
-                        offload_stream=self.offload_stream,
-                    )
+                    output["router_logits"][f"layer{idx}"] = self._maybe_offload_router(router_results)
+                    output["router_weights"][f"layer{idx}"] = self._maybe_offload_router(router_weights)
                 hidden_states = self.aux_loss.accumulate(
                     selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
                     selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
