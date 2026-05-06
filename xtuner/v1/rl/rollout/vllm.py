@@ -275,7 +275,7 @@ class vLLMWorker(RolloutWorker):
     def reset_prefix_cache(self, tags: List[str] | None = None):
         raise NotImplementedError("The 'reset_prefix_cache' API is not yet implemented in the vLLM server.")
 
-    def _decode_routed_experts(self, routed_experts: Any):
+    async def _decode_routed_experts(self, routed_experts: Any):
         raise NotImplementedError
 
     def _transform_rollout_config_to_server_configs(self) -> Namespace:

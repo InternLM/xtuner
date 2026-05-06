@@ -177,12 +177,12 @@ class LMDeployWorker(RolloutWorker):
         assert response.status_code == 200, response.status_code
         return response.text
 
-    def _decode_routed_experts(self, routed_experts: Any) -> Any:
+    async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         if isinstance(routed_experts, str):
             if self.lmdeploy_actor is None:
                 self.lmdeploy_actor = ray.get_actor(SHARED_STORE, namespace=SHARED_STORE_NAMESPACE)
             assert self.lmdeploy_actor is not None, "LMDeploy actor should be available in the shared store."
-            routed_experts_data = ray.get(self.lmdeploy_actor.get.remote(routed_experts))
+            routed_experts_data = await self.lmdeploy_actor.get.remote(routed_experts)
             return ray.put(routed_experts_data)
         return torch.tensor(routed_experts)
 

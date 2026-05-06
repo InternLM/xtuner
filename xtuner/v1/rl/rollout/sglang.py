@@ -190,7 +190,7 @@ class SGLangWorker(RolloutWorker):
         self.flush_cache()
         return self._make_request("release_memory_occupation")
 
-    def _decode_routed_experts(self, routed_experts: Any):
+    async def _decode_routed_experts(self, routed_experts: Any):
         if isinstance(routed_experts, str):
             routed_experts_flat = np.frombuffer(base64.b64decode(routed_experts), dtype=np.int32)
             routed_experts_array = routed_experts_flat.reshape(

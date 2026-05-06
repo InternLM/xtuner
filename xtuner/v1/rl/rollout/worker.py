@@ -572,7 +572,7 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.error(f"Health check failed for server {self.server_url}: {e}")
             return False
 
-    def _decode_routed_experts(self, routed_experts: Any) -> Any:
+    async def _decode_routed_experts(self, routed_experts: Any) -> Any:
         return routed_experts
 
     async def generate(self, rollout_state: RolloutState) -> RolloutState:
@@ -835,11 +835,30 @@ class RolloutWorker(SingleAcceleratorWorker):
             logprobs: list[float] = []
             routed_experts = None
             returned_response = ""
-            finish_reason = response["meta_info"]["finish_reason"]["type"]
-            if finish_reason == "abort" and self.receive_abort_request.is_set() is False:
-                self.receive_abort_request.set()
-                self.logger.info(f"Setting receive_abort_request to True for rank {self.rank}")
             try:
+                meta_info = response.get("meta_info") or {}
+                finish_reason_info = meta_info.get("finish_reason") or {}
+                finish_reason = finish_reason_info.get("type")
+                if finish_reason is None:
+                    if self.receive_abort_request.is_set():
+                        rollout_state.finish_reason = "abort"
+                        rollout_state.status = Status.ABORTED
+                        self.logger.warning(
+                            f"finish_reason is missing in response meta_info when waiting for aborted message {uid}, defaulting to 'abort'. Response: {response}"
+                        )
+                    else:
+                        rollout_state.finish_reason = "error"
+                        rollout_state.status = Status.FAILED
+                        self.logger.warning(
+                            f"finish_reason is missing in response meta_info for message {uid}, defaulting to 'error'. Response: {response}"
+                        )
+                    rollout_state.error_msg = "Missing finish_reason in response meta_info"
+                    return rollout_state
+
+                if finish_reason == "abort" and self.receive_abort_request.is_set() is False:
+                    self.receive_abort_request.set()
+                    self.logger.info(f"Setting receive_abort_request to True for rank {self.rank}")
+
                 returned_response = response.get("text", "")
                 # 获取response_ids && respoonse_ids
                 if (
@@ -859,7 +878,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     )
                     routed_experts = response["meta_info"]["routed_experts"]  # token[layer[expert]]
                     if routed_experts is not None:
-                        routed_experts = self._decode_routed_experts(routed_experts)
+                        routed_experts = await self._decode_routed_experts(routed_experts)
                         if not isinstance(routed_experts, ray.ObjectRef):
                             routed_experts = ray.put(routed_experts)
 
