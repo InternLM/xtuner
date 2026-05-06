@@ -32,7 +32,6 @@ export RANK=${NODE_RANK:-"0"}
 export RAY_MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 export RAY_RANK=${RANK:-0} # 0 代表主节点, >0 代表工作节点
 export RAY_HEAD_PORT=${RAY_HEAD_PORT:-"6379"}
-export RAY_CLIENT_PORT=${RAY_CLIENT_PORT:-"10001"}
 export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-"8265"}
 # TODO: 提供非环境变量方式配置 ray_max_concurrency
 export RAY_MAX_CONCURRENCY=${RAY_MAX_CONCURRENCY:-1024} # dataflow_max_concurrency * prompt_repeat_k
@@ -69,7 +68,6 @@ export XTUNER_RL_MEM_DIR="${WORK_DIR}/mem_${current_time}"
 # 2. Launch Ray cluster
 # 根据 NODE_COUNT 分配 num_cpus, 防止内存OOM
 node_count=${NODE_COUNT:-1}
-total_cpus=$((node_count * 128))
 
 WORK_DIR=$(realpath "$WORK_DIR")
 if [ "$RAY_RANK" -eq 0 ]; then
@@ -84,7 +82,6 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --dashboard-port=$RAY_DASHBOARD_PORT \
     --include-dashboard=true \
     --disable-usage-stats \
-    --num-cpus=$total_cpus \
     --temp-dir="/tmp/ray_log/"
 else
   while true; do
