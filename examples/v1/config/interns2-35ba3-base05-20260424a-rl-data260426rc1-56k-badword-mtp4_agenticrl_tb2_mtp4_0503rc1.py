@@ -71,7 +71,7 @@ if not ray.is_initialized():
     ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG_POST_MORTEM": "0"}})
 
 experimental_name = os.path.basename(__file__).split(".py")[0]
-base_work_dir = "/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0430rc9"
+base_work_dir = "/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0430rc10"
 work_dir = os.path.join(base_work_dir, experimental_name)
 model_name = os.environ["RL_LLM_MODEL"]
 model_path = '/mnt/shared-storage-user/llmit1/user/wangziyi/exp/mindcopilot_rl/work_dirs/ckpt/interns2-35ba3-base05-20260424a-rl-data260428rc0-56k-badword-mtp4-resume800/20260430074140/hf-40'
@@ -145,6 +145,7 @@ rollout_config = RolloutConfig(
     allow_over_concurrency_ratio=1.2,
     rollout_timeout=1800,
     enable_return_routed_experts=enable_return_routed_experts,
+    return_routed_experts_key=enable_return_routed_experts,
     # max_prefill_token_num=max_prefill_token_num,
     extra_rollout_config=dict(
         lmdeploy_log_level="ERROR",
@@ -440,12 +441,12 @@ eval_data_cfg_tb2eval = [
         ),
     },
 ]
-# eval_dataset_cfg = (
-#     (eval_dataset_cfg_search + eval_dataset_cfg_math + eval_dataset_cfg_review + eval_data_cfg_tb2eval)
-#     if enable_evaluate
-#     else []
-# )
-eval_dataset_cfg = eval_data_cfg_tb2eval
+eval_dataset_cfg = (
+    (eval_dataset_cfg_search + eval_dataset_cfg_math + eval_dataset_cfg_review + eval_data_cfg_tb2eval)
+    if enable_evaluate
+    else []
+)
+# eval_dataset_cfg = eval_data_cfg_tb2eval
 dataloader_config = DataloaderConfig(pack_max_length=pack_max_length, collator="fake_collator", pack_level="none")
 
 
@@ -622,6 +623,11 @@ def convert_rollout_tractory_to_train_for_tb2rl(env, group_data_items):
 
 pg = AutoAcceleratorWorkers.build_placement_group(resources)
 rollout_controller = ray.remote(max_concurrency=1000)(RolloutController).remote(rollout_config, pg)
+policy_model = ControllerWrapper(
+            rollout_controller=rollout_controller,
+            sample_params=SampleParams(max_tokens=max_response_length),
+            tool_call_parser=Qwen3_5FunctionCallParser(),
+        )
 load_checkpoint_cfg = LoadCheckpointConfig(load_optimizer_states=False, load_optimizer_args=False)
 
 search_tool = AsyncMCPClient(
@@ -677,12 +683,7 @@ visit_tool = WebVisitor(
             'http://10.102.103.155:8106/mcp',
         ],
     ),
-    llm=dict(
-        type=ControllerWrapper,
-        rollout_controller=rollout_controller,
-        sample_params=SampleParams(max_tokens=max_response_length),
-        tool_call_parser=Qwen3_5FunctionCallParser(),
-    ),
+    llm=policy_model,
     truncate_browse_response_length=60000,
     tokenizer_path=model_path,
 )
@@ -805,12 +806,7 @@ train_science_search_browse_agent = dict(
     type=FunctionCallAgent,
     policy_agent=dict(
         type=AsyncTokenInOutAgent,
-        llm=dict(
-            type=ControllerWrapper,
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(),
-        ),
+        llm=policy_model,
         template=search_browse_python_tool_prompt,
     ),
     env_agent=dict(
@@ -841,12 +837,7 @@ train_science_search_visit_agent = dict(
     type=FunctionCallAgent,
     policy_agent=dict(
         type=AsyncTokenInOutAgent,
-        llm=dict(
-            type=ControllerWrapper,
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(),
-        ),
+        llm=policy_model,
         template=search_visit_python_tool_prompt,
     ),
     env_agent=dict(
@@ -879,12 +870,7 @@ train_agent_with_search_browse = dict(
     type=FunctionCallAgent,
     policy_agent=dict(
         type=AsyncTokenInOutAgent,
-        llm=dict(
-            type=ControllerWrapper,
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(),
-        ),
+        llm=policy_model,
         template=search_browse_tool_prompt,
     ),
     env_agent=dict(
@@ -915,12 +901,7 @@ train_agent_with_search_visit = dict(
     type=FunctionCallAgent,
     policy_agent=dict(
         type=AsyncTokenInOutAgent,
-        llm=dict(
-            type=ControllerWrapper,
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(),
-        ),
+        llm=policy_model,
         template=search_visit_tool_prompt,
     ),
     env_agent=dict(
@@ -951,12 +932,7 @@ eval_search_agent = dict(
     type=FunctionCallAgent,
     policy_agent=dict(
         type=AsyncTokenInOutAgent,
-        llm=dict(
-            type=ControllerWrapper,
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(),
-        ),
+        llm=policy_model,
         template=search_visit_python_tool_prompt,
     ),
     env_agent=dict(
@@ -988,12 +964,7 @@ train_math_agent = dict(
     type=FunctionCallAgent,
     policy_agent=dict(
         type=AsyncTokenInOutAgent,
-        llm=dict(
-            type=ControllerWrapper,
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(),
-        ),
+        llm=policy_model,
         template=python_tool_prompt,
     ),
     env_agent=dict(
@@ -1024,12 +995,7 @@ eval_math_agent = dict(
     type=FunctionCallAgent,
     policy_agent=dict(
         type=AsyncTokenInOutAgent,
-        llm=dict(
-            type=ControllerWrapper,
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(),
-        ),
+        llm=policy_model,
         template=python_tool_prompt,
     ),
     env_agent=dict(
@@ -1061,12 +1027,7 @@ train_review_agent = dict(
     type=FunctionCallAgent,
     policy_agent=dict(
         type=AsyncTokenInOutAgent,
-        llm=dict(
-            type=ControllerWrapper,
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(argument_type={'end_date': str}),
-        ),
+        llm=policy_model,
         template=review_tool_prompt + "\n\n" + review_sys_prompt,
     ),
     env_agent=dict(
@@ -1094,12 +1055,7 @@ eval_review_agent = dict(
     type=FunctionCallAgent,
     policy_agent=dict(
         type=AsyncTokenInOutAgent,
-        llm=dict(
-            type=ControllerWrapper,
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(argument_type={'end_date': str}),
-        ),
+        llm=policy_model,
         template=review_tool_prompt + "\n\n" + review_sys_prompt,
     ),
     env_agent=dict(
