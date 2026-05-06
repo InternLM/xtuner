@@ -11,13 +11,14 @@ export TRANSFORMERS_OFFLINE=1
 export HF_EVALUATE_OFFLINE=1
 export HF_HUB_OFFLINE=1
 
+# lmdeploy_dir=/mnt/shared-storage-user/llmit/user/lvchengqi/projects/interns2_rl/mtp_rl_dev/lmdeploy
 lmdeploy_dir=/mnt/shared-storage-user/llmit/user/lvchengqi/projects/interns2_rl/mtp_rl_dev/lmdeploy
 xtuner_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner
-intern_s2_delivery_dir=/mnt/shared-storage-user/llmit/user/lvchengqi/projects/interns2_rl/crg_rl_projects/src
+intern_s2_delivery_dir=/mnt/shared-storage-user/llmit/user/liujiangning/projects/interns2_preview_agentrl_mtp/crg_rl_projects/src
 lagent_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent
 xtuner_project_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/projects
-
-export PYTHONPATH=$intern_s2_delivery_dir:$lmdeploy_dir:$xtuner_dir:$lagent_dir:$xtuner_project_dir:$PYTHONPATH 
+transformer_model=/mnt/shared-storage-user/llmit1/user/wangziyi/.cache/huggingface/modules
+export PYTHONPATH=$intern_s2_delivery_dir:$lmdeploy_dir:$xtuner_dir:$lagent_dir:$xtuner_project_dir:$transformer_model:$PYTHONPATH 
 export NLTK_DATA=/mnt/shared-storage-user/llmit/user/lishuaibin/mv2yidian/nltk_data
 
 export XTUNER_USE_FA3=1
@@ -29,7 +30,7 @@ export PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True'
 export XTUNER_USE_SGLANG=0
 export XTUNER_USE_LMDEPLOY=1
 export XTUNER_USE_VLLM=0
-export RL_LLM_MODEL=train_lkk_test_0429rc1
+export RL_LLM_MODEL=train_lkk_test_$(date "+%m%d%H%M%S")
 export MASTER_PORT=6000
 export WORLD_SIZE=1
 export LMD_SKIP_WARMUP=1
@@ -51,8 +52,8 @@ export TRAIN_OPTIMIZER_STEPS=8
 
 current_time=$(date "+%m%d%H")
 
-export CONFIG_PATH='/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/examples/v1/config/interns2-35ba3-base03-20260413a-websearch-rl0415rc1_local.py'
-export WORK_DIR='/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0429'
+export CONFIG_PATH='/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/examples/v1/config/interns2-35ba3-base05-20260424a-rl-data260426rc1-56k-badword-mtp4_agenticrl_tb2_mtp4_0503rc1.py'
+export WORK_DIR='/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0430rc9'
 
 
 if [ ! -d "$WORK_DIR" ]; then

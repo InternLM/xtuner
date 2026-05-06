@@ -376,8 +376,12 @@ async def exec_in(
     """
     if env:
         command = _expand_vars(command, env)
-        prefix = " ".join(f'{k}="{v}"' for k, v in env.items())
-        command = f"{prefix} {command}"
+        # Use `export` so vars carry across chained commands (`bash A && bash B`).
+        # Inline `VAR=val cmd1 && cmd2` scopes VAR to cmd1 only, which bites
+        # when entry runs pre_entry.sh && lagent_entry.sh — daemon subprocess
+        # wouldn't see RL_LLM_MODEL etc.
+        exports = "; ".join(f'export {k}="{v}"' for k, v in env.items())
+        command = f"{exports}; {command}"
     result = await client.execute(command, cwd, timeout_sec)
     rc = _result_code(result)
     if raise_on_error and rc != 0:
@@ -487,17 +491,27 @@ def _result_code(exec_res: dict[str, Any]) -> int:
     return int(rc)
 
 
+_HOOK_STUCK_WARN_SEC = 30.0
+
+
 async def _run_hook(hook: Hook, client: Any, ctx: dict[str, Any], *, phase: str) -> None:
     """Run one hook; on failure, log + stash + re-raise with a label that names
     the hook class so the traceback says which one blew up."""
     name = getattr(hook, "name", None) or type(hook).__name__
-    label = f"{phase}-hook {type(hook).__name__}({name!r})"
     tid = (ctx.get("data") and getattr(ctx["data"], "id", None)) or "?"
-    get_logger().debug(f"[{tid}] {label} start")
+    image = ctx.get("sandbox_image") or "?"
+    label = f"{phase}-hook {type(hook).__name__}({name!r}) image={image}"
+    get_logger().info(f"[{tid}] {label} start")
     t0 = time.monotonic()
+    hook_task = asyncio.create_task(hook(client, ctx))
     try:
-        await hook(client, ctx)
-        get_logger().debug(f"[{tid}] {label} done ({time.monotonic() - t0:.2f}s)")
+        while True:
+            done, _ = await asyncio.wait([hook_task], timeout=_HOOK_STUCK_WARN_SEC)
+            if done:
+                break
+            get_logger().warning(f"[{tid}] {label} still running ({time.monotonic() - t0:.0f}s)")
+        await hook_task  # re-raise if hook failed
+        get_logger().info(f"[{tid}] {label} done ({time.monotonic() - t0:.2f}s)")
     except Exception as exc:
         import traceback as _tb
 
