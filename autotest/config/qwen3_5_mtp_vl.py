@@ -14,7 +14,7 @@ MODEL_PATH = os.environ["MODEL_PATH"]
 DATA_PATH = os.environ["DATA_PATH"]
 
 
-moe_cfg = Qwen3_5_VLMoE35BA3Config()
+moe_cfg = Qwen3_5_VLMoE35BA3Config(compile_cfg=False)
 moe_cfg.text_config.mtp_config = MTPConfig(num_layers=1, loss_scaling_factor=0.1)
 
 optim_cfg = AdamWConfig(lr=6e-05)
