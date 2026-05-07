@@ -55,31 +55,19 @@ class _FakeProduceStrategy:
         self.cleanup_progresses: list[object | None] = []
         self.cleanup_call_count = 0
 
-    async def produce_batch(
-        self,
-        agent_loop,
-        sampler,
-        replay_buffer,
-        batch_size: int,
-        task_name: str,
-        train_step: int = 0,
-        update_event=None,
-        *,
-        model_step: int,
-        progress,
-    ) -> ProduceBatchStatus:
-        self.called_batch_sizes.append(batch_size)
-        self.called_train_steps.append(train_step)
-        self.called_model_steps.append(model_step)
-        self.called_update_events.append(update_event)
-        self.called_update_event_states.append(None if update_event is None else update_event.is_set())
-        self.called_progresses.append(progress)
+    async def produce_batch(self, ctx) -> ProduceBatchStatus:
+        self.called_batch_sizes.append(ctx.task_batch_size)
+        self.called_train_steps.append(ctx.train_step)
+        self.called_model_steps.append(ctx.model_step)
+        self.called_update_events.append(ctx.update_event)
+        self.called_update_event_states.append(None if ctx.update_event is None else ctx.update_event.is_set())
+        self.called_progresses.append(ctx.progress)
         return self.status
 
-    async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, model_step: int, progress) -> float:
+    async def pause_produce(self, ctx) -> float:
         self.cleanup_call_count += 1
-        self.cleanup_model_steps.append(model_step)
-        self.cleanup_progresses.append(progress)
+        self.cleanup_model_steps.append(ctx.model_step)
+        self.cleanup_progresses.append(ctx.progress)
         return self.cleanup_pause_time_s
 
 
@@ -96,30 +84,18 @@ class _FakeStatusProduceStrategy:
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
 
-    async def produce_batch(
-        self,
-        agent_loop,
-        sampler,
-        replay_buffer,
-        batch_size: int,
-        task_name: str,
-        train_step: int = 0,
-        update_event=None,
-        *,
-        model_step: int,
-        progress,
-    ) -> ProduceBatchStatus:
-        self.called_train_steps.append(train_step)
-        self.called_model_steps.append(model_step)
-        self.called_update_events.append(update_event)
-        self.called_update_event_states.append(None if update_event is None else update_event.is_set())
-        self.called_progresses.append(progress)
+    async def produce_batch(self, ctx) -> ProduceBatchStatus:
+        self.called_train_steps.append(ctx.train_step)
+        self.called_model_steps.append(ctx.model_step)
+        self.called_update_events.append(ctx.update_event)
+        self.called_update_event_states.append(None if ctx.update_event is None else ctx.update_event.is_set())
+        self.called_progresses.append(ctx.progress)
         return self.status
 
-    async def pause_produce(self, agent_loop, replay_buffer, task_name: str, *, model_step: int, progress) -> float:
+    async def pause_produce(self, ctx) -> float:
         self.cleanup_call_count += 1
-        self.cleanup_model_steps.append(model_step)
-        self.cleanup_progresses.append(progress)
+        self.cleanup_model_steps.append(ctx.model_step)
+        self.cleanup_progresses.append(ctx.progress)
         return self.pause_time_s
 
 
@@ -141,25 +117,13 @@ class _SequencedProduceStrategy(_FakeProduceStrategy):
         super().__init__(status=ProduceBatchStatus.NORMAL, cleanup_pause_time_s=cleanup_pause_time_s)
         self._statuses = list(statuses)
 
-    async def produce_batch(
-        self,
-        agent_loop,
-        sampler,
-        replay_buffer,
-        batch_size: int,
-        task_name: str,
-        train_step: int = 0,
-        update_event=None,
-        *,
-        model_step: int,
-        progress,
-    ) -> ProduceBatchStatus:
-        self.called_batch_sizes.append(batch_size)
-        self.called_train_steps.append(train_step)
-        self.called_model_steps.append(model_step)
-        self.called_update_events.append(update_event)
-        self.called_update_event_states.append(None if update_event is None else update_event.is_set())
-        self.called_progresses.append(progress)
+    async def produce_batch(self, ctx) -> ProduceBatchStatus:
+        self.called_batch_sizes.append(ctx.task_batch_size)
+        self.called_train_steps.append(ctx.train_step)
+        self.called_model_steps.append(ctx.model_step)
+        self.called_update_events.append(ctx.update_event)
+        self.called_update_event_states.append(None if ctx.update_event is None else ctx.update_event.is_set())
+        self.called_progresses.append(ctx.progress)
         return self._statuses.pop(0) if self._statuses else ProduceBatchStatus.NORMAL
 
 

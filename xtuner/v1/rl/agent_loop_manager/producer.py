@@ -12,9 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
-    refresh_seq_staleness,
     update_group_status,
-    update_sample_version,
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
@@ -224,6 +222,73 @@ class ShouldContinueFn(Protocol):
     def __call__(self, completed_count: int, batch_size: int, **kwargs) -> bool: ...
 
 
+@dataclass
+class ProduceContext:
+    """单 task 生产上下文。
+
+    这里集中维护 AsyncProduceStrategy 最容易传错的运行时契约：
+    - target / consumed 都按绝对累计口径读取；
+    - 暂停只读 manager 传入的 update_event；
+    - 生成结果先按业务有效性过滤，再统一交给 ReplayBuffer 写版本、刷新 staleness、执行过期。
+    """
+
+    agent_loop: AgentLoopSpec
+    sampler: Sampler | None
+    replay_buffer: ReplayBuffer
+    task_batch_size: int
+    task_name: str
+    train_step: int
+    update_event: asyncio.Event | None
+    model_step: int
+    progress: ProduceProgress
+    is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
+    stale_threshold: int | None = None
+
+    @property
+    def consumer_step(self) -> int:
+        return self.progress.next_consumer_step
+
+    @property
+    def target_abs(self) -> int:
+        return self.progress.target_samples[self.task_name]
+
+    def should_abort(self) -> bool:
+        return self.update_event is not None and self.update_event.is_set()
+
+    def model_expired(self) -> bool:
+        if self.stale_threshold is None:
+            return False
+        return calculate_seq_staleness(self.model_step, self.train_step) >= self.stale_threshold
+
+    async def expired_count(self) -> int:
+        return await self.replay_buffer.count(task_name=self.task_name, group_status=Status.EXPIRED)
+
+    async def available_count(self) -> int:
+        completed_count = await self.replay_buffer.count(task_name=self.task_name, group_status=Status.COMPLETED)
+        return self.progress.consumed_samples[self.task_name] + completed_count
+
+    async def sample_group(self, *, from_expired_pool: bool) -> list[RolloutState]:
+        if self.sampler is None:
+            raise RuntimeError("ProduceContext.sample_group requires sampler.")
+        group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
+        return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
+
+    async def put_generated_group(self, group: list[RolloutState]) -> bool:
+        # 新约束：is_valid_sample_fn 只判断生成结果本身是否可训练，不依赖 staleness / expired 状态。
+        is_valid = self.is_valid_sample_fn(group)
+        if not is_valid:
+            for item in group:
+                item.status = Status.FILTERED
+        await self.replay_buffer.put(
+            group,
+            self.task_name,
+            model_step=self.model_step,
+            current_train_step=self.consumer_step,
+            stale_threshold=self.stale_threshold,
+        )
+        return is_valid
+
+
 class ProduceStrategyConfig(ABC, BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
@@ -267,29 +332,112 @@ class ProduceStrategy(ABC):
         self.is_valid_sample_fn = is_valid_sample_fn
         self.should_continue_fn = should_continue_fn
 
-    @abstractmethod
-    async def produce_batch(
+    def _build_context(
         self,
         agent_loop: AgentLoopSpec,
-        sampler: Sampler,
+        sampler: Sampler | None,
         replay_buffer: ReplayBuffer,
         batch_size: int,
         task_name: str,
-        train_step: int = 0,
-        update_event: asyncio.Event | None = None,
+        train_step: int,
+        update_event: asyncio.Event | None,
         *,
         model_step: int,
         progress: ProduceProgress,
+    ) -> ProduceContext:
+        return ProduceContext(
+            agent_loop=agent_loop,
+            sampler=sampler,
+            replay_buffer=replay_buffer,
+            task_batch_size=batch_size,
+            task_name=task_name,
+            train_step=train_step,
+            update_event=update_event,
+            model_step=model_step,
+            progress=progress,
+            is_valid_sample_fn=self.is_valid_sample_fn,
+            stale_threshold=getattr(self, "stale_threshold", None),
+        )
+
+    def _coerce_produce_context(
+        self,
+        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
+        sampler: Sampler | None = None,
+        replay_buffer: ReplayBuffer | None = None,
+        batch_size: int | None = None,
+        task_name: str | None = None,
+        train_step: int = 0,
+        update_event: asyncio.Event | None = None,
+        *,
+        model_step: int | None = None,
+        progress: ProduceProgress | None = None,
+    ) -> ProduceContext:
+        if isinstance(ctx_or_agent_loop, ProduceContext):
+            return ctx_or_agent_loop
+        if sampler is None or replay_buffer is None or batch_size is None or task_name is None:
+            raise TypeError("legacy produce_batch call requires sampler, replay_buffer, batch_size and task_name.")
+        if model_step is None or progress is None:
+            raise TypeError("legacy produce_batch call requires model_step and progress.")
+        return self._build_context(
+            ctx_or_agent_loop,
+            sampler,
+            replay_buffer,
+            batch_size,
+            task_name,
+            train_step,
+            update_event,
+            model_step=model_step,
+            progress=progress,
+        )
+
+    def _coerce_pause_context(
+        self,
+        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
+        replay_buffer: ReplayBuffer | None = None,
+        task_name: str | None = None,
+        *,
+        model_step: int | None = None,
+        progress: ProduceProgress | None = None,
+    ) -> ProduceContext:
+        if isinstance(ctx_or_agent_loop, ProduceContext):
+            return ctx_or_agent_loop
+        if replay_buffer is None or task_name is None or model_step is None or progress is None:
+            raise TypeError("legacy pause_produce call requires replay_buffer, task_name, model_step and progress.")
+        return self._build_context(
+            ctx_or_agent_loop,
+            None,
+            replay_buffer,
+            0,
+            task_name,
+            progress.producer_future_step,
+            None,
+            model_step=model_step,
+            progress=progress,
+        )
+
+    @abstractmethod
+    async def produce_batch(
+        self,
+        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
+        sampler: Sampler | None = None,
+        replay_buffer: ReplayBuffer | None = None,
+        batch_size: int | None = None,
+        task_name: str | None = None,
+        train_step: int = 0,
+        update_event: asyncio.Event | None = None,
+        *,
+        model_step: int | None = None,
+        progress: ProduceProgress | None = None,
     ) -> ProduceBatchStatus: ...
 
     async def pause_produce(
         self,
-        agent_loop: AgentLoopSpec,
-        replay_buffer: ReplayBuffer,
-        task_name: str,
+        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
+        replay_buffer: ReplayBuffer | None = None,
+        task_name: str | None = None,
         *,
-        model_step: int,
-        progress: ProduceProgress,
+        model_step: int | None = None,
+        progress: ProduceProgress | None = None,
     ) -> float:
         return 0.0
 
@@ -297,27 +445,43 @@ class ProduceStrategy(ABC):
 class SyncProduceStrategy(ProduceStrategy):
     async def produce_batch(
         self,
-        agent_loop: AgentLoopSpec,
-        sampler: Sampler,
-        replay_buffer: ReplayBuffer,
-        batch_size: int,
-        task_name: str,
+        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
+        sampler: Sampler | None = None,
+        replay_buffer: ReplayBuffer | None = None,
+        batch_size: int | None = None,
+        task_name: str | None = None,
         train_step: int = 0,
         update_event: asyncio.Event | None = None,
         *,
-        model_step: int,
-        progress: ProduceProgress,
+        model_step: int | None = None,
+        progress: ProduceProgress | None = None,
     ) -> ProduceBatchStatus:
+        ctx = self._coerce_produce_context(
+            ctx_or_agent_loop,
+            sampler,
+            replay_buffer,
+            batch_size,
+            task_name,
+            train_step,
+            update_event,
+            model_step=model_step,
+            progress=progress,
+        )
+        return await self._produce_batch(ctx)
+
+    async def _produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
+        if ctx.sampler is None:
+            raise RuntimeError("SyncProduceStrategy requires sampler.")
         pending_tasks = set()
-        completed_sample_count = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
+        completed_sample_count = await ctx.replay_buffer.count(task_name=ctx.task_name, group_status=Status.COMPLETED)
         # TODO: 是否支持 SyncProduceStrategy 在非共卡时使用？如果支持，下面这行注释掉？
         # assert completed_sample_count == 0, "SyncProduceStrategy assumes no completed samples at the start."
 
-        for _ in range(batch_size):
-            rollout_state = await sampler.sample(task_name=task_name)
+        for _ in range(ctx.task_batch_size):
+            rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
             task = create_task(
                 _timed_generate_group(
-                    agent_loop,
+                    ctx.agent_loop,
                     rollout_state,
                 )
             )
@@ -325,7 +489,7 @@ class SyncProduceStrategy(ProduceStrategy):
 
         logger.info(f"[SyncProduceStrategy] Started {len(pending_tasks)} initial tasks.")
 
-        while self.should_continue_fn(completed_sample_count, batch_size):
+        while self.should_continue_fn(completed_sample_count, ctx.task_batch_size):
             if not pending_tasks:
                 logger.warning("[SyncProduceStrategy] All tasks are done but not enough samples collected.")
                 break
@@ -337,35 +501,26 @@ class SyncProduceStrategy(ProduceStrategy):
             for task in done_tasks:
                 items = task.result()
 
-                for item in items:
-                    update_sample_version(item, model_step)
-                refresh_seq_staleness(items, train_step)
-
-                is_valid = self.is_valid_sample_fn(items)
-                if not is_valid:
-                    for item in items:
-                        item.status = Status.FILTERED
-
-                await replay_buffer.put(items, task_name)
+                is_valid = await ctx.put_generated_group(items)
                 if not is_valid:
                     continue
 
                 completed_sample_count += 1
-                if progress.target_samples[task_name] > 0:
+                if ctx.target_abs > 0:
                     logger.info(
                         f"[{self.__class__.__name__}] Collected "
-                        f"{min(progress.target_samples[task_name], max(0, completed_sample_count))}/"
-                        f"{progress.target_samples[task_name]} "
-                        f"valid samples for task {task_name}."
+                        f"{min(ctx.target_abs, max(0, completed_sample_count))}/"
+                        f"{ctx.target_abs} "
+                        f"valid samples for task {ctx.task_name}."
                     )
 
-            while len(pending_tasks) + completed_sample_count < batch_size and self.should_continue_fn(
-                completed_sample_count, batch_size
+            while len(pending_tasks) + completed_sample_count < ctx.task_batch_size and self.should_continue_fn(
+                completed_sample_count, ctx.task_batch_size
             ):
-                rollout_state = await sampler.sample(task_name=task_name)
+                rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
                 task = create_task(
                     _timed_generate_group(
-                        agent_loop,
+                        ctx.agent_loop,
                         rollout_state,
                     )
                 )
@@ -442,76 +597,42 @@ class AsyncProduceStrategy(ProduceStrategy):
             self._pending_tasks.clear()
             return claimed
 
-    async def _put_generated_group(
-        self,
-        items: list[RolloutState],
-        replay_buffer: ReplayBuffer,
-        task_name: str,
-        current_train_step: int,
-        model_step: int,
-    ) -> bool:
-        for item in items:
-            update_sample_version(item, model_step)
-        refresh_seq_staleness(items, current_train_step)
-        items = expire_group_if_needed(items, self.stale_threshold)
-
-        is_valid = self.is_valid_sample_fn(items)
-        if not is_valid:
-            for item in items:
-                item.status = Status.FILTERED
-
-        await replay_buffer.put(items, task_name)
-        return is_valid
-
     async def _put_claimed_tasks(
         self,
         claimed_tasks: set[asyncio.Task],
-        replay_buffer: ReplayBuffer,
-        task_name: str,
-        progress: ProduceProgress,
-        model_step: int,
+        ctx: ProduceContext,
         available_base: int | None = None,
     ) -> None:
         valid_completed_count = 0
         for task in claimed_tasks:
-            is_valid = await self._put_generated_group(
-                task.result(),
-                replay_buffer,
-                task_name,
-                current_train_step=progress.next_consumer_step,
-                model_step=model_step,
-            )
+            is_valid = await ctx.put_generated_group(task.result())
             if is_valid:
                 valid_completed_count += 1
             if is_valid and available_base is not None:
-                if progress.target_samples[task_name] > 0:
+                if ctx.target_abs > 0:
                     logger.info(
                         f"[{self.__class__.__name__}] Collected "
-                        f"{min(progress.target_samples[task_name], max(0, available_base + valid_completed_count))}/"
-                        f"{progress.target_samples[task_name]} "
-                        f"valid samples for task {task_name}."
+                        f"{min(ctx.target_abs, max(0, available_base + valid_completed_count))}/"
+                        f"{ctx.target_abs} "
+                        f"valid samples for task {ctx.task_name}."
                     )
 
     async def _schedule_one(
         self,
-        agent_loop: AgentLoopSpec,
-        sampler: Sampler,
+        ctx: ProduceContext,
         desired_pending: int,
         sample_from_expired: bool,
-        task_name: str,
-        update_event: asyncio.Event | None,
     ) -> bool:
         async with self._pending_lock:
             # update_event 是 manager 级暂停信号；在调度临界区内检查，避免 pause 已触发后继续新增任务。
-            if update_event is not None and update_event.is_set():
+            if ctx.should_abort():
                 return False
             if len(self._pending_tasks) >= desired_pending:
                 return False
-            group_status = [Status.EXPIRED, Status.ABORTED] if sample_from_expired else [Status.ABORTED]
-            rollout_state = await sampler.sample(task_name=task_name, group_status=group_status)
+            rollout_state = await ctx.sample_group(from_expired_pool=sample_from_expired)
             task = create_task(
                 _timed_generate_group(
-                    agent_loop,
+                    ctx.agent_loop,
                     rollout_state,
                     enable_partial_rollout=self.enable_partial_rollout,
                 )
@@ -521,37 +642,41 @@ class AsyncProduceStrategy(ProduceStrategy):
 
     async def _schedule_tasks_until(
         self,
-        agent_loop: AgentLoopSpec,
-        sampler: Sampler,
-        task_name: str,
+        ctx: ProduceContext,
         desired_pending: int,
         sample_from_expired: bool,
-        update_event: asyncio.Event | None,
     ) -> None:
         while await self._schedule_one(
-            agent_loop=agent_loop,
-            sampler=sampler,
+            ctx=ctx,
             desired_pending=desired_pending,
             sample_from_expired=sample_from_expired,
-            task_name=task_name,
-            update_event=update_event,
         ):
             pass
 
     async def pause_produce(
         self,
-        agent_loop: AgentLoopSpec,
-        replay_buffer: ReplayBuffer,
-        task_name: str,
+        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
+        replay_buffer: ReplayBuffer | None = None,
+        task_name: str | None = None,
         *,
-        model_step: int,
-        progress: ProduceProgress,
+        model_step: int | None = None,
+        progress: ProduceProgress | None = None,
     ) -> float:
+        ctx = self._coerce_pause_context(
+            ctx_or_agent_loop,
+            replay_buffer,
+            task_name,
+            model_step=model_step,
+            progress=progress,
+        )
+        return await self._pause_produce(ctx)
+
+    async def _pause_produce(self, ctx: ProduceContext) -> float:
         pause_start = time.perf_counter()
         if await self._pending_count() == 0:
             return 0.0
 
-        rollout_ctl = await get_agent_loop_rollout_ctl(agent_loop)
+        rollout_ctl = await get_agent_loop_rollout_ctl(ctx.agent_loop)
         await pause_generation(rollout_ctl)
         cleanup_start_time = time.perf_counter()
         while True:
@@ -581,17 +706,11 @@ class AsyncProduceStrategy(ProduceStrategy):
                 paused_items = task.result()
                 for item in paused_items:
                     logger.debug(
-                        f"[{self.__class__.__name__}] Task {task_name} | "
+                        f"[{self.__class__.__name__}] Task {ctx.task_name} | "
                         f"Collecting paused sample (uid: {item.uid}, status: {item.status}, "
                         f"length: {len(item.response_ids or [])}) after pausing generation."
                     )
-                await self._put_generated_group(
-                    paused_items,
-                    replay_buffer,
-                    task_name,
-                    current_train_step=progress.next_consumer_step,
-                    model_step=model_step,
-                )
+                await ctx.put_generated_group(paused_items)
             if await self._pending_count() > 0:
                 await pause_generation(rollout_ctl)
                 await asyncio.sleep(1)
@@ -599,45 +718,51 @@ class AsyncProduceStrategy(ProduceStrategy):
 
     async def produce_batch(
         self,
-        agent_loop: AgentLoopSpec,
-        sampler: Sampler,
-        replay_buffer: ReplayBuffer,
-        batch_size: int,
-        task_name: str,
+        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
+        sampler: Sampler | None = None,
+        replay_buffer: ReplayBuffer | None = None,
+        batch_size: int | None = None,
+        task_name: str | None = None,
         train_step: int = 0,
         update_event: asyncio.Event | None = None,
         *,
-        model_step: int,
-        progress: ProduceProgress,
+        model_step: int | None = None,
+        progress: ProduceProgress | None = None,
     ) -> ProduceBatchStatus:
-        if update_event is None:
-            update_event = asyncio.Event()
-        _validate_progress_for_task(progress, task_name)
+        ctx = self._coerce_produce_context(
+            ctx_or_agent_loop,
+            sampler,
+            replay_buffer,
+            batch_size,
+            task_name,
+            train_step,
+            update_event if update_event is not None else asyncio.Event(),
+            model_step=model_step,
+            progress=progress,
+        )
+        return await self._produce_batch(ctx)
 
-        if progress.target_samples[task_name] <= 0:
+    async def _produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
+        _validate_progress_for_task(ctx.progress, ctx.task_name)
+
+        if ctx.target_abs <= 0:
             return ProduceBatchStatus.NORMAL
 
-        if update_event.is_set():
+        if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
-        if self.is_model_expired(train_step, model_step):
+        if ctx.model_expired():
             return ProduceBatchStatus.EXPIRED_BATCH
 
         # 先回收跨 produce_batch 调用遗留的已完成任务，避免 done task 长期留在 pending 集合里。
         claimed_done = await self._claim_already_done()
-        await self._put_claimed_tasks(
-            claimed_done,
-            replay_buffer,
-            task_name,
-            progress,
-            model_step=model_step,
-        )
+        await self._put_claimed_tasks(claimed_done, ctx)
 
-        if update_event.is_set():
+        if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
-        if self.is_model_expired(train_step, model_step):
+        if ctx.model_expired():
             return ProduceBatchStatus.EXPIRED_BATCH
 
-        expired_count = await replay_buffer.count(task_name=task_name, group_status=Status.EXPIRED)
+        expired_count = await ctx.expired_count()
         sample_from_expired = self.tail_batch_trigger_size > 0 and expired_count >= self.tail_batch_trigger_size
         if sample_from_expired:
             logger.info(
@@ -647,22 +772,20 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         # 本轮 produce_batch 的必要累计目标固定；normal 模式只按当前 task batch 追加固定超发预算。
         # tail-batch 模式只补必要缺口，新增任务固定从 EXPIRED pool 取，不再扩大超发窗口。
-        target_abs = progress.target_samples[task_name]
-        oversample_budget = 0 if sample_from_expired else math.ceil(self.over_sample_threshold * batch_size)
+        target_abs = ctx.target_abs
+        oversample_budget = 0 if sample_from_expired else math.ceil(self.over_sample_threshold * ctx.task_batch_size)
         scheduled_target = target_abs + oversample_budget
         logger.info(
-            f"Starting produce_batch for task {task_name} with target_abs={target_abs}, "
+            f"Starting produce_batch for task {ctx.task_name} with target_abs={target_abs}, "
             f"oversample_budget={oversample_budget}, scheduled_target={scheduled_target}."
         )
         while True:
-            if update_event.is_set():
+            if ctx.should_abort():
                 return ProduceBatchStatus.UPDATE_ABORT
-            if self.is_model_expired(train_step, model_step):
+            if ctx.model_expired():
                 return ProduceBatchStatus.EXPIRED_BATCH
 
-            fresh = await replay_buffer.count(task_name=task_name, group_status=Status.COMPLETED)
-            available = progress.consumed_samples[task_name] + fresh
-            # if available >= target_abs:
+            available = await ctx.available_count()
             if not self.should_continue_fn(available, target_abs):
                 return ProduceBatchStatus.NORMAL
 
@@ -670,18 +793,15 @@ class AsyncProduceStrategy(ProduceStrategy):
             desired_pending = max(0, scheduled_target - available)
             if available + pending_count < scheduled_target:
                 await self._schedule_tasks_until(
-                    agent_loop=agent_loop,
-                    sampler=sampler,
-                    task_name=task_name,
+                    ctx=ctx,
                     desired_pending=desired_pending,
                     sample_from_expired=sample_from_expired,
-                    update_event=update_event,
                 )
-                if update_event.is_set():
+                if ctx.should_abort():
                     return ProduceBatchStatus.UPDATE_ABORT
 
             pending_snapshot = await self._snapshot_pending()
-            if update_event.is_set():
+            if ctx.should_abort():
                 return ProduceBatchStatus.UPDATE_ABORT
             if not pending_snapshot:
                 logger.warning("All tasks are done but not enough samples collected.")
@@ -695,9 +815,6 @@ class AsyncProduceStrategy(ProduceStrategy):
             claimed_done = await self._claim_done(done_tasks)
             await self._put_claimed_tasks(
                 claimed_done,
-                replay_buffer,
-                task_name,
-                progress,
-                model_step=model_step,
+                ctx,
                 available_base=available,
             )

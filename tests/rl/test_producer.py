@@ -6,6 +6,7 @@ from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop_manager import (
     AsyncProduceStrategyConfig,
     ProduceBatchStatus,
+    ProduceContext,
     ProduceProgress,
     SamplerConfig,
     SyncProduceStrategyConfig,
@@ -217,6 +218,31 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(final_data), 4)
         self.assertEqual(sorted(group[0].id for group in final_data), [0, 1, 2, 999])
+
+    async def test_async_produce_strategy_accepts_context_entrypoint(self):
+        task_name = "test_context_entry"
+        mock_agent_loop = self._build_agent_loop()
+        sampler = self._build_sampler()
+        strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
+        progress = self._build_progress(task_name, target=1, train_step=1)
+        ctx = ProduceContext(
+            agent_loop=mock_agent_loop,
+            sampler=sampler,
+            replay_buffer=self.replay_buffer,
+            task_batch_size=1,
+            task_name=task_name,
+            train_step=1,
+            update_event=asyncio.Event(),
+            model_step=0,
+            progress=progress,
+            is_valid_sample_fn=strategy.is_valid_sample_fn,
+            stale_threshold=strategy.stale_threshold,
+        )
+
+        status = await strategy.produce_batch(ctx)
+
+        self.assertEqual(status, ProduceBatchStatus.NORMAL)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)
 
     async def test_async_produce_strategy_uses_live_consumed_progress(self):
         task_name = "test_live_consumed"

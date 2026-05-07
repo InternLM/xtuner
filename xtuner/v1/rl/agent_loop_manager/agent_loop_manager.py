@@ -22,10 +22,12 @@ from .producer import (
     GROUP_GENERATE_TIME_KEY,
     AsyncProduceStrategy,
     ProduceBatchStatus,
+    ProduceContext,
     ProduceProgress,
     ProduceStrategy,
     ProduceStrategyConfig,
     SyncProduceStrategyConfig,
+    default_is_valid_sample_fn,
 )
 from .sampler import Sampler, SamplerConfig
 
@@ -177,6 +179,30 @@ def _fill_leftover_counts(result: ProduceBatchResult, status_counts: dict[Status
     result.leftover_filtered = status_counts.get(Status.FILTERED, 0)
 
 
+def _build_produce_context(
+    task_runner: _TaskRunner,
+    replay_buffer: ReplayBuffer,
+    batch_size: int,
+    train_step: int,
+    model_step: int,
+    update_event: asyncio.Event | None,
+    progress: ProduceProgress,
+) -> ProduceContext:
+    return ProduceContext(
+        agent_loop=task_runner.agent_loop,
+        sampler=task_runner.sampler,
+        replay_buffer=replay_buffer,
+        task_batch_size=batch_size,
+        task_name=task_runner.task_name,
+        train_step=train_step,
+        update_event=update_event,
+        model_step=model_step,
+        progress=progress,
+        is_valid_sample_fn=getattr(task_runner.produce_strategy, "is_valid_sample_fn", default_is_valid_sample_fn),
+        stale_threshold=getattr(task_runner.produce_strategy, "stale_threshold", None),
+    )
+
+
 async def _produce_single_task_to_buffer(
     task_runner: _TaskRunner,
     replay_buffer: ReplayBuffer,
@@ -186,16 +212,17 @@ async def _produce_single_task_to_buffer(
     update_event: asyncio.Event | None,
     progress: ProduceProgress,
 ) -> ProduceBatchStatus:
-    return await task_runner.produce_strategy.produce_batch(
-        task_runner.agent_loop,
-        task_runner.sampler,
+    ctx = _build_produce_context(
+        task_runner,
         replay_buffer,
         batch_size,
-        task_runner.task_name,
-        train_step=train_step,
-        model_step=model_step,
-        update_event=update_event,
-        progress=progress,
+        train_step,
+        model_step,
+        update_event,
+        progress,
+    )
+    return await task_runner.produce_strategy.produce_batch(
+        ctx,
     )
 
 
@@ -589,12 +616,17 @@ class AgentLoopManager:
         self._status = AgentLoopManagerStatus.UPDATE_ABORT
         pause_time_s = 0.0
         for task in self.task_runners:
-            pause_time_s += await task.produce_strategy.pause_produce(
-                task.agent_loop,
+            ctx = _build_produce_context(
+                task,
                 self.replay_buffer,
-                task.task_name,
-                model_step=self._model_step,
-                progress=pause_progress,
+                0,
+                pause_progress.producer_future_step,
+                self._model_step,
+                self._update_event,
+                pause_progress,
+            )
+            pause_time_s += await task.produce_strategy.pause_produce(
+                ctx,
             )
         self._pause_time_s = pause_time_s
         return pause_time_s
