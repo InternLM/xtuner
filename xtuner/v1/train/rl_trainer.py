@@ -508,6 +508,8 @@ class BaseRLTrainer:
         *,
         offload_rollout_before_train: bool = False,
         onload_train_before_train: bool = False,
+        filtered_rewards_sum: float = 0.0,
+        filtered_rewards_count: int = 0,
     ) -> TrainInfo:
         train_sample_count = sum(len(group) for group in train_batch)
         self.logger.info(f"generate {train_sample_count} samples for training")
@@ -527,7 +529,12 @@ class BaseRLTrainer:
                 self.logger.info("Training controller loaded")
 
         with timer("prepare_data", step_timer_dict):
-            data_batches, data_info = self._prepare_train_data(train_batch, self._train_worker_cfg.pack_max_length)
+            data_batches, data_info = self._prepare_train_data(
+                train_batch,
+                self._train_worker_cfg.pack_max_length,
+                filtered_rewards_sum=filtered_rewards_sum,
+                filtered_rewards_count=filtered_rewards_count,
+            )
         self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
         with timer("training", step_timer_dict):
@@ -561,7 +568,13 @@ class BaseRLTrainer:
         return eval_metrics
 
     # TODO: simplify with Packer.pack_pad_dispatch()
-    def _prepare_train_data(self, data_groups: list[list[RolloutState]], pack_max_length: int):
+    def _prepare_train_data(
+        self,
+        data_groups: list[list[RolloutState]],
+        pack_max_length: int,
+        filtered_rewards_sum: float = 0.0,
+        filtered_rewards_count: int = 0,
+    ):
         rewards_list = []
         advantages_list = []
         prompt_len_list = []
@@ -682,11 +695,17 @@ class BaseRLTrainer:
         prompt_len_t = torch.tensor(prompt_len_list).float() if prompt_len_list else torch.tensor([0.0]).float()
         response_len_t = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
+        for rewards in rewards_list:
+            filtered_rewards_sum += rewards
+            filtered_rewards_count += 1
+
+        raw_rewards_mean = filtered_rewards_sum / filtered_rewards_count if filtered_rewards_count > 0 else 0.0
         info_dict = {
             "batch_size": len(rewards_list),
             "rewards/mean": rewards_t.mean().item(),
             "rewards/min": rewards_t.min().item(),
             "rewards/max": rewards_t.max().item(),
+            "raw_rewards/mean": raw_rewards_mean,
             "advantages/mean": advantages_t.mean().item(),
             "advantages/min": advantages_t.min().item(),
             "advantages/max": advantages_t.max().item(),
@@ -930,6 +949,8 @@ class RLColocateTrainer(BaseRLTrainer):
                         step_timer_dict,
                         offload_rollout_before_train=True,
                         onload_train_before_train=True,
+                        filtered_rewards_sum=produce_result.filtered_rewards_sum,
+                        filtered_rewards_count=produce_result.filtered_rewards_count,
                     )
 
                     weights_synced = self._sync_weights_and_save(train_step, step_timer_dict)
@@ -1089,7 +1110,13 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             "RLDisaggregatedTrainer expects get_batch() to return non-empty rollout_states "
                             "unless status is EXPIRED_BATCH."
                         )
-                        train_log_info = self._train_one_batch(train_batch, train_step, step_timer_dict)
+                        train_log_info = self._train_one_batch(
+                            train_batch,
+                            train_step,
+                            step_timer_dict,
+                            filtered_rewards_sum=produce_result.filtered_rewards_sum,
+                            filtered_rewards_count=produce_result.filtered_rewards_count,
+                        )
                     else:
                         self.logger.info(
                             "Skip train step because rollout model is expired; prioritize weight sync first."
