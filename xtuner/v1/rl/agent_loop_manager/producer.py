@@ -4,7 +4,11 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
+
+
+if TYPE_CHECKING:
+    from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 
 import ray
 from pydantic import BaseModel, ConfigDict, Field
@@ -267,11 +271,21 @@ class ProduceStrategyConfig(ABC, BaseModel):
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
 
     @abstractmethod
-    def build(self, *, sync_weights_interval: int = 1) -> "ProduceStrategy": ...
+    def build(
+        self,
+        *,
+        sync_weights_interval: int = 1,
+        rollout_controller: "Optional[RolloutControllerProxy]" = None,
+    ) -> "ProduceStrategy": ...
 
 
 class SyncProduceStrategyConfig(ProduceStrategyConfig):
-    def build(self, *, sync_weights_interval: int = 1) -> "SyncProduceStrategy":
+    def build(
+        self,
+        *,
+        sync_weights_interval: int = 1,
+        rollout_controller: "Optional[RolloutControllerProxy]" = None,
+    ) -> "SyncProduceStrategy":
         return SyncProduceStrategy(
             is_valid_sample_fn=self.is_valid_sample_fn, should_continue_fn=self.should_continue_fn
         )
@@ -283,7 +297,16 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
     max_staleness: int = Field(default=0, ge=0)
     tail_batch_trigger_size: int = 0
 
-    def build(self, *, sync_weights_interval: int = 1) -> "AsyncProduceStrategy":
+    def build(
+        self,
+        *,
+        sync_weights_interval: int = 1,
+        rollout_controller: "Optional[RolloutControllerProxy]" = None,
+    ) -> "AsyncProduceStrategy":
+        if rollout_controller is not None:
+            import ray
+
+            ray.get(rollout_controller.set_enable_partial_rollout.remote(self.enable_partial_rollout))
         return AsyncProduceStrategy(
             over_sample_threshold=self.over_sample_threshold,
             enable_partial_rollout=self.enable_partial_rollout,

@@ -244,7 +244,10 @@ class AgentLoopManagerConfig(BaseModel):
                 judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
                 logger=logger,
             )
-            produce_strategy = task_cfg.produce_strategy_config.build(sync_weights_interval=sync_weights_interval)
+            produce_strategy = task_cfg.produce_strategy_config.build(
+                sync_weights_interval=sync_weights_interval,
+                rollout_controller=rollout_controller,
+            )
             sampler = task_cfg.sampler_config.build(tokenizer=tokenizer, replay_buffer=replay_buffer)
             task_runners.append(
                 _TaskRunner(

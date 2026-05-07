@@ -231,6 +231,12 @@ class RolloutController:
             else:
                 rollout_state.extra_fields.pop("reasoning_text", None)
 
+    def set_enable_partial_rollout(self, enable: bool) -> None:
+        """Propagate enable_partial_rollout flag to all active workers."""
+        with self.worker_info_lock:
+            active_actors = [info.actor for info in self.rank2info.values() if info.is_active]
+            ray.get([actor.set_enable_partial_rollout.remote(enable) for actor in active_actors])  # type: ignore[attr-defined]
+
     def pause_generation(self):
         self.health_checker.pause()
 
