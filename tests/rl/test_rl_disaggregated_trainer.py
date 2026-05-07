@@ -36,6 +36,11 @@ class _FakeManager:
     def continue_produce(self, model_step: int):
         self.calls.append(("continue_produce", model_step))
 
+    def shutdown(self):
+        self.calls.append("shutdown")
+        self._status = AgentLoopManagerStatus.FINISH
+        self._finish_event.set()
+
 
 class TestRLDisaggregatedTrainer(unittest.TestCase):
     def setUp(self):

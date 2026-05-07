@@ -717,6 +717,26 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.called_train_steps[:3], [3, 4, 4])
         self.assertEqual(strategy.called_model_steps[2], 9)
 
-        manager._status = AgentLoopManagerStatus.FINISH
-        manager._finish_event.set()
+        manager.shutdown()
         await asyncio.wait_for(loop_task, timeout=1.0)
+
+    async def test_shutdown_sets_finish_signals(self):
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+            ],
+            replay_buffer=_FakeReplayBuffer({}, {}),
+        )
+
+        manager.shutdown()
+
+        self.assertEqual(manager._status, AgentLoopManagerStatus.FINISH)
+        self.assertTrue(manager._update_event.is_set())
+        self.assertTrue(manager._finish_event.is_set())

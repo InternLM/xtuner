@@ -746,6 +746,12 @@ class AgentLoopManager:
         self._model_step = model_step
         self._update_event.clear()
 
+    def shutdown(self) -> None:
+        # 公开收口后台 producer 的退出信号，避免 trainer 直接写 manager 私有状态。
+        self._status = AgentLoopManagerStatus.FINISH
+        self._update_event.set()
+        self._finish_event.set()
+
     async def _wait_for_status_exit(self, blocked_status: AgentLoopManagerStatus) -> None:
         while not self._finish_event.is_set() and self._status == blocked_status:
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
