@@ -16,6 +16,7 @@ from intern_s1_delivery.advantage.rloo_entropy_badword import (
 )
 from lagent.actions.mcp_client import AsyncMCPClient
 from lagent.actions.web_visitor import WebVisitor
+from lagent.agents import AsyncAgent
 from lagent.agents.fc_agent import FunctionCallAgent, get_tool_prompt
 from ray.util.placement_group import placement_group
 from tb2_eval.tb2_eval_tokenize_fn import RLTB2EvalTokenizeFnConfig
@@ -547,13 +548,13 @@ review_judger_controller = JudgerController.remote(
     ),
 )
 
+from lagent.llms.model import AsyncAPIClient, ModelConfig
 
 from xtuner.v1.ray.environment.lagent.parsers import Qwen3_5FunctionCallParser
 
 
 def prepare_agent_inputs(env, group_data_item: RLDataFlowItem):
     agent = group_data_item.env.agent.extra_info.pop('agent')
-    agent.policy_agent.llm.tokenizer = env.tokenizer
     env_agent = agent.env_agent
     user_prompt = group_data_item.data.messages[-1]['content']
     env_message = AgentMessage(
@@ -624,11 +625,20 @@ def convert_rollout_tractory_to_train_for_tb2rl(env, group_data_items):
 
 
 pg = AutoAcceleratorWorkers.build_placement_group(resources)
-rollout_controller = ray.remote(max_concurrency=1000)(RolloutController).remote(rollout_config, pg)
-policy_model = ControllerWrapper(
-    rollout_controller=rollout_controller,
-    sample_params=SampleParams(max_tokens=max_response_length),
-    tool_call_parser=Qwen3_5FunctionCallParser(),
+rollout_controller = ray.remote(max_concurrency=1000)(RolloutController).remote(
+    rollout_config, pg, tool_call_parser=Qwen3_5FunctionCallParser(argument_type={'end_date': str})
+)
+llm = AsyncAPIClient(
+    model=ModelConfig(
+        model='',
+        base_url=ray.get(rollout_controller.get_rollout_info.remote())['api_server_url'] + '/v1',
+        api_key='admin',
+    ),
+    sample_params=training_sample_params.model_dump(exclude_none=True),
+    timeout=1200,
+    max_retry=1,
+    sleep_interval=5,
+    extra_body={'enable_thinking': True, 'spaces_between_special_tokens': False},
 )
 load_checkpoint_cfg = LoadCheckpointConfig(load_optimizer_states=False, load_optimizer_args=False)
 
@@ -685,7 +695,7 @@ visit_tool = WebVisitor(
             'http://10.102.103.155:8106/mcp',
         ],
     ),
-    llm=policy_model,
+    llm=llm,
     truncate_browse_response_length=60000,
     tokenizer_path=model_path,
 )
@@ -806,26 +816,11 @@ python_tool_prompt = get_tool_prompt([python_action], template=tool_template)
 # ============================================================
 train_science_search_browse_agent = dict(
     type=FunctionCallAgent,
-    policy_agent=dict(
-        type=AsyncTokenInOutAgent,
-        llm=policy_model,
-        template=search_browse_python_tool_prompt,
-    ),
+    policy_agent=dict(type=AsyncAgent, llm=llm, template=search_browse_python_tool_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[search_tool, browse_tool, python_action],
-        judger=JudgerWrapper(
-            # type=JudgerWrapper,
-            # judger_cfg=compass_judger_cfg,
-            # placement_group=ray.get(
-            #     placement_group(
-            #         bundles=[{"CPU": 1, "memory": 1024**3}] * len(compass_judger_cfg.reward_judger_configs),
-            #         strategy="PACK",
-            #     ).ready(),
-            #     timeout=30,
-            # ),
-            judger_controller=compass_judger_controller,
-        ),
+        judger=JudgerWrapper(judger_controller=compass_judger_controller),
         max_turn=max_turn,
         lower_tool_turn_bound=lower_tool_turn_bound_science,
         enable_repeated_tool_call_penalty=enable_repeated_tool_call_penalty,
@@ -837,26 +832,11 @@ train_science_search_browse_agent = dict(
 )
 train_science_search_visit_agent = dict(
     type=FunctionCallAgent,
-    policy_agent=dict(
-        type=AsyncTokenInOutAgent,
-        llm=policy_model,
-        template=search_visit_python_tool_prompt,
-    ),
+    policy_agent=dict(type=AsyncAgent, llm=llm, template=search_visit_python_tool_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[search_tool, visit_tool, python_action],
-        judger=JudgerWrapper(
-            # type=JudgerWrapper,
-            # judger_cfg=compass_judger_cfg,
-            # placement_group=ray.get(
-            #     placement_group(
-            #         bundles=[{"CPU": 1, "memory": 1024**3}] * len(compass_judger_cfg.reward_judger_configs),
-            #         strategy="PACK",
-            #     ).ready(),
-            #     timeout=30,
-            # ),
-            judger_controller=compass_judger_controller,
-        ),
+        judger=JudgerWrapper(judger_controller=compass_judger_controller),
         max_turn=max_turn,
         lower_tool_turn_bound=lower_tool_turn_bound_science,
         enable_repeated_tool_call_penalty=enable_repeated_tool_call_penalty,
@@ -870,26 +850,11 @@ train_science_search_visit_agent = dict(
 
 train_agent_with_search_browse = dict(
     type=FunctionCallAgent,
-    policy_agent=dict(
-        type=AsyncTokenInOutAgent,
-        llm=policy_model,
-        template=search_browse_tool_prompt,
-    ),
+    policy_agent=dict(type=AsyncAgent, llm=llm, template=search_browse_tool_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[search_tool, browse_tool],
-        judger=JudgerWrapper(
-            # type=JudgerWrapper,
-            # judger_cfg=compass_judger_cfg,
-            # placement_group=ray.get(
-            #     placement_group(
-            #         bundles=[{"CPU": 1, "memory": 1024**3}] * len(compass_judger_cfg.reward_judger_configs),
-            #         strategy="PACK",
-            #     ).ready(),
-            #     timeout=30,
-            # ),
-            judger_controller=compass_judger_controller,
-        ),
+        judger=JudgerWrapper(judger_controller=compass_judger_controller),
         max_turn=max_turn,
         lower_tool_turn_bound=lower_tool_turn_bound,
         enable_repeated_tool_call_penalty=enable_repeated_tool_call_penalty,
@@ -901,26 +866,11 @@ train_agent_with_search_browse = dict(
 )
 train_agent_with_search_visit = dict(
     type=FunctionCallAgent,
-    policy_agent=dict(
-        type=AsyncTokenInOutAgent,
-        llm=policy_model,
-        template=search_visit_tool_prompt,
-    ),
+    policy_agent=dict(type=AsyncAgent, llm=llm, template=search_visit_tool_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[search_tool, visit_tool],
-        judger=JudgerWrapper(
-            # type=JudgerWrapper,
-            # judger_cfg=compass_judger_cfg,
-            # placement_group=ray.get(
-            #     placement_group(
-            #         bundles=[{"CPU": 1, "memory": 1024**3}] * len(compass_judger_cfg.reward_judger_configs),
-            #         strategy="PACK",
-            #     ).ready(),
-            #     timeout=30,
-            # ),
-            judger_controller=compass_judger_controller,
-        ),
+        judger=JudgerWrapper(judger_controller=compass_judger_controller),
         max_turn=max_turn,
         lower_tool_turn_bound=lower_tool_turn_bound,
         enable_repeated_tool_call_penalty=enable_repeated_tool_call_penalty,
@@ -932,26 +882,11 @@ train_agent_with_search_visit = dict(
 )
 eval_search_agent = dict(
     type=FunctionCallAgent,
-    policy_agent=dict(
-        type=AsyncTokenInOutAgent,
-        llm=policy_model,
-        template=search_visit_python_tool_prompt,
-    ),
+    policy_agent=dict(type=AsyncAgent, llm=llm, template=search_visit_python_tool_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[search_tool, visit_tool, python_action],
-        judger=JudgerWrapper(
-            # type=JudgerWrapper,
-            # judger_cfg=compass_judger_cfg,
-            # placement_group=ray.get(
-            #     placement_group(
-            #         bundles=[{"CPU": 1, "memory": 1024**3}] * len(compass_judger_cfg.reward_judger_configs),
-            #         strategy="PACK",
-            #     ).ready(),
-            #     timeout=30,
-            # ),
-            judger_controller=compass_judger_controller,
-        ),
+        judger=JudgerWrapper(judger_controller=compass_judger_controller),
         max_turn=max_turn,
         lower_tool_turn_bound=None,
         enable_repeated_tool_call_penalty=False,
@@ -964,26 +899,11 @@ eval_search_agent = dict(
 
 train_math_agent = dict(
     type=FunctionCallAgent,
-    policy_agent=dict(
-        type=AsyncTokenInOutAgent,
-        llm=policy_model,
-        template=python_tool_prompt,
-    ),
+    policy_agent=dict(type=AsyncAgent, llm=llm, template=python_tool_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[python_action],
-        judger=JudgerWrapper(
-            # type=JudgerWrapper,
-            # judger_cfg=compass_judger_cfg,
-            # placement_group=ray.get(
-            #     placement_group(
-            #         bundles=[{"CPU": 1, "memory": 1024**3}] * len(compass_judger_cfg.reward_judger_configs),
-            #         strategy="PACK",
-            #     ).ready(),
-            #     timeout=30,
-            # ),
-            judger_controller=compass_judger_controller,
-        ),
+        judger=JudgerWrapper(judger_controller=compass_judger_controller),
         max_turn=25,
         lower_tool_turn_bound=5,
         enable_repeated_tool_call_penalty=False,
@@ -995,26 +915,11 @@ train_math_agent = dict(
 )
 eval_math_agent = dict(
     type=FunctionCallAgent,
-    policy_agent=dict(
-        type=AsyncTokenInOutAgent,
-        llm=policy_model,
-        template=python_tool_prompt,
-    ),
+    policy_agent=dict(type=AsyncAgent, llm=llm, template=python_tool_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[python_action],
-        judger=JudgerWrapper(
-            # type=JudgerWrapper,
-            # judger_cfg=compass_judger_cfg,
-            # placement_group=ray.get(
-            #     placement_group(
-            #         bundles=[{"CPU": 1, "memory": 1024**3}] * len(compass_judger_cfg.reward_judger_configs),
-            #         strategy="PACK",
-            #     ).ready(),
-            #     timeout=30,
-            # ),
-            judger_controller=compass_judger_controller,
-        ),
+        judger=JudgerWrapper(judger_controller=compass_judger_controller),
         max_turn=25,
         lower_tool_turn_bound=None,
         enable_repeated_tool_call_penalty=False,
@@ -1027,23 +932,11 @@ eval_math_agent = dict(
 
 train_review_agent = dict(
     type=FunctionCallAgent,
-    policy_agent=dict(
-        type=AsyncTokenInOutAgent,
-        llm=policy_model,
-        template=review_tool_prompt + "\n\n" + review_sys_prompt,
-    ),
+    policy_agent=dict(type=AsyncAgent, llm=llm, template=review_tool_prompt + "\n\n" + review_sys_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[arxiv_tool],
-        judger=JudgerWrapper(
-            # type=JudgerWrapper,
-            # judger_cfg=review_judger_cfg,
-            # placement_group=ray.get(
-            #     placement_group(bundles=[{"CPU": 1, "memory": 1024**3}], strategy="PACK").ready(), timeout=30
-            # ),
-            judger_controller=review_judger_controller,
-            reward_key=None,
-        ),
+        judger=JudgerWrapper(judger_controller=review_judger_controller, reward_key=None),
         max_turn=25,
         lower_tool_turn_bound=None,
         enable_repeated_tool_call_penalty=False,
@@ -1055,23 +948,11 @@ train_review_agent = dict(
 )
 eval_review_agent = dict(
     type=FunctionCallAgent,
-    policy_agent=dict(
-        type=AsyncTokenInOutAgent,
-        llm=policy_model,
-        template=review_tool_prompt + "\n\n" + review_sys_prompt,
-    ),
+    policy_agent=dict(type=AsyncAgent, llm=llm, template=review_tool_prompt + "\n\n" + review_sys_prompt),
     env_agent=dict(
         type=EnvAgent,
         actions=[arxiv_tool],
-        judger=JudgerWrapper(
-            # type=JudgerWrapper,
-            # judger_cfg=review_judger_cfg,
-            # placement_group=ray.get(
-            #     placement_group(bundles=[{"CPU": 1, "memory": 1024**3}], strategy="PACK").ready(), timeout=30
-            # ),
-            judger_controller=review_judger_controller,
-            reward_key=None,
-        ),
+        judger=JudgerWrapper(judger_controller=review_judger_controller, reward_key=None),
         max_turn=25,
         lower_tool_turn_bound=None,
         enable_repeated_tool_call_penalty=False,
