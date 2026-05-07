@@ -898,6 +898,8 @@ class RLColocateTrainer(BaseRLTrainer):
         if self._debug_rollout:
             self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
 
+        self.train_controller.set_train_rollout_mode("colocate")
+
     def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
         ray.get(self.rollout_controller.offload.remote())
@@ -1032,6 +1034,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 "Debug rollout mode is enabled. Disaggregated training keeps rollout workers resident."
             )
 
+        self.train_controller.set_train_rollout_mode("disaggregated")
     def _build_disaggregated_placement_groups(
         self,
         train_resources: AcceleratorResourcesConfig,
@@ -1155,5 +1158,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
             self.fake_update_weights()
 
     def fake_update_weights(self):
+        ray.get(self.rollout_controller.pause_generation.remote())
         self.train_controller.update_weights()
+        ray.get(self.rollout_controller.continue_generation.remote())
         self.logger.info("Rollout workers updated weights through fake disaggregated sync.")

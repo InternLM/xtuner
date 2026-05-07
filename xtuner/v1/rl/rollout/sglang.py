@@ -2,6 +2,7 @@ import base64
 import os
 from typing import Any, Dict, List, Union
 
+import ray
 import numpy as np
 import requests
 import torch
@@ -221,6 +222,8 @@ class SGLangWorker(RolloutWorker):
         ep_size = num_gpus_per_engine if self.config.expert_parallel_size > 1 else self.config.expert_parallel_size
         nnodes = max(1, num_gpus_per_engine // self.config.gpus_per_node)
         node_rank = self.rank // self.config.gpus_per_node if nnodes > 1 else 0
+        assigned_gpu_id = int(ray.get_runtime_context().get_accelerator_ids()[self.accelerator][0])
+
         init_kwargs = dict(
             model_path=self.config.model_path,
             trust_remote_code=True,
@@ -228,7 +231,7 @@ class SGLangWorker(RolloutWorker):
             port=self.server_port,
             nccl_port=self.nccl_port,
             dist_init_addr=self.dist_init_addr,
-            base_gpu_id=self.rank % self.config.gpus_per_node,
+            base_gpu_id=assigned_gpu_id,
             gpu_id_step=1,
             nnodes=nnodes,
             node_rank=node_rank,
