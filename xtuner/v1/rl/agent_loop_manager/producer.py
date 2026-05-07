@@ -4,7 +4,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 import ray
 from pydantic import BaseModel, ConfigDict, Field
@@ -60,6 +60,80 @@ class ProduceProgress:
     consumed_samples: dict[str, int] = field(default_factory=dict)
     target_samples: dict[str, int] = field(default_factory=dict)
     target_upto_future_step: int = 0
+
+    @classmethod
+    def build(cls, task_names: list[str]) -> "ProduceProgress":
+        return cls(
+            consumed_samples={task_name: 0 for task_name in task_names},
+            target_samples={task_name: 0 for task_name in task_names},
+        )
+
+    @classmethod
+    def build_local(
+        cls,
+        task_names: list[str],
+        task_batch_sizes: dict[str, int],
+        train_step: int,
+    ) -> "ProduceProgress":
+        # 共卡路径使用局部 progress，只表达本次 produce_batch 的目标，不污染非共卡累计窗口。
+        return cls(
+            next_consumer_step=train_step,
+            producer_future_step=train_step,
+            consumed_samples={task_name: 0 for task_name in task_names},
+            target_samples=dict(task_batch_sizes),
+            target_upto_future_step=train_step,
+        )
+
+    def ensure_target_upto(
+        self,
+        *,
+        batch_size: int,
+        future_step: int,
+        allocate_batch_sizes: Callable[[int, int], dict[str, int]],
+    ) -> dict[str, int]:
+        """把累计 target 推进到指定 future step，并返回该 step 的 task batch size。"""
+
+        if future_step > self.target_upto_future_step:
+            for step in range(self.target_upto_future_step + 1, future_step + 1):
+                task_batch_sizes = allocate_batch_sizes(batch_size, step)
+                for task_name, task_batch_size in task_batch_sizes.items():
+                    self.target_samples[task_name] += task_batch_size
+            self.target_upto_future_step = future_step
+
+        return allocate_batch_sizes(batch_size, future_step)
+
+    def begin_consume(self, train_step: int) -> None:
+        self.next_consumer_step = train_step
+
+    def mark_consumed(self, consumed_counts: dict[str, int]) -> None:
+        # consumer 真实取出多少就累计多少，target 不回退，避免 producer 把已消费样本当成缺口。
+        for task_name, count in consumed_counts.items():
+            self.consumed_samples[task_name] += count
+
+    def finish_consume(self, train_step: int) -> None:
+        self.next_consumer_step = train_step + 1
+
+    def advance_future_step(self) -> None:
+        self.producer_future_step += 1
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "next_consumer_step": self.next_consumer_step,
+            "producer_future_step": self.producer_future_step,
+            "consumed_samples": dict(self.consumed_samples),
+            "target_samples": dict(self.target_samples),
+            "target_upto_future_step": self.target_upto_future_step,
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        # 原地更新 dict，避免 strategy / context 持有旧引用。
+        self.next_consumer_step = state["next_consumer_step"]
+        self.producer_future_step = state["producer_future_step"]
+        self.target_upto_future_step = state["target_upto_future_step"]
+        self.consumed_samples.clear()
+        self.consumed_samples.update(state["consumed_samples"])
+        self.target_samples.clear()
+        self.target_samples.update(state["target_samples"])
 
 
 class ProduceBatchStatus(Enum):

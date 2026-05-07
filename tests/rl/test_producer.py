@@ -76,6 +76,50 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop.generate_group = mock_gen
         return mock_agent_loop
 
+    def test_produce_progress_methods_keep_absolute_window(self):
+        progress = ProduceProgress.build(["task_a", "task_b"])
+
+        def allocate(batch_size: int, step: int) -> dict[str, int]:
+            self.assertEqual(batch_size, 4)
+            return {"task_a": step, "task_b": batch_size - step}
+
+        current_sizes = progress.ensure_target_upto(
+            batch_size=4,
+            future_step=2,
+            allocate_batch_sizes=allocate,
+        )
+
+        self.assertEqual(current_sizes, {"task_a": 2, "task_b": 2})
+        self.assertEqual(progress.target_samples, {"task_a": 3, "task_b": 5})
+        self.assertEqual(progress.target_upto_future_step, 2)
+
+        progress.begin_consume(2)
+        progress.mark_consumed({"task_a": 1, "task_b": 2})
+        progress.finish_consume(2)
+        progress.advance_future_step()
+        self.assertEqual(progress.next_consumer_step, 3)
+        self.assertEqual(progress.producer_future_step, 2)
+        self.assertEqual(progress.consumed_samples, {"task_a": 1, "task_b": 2})
+
+        local_progress = ProduceProgress.build_local(["task_a", "task_b"], {"task_a": 1, "task_b": 3}, 7)
+        self.assertEqual(local_progress.target_samples, {"task_a": 1, "task_b": 3})
+        self.assertEqual(progress.target_samples, {"task_a": 3, "task_b": 5})
+
+        consumed_ref = progress.consumed_samples
+        target_ref = progress.target_samples
+        progress.load_state_dict(
+            {
+                "next_consumer_step": 8,
+                "producer_future_step": 9,
+                "consumed_samples": {"task_a": 4, "task_b": 5},
+                "target_samples": {"task_a": 6, "task_b": 7},
+                "target_upto_future_step": 10,
+            }
+        )
+        self.assertIs(progress.consumed_samples, consumed_ref)
+        self.assertIs(progress.target_samples, target_ref)
+        self.assertEqual(progress.state_dict()["target_samples"], {"task_a": 6, "task_b": 7})
+
     async def test_sampler_with_replay_buffer(self):
         task_name = "test_task"
         sampler = self._build_sampler()
