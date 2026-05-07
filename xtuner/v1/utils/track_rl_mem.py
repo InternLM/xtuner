@@ -153,6 +153,10 @@ def _format_memory_info_for_console(memory_info: dict) -> str:
     return "\n".join(lines)
 
 
+def _round_gb(value: float) -> float:
+    return round(value, 1)
+
+
 def monitor_actor_memory(work_dir: str, interval: int = 60):
     if pynvml is None:
         raise ImportError("pynvml 未安装，无法监控 GPU 内存")
@@ -240,6 +244,9 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
                     for device_idx, device_mem_gb in enumerate(gpu_memory_by_device):
                         rollout_gpu_by_device_gb[device_idx] += device_mem_gb
 
+                memory_gb = _round_gb(memory_gb)  # type: ignore
+                gpu_memory_gb = _round_gb(gpu_memory_gb)  # type: ignore
+
                 if actor_name in memory_info:
                     memory_info[actor_name]["mem_gb"].append(memory_gb)  # type: ignore
                     memory_info[actor_name]["pid"].append(str(pid))  # type: ignore
@@ -251,6 +258,7 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
                         "gpu_mem_gb": [gpu_memory_gb],
                     }
 
+            rollout_gpu_by_device_gb = [_round_gb(v) for v in rollout_gpu_by_device_gb]
             memory_info["rollout_gpu_by_device_gb"] = rollout_gpu_by_device_gb  # type: ignore
 
             # 写入文件
@@ -272,7 +280,7 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
             for device_idx, device_gpu_gb in enumerate(rollout_gpu_by_device_gb):
                 tb_writer_list[0].add_scalar(
                     tag=f"rollout/gpu_device_{device_idx}_gb",
-                    scalar_value=device_gpu_gb,
+                    scalar_value=_round_gb(device_gpu_gb),
                     global_step=count,
                 )
 
@@ -285,33 +293,33 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
                 if len(memory_mb) == 1:
                     tb_writer_list[0].add_scalar(
                         tag=f"{actor_name}/cpu_gb",
-                        scalar_value=memory_mb[-1],
+                        scalar_value=_round_gb(memory_mb[-1]),
                         global_step=count,
                     )
                     tb_writer_list[0].add_scalar(
                         tag=f"{actor_name}/gpu_gb",
-                        scalar_value=gpu_memory_mb[-1],
+                        scalar_value=_round_gb(gpu_memory_mb[-1]),
                         global_step=count,
                     )
                 else:
                     for i in range(len(memory_mb)):
                         tb_writer_list[i % len(tb_writer_list)].add_scalar(
                             tag=f"{actor_name}/cpu_gb",
-                            scalar_value=memory_mb[i],
+                            scalar_value=_round_gb(memory_mb[i]),
                             global_step=count,
                         )
 
                 if len(gpu_memory_mb) == 1:
                     tb_writer_list[0].add_scalar(
                         tag=f"{actor_name}/gpu_gb",
-                        scalar_value=gpu_memory_mb[-1],
+                        scalar_value=_round_gb(gpu_memory_mb[-1]),
                         global_step=count,
                     )
                 else:
                     for i in range(len(gpu_memory_mb)):
                         tb_writer_list[i % len(tb_writer_list)].add_scalar(
                             tag=f"{actor_name}/gpu_gb",
-                            scalar_value=gpu_memory_mb[i],
+                            scalar_value=_round_gb(gpu_memory_mb[i]),
                             global_step=count,
                         )
 
