@@ -1,6 +1,9 @@
 set -ex
 
 source /mnt/shared-storage-user/llmit/user/lvchengqi/uv_venvs/interns2_rl/bin/activate
+cd /mnt/shared-storage-user/huanghaian/code/temp/xtuner/
+
+ray stop --force || true
 
 export PYTHONUNBUFFERED=1
 
@@ -13,12 +16,12 @@ export HF_HUB_OFFLINE=1
 
 # lmdeploy_dir=/mnt/shared-storage-user/llmit/user/lvchengqi/projects/interns2_rl/mtp_rl_dev/lmdeploy
 lmdeploy_dir=/mnt/shared-storage-user/llmit/user/lvchengqi/projects/interns2_rl/mtp_rl_dev/lmdeploy
-xtuner_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner
 intern_s2_delivery_dir=/mnt/shared-storage-user/llmit/user/liujiangning/projects/interns2_preview_agentrl_mtp/crg_rl_projects/src
 lagent_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent
-xtuner_project_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/projects
-transformer_model=/mnt/shared-storage-user/llmit1/user/wangziyi/.cache/huggingface/modules
-export PYTHONPATH=$intern_s2_delivery_dir:$lmdeploy_dir:$xtuner_dir:$lagent_dir:$xtuner_project_dir:$transformer_model:$PYTHONPATH 
+xtuner_dir=/mnt/shared-storage-user/huanghaian/code/temp/xtuner/
+xtuner_project_dir=/mnt/shared-storage-user/huanghaian/code/temp/xtuner/projects
+# transformer_model=/mnt/shared-storage-user/llmit1/user/wangziyi/.cache/huggingface/modules
+export PYTHONPATH=$intern_s2_delivery_dir:$lmdeploy_dir:$xtuner_dir:$lagent_dir:$xtuner_project_dir:$PYTHONPATH  # $transformer_model
 export NLTK_DATA=/mnt/shared-storage-user/llmit/user/lishuaibin/mv2yidian/nltk_data
 
 export XTUNER_USE_FA3=1
@@ -44,16 +47,16 @@ if [ "$XTUNER_USE_SGLANG" = "1" ]; then
 fi
 
 export MAX_CONCURRENT=128
-export ENABLE_PARTIAL_ROLLOUT=1
+export ENABLE_PARTIAL_ROLLOUT=0
 export TAIL_BATCH_CANDIDATE_STEPS=2
 export TAIL_BATCH_TRIGGER_SIZE=10000000
-export STALENESS_THRESHOLD=0
+export STALENESS_THRESHOLD=0.5
 export TRAIN_OPTIMIZER_STEPS=8
 
 current_time=$(date "+%m%d%H")
 
-export CONFIG_PATH='/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/examples/v1/config/interns2-35ba3-base05-20260424a-rl-data260426rc1-56k-badword-mtp4_agenticrl_tb2_mtp4_0503rc1.py'
-export WORK_DIR='/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0430rc9'
+export CONFIG_PATH='/mnt/shared-storage-user/huanghaian/code/temp/xtuner/examples/v1/config/interns2-35ba3-base05-20260424a-rl-data260426rc1-56k-badword-mtp4_agenticrl_tb2_mtp4_0503rc1.py'
+export WORK_DIR='/mnt/shared-storage-user/huanghaian/code/temp/xtuner/work_dirs_rl/interns2_preview_0430rc9'
 
 
 if [ ! -d "$WORK_DIR" ]; then
@@ -63,7 +66,6 @@ fi
 export RAY_MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 export RAY_RANK=${RANK:-0}
 export RAY_HEAD_PORT=${RAY_HEAD_PORT:-"6379"}
-export RAY_CLIENT_PORT=${RAY_CLIENT_PORT:-"10001"}
 export RAY_DASHBOARD_PORT=${RAY_DASHBOARD_PORT:-"8265"}
 
 # 一定要短，不能放在很深的共享目录里
@@ -89,8 +91,7 @@ if [ "$RAY_RANK" -eq 0 ]; then
     --dashboard-port="$RAY_DASHBOARD_PORT" \
     --include-dashboard=true \
     --disable-usage-stats \
-    --temp-dir="$RAY_TMPDIR" \
-    --num-cpus=128
+    --temp-dir="$RAY_TMPDIR"
 else
   cleanup_ray
   sleep 10
@@ -112,7 +113,7 @@ NCCL_IB_HCA="=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" \
 NCCL_IB_GID_INDEX=3 \
 NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=bond0 \
 NVSHMEM_IB_GID_INDEX=3 \
-NCCL_DEBUG=INFO
+# NCCL_DEBUG=INFO
 
 # 4. Submit training job on Head node
 if [ "$RAY_RANK" -eq 0 ]; then

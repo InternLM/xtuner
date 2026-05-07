@@ -1,30 +1,28 @@
 import asyncio
-from concurrent.futures import ProcessPoolExecutor
 from functools import partial
-from multiprocessing import get_context
 from typing import Any, Dict, List, Optional
 
 import ray
 
 from transformers import AutoTokenizer
 from xtuner.v1.ray.environment.lagent.tokenize import tokenize as lagent_tokenize
+from xtuner.v1.utils.executor import SharedPoolExecutor
 from xtuner.v1.utils import get_logger
 
 
 _PROCESS_TOKENIZER = None
 
 
-def _init_process_tokenizer(tokenizer_path: str):
-    global _PROCESS_TOKENIZER
-    _PROCESS_TOKENIZER = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
-
 def _tokenize_in_process(
-    messages: List[Dict[str, Any]],
-    tools: Optional[List[Any]],
+    task: tuple[List[Dict[str, Any]], Optional[List[Any]]],
+    tokenizer_path: str,
     enable_interleaved_thinking: bool,
     enable_thinking: bool,
 ) -> Dict[str, Any]:
+    messages, tools = task
+    global _PROCESS_TOKENIZER
+    if _PROCESS_TOKENIZER is None:
+        _PROCESS_TOKENIZER = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
     assert _PROCESS_TOKENIZER is not None, "Process tokenizer is not initialized."
     return lagent_tokenize(
         _PROCESS_TOKENIZER,
@@ -48,15 +46,19 @@ class TokenizeWorker:
         self.enable_interleaved_thinking = enable_interleaved_thinking
         self.enable_thinking = enable_thinking
         self.num_processes = max(1, num_processes)
-        self.pool: Optional[ProcessPoolExecutor] = None
+        self.pool: Optional[SharedPoolExecutor] = None
         self.tokenizer = None
 
         if self.num_processes > 1:
-            self.pool = ProcessPoolExecutor(
+            self.pool = SharedPoolExecutor(
+                fn=_tokenize_in_process,
+                partial_kwargs={
+                    "tokenizer_path": tokenizer_path,
+                    "enable_interleaved_thinking": self.enable_interleaved_thinking,
+                    "enable_thinking": self.enable_thinking,
+                },
                 max_workers=self.num_processes,
-                mp_context=get_context("spawn"),
-                initializer=_init_process_tokenizer,
-                initargs=(tokenizer_path,),
+                mp_context="fork",
             )
             self.logger.info(f"Tokenize worker starts process pool, num_processes={self.num_processes}")
         else:
@@ -64,15 +66,7 @@ class TokenizeWorker:
 
     async def tokenize(self, messages: List[Dict[str, Any]], tools: Optional[List[Any]] = None) -> Dict[str, Any]:
         if self.pool is not None:
-            loop = asyncio.get_running_loop()
-            tokenize_call = partial(
-                _tokenize_in_process,
-                messages,
-                tools,
-                self.enable_interleaved_thinking,
-                self.enable_thinking,
-            )
-            return await loop.run_in_executor(self.pool, tokenize_call)
+            return await asyncio.wrap_future(self.pool.submit((messages, tools)))
 
         assert self.tokenizer is not None, "Tokenizer is not initialized."
         tokenize_call = partial(
@@ -83,12 +77,11 @@ class TokenizeWorker:
             enable_interleaved_thinking=self.enable_interleaved_thinking,
             enable_thinking=self.enable_thinking,
         )
-        # 额外用loop.run_in_executor(None, tokenize_call)会额外创建一个事件循环，导致性能下降
         return tokenize_call()
 
     def shutdown(self):
         if self.pool is not None:
-            self.pool.shutdown(wait=False, cancel_futures=True)
+            self.pool.shutdown()
             self.pool = None
 
 

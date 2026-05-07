@@ -32,8 +32,9 @@ from xtuner.v1.rl.grpo import GRPOLossConfig
 from xtuner.v1.train.agent_rl_trainer import AgentRLTrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 
-if not ray.is_initialized():
-    ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG_POST_MORTEM": "1"}})
+# if not ray.is_initialized():
+#     ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG_POST_MORTEM": "1"}})
+
 # export RL_LLM_MODEL='xtuner-qwen35-30b'
 # bash examples/v1/scripts/run_rl.sh examples/v1/config/agent_rl_qwen35_30b_grpo.py "lmdeploy" $QWEN3P5_VL_MODEL_PATH $TRAIN_DATA_PATH
 experimental_name = 'agent_rl_qwen3.5_30b_grpo'
