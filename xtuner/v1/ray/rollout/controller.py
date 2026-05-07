@@ -12,8 +12,8 @@ import ray
 import uvicorn
 from fastapi import FastAPI
 from ray.util.placement_group import PlacementGroup
-
 from transformers import AutoTokenizer
+
 from xtuner.v1.data_proto.rl_data import (
     RLRolloutResponseItem,
     RolloutExtraParams,
@@ -24,7 +24,6 @@ from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
-
 
 ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
@@ -118,6 +117,8 @@ class RolloutController:
         self,
         infer_config: RolloutConfig,
         placement_group: PlacementGroup,
+        reasoning_parser=None,
+        tool_call_parser=None,
     ):
         """Initialize the RolloutController.
 
@@ -166,13 +167,15 @@ class RolloutController:
         self.timeout_multiplier = 2.0
         self.cancel_response_timeout = 5.0
 
+        from lagent.utils import create_object
+
         from xtuner.v1.ray.environment.lagent.parsers import (
             Qwen3_5FunctionCallParser,
             Qwen3TokenReasonParser,
         )
 
-        self.reasoning_parser = Qwen3TokenReasonParser(tokenizer_path)
-        self.tool_call_parser = Qwen3_5FunctionCallParser()
+        self.reasoning_parser = create_object(reasoning_parser) or Qwen3TokenReasonParser(tokenizer_path)
+        self.tool_call_parser = create_object(tool_call_parser) or Qwen3_5FunctionCallParser()
 
     def _get_worker_status_for_router(self) -> Dict[RolloutWorker, bool]:
         """Helper to generate the status dict required by the SessionRouter."""
@@ -487,17 +490,20 @@ class RolloutController:
         @app.post("/v1/chat/completions")
         async def chat_completions(request: LagentChatCompletionRequest):
             inputs = tokenize(self.tokenizer, request.messages, request.tools)
-            response: RLRolloutResponseItem = await self.rollout(
-                prompt=request.messages,
-                input_ids=inputs["input_ids"],
-                tools=request.tools,
-                tool_choice=request.tool_choice,
-                sample_params=request.sample_params,
-                extra_params=request.extra_params,
-                extra_info=(
-                    {"routed_experts": inputs["routed_experts"]} if inputs["routed_experts"] is not None else {}
-                ),
-            )
+            if len(inputs["input_ids"]) >= self.config.context_length:
+                response = RLRolloutResponseItem(finish_reason="length")
+            else:
+                response: RLRolloutResponseItem = await self.rollout(
+                    prompt=request.messages,
+                    input_ids=inputs["input_ids"],
+                    tools=request.tools,
+                    tool_choice=request.tool_choice,
+                    sample_params=request.sample_params,
+                    extra_params=request.extra_params,
+                    extra_info=(
+                        {"routed_experts": inputs["routed_experts"]} if inputs["routed_experts"] is not None else {}
+                    ),
+                )
             message = AgentMessage.from_model_response(response, "assistant")
             message = self.reasoning_parser.parse_response(message)
             message = self.tool_call_parser.parse_response(message)
@@ -662,5 +668,4 @@ class RolloutController:
         Args:
             block (bool): Whether to block until the operation completes.
         """
-        return self._broadcast_to_active_workers("shutdown", block)
         return self._broadcast_to_active_workers("shutdown", block)
