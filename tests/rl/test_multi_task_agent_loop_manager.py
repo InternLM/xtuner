@@ -183,20 +183,49 @@ class _FakeReplayBuffer:
 
     async def refresh_staleness(
         self,
-        task_name: str,
+        *,
+        task_stale_thresholds: dict[str, int],
         current_train_step: int,
-        stale_threshold: int,
         statuses: list[Status] | None = None,
     ):
-        self.refresh_staleness_calls.append((task_name, current_train_step, stale_threshold, tuple(statuses or ())))
-        for group in self._rollout_states_by_task.get(task_name, []):
-            for state in group:
-                response_model_steps = getattr(state, "response_model_steps", None) or []
-                if response_model_steps and hasattr(state, "seq_staleness"):
-                    state.seq_staleness = calculate_seq_staleness(
-                        min(response_model_steps), current_train_step
-                    )
-        return 0
+        expired_counts = {}
+        for task_name, stale_threshold in task_stale_thresholds.items():
+            self.refresh_staleness_calls.append(
+                (task_name, current_train_step, stale_threshold, tuple(statuses or ()))
+            )
+            for group in self._rollout_states_by_task.get(task_name, []):
+                for state in group:
+                    response_model_steps = getattr(state, "response_model_steps", None) or []
+                    if response_model_steps and hasattr(state, "seq_staleness"):
+                        state.seq_staleness = calculate_seq_staleness(
+                            min(response_model_steps), current_train_step
+                        )
+            expired_counts[task_name] = 0
+        return expired_counts
+
+    async def is_ready(self, task_batch_sizes: dict[str, int], *, group_status: Status = Status.COMPLETED):
+        for task_name, batch_size in task_batch_sizes.items():
+            if await self.count(task_name, group_status) < batch_size:
+                return False
+        return True
+
+    async def take_batch(self, task_batch_sizes: dict[str, int], *, group_status: Status = Status.COMPLETED):
+        batch_by_task = {}
+        consumed_counts = {}
+        for task_name, batch_size in task_batch_sizes.items():
+            batch = await self.get(batch_size, task_name, group_status)
+            batch_by_task[task_name] = batch
+            consumed_counts[task_name] = len(batch)
+        return batch_by_task, consumed_counts
+
+    async def count_statuses(self, task_names: list[str], statuses: list[Status]):
+        return {
+            task_name: {
+                status: self._leftover_counts.get((task_name, status), 0)
+                for status in statuses
+            }
+            for task_name in task_names
+        }
 
     async def save(self, checkpoint_path: Path | str):
         self.saved_paths.append(Path(checkpoint_path))

@@ -640,13 +640,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         stale_item.response_model_steps = [3]
         await self.replay_buffer.put([stale_item], task_name)
 
-        expired_count = await self.replay_buffer.refresh_staleness(
-            task_name=task_name,
+        expired_counts = await self.replay_buffer.refresh_staleness(
+            task_stale_thresholds={task_name: 2},
             current_train_step=6,
-            stale_threshold=2,
         )
         expired_groups = await self.replay_buffer.get(10, task_name, Status.EXPIRED)
 
-        self.assertEqual(expired_count, 1)
+        self.assertEqual(expired_counts, {task_name: 1})
         self.assertEqual(len(expired_groups), 1)
         self.assertEqual(expired_groups[0][0].seq_staleness, 2)

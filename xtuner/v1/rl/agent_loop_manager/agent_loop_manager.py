@@ -158,6 +158,25 @@ def _aggregate_status(statuses: list[ProduceBatchStatus]) -> ProduceBatchStatus:
     return ProduceBatchStatus.NORMAL
 
 
+_LEFTOVER_STATUSES = [
+    Status.INIT,
+    Status.COMPLETED,
+    Status.ABORTED,
+    Status.EXPIRED,
+    Status.FAILED,
+    Status.FILTERED,
+]
+
+
+def _fill_leftover_counts(result: ProduceBatchResult, status_counts: dict[Status, int]) -> None:
+    result.leftover_init = status_counts.get(Status.INIT, 0)
+    result.leftover_completed = status_counts.get(Status.COMPLETED, 0)
+    result.leftover_aborted = status_counts.get(Status.ABORTED, 0)
+    result.leftover_expired = status_counts.get(Status.EXPIRED, 0)
+    result.leftover_failed = status_counts.get(Status.FAILED, 0)
+    result.leftover_filtered = status_counts.get(Status.FILTERED, 0)
+
+
 async def _produce_single_task_to_buffer(
     task_runner: _TaskRunner,
     replay_buffer: ReplayBuffer,
@@ -376,6 +395,7 @@ class AgentLoopManager:
     async def _refresh_for_all_tasks(self, train_step: int, statuses: list[Status]) -> None:
         XTUNER_REFRESH_STALENESS = os.environ.get("XTUNER_REFRESH_STALENESS", "1") == "1"
         self.logger.debug(f"[AgentLoopManager][{self.name}] XTUNER_REFRESH_STALENESS={XTUNER_REFRESH_STALENESS}")
+        task_stale_thresholds: dict[str, int] = {}
         for task in self.task_runners:
             if XTUNER_REFRESH_STALENESS:
                 # TODO: 同步Colocate训练，都必须走这个分支才能保证精度正常,
@@ -393,14 +413,19 @@ class AgentLoopManager:
                     )
                     continue
 
-            expired_count = await self.replay_buffer.refresh_staleness(
-                task_name=task.task_name,
-                current_train_step=train_step,
-                stale_threshold=stale_threshold,
-                statuses=statuses,
-            )
+            task_stale_thresholds[task.task_name] = stale_threshold
+
+        if not task_stale_thresholds:
+            return
+
+        expired_counts = await self.replay_buffer.refresh_staleness(
+            task_stale_thresholds=task_stale_thresholds,
+            current_train_step=train_step,
+            statuses=statuses,
+        )
+        for task_name, expired_count in expired_counts.items():
             self.logger.info(
-                f"[AgentLoopManager][{self.name}] Refresh staleness for task {task.task_name}: expired_count={expired_count}"
+                f"[AgentLoopManager][{self.name}] Refresh staleness for task {task_name}: expired_count={expired_count}"
             )
 
     def _get_task_batch_sizes_for_step(self, batch_size: int, train_step: int) -> dict[str, int]:
@@ -628,42 +653,42 @@ class AgentLoopManager:
         pause_time_s = self._pause_time_s
         self._pause_time_s = 0.0
 
-        if len(self.task_runners) == 1:
-            task = self.task_runners[0]
-            result = await self._get_single_task_batch_from_buffer(
-                task,
-                batch_size,
-                train_step,
-                consume_progress=consume_progress,
-            )
-            _fill_group_timing_stats(result, result.rollout_states, pause_time_s=pause_time_s)
-            return result
-
         if task_batch_sizes is None:
             task_batch_sizes = self._get_task_batch_sizes_for_step(batch_size, train_step)
         else:
             self._validate_task_batch_sizes(task_batch_sizes, batch_size)
-        active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
-        results = (
-            await asyncio.gather(
-                *[
-                    self._get_single_task_batch_from_buffer(
-                        task,
-                        task_batch_sizes[task.task_name],
-                        train_step,
-                        consume_progress=consume_progress,
-                    )
-                    for task in active_tasks
-                ]
-            )
-            if active_tasks
-            else []
-        )
 
-        task_results = {task.task_name: result for task, result in zip(active_tasks, results)}
+        batch_by_task, consumed_counts = await self.replay_buffer.take_batch(task_batch_sizes)
+        if consume_progress is not None:
+            consume_progress.mark_consumed(consumed_counts)
+        leftover_counts = await self.replay_buffer.count_statuses(self.task_names, _LEFTOVER_STATUSES)
+
         for task in self.task_runners:
-            if task.task_name not in task_results:
-                task_results[task.task_name] = ProduceBatchResult(rollout_states=[])
+            task_name = task.task_name
+            task_counts = leftover_counts.get(task_name, {})
+            self.logger.info(
+                f"[AgentLoopManager][{self.name}] get_batch from buffer for task {task_name}: "
+                f"requested={task_batch_sizes[task_name]}, retrieved={len(batch_by_task.get(task_name, []))}, "
+                f"leftover_init={task_counts.get(Status.INIT, 0)}, "
+                f"leftover_completed={task_counts.get(Status.COMPLETED, 0)}, "
+                f"leftover_aborted={task_counts.get(Status.ABORTED, 0)}, "
+                f"leftover_expired={task_counts.get(Status.EXPIRED, 0)}, "
+                f"leftover_failed={task_counts.get(Status.FAILED, 0)}, "
+                f"leftover_filtered={task_counts.get(Status.FILTERED, 0)}"
+            )
+
+        if len(self.task_runners) == 1:
+            task = self.task_runners[0]
+            result = ProduceBatchResult(rollout_states=batch_by_task.get(task.task_name, []))
+            _fill_leftover_counts(result, leftover_counts.get(task.task_name, {}))
+            _fill_group_timing_stats(result, result.rollout_states, pause_time_s=pause_time_s)
+            return result
+
+        task_results: dict[str, ProduceBatchResult] = {}
+        for task in self.task_runners:
+            result = ProduceBatchResult(rollout_states=batch_by_task.get(task.task_name, []))
+            _fill_leftover_counts(result, leftover_counts.get(task.task_name, {}))
+            task_results[task.task_name] = result
 
         ordered_tasks = sorted(self.task_runners, key=lambda task: (task.task_name, task.order))
         aggregated = self._aggregate_task_results(ordered_tasks, task_results)
@@ -672,26 +697,8 @@ class AgentLoopManager:
         return aggregated
 
     async def _is_batch_ready(self, batch_size: int, train_step: int) -> bool:
-        if len(self.task_runners) == 1:
-            task = self.task_runners[0]
-            completed_count = await self.replay_buffer.count(task_name=task.task_name, group_status=Status.COMPLETED)
-            return completed_count >= batch_size
-
         task_batch_sizes = self._get_task_batch_sizes_for_step(batch_size, train_step)
-        active_tasks = [task for task in self.task_runners if task_batch_sizes[task.task_name] > 0]
-        if not active_tasks:
-            return True
-
-        completed_counts = await asyncio.gather(
-            *[
-                self.replay_buffer.count(task_name=task.task_name, group_status=Status.COMPLETED)
-                for task in active_tasks
-            ]
-        )
-        return all(
-            completed_count >= task_batch_sizes[task.task_name]
-            for task, completed_count in zip(active_tasks, completed_counts)
-        )
+        return await self.replay_buffer.is_ready(task_batch_sizes)
 
         # continue_produce 的语义是“producer 可以恢复工作了”。
 
