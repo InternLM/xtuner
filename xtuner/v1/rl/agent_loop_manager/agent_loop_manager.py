@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
+from typing import cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -66,6 +67,9 @@ class ProduceBatchResult:
     leftover_expired: int = 0
     leftover_failed: int = 0
     leftover_filtered: int = 0
+    # filtered rewards are not included in rollout_states, but we want to record their scores for diagnostics.
+    filtered_rewards_sum: float = 0.0
+    filtered_rewards_count: int = 0
     task_batch_sizes: dict[str, int] | None = None
     task_results: dict[str, "ProduceBatchResult"] | None = None
 
@@ -454,6 +458,8 @@ class AgentLoopManager:
         weighted_group_p99_sum = 0.0
         weighted_group_ratio_sum = 0.0
         total_pause_time_s = 0.0
+        filtered_rewards_sum = 0.0
+        filtered_rewards_count = 0
 
         for task in ordered_tasks:
             result = task_results[task.task_name]
@@ -464,6 +470,8 @@ class AgentLoopManager:
             leftover_expired += result.leftover_expired
             leftover_failed += result.leftover_failed
             leftover_filtered += result.leftover_filtered
+            filtered_rewards_sum += result.filtered_rewards_sum
+            filtered_rewards_count += result.filtered_rewards_count
             if result.group_gen_count is not None and result.group_gen_mean_s is not None:
                 total_group_count += result.group_gen_count
                 weighted_group_mean_sum += result.group_gen_count * result.group_gen_mean_s
@@ -480,6 +488,8 @@ class AgentLoopManager:
             leftover_expired=leftover_expired,
             leftover_failed=leftover_failed,
             leftover_filtered=leftover_filtered,
+            filtered_rewards_sum=filtered_rewards_sum,
+            filtered_rewards_count=filtered_rewards_count,
             task_results={task.task_name: task_results[task.task_name] for task in ordered_tasks},
         )
         if total_group_count > 0:
@@ -636,6 +646,14 @@ class AgentLoopManager:
             f"leftover_aborted={aborted_count}, leftover_expired={expired_count}, "
             f"leftover_failed={failed_count}, leftover_filtered={filtered_count}"
         )
+        batch_filtered_rollout_states: list[list[RolloutState]] = await self.replay_buffer.get(
+            filtered_count, task_runner.task_name, Status.FILTERED
+        )
+        # record all state's reward, including filtered
+        for group in batch_filtered_rollout_states:
+            for state in group:
+                result.filtered_rewards_sum += cast(dict, state.reward)["score"]
+                result.filtered_rewards_count += 1
         return result
 
     async def _get_batch_from_buffer(
