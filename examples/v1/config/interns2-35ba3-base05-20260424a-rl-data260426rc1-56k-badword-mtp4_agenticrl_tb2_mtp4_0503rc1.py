@@ -57,7 +57,7 @@ from xtuner.v1.ray.evaluator import EvaluatorConfig
 from xtuner.v1.ray.judger.compass_verifier_v2 import CompassVerifierV2Config
 from xtuner.v1.ray.judger.controller import JudgerConfig
 from xtuner.v1.ray.judger.frontierscience_judger import FrontierScienceJudgerConfig
-
+from xtuner.v1.ray.judger.review import ReviewJudgerConfig
 from xtuner.v1.ray.judger.sgi_judger import SGIJudgerConfig
 from xtuner.v1.ray.rollout import RolloutController
 from xtuner.v1.rl.base import WorkerConfig
@@ -67,26 +67,24 @@ from xtuner.v1.train.agent_rl_trainer import AgentRLTrainerConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils.compute_metric import compute_metric
 
-# if not ray.is_initialized():
-#     ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG_POST_MORTEM": "0"}})
+if not ray.is_initialized():
+    ray.init(ignore_reinit_error=True, runtime_env={"env_vars": {"RAY_DEBUG_POST_MORTEM": "0"}})
 
-work_dir = os.environ["WORK_DIR"]
+experimental_name = os.path.basename(__file__).split(".py")[0]
+base_work_dir = "/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0430rc10"
+work_dir = os.path.join(base_work_dir, experimental_name)
 model_name = os.environ["RL_LLM_MODEL"]
 model_path = '/mnt/shared-storage-user/llmit1/user/wangziyi/exp/mindcopilot_rl/work_dirs/ckpt/interns2-35ba3-base05-20260424a-rl-data260428rc0-56k-badword-mtp4-resume800/20260430074140/hf-40'
 stop_word = "<|im_end|>"
 
 # basic settings
-global_batch_size = 128 # 128
-prompt_repeat_k = 8
-max_concurrent_groups = 128 # 512
+global_batch_size = 256
+prompt_repeat_k = 16
+max_concurrent_groups = 512
 
 max_prompt_length = 16 * 1024
 pack_max_length =  130 * 1024
 max_response_length = 128 * 1024
-
-# max_prompt_length = 8 * 1024
-# pack_max_length =  16 * 1024
-# max_response_length = 8 * 1024
 
 train_ep_size = 1
 train_sp_size = 2
@@ -94,7 +92,7 @@ rollout_tp_size = 4
 rollout_ep_size = 1
 fp32_lm_head = True
 enable_float8_rollout = False
-rollout_max_batch_size = 128 # 128
+rollout_max_batch_size = 128
 max_prefill_token_num = 1024
 enable_return_routed_experts = True
 enable_partial_rollout = False
@@ -107,7 +105,7 @@ train_optimizer_steps = 8  # mini batch steps
 hf_interval = 5
 total_epochs = 10
 # evaluation settings
-enable_evaluate = False
+enable_evaluate = True
 enable_initial_evaluate = True
 evaluate_step = 5
 
@@ -123,7 +121,7 @@ max_tool_response_length = 8192
 # 1. resources
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=16,
+    num_workers=64,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )
@@ -131,7 +129,7 @@ judger_cpu_resources = CPUResourcesConfig.from_total(total_cpus=64, num_workers=
 
 # 2. rollout
 rollout_config = RolloutConfig(
-    env="interns2_preview_0430rc10",
+    env=experimental_name,
     device=resources.accelerator,
     model_name=model_name,
     model_path=model_path,
@@ -306,7 +304,7 @@ train_dataset_cfg = (
     + train_dataset_cfg_internlm_science
     + train_dataset_cfg_search
     + train_dataset_cfg_math
-    # + train_dataset_cfg_review
+    + train_dataset_cfg_review
     + train_dataset_cfg_tb2rl
 )
 eval_dataset_cfg_search = [
@@ -524,7 +522,7 @@ compass_judger_cfg = JudgerConfig(
         ),
     ],
 )
-# review_judger_cfg = JudgerConfig(reward_judger_configs=[ReviewJudgerConfig(judger_name="openreview")])
+review_judger_cfg = JudgerConfig(reward_judger_configs=[ReviewJudgerConfig(judger_name="openreview")])
 
 from xtuner.v1.ray.judger.controller import JudgerController
 
@@ -538,16 +536,16 @@ compass_judger_controller = JudgerController.remote(
         timeout=30,
     )
 )
-# review_judger_controller = JudgerController.remote(
-#     review_judger_cfg,
-#     ray.get(
-#         placement_group(
-#             bundles=[{"CPU": 1, "memory": 1024**3}] * len(review_judger_cfg.reward_judger_configs),
-#             strategy="PACK",
-#         ).ready(),
-#         timeout=30,
-#     )
-# )
+review_judger_controller = JudgerController.remote(
+    review_judger_cfg,
+    ray.get(
+        placement_group(
+            bundles=[{"CPU": 1, "memory": 1024**3}] * len(review_judger_cfg.reward_judger_configs),
+            strategy="PACK",
+        ).ready(),
+        timeout=30,
+    )
+)
 
 
 from xtuner.v1.ray.environment.lagent.parsers import Qwen3_5FunctionCallParser
@@ -1025,62 +1023,62 @@ eval_math_agent = dict(
     initialize_input=False,
 )
 
-# train_review_agent = dict(
-#     type=FunctionCallAgent,
-#     policy_agent=dict(
-#         type=AsyncTokenInOutAgent,
-#         llm=policy_model,
-#         template=review_tool_prompt + "\n\n" + review_sys_prompt,
-#     ),
-#     env_agent=dict(
-#         type=EnvAgent,
-#         actions=[arxiv_tool],
-#         judger=JudgerWrapper(
-#             # type=JudgerWrapper,
-#             # judger_cfg=review_judger_cfg,
-#             # placement_group=ray.get(
-#             #     placement_group(bundles=[{"CPU": 1, "memory": 1024**3}], strategy="PACK").ready(), timeout=30
-#             # ),
-#             judger_controller=review_judger_controller,
-#             reward_key=None,
-#         ),
-#         max_turn=25,
-#         lower_tool_turn_bound=None,
-#         enable_repeated_tool_call_penalty=False,
-#         enable_no_thinking_penalty=False,
-#         max_tool_response_length=max_tool_response_length,
-#     ),
-#     finish_condition=finish_condition_func,
-#     initialize_input=False,
-# )
-# eval_review_agent = dict(
-#     type=FunctionCallAgent,
-#     policy_agent=dict(
-#         type=AsyncTokenInOutAgent,
-#         llm=policy_model,
-#         template=review_tool_prompt + "\n\n" + review_sys_prompt,
-#     ),
-#     env_agent=dict(
-#         type=EnvAgent,
-#         actions=[arxiv_tool],
-#         judger=JudgerWrapper(
-#             # type=JudgerWrapper,
-#             # judger_cfg=review_judger_cfg,
-#             # placement_group=ray.get(
-#             #     placement_group(bundles=[{"CPU": 1, "memory": 1024**3}], strategy="PACK").ready(), timeout=30
-#             # ),
-#             judger_controller=review_judger_controller,
-#             reward_key=None,
-#         ),
-#         max_turn=25,
-#         lower_tool_turn_bound=None,
-#         enable_repeated_tool_call_penalty=False,
-#         enable_no_thinking_penalty=False,
-#         max_tool_response_length=max_tool_response_length,
-#     ),
-#     finish_condition=finish_condition_func,
-#     initialize_input=False,
-# )
+train_review_agent = dict(
+    type=FunctionCallAgent,
+    policy_agent=dict(
+        type=AsyncTokenInOutAgent,
+        llm=policy_model,
+        template=review_tool_prompt + "\n\n" + review_sys_prompt,
+    ),
+    env_agent=dict(
+        type=EnvAgent,
+        actions=[arxiv_tool],
+        judger=JudgerWrapper(
+            # type=JudgerWrapper,
+            # judger_cfg=review_judger_cfg,
+            # placement_group=ray.get(
+            #     placement_group(bundles=[{"CPU": 1, "memory": 1024**3}], strategy="PACK").ready(), timeout=30
+            # ),
+            judger_controller=review_judger_controller,
+            reward_key=None,
+        ),
+        max_turn=25,
+        lower_tool_turn_bound=None,
+        enable_repeated_tool_call_penalty=False,
+        enable_no_thinking_penalty=False,
+        max_tool_response_length=max_tool_response_length,
+    ),
+    finish_condition=finish_condition_func,
+    initialize_input=False,
+)
+eval_review_agent = dict(
+    type=FunctionCallAgent,
+    policy_agent=dict(
+        type=AsyncTokenInOutAgent,
+        llm=policy_model,
+        template=review_tool_prompt + "\n\n" + review_sys_prompt,
+    ),
+    env_agent=dict(
+        type=EnvAgent,
+        actions=[arxiv_tool],
+        judger=JudgerWrapper(
+            # type=JudgerWrapper,
+            # judger_cfg=review_judger_cfg,
+            # placement_group=ray.get(
+            #     placement_group(bundles=[{"CPU": 1, "memory": 1024**3}], strategy="PACK").ready(), timeout=30
+            # ),
+            judger_controller=review_judger_controller,
+            reward_key=None,
+        ),
+        max_turn=25,
+        lower_tool_turn_bound=None,
+        enable_repeated_tool_call_penalty=False,
+        enable_no_thinking_penalty=False,
+        max_tool_response_length=max_tool_response_length,
+    ),
+    finish_condition=finish_condition_func,
+    initialize_input=False,
+)
 
 
 def bucket(key: str, n: int) -> int:
@@ -1135,7 +1133,7 @@ def rollout_env_router_fn(item: RLDataFlowItem):
 
 environment_config = dict(
     type=ComposedEnvironment,
-    environment="interns2_preview_0430rc10",
+    environment=experimental_name,
     rollout_controller=rollout_controller,
     environments={
         'train_science_search_browse_agent': dict(
@@ -1194,22 +1192,22 @@ environment_config = dict(
             preprocess_func=prepare_agent_inputs,
             postprocess_func=convert_rollout_tractory_to_train,
         ),
-        # 'train_review_agent': dict(
-        #     type=AgentEnvironment,
-        #     environment='train_review_agent',
-        #     agent_cfg=train_review_agent,
-        #     rollout_controller=rollout_controller,
-        #     preprocess_func=prepare_agent_inputs,
-        #     postprocess_func=convert_rollout_tractory_to_train,
-        # ),
-        # 'eval_review_agent': dict(
-        #     type=AgentEnvironment,
-        #     environment='eval_review_agent',
-        #     agent_cfg=eval_review_agent,
-        #     rollout_controller=rollout_controller,
-        #     preprocess_func=prepare_agent_inputs,
-        #     postprocess_func=convert_rollout_tractory_to_train,
-        # ),
+        'train_review_agent': dict(
+            type=AgentEnvironment,
+            environment='train_review_agent',
+            agent_cfg=train_review_agent,
+            rollout_controller=rollout_controller,
+            preprocess_func=prepare_agent_inputs,
+            postprocess_func=convert_rollout_tractory_to_train,
+        ),
+        'eval_review_agent': dict(
+            type=AgentEnvironment,
+            environment='eval_review_agent',
+            agent_cfg=eval_review_agent,
+            rollout_controller=rollout_controller,
+            preprocess_func=prepare_agent_inputs,
+            postprocess_func=convert_rollout_tractory_to_train,
+        ),
         'train_tb2rl': dict(
             type=InstallAgentEnvironment,
             environment='train_tb2rl',
@@ -1230,7 +1228,7 @@ environment_config = dict(
 
 # 4. dataflow and evaluator
 dataflow_config = DataFlowConfig(
-    env='interns2_preview_0430rc10',
+    env=experimental_name,
     max_concurrent=max_concurrent_groups,
     enable_partial_rollout=enable_partial_rollout,
     tail_batch_candidate_steps=tail_batch_candidate_steps,
