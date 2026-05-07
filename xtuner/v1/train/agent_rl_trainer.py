@@ -481,6 +481,7 @@ class AgentRLTrainer(RLTrainer):
                         "response": _compact_message(messages[-1]) if messages else None,
                         "response_len": len(data.env.rollout.response_ids or []),
                         "reward": data.env.judger.reward["score"],
+                        "data_source": data.data.extra_info.get('origin_data_source'),
                     }
                     if is_eval:
                         entry["daemon_log"] = data.env.agent.extra_info.get("daemon_log", "")
