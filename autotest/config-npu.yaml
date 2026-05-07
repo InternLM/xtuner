@@ -9,6 +9,7 @@ default_config:
             cpus_per_task: 256
             memory_per_task: 1920
             image: ccr-hw/910c:cann83rc3_pta271_fixzero
+            pip_package: pip install -e .[all]; pip install more-itertools
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
     eval:
@@ -214,6 +215,7 @@ case:
                 output_path: /mnt/hwfile/llmrazor/qa-llm-cic/qa-llm-cicd/test_output
             resource:
                 image: ccr-hw/910c:rl_s1_vllm
+                pip_package: ls
                 envs:
                     - MODEL_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/qa_test_models/Qwen3-30B-A3B
                     - DATA_PATH=/mnt/hwfile/llmrazor/qa-llm-cicd/xtuner_resource/datasets/gsm8k/train-mini.jsonl

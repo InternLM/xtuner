@@ -10,7 +10,7 @@ class Train:
         config_path = config.get("parameters").get("config")
         train_type = config.get("type")
         nproc_per_node = config.get("resource", {}).get("gpus_per_task", 8)
-        pip_package = config.get("resource", {}).get("pip_package", '')
+        pip_package = config.get("resource", {}).get("pip_package", 'ls')
         if train_type in ["sft", "rl"]:
             model_config = config.get("parameters", {}).get("model", None)
             config_path = config.get("parameters", {}).get("config", None)
