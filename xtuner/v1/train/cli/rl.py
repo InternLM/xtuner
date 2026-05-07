@@ -1,6 +1,5 @@
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Annotated
 
@@ -19,18 +18,8 @@ app = App(
 )
 
 
-def rl_monitor_actor_memory(work_dir, interval: int = 60):
-    while True:
-        try:
-            ray.init(address="auto")
-            time.sleep(interval)
-            break
-        except KeyboardInterrupt:
-            print("\n监控已停止")
-            break
-        except Exception:
-            print("连接 Ray 集群失败, 等等")
-
+def rl_monitor_actor_memory(work_dir: str, interval: int = 60) -> None:
+    # 主线程已完成 ray.init，监控线程直接复用连接，避免重复初始化 Ray 后刷连接失败日志。
     monitor_actor_memory(work_dir=work_dir, interval=interval)
 
 
@@ -44,9 +33,10 @@ def main(
     if not ray.is_initialized():
         ray.init(address="auto")
 
-    if os.getenv("XTUNER_RL_MEM_DIR"):
+    mem_dir = os.getenv("XTUNER_RL_MEM_DIR")
+    if mem_dir:
         print("Start to monitor actor memory")
-        track_thread = threading.Thread(target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"),))
+        track_thread = threading.Thread(target=rl_monitor_actor_memory, args=(mem_dir,))
         track_thread.daemon = True
         track_thread.start()
 
