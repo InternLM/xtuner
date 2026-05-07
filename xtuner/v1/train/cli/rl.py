@@ -36,9 +36,6 @@ def main(
         ray.init(address="auto")
 
     if os.getenv("XTUNER_RL_MEM_DIR"):
-        print(
-            "Start to monitor actor memory on the current Ray node. It is usually the head node, but not guaranteed."
-        )
         interval = int(os.getenv("XTUNER_RL_MEM_INTERVAL", "60"))
         track_thread = threading.Thread(
             target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"), interval)
