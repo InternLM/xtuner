@@ -10,6 +10,7 @@ from copy import deepcopy
 from functools import partial
 
 import ray
+from claw_bench.claw_tokenize_fn import RLClawTokenizeFnConfig
 from intern_s1_delivery.advantage.rloo_entropy_badword import (
     OverlongRLOOGroupEntropyBadwordAdvantageConfig,
 )
@@ -17,10 +18,9 @@ from lagent.actions.mcp_client import AsyncMCPClient
 from lagent.actions.web_visitor import WebVisitor
 from lagent.agents.fc_agent import FunctionCallAgent, get_tool_prompt
 from ray.util.placement_group import placement_group
-
-from claw_bench.claw_tokenize_fn import RLClawTokenizeFnConfig
 from tb2_eval.tb2_eval_tokenize_fn import RLTB2EvalTokenizeFnConfig
 from tb2_rl.tb2_rl_tokenize_fn import RLTB2RLTokenizeFnConfig
+
 from xtuner.v1.config import AdamWConfig, FSDPConfig, LRConfig
 from xtuner.v1.data_proto.rl_data import (
     RLAgentDataItem,
@@ -83,7 +83,7 @@ prompt_repeat_k = 16
 max_concurrent_groups = 512
 
 max_prompt_length = 16 * 1024
-pack_max_length =  130 * 1024
+pack_max_length = 130 * 1024
 max_response_length = 128 * 1024
 
 train_ep_size = 1
@@ -534,7 +534,7 @@ compass_judger_controller = JudgerController.remote(
             strategy="PACK",
         ).ready(),
         timeout=30,
-    )
+    ),
 )
 review_judger_controller = JudgerController.remote(
     review_judger_cfg,
@@ -544,7 +544,7 @@ review_judger_controller = JudgerController.remote(
             strategy="PACK",
         ).ready(),
         timeout=30,
-    )
+    ),
 )
 
 
@@ -552,7 +552,9 @@ from xtuner.v1.ray.environment.lagent.parsers import Qwen3_5FunctionCallParser
 
 
 def prepare_agent_inputs(env, group_data_item: RLDataFlowItem):
-    env_agent = group_data_item.env.agent.extra_info.pop('agent').env_agent
+    agent = group_data_item.env.agent.extra_info.pop('agent')
+    agent.policy_agent.llm.tokenizer = env.tokenizer
+    env_agent = agent.env_agent
     user_prompt = group_data_item.data.messages[-1]['content']
     env_message = AgentMessage(
         sender="env", content=user_prompt, uid=hashlib.md5(user_prompt.encode('utf-8')).hexdigest()
@@ -624,10 +626,10 @@ def convert_rollout_tractory_to_train_for_tb2rl(env, group_data_items):
 pg = AutoAcceleratorWorkers.build_placement_group(resources)
 rollout_controller = ray.remote(max_concurrency=1000)(RolloutController).remote(rollout_config, pg)
 policy_model = ControllerWrapper(
-            rollout_controller=rollout_controller,
-            sample_params=SampleParams(max_tokens=max_response_length),
-            tool_call_parser=Qwen3_5FunctionCallParser(),
-        )
+    rollout_controller=rollout_controller,
+    sample_params=SampleParams(max_tokens=max_response_length),
+    tool_call_parser=Qwen3_5FunctionCallParser(),
+)
 load_checkpoint_cfg = LoadCheckpointConfig(load_optimizer_states=False, load_optimizer_args=False)
 
 search_tool = AsyncMCPClient(
@@ -785,7 +787,7 @@ python_action = PythonExecutor(
     burst=20,
     retries=5,
     connect_timeout=5.0,
-    read_timeout=30.0
+    read_timeout=30.0,
 )
 
 # tool prompts with python (for science search)
