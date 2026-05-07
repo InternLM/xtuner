@@ -1,6 +1,5 @@
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Annotated
 
@@ -20,18 +19,10 @@ app = App(
 
 
 def rl_monitor_actor_memory(work_dir, interval: int = 60):
-    while True:
-        try:
-            ray.init(address="auto")
-            time.sleep(interval)
-            break
-        except KeyboardInterrupt:
-            print("\n监控已停止")
-            break
-        except Exception:
-            print("连接 Ray 集群失败, 等等")
-
-    monitor_actor_memory(work_dir=work_dir, interval=interval)
+    try:
+        monitor_actor_memory(work_dir=work_dir, interval=interval)
+    except Exception as exc:
+        print(f"Actor memory monitor stopped due to error: {exc}")
 
 
 @app.default()
@@ -45,8 +36,10 @@ def main(
         ray.init(address="auto")
 
     if os.getenv("XTUNER_RL_MEM_DIR"):
-        print("Start to monitor actor memory")
-        track_thread = threading.Thread(target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"),))
+        interval = int(os.getenv("XTUNER_RL_MEM_INTERVAL", "60"))
+        track_thread = threading.Thread(
+            target=rl_monitor_actor_memory, args=(os.getenv("XTUNER_RL_MEM_DIR"), interval)
+        )
         track_thread.daemon = True
         track_thread.start()
 
