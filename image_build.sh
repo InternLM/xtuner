@@ -12,7 +12,7 @@ export CAUSAL_CONV1D_URL=https://github.com/Dao-AILab/causal-conv1d@da6dbaa9fd5a
 
 export TORCH_VERSION=${TORCH_VERSION:-"2.9.1"}
 # export LMDEPLOY_VERSION="0.13.0dev"
-export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@9df0eff7c38ae69b9d4b9f7ad1441e484d439f92
+export LMDEPLOY_URL=https://github.com/InternLM/lmdeploy@efe3b88607756a7ad9411b89627b5ac6ebaa540e
 export PPA_SOURCE="https://mirrors.aliyun.com"
 export DEFAULT_PYPI_URL=${DEFAULT_PYPI_URL:-"https://mirrors.aliyun.com/pypi/simple"}
 # mirror https://download.pytorch.org/whl
