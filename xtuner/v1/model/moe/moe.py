@@ -424,7 +424,10 @@ class MoE(BaseModel):
         else:
             cat_input_ids = torch.cat([ctx.input_ids for ctx in seq_ctx_list], dim=1)  # type: ignore
             cat_hidden_states = self.embed_tokens(cat_input_ids)
-        cat_position_ids = torch.cat([ctx.position_ids for ctx in seq_ctx_list], dim=1)  # type: ignore
+        # M-RoPE position_ids are 3D [axes, batch, seq] for VL while text-only ones are 2D
+        # [batch, seq]; -1 selects the seq dim in both cases. Hard-coded dim=1 was a text-only
+        # assumption and produced a wrong-length cos/sin for VL under intra_layer_micro_batch.
+        cat_position_ids = torch.cat([ctx.position_ids for ctx in seq_ctx_list], dim=-1)  # type: ignore
         cat_position_embeddings = self.rotary_emb(cat_hidden_states, cat_position_ids)  # type: ignore
         position_embeddings_list = list(
             zip(
