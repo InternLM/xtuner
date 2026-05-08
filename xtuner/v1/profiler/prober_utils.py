@@ -4,7 +4,6 @@ from pathlib import Path
 
 import torch.nn as nn
 
-from xtuner.v1.loss.moe_loss import BalancingLoss, ZLoss
 from xtuner.v1.model.moe.moe import DenseDecoderLayer, LMHead, MoEBlock, MoEDecoderLayer
 from xtuner.v1.module.attention.mha import MultiHeadAttention
 from xtuner.v1.module.attention.mla import MultiLatentAttention
@@ -39,12 +38,6 @@ def register_prober_list(model: nn.Module):
             module.forward = types.MethodType(wrapped, module)  # type: ignore
         elif isinstance(module, LMHead):
             wrapped = ProberList.wrap_lm_head_forward(module.forward, name)
-            module.forward = types.MethodType(wrapped, module)  # type: ignore
-        elif isinstance(module, BalancingLoss):
-            wrapped = ProberList.wrap_balancing_loss_forward(module.forward, name)
-            module.forward = types.MethodType(wrapped, module)  # type: ignore
-        elif isinstance(module, ZLoss):
-            wrapped = ProberList.wrap_z_loss_forward(module.forward, name)
             module.forward = types.MethodType(wrapped, module)  # type: ignore
 
 

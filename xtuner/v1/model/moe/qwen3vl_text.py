@@ -133,10 +133,22 @@ class Qwen3VLTextMoE(Qwen3MoE):
         if self.config.return_hidden_states:
             output["hidden_states"] = []
 
-        output["router_logits"] = {}
-        output["router_weights"] = {}
+        # Mirror MoE._forward: only allocate the per-layer router dicts when a
+        # downstream consumer actually asked for them.
+        keep_router = self.config.return_router_results or return_router_logits
+        if keep_router:
+            output["router_logits"] = {}
+            output["router_weights"] = {}
+        else:
+            output["router_logits"] = None
+            output["router_weights"] = None
 
         self._mark_dynamic(seq_ctx)
+        balancing_ctx, z_ctx = self._extract_aux_loss_ctx(loss_ctx)
+        # Hoisted out of the per-layer accumulate path: mask is constant across layers.
+        nonpad_indices = torch.nonzero(seq_ctx.mask, as_tuple=True)[1]
+        non_pad_token = nonpad_indices.numel()
+        num_tokens_global, z_world_size = self._z_loss_dist_token_count(z_ctx, non_pad_token, seq_ctx.mask.device)
 
         # =====================================================
         deepstack_visual_embeds = seq_ctx.deepstack_visual_embeds
@@ -173,8 +185,19 @@ class Qwen3VLTextMoE(Qwen3MoE):
                         seq_ctx=seq_ctx,
                     )
 
-                output["router_logits"][f"layer{idx}"] = router_results
-                output["router_weights"][f"layer{idx}"] = router_weights
+                if keep_router:
+                    output["router_logits"][f"layer{idx}"] = router_results
+                    output["router_weights"][f"layer{idx}"] = router_weights
+                hidden_states = self.aux_loss.accumulate(
+                    selected_router_weights=router_weights.index_select(0, nonpad_indices).contiguous().float(),
+                    selected_router_logits=router_results.index_select(0, nonpad_indices).contiguous().float(),
+                    hidden_states=hidden_states,
+                    balancing_ctx=balancing_ctx,
+                    z_ctx=z_ctx,
+                    num_tokens_local=non_pad_token,
+                    num_tokens_global=num_tokens_global,
+                    world_size=z_world_size,
+                )
 
             if deepstack_visual_embeds is not None and ((idx := int(idx)) in range(len(deepstack_visual_embeds))):
                 assert visual_pos_masks is not None
@@ -192,41 +215,21 @@ class Qwen3VLTextMoE(Qwen3MoE):
         output["logits"] = logits
         output["extra_info"] = extra_info
 
-        router_logits_list = list(output["router_logits"].values())  # type: ignore
-        router_weights_list = list(output["router_weights"].values())  # type: ignore
-        router_logits = self._select_non_pad_router_logits(router_logits_list, seq_ctx.mask)
-        router_weights = self._select_non_pad_router_logits(router_weights_list, seq_ctx.mask)
-
-        # Calculate balancing loss using loss context
-        if loss_ctx is not None:
-            balancing_ctx = loss_ctx.get("balancing")
-            if balancing_ctx is not None:
-                balancing_loss = balancing_ctx(
-                    router_weights,
-                    self.config.n_routed_experts,
-                    self.config.num_experts_per_tok,
-                )
-                output["balancing_loss"] = balancing_loss
-
-        # Calculate z-loss using loss context
-        if loss_ctx is not None:
-            z_loss_ctx = loss_ctx.get("z_loss")
-            if z_loss_ctx is not None:
-                z_loss = z_loss_ctx(router_logits)
-                output["z_loss"] = z_loss
-
-        tokens_per_expert_global = self._cal_tokens_per_expert(router_logits)
+        balancing_loss, z_loss, tokens_per_expert_global = self.aux_loss.finalize(
+            balancing_ctx=balancing_ctx,
+            z_ctx=z_ctx,
+            non_pad_token=non_pad_token,
+        )
+        if balancing_loss is not None:
+            output["balancing_loss"] = balancing_loss
+        if z_loss is not None:
+            output["z_loss"] = z_loss
         output["tokens_per_expert_global"] = tokens_per_expert_global
 
-        del router_logits
-
-        if self.config.return_router_results or return_router_logits:
-            # raise NotImplementedError
-            # TODO: Move router logits to CPU is cost
+        if keep_router:
+            # TODO: Moving router logits to CPU is costly.
             for layer_name, router_logits in output["router_logits"].items():
                 output["router_logits"][layer_name] = router_logits.detach().unsqueeze(0)
-        else:
-            output["router_logits"] = None
 
         return MoEModelOutputs(**output)  # type: ignore[typeddict-item]
 
