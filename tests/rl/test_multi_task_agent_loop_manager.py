@@ -70,6 +70,10 @@ class _FakeProduceStrategy:
         self.cleanup_progresses.append(ctx.progress)
         return self.cleanup_pause_time_s
 
+    def is_model_expired(self, train_step: int, model_step: int) -> bool:
+        # fake strategy 的过期状态由用例显式返回 status 控制。
+        return False
+
 
 class _FakeStatusProduceStrategy:
     def __init__(self, status: ProduceBatchStatus, pause_time_s: float):
@@ -97,6 +101,10 @@ class _FakeStatusProduceStrategy:
         self.cleanup_model_steps.append(ctx.model_step)
         self.cleanup_progresses.append(ctx.progress)
         return self.pause_time_s
+
+    def is_model_expired(self, train_step: int, model_step: int) -> bool:
+        # fake strategy 的过期状态由用例显式返回 status 控制。
+        return False
 
 
 class _FakeRolloutState:

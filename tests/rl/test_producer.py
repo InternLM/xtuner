@@ -77,6 +77,38 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         mock_agent_loop.generate_group = mock_gen
         return mock_agent_loop
 
+    def _build_context(
+        self,
+        strategy,
+        task_name: str,
+        agent_loop,
+        sampler,
+        *,
+        batch_size: int,
+        train_step: int = 0,
+        model_step: int = 0,
+        progress: ProduceProgress | None = None,
+        update_event: asyncio.Event | None = None,
+    ) -> ProduceContext:
+        # 测试只走新的 ProduceContext 入口，不再覆盖旧散装参数兼容逻辑。
+        if progress is None:
+            progress = self._build_progress(task_name, target=batch_size, train_step=train_step)
+        if update_event is None:
+            update_event = asyncio.Event()
+        return ProduceContext(
+            agent_loop=agent_loop,
+            sampler=sampler,
+            replay_buffer=self.replay_buffer,
+            task_batch_size=batch_size,
+            task_name=task_name,
+            train_step=train_step,
+            update_event=update_event,
+            model_step=model_step,
+            progress=progress,
+            is_valid_sample_fn=strategy.is_valid_sample_fn,
+            stale_threshold=getattr(strategy, "stale_threshold", None),
+        )
+
     def test_produce_progress_methods_keep_absolute_window(self):
         progress = ProduceProgress.build(["task_a", "task_b"])
 
@@ -153,16 +185,17 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         strategy = produce_strategy_cfg.build()
 
         # 执行：生产 batch_size 为 2 的数据
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=2,
-            task_name=task_name,
             train_step=4,
             model_step=3,
             progress=self._build_progress(task_name, target=2, train_step=4),
         )
+        status = await strategy.produce_batch(ctx)
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
 
         # 验证：ReplayBuffer 中应该有 2 条 COMPLETED 数据
@@ -203,15 +236,16 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         aborted_item = MockRolloutState(999, status=Status.ABORTED)
         await self.replay_buffer.put([aborted_item], task_name)
         # 执行
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=2,
-            task_name=task_name,
             model_step=0,
             progress=self._build_progress(task_name, target=2),
         )
+        status = await strategy.produce_batch(ctx)
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
 
         # 验证：ReplayBuffer 中应该有 4 条 COMPLETED 数据。
@@ -225,18 +259,14 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         sampler = self._build_sampler()
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0).build()
         progress = self._build_progress(task_name, target=1, train_step=1)
-        ctx = ProduceContext(
-            agent_loop=mock_agent_loop,
-            sampler=sampler,
-            replay_buffer=self.replay_buffer,
-            task_batch_size=1,
-            task_name=task_name,
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            mock_agent_loop,
+            sampler,
+            batch_size=1,
             train_step=1,
-            update_event=asyncio.Event(),
-            model_step=0,
             progress=progress,
-            is_valid_sample_fn=strategy.is_valid_sample_fn,
-            stale_threshold=strategy.stale_threshold,
         )
 
         status = await strategy.produce_batch(ctx)
@@ -268,16 +298,17 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             target_upto_future_step=2,
         )
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             train_step=2,
             model_step=1,
             progress=progress,
         )
+        status = await strategy.produce_batch(ctx)
 
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         self.assertEqual(call_count, 1)
@@ -297,15 +328,16 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=1.0).build()
         progress = self._build_progress(task_name, target=10, consumed=9)
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=4,
-            task_name=task_name,
             model_step=0,
             progress=progress,
         )
+        status = await strategy.produce_batch(ctx)
 
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         # 当前只缺 1 个样本，但 over-sample 预算固定为 over * batch_size = 4，
@@ -333,15 +365,16 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             tail_batch_trigger_size=1,
         ).build()
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=2,
-            task_name=task_name,
             model_step=0,
             progress=self._build_progress(task_name, target=2),
         )
+        status = await strategy.produce_batch(ctx)
 
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         # tail-batch 模式在本轮优先走 EXPIRED pool，并且不使用 over-sample 额外发射。
@@ -364,16 +397,17 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             target_upto_future_step=1,
         )
         with self.assertRaisesRegex(KeyError, "consumed_samples"):
-            await strategy.produce_batch(
+            ctx = self._build_context(
+                strategy,
+                task_name,
                 mock_agent_loop,
                 sampler,
-                self.replay_buffer,
                 batch_size=1,
-                task_name=task_name,
                 train_step=1,
                 model_step=0,
                 progress=missing_consumed,
             )
+            await strategy.produce_batch(ctx)
 
         missing_target = ProduceProgress(
             next_consumer_step=1,
@@ -383,16 +417,17 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             target_upto_future_step=1,
         )
         with self.assertRaisesRegex(KeyError, "target_samples"):
-            await strategy.produce_batch(
+            ctx = self._build_context(
+                strategy,
+                task_name,
                 mock_agent_loop,
                 sampler,
-                self.replay_buffer,
                 batch_size=1,
-                task_name=task_name,
                 train_step=1,
                 model_step=0,
                 progress=missing_target,
             )
+            await strategy.produce_batch(ctx)
 
     async def test_async_produce_strategy_records_sample_version_before_staleness_refresh(self):
         task_name = "test_sample_version"
@@ -410,16 +445,17 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 该用例验证版本记录顺序，放宽 stale 策略避免在生产入口提前返回。
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0, max_staleness=3).build()
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             train_step=5,
             model_step=3,
             progress=self._build_progress(task_name, target=1, train_step=5),
         )
+        status = await strategy.produce_batch(ctx)
 
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         completed = await self.replay_buffer.get(1, task_name, Status.COMPLETED)
@@ -450,16 +486,17 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             max_staleness=3,
         ).build()
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             train_step=5,
             model_step=3,
             progress=self._build_progress(task_name, target=1, train_step=5),
         )
+        status = await strategy.produce_batch(ctx)
 
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         completed = await self.replay_buffer.get(1, task_name, Status.COMPLETED)
@@ -474,29 +511,31 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         strategy = produce_strategy_cfg.build()
         progress = self._build_progress(task_name, target=1)
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             model_step=0,
             progress=progress,
         )
+        status = await strategy.produce_batch(ctx)
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         self.assertGreater(len(strategy._pending_tasks), 0)
 
         await asyncio.sleep(0.08)
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             model_step=0,
             progress=progress,
         )
+        status = await strategy.produce_batch(ctx)
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
         self.assertEqual(len(strategy._pending_tasks), 0)
 
@@ -515,24 +554,19 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         strategy = produce_strategy_cfg.build()
         progress = self._build_progress(task_name, target=1)
 
-        await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             model_step=0,
             progress=progress,
         )
+        await strategy.produce_batch(ctx)
         self.assertGreater(len(strategy._pending_tasks), 0)
 
-        pause_time_s = await strategy.pause_produce(
-            mock_agent_loop,
-            self.replay_buffer,
-            task_name,
-            model_step=0,
-            progress=progress,
-        )
+        pause_time_s = await strategy.pause_produce(ctx)
 
         self.assertGreaterEqual(pause_time_s, 0.0)
         self.assertEqual(len(strategy._pending_tasks), 0)
@@ -550,24 +584,19 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         strategy.cleanup_task_time = 0
         progress = self._build_progress(task_name, target=1)
 
-        await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             model_step=0,
             progress=progress,
         )
+        await strategy.produce_batch(ctx)
         self.assertGreater(len(strategy._pending_tasks), 0)
 
-        await strategy.pause_produce(
-            mock_agent_loop,
-            self.replay_buffer,
-            task_name,
-            model_step=0,
-            progress=progress,
-        )
+        await strategy.pause_produce(ctx)
 
         self.assertEqual(len(strategy._pending_tasks), 0)
         completed = await self.replay_buffer.count(task_name, Status.COMPLETED)
@@ -584,17 +613,18 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         update_event = asyncio.Event()
         update_event.set()
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             train_step=1,
             model_step=1,
             update_event=update_event,
             progress=self._build_progress(task_name, target=1, train_step=1),
         )
+        status = await strategy.produce_batch(ctx)
 
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 0)
@@ -614,27 +644,22 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
         sampler.sample = AsyncMock(side_effect=sample)
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             update_event=update_event,
             model_step=0,
             progress=progress,
         )
+        status = await strategy.produce_batch(ctx)
 
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
         self.assertEqual(sampler.sample.await_count, 1)
 
-        await strategy.pause_produce(
-            mock_agent_loop,
-            self.replay_buffer,
-            task_name,
-            model_step=0,
-            progress=progress,
-        )
+        await strategy.pause_produce(ctx)
         self.assertEqual(len(strategy._pending_tasks), 0)
 
     async def test_async_produce_strategy_returns_expired_batch_before_processing_leftovers(self):
@@ -645,16 +670,17 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         sampler.sample = AsyncMock(side_effect=AssertionError("sampler.sample should not be called"))
         await self.replay_buffer.put([MockRolloutState(999, status=Status.COMPLETED)], task_name)
 
-        status = await strategy.produce_batch(
+        ctx = self._build_context(
+            strategy,
+            task_name,
             mock_agent_loop,
             sampler,
-            self.replay_buffer,
             batch_size=1,
-            task_name=task_name,
             train_step=3,
             model_step=1,
             progress=self._build_progress(task_name, target=1, train_step=3),
         )
+        status = await strategy.produce_batch(ctx)
 
         self.assertEqual(status, ProduceBatchStatus.EXPIRED_BATCH)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 1)

@@ -227,18 +227,19 @@ class ProduceContext:
     """单 task 生产上下文。
 
     这里集中维护 AsyncProduceStrategy 最容易传错的运行时契约：
+    - strategy 只接受 ProduceContext，不再兼容散装参数入口；
     - target / consumed 都按绝对累计口径读取；
     - 暂停只读 manager 传入的 update_event；
     - 生成结果先按业务有效性过滤，再统一交给 ReplayBuffer 写版本、刷新 staleness、执行过期。
     """
 
     agent_loop: AgentLoopSpec
-    sampler: Sampler | None
+    sampler: Sampler
     replay_buffer: ReplayBuffer
     task_batch_size: int
     task_name: str
     train_step: int
-    update_event: asyncio.Event | None
+    update_event: asyncio.Event
     model_step: int
     progress: ProduceProgress
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
@@ -253,12 +254,7 @@ class ProduceContext:
         return self.progress.target_samples[self.task_name]
 
     def should_abort(self) -> bool:
-        return self.update_event is not None and self.update_event.is_set()
-
-    def model_expired(self) -> bool:
-        if self.stale_threshold is None:
-            return False
-        return calculate_seq_staleness(self.model_step, self.train_step) >= self.stale_threshold
+        return self.update_event.is_set()
 
     async def expired_count(self) -> int:
         return await self.replay_buffer.count(task_name=self.task_name, group_status=Status.EXPIRED)
@@ -268,8 +264,6 @@ class ProduceContext:
         return self.progress.consumed_samples[self.task_name] + completed_count
 
     async def sample_group(self, *, from_expired_pool: bool) -> list[RolloutState]:
-        if self.sampler is None:
-            raise RuntimeError("ProduceContext.sample_group requires sampler.")
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
         return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
 
@@ -332,146 +326,19 @@ class ProduceStrategy(ABC):
         self.is_valid_sample_fn = is_valid_sample_fn
         self.should_continue_fn = should_continue_fn
 
-    def _build_context(
-        self,
-        agent_loop: AgentLoopSpec,
-        sampler: Sampler | None,
-        replay_buffer: ReplayBuffer,
-        batch_size: int,
-        task_name: str,
-        train_step: int,
-        update_event: asyncio.Event | None,
-        *,
-        model_step: int,
-        progress: ProduceProgress,
-    ) -> ProduceContext:
-        return ProduceContext(
-            agent_loop=agent_loop,
-            sampler=sampler,
-            replay_buffer=replay_buffer,
-            task_batch_size=batch_size,
-            task_name=task_name,
-            train_step=train_step,
-            update_event=update_event,
-            model_step=model_step,
-            progress=progress,
-            is_valid_sample_fn=self.is_valid_sample_fn,
-            stale_threshold=getattr(self, "stale_threshold", None),
-        )
-
-    def _coerce_produce_context(
-        self,
-        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
-        sampler: Sampler | None = None,
-        replay_buffer: ReplayBuffer | None = None,
-        batch_size: int | None = None,
-        task_name: str | None = None,
-        train_step: int = 0,
-        update_event: asyncio.Event | None = None,
-        *,
-        model_step: int | None = None,
-        progress: ProduceProgress | None = None,
-    ) -> ProduceContext:
-        if isinstance(ctx_or_agent_loop, ProduceContext):
-            return ctx_or_agent_loop
-        if sampler is None or replay_buffer is None or batch_size is None or task_name is None:
-            raise TypeError("legacy produce_batch call requires sampler, replay_buffer, batch_size and task_name.")
-        if model_step is None or progress is None:
-            raise TypeError("legacy produce_batch call requires model_step and progress.")
-        return self._build_context(
-            ctx_or_agent_loop,
-            sampler,
-            replay_buffer,
-            batch_size,
-            task_name,
-            train_step,
-            update_event,
-            model_step=model_step,
-            progress=progress,
-        )
-
-    def _coerce_pause_context(
-        self,
-        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
-        replay_buffer: ReplayBuffer | None = None,
-        task_name: str | None = None,
-        *,
-        model_step: int | None = None,
-        progress: ProduceProgress | None = None,
-    ) -> ProduceContext:
-        if isinstance(ctx_or_agent_loop, ProduceContext):
-            return ctx_or_agent_loop
-        if replay_buffer is None or task_name is None or model_step is None or progress is None:
-            raise TypeError("legacy pause_produce call requires replay_buffer, task_name, model_step and progress.")
-        return self._build_context(
-            ctx_or_agent_loop,
-            None,
-            replay_buffer,
-            0,
-            task_name,
-            progress.producer_future_step,
-            None,
-            model_step=model_step,
-            progress=progress,
-        )
-
     @abstractmethod
-    async def produce_batch(
-        self,
-        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
-        sampler: Sampler | None = None,
-        replay_buffer: ReplayBuffer | None = None,
-        batch_size: int | None = None,
-        task_name: str | None = None,
-        train_step: int = 0,
-        update_event: asyncio.Event | None = None,
-        *,
-        model_step: int | None = None,
-        progress: ProduceProgress | None = None,
-    ) -> ProduceBatchStatus: ...
+    async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus: ...
 
-    async def pause_produce(
-        self,
-        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
-        replay_buffer: ReplayBuffer | None = None,
-        task_name: str | None = None,
-        *,
-        model_step: int | None = None,
-        progress: ProduceProgress | None = None,
-    ) -> float:
+    async def pause_produce(self, ctx: ProduceContext) -> float:
         return 0.0
+
+    def is_model_expired(self, train_step: int, model_step: int) -> bool:
+        # 默认同步策略没有跨权重版本的后台样本，只有异步策略需要判定模型过期。
+        return False
 
 
 class SyncProduceStrategy(ProduceStrategy):
-    async def produce_batch(
-        self,
-        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
-        sampler: Sampler | None = None,
-        replay_buffer: ReplayBuffer | None = None,
-        batch_size: int | None = None,
-        task_name: str | None = None,
-        train_step: int = 0,
-        update_event: asyncio.Event | None = None,
-        *,
-        model_step: int | None = None,
-        progress: ProduceProgress | None = None,
-    ) -> ProduceBatchStatus:
-        ctx = self._coerce_produce_context(
-            ctx_or_agent_loop,
-            sampler,
-            replay_buffer,
-            batch_size,
-            task_name,
-            train_step,
-            update_event,
-            model_step=model_step,
-            progress=progress,
-        )
-        return await self._produce_batch(ctx)
-
-    async def _produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
-        if ctx.sampler is None:
-            raise RuntimeError("SyncProduceStrategy requires sampler.")
+    async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
         pending_tasks = set()
         completed_sample_count = await ctx.replay_buffer.count(task_name=ctx.task_name, group_status=Status.COMPLETED)
         # TODO: 是否支持 SyncProduceStrategy 在非共卡时使用？如果支持，下面这行注释掉？
@@ -568,9 +435,6 @@ class AsyncProduceStrategy(ProduceStrategy):
         staleness = calculate_seq_staleness(model_step, train_step)
         return staleness >= self.stale_threshold
 
-    def _is_model_expired(self, train_step: int, model_step: int) -> bool:
-        return self.is_model_expired(train_step, model_step)
-
     async def _snapshot_pending(self) -> set[asyncio.Task]:
         async with self._pending_lock:
             return set(self._pending_tasks)
@@ -653,25 +517,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         ):
             pass
 
-    async def pause_produce(
-        self,
-        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
-        replay_buffer: ReplayBuffer | None = None,
-        task_name: str | None = None,
-        *,
-        model_step: int | None = None,
-        progress: ProduceProgress | None = None,
-    ) -> float:
-        ctx = self._coerce_pause_context(
-            ctx_or_agent_loop,
-            replay_buffer,
-            task_name,
-            model_step=model_step,
-            progress=progress,
-        )
-        return await self._pause_produce(ctx)
-
-    async def _pause_produce(self, ctx: ProduceContext) -> float:
+    async def pause_produce(self, ctx: ProduceContext) -> float:
         pause_start = time.perf_counter()
         if await self._pending_count() == 0:
             return 0.0
@@ -716,33 +562,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                 await asyncio.sleep(1)
         return time.perf_counter() - pause_start
 
-    async def produce_batch(
-        self,
-        ctx_or_agent_loop: ProduceContext | AgentLoopSpec,
-        sampler: Sampler | None = None,
-        replay_buffer: ReplayBuffer | None = None,
-        batch_size: int | None = None,
-        task_name: str | None = None,
-        train_step: int = 0,
-        update_event: asyncio.Event | None = None,
-        *,
-        model_step: int | None = None,
-        progress: ProduceProgress | None = None,
-    ) -> ProduceBatchStatus:
-        ctx = self._coerce_produce_context(
-            ctx_or_agent_loop,
-            sampler,
-            replay_buffer,
-            batch_size,
-            task_name,
-            train_step,
-            update_event if update_event is not None else asyncio.Event(),
-            model_step=model_step,
-            progress=progress,
-        )
-        return await self._produce_batch(ctx)
-
-    async def _produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
+    async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
         _validate_progress_for_task(ctx.progress, ctx.task_name)
 
         if ctx.target_abs <= 0:
@@ -750,7 +570,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
-        if ctx.model_expired():
+        if self.is_model_expired(ctx.train_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
         # 先回收跨 produce_batch 调用遗留的已完成任务，避免 done task 长期留在 pending 集合里。
@@ -759,7 +579,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
-        if ctx.model_expired():
+        if self.is_model_expired(ctx.train_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
         expired_count = await ctx.expired_count()
@@ -782,7 +602,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         while True:
             if ctx.should_abort():
                 return ProduceBatchStatus.UPDATE_ABORT
-            if ctx.model_expired():
+            if self.is_model_expired(ctx.train_step, ctx.model_step):
                 return ProduceBatchStatus.EXPIRED_BATCH
 
             available = await ctx.available_count()

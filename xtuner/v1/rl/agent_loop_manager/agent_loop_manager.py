@@ -20,7 +20,6 @@ from xtuner.v1.utils import get_logger
 
 from .producer import (
     GROUP_GENERATE_TIME_KEY,
-    AsyncProduceStrategy,
     ProduceBatchStatus,
     ProduceContext,
     ProduceProgress,
@@ -185,7 +184,7 @@ def _build_produce_context(
     batch_size: int,
     train_step: int,
     model_step: int,
-    update_event: asyncio.Event | None,
+    update_event: asyncio.Event,
     progress: ProduceProgress,
 ) -> ProduceContext:
     return ProduceContext(
@@ -209,7 +208,7 @@ async def _produce_single_task_to_buffer(
     batch_size: int,
     train_step: int,
     model_step: int,
-    update_event: asyncio.Event | None,
+    update_event: asyncio.Event,
     progress: ProduceProgress,
 ) -> ProduceBatchStatus:
     ctx = _build_produce_context(
@@ -404,8 +403,7 @@ class AgentLoopManager:
         expired_tasks = [
             task.task_name
             for task in self.task_runners
-            if isinstance(task.produce_strategy, AsyncProduceStrategy)
-            and task.produce_strategy.is_model_expired(current_future_step, self._model_step)
+            if task.produce_strategy.is_model_expired(current_future_step, self._model_step)
         ]
         if expired_tasks:
             self.logger.info(f"Expired future_step={current_future_step}, tasks={expired_tasks}")
