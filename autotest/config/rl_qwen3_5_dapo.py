@@ -41,7 +41,7 @@ pack_max_length = 32768
 train_optimizer_steps = 8
 hf_interval = 15
 enable_initial_evaluate = True
-evaluate_step = 5
+evaluate_step = 10
 
 # 1. resources
 resources = AcceleratorResourcesConfig(

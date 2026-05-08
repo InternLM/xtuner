@@ -31,7 +31,7 @@ enable_evaluate = eval_data_path != ""
 # basic settings
 experimental_name = "grpo_gsm8k_qwen3p5_text"
 total_epochs = 15
-global_batch_size = 128
+global_batch_size = 256
 prompt_repeat_k = 5
 rollout_tp_size = 1
 rollout_ep_size = 1
@@ -41,7 +41,7 @@ pack_max_length = 32768
 train_optimizer_steps = 8
 hf_interval = 15
 enable_initial_evaluate = True
-evaluate_step = 5
+evaluate_step = 10
 
 # 1. resources
 resources = AcceleratorResourcesConfig(
