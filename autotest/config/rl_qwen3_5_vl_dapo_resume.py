@@ -180,6 +180,6 @@ trainer = RLTrainerConfig(
     hf_interval=hf_interval,
     checkpoint_interval=10,
     checkpoint_maxkeep=2,
-    resume_cfg=ResumeConfig(auto_resume=True),
+    resume_config=ResumeConfig(auto_resume=True),
     exp_tracker="jsonl",
 )
