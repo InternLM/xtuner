@@ -18,7 +18,7 @@ intern_s2_delivery_dir=/mnt/shared-storage-user/llmit/user/liujiangning/projects
 lagent_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/lagent
 xtuner_project_dir=/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/projects
 transformer_model=/mnt/shared-storage-user/llmit1/user/wangziyi/.cache/huggingface/modules
-export PYTHONPATH=$intern_s2_delivery_dir:$lmdeploy_dir:$xtuner_dir:$lagent_dir:$xtuner_project_dir:$transformer_model:$PYTHONPATH 
+export PYTHONPATH=$intern_s2_delivery_dir:$lmdeploy_dir:$xtuner_dir:$lagent_dir:$xtuner_project_dir:$PYTHONPATH 
 export NLTK_DATA=/mnt/shared-storage-user/llmit/user/lishuaibin/mv2yidian/nltk_data
 
 export XTUNER_USE_FA3=1
@@ -53,7 +53,7 @@ export TRAIN_OPTIMIZER_STEPS=8
 current_time=$(date "+%m%d%H")
 
 export CONFIG_PATH='/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/examples/v1/config/interns2-35ba3-base05-20260424a-rl-data260426rc1-56k-badword-mtp4_agenticrl_tb2_mtp4_0503rc1.py'
-export WORK_DIR='/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0430rc9'
+export WORK_DIR='/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0508rc1'
 
 
 if [ ! -d "$WORK_DIR" ]; then
@@ -138,7 +138,10 @@ if [ "$RAY_RANK" -eq 0 ]; then
         \"PYTORCH_CUDA_ALLOC_CONF\": \"${PYTORCH_CUDA_ALLOC_CONF:-}\",
         \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
         \"TORCH_ALLOW_TF32_CUBLAS_OVERRIDE\": \"0\",
-        \"CUBLAS_WORKSPACE_CONFIG\": \":16:8\"
+        \"CUBLAS_WORKSPACE_CONFIG\": \":16:8\",
+        \"RL_LLM_MODEL\": \"${RL_LLM_MODEL}\",
+        \"RL_LLM_BASE_URL\": \"${RL_LLM_BASE_URL:-}\",
+        \"RL_LLM_API_KEY\": \"${RL_LLM_API_KEY:-}\"
       }
     }"
 
