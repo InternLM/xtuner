@@ -1,6 +1,6 @@
 name: ete_test
 
-run_name: '用例:${{ github.event.inputs.run_case || "all" }}'
+run-name: '用例:${{ github.event.inputs.run_case }}'
 
 permissions:
   contents: write
