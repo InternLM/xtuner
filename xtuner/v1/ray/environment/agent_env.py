@@ -55,11 +55,6 @@ class AgentEnvironment(BaseEnvironment):
         self.preprocess_func = preprocess_func
         self.postprocess_func = postprocess_func
 
-        from transformers import AutoTokenizer
-
-        rollout_cfg = ray.get(rollout_controller.get_rollout_info.remote())["rollout_config"]  # type: ignore[call-overload, attr-defined]
-        self.tokenizer = AutoTokenizer.from_pretrained(rollout_cfg.tokenizer_path, trust_remote_code=True)
-
     async def generate(  # type: ignore[override]
         self, group_data_items: List[RLDataFlowItem], sample_params=None, extra_params=None
     ) -> List[RLDataFlowItem]:
