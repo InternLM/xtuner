@@ -49,5 +49,5 @@ docker build . \
   --label "CAUSAL_CONV1D_URL=${CAUSAL_CONV1D_URL/@/\/tree\/}" \
   --label "DEEP_EP_URL=${DEEP_EP_URL/@/\/tree\/}" \
   --label "DEEP_GEMM_URL=${DEEP_GEMM_URL/@/\/tree\/}" \
-  --label "LMDEPLOY_URL=$LMDEPLOY_URL"
+  --label "LMDEPLOY_URL=${LMDEPLOY_URL/@/\/tree\/}"
   # --label "LMDEPLOY_VERSION=$LMDEPLOY_VERSION"
