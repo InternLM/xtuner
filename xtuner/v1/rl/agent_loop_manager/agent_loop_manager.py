@@ -852,9 +852,9 @@ class AgentLoopManager:
     def _get_pending_task_counts(self) -> dict[str, int]:
         pending_task_counts: dict[str, int] = {}
         for task in self.task_runners:
-            pending_tasks = getattr(task.produce_strategy, "_pending_tasks", None)
-            if pending_tasks:
-                pending_task_counts[task.task_name] = len(pending_tasks)
+            pending_count = task.produce_strategy.pending_task_count()
+            if pending_count > 0:
+                pending_task_counts[task.task_name] = pending_count
         return pending_task_counts
 
     def save(self, checkpoint_path: Path | str, model_step: int) -> None:

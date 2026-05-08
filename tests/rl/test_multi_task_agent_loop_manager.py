@@ -54,6 +54,7 @@ class _FakeProduceStrategy:
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
         self.cleanup_call_count = 0
+        self.pending_task_count_value = 0
 
     async def produce_batch(self, ctx) -> ProduceBatchStatus:
         self.called_batch_sizes.append(ctx.task_batch_size)
@@ -74,6 +75,9 @@ class _FakeProduceStrategy:
         # fake strategy 的过期状态由用例显式返回 status 控制。
         return False
 
+    def pending_task_count(self) -> int:
+        return self.pending_task_count_value
+
 
 class _FakeStatusProduceStrategy:
     def __init__(self, status: ProduceBatchStatus, pause_time_s: float):
@@ -87,6 +91,7 @@ class _FakeStatusProduceStrategy:
         self.called_progresses: list[object] = []
         self.cleanup_model_steps: list[int] = []
         self.cleanup_progresses: list[object | None] = []
+        self.pending_task_count_value = 0
 
     async def produce_batch(self, ctx) -> ProduceBatchStatus:
         self.called_train_steps.append(ctx.train_step)
@@ -105,6 +110,9 @@ class _FakeStatusProduceStrategy:
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         # fake strategy 的过期状态由用例显式返回 status 控制。
         return False
+
+    def pending_task_count(self) -> int:
+        return self.pending_task_count_value
 
 
 class _FakeRolloutState:
@@ -386,7 +394,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
     def test_save_rejects_pending_async_tasks(self):
         strategy = _FakeProduceStrategy()
-        strategy._pending_tasks = {object()}
+        strategy.pending_task_count_value = 1
         manager = AgentLoopManager(
             task_runners=[
                 _TaskRunner(

@@ -4,7 +4,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Protocol, runtime_checkable
+from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
 import ray
 from pydantic import BaseModel, ConfigDict, Field
@@ -336,6 +336,72 @@ class ProduceStrategy(ABC):
         # 默认同步策略没有跨权重版本的后台样本，只有异步策略需要判定模型过期。
         return False
 
+    def pending_task_count(self) -> int:
+        return 0
+
+
+class _PendingTasks:
+    """AsyncProduceStrategy 的并发 pending task 集合。
+
+    这里只封装 pending set 的并发协议，不理解 sampler / rollout / replay buffer：
+    - wait 使用快照，随后必须二次 claim，避免 produce 和 pause 重复处理同一个 done task。
+    - cancel 前先原子 claim 并清空集合，避免 cancel 后又被其他路径 claim。
+    - schedule one 在锁内同时检查 abort 和 pending 数，避免 pause 已触发后继续新增 task。
+    """
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task] = set()
+        self._lock = asyncio.Lock()
+
+    def count(self) -> int:
+        # 只暴露已经纳入 pending 集合的 task 数量。
+        return len(self._tasks)
+
+    async def claim_ready(self) -> set[asyncio.Task]:
+        async with self._lock:
+            ready = {task for task in self._tasks if task.done()}
+            self._tasks.difference_update(ready)
+            return ready
+
+    async def wait_and_claim(self, *, timeout_s: float) -> set[asyncio.Task]:
+        async with self._lock:
+            snapshot = set(self._tasks)
+        if not snapshot:
+            return set()
+
+        done, _ = await asyncio.wait(snapshot, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED)
+        async with self._lock:
+            claimed = done & self._tasks
+            self._tasks.difference_update(claimed)
+            return claimed
+
+    async def schedule_one(
+        self,
+        *,
+        max_pending: int,
+        should_abort: Callable[[], bool],
+        spawn_one: Callable[[], Awaitable[asyncio.Task]],
+    ) -> bool:
+        async with self._lock:
+            if should_abort() or len(self._tasks) >= max_pending:
+                return False
+            # 保持“检查 abort / pending 数 / 新增 task”这一组操作原子化。
+            self._tasks.add(await spawn_one())
+            return True
+
+    async def claim_all(self) -> set[asyncio.Task]:
+        async with self._lock:
+            claimed = set(self._tasks)
+            self._tasks.clear()
+            return claimed
+
+    async def cancel_all(self) -> int:
+        tasks = await self.claim_all()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        return len(tasks)
+
 
 class SyncProduceStrategy(ProduceStrategy):
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
@@ -427,41 +493,17 @@ class AsyncProduceStrategy(ProduceStrategy):
         self.sync_weights_interval = sync_weights_interval
         self.stale_threshold = calculate_stale_threshold(max_staleness, sync_weights_interval)
         self.tail_batch_trigger_size = tail_batch_trigger_size
-        self._pending_tasks: set[asyncio.Task] = set()
-        self._pending_lock = asyncio.Lock()
+        self._pending_tasks = _PendingTasks()
         self.cleanup_task_time = 5 * 60  # 5 minutes
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
         staleness = calculate_seq_staleness(model_step, train_step)
         return staleness >= self.stale_threshold
 
-    async def _snapshot_pending(self) -> set[asyncio.Task]:
-        async with self._pending_lock:
-            return set(self._pending_tasks)
+    def pending_task_count(self) -> int:
+        return self._pending_tasks.count()
 
-    async def _pending_count(self) -> int:
-        async with self._pending_lock:
-            return len(self._pending_tasks)
-
-    async def _claim_done(self, done: set[asyncio.Task]) -> set[asyncio.Task]:
-        async with self._pending_lock:
-            claimed = done & self._pending_tasks
-            self._pending_tasks.difference_update(claimed)
-            return claimed
-
-    async def _claim_already_done(self) -> set[asyncio.Task]:
-        async with self._pending_lock:
-            done = {task for task in self._pending_tasks if task.done()}
-            self._pending_tasks.difference_update(done)
-            return done
-
-    async def _claim_all_pending(self) -> set[asyncio.Task]:
-        async with self._pending_lock:
-            claimed = set(self._pending_tasks)
-            self._pending_tasks.clear()
-            return claimed
-
-    async def _put_claimed_tasks(
+    async def _put_claimed(
         self,
         claimed_tasks: set[asyncio.Task],
         ctx: ProduceContext,
@@ -481,45 +523,23 @@ class AsyncProduceStrategy(ProduceStrategy):
                         f"valid samples for task {ctx.task_name}."
                     )
 
-    async def _schedule_one(
+    async def _spawn_one(
         self,
         ctx: ProduceContext,
-        desired_pending: int,
         sample_from_expired: bool,
-    ) -> bool:
-        async with self._pending_lock:
-            # update_event 是 manager 级暂停信号；在调度临界区内检查，避免 pause 已触发后继续新增任务。
-            if ctx.should_abort():
-                return False
-            if len(self._pending_tasks) >= desired_pending:
-                return False
-            rollout_state = await ctx.sample_group(from_expired_pool=sample_from_expired)
-            task = create_task(
-                _timed_generate_group(
-                    ctx.agent_loop,
-                    rollout_state,
-                    enable_partial_rollout=self.enable_partial_rollout,
-                )
+    ) -> asyncio.Task:
+        rollout_state = await ctx.sample_group(from_expired_pool=sample_from_expired)
+        return create_task(
+            _timed_generate_group(
+                ctx.agent_loop,
+                rollout_state,
+                enable_partial_rollout=self.enable_partial_rollout,
             )
-            self._pending_tasks.add(task)
-            return True
-
-    async def _schedule_tasks_until(
-        self,
-        ctx: ProduceContext,
-        desired_pending: int,
-        sample_from_expired: bool,
-    ) -> None:
-        while await self._schedule_one(
-            ctx=ctx,
-            desired_pending=desired_pending,
-            sample_from_expired=sample_from_expired,
-        ):
-            pass
+        )
 
     async def pause_produce(self, ctx: ProduceContext) -> float:
         pause_start = time.perf_counter()
-        if await self._pending_count() == 0:
+        if self._pending_tasks.count() == 0:
             return 0.0
 
         rollout_ctl = await get_agent_loop_rollout_ctl(ctx.agent_loop)
@@ -528,26 +548,17 @@ class AsyncProduceStrategy(ProduceStrategy):
         while True:
             elapsed_time = time.perf_counter() - cleanup_start_time
             if elapsed_time > self.cleanup_task_time:
-                tasks_to_cancel = await self._claim_all_pending()
+                cancelled_count = await self._pending_tasks.cancel_all()
                 logger.warning(
                     f"Cleanup timeout of {self.cleanup_task_time}s reached. "
-                    f"Forcefully cancelling {len(tasks_to_cancel)} remaining tasks."
+                    f"Forcefully cancelling {cancelled_count} remaining tasks."
                 )
-                for task in tasks_to_cancel:
-                    task.cancel()
-                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
                 break
 
-            pending_snapshot = await self._snapshot_pending()
-            if not pending_snapshot:
+            if self._pending_tasks.count() == 0:
                 break
 
-            done_tasks, _ = await asyncio.wait(
-                pending_snapshot,
-                timeout=1,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            claimed_done = await self._claim_done(done_tasks)
+            claimed_done = await self._pending_tasks.wait_and_claim(timeout_s=1)
             for task in claimed_done:
                 paused_items = task.result()
                 for item in paused_items:
@@ -557,7 +568,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                         f"length: {len(item.response_ids or [])}) after pausing generation."
                     )
                 await ctx.put_generated_group(paused_items)
-            if await self._pending_count() > 0:
+            if self._pending_tasks.count() > 0:
                 await pause_generation(rollout_ctl)
                 await asyncio.sleep(1)
         return time.perf_counter() - pause_start
@@ -574,8 +585,8 @@ class AsyncProduceStrategy(ProduceStrategy):
             return ProduceBatchStatus.EXPIRED_BATCH
 
         # 先回收跨 produce_batch 调用遗留的已完成任务，避免 done task 长期留在 pending 集合里。
-        claimed_done = await self._claim_already_done()
-        await self._put_claimed_tasks(claimed_done, ctx)
+        claimed_done = await self._pending_tasks.claim_ready()
+        await self._put_claimed(claimed_done, ctx)
 
         if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
@@ -609,31 +620,26 @@ class AsyncProduceStrategy(ProduceStrategy):
             if not self.should_continue_fn(available, target_abs):
                 return ProduceBatchStatus.NORMAL
 
-            pending_count = await self._pending_count()
+            pending_count = self._pending_tasks.count()
             desired_pending = max(0, scheduled_target - available)
             if available + pending_count < scheduled_target:
-                await self._schedule_tasks_until(
-                    ctx=ctx,
-                    desired_pending=desired_pending,
-                    sample_from_expired=sample_from_expired,
-                )
+                while await self._pending_tasks.schedule_one(
+                    max_pending=desired_pending,
+                    should_abort=ctx.should_abort,
+                    spawn_one=lambda: self._spawn_one(ctx, sample_from_expired=sample_from_expired),
+                ):
+                    pass
                 if ctx.should_abort():
                     return ProduceBatchStatus.UPDATE_ABORT
 
-            pending_snapshot = await self._snapshot_pending()
             if ctx.should_abort():
                 return ProduceBatchStatus.UPDATE_ABORT
-            if not pending_snapshot:
+            if self._pending_tasks.count() == 0:
                 logger.warning("All tasks are done but not enough samples collected.")
                 return ProduceBatchStatus.NORMAL
 
-            done_tasks, _ = await asyncio.wait(
-                pending_snapshot,
-                timeout=1,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            claimed_done = await self._claim_done(done_tasks)
-            await self._put_claimed_tasks(
+            claimed_done = await self._pending_tasks.wait_and_claim(timeout_s=1)
+            await self._put_claimed(
                 claimed_done,
                 ctx,
                 available_base=available,

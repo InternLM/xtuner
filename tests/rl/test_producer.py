@@ -11,6 +11,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     SamplerConfig,
     SyncProduceStrategyConfig,
 )
+from xtuner.v1.rl.agent_loop_manager.producer import _PendingTasks
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 
 
@@ -152,6 +153,79 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertIs(progress.consumed_samples, consumed_ref)
         self.assertIs(progress.target_samples, target_ref)
         self.assertEqual(progress.state_dict()["target_samples"], {"task_a": 6, "task_b": 7})
+
+    async def test_pending_tasks_claim_ready_only_once(self):
+        pending_tasks = _PendingTasks()
+
+        async def spawn_one():
+            async def done():
+                return "done"
+
+            return asyncio.create_task(done())
+
+        scheduled = await pending_tasks.schedule_one(
+            max_pending=1,
+            should_abort=lambda: False,
+            spawn_one=spawn_one,
+        )
+        self.assertTrue(scheduled)
+        self.assertEqual(pending_tasks.count(), 1)
+
+        await asyncio.sleep(0)
+        claimed = await pending_tasks.claim_ready()
+        self.assertEqual(len(claimed), 1)
+        self.assertEqual(await pending_tasks.claim_ready(), set())
+        self.assertEqual(pending_tasks.count(), 0)
+
+    async def test_pending_tasks_schedule_respects_abort_and_limit(self):
+        pending_tasks = _PendingTasks()
+        spawn_count = 0
+
+        async def spawn_one():
+            nonlocal spawn_count
+            spawn_count += 1
+
+            async def wait_forever():
+                await asyncio.Event().wait()
+
+            return asyncio.create_task(wait_forever())
+
+        self.assertFalse(
+            await pending_tasks.schedule_one(max_pending=0, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        self.assertFalse(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: True, spawn_one=spawn_one)
+        )
+        self.assertTrue(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        self.assertFalse(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        self.assertEqual(spawn_count, 1)
+
+        self.assertEqual(await pending_tasks.cancel_all(), 1)
+        self.assertEqual(pending_tasks.count(), 0)
+
+    async def test_pending_tasks_claim_all_clears_before_wait_claims(self):
+        pending_tasks = _PendingTasks()
+
+        async def spawn_one():
+            async def wait_forever():
+                await asyncio.Event().wait()
+
+            return asyncio.create_task(wait_forever())
+
+        self.assertTrue(
+            await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
+        )
+        claimed = await pending_tasks.claim_all()
+        self.assertEqual(len(claimed), 1)
+        self.assertEqual(await pending_tasks.wait_and_claim(timeout_s=0), set())
+        self.assertEqual(pending_tasks.count(), 0)
+        for task in claimed:
+            task.cancel()
+        await asyncio.gather(*claimed, return_exceptions=True)
 
     async def test_sampler_with_replay_buffer(self):
         task_name = "test_task"
@@ -522,7 +596,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         )
         status = await strategy.produce_batch(ctx)
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
-        self.assertGreater(len(strategy._pending_tasks), 0)
+        self.assertGreater(strategy.pending_task_count(), 0)
 
         await asyncio.sleep(0.08)
 
@@ -537,7 +611,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         )
         status = await strategy.produce_batch(ctx)
         self.assertEqual(status, ProduceBatchStatus.NORMAL)
-        self.assertEqual(len(strategy._pending_tasks), 0)
+        self.assertEqual(strategy.pending_task_count(), 0)
 
         final_data = await self.replay_buffer.get(10, task_name, Status.COMPLETED)
         self.assertEqual(len(final_data), 3)
@@ -564,12 +638,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             progress=progress,
         )
         await strategy.produce_batch(ctx)
-        self.assertGreater(len(strategy._pending_tasks), 0)
+        self.assertGreater(strategy.pending_task_count(), 0)
 
         pause_time_s = await strategy.pause_produce(ctx)
 
         self.assertGreaterEqual(pause_time_s, 0.0)
-        self.assertEqual(len(strategy._pending_tasks), 0)
+        self.assertEqual(strategy.pending_task_count(), 0)
         completed = await self.replay_buffer.count(task_name, Status.COMPLETED)
         aborted = await self.replay_buffer.count(task_name, Status.ABORTED)
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
@@ -594,11 +668,11 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             progress=progress,
         )
         await strategy.produce_batch(ctx)
-        self.assertGreater(len(strategy._pending_tasks), 0)
+        self.assertGreater(strategy.pending_task_count(), 0)
 
         await strategy.pause_produce(ctx)
 
-        self.assertEqual(len(strategy._pending_tasks), 0)
+        self.assertEqual(strategy.pending_task_count(), 0)
         completed = await self.replay_buffer.count(task_name, Status.COMPLETED)
         aborted = await self.replay_buffer.count(task_name, Status.ABORTED)
         expired = await self.replay_buffer.count(task_name, Status.EXPIRED)
@@ -660,7 +734,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sampler.sample.await_count, 1)
 
         await strategy.pause_produce(ctx)
-        self.assertEqual(len(strategy._pending_tasks), 0)
+        self.assertEqual(strategy.pending_task_count(), 0)
 
     async def test_async_produce_strategy_returns_expired_batch_before_processing_leftovers(self):
         task_name = "test_expired_batch"
