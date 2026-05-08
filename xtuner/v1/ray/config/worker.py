@@ -5,10 +5,12 @@ from pathlib import Path
 from typing import Any, List, Literal, Optional, Union
 
 from cyclopts import Group, Parameter
-from pydantic import BaseModel, ConfigDict, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from typing_extensions import Annotated
 
 from xtuner.v1.utils import get_logger
+
+from .tokenize import TokenizeControllerConfig
 
 
 worker_group = Group("worker", help="Types of workers available.")
@@ -263,6 +265,13 @@ class RolloutConfig(BaseModel):
             help="Use float32 for language model head.",
         ),
     ] = False
+    tokenize_controller_config: Annotated[
+        TokenizeControllerConfig,
+        Parameter(
+            group=infer_group,
+            help="Configuration of tokenize controller used by rollout controller.",
+        ),
+    ] = Field(default_factory=TokenizeControllerConfig)
     worker_log_dir: Annotated[Path, Parameter(help="Directory to save worker logs.")] = Path.cwd() / "work_dir"
     _logged_server_urls_per_engine: bool = PrivateAttr(default=False)
 

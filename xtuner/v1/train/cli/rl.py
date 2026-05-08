@@ -1,4 +1,3 @@
-import os
 import time
 from pathlib import Path
 from typing import Annotated
@@ -40,13 +39,7 @@ def main(
     config: Annotated[Path, Parameter(group=Group("config-path", sort_key=0))],
 ):
     if not ray.is_initialized():
-        if os.getenv("RAY_MASTER_ADDR"):
-            master_addr = os.getenv("RAY_MASTER_ADDR", "127.0.0.1")
-            client_port = os.getenv("RAY_CLIENT_PORT", "10001")
-            ray_head_address = f"ray://{master_addr}:{client_port}"
-            ray.init(address=ray_head_address)
-        else:
-            ray.init(num_cpus=128)
+        ray.init(address="auto")
 
     # if os.getenv("XTUNER_RL_MEM_DIR"):
     #     print("Start to monitor actor memory")

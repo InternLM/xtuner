@@ -12,7 +12,6 @@ import ray
 import uvicorn
 from fastapi import FastAPI
 from ray.util.placement_group import PlacementGroup
-from transformers import AutoTokenizer
 
 from xtuner.v1.data_proto.rl_data import (
     RLRolloutResponseItem,
@@ -139,7 +138,7 @@ class RolloutController:
         self.active_rollout_workers: List[RolloutWorker] = []
         tokenizer_path = infer_config.tokenizer_path
         assert tokenizer_path is not None, "tokenizer_path must be set before creating RolloutController"
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        self.tokenize_controller = infer_config.tokenize_controller_config.build(tokenizer_path=tokenizer_path)
         self.workers, self.rank_bundle_idx_list = AutoAcceleratorWorkers.from_placement_group(
             self._get_worker_cls(), infer_config, placement_group
         )
@@ -246,6 +245,9 @@ class RolloutController:
             worker_server_urls_status=worker_server_urls_status,
             api_server_url=getattr(self, "api_server_url", None),
         )
+
+    async def tokenize(self, messages: List[Dict[str, Any]], tools: Optional[List[Any]] = None) -> Dict[str, Any]:
+        return await self.tokenize_controller.tokenize(messages, tools)
 
     def init_workers(self):
         """Initializes and configures the pool of RolloutWorker actors.
@@ -484,12 +486,13 @@ class RolloutController:
             LagentChatCompletionMessage,
             LagentChatCompletionRequest,
             LagentChoice,
+            LagentTokenizeRequest,
+            LagentTokenizeResponse,
         )
-        from xtuner.v1.ray.environment.lagent.tokenize import tokenize
 
         @app.post("/v1/chat/completions")
         async def chat_completions(request: LagentChatCompletionRequest):
-            inputs = tokenize(self.tokenizer, request.messages, request.tools)
+            inputs = await self.tokenize(request.messages, request.tools)
             if len(inputs["input_ids"]) >= self.config.context_length:
                 response = RLRolloutResponseItem(finish_reason="length")
             else:
@@ -526,6 +529,11 @@ class RolloutController:
                     total_tokens=len(inputs["input_ids"]) + completion_tokens,
                 ),
             ).model_dump()
+
+        @app.post("/v1/tokenize")
+        async def tokenize(request: LagentTokenizeRequest):
+            inputs = await self.tokenize(request.messages, request.tools)
+            return LagentTokenizeResponse(**inputs).model_dump()
 
         config = uvicorn.Config(app, host=host, port=port)
         server = uvicorn.Server(config)
@@ -668,4 +676,5 @@ class RolloutController:
         Args:
             block (bool): Whether to block until the operation completes.
         """
+        self.tokenize_controller.shutdown()
         return self._broadcast_to_active_workers("shutdown", block)

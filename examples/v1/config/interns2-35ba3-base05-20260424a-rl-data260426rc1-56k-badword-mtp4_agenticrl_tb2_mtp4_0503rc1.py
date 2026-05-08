@@ -41,6 +41,7 @@ from xtuner.v1.ray.base import (
     AutoAcceleratorWorkers,
     CPUResourcesConfig,
 )
+from xtuner.v1.ray.config.tokenize import TokenizeControllerConfig
 from xtuner.v1.ray.config.worker import RolloutConfig
 from xtuner.v1.ray.dataflow import DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment.agent_env import AgentEnvironment
@@ -73,14 +74,14 @@ if not ray.is_initialized():
 
 experimental_name = os.path.basename(__file__).split(".py")[0]
 base_work_dir = "/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0430rc10"
-work_dir = os.path.join(base_work_dir, experimental_name)
+work_dir = os.environ['WORK_DIR']
 model_name = os.environ["RL_LLM_MODEL"]
 model_path = '/mnt/shared-storage-user/llmit1/user/wangziyi/exp/mindcopilot_rl/work_dirs/ckpt/interns2-35ba3-base05-20260424a-rl-data260428rc0-56k-badword-mtp4-resume800/20260430074140/hf-40'
 stop_word = "<|im_end|>"
 
 # basic settings
-global_batch_size = 256
-prompt_repeat_k = 16
+global_batch_size = 44
+prompt_repeat_k = 4
 max_concurrent_groups = 512
 
 max_prompt_length = 16 * 1024
@@ -97,7 +98,7 @@ rollout_max_batch_size = 128
 max_prefill_token_num = 1024
 enable_return_routed_experts = True
 enable_partial_rollout = False
-staleness_threshold = 0.0
+staleness_threshold = 0.5
 tail_batch_candidate_steps = 0
 auto_resume = True
 skip_load_weights = True
@@ -106,7 +107,7 @@ train_optimizer_steps = 8  # mini batch steps
 hf_interval = 5
 total_epochs = 10
 # evaluation settings
-enable_evaluate = True
+enable_evaluate = False
 enable_initial_evaluate = True
 evaluate_step = 5
 
@@ -155,6 +156,11 @@ rollout_config = RolloutConfig(
         lmdeploy_speculative_num_draft_tokens=4,
     ),
     fp32_lm_head=fp32_lm_head,
+    tokenize_controller_config=TokenizeControllerConfig(
+        num_ray_actors=64,
+        num_cpus_per_actor=1,
+        num_processes_per_actor=1,
+    ),
 )
 
 # sampling params
@@ -697,7 +703,7 @@ visit_tool = WebVisitor(
     ),
     llm=llm,
     truncate_browse_response_length=60000,
-    tokenizer_path=model_path,
+    # tokenizer_path=model_path,
 )
 arxiv_tool = AsyncMCPClient(
     # type=AsyncMCPClient,

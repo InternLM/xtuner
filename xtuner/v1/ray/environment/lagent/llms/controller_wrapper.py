@@ -12,7 +12,6 @@ from xtuner.v1.ray.environment.lagent.parsers import (
     ResponseParser,
 )
 from xtuner.v1.ray.environment.lagent.schema import AgentMessage
-from xtuner.v1.ray.environment.lagent.tokenize import tokenize
 from xtuner.v1.ray.rollout.controller import RolloutController
 
 
@@ -26,9 +25,9 @@ class ControllerWrapper:
         reasoning_parser: Optional[ResponseParser] = None,
         tool_call_parser: Optional[ResponseParser] = None,
     ):
-        assert rollout_controller is not None or (
-            placement_group and rollout_cfg
-        ), "Either rollout_controller or placement_group and rollout_cfg must be provided."
+        assert rollout_controller is not None or (placement_group and rollout_cfg), (
+            "Either rollout_controller or placement_group and rollout_cfg must be provided."
+        )
         if rollout_controller:
             self.rollout_controller = rollout_controller
             self.rollout_cfg = ray.get(rollout_controller.get_rollout_info.remote())["rollout_config"]  # type: ignore[call-overload, attr-defined]
@@ -36,9 +35,6 @@ class ControllerWrapper:
             self.rollout_controller = RolloutController.remote(rollout_cfg, placement_group)  # type: ignore[attr-defined]
             self.rollout_cfg = rollout_cfg
 
-        from transformers import AutoTokenizer
-
-        self.tokenizer = AutoTokenizer.from_pretrained(self.rollout_cfg.tokenizer_path, trust_remote_code=True)
         self.sample_params = sample_params or SampleParams()
         # default parsers
         self.reasoning_parser = (
@@ -50,7 +46,7 @@ class ControllerWrapper:
 
     async def chat(self, messages, tools: Optional[List[Dict]] = None, **kwargs):
         sample_params = self.sample_params.model_copy(update=kwargs)
-        inputs = tokenize(self.tokenizer, messages, tools)
+        inputs = await self.rollout_controller.tokenize.remote(messages, tools)  # type: ignore[attr-defined]
         if len(inputs["input_ids"]) >= self.rollout_cfg.context_length:
             response = RLRolloutResponseItem(finish_reason="length")
         else:
