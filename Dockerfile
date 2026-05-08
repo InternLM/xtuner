@@ -266,7 +266,7 @@ ENV XTUNER_LMDEPLOY_ENVS_DIR=/envs/lmdeploy
 
 # RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
 RUN --mount=type=secret,id=HTTPS_PROXY,env=https_proxy \
-    --mount=type=secret,id=NO_PROXY,env=no_proxy \
+    # --mount=type=secret,id=NO_PROXY,env=no_proxy \
     pip install fastapi fire openai outlines \
         pyzmq aiohttp cloudpickle prometheus_client protobuf numpy pillow einops tiktoken sentencepiece \
         partial_json_parser 'ray[default]<3' shortuuid uvicorn pybase64 \
