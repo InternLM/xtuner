@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 
 class Status(Enum):
@@ -329,14 +329,82 @@ class ProduceStrategy(Protocol):
     async def pause_produce(self, ctx: ProduceContext) -> float: ...
 
 
+class _PendingTasks:
+    """AsyncProduceStrategy 的并发 pending task 集合。
+
+    这个 helper 只封装并发集合语义，不理解 sampler / rollout / replay buffer：
+    - wait 使用快照，随后必须 claim，避免 pause 和 produce 重复处理同一个 task。
+    - cancel 前先原子取出并清空集合，避免 cancel 后又被其他路径 claim。
+    - schedule 时在锁内检查 abort 和 pending 数，避免 pause 已触发后继续新增 task。
+    """
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task] = set()
+        self._lock = asyncio.Lock()
+
+    async def count(self) -> int:
+        async with self._lock:
+            return len(self._tasks)
+
+    async def claim_ready(self) -> set[asyncio.Task]:
+        async with self._lock:
+            ready = {task for task in self._tasks if task.done()}
+            self._tasks.difference_update(ready)
+            return ready
+
+    async def wait_and_claim(self, *, timeout_s: float) -> set[asyncio.Task]:
+        async with self._lock:
+            snapshot = set(self._tasks)
+        if not snapshot:
+            return set()
+
+        done, _ = await asyncio.wait(snapshot, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED)
+        async with self._lock:
+            claimed = done & self._tasks
+            self._tasks.difference_update(claimed)
+            return claimed
+
+    async def schedule_one(
+        self,
+        *,
+        max_pending: int,
+        should_abort: Callable[[], bool],
+        spawn_one: Callable[[], Awaitable[asyncio.Task]],
+    ) -> bool:
+        async with self._lock:
+            if should_abort() or len(self._tasks) >= max_pending:
+                return False
+            # spawn_one 内部可以采样并创建 rollout task；放在锁内是为了让 abort 检查和新增 task 原子化。
+            self._tasks.add(await spawn_one())
+            return True
+
+    async def claim_all(self) -> set[asyncio.Task]:
+        async with self._lock:
+            claimed = set(self._tasks)
+            self._tasks.clear()
+            return claimed
+
+    async def cancel_all(self) -> None:
+        tasks = await self.claim_all()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class AsyncProduceStrategy:
-    """异步生产策略只保留策略决策和 pending 生命周期。
+    """异步生产策略只保留策略决策。
 
     strategy 不直接读 progress dict、不直接拼 replay_buffer 参数、不直接管理 manager event。
+    pending task 的并发集合语义交给 _PendingTasks。
     """
 
     over_sample_threshold: float
     tail_batch_trigger_size: int
+    _pending_tasks: _PendingTasks
+
+    def __init__(self) -> None:
+        # 真实实现继续保留现有配置参数；这里强调 pending helper 由 strategy 持有。
+        self._pending_tasks = _PendingTasks()
 
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
         if ctx.should_abort():
@@ -345,7 +413,7 @@ class AsyncProduceStrategy:
             return ProduceBatchStatus.EXPIRED_BATCH
 
         # 先回收跨调用遗留的 done pending；真实实现中所有结果都通过 ctx.put_generated_group 落库。
-        await self._claim_ready_and_put(ctx)
+        await self._put_claimed(await self._pending_tasks.claim_ready(), ctx)
 
         if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
@@ -369,39 +437,44 @@ class AsyncProduceStrategy:
             if available >= target_abs:
                 return ProduceBatchStatus.NORMAL
 
-            pending_count = await self._pending_count()
-            if available + pending_count < scheduled_target:
-                await self._schedule_until(
-                    ctx,
-                    desired_pending=scheduled_target - available,
-                    from_expired_pool=from_expired_pool,
+            while available + await self._pending_tasks.count() < scheduled_target:
+                scheduled = await self._pending_tasks.schedule_one(
+                    max_pending=scheduled_target - available,
+                    should_abort=ctx.should_abort,
+                    spawn_one=lambda: self._spawn_one(ctx, from_expired_pool=from_expired_pool),
                 )
+                if not scheduled:
+                    break
 
-            if not await self._wait_one_and_put(ctx):
+            claimed = await self._pending_tasks.wait_and_claim(timeout_s=1.0)
+            if not claimed:
                 return ProduceBatchStatus.NORMAL
+            await self._put_claimed(claimed, ctx, available_base=available)
 
     async def pause_produce(self, ctx: ProduceContext) -> float:
         # 真实实现：
         # 1. pause rollout generation。
-        # 2. claim pending done task。
+        # 2. 通过 _pending_tasks.wait_and_claim(...) claim done task。
         # 3. 通过 ctx.put_generated_group(...) 按当前 consumer_step 刷新 staleness 后落库。
         # 4. 超时后取消未完成 task。
         ...
 
-    async def _claim_ready_and_put(self, ctx: ProduceContext) -> None:
-        ...
-
-    async def _schedule_until(self, ctx: ProduceContext, *, desired_pending: int, from_expired_pool: bool) -> None:
+    async def _spawn_one(self, ctx: ProduceContext, *, from_expired_pool: bool) -> asyncio.Task:
         # rollout_state = await ctx.sample_group(from_expired_pool=from_expired_pool)
-        # create_task(generate_group(ctx.task.agent_loop, rollout_state))
+        # return create_task(generate_group(ctx.task.agent_loop, rollout_state))
         ...
 
-    async def _wait_one_and_put(self, ctx: ProduceContext) -> bool:
-        # done = await wait_one_pending()
-        # await ctx.put_generated_group(done.result())
-        ...
-
-    async def _pending_count(self) -> int:
+    async def _put_claimed(
+        self,
+        claimed: set[asyncio.Task],
+        ctx: ProduceContext,
+        *,
+        available_base: int | None = None,
+    ) -> int:
+        # for task in claimed:
+        #     is_valid = await ctx.put_generated_group(task.result())
+        #     ...
+        # return valid_completed_count
         ...
 
 

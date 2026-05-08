@@ -698,7 +698,15 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
         manager._model_step = 5
         manager._produce_progress.producer_future_step = 5
-        status = await manager._produce_batch_to_buffer(batch_size=3, progress=manager._produce_progress)
+        task_batch_sizes = manager._produce_progress.ensure_target_upto(
+            batch_size=3,
+            future_step=manager._produce_progress.producer_future_step,
+            allocate_batch_sizes=manager._get_task_batch_sizes_for_step,
+        )
+        status = await manager._produce_batch_to_buffer(
+            task_batch_sizes=task_batch_sizes,
+            progress=manager._produce_progress,
+        )
 
         self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
 

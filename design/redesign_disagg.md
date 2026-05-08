@@ -54,9 +54,10 @@
 1. 扩展现有 `ProduceProgress`。
 2. 给现有 `ReplayBuffer` 增加通用 batch 方法。
 
-同时新增一个小的行为接口：
+同时新增一个业务接口和一个私有并发 helper：
 
 3. 新增 `ProduceContext`，重点服务 `AsyncProduceStrategy` 的复杂运行时契约。
+4. 新增 `_PendingTasks`，只服务 `AsyncProduceStrategy` 的 pending task 并发集合语义。
 
 ## 5. ProduceProgress 扩展
 
@@ -204,7 +205,44 @@ ctx.put_generated_group(group)
 
 `ProduceContext` 的目标是隐藏调用契约，不是缩短参数列表。
 
-## 8. AgentLoopManager 保留的职责
+## 8. _PendingTasks
+
+`_PendingTasks` 是 `AsyncProduceStrategy` 的私有 helper，不是业务抽象，也不进入 manager / trainer 的公开接口。
+
+它要隐藏的是 pending task 集合的并发协议：
+
+```python
+class _PendingTasks:
+    async def count(self) -> int: ...
+    async def claim_ready(self) -> set[asyncio.Task]: ...
+    async def wait_and_claim(self, *, timeout_s: float) -> set[asyncio.Task]: ...
+    async def schedule_one(
+        self,
+        *,
+        max_pending: int,
+        should_abort: Callable[[], bool],
+        spawn_one: Callable[[], Awaitable[asyncio.Task]],
+    ) -> bool: ...
+    async def claim_all(self) -> set[asyncio.Task]: ...
+    async def cancel_all(self) -> None: ...
+```
+
+放进 `_PendingTasks` 的逻辑：
+
+- `asyncio.wait(snapshot)` 后必须再次 `claim`，避免 `produce_batch` 和 `pause_produce` 重复处理同一个 done task。
+- cancel 前先原子取出并清空集合，避免 cancel 后又被其他路径 claim。
+- schedule one 时在锁内同时检查 `should_abort()` 和 pending 数量，避免 pause 信号已触发后继续新增 task。
+
+不放进 `_PendingTasks` 的逻辑：
+
+- 从 sampler 取哪个 pool 的样本。
+- 如何调用 rollout generate。
+- 生成结果是否有效、如何写入 replay buffer。
+- 是否触发 tail batch / oversample。
+
+`SyncProduceStrategy` 不需要使用 `_PendingTasks`。同步路径里的 pending set 是单次 `produce_batch` 的局部变量，没有后台 producer 和 consumer pause 的并发访问；强行复用会让简单路径承担异步路径的复杂度。
+
+## 9. AgentLoopManager 保留的职责
 
 `AgentLoopManager` 仍负责流程编排：
 
@@ -225,9 +263,9 @@ ctx.put_generated_group(group)
 
 这些状态转移目前仍比较简单，先保留在 `AgentLoopManager` 内部，并新增公开方法 `shutdown()`，避免 trainer 直接写私有字段。
 
-## 9. 核心流程
+## 10. 核心流程
 
-### 9.1 共卡 produce_batch
+### 10.1 共卡 produce_batch
 
 ```python
 self.continue_produce(model_step)
@@ -242,7 +280,7 @@ batch_by_task, _ = await self.replay_buffer.take_batch(task_sizes)
 return await self._build_result(batch_by_task, status=status)
 ```
 
-### 9.2 非共卡 produce_loop
+### 10.2 非共卡 produce_loop
 
 ```python
 progress = self._produce_progress
@@ -259,7 +297,7 @@ elif status == EXPIRED_BATCH:
     self._status = EXPIRED_BATCH
 ```
 
-### 9.3 非共卡 get_batch
+### 10.3 非共卡 get_batch
 
 ```python
 progress.begin_consume(train_step)
@@ -274,7 +312,7 @@ if await self.replay_buffer.is_ready(task_sizes):
     return await self._build_result(batch_by_task)
 ```
 
-## 10. 建议迁移步骤
+## 11. 建议迁移步骤
 
 ### 步骤 1：扩展 ProduceProgress
 
@@ -295,14 +333,21 @@ if await self.replay_buffer.is_ready(task_sizes):
 - 先让旧签名包一层 context 调新签名，降低一次性改动风险。
 - 再逐步把 `AsyncProduceStrategy` 内部读取 progress / replay / event 的地方改成 `ctx` 方法。
 
-### 步骤 4：收敛 AgentLoopManager 公开状态操作
+### 步骤 4：新增 _PendingTasks
+
+- 新增 `_PendingTasks`，先把 `_snapshot_pending / _pending_count / _claim_done / _claim_already_done / _claim_all_pending` 搬进去。
+- 把 `_schedule_one` 收敛成 `self._pending_tasks.schedule_one(...)`；是否循环调度到目标数量仍留在 `AsyncProduceStrategy`。
+- `AsyncProduceStrategy` 保留 `_spawn_one(...)` 和 `_put_claimed(...)`，避免 `_PendingTasks` 理解 sampler / rollout / replay buffer。
+- 不改 `SyncProduceStrategy` 的局部 `pending_tasks`。
+
+### 步骤 5：收敛 AgentLoopManager 公开状态操作
 
 - 保留 `pause_produce(use_global_progress=True)` 作为权重同步前的显式暂停入口。
 - 保留 `continue_produce(model_step)` 作为权重同步后的恢复入口。
 - 新增 `shutdown()`，替换 trainer 中直接写 `_status / _finish_event` 的代码。
 - 旧方法可以短期保留为兼容 wrapper。
 
-### 步骤 5：清理旧私有 helper
+### 步骤 6：清理旧私有 helper
 
 可以删除或缩小：
 
@@ -319,7 +364,7 @@ if await self.replay_buffer.is_ready(task_sizes):
 - `_produce_to_buffer`
 - `_pause_with_progress`
 
-## 11. 测试建议
+## 12. 测试建议
 
 ### ProduceProgress
 
@@ -349,12 +394,20 @@ if await self.replay_buffer.is_ready(task_sizes):
 - `ctx.put_generated_group` 统一处理生成结果落库。
 - pause drain 和 producer claim 不重复 put pending task。
 
-## 12. 设计总结
+### _PendingTasks
+
+- `wait_and_claim` 对快照 wait 后只返回仍在集合中的 task。
+- `claim_ready` 不重复返回已 claim 的 done task。
+- `claim_all / cancel_all` 清空集合后，后续 claim 返回空。
+- `schedule_one` 在 `should_abort()` 为 true 或 pending 数已达到 `max_pending` 时不新增 task。
+
+## 13. 设计总结
 
 本设计不追求一次性完全拆分 `AgentLoopManager`。它优先处理最影响理解和修改的隐藏知识：
 
 - progress 的累计口径收进 `ProduceProgress`。
 - replay buffer 的通用批操作收进 `ReplayBuffer`。
 - strategy 的运行时契约收进 `ProduceContext`。
+- async pending task 的并发 claim / cancel / schedule 协议收进 `_PendingTasks`。
 
 这样新增类少，接口更深，迁移路径也更短。后续如果 `_status / _update_event / _finish_event / _model_step` 的状态转移继续变复杂，再单独评估是否需要进一步抽象状态机。

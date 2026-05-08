@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
-    update_group_status,
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
@@ -182,24 +181,6 @@ def calculate_stale_threshold(max_staleness: int, sync_weights_interval: int) ->
 
     # max_staleness 按同步周期计数；+1 表示训练天然必须接受的当前同步周期滞后。
     return (max_staleness + 1) * sync_weights_interval
-
-
-def expire_group_if_needed(group: list[RolloutState], stale_threshold: int) -> list[RolloutState]:
-    if stale_threshold <= 0:
-        raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
-
-    group_status = update_group_status(group)
-    if group_status not in (Status.COMPLETED, Status.ABORTED):
-        return group
-    if any(getattr(sample, "seq_staleness", 0) >= stale_threshold for sample in group):
-        # completed / aborted 只要组内任一样本过期，就整组转为 EXPIRED。
-        group_stalenss = [getattr(sample, "seq_staleness", 0) for sample in group]
-        logger.info(
-            f"Expiring group of {len(group)} samples due to sample staleness {group_stalenss} exceeding threshold {stale_threshold}. "
-        )
-        for sample in group:
-            sample.status = Status.EXPIRED
-    return group
 
 
 def _validate_progress_for_task(
@@ -579,6 +560,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         if ctx.target_abs <= 0:
             return ProduceBatchStatus.NORMAL
 
+        # TODO: place this check just before while loop
         if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
         if self.is_model_expired(ctx.train_step, ctx.model_step):
@@ -588,6 +570,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         claimed_done = await self._pending_tasks.claim_ready()
         await self._put_claimed(claimed_done, ctx)
 
+        # TODO: remove this check
         if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
         if self.is_model_expired(ctx.train_step, ctx.model_step):
@@ -629,6 +612,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                     spawn_one=lambda: self._spawn_one(ctx, sample_from_expired=sample_from_expired),
                 ):
                     pass
+                # TODO: remove this check, because will check it when exit if statement, it's redundant
                 if ctx.should_abort():
                     return ProduceBatchStatus.UPDATE_ABORT
 
