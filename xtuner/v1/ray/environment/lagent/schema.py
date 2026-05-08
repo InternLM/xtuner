@@ -203,3 +203,16 @@ class LagentChatCompletionRequest(BaseModel):
     # XTuner-specific generation parameters
     sample_params: SampleParams = Field(default_factory=SampleParams)
     extra_params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class LagentTokenizeRequest(BaseModel):
+    model: str = ""
+    messages: List[Dict[str, Any]]
+    tools: List[Any] = Field(default_factory=list)
+
+
+class LagentTokenizeResponse(BaseModel):
+    input_ids: List[int]
+    labels: List[int]
+    logprobs: List[float]
+    routed_experts: Optional[Any] = None
