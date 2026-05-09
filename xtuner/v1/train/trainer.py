@@ -730,19 +730,18 @@ class Trainer:
 
             with self._maybe_profiling():
                 train_step_info = self._engine.train_step(engine_input)
+                hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
+                for hook in hooks:
+                    hook(
+                        train_step_info=train_step_info,
+                        step=self.cur_step,
+                        epoch=self._cur_epoch,
+                        total_step=self.total_step,
+                        total_epoch=self.total_epoch,
+                    )
 
-            hooks = self.hooks_config.get_hooks(HookStage.AFTER_TRAIN_STEP)
-            for hook in hooks:
-                hook(
-                    train_step_info=train_step_info,
-                    step=self.cur_step,
-                    epoch=self._cur_epoch,
-                    total_step=self.total_step,
-                    total_epoch=self.total_epoch,
-                )
-
-            grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
-            self._engine.step_optimizer(grad_norm)
+                grad_norm = self._engine.clip_grad_norm(do_clip=self._do_clip, dtype=self._grad_norm_dtype)
+                self._engine.step_optimizer(grad_norm)
 
             time_after_train_step = time.time()
             ProberList.after_step()

@@ -13,7 +13,7 @@ from xtuner.v1.utils import get_logger
 logger = get_logger()
 
 
-MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
+MEMORY_SNAPSHOT_MAX_ENTRIES = 10000000
 
 
 class TimeProfiler:
@@ -74,7 +74,7 @@ class TimeProfiler:
 
 class MemoryProfiler:
     def __init__(self, profile_dir: Path):
-        torch.cuda.memory._record_memory_history(max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES)
+        torch.cuda.memory._record_memory_history(max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES, stacks="python")
         self.profile_dir = profile_dir
 
     def step(self, exit_ctx: bool = False):
