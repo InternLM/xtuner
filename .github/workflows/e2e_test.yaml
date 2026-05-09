@@ -1,5 +1,5 @@
 name: ete_test
-
+run-name: 'e2e_test-${{ github.event.inputs.run_case }}'
 permissions:
   contents: write
   pages: write
