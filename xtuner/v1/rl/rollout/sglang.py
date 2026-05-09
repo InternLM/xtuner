@@ -182,7 +182,7 @@ class SGLangWorker(RolloutWorker):
         return self._make_request("resume_memory_occupation", {"tags": ["kv_cache"]})
 
     def pause_generation(self):
-        return self._make_request("pause_generation")
+        return self._make_request("pause_generation", {"mode": "retract"})
 
     def continue_generation(self):
         return self._make_request("continue_generation")
