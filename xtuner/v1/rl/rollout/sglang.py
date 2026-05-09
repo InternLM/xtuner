@@ -184,6 +184,8 @@ class SGLangWorker(RolloutWorker):
         return self._make_request("pause_generation")
 
     def continue_generation(self):
+        # 恢复生成时必须清掉上一轮 abort 标志，否则新请求会在发送前被本地直接标成 ABORTED。
+        self.receive_abort_request.clear()
         return self._make_request("continue_generation")
 
     def reset_prefix_cache(self):
