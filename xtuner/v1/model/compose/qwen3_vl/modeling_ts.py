@@ -56,9 +56,9 @@ class Qwen3VLTimeSeriesModel(BaseModel):
 
     @override
     def fully_shard(
-            self,
-            fsdp_config: FSDPConfig,
-            float8_handler: Float8Handler | None = None,
+        self,
+        fsdp_config: FSDPConfig,
+        float8_handler: Float8Handler | None = None,
     ):
         self.fsdp_config = fsdp_config
         assert float8_handler is None
@@ -119,10 +119,12 @@ class Qwen3VLTimeSeriesModel(BaseModel):
     def forward(self,
                 time_series_signals: Optional[torch.FloatTensor] = None,
                 ts_lens: Optional[torch.Tensor] = None,
+                ts_channels: Optional[torch.Tensor] = None,
                 sr: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
         ts_embeds, ts_pad_mask = self.time_series(
             time_series_signals,
             ts_lens=ts_lens,
+            channels=ts_channels,
             sr=sr
         )
         return ts_embeds, ts_pad_mask
