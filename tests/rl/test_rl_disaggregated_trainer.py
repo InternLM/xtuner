@@ -36,6 +36,11 @@ class _FakeManager:
     def continue_produce(self, model_step: int):
         self.calls.append(("continue_produce", model_step))
 
+    def shutdown(self):
+        self.calls.append("shutdown")
+        self._status = AgentLoopManagerStatus.FINISH
+        self._finish_event.set()
+
 
 class TestRLDisaggregatedTrainer(unittest.TestCase):
     def setUp(self):
@@ -123,8 +128,11 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
         self.assertIn("produce_loop_exit", manager.calls)
 
     def test_fit_runs_eval_before_reset_and_stops_producer(self):
+        # 确定性排序依赖 RolloutState 的 message_uid 和 uid，测试用轻量对象模拟即可。
+        train_sample = SimpleNamespace(message_uid=1, uid=1)
+        eval_sample = SimpleNamespace(message_uid=2, uid=2)
         manager = _FakeManager(
-            [ProduceBatchResult(rollout_states=[["sample"]], status=ProduceBatchStatus.NORMAL)]
+            [ProduceBatchResult(rollout_states=[[train_sample]], status=ProduceBatchStatus.NORMAL)]
         )
         trainer = self._make_trainer(manager)
         trainer._enable_evaluate = True
@@ -135,7 +143,7 @@ class TestRLDisaggregatedTrainer(unittest.TestCase):
 
         async def eval_produce_batch(batch_size: int, train_step: int, model_step: int):
             events.append("eval")
-            return ProduceBatchResult(rollout_states=[["eval"]])
+            return ProduceBatchResult(rollout_states=[[eval_sample]])
 
         def continue_produce(model_step: int):
             events.append("continue_produce")

@@ -20,7 +20,6 @@ from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.rl.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.rl.agent_loop_manager import (
     AgentLoopManagerConfig,
-    AgentLoopManagerStatus,
     ProduceBatchResult,
     ProduceBatchStatus,
 )
@@ -1142,8 +1141,7 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                 self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
                 self._cur_step = train_step
         finally:
-            self.agent_loop_manager._status = AgentLoopManagerStatus.FINISH
-            self.agent_loop_manager._finish_event.set()
+            self.agent_loop_manager.shutdown()
             await producer_task
 
     async def _sync_weights_and_save(self, train_step: int, step_timer_dict: dict):

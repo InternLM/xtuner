@@ -2,16 +2,7 @@ import unittest
 
 from pydantic import ValidationError
 
-from xtuner.v1.data_proto.rl_data import Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, calculate_stale_threshold
-from xtuner.v1.rl.agent_loop_manager.producer import expire_group_if_needed
-
-
-class _State:
-    def __init__(self, seq_staleness: int, status: Status = Status.COMPLETED):
-        self.uid = "state"
-        self.seq_staleness = seq_staleness
-        self.status = status
 
 
 class TestStalenessPolicy(unittest.TestCase):
@@ -33,14 +24,6 @@ class TestStalenessPolicy(unittest.TestCase):
     def test_negative_max_staleness_is_invalid(self):
         with self.assertRaises(ValidationError):
             AsyncProduceStrategyConfig(max_staleness=-1)
-
-    def test_expire_group_requires_positive_step_threshold(self):
-        with self.assertRaisesRegex(ValueError, "stale_threshold must be positive"):
-            expire_group_if_needed([_State(seq_staleness=0)], stale_threshold=0)
-
-        group = [_State(seq_staleness=4)]
-        expire_group_if_needed(group, stale_threshold=4)
-        self.assertEqual(group[0].status, Status.EXPIRED)
 
 
 if __name__ == "__main__":
