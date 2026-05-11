@@ -5,6 +5,7 @@ from transformers import PreTrainedTokenizer
 from xtuner.v1.data_proto.rl_data import RolloutState
 from xtuner.v1.utils import get_logger
 
+from ..data_item import CacheItem
 from ..utils import CachableTokenizeFunction
 
 
@@ -26,7 +27,7 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
         self.data_judger_mapping = data_judger_mapping
         self.system_prompt = system_prompt
 
-    def __call__(self, item: dict, **kwargs) -> RolloutState:
+    def __call__(self, item: dict, **kwargs) -> RolloutState | CacheItem:
         """example:
         item = {
                 "data_source": data_source,
@@ -79,16 +80,22 @@ class RLTextTokenizeFn(CachableTokenizeFunction[RolloutState]):
             else:
                 mapped_judger_name_and_weight = {data_source: 1.0}
 
-        rollout_state = RolloutState(
-            prompt_ids=prompt_token_ids,
-            message=message,
-            reward_model=item.get("reward_model", {}),
-            num_tokens=num_tokens,
-            proxy_attn_flops=float(num_tokens),
-            data_source=mapped_judger_name_and_weight,
-            extra_fields=extra_info,
-        )
-        return rollout_state
+        if self.state == "cache":
+            # If return RolloutState, the cache speed will be slow because of serialization problem
+            return CacheItem(
+                num_tokens=num_tokens,
+                proxy_attn_flops=float(num_tokens),
+            )
+        else:
+            return RolloutState(
+                prompt_ids=prompt_token_ids,
+                message=message,
+                reward_model=item.get("reward_model", {}),
+                num_tokens=num_tokens,
+                proxy_attn_flops=float(num_tokens),
+                data_source=mapped_judger_name_and_weight,
+                extra_fields=extra_info,
+            )
 
     def hash(self) -> str:
         return "RLTextTokenizeFn"

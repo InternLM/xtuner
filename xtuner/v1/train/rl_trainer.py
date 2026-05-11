@@ -187,8 +187,8 @@ class BaseRLTrainerConfig(BaseModel):
     tokenizer_path: str | Path
     replay_buffer_config: SyncReplayBufferConfig | AsyncReplayBufferConfig = SyncReplayBufferConfig()
     agent_loop_manager_cfg: AgentLoopManagerConfig
-    eval_agent_loop_manager_cfg: AgentLoopManagerConfig
-    evaluator_config: EvaluatorConfig
+    eval_agent_loop_manager_cfg: AgentLoopManagerConfig | None = None
+    evaluator_config: EvaluatorConfig | None = None
     load_from: str | Path
     total_train_steps: int | None = None
     total_epochs: int | None = None
@@ -332,7 +332,7 @@ class BaseRLTrainer:
 
     def _init_runtime_flags(self, cfg: BaseRLTrainerConfig) -> None:
         self._enable_evaluate = cfg.enable_evaluate
-        self._enable_initial_evaluate = cfg.enable_initial_evaluate
+        self._enable_initial_evaluate = cfg.enable_initial_evaluate and cfg.enable_evaluate
         self._evaluate_step = cfg.evaluate_step
         self._debug_rollout = cfg.debug_rollout
 
@@ -352,16 +352,19 @@ class BaseRLTrainer:
             sync_weights_interval=cfg.sync_weights_interval,
         )
 
-        self.eval_agent_loop_manager = cfg.eval_agent_loop_manager_cfg.build(
-            rollout_controller=self.rollout_controller,
-            tokenizer=self.tokenizer,
-            replay_buffer=replay_buffer,
-            logger=self.logger,
-            sync_weights_interval=cfg.sync_weights_interval,
-        )
+        if self._enable_evaluate:
+            assert cfg.eval_agent_loop_manager_cfg is not None
+            self.eval_agent_loop_manager = cfg.eval_agent_loop_manager_cfg.build(
+                rollout_controller=self.rollout_controller,
+                tokenizer=self.tokenizer,
+                replay_buffer=replay_buffer,
+                logger=self.logger,
+                sync_weights_interval=cfg.sync_weights_interval,
+            )
 
-        total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
-        self.evaluator = cfg.evaluator_config.build(total_eval_samples=total_eval_samples)
+            total_eval_samples = len(self.eval_agent_loop_manager.data_sampler)
+            assert cfg.evaluator_config is not None
+            self.evaluator = cfg.evaluator_config.build(total_eval_samples=total_eval_samples)
         self._resolve_total_train_steps(cfg)
 
     def _resolve_total_train_steps(self, cfg: BaseRLTrainerConfig) -> None:
