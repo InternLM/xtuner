@@ -310,14 +310,14 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             ],
             replay_buffer=replay_buffer,
         )
-        multi_task_manager._status = AgentLoopManagerStatus.UPDATE_ABORT
+        multi_task_manager._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         multi_task_manager._update_event.set()
 
         result = await multi_task_manager.produce_batch(batch_size=7, train_step=3, model_step=2)
 
         self.assertEqual(result.task_batch_sizes, {"task_a": 5, "task_b": 2, "task_c": 0})
-        # sync produce_batch 在本轮入口恢复 NORMAL，收尾 pause 后保留 UPDATE_ABORT 到下一轮入口再清理。
-        self.assertEqual(multi_task_manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
+        # sync produce_batch 在本轮入口恢复 NORMAL，收尾 pause 后保留 UPDATE_WEIGHT_AND_ABORT 到下一轮入口再清理。
+        self.assertEqual(multi_task_manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
         self.assertTrue(multi_task_manager._update_event.is_set())
         self.assertEqual(multi_task_manager._model_step, 2)
         self.assertEqual(strategy_a.called_batch_sizes, [5])
@@ -382,7 +382,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             restored_step = manager.resume(checkpoint_path)
 
         self.assertEqual(restored_step, 7)
-        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
+        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
         self.assertTrue(manager._update_event.is_set())
         self.assertFalse(manager._finish_event.is_set())
         self.assertEqual(manager._pause_time_s, 0.0)
@@ -497,7 +497,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.called_model_steps, [6])
         self.assertEqual(len(strategy.called_update_events), 1)
         self.assertFalse(strategy.called_update_event_states[0])
-        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
+        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
         self.assertTrue(manager._update_event.is_set())
         self.assertEqual(result.group_gen_count, 2)
         self.assertAlmostEqual(result.group_gen_mean_s, 0.75)
@@ -547,7 +547,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(strategy.cleanup_model_steps, [0])
         self.assertIs(strategy.cleanup_progresses[0], manager._produce_progress)
         self.assertTrue(manager._update_event.is_set())
-        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_ABORT)
+        self.assertEqual(manager._status, AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT)
         self.assertEqual(manager._pause_time_s, 2.5)
 
     async def test_pause_produce_validates_progress_selection_before_state_change(self):
@@ -687,7 +687,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 _TaskRunner(
                     task_name="task_c",
                     agent_loop=_fake_agent_loop(),
-                    produce_strategy=_FakeProduceStrategy(status=ProduceBatchStatus.UPDATE_ABORT),
+                    produce_strategy=_FakeProduceStrategy(status=ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT),
                     sampler=_FakeSampler(),
                     weight=1.0,
                     order=2,
@@ -708,7 +708,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             progress=manager._produce_progress,
         )
 
-        self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
+        self.assertEqual(status, ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT)
 
     async def test_produce_loop_waits_for_continue_produce_and_stops_on_finish(self):
         strategy = _SequencedProduceStrategy(

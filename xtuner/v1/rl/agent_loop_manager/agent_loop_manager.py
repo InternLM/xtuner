@@ -93,13 +93,13 @@ class AgentLoopManagerStatus(Enum):
 
     按下面的路径流转：
     - 初始状态是 NORMAL
-    - NORMAL -> UPDATE_ABORT
+    - NORMAL -> UPDATE_WEIGHT_AND_ABORT
       - trainer 开始做权重同步前触发
-    - UPDATE_ABORT -> NORMAL
+    - UPDATE_WEIGHT_AND_ABORT -> NORMAL
       - 权重同步完成后调用 continue_product()
     - NORMAL -> EXPIRED_BATCH
       - 当前 rollout model 已经过旧
-    - EXPIRED_BATCH -> UPDATE_ABORT
+    - EXPIRED_BATCH -> UPDATE_WEIGHT_AND_ABORT
       - trainer 检测到过期后，进入权重同步阶段
     - 任意状态 -> FINISH
       - 训练结束
@@ -110,7 +110,7 @@ class AgentLoopManagerStatus(Enum):
     """
 
     NORMAL = auto()
-    UPDATE_ABORT = auto()
+    UPDATE_WEIGHT_AND_ABORT = auto()
     EXPIRED_BATCH = auto()
     FINISH = auto()
 
@@ -151,8 +151,8 @@ def _fill_group_timing_stats(
 
 
 def _aggregate_status(statuses: list[ProduceBatchStatus]) -> ProduceBatchStatus:
-    if any(status == ProduceBatchStatus.UPDATE_ABORT for status in statuses):
-        return ProduceBatchStatus.UPDATE_ABORT
+    if any(status == ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT for status in statuses):
+        return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
     if any(status == ProduceBatchStatus.EXPIRED_BATCH for status in statuses):
         return ProduceBatchStatus.EXPIRED_BATCH
     return ProduceBatchStatus.NORMAL
@@ -524,7 +524,7 @@ class AgentLoopManager:
 
         # 合法参数确认后，统一拉起 manager 级暂停信号，阻止仍在运行的 produce_batch 继续调度新 rollout。
         self._update_event.set()
-        self._status = AgentLoopManagerStatus.UPDATE_ABORT
+        self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         pause_time_s = 0.0
         for task in self.task_runners:
             ctx = _build_produce_context(
@@ -665,7 +665,7 @@ class AgentLoopManager:
         await continue_generation(rollout_ctl)
         try:
             # 共卡路径不复用非共卡的 paused producer 状态机。
-            # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_ABORT，
+            # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_WEIGHT_AND_ABORT，
             # produce_batch() 也应视作一次独立的同步生产过程，从干净状态开始。
             #
             # 共卡路径下，produce_batch() 对应 rollout worker 当前持有的权重版本。
@@ -716,7 +716,7 @@ class AgentLoopManager:
         while not self._finish_event.is_set():
             if self._status == AgentLoopManagerStatus.FINISH:
                 break
-            if self._status in (AgentLoopManagerStatus.UPDATE_ABORT, AgentLoopManagerStatus.EXPIRED_BATCH):
+            if self._status in (AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT, AgentLoopManagerStatus.EXPIRED_BATCH):
                 # 同步前主动暂停和模型过期都只能由 trainer 调用 continue_produce() 恢复。
                 await self._wait_for_status_exit(self._status)
                 continue
@@ -736,7 +736,7 @@ class AgentLoopManager:
             if produce_status == ProduceBatchStatus.EXPIRED_BATCH:
                 # 注意：
                 # - EXPIRED_BATCH 是 producer 在生产过程中自己检测出来的“立即停下”信号
-                # - UPDATE_ABORT 则是 trainer 在同步前通过 pause_produce() 主动设置的
+                # - UPDATE_WEIGHT_AND_ABORT 则是 trainer 在同步前通过 pause_produce() 主动设置的
                 self._status = AgentLoopManagerStatus.EXPIRED_BATCH
             elif produce_status == ProduceBatchStatus.NORMAL:
                 # 只有正常完成一轮生产时，producer 自己维护的 train_step 才前进一步。
@@ -841,7 +841,7 @@ class AgentLoopManager:
         self._update_event = asyncio.Event()
         self._finish_event = asyncio.Event()
         self._update_event.set()
-        self._status = AgentLoopManagerStatus.UPDATE_ABORT
+        self._status = AgentLoopManagerStatus.UPDATE_WEIGHT_AND_ABORT
         self._pause_time_s = 0.0
         self._model_step = saved_model_step
         return saved_model_step

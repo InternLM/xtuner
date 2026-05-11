@@ -207,7 +207,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await pending_tasks.cancel_all(), 1)
         self.assertEqual(pending_tasks.count(), 0)
 
-    async def test_pending_tasks_claim_all_clears_before_wait_claims(self):
+    async def test_pending_tasks_cancel_all_clears_before_wait_claims(self):
         pending_tasks = _PendingTasks()
 
         async def spawn_one():
@@ -219,13 +219,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             await pending_tasks.schedule_one(max_pending=1, should_abort=lambda: False, spawn_one=spawn_one)
         )
-        claimed = await pending_tasks.claim_all()
-        self.assertEqual(len(claimed), 1)
+        self.assertEqual(await pending_tasks.cancel_all(), 1)
         self.assertEqual(await pending_tasks.wait_and_claim(timeout_s=0), set())
         self.assertEqual(pending_tasks.count(), 0)
-        for task in claimed:
-            task.cancel()
-        await asyncio.gather(*claimed, return_exceptions=True)
 
     async def test_sampler_with_replay_buffer(self):
         task_name = "test_task"
@@ -729,7 +725,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         )
         status = await strategy.produce_batch(ctx)
 
-        self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
+        self.assertEqual(status, ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.COMPLETED), 0)
 
     async def test_async_produce_strategy_returns_update_abort_after_schedule_pause(self):
@@ -759,7 +755,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         )
         status = await strategy.produce_batch(ctx)
 
-        self.assertEqual(status, ProduceBatchStatus.UPDATE_ABORT)
+        self.assertEqual(status, ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT)
         self.assertEqual(sampler.sample.await_count, 1)
 
         await strategy.pause_produce(ctx)

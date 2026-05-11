@@ -136,34 +136,8 @@ class ProduceProgress:
 
 class ProduceBatchStatus(Enum):
     NORMAL = auto()
-    UPDATE_ABORT = auto()
+    UPDATE_WEIGHT_AND_ABORT = auto()
     EXPIRED_BATCH = auto()
-
-
-async def _timed_generate_group(
-    agent_loop: AgentLoopSpec,
-    rollout_state: list[RolloutState],
-    enable_partial_rollout: bool = False,
-) -> list[RolloutState]:
-    start = time.perf_counter()
-    if isinstance(agent_loop, ray.actor.ActorHandle):
-        result = await agent_loop.generate_group.remote(
-            rollout_state,
-            enable_partial_rollout=enable_partial_rollout,
-        )
-    else:
-        result = await agent_loop.generate_group(
-            rollout_state,
-            enable_partial_rollout=enable_partial_rollout,
-        )
-    elapsed = time.perf_counter() - start
-    for item in result:
-        extra_fields = getattr(item, "extra_fields", None)
-        if extra_fields is None:
-            extra_fields = {}
-            setattr(item, "extra_fields", extra_fields)
-        extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
-    return result
 
 
 def default_is_valid_sample_fn(samples: list[RolloutState]) -> bool:
@@ -184,16 +158,6 @@ def calculate_stale_threshold(max_staleness: int, sync_weights_interval: int) ->
     return (max_staleness + 1) * sync_weights_interval
 
 
-def _validate_progress_for_task(
-    progress: ProduceProgress,
-    task_name: str,
-) -> None:
-    if task_name not in progress.consumed_samples:
-        raise KeyError(f"ProduceProgress.consumed_samples missing task_name={task_name!r}")
-    if task_name not in progress.target_samples:
-        raise KeyError(f"ProduceProgress.target_samples missing task_name={task_name!r}")
-
-
 @runtime_checkable
 class IsValidSampleFn(Protocol):
     def __call__(self, samples: list[RolloutState]) -> bool: ...
@@ -212,6 +176,7 @@ class ProduceContext:
     - strategy 只接受 ProduceContext，不再兼容散装参数入口；
     - target / consumed 都按绝对累计口径读取；
     - 暂停只读 manager 传入的 update_event；
+    - rollout generate 的 ray/local 差异和 timing 字段写入；
     - 生成结果先按业务有效性过滤，再统一交给 ReplayBuffer 写版本、刷新 staleness、执行过期。
     """
 
@@ -248,6 +213,33 @@ class ProduceContext:
     async def sample_group(self, *, from_expired_pool: bool) -> list[RolloutState]:
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
         return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
+
+    async def generate_group(
+        self,
+        rollout_state: list[RolloutState],
+        *,
+        enable_partial_rollout: bool = False,
+    ) -> list[RolloutState]:
+        # strategy 只表达“要生成”，不关心 agent_loop 是 ray actor 还是本地对象。
+        start = time.perf_counter()
+        if isinstance(self.agent_loop, ray.actor.ActorHandle):
+            result = await self.agent_loop.generate_group.remote(
+                rollout_state,
+                enable_partial_rollout=enable_partial_rollout,
+            )
+        else:
+            result = await self.agent_loop.generate_group(
+                rollout_state,
+                enable_partial_rollout=enable_partial_rollout,
+            )
+        elapsed = time.perf_counter() - start
+        for item in result:
+            extra_fields = getattr(item, "extra_fields", None)
+            if extra_fields is None:
+                extra_fields = {}
+                setattr(item, "extra_fields", extra_fields)
+            extra_fields[GROUP_GENERATE_TIME_KEY] = elapsed
+        return result
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
         # 只有完整生成的 group 才需要业务有效性过滤；ABORTED / EXPIRED 保留原状态供重试或统计。
@@ -375,14 +367,14 @@ class _PendingTasks:
             self._tasks.add(await spawn_one())
             return True
 
-    async def claim_all(self) -> set[asyncio.Task]:
+    async def _claim_all(self) -> set[asyncio.Task]:
         async with self._lock:
             claimed = set(self._tasks)
             self._tasks.clear()
             return claimed
 
     async def cancel_all(self) -> int:
-        tasks = await self.claim_all()
+        tasks = await self._claim_all()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -398,12 +390,7 @@ class SyncProduceStrategy(ProduceStrategy):
 
         for _ in range(ctx.task_batch_size):
             rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-            task = create_task(
-                _timed_generate_group(
-                    ctx.agent_loop,
-                    rollout_state,
-                )
-            )
+            task = create_task(ctx.generate_group(rollout_state))
             pending_tasks.add(task)
 
         logger.info(f"[SyncProduceStrategy] Started {len(pending_tasks)} initial tasks.")
@@ -437,12 +424,7 @@ class SyncProduceStrategy(ProduceStrategy):
                 completed_sample_count, ctx.task_batch_size
             ):
                 rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-                task = create_task(
-                    _timed_generate_group(
-                        ctx.agent_loop,
-                        rollout_state,
-                    )
-                )
+                task = create_task(ctx.generate_group(rollout_state))
                 pending_tasks.add(task)
 
         return ProduceBatchStatus.NORMAL
@@ -509,20 +491,6 @@ class AsyncProduceStrategy(ProduceStrategy):
                         f"valid samples for task {ctx.task_name}."
                     )
 
-    async def _spawn_one(
-        self,
-        ctx: ProduceContext,
-        sample_from_expired: bool,
-    ) -> asyncio.Task:
-        rollout_state = await ctx.sample_group(from_expired_pool=sample_from_expired)
-        return create_task(
-            _timed_generate_group(
-                ctx.agent_loop,
-                rollout_state,
-                enable_partial_rollout=self.enable_partial_rollout,
-            )
-        )
-
     async def pause_produce(self, ctx: ProduceContext) -> float:
         pause_start = time.perf_counter()
         if self._pending_tasks.count() == 0:
@@ -560,14 +528,17 @@ class AsyncProduceStrategy(ProduceStrategy):
         return time.perf_counter() - pause_start
 
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
-        _validate_progress_for_task(ctx.progress, ctx.task_name)
+        if ctx.task_name not in ctx.progress.consumed_samples:
+            raise KeyError(f"ProduceProgress.consumed_samples missing task_name={ctx.task_name!r}")
+        if ctx.task_name not in ctx.progress.target_samples:
+            raise KeyError(f"ProduceProgress.target_samples missing task_name={ctx.task_name!r}")
 
         if ctx.target_abs <= 0:
             return ProduceBatchStatus.NORMAL
 
         # TODO: place this check just before while loop
         if ctx.should_abort():
-            return ProduceBatchStatus.UPDATE_ABORT
+            return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
         if self.is_model_expired(ctx.train_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
@@ -577,7 +548,7 @@ class AsyncProduceStrategy(ProduceStrategy):
 
         # TODO: remove this check
         if ctx.should_abort():
-            return ProduceBatchStatus.UPDATE_ABORT
+            return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
         if self.is_model_expired(ctx.train_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
@@ -598,9 +569,19 @@ class AsyncProduceStrategy(ProduceStrategy):
             f"Starting produce_batch for task {ctx.task_name} with target_abs={target_abs}, "
             f"oversample_budget={oversample_budget}, scheduled_target={scheduled_target}."
         )
+
+        async def spawn_one() -> asyncio.Task:
+            rollout_state = await ctx.sample_group(from_expired_pool=sample_from_expired)
+            return create_task(
+                ctx.generate_group(
+                    rollout_state,
+                    enable_partial_rollout=self.enable_partial_rollout,
+                )
+            )
+
         while True:
             if ctx.should_abort():
-                return ProduceBatchStatus.UPDATE_ABORT
+                return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
             if self.is_model_expired(ctx.train_step, ctx.model_step):
                 return ProduceBatchStatus.EXPIRED_BATCH
 
@@ -614,15 +595,15 @@ class AsyncProduceStrategy(ProduceStrategy):
                 while await self._pending_tasks.schedule_one(
                     max_pending=desired_pending,
                     should_abort=ctx.should_abort,
-                    spawn_one=lambda: self._spawn_one(ctx, sample_from_expired=sample_from_expired),
+                    spawn_one=spawn_one,
                 ):
                     pass
                 # TODO: remove this check, because will check it when exit if statement, it's redundant
                 if ctx.should_abort():
-                    return ProduceBatchStatus.UPDATE_ABORT
+                    return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
 
             if ctx.should_abort():
-                return ProduceBatchStatus.UPDATE_ABORT
+                return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
             if self._pending_tasks.count() == 0:
                 logger.warning("All tasks are done but not enough samples collected.")
                 return ProduceBatchStatus.NORMAL

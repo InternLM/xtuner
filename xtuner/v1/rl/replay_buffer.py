@@ -35,7 +35,7 @@ from xtuner.v1.utils import get_logger
 logger = get_logger(__name__)
 
 
-def _expire_group_if_needed(group: list[RolloutState], stale_threshold: int) -> None:
+def maybe_expire_group(group: list[RolloutState], stale_threshold: int) -> None:
     if stale_threshold <= 0:
         raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
 
@@ -467,7 +467,7 @@ class ReplayBuffer:
         if current_train_step is not None:
             refresh_seq_staleness(items, current_train_step)
         if stale_threshold is not None:
-            _expire_group_if_needed(items, stale_threshold)
+            maybe_expire_group(items, stale_threshold)
 
         status = get_group_status(items)
         if status == Status.EXPIRED:

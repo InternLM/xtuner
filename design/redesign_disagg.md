@@ -190,6 +190,7 @@ ctx.should_abort()
 ctx.expired_count()
 ctx.available_count()
 ctx.sample_group(from_expired_pool=True)
+ctx.generate_group(group, enable_partial_rollout=True)
 ctx.put_generated_group(group)
 ```
 
@@ -200,6 +201,7 @@ ctx.put_generated_group(group)
 - `update_event.is_set()`
 - `replay_buffer.count(task_name, Status.COMPLETED)`
 - sampler 的 `group_status` 组合
+- agent loop 本地/Ray 调用差异和 generate timing 字段写入
 - 生成结果过滤和入库前标准化的顺序
 
 模型过期判断不放在 `ProduceContext` 中重复维护，而是统一由 `ProduceStrategy.is_model_expired(train_step, model_step)` 提供。`AgentLoopManager` 在调度前先检查该入口，strategy 内部如果需要再次判断也调用自己的策略方法。
@@ -224,7 +226,7 @@ class _PendingTasks:
         should_abort: Callable[[], bool],
         spawn_one: Callable[[], Awaitable[asyncio.Task]],
     ) -> bool: ...
-    async def claim_all(self) -> set[asyncio.Task]: ...
+    async def _claim_all(self) -> set[asyncio.Task]: ...
     async def cancel_all(self) -> int: ...
 ```
 
@@ -348,9 +350,9 @@ if await self.replay_buffer.is_ready(task_sizes):
 
 ### 步骤 4：新增 _PendingTasks
 
-- 新增 `_PendingTasks`，先把 `_snapshot_pending / _pending_count / _claim_done / _claim_already_done / _claim_all_pending` 搬进去。
+- 新增 `_PendingTasks`，先把 `_snapshot_pending / _pending_count / _claim_done / _claim_already_done / _claim_all` 搬进去。
 - 把 `_schedule_one` 收敛成 `self._pending_tasks.schedule_one(...)`；是否循环调度到目标数量仍留在 `AsyncProduceStrategy`。
-- `AsyncProduceStrategy` 保留 `_spawn_one(...)` 和 `_put_claimed(...)`，避免 `_PendingTasks` 理解 sampler / rollout / replay buffer。
+- `AsyncProduceStrategy` 保留 `_put_claimed(...)`，采样和 generate task 创建直接在调度处表达，避免再增加只用一次的 helper。
 - 不改 `SyncProduceStrategy` 的局部 `pending_tasks`。
 
 ### 步骤 5：收敛 AgentLoopManager 公开状态操作
@@ -412,7 +414,7 @@ if await self.replay_buffer.is_ready(task_sizes):
 
 - `wait_and_claim` 对快照 wait 后只返回仍在集合中的 task。
 - `claim_ready` 不重复返回已 claim 的 done task。
-- `claim_all / cancel_all` 清空集合后，后续 claim 返回空。
+- `_claim_all / cancel_all` 清空集合后，后续 claim 返回空。
 - `schedule_one` 在 `should_abort()` 为 true 或 pending 数已达到 `max_pending` 时不新增 task。
 
 ## 13. 设计总结

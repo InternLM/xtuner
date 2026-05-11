@@ -31,14 +31,14 @@ class Status(Enum):
 
 class ProduceBatchStatus(Enum):
     NORMAL = auto()
-    UPDATE_ABORT = auto()
+    UPDATE_WEIGHT_AND_ABORT = auto()
     EXPIRED_BATCH = auto()
     FINISH = auto()
 
 
 class ManagerStatus(Enum):
     NORMAL = auto()
-    UPDATE_ABORT = auto()
+    UPDATE_WEIGHT_AND_ABORT = auto()
     EXPIRED_BATCH = auto()
     FINISH = auto()
 
@@ -211,7 +211,7 @@ class ReplayBuffer(Protocol):
         # 生成结果入库时显式传入 model_step/current_train_step/stale_threshold：
         # 1. update_sample_version(items, model_step)
         # 2. refresh_seq_staleness(items, current_train_step)
-        # 3. stale_threshold 非空时执行 _expire_group_if_needed(items, stale_threshold)
+        # 3. stale_threshold 非空时执行 maybe_expire_group(items, stale_threshold)
         # 4. 用 get_group_status(items) 按最终状态入库
         #
         # is_valid_sample_fn 只在 caller 侧对 completed group 执行；非完整样本保留原状态。
@@ -306,6 +306,15 @@ class ProduceContext:
         group_status = [Status.EXPIRED, Status.ABORTED] if from_expired_pool else [Status.ABORTED]
         return await self.task.sampler.sample(task_name=self.task_name, group_status=group_status)
 
+    async def generate_group(
+        self,
+        rollout_state: list[Any],
+        *,
+        enable_partial_rollout: bool = False,
+    ) -> list[Any]:
+        # 隐藏 agent_loop 本地/Ray 调用差异，并统一写入 generate timing 字段。
+        ...
+
     async def put_generated_group(self, group: list[Any]) -> bool:
         # 只有完整生成的 group 才做业务有效性过滤；ABORTED / EXPIRED 保留原状态供重试或统计。
         is_completed = get_group_status(group) == Status.COMPLETED
@@ -386,14 +395,14 @@ class _PendingTasks:
             self._tasks.add(await spawn_one())
             return True
 
-    async def claim_all(self) -> set[asyncio.Task]:
+    async def _claim_all(self) -> set[asyncio.Task]:
         async with self._lock:
             claimed = set(self._tasks)
             self._tasks.clear()
             return claimed
 
     async def cancel_all(self) -> int:
-        tasks = await self.claim_all()
+        tasks = await self._claim_all()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -409,12 +418,14 @@ class AsyncProduceStrategy:
 
     over_sample_threshold: float
     tail_batch_trigger_size: int
+    enable_partial_rollout: bool
     stale_threshold: int
     _pending_tasks: _PendingTasks
 
     def __init__(self) -> None:
         # 真实实现继续保留现有配置参数；这里强调 pending helper 由 strategy 持有。
         self._pending_tasks = _PendingTasks()
+        self.enable_partial_rollout = False
         self.stale_threshold = 1
 
     def is_model_expired(self, train_step: int, model_step: int) -> bool:
@@ -426,7 +437,7 @@ class AsyncProduceStrategy:
 
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
         if ctx.should_abort():
-            return ProduceBatchStatus.UPDATE_ABORT
+            return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
         if self.is_model_expired(ctx.future_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
@@ -434,7 +445,7 @@ class AsyncProduceStrategy:
         await self._put_claimed(await self._pending_tasks.claim_ready(), ctx)
 
         if ctx.should_abort():
-            return ProduceBatchStatus.UPDATE_ABORT
+            return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
         if self.is_model_expired(ctx.future_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
@@ -445,9 +456,18 @@ class AsyncProduceStrategy:
         oversample_budget = 0 if from_expired_pool else int(self.over_sample_threshold * ctx.task_batch_size)
         scheduled_target = target_abs + oversample_budget
 
+        async def spawn_one() -> asyncio.Task:
+            rollout_state = await ctx.sample_group(from_expired_pool=from_expired_pool)
+            return asyncio.create_task(
+                ctx.generate_group(
+                    rollout_state,
+                    enable_partial_rollout=self.enable_partial_rollout,
+                )
+            )
+
         while True:
             if ctx.should_abort():
-                return ProduceBatchStatus.UPDATE_ABORT
+                return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
             if self.is_model_expired(ctx.future_step, ctx.model_step):
                 return ProduceBatchStatus.EXPIRED_BATCH
 
@@ -459,7 +479,7 @@ class AsyncProduceStrategy:
                 scheduled = await self._pending_tasks.schedule_one(
                     max_pending=scheduled_target - available,
                     should_abort=ctx.should_abort,
-                    spawn_one=lambda: self._spawn_one(ctx, from_expired_pool=from_expired_pool),
+                    spawn_one=spawn_one,
                 )
                 if not scheduled:
                     break
@@ -475,11 +495,6 @@ class AsyncProduceStrategy:
         # 2. 通过 _pending_tasks.wait_and_claim(...) claim done task。
         # 3. 通过 ctx.put_generated_group(...) 按当前 consumer_step 刷新 staleness 后落库。
         # 4. 超时后取消未完成 task。
-        ...
-
-    async def _spawn_one(self, ctx: ProduceContext, *, from_expired_pool: bool) -> asyncio.Task:
-        # rollout_state = await ctx.sample_group(from_expired_pool=from_expired_pool)
-        # return create_task(generate_group(ctx.task.agent_loop, rollout_state))
         ...
 
     async def _put_claimed(
@@ -546,7 +561,7 @@ class AgentLoopManager:
         while not self._finish_event.is_set():
             if self._status == ManagerStatus.FINISH:
                 break
-            if self._status in (ManagerStatus.UPDATE_ABORT, ManagerStatus.EXPIRED_BATCH):
+            if self._status in (ManagerStatus.UPDATE_WEIGHT_AND_ABORT, ManagerStatus.EXPIRED_BATCH):
                 await self._wait_until_resumed_or_finished()
                 continue
 
@@ -607,7 +622,7 @@ class AgentLoopManager:
             pause_progress = progress
 
         self._update_event.set()
-        self._status = ManagerStatus.UPDATE_ABORT
+        self._status = ManagerStatus.UPDATE_WEIGHT_AND_ABORT
         task_sizes = {task.task_name: 0 for task in self.task_runners}
         self._pause_time_s = await self._pause_with_progress(task_sizes, pause_progress)
         return self._pause_time_s
@@ -736,7 +751,7 @@ class AgentLoopManager:
         )
 
     async def _wait_until_resumed_or_finished(self) -> None:
-        while self._status in (ManagerStatus.UPDATE_ABORT, ManagerStatus.EXPIRED_BATCH):
+        while self._status in (ManagerStatus.UPDATE_WEIGHT_AND_ABORT, ManagerStatus.EXPIRED_BATCH):
             if self._finish_event.is_set():
                 return
             await asyncio.sleep(self._STATUS_POLL_INTERVAL_S)
@@ -748,8 +763,8 @@ class AgentLoopManager:
 
     @staticmethod
     def _aggregate_status(statuses: list[ProduceBatchStatus]) -> ProduceBatchStatus:
-        if any(status == ProduceBatchStatus.UPDATE_ABORT for status in statuses):
-            return ProduceBatchStatus.UPDATE_ABORT
+        if any(status == ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT for status in statuses):
+            return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
         if any(status == ProduceBatchStatus.EXPIRED_BATCH for status in statuses):
             return ProduceBatchStatus.EXPIRED_BATCH
         if any(status == ProduceBatchStatus.FINISH for status in statuses):
