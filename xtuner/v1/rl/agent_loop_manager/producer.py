@@ -267,13 +267,16 @@ class SyncProduceStrategy(ProduceStrategy):
                     update_sample_version(item, model_step)
                 refresh_seq_staleness(items, train_step)
 
-                is_valid = self.is_valid_sample_fn(items)
-                if not is_valid:
-                    for item in items:
-                        item.status = Status.FILTERED
+                is_completed = update_group_status(items) == Status.COMPLETED
+                if is_completed:
+                    is_valid = self.is_valid_sample_fn(items)
+                    if not is_valid:
+                        is_completed = False
+                        for item in items:
+                            item.status = Status.FILTERED
 
                 await replay_buffer.put(items, task_name)
-                if not is_valid:
+                if not is_completed:
                     continue
 
                 completed_sample_count += 1
@@ -381,13 +384,16 @@ class AsyncProduceStrategy(ProduceStrategy):
         refresh_seq_staleness(items, current_train_step)
         items = expire_group_if_needed(items, self.stale_threshold)
 
-        is_valid = self.is_valid_sample_fn(items)
-        if not is_valid:
-            for item in items:
-                item.status = Status.FILTERED
+        is_completed = update_group_status(items) == Status.COMPLETED
+        if is_completed:
+            is_valid = self.is_valid_sample_fn(items)
+            if not is_valid:
+                is_completed = False
+                for item in items:
+                    item.status = Status.FILTERED
 
         await replay_buffer.put(items, task_name)
-        return update_group_status(items) == Status.COMPLETED
+        return is_completed
 
     async def _put_claimed_tasks(
         self,
