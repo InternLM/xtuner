@@ -74,6 +74,7 @@ env_agent = dict(
     max_tool_response_length=4096,
     tool_response_truncate_side="left",
     enable_no_thinking_penalty=False,
+    hooks=[dict(type="lagent.hooks.logger.MessageLogger")],
 )
 
 agent_config = dict(

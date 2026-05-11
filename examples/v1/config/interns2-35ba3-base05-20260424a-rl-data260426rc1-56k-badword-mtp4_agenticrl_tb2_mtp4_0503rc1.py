@@ -80,16 +80,16 @@ model_path = '/mnt/shared-storage-user/llmit1/user/wangziyi/exp/mindcopilot_rl/w
 stop_word = "<|im_end|>"
 
 # basic settings
-global_batch_size = 44
-prompt_repeat_k = 4
+global_batch_size = 128
+prompt_repeat_k = 8
 max_concurrent_groups = 512
 
 max_prompt_length = 16 * 1024
-pack_max_length = 130 * 1024
-max_response_length = 128 * 1024
+pack_max_length = 68 * 1024
+max_response_length = 64 * 1024
 
 train_ep_size = 1
-train_sp_size = 2
+train_sp_size = 1
 rollout_tp_size = 4
 rollout_ep_size = 1
 fp32_lm_head = True
@@ -123,7 +123,7 @@ max_tool_response_length = 8192
 # 1. resources
 resources = AcceleratorResourcesConfig(
     accelerator="GPU",
-    num_workers=64,
+    num_workers=32,
     num_cpus_per_worker=12,
     cpu_memory_per_worker=16 * 1024**3,  # 16 GB
 )
@@ -147,18 +147,17 @@ rollout_config = RolloutConfig(
     allow_over_concurrency_ratio=1.2,
     rollout_timeout=1800,
     enable_return_routed_experts=enable_return_routed_experts,
-    return_routed_experts_key=enable_return_routed_experts,
     # max_prefill_token_num=max_prefill_token_num,
     extra_rollout_config=dict(
-        lmdeploy_log_level="ERROR",
-        lmdeploy_uvicorn_log_level="ERROR",
+        lmdeploy_log_level="INFO",
+        lmdeploy_uvicorn_log_level="INFO",
         lmdeploy_speculative_algorithm='qwen3_5_mtp',
         lmdeploy_speculative_num_draft_tokens=4,
     ),
     fp32_lm_head=fp32_lm_head,
     tokenize_controller_config=TokenizeControllerConfig(
-        num_ray_actors=64,
-        num_cpus_per_actor=1,
+        num_ray_actors=256,
+        num_cpus_per_actor=0.5,
         num_processes_per_actor=1,
     ),
 )
@@ -579,6 +578,27 @@ def convert_rollout_tractory_to_train(env, group_data_items):
         env_history = group_data_items[i].env.rollout.extra_info['agent_state_dict']['env_agent.memory']
         messages = group_data_items[i].env.rollout.extra_info['agent_message_dict']['policy_agent.messages']
         agent_data_items.append(RLAgentDataItem(extra_info=dict(messages=messages, state={"history": history})))
+        # Defense: lagent can return a "completed" sample where policy memory
+        # is empty (0 msgs), or has only the input env message with no assistant
+        # reply (last msg's raw_content_ids is None). Both cases corrupt
+        # downstream train data. Mark SKIPPED and log for later diagnostics.
+        last_policy = history[-1] if history else None
+        has_assistant_response = (
+            last_policy is not None
+            and last_policy.get('raw_content_ids') is not None
+            and last_policy.get('raw_content_logprobs') is not None
+        )
+        if not history or not env_history or not has_assistant_response:
+            print(
+                f"[convert_rollout_tractory_to_train] skipped guard: "
+                f"policy_len={len(history)} env_len={len(env_history)} "
+                f"last_policy_has_response={has_assistant_response} "
+                f"last_sender={last_policy.get('sender') if last_policy else None} "
+                f"source={group_data_items[i].data.extra_info.get('origin_data_source')}"
+            )
+            rollout_response_items.append(RLRolloutResponseItem(state=RolloutState.SKIPPED))
+            judger_response_items.append(RLJudgerResponseItem(reward=dict(score=0.0)))
+            continue
         rollout_response_items.append(
             RLRolloutResponseItem(
                 response=history[-1]['raw_content'],
@@ -612,7 +632,23 @@ def convert_rollout_tractory_to_train_for_tb2rl(env, group_data_items):
         messages = group_data_items[i].env.agent.extra_info['message_dict']['policy_agent.messages']
         tools = group_data_items[i].env.agent.extra_info['message_dict'].get('policy_agent.tools')
         agent_data_items.append(RLAgentDataItem(extra_info=dict(messages=messages, tools=tools)))
-        # breakpoint()
+        # Same stronger guard as convert_rollout_tractory_to_train: reject
+        # empty OR missing assistant-response fields on the last message.
+        last_msg = messages[-1] if messages else None
+        has_assistant_response = (
+            isinstance(last_msg, dict)
+            and last_msg.get('raw_content_ids') is not None
+            and last_msg.get('raw_content_logprobs') is not None
+        )
+        if not messages or not has_assistant_response:
+            print(
+                f"[convert_rollout_tractory_to_train_for_tb2rl] skipped guard: "
+                f"n_messages={len(messages)} "
+                f"last_has_response={has_assistant_response}"
+            )
+            rollout_response_items.append(RLRolloutResponseItem(state=RolloutState.SKIPPED))
+            judger_response_items.append(RLJudgerResponseItem(reward=dict(score=0.0)))
+            continue
         rollout_response_items.append(
             RLRolloutResponseItem(
                 response=messages[-1]['raw_content'],
@@ -626,7 +662,6 @@ def convert_rollout_tractory_to_train_for_tb2rl(env, group_data_items):
     group_data_items = update_dataflow_item(group_data_items, "env.agent", agent_data_items)
     group_data_items = update_dataflow_item(group_data_items, "env.rollout", rollout_response_items)
     group_data_items = update_dataflow_item(group_data_items, "env.judger", judger_response_items)
-    # breakpoint()
     return group_data_items
 
 

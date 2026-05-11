@@ -49,6 +49,315 @@ from xtuner.v1.utils import get_logger  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────────────────
+# Daemon-silence watchdog
+# ─────────────────────────────────────────────────────────────────
+#
+# The sandbox /exec call has a single host-side timeout of
+# ``timeout_sec + 10 = 10810s`` (3h). If the sandbox daemon silently
+# hangs part-way through the agent loop (no LLM traffic, no tool activity,
+# no log output), the whole batch is held up for nearly 3h before the
+# host httpx read-timeout fires. The agent config's LLM timeout (1800s)
+# and tool-level timeouts bound individual operations but don't cover
+# "daemon stuck between operations" — that's what this watchdog is for.
+#
+# Strategy: poll ``/tmp/agent_daemon.log`` size concurrently with the
+# in-flight /exec. If the log hasn't grown for longer than
+# ``XTUNER_SANDBOX_WATCHDOG_STALE_SEC`` we call the daemon dead, cancel
+# /exec, and fail fast with the last known tail.
+#
+# The stale threshold must exceed the LLM timeout, because a single
+# legit slow LLM call can produce no log output for its full duration.
+# Default 2400s = 1800s (AsyncAPIClient.timeout default for interndp
+# config) + 600s margin.
+
+_WATCHDOG_STALE_SEC = int(os.environ.get("XTUNER_SANDBOX_WATCHDOG_STALE_SEC", "2400"))
+_WATCHDOG_POLL_SEC = float(os.environ.get("XTUNER_SANDBOX_WATCHDOG_POLL_SEC", "60"))
+_WATCHDOG_DOWNLOAD_TIMEOUT_SEC = 10.0
+_WATCHDOG_MAX_CONSECUTIVE_POLL_FAILURES = 5
+_WATCHDOG_DAEMON_LOG_PATH = "/tmp/agent_daemon.log"
+_WATCHDOG_DAEMON_SOCK_PATH = "/tmp/lagent_agent.sock"
+_WATCHDOG_PING_TIMEOUT_SEC = 5
+_WATCHDOG_MAX_CONSECUTIVE_PING_FAILURES = 3
+
+
+class DaemonStuckError(RuntimeError):
+    """Raised by the watchdog when the daemon log stops growing."""
+
+
+async def _ping_daemon(
+    client: Any,
+    sock_path: str = _WATCHDOG_DAEMON_SOCK_PATH,
+    timeout: int = _WATCHDOG_PING_TIMEOUT_SEC,
+) -> tuple[bool, str]:
+    """Send ``{"cmd": "ping"}`` to the in-sandbox daemon socket.
+
+    The daemon's asyncio accept loop handles each client connection in a
+    new ``_handle_client`` task, so a ping can get a fresh
+    ``_dispatch("ping")`` response even while another task is stuck in
+    ``await self.agent(*messages)``.  That makes this a precise
+    liveness signal: ping-alive + log-unchanged = agent deadlocked;
+    ping-dead = daemon process / network itself is gone.
+
+    We implement the wire protocol inline with the sandbox's stdlib
+    ``python3``: a prior version tried ``python3 -m lagent.serving.sandbox.daemon
+    call`` but the sandbox's ``/usr/bin/python3`` has no ``lagent`` on
+    its ``sys.path`` (lagent lives in the host-side shared NFS that the
+    sandbox container doesn't mount), so the subprocess failed with
+    ``ModuleNotFoundError`` and every ping produced false "daemon dead"
+    verdicts.  Speaking the socket protocol directly (4-byte big-endian
+    length header, then JSON body — matches ``daemon._send_msg`` /
+    ``_recv_msg``) is robust to whatever python environment the sandbox
+    has.
+
+    Args:
+        client (Any): :class:`SandboxClient` that can run ``/exec``.
+        sock_path (str): Unix socket path inside the sandbox.
+        timeout (int): Max seconds to wait for ping response.  Used as
+            both the in-sandbox socket timeout and the /exec timeout
+            budget.
+
+    Returns:
+        tuple[bool, str]: ``(alive, detail)``.  ``detail`` carries the
+            daemon's JSON response on success or the failure reason.
+    """
+    # Inline python one-liner: open the unix socket, send the length-
+    # prefixed JSON, read the response, print to stdout.  Any exception
+    # → write a PING_FAIL line to stderr and exit 1.  No imports
+    # beyond stdlib — robust to broken PYTHONPATHs / missing packages.
+    inline = (
+        "import socket,struct,json,sys\n"
+        "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n"
+        f"s.settimeout({timeout})\n"
+        "try:\n"
+        f"  s.connect({sock_path!r})\n"
+        '  m=json.dumps({"cmd":"ping"}).encode()\n'
+        '  s.sendall(struct.pack("!I",len(m))+m)\n'
+        "  h=s.recv(4)\n"
+        '  assert len(h)==4,"short header"\n'
+        '  (n,)=struct.unpack("!I",h)\n'
+        '  buf=b""\n'
+        "  while len(buf)<n:\n"
+        "    chunk=s.recv(n-len(buf))\n"
+        '    assert chunk,"short body"\n'
+        "    buf+=chunk\n"
+        "  sys.stdout.write(buf.decode())\n"
+        "except Exception as e:\n"
+        '  sys.stderr.write(f"PING_FAIL: {type(e).__name__}: {e}")\n'
+        "  sys.exit(1)\n"
+    )
+    # Use bash -c with stdin-feed so the inline script survives shell
+    # quoting without needing carefully-escaped single-quotes in the
+    # outer command.
+    cmd = f"python3 - <<'PING_EOF'\n{inline}\nPING_EOF"
+
+    try:
+        res = await asyncio.wait_for(
+            client.execute(cmd, timeout_sec=timeout),
+            timeout=timeout + 5,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return False, f"/exec failed: {type(exc).__name__}: {exc}"
+
+    rc = res.get("return_code")
+    stdout = (res.get("stdout") or "").strip()
+    stderr = (res.get("stderr") or "").strip()
+    if rc != 0:
+        return False, f"daemon ping rc={rc} stderr={stderr!r}"
+    try:
+        parsed = json.loads(stdout)
+    except Exception:
+        return False, f"non-JSON ping response: {stdout!r}"
+    if parsed.get("status") == "ok":
+        return True, stdout
+    # Response parsed but status != ok — daemon is technically alive but
+    # in a weird state (shouldn't happen for ping, but be explicit).
+    return False, f"ping response not ok: {stdout!r}"
+
+
+async def _daemon_silence_watchdog(
+    client: Any,
+    tid: str,
+    *,
+    stale_threshold_sec: int | None = None,
+    poll_interval_sec: float | None = None,
+) -> None:
+    """Watch the sandbox daemon via two liveness signals.
+
+    Runs alongside the in-flight ``/exec`` call via
+    :func:`asyncio.wait(..., FIRST_COMPLETED)`.  A clean exit is
+    impossible — this coroutine only returns by raising, or by being
+    cancelled when the caller observes that the infer stage finished
+    first.
+
+    Two signals, in order of precision:
+
+    * **Daemon ping** (primary).  Cheap unix-socket round-trip via the
+      sandbox ``/exec`` endpoint.  A dead daemon fails ping immediately;
+      an agent stuck inside ``self.agent(*messages)`` will still answer
+      ping because the daemon accept loop is independent.  Consecutive
+      ping failures (``_WATCHDOG_MAX_CONSECUTIVE_PING_FAILURES``) fire
+      the watchdog with reason ``"daemon dead/unreachable"``.
+
+    * **Daemon-log size** (secondary).  Detects the
+      ping-alive-but-agent-deadlocked case — daemon process is fine,
+      accept loop answers, but the agent coroutine made no progress
+      for longer than ``stale_threshold_sec``.  Requires threshold
+      ``> LLM per-call timeout`` so a single legit slow LLM doesn't
+      false-positive.
+
+    Defaults for the two tunables come from module-level constants
+    (read at call time, so tests / env-var tuning take effect without
+    process restart).
+
+    Args:
+        client (Any): SandboxClient with ``download_file`` and
+            ``execute`` APIs.
+        tid (str): Task id used in log tags.
+        stale_threshold_sec (int): How long the log can go without
+            growing before we declare the agent deadlocked.  Defaults
+            to ``_WATCHDOG_STALE_SEC`` when None.
+        poll_interval_sec (float): Seconds between polls.  Defaults to
+            ``_WATCHDOG_POLL_SEC`` when None.
+
+    Raises:
+        DaemonStuckError: Either ping failed ``N`` consecutive times
+            (daemon dead) or log unchanged past threshold (agent
+            deadlocked).  Message distinguishes the two cases.
+    """
+    if stale_threshold_sec is None:
+        stale_threshold_sec = _WATCHDOG_STALE_SEC
+    if poll_interval_sec is None:
+        poll_interval_sec = _WATCHDOG_POLL_SEC
+    last_size = -1
+    last_change_monotonic = time.monotonic()
+    last_blob = b""
+    consecutive_download_failures = 0
+    consecutive_ping_failures = 0
+    last_ping_detail = "(none yet)"
+
+    while True:
+        await asyncio.sleep(poll_interval_sec)
+
+        # --- Signal 1: daemon ping. Fast, precise. ---
+        try:
+            alive, detail = await _ping_daemon(client)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            alive, detail = False, f"ping raised: {type(exc).__name__}: {exc}"
+        if alive:
+            consecutive_ping_failures = 0
+            last_ping_detail = detail
+        else:
+            consecutive_ping_failures += 1
+            last_ping_detail = detail
+            get_logger().warning(
+                f"[{tid}] watchdog ping {consecutive_ping_failures}/"
+                f"{_WATCHDOG_MAX_CONSECUTIVE_PING_FAILURES} failed: {detail}"
+            )
+            if consecutive_ping_failures >= _WATCHDOG_MAX_CONSECUTIVE_PING_FAILURES:
+                raise DaemonStuckError(
+                    f"[{tid}] daemon dead/unreachable: ping failed "
+                    f"{consecutive_ping_failures} consecutive times; "
+                    f"last detail: {detail}"
+                )
+
+        # --- Signal 2: daemon-log size. Catches ping-alive-deadlock. ---
+        try:
+            blob = await asyncio.wait_for(
+                client.download_file(_WATCHDOG_DAEMON_LOG_PATH),
+                timeout=_WATCHDOG_DOWNLOAD_TIMEOUT_SEC,
+            )
+            consecutive_download_failures = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            consecutive_download_failures += 1
+            get_logger().warning(
+                f"[{tid}] watchdog: daemon log download failed "
+                f"({consecutive_download_failures}/{_WATCHDOG_MAX_CONSECUTIVE_POLL_FAILURES}): "
+                f"{type(exc).__name__}: {exc}"
+            )
+            if consecutive_download_failures >= _WATCHDOG_MAX_CONSECUTIVE_POLL_FAILURES:
+                # Can't download log but ping was working — something is
+                # wrong with the FS or /download endpoint specifically.
+                # Still actionable, but keep the message specific.
+                raise DaemonStuckError(
+                    f"[{tid}] daemon log unavailable: "
+                    f"{consecutive_download_failures} consecutive download failures; "
+                    f"last error {type(exc).__name__}: {exc}. "
+                    f"Last ping detail: {last_ping_detail}"
+                ) from exc
+            continue
+
+        cur_size = len(blob)
+        now = time.monotonic()
+        if cur_size != last_size:
+            last_size = cur_size
+            last_blob = blob
+            last_change_monotonic = now
+            continue
+
+        stale_for = now - last_change_monotonic
+        if stale_for >= stale_threshold_sec:
+            tail_lines = last_blob.decode(errors="replace").splitlines()[-200:]
+            raise DaemonStuckError(
+                f"[{tid}] agent deadlocked: ping OK but daemon log unchanged for "
+                f"{stale_for:.0f}s (size={cur_size}, threshold={stale_threshold_sec}s); "
+                f"last ping detail: {last_ping_detail}\ntail:\n" + "\n".join(tail_lines)
+            )
+
+
+async def _run_infer_with_watchdog(
+    infer: SandboxStage,
+    client: Any,
+    ctx: dict[str, Any],
+    tid: str,
+) -> Any:
+    """Race ``infer.run(client, ctx)`` against the daemon-silence watchdog.
+
+    If the infer stage finishes first, cancel the watchdog and return
+    its result.  If the watchdog fires first, cancel the in-flight
+    ``/exec`` (which will propagate ``CancelledError`` through httpx)
+    and raise the :class:`DaemonStuckError` so the caller's exception
+    handler can surface the stuck-tail and mark the sample failed.
+    """
+    infer_task = asyncio.create_task(infer.run(client, ctx), name=f"infer-{tid}")
+    watchdog_task = asyncio.create_task(_daemon_silence_watchdog(client, tid), name=f"watchdog-{tid}")
+
+    try:
+        done, _ = await asyncio.wait(
+            {infer_task, watchdog_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except BaseException:
+        for t in (infer_task, watchdog_task):
+            if not t.done():
+                t.cancel()
+        raise
+
+    if infer_task in done:
+        # Normal path: /exec returned first.
+        watchdog_task.cancel()
+        try:
+            await watchdog_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        return await infer_task
+
+    # Watchdog fired — kill the in-flight /exec and re-raise its error.
+    infer_task.cancel()
+    try:
+        await asyncio.wait_for(infer_task, timeout=30)
+    except (asyncio.CancelledError, asyncio.TimeoutError, Exception) as exc:
+        get_logger().debug(f"[{tid}] infer cancel after watchdog: {type(exc).__name__}: {exc}")
+    # Re-raise the watchdog error (it's in the done-set as an exception).
+    return await watchdog_task  # raises DaemonStuckError
+
+
+# ─────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────
 
@@ -104,7 +413,7 @@ class Runner:
 
             get_logger().info(f"[{tid}] infer: start ({len(self.infer.pre)} pre-hooks)")
             t1 = time.monotonic()
-            infer_result = await self.infer.run(client, ctx)
+            infer_result = await _run_infer_with_watchdog(self.infer, client, ctx, tid)
             get_logger().info(f"[{tid}] infer: done rc={infer_result.return_code} ({time.monotonic() - t1:.1f}s)")
             if not infer_result.ok:
                 return _mark_failed(

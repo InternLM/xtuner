@@ -23,7 +23,6 @@ from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
 from xtuner.v1.ray.environment.lagent.tokenize import tokenize
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
-from xtuner.v1.ray.rollout.lmdeploy import get_lmdeploy_routed_experts_ref
 from xtuner.v1.rl.base import WorkerConfig
 from xtuner.v1.rl.config.advantage import BaseAdvantageConfig, GRPOAdvantageConfig
 from xtuner.v1.train.trainer import LoadCheckpointConfig
@@ -259,6 +258,11 @@ class AgentRLTrainer(RLTrainer):
         self.model_name = rollout_info["rollout_config"].model_name
         api_server_url = rollout_info["api_server_url"]
 
+        # Cache the RolloutController handle so _prepare_train_data can route
+        # tokenize() through the 256 TokenizeWorker actors instead of the
+        # driver-side SentencePiece slow tokenizer.
+        self._rollout_controller = ray.get(self._rollout_env_controller.get_rollout_controller.remote())
+
         # 写死 0.0.0.0:8000
         url = "http://s-20260104203038-22bhb-decode.ailab-evalservice.svc:4000/v1/models/new"
         payload = {
@@ -481,7 +485,7 @@ class AgentRLTrainer(RLTrainer):
                         "response": _compact_message(messages[-1]) if messages else None,
                         "response_len": len(data.env.rollout.response_ids or []),
                         "reward": data.env.judger.reward["score"],
-                        "data_source": data.data.extra_info.get('origin_data_source'),
+                        "data_source": data.data.extra_info.get("origin_data_source"),
                     }
                     if is_eval:
                         entry["daemon_log"] = data.env.agent.extra_info.get("daemon_log", "")
@@ -558,19 +562,44 @@ class AgentRLTrainer(RLTrainer):
         def _tokenize_agent_messages(data_item):
             if "inputs" in data_item.env.agent.extra_info:
                 return data_item.env.agent.extra_info["inputs"]
-            return tokenize(
-                self.tokenizer,
-                data_item.env.agent.extra_info["messages"],
-                tools=data_item.env.agent.extra_info.get("tools"),
-            )
+            messages = data_item.env.agent.extra_info.get("messages")
+            tools = data_item.env.agent.extra_info.get("tools")
+            # Fast path: dispatch to the RolloutController's TokenizeController
+            # (256 actor workers, SPREAD scheduled). The driver here just
+            # waits on a Ray object ref — no SentencePiece work on this
+            # process, so GIL is not in the way. If the controller is
+            # unavailable (e.g. eval-only setup) fall back to local tokenize.
+            if messages is None:
+                return tokenize(self.tokenizer, [], tools=tools)
+            if self._rollout_controller is not None:
+                return ray.get(self._rollout_controller.tokenize.remote(messages, tools))
+            return tokenize(self.tokenizer, messages, tools=tools)
 
-        with ThreadPoolExecutor(max_workers=64) as executor:
+        # Fast-path diagnostics: how many samples were pre-tokenized by the
+        # rollout-side TokenizeController vs how many fall back to driver-side
+        # tokenize (SentencePiece slow tokenizer, bottlenecked by GIL).
+        import time as _time
+
+        _flat = [group[i] for group in agent_data_groups for i in range(len(group))]
+        _pre = sum(1 for d in _flat if "inputs" in d.env.agent.extra_info)
+        _fallback = len(_flat) - _pre
+        _t0 = _time.perf_counter()
+        # ThreadPoolExecutor here is fine even when the work is done by
+        # remote actors — each worker just blocks on ray.get, and threads
+        # release the GIL while waiting. Fan-out cap should be ≥ the number
+        # of TokenizeController actors to saturate them.
+        with ThreadPoolExecutor(max_workers=256) as executor:
             inputs_list = list(
                 executor.map(
                     _tokenize_agent_messages,
-                    [group[i] for group in agent_data_groups for i in range(len(group))],
+                    _flat,
                 )
             )
+        _dt = _time.perf_counter() - _t0
+        self.logger.info(
+            f"[AgentRLTrainer] tokenize: total={len(_flat)} pre_tokenized={_pre} "
+            f"fallback={_fallback} wall_seconds={_dt:.2f}"
+        )
 
         rewards_list = []
         advantages_list = []
@@ -630,10 +659,11 @@ class AgentRLTrainer(RLTrainer):
                 )
 
                 seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
-                routed_experts = inputs["routed_experts"]
-                if isinstance(routed_experts, str):
-                    routed_experts = get_lmdeploy_routed_experts_ref(routed_experts)
-                seq_ctx.rollout_routed_experts = routed_experts
+                # Pass the accumulator dict {"keys": [...], "length": N} straight
+                # through — fetch + concat happens in the training worker so the
+                # trainer driver does not hold all rollout routing tensors at
+                # once (that path OOM'd on a 128k-context batch).
+                seq_ctx.rollout_routed_experts = inputs.get("routed_experts")
                 data_batches.append(
                     dict(
                         seq_ctx=seq_ctx,
@@ -643,6 +673,17 @@ class AgentRLTrainer(RLTrainer):
                     )
                 )
         random.shuffle(data_batches)
+        # End-to-end sample funnel — tells us how many rollouts actually entered
+        # training this step. Diverges from DataFlow's finished_samples_count
+        # when the postprocess guard marks some as SKIPPED.
+        n_with_routed = sum(1 for db in data_batches if db["seq_ctx"].rollout_routed_experts is not None)
+        n_prompt_tokens_total = sum(len for len in prompt_len_list)
+        n_resp_tokens_total = sum(len for len in response_len_list)
+        self.logger.info(
+            f"[AgentRLTrainer] prepare: entered_train={len(data_batches)} "
+            f"groups={len(agent_data_groups)} with_routed_experts={n_with_routed} "
+            f"prompt_tokens_total={n_prompt_tokens_total} resp_tokens_total={n_resp_tokens_total}"
+        )
         info_dict.update(
             {
                 "agent/batch_size": len(rewards_list),

@@ -115,8 +115,30 @@ class RLDatasetItem(BaseModel):
     multimodal_train_info: MultimodalTrainInfo | None = None
 
 
+class RoutedExpertsRef(TypedDict):
+    """Per-message routed_experts wire payload stored on each assistant
+    message.
+
+    ``key`` is a uuid into :class:`RoutedExpertStore <xtuner.v1.ray.rollout.routed_expert_store.RoutedExpertStore>`
+    addressing the delta ndarray for this turn.  ``length`` is the cumulative
+    position count through this turn (inclusive) — i.e. the value to slice
+    against on the next turn's lmdeploy output.
+    """
+
+    key: str
+    length: int
+
+
+class RoutedExpertsAcc(TypedDict):
+    """Controller-internal accumulator form, produced by tokenize by walking
+    assistant messages and collecting each turn's per-message ``key``."""
+
+    keys: list[str]
+    length: int
+
+
 class RolloutExtraInfo(TypedDict):
-    routed_experts: NotRequired[list[int] | str | RayObjectRef]  # type: ignore[valid-type]
+    routed_experts: NotRequired[RoutedExpertsRef | RoutedExpertsAcc]
     partial_rollout_input_ids: NotRequired[list[int]]
 
 

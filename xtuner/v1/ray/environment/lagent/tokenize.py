@@ -24,7 +24,8 @@ def tokenize(
     input_ids = tokenizer.encode("", add_special_tokens=False)
     thinking_start_ids = tokenizer.encode("<think>", add_special_tokens=False)
     thinking_end_ids = tokenizer.encode("</think>", add_special_tokens=False)
-    routed_experts = None
+    routed_experts_keys: List[str] = []
+    routed_experts_length = 0
 
     def get_content_index(content_ids) -> int:
         content_ids_str = " ".join([str(content_id) for content_id in content_ids])
@@ -78,12 +79,12 @@ def tokenize(
 
             if (
                 isinstance(msg[0].get("extra_info"), dict)
-                and "routed_experts" in msg[0]["extra_info"]
-                and msg[0]["extra_info"]["routed_experts"] is not None
+                and isinstance(msg[0]["extra_info"].get("routed_experts"), dict)
+                and msg[0]["extra_info"]["routed_experts"].get("key")
             ):
-                routed_experts = msg[0]["extra_info"]["routed_experts"]
-            else:
-                routed_experts = None
+                entry = msg[0]["extra_info"]["routed_experts"]
+                routed_experts_keys.append(entry["key"])
+                routed_experts_length = entry["length"]
 
         else:
             prompt = tokenizer.apply_chat_template(
@@ -112,4 +113,5 @@ def tokenize(
             logprobs.extend([0] * len(token_ids))
         input_ids.extend(token_ids)
     assert len(input_ids) == len(labels) == len(logprobs)
+    routed_experts = {"keys": routed_experts_keys, "length": routed_experts_length} if routed_experts_keys else None
     return {"input_ids": input_ids, "labels": labels, "logprobs": logprobs, "routed_experts": routed_experts}

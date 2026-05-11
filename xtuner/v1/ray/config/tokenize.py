@@ -23,7 +23,7 @@ class TokenizeControllerConfig(BaseModel):
         Parameter(help="Number of ray actors used by tokenize controller. 0 means local tokenize mode."),
     ] = 0
     num_cpus_per_actor: Annotated[
-        int,
+        float,
         Parameter(help="CPU cores allocated for each tokenize ray actor."),
     ] = 1
     num_processes_per_actor: Annotated[
@@ -50,6 +50,5 @@ class TokenizeControllerConfig(BaseModel):
             num_ray_actors=self.num_ray_actors,
             num_cpus_per_actor=self.num_cpus_per_actor,
             num_processes_per_actor=self.num_processes_per_actor,
-            request_timeout=self.request_timeout,
             enable_spread_scheduling=self.enable_spread_scheduling,
         )

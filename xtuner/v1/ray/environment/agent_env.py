@@ -93,10 +93,48 @@ class AgentEnvironment(BaseEnvironment):
                 sample.env.rollout.state = RolloutState.ABORTED
                 passed_data_items.append(sample)
             else:
+                # Diagnostic: "completed" but lagent's policy memory is empty
+                # OR the last policy message has no raw_content_ids (i.e. an
+                # env/user message, no assistant reply captured). Both lead to
+                # downstream crashes. Log enough to reverse-engineer the exact
+                # lagent path next time this fires.
+                state_dict = (sample.env.rollout.extra_info or {}).get("agent_state_dict") or {}
+                policy_memory = state_dict.get("policy_agent.memory") or []
+                env_memory = state_dict.get("env_agent.memory") or []
+                last_policy = policy_memory[-1] if policy_memory else None
+                has_assistant = last_policy is not None and last_policy.get("raw_content_ids") is not None
+                if not policy_memory or not env_memory or not has_assistant:
+                    content = getattr(message, "content", "") or ""
+                    get_logger().warning(
+                        f"[AgentEnvironment] completed but missing assistant response — "
+                        f"uid={getattr(sample, 'uid', None)} "
+                        f"source={sample.data.extra_info.get('origin_data_source') if sample.data else None} "
+                        f"policy_mem_len={len(policy_memory)} env_mem_len={len(env_memory)} "
+                        f"last_policy_sender={last_policy.get('sender') if last_policy else None} "
+                        f"last_policy_finish={last_policy.get('finish_reason') if last_policy else None} "
+                        f"has_assistant_response={has_assistant} "
+                        f"finish_reason={getattr(message, 'finish_reason', None)} "
+                        f"stream_state={getattr(message, 'stream_state', None)} "
+                        f"content_len={len(content)} content_head={content[:120]!r}"
+                    )
                 completed_data_items.append(sample)
-        completed_data_items_result = self.postprocess_func(self, completed_data_items)  # type: ignore[arg-type]
-        if inspect.iscoroutinefunction(self.postprocess_func):
-            completed_data_items_result = await completed_data_items_result  # type: ignore[misc]
+        # User-provided postprocess_func may touch agent internals (memory,
+        # messages) that are occasionally in unexpected states (empty memory
+        # after lagent scroll_buffer, partial rollout resume edge cases, etc).
+        # A raise here would kill the entire training job — instead, mark the
+        # whole group SKIPPED and keep the trainer alive.
+        try:
+            completed_data_items_result = self.postprocess_func(self, completed_data_items)  # type: ignore[arg-type]
+            if inspect.iscoroutinefunction(self.postprocess_func):
+                completed_data_items_result = await completed_data_items_result  # type: ignore[misc]
+        except Exception as exc:
+            get_logger().error(
+                f"[AgentEnvironment] postprocess_func failed on "
+                f"{len(completed_data_items)} samples: {exc}\n{traceback.format_exc()}"
+            )
+            for item in completed_data_items:
+                item.env.rollout.state = RolloutState.SKIPPED
+            completed_data_items_result = completed_data_items
         return passed_data_items + completed_data_items_result
 
     async def run(  # type: ignore[override]

@@ -22,12 +22,14 @@ from xtuner.v1.data_proto.rl_data import (
     RLEnvDataItem,
     RLExtraDataItem,
     RLUIDItem,
-    RolloutExtraInfo,
     RolloutState,
     is_valid_for_replaybuffer,
 )
 from xtuner.v1.datasets.config import DataloaderConfig
-from xtuner.v1.ray.rollout.lmdeploy import get_lmdeploy_routed_experts_ref
+from xtuner.v1.ray.rollout.routed_expert_store import (
+    collect_routed_expert_keys_from_env,
+    get_store,
+)
 from xtuner.v1.ray.utils import free_object_refs
 from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
 from xtuner.v1.utils.device import get_device
@@ -375,23 +377,47 @@ class ReplayBufferStorage:
         self.sample_from_aborted_count = 0
         self.sample_from_expired_count = 0
 
-    def _pop_routed_experts_from_extra_info(
-        self, extra_info: RolloutExtraInfo, *, free_ref: bool = False
-    ) -> ObjectRef | None:
-        if "routed_experts" not in extra_info:
-            return None
+    def _release_routed_experts_for_env(self, env: Any, *, free_ref: bool = False) -> None:
+        """Release ``routed_experts`` store keys attached to ``env`` on cleanup
+        paths (expired / aborted re-rollout / payload-strip).
 
-        routed_experts = extra_info["routed_experts"]
-        if isinstance(routed_experts, str):
-            routed_experts = get_lmdeploy_routed_experts_ref(routed_experts)
-        elif not isinstance(routed_experts, ObjectRef):
-            routed_experts = ray.put(routed_experts)
+        The previous implementation only looked at
+        ``env.rollout.extra_info["routed_experts"]`` (legacy single-turn
+        wire).  Agent multi-turn rollouts scatter keys across individual
+        assistant messages inside ``agent_message_dict`` /
+        ``message_dict`` / ``agent_state_dict``, which can sit on either
+        ``rollout.extra_info`` (AgentEnvironment) or
+        ``agent.extra_info`` (InstallAgentEnvironment).  For those
+        schemas the old helper was a no-op and the keys leaked until the
+        store TTL expired.
 
-        del extra_info["routed_experts"]
-        if free_ref:
-            free_object_refs([routed_experts])
+        Walking logic is shared with
+        :func:`xtuner.v1.ray.rollout.routed_expert_store.collect_routed_expert_keys_from_env`
+        so the dataflow skipped/failed path and this replay-buffer path
+        can't drift apart.
+
+        Args:
+            env (Any): ``RLEnvDataItem``-shaped object with ``rollout``
+                and ``agent`` attrs.  Safe for partials.
+            free_ref (bool): When True, dispatch ``store.release_many``
+                for the collected keys.  Always a fire-and-forget — store
+                TTL is the correctness fallback.
+        """
+        keys = collect_routed_expert_keys_from_env(env)
+        # Pop the legacy single-turn field so the RLEnvDataItem can be
+        # reused without stale data.  Agent per-message keys live on the
+        # individual messages — callers already discard the env or its
+        # message_dicts elsewhere, no need to scrub them here.
+        rollout_extra = getattr(getattr(env, "rollout", None), "extra_info", None)
+        if isinstance(rollout_extra, dict):
+            rollout_extra.pop("routed_experts", None)
+        if not free_ref or not keys:
             return None
-        return routed_experts
+        try:
+            get_store().release_many.remote(keys)
+        except Exception as exc:
+            self.logger.warning(f"release_many for orphan keys failed (TTL will catch): {exc}")
+        return None
 
     def _update_replay_meta_state(self, replay_meta: ReplayMeta, new_state: RolloutState):
         for observation_id in replay_meta.observation_ids:
@@ -411,7 +437,7 @@ class ReplayBufferStorage:
             for old_obs_ref in old_obs_refs:
                 old_env = ray.get(old_obs_ref)
                 if hasattr(old_env, "rollout"):
-                    self._pop_routed_experts_from_extra_info(old_env.rollout.extra_info, free_ref=True)
+                    self._release_routed_experts_for_env(old_env, free_ref=True)
             ray.internal.free(old_obs_refs, local_only=False)
         replay_meta.observation_refs = [ray.put(RLEnvDataItem()) for _ in replay_meta.observation_ids]
         self._update_replay_meta_state(replay_meta, new_state)
@@ -718,7 +744,7 @@ class ReplayBufferStorage:
 
         for sample in group_samples:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
-            self._pop_routed_experts_from_extra_info(sample.env.rollout.extra_info, free_ref=True)
+            self._release_routed_experts_for_env(sample.env, free_ref=True)
             del sample.env
             sample.env = RLEnvDataItem()  # 重置env数据
             sample.uid.action_id = action_id
@@ -754,7 +780,7 @@ class ReplayBufferStorage:
             assert sample.data.input_ids and sample.data.num_tokens, "input_ids or num_tokens is empty!"
             if not self.enable_partial_rollout:
                 # 清除上次的response_ids等env数据
-                self._pop_routed_experts_from_extra_info(sample.env.rollout.extra_info, free_ref=True)
+                self._release_routed_experts_for_env(sample.env, free_ref=True)
                 del sample.env
                 sample.env = RLEnvDataItem()
                 sample.uid.version = 0

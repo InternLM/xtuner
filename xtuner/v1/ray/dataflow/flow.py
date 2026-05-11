@@ -231,6 +231,34 @@ class RawDataFlow:
         """Gets the length of the training dataset from the replay buffer."""
         return self.replay_buffer.get_train_dataset_length()
 
+    def _release_routed_expert_keys(self, group_data_items: List[RLDataFlowItem]) -> None:
+        """Release routed_expert_store keys belonging to SKIPPED / FAILED
+        samples.
+
+        Rollout puts one delta key per turn onto the store; these are normally
+        drained at training-prepare time.  For samples that never reach training
+        (skipped / failed / dropped upstream of replay_buffer), the keys would
+        otherwise leak until the store TTL expires.  Shares the walk logic
+        with :meth:`ReplayBuffer._release_routed_experts_for_env` via
+        :func:`collect_routed_expert_keys_from_env` so cleanup paths can't
+        drift out of sync with the wire schema.
+        """
+        from xtuner.v1.ray.rollout.routed_expert_store import (
+            collect_routed_expert_keys_from_env,
+            get_store,
+        )
+
+        keys: List[str] = []
+        for item in group_data_items:
+            keys.extend(collect_routed_expert_keys_from_env(item.env))
+        if not keys:
+            return
+        try:
+            get_store().release_many.remote(list(dict.fromkeys(keys)))
+            self.logger.debug(f"released {len(keys)} orphan routed_experts keys for skipped/failed group")
+        except Exception as exc:
+            self.logger.warning(f"release_many for orphan keys failed (TTL will catch): {exc}")
+
     @ray_method
     async def worker_task(self, group_samples_for_retry: Optional[List[RLDataFlowItem]] = None):
         """A single worker task to generate and process a group of samples.
@@ -301,9 +329,11 @@ class RawDataFlow:
         elif group_state == RolloutState.SKIPPED:
             self.skipped_sample_count += 1
             self.logger.info(f"Total skipped samples count: {self.skipped_sample_count}")
+            self._release_routed_expert_keys(group_data_items)
         elif group_state == RolloutState.FAILED:
             self.failed_sample_count += 1
             self.logger.info(f"Total failed samples count: {self.failed_sample_count}")
+            self._release_routed_expert_keys(group_data_items)
         else:
             self.logger.error(f"Unexpected group state '{group_state}' for action_id {action_id}.")
 

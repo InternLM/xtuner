@@ -26,7 +26,6 @@ from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, DataFlowProxy, Repl
 from xtuner.v1.ray.environment import SingleTurnEnvironment, SingleTurnEnvironmentProxy
 from xtuner.v1.ray.evaluator import Evaluator, EvaluatorConfig
 from xtuner.v1.ray.judger import JudgerConfig
-from xtuner.v1.ray.rollout.lmdeploy import get_lmdeploy_routed_experts_ref
 from xtuner.v1.rl.base import (
     TrainingController,
     TrainingControllerProxy,
@@ -373,6 +372,10 @@ class RLTrainer:
             judger_cfg=judger_config,
             replay_buffer_config=replay_buffer_config,
         )
+        # Subclasses (AgentRLTrainer) overwrite this to route tokenize calls
+        # through the 256-way TokenizeController; base RLTrainer doesn't need
+        # it because single-turn tokenize is cheap.
+        self._rollout_controller = None
         self._dataflow_partial_rollout_step = dataflow_config.tail_batch_candidate_steps
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
@@ -821,10 +824,10 @@ class RLTrainer:
                 }
 
                 if "routed_experts" in group[i].env.rollout.extra_info:
-                    routed_experts = group[i].env.rollout.extra_info.pop("routed_experts")  # n,layer*expert
-                    if isinstance(routed_experts, str):
-                        routed_experts = get_lmdeploy_routed_experts_ref(routed_experts)
-                    seq_ctx.rollout_routed_experts = routed_experts  # n,layer,expert
+                    # Per-message wire form {"key": str, "length": int}; the
+                    # training worker fetches + concats from the store so the
+                    # trainer driver never holds the full routing tensors.
+                    seq_ctx.rollout_routed_experts = group[i].env.rollout.extra_info.pop("routed_experts")
 
                 data_batches.append(data_dict)
             if multimodal_train_info is not None:
@@ -852,6 +855,12 @@ class RLTrainer:
             "prompt_len/min": prompt_len_t.min().item(),
             "prompt_len/max": prompt_len_t.max().item(),
         }
+        # End-to-end sample funnel — what actually entered training this step.
+        n_with_routed = sum(1 for db in data_batches if db["seq_ctx"].rollout_routed_experts is not None)
+        get_logger().info(
+            f"[RLTrainer] prepare: entered_train={len(data_batches)} "
+            f"groups={len(data_groups)} with_routed_experts={n_with_routed}"
+        )
         return data_batches, info_dict
 
     def _save_trajectories(self, data_groups, save_path):

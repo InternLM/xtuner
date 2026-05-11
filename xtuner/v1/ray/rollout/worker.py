@@ -14,7 +14,6 @@ import numpy as np
 import ray
 import requests  # type: ignore[import-untyped]
 from packaging.version import Version
-from ray import ObjectRef
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from transformers import AutoTokenizer
@@ -153,36 +152,22 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.launch_server()
         return (self.rank, self.server_url)
 
-    def _decode_routed_experts(self, routed_experts: Any) -> Any:
-        return routed_experts
+    def _decode_routed_experts(self, routed_experts: Any) -> np.ndarray:
+        """Normalize the backend-specific ``routed_experts`` payload to
+        ndarray.
 
-    def _concat_partial_routed_experts(
-        self,
-        root_id: Any,
-        action_id: Any,
-        response: dict,
-        history_routed_experts: Any,
-        cur_routed_experts: Any,
-    ) -> Any:
-        assert (history_routed_experts.shape[0] - 1) > 0 and history_routed_experts.shape[
-            0
-        ] - 1 <= cur_routed_experts.shape[0], (
-            f"Existing routed_experts shape: {history_routed_experts.shape}, current routed_experts shape: {cur_routed_experts.shape}"
-        )
-        init_cur_roued_experts = cur_routed_experts.shape[0]
-        cur_routed_experts = cur_routed_experts[history_routed_experts.shape[0] :, :, :]
-        concat_routed_experts = np.concatenate((history_routed_experts, cur_routed_experts), axis=0)
-        prompt_tokens = response["meta_info"].get("prompt_tokens", 0)
-        response_tokens = response["meta_info"].get("completion_tokens", 0)
-        assert concat_routed_experts.shape[0] == prompt_tokens + response_tokens - 1, (
-            f"Routed experts shape {concat_routed_experts.shape[0]} does not match total tokens {prompt_tokens + response_tokens - 1}"
-        )
-        self.logger.debug(
-            f"[{root_id}/{action_id}] Partial Rollout Stats: "
-            f"Tokens(prompt={prompt_tokens}, response={response_tokens}, total={prompt_tokens + response_tokens}) | "
-            f"Experts(exist={history_routed_experts.shape}, init_cur={init_cur_roued_experts}, cur={cur_routed_experts.shape}, concat={concat_routed_experts.shape})"
-        )
-        return concat_routed_experts
+        Backends may return ``np.ndarray`` directly or a ``torch.Tensor``-
+        compatible buffer.  Default normalises via ``np.asarray``; subclasses
+        may override if the raw payload needs backend-specific handling
+        (e.g. pulling from an external shared store before normalising).
+
+        Args:
+            routed_experts (Any): Raw payload from ``response["meta_info"]``.
+
+        Returns:
+            np.ndarray: Shape ``(P + C - 1, num_layers, top_k)``.
+        """
+        return np.asarray(routed_experts)
 
     async def _handle_routed_experts_response(
         self,
@@ -193,42 +178,44 @@ class RolloutWorker(SingleAcceleratorWorker):
         extra_info: RolloutExtraInfo,
         finish_reason: str,
     ) -> None:
-        exist_history_routed_experts = (
-            "routed_experts" in input_extra_info and input_extra_info["routed_experts"] is not None
-        )
         routed_experts = response["meta_info"].pop("routed_experts")  # token[layer[expert]]
-        if routed_experts is not None and not exist_history_routed_experts:
-            routed_experts = self._decode_routed_experts(routed_experts)
-            assert not isinstance(routed_experts, str), (
-                "String routed_experts keys must be handled by the backend-specific rollout worker."
-            )
-            if not isinstance(routed_experts, ObjectRef):
-                routed_experts = ray.put(routed_experts)
-            extra_info["routed_experts"] = routed_experts
-        elif routed_experts is not None and exist_history_routed_experts:
-            routed_experts = self._decode_routed_experts(routed_experts)
-            if isinstance(routed_experts, ObjectRef):
-                cur_routed_experts = await routed_experts  # n, layer, expert
-                ray.internal.free(routed_experts, local_only=False)
-            else:
-                cur_routed_experts = routed_experts
-
-            history_routed_experts_ref = input_extra_info["routed_experts"]
-            assert isinstance(history_routed_experts_ref, ObjectRef), (
-                "Base rollout worker expects history routed_experts to be a Ray ObjectRef."
-            )
-            history_routed_experts = await history_routed_experts_ref  # n, layer, expert
-            ray.internal.free(history_routed_experts_ref, local_only=False)
-            concat_routed_experts = self._concat_partial_routed_experts(
-                root_id, action_id, response, history_routed_experts, cur_routed_experts
-            )
-            extra_info["routed_experts"] = ray.put(concat_routed_experts)
-            del history_routed_experts
-            del cur_routed_experts
-        else:
+        if routed_experts is None:
             assert finish_reason == "abort", (
                 f"routed_experts is None, but finish_reason is {finish_reason}, expected abort. response: {response}"
             )
+            return
+        decoded = self._decode_routed_experts(routed_experts)
+        if isinstance(decoded, ray.ObjectRef):
+            # lmdeploy returned an ObjectRef; materialise + drop its plasma
+            # copy (we'll re-put the sliced delta under the store's ownership).
+            ref = decoded
+            decoded = await ref
+            try:
+                ray.internal.free([ref], local_only=False)
+            except Exception:
+                pass
+        if not isinstance(decoded, np.ndarray):
+            decoded = np.asarray(decoded)
+        # Slice delta using the caller-supplied cumulative length, put under
+        # the xtuner RoutedExpertStore, and write the per-message wire dict
+        # {"key", "length"} to extra_info.  This has to happen in the worker
+        # (not the controller) because RLRolloutResponseItem.extra_info is
+        # Pydantic-validated on the Ray RPC boundary — a raw ndarray would
+        # fail schema validation before the controller ever sees it.
+        from xtuner.v1.ray.rollout.routed_expert_store import get_store
+
+        prev_acc = (input_extra_info or {}).get("routed_experts") or {}
+        prev_len = int(prev_acc.get("length", 0))
+        total_len = int(decoded.shape[0])
+        assert total_len >= prev_len, (
+            f"lmdeploy routed_experts shape {total_len} < prev cumulative length {prev_len}; "
+            "invariant violation — check lmdeploy output layout."
+        )
+        delta = decoded[prev_len:]
+        if delta.shape[0] == 0:
+            return
+        new_key = await get_store().put_ref.remote([ray.put(delta)])
+        extra_info["routed_experts"] = {"key": new_key, "length": total_len}
 
     def set_engine_rank_mesh_array(self, engine_rank_mesh_array: list[list[int]]):
         self.engine_rank_mesh_array = engine_rank_mesh_array

@@ -167,9 +167,22 @@ class InstallAgentEnvironment(BaseEnvironment):
                 sample.env.agent.extra_info["daemon_log"] = result["env"]["agent"].get("daemon_log", "")
                 sample.env.judger.extra_info.update(result["env"]["judger"])
                 completed_data_items.append(sample)
-        completed_data_items_result = self.postprocess_func(self, completed_data_items)  # type: ignore[arg-type]
-        if inspect.iscoroutinefunction(self.postprocess_func):
-            completed_data_items_result = await completed_data_items_result  # type: ignore[misc]
+        # Wrap user postprocess — any raise would kill the trainer. See
+        # AgentEnvironment.generate for rationale.
+        try:
+            completed_data_items_result = self.postprocess_func(self, completed_data_items)  # type: ignore[arg-type]
+            if inspect.iscoroutinefunction(self.postprocess_func):
+                completed_data_items_result = await completed_data_items_result  # type: ignore[misc]
+        except Exception as exc:
+            import traceback as _tb
+
+            get_logger().error(
+                f"[InstallAgentEnvironment] postprocess_func failed on "
+                f"{len(completed_data_items)} samples: {exc}\n{_tb.format_exc()}"
+            )
+            for item in completed_data_items:
+                item.env.rollout.state = RolloutState.SKIPPED
+            completed_data_items_result = completed_data_items
         return passed_data_items + completed_data_items_result
 
     async def run(  # type: ignore[override]

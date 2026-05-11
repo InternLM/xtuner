@@ -20,9 +20,11 @@ from xtuner.v1.data_proto.rl_data import (
 )
 from xtuner.v1.ray.base import AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.ray.rollout.routed_expert_store import get_store
 from xtuner.v1.utils import get_logger
 
 from .worker import RolloutWorker
+
 
 ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
 
@@ -143,6 +145,13 @@ class RolloutController:
             self._get_worker_cls(), infer_config, placement_group
         )
         self.engine_rank_mesh_array, self.worker_server_urls_map = self.init_workers()
+        # Ensure RoutedExpertStore actor is alive before HTTP server starts
+        # serving.  Bootstrap is idempotent + race-safe.
+        if self.config.enable_return_routed_experts:
+            self._routed_expert_store = get_store()
+            self._start_routed_expert_stats_logger()
+        else:
+            self._routed_expert_store = None
         self.start_api_server()
         # todo(@duanyanhui): add router to replace native round robin
         self.router = SessionRouter(self._get_worker_status_for_router())
@@ -175,6 +184,31 @@ class RolloutController:
 
         self.reasoning_parser = create_object(reasoning_parser) or Qwen3TokenReasonParser(tokenizer_path)
         self.tool_call_parser = create_object(tool_call_parser) or Qwen3_5FunctionCallParser()
+
+    def _start_routed_expert_stats_logger(self, interval_sec: float = 60.0):
+        """Daemon thread that periodically logs ``RoutedExpertStore.stats()``.
+
+        Makes leaks (live key count trending up) + plasma pressure visible without having to ray-attach to the store
+        actor.  No-op if the store is not configured.
+        """
+
+        def _loop():
+            while True:
+                try:
+                    stats = ray.get(self._routed_expert_store.stats.remote(), timeout=10.0)
+                    self.logger.info(
+                        f"[routed_expert_store] live={stats['live']} "
+                        f"put={stats['n_put']} get={stats['n_get']} "
+                        f"release={stats['n_release']} "
+                        f"missing_get={stats['n_missing_get']} "
+                        f"missing_release={stats['n_missing_release']}"
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"[routed_expert_store] stats fetch failed: {exc}")
+                time.sleep(interval_sec)
+
+        thread = threading.Thread(target=_loop, name="routed-expert-stats", daemon=True)
+        thread.start()
 
     def _get_worker_status_for_router(self) -> Dict[RolloutWorker, bool]:
         """Helper to generate the status dict required by the SessionRouter."""
