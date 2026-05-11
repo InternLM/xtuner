@@ -421,6 +421,7 @@ class Qwen3VLTokenizeFunction(BaseMLLMTokenizeFunction):
         )
 
     def calc_num_tokens_pure_text_get_item(self, data_item) -> CacheItem:
+        # It is expected that Qwen35ChatMessages is slightly slower than ChatMessages in the same data and same output.
         if self.chat_template_name == "qwen3.5-vl":
             messages = Qwen35ChatMessages(messages=data_item["messages"], tools=data_item.get("tools"))
         else:

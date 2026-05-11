@@ -4,6 +4,7 @@ from typing import Any, cast
 from xtuner.v1.data_proto.rl_data import RolloutState
 
 from ...data_proto.rl_data import MultimodalInfo
+from ..data_item import CacheItem
 from ..mllm_tokenize_fn.qwen3_vl_tokenize_fn import Qwen3VLTokenizeFnConfig, Qwen3VLTokenizeFunction, QwenVL3DataItem
 
 
@@ -59,7 +60,7 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
         self.data_judger_mapping = data_judger_mapping
         super().__init__(*args, **kwargs)
 
-    def __call__(self, item: dict, media_root: str = "", **kwargs) -> RolloutState:
+    def __call__(self, item: dict, media_root: str = "", **kwargs) -> RolloutState | CacheItem:
         extra_info = item.get("extra_info", {})
         if isinstance(item["prompt"], dict):
             assert "messages" in item["prompt"], "When prompt is a dict, it must contain 'messages' key"
@@ -78,8 +79,8 @@ class RLQwen3VLTokenizeFunction(Qwen3VLTokenizeFunction):
         data = super().__call__({"messages": messages, "tools": tools}, media_root=media_root)
 
         if self.state == "cache":
-            return RolloutState(
-                message=messages,
+            # If return RolloutState, the cache speed will be slow because of serialization problem
+            return CacheItem(
                 num_tokens=data["num_tokens"],
                 proxy_attn_flops=data.get("proxy_attn_flops", float(data["num_tokens"])),
             )
