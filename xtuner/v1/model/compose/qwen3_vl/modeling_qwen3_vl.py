@@ -138,9 +138,10 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
 
         return special_visual_mask, visual_features, deepstack_visual_embeds
 
-    def get_ts_feature(self, ts_values, ts_lens, sr):
+    def get_ts_feature(self, ts_values, ts_lens, ts_channels, sr):
         ts_embeds, ts_pad_mask = self.time_series(
             time_series_signals=ts_values,
+            ts_channels=ts_channels,
             ts_lens=ts_lens,
             sr=sr)
         return ts_embeds, ts_pad_mask
@@ -213,7 +214,7 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
         )
         time_series_signals = seq_ctx.time_series_signals
         if time_series_signals is not None:
-            ts_features, ts_pad_mask = self.get_ts_feature(time_series_signals, seq_ctx.ts_lens, seq_ctx.ts_sr)  # [B, T, C], [B, T]
+            ts_features, ts_pad_mask = self.get_ts_feature(time_series_signals, seq_ctx.ts_lens, seq_ctx.ts_channels, seq_ctx.ts_sr)  # [B, T, C], [B, T]
             ts_features = ts_features[~ts_pad_mask].to(inputs_embeds.device,
                                                        inputs_embeds.dtype)  # [num_valid_ts_tokens, C]
             B, N, C = inputs_embeds.shape
@@ -236,8 +237,9 @@ class Qwen3VLForConditionalGeneration(BaseComposeModel):
         else:
             fake_time_series_signals = torch.zeros((1, 147, 3), device=input_ids.device, dtype=inputs_embeds.dtype)
             fake_ts_lens = torch.tensor([147], device=input_ids.device)
+            fake_ts_channels = torch.tensor([3], device=input_ids.device)
             fake_sr = torch.tensor([36], device=input_ids.device)
-            ts_features, _ = self.get_ts_feature(fake_time_series_signals, fake_ts_lens, fake_sr)
+            ts_features, _ = self.get_ts_feature(fake_time_series_signals, fake_ts_lens, fake_ts_channels, fake_sr)
             inputs_embeds = inputs_embeds * 0.0 + ts_features.sum() * 0.0
 
             # NOTE: 一定不要原地覆盖，否则第二次 forward 会缺少数据

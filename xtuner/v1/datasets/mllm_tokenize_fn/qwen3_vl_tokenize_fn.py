@@ -237,11 +237,13 @@ def build_ts_transform(do_normalize=True, do_truncate=True, max_len=240000):
         try:
             if ext in [".wav", ".mp3", ".flac"]:
                 try:
-                    import librosa
+                    import soundfile as sf
                 except ImportError:
-                    raise ImportError("Please install librosa to process audio files.")
-                ts_input, sr = librosa.load(ts_path, sr=None)
-                ts_input = ts_input[:, None]  # [T, 1]
+                    raise ImportError("Please install soundfile to process audio files.")
+                ts_input, sr = sf.read(ts_path) # ts_input: np.ndarray, shape [T] or [T, C]
+                sr = [sr]
+                if ts_input.ndim == 1:
+                    ts_input = ts_input[:, None]
             elif ext == ".csv":
                 try:
                     import pandas as pd
