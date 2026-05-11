@@ -258,7 +258,8 @@ class vLLMWorker(RolloutWorker):
         pass
 
     def continue_generation(self):
-        pass
+        # 恢复生成时必须清掉上一轮 abort 标志，否则新请求会在发送前被本地直接标成 ABORTED。
+        self.receive_abort_request.clear()
 
     def onload_weights(self):
         """Onloads the model weights by waking up the model."""
