@@ -267,13 +267,16 @@ class SyncProduceStrategy(ProduceStrategy):
                     update_sample_version(item, model_step)
                 refresh_seq_staleness(items, train_step)
 
-                is_valid = self.is_valid_sample_fn(items)
-                if not is_valid:
-                    for item in items:
-                        item.status = Status.FILTERED
+                is_completed = update_group_status(items) == Status.COMPLETED
+                if is_completed:
+                    is_valid = self.is_valid_sample_fn(items)
+                    if not is_valid:
+                        is_completed = False
+                        for item in items:
+                            item.status = Status.FILTERED
 
                 await replay_buffer.put(items, task_name)
-                if not is_valid:
+                if not is_completed:
                     continue
 
                 completed_sample_count += 1
@@ -381,13 +384,16 @@ class AsyncProduceStrategy(ProduceStrategy):
         refresh_seq_staleness(items, current_train_step)
         items = expire_group_if_needed(items, self.stale_threshold)
 
-        is_valid = self.is_valid_sample_fn(items)
-        if not is_valid:
-            for item in items:
-                item.status = Status.FILTERED
+        is_completed = update_group_status(items) == Status.COMPLETED
+        if is_completed:
+            is_valid = self.is_valid_sample_fn(items)
+            if not is_valid:
+                is_completed = False
+                for item in items:
+                    item.status = Status.FILTERED
 
         await replay_buffer.put(items, task_name)
-        return is_valid
+        return is_completed
 
     async def _put_claimed_tasks(
         self,
@@ -398,24 +404,24 @@ class AsyncProduceStrategy(ProduceStrategy):
         model_step: int,
         available_base: int | None = None,
     ) -> None:
-        valid_completed_count = 0
+        completed_count = 0
         for task in claimed_tasks:
-            is_valid = await self._put_generated_group(
+            is_completed = await self._put_generated_group(
                 task.result(),
                 replay_buffer,
                 task_name,
                 current_train_step=progress.next_consumer_step,
                 model_step=model_step,
             )
-            if is_valid:
-                valid_completed_count += 1
-            if is_valid and available_base is not None:
+            if is_completed:
+                completed_count += 1
+            if is_completed and available_base is not None:
                 if progress.target_samples[task_name] > 0:
                     logger.info(
                         f"[{self.__class__.__name__}] Collected "
-                        f"{min(progress.target_samples[task_name], max(0, available_base + valid_completed_count))}/"
+                        f"{min(progress.target_samples[task_name], max(0, available_base + completed_count))}/"
                         f"{progress.target_samples[task_name]} "
-                        f"valid samples for task {task_name}."
+                        f"completed samples for task {task_name}."
                     )
 
     async def _schedule_one(
