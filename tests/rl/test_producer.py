@@ -251,6 +251,35 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         data = await sampler.sample(task_name, group_status=[Status.EXPIRED, Status.ABORTED])
         self.assertEqual(data[0].id, 1)
 
+    async def test_put_generated_group_only_validates_completed_group(self):
+        task_name = "test_valid_completed_only"
+        valid_checked_statuses = []
+
+        def is_valid_sample_fn(samples):
+            valid_checked_statuses.append([sample.status for sample in samples])
+            return False
+
+        strategy = SyncProduceStrategyConfig(is_valid_sample_fn=is_valid_sample_fn).build()
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            self._build_agent_loop(),
+            self._build_sampler(),
+            batch_size=1,
+        )
+
+        completed_group = [MockRolloutState(1, status=Status.COMPLETED)]
+        self.assertFalse(await ctx.put_generated_group(completed_group))
+        self.assertEqual(completed_group[0].status, Status.FILTERED)
+
+        aborted_group = [MockRolloutState(2, status=Status.ABORTED)]
+        self.assertFalse(await ctx.put_generated_group(aborted_group))
+        self.assertEqual(aborted_group[0].status, Status.ABORTED)
+
+        self.assertEqual(valid_checked_statuses, [[Status.COMPLETED]])
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 1)
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 1)
+
     async def test_sync_produce_strategy(self):
         task_name = "test_task"
         mock_agent_loop = self._build_agent_loop({0: 0.0, 1: 0.01})

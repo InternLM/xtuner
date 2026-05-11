@@ -43,6 +43,11 @@ class ManagerStatus(Enum):
     FINISH = auto()
 
 
+def get_group_status(group: list[Any]) -> Status:
+    # 只聚合状态，不在这里修改样本；状态翻转必须发生在显式过滤或过期逻辑中。
+    ...
+
+
 @dataclass
 class ProduceBatchResult:
     rollout_states: list[list[Any]]
@@ -206,9 +211,10 @@ class ReplayBuffer(Protocol):
         # 生成结果入库时显式传入 model_step/current_train_step/stale_threshold：
         # 1. update_sample_version(items, model_step)
         # 2. refresh_seq_staleness(items, current_train_step)
-        # 3. stale_threshold 非空时执行 expire_group_if_needed(items, stale_threshold)
+        # 3. stale_threshold 非空时执行 _expire_group_if_needed(items, stale_threshold)
+        # 4. 用 get_group_status(items) 按最终状态入库
         #
-        # is_valid_sample_fn 已在 caller 侧先执行；新的约束是它不依赖 version/staleness/expired 状态。
+        # is_valid_sample_fn 只在 caller 侧对 completed group 执行；非完整样本保留原状态。
         ...
 
     async def refresh_staleness(
@@ -255,9 +261,11 @@ class ProduceContext:
     它不是参数袋；它把容易传错的运行时契约封装成语义方法：
     - target / consumed 的绝对累计口径。
     - update_event 的暂停判断。
-    - future_step 和 model_step 的过期判断输入。
     - replay buffer 的 available / expired 计数。
     - put 生成结果前的 producer 专属后处理入口。
+
+    模型过期判断由 ProduceStrategy.is_model_expired(...) 提供，避免 context 和 strategy
+    各维护一份相同逻辑。
     """
 
     task: _TaskRunner
@@ -286,13 +294,6 @@ class ProduceContext:
     def should_abort(self) -> bool:
         return self.update_event.is_set()
 
-    def model_expired(self) -> bool:
-        stale_threshold = self.task.stale_threshold
-        if stale_threshold is None:
-            return False
-        # model_step 表示哪个 train_step 训练后的模型；完全同步时 current step 天然领先 1。
-        return self.future_step - self.model_step - 1 >= stale_threshold
-
     async def expired_count(self) -> int:
         return await self.replay_buffer.count(self.task_name, Status.EXPIRED)
 
@@ -306,13 +307,13 @@ class ProduceContext:
         return await self.task.sampler.sample(task_name=self.task_name, group_status=group_status)
 
     async def put_generated_group(self, group: list[Any]) -> bool:
-        # 新约束：is_valid_sample_fn 只判断生成结果本身是否可训练，
-        # 不依赖 response_model_steps / seq_staleness / expired 状态。
-        # 因此先过滤，再由 replay_buffer.put 统一做 version/staleness/expire。
-        is_valid = self.task.produce_strategy.is_valid_sample_fn(group)
-        if not is_valid:
-            for item in group:
-                item.status = Status.FILTERED
+        # 只有完整生成的 group 才做业务有效性过滤；ABORTED / EXPIRED 保留原状态供重试或统计。
+        is_completed = get_group_status(group) == Status.COMPLETED
+        if is_completed:
+            is_valid = self.task.produce_strategy.is_valid_sample_fn(group)
+            if not is_valid:
+                for item in group:
+                    item.status = Status.FILTERED
         await self.replay_buffer.put(
             group,
             self.task_name,
@@ -320,13 +321,20 @@ class ProduceContext:
             current_train_step=self.consumer_step,
             stale_threshold=self.task.stale_threshold,
         )
-        return is_valid
+        # put 内部可能因为 staleness 把 completed group 转为 EXPIRED，返回前重新聚合最终状态。
+        return get_group_status(group) == Status.COMPLETED
 
 
 class ProduceStrategy(Protocol):
+    is_valid_sample_fn: Callable[[list[Any]], bool]
+
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus: ...
 
     async def pause_produce(self, ctx: ProduceContext) -> float: ...
+
+    def is_model_expired(self, train_step: int, model_step: int) -> bool: ...
+
+    def pending_task_count(self) -> int: ...
 
 
 class _PendingTasks:
@@ -342,9 +350,9 @@ class _PendingTasks:
         self._tasks: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
 
-    async def count(self) -> int:
-        async with self._lock:
-            return len(self._tasks)
+    def count(self) -> int:
+        # count 是轻量观测值；需要互斥的 claim / schedule / cancel 仍在各自方法里加锁。
+        return len(self._tasks)
 
     async def claim_ready(self) -> set[asyncio.Task]:
         async with self._lock:
@@ -384,11 +392,12 @@ class _PendingTasks:
             self._tasks.clear()
             return claimed
 
-    async def cancel_all(self) -> None:
+    async def cancel_all(self) -> int:
         tasks = await self.claim_all()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        return len(tasks)
 
 
 class AsyncProduceStrategy:
@@ -400,16 +409,25 @@ class AsyncProduceStrategy:
 
     over_sample_threshold: float
     tail_batch_trigger_size: int
+    stale_threshold: int
     _pending_tasks: _PendingTasks
 
     def __init__(self) -> None:
         # 真实实现继续保留现有配置参数；这里强调 pending helper 由 strategy 持有。
         self._pending_tasks = _PendingTasks()
+        self.stale_threshold = 1
+
+    def is_model_expired(self, train_step: int, model_step: int) -> bool:
+        # model_step 表示哪个 train_step 训练后的模型；完全同步时 current step 天然领先 1。
+        return train_step - model_step - 1 >= self.stale_threshold
+
+    def pending_task_count(self) -> int:
+        return self._pending_tasks.count()
 
     async def produce_batch(self, ctx: ProduceContext) -> ProduceBatchStatus:
         if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
-        if ctx.model_expired():
+        if self.is_model_expired(ctx.future_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
         # 先回收跨调用遗留的 done pending；真实实现中所有结果都通过 ctx.put_generated_group 落库。
@@ -417,7 +435,7 @@ class AsyncProduceStrategy:
 
         if ctx.should_abort():
             return ProduceBatchStatus.UPDATE_ABORT
-        if ctx.model_expired():
+        if self.is_model_expired(ctx.future_step, ctx.model_step):
             return ProduceBatchStatus.EXPIRED_BATCH
 
         expired_count = await ctx.expired_count()
@@ -430,14 +448,14 @@ class AsyncProduceStrategy:
         while True:
             if ctx.should_abort():
                 return ProduceBatchStatus.UPDATE_ABORT
-            if ctx.model_expired():
+            if self.is_model_expired(ctx.future_step, ctx.model_step):
                 return ProduceBatchStatus.EXPIRED_BATCH
 
             available = await ctx.available_count()
             if available >= target_abs:
                 return ProduceBatchStatus.NORMAL
 
-            while available + await self._pending_tasks.count() < scheduled_target:
+            while available + self._pending_tasks.count() < scheduled_target:
                 scheduled = await self._pending_tasks.schedule_one(
                     max_pending=scheduled_target - available,
                     should_abort=ctx.should_abort,
@@ -470,11 +488,10 @@ class AsyncProduceStrategy:
         ctx: ProduceContext,
         *,
         available_base: int | None = None,
-    ) -> int:
+    ) -> None:
         # for task in claimed:
         #     is_valid = await ctx.put_generated_group(task.result())
-        #     ...
-        # return valid_completed_count
+        #     根据 is_valid 更新日志计数；函数本身不再返回累计值。
         ...
 
 
@@ -508,12 +525,16 @@ class AgentLoopManager:
         task_sizes = self.get_task_batch_sizes(batch_size, train_step)
         local_progress = ProduceProgress.build_local(self.task_names, task_sizes, train_step)
 
-        await self._refresh_before_consume(train_step)
-        status = await self._produce_to_buffer(task_sizes, local_progress)
+        await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
+        status = await self._produce_batch_to_buffer(task_sizes, local_progress)
         await self.pause_produce(use_global_progress=False, progress=local_progress)
 
-        batch_by_task, _ = await self.replay_buffer.take_batch(task_sizes)
-        result = await self._build_result(batch_by_task, status=status)
+        result = await self._get_batch_from_buffer(
+            batch_size=batch_size,
+            task_batch_sizes=task_sizes,
+            consume_progress=local_progress,
+        )
+        result.status = status
         result.task_batch_sizes = task_sizes
         assert result.rollout_states, "共卡 produce_batch 必须返回非空训练 batch。"
         return result
@@ -534,7 +555,7 @@ class AgentLoopManager:
                 future_step=progress.producer_future_step,
                 allocate_batch_sizes=self.get_task_batch_sizes,
             )
-            status = await self._produce_to_buffer(task_sizes, progress)
+            status = await self._produce_batch_to_buffer(task_sizes, progress)
 
             if status == ProduceBatchStatus.EXPIRED_BATCH:
                 self._status = ManagerStatus.EXPIRED_BATCH
@@ -548,7 +569,7 @@ class AgentLoopManager:
 
         progress = self._produce_progress
         progress.begin_consume(train_step)
-        await self._refresh_before_consume(train_step)
+        await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
 
         task_sizes = self.get_task_batch_sizes(batch_size, train_step)
         while not self._finish_event.is_set():
@@ -556,13 +577,13 @@ class AgentLoopManager:
                 return ProduceBatchResult([], status=ProduceBatchStatus.EXPIRED_BATCH)
 
             if await self.replay_buffer.is_ready(task_sizes):
-                batch_by_task, consumed_counts = await self.replay_buffer.take_batch(task_sizes)
-                progress.mark_consumed(consumed_counts)
-
+                result = await self._get_batch_from_buffer(
+                    batch_size=batch_size,
+                    task_batch_sizes=task_sizes,
+                    consume_progress=progress,
+                )
                 progress.finish_consume(train_step)
-                await self._refresh_before_consume(train_step + 1)
-
-                result = await self._build_result(batch_by_task)
+                await self._refresh_for_all_tasks(train_step + 1, [Status.COMPLETED, Status.ABORTED])
                 result.task_batch_sizes = task_sizes
                 return result
 
@@ -605,28 +626,40 @@ class AgentLoopManager:
         # 维持原扩展点：默认按 weight 分配；自定义动态分配仍可覆盖这个方法。
         ...
 
-    async def _refresh_before_consume(self, train_step: int) -> None:
+    def _validate_task_batch_sizes(self, task_batch_sizes: dict[str, int], global_batch_size: int) -> None:
+        # get_task_batch_sizes 是扩展点，入口集中校验 task 名和总 batch size。
+        ...
+
+    async def _refresh_for_all_tasks(self, train_step: int, statuses: list[Status]) -> None:
         task_stale_thresholds = {
-            task.task_name: task.stale_threshold
+            task.task_name: task.stale_threshold if task.stale_threshold is not None else 1
             for task in self.task_runners
-            if task.stale_threshold is not None
         }
-        if not task_stale_thresholds:
-            return
 
         await self.replay_buffer.refresh_staleness(
             task_stale_thresholds=task_stale_thresholds,
             current_train_step=train_step,
-            statuses=[Status.COMPLETED, Status.ABORTED],
+            statuses=statuses,
         )
 
-    async def _produce_to_buffer(self, task_sizes: dict[str, int], progress: ProduceProgress) -> ProduceBatchStatus:
-        if any(self._build_context(task, task_sizes, progress).model_expired() for task in self.task_runners):
+    async def _produce_batch_to_buffer(
+        self,
+        task_batch_sizes: dict[str, int],
+        progress: ProduceProgress,
+    ) -> ProduceBatchStatus:
+        current_future_step = progress.producer_future_step
+        model_step = self._model_step
+        expired_tasks = [
+            task
+            for task in self.task_runners
+            if task.produce_strategy.is_model_expired(current_future_step, model_step)
+        ]
+        if expired_tasks:
             return ProduceBatchStatus.EXPIRED_BATCH
 
         statuses = await asyncio.gather(
             *[
-                task.produce_strategy.produce_batch(self._build_context(task, task_sizes, progress))
+                task.produce_strategy.produce_batch(self._build_context(task, task_batch_sizes, progress))
                 for task in self.task_runners
                 if progress.target_samples[task.task_name] > 0
             ]
@@ -656,6 +689,21 @@ class AgentLoopManager:
             update_event=self._update_event,
             model_step=self._model_step,
         )
+
+    async def _get_batch_from_buffer(
+        self,
+        *,
+        batch_size: int,
+        task_batch_sizes: dict[str, int],
+        consume_progress: ProduceProgress,
+    ) -> ProduceBatchResult:
+        # 所有参数都必填，避免隐藏默认路径绕过 batch size 校验或 progress 更新。
+        self._validate_task_batch_sizes(task_batch_sizes, batch_size)
+        batch_by_task, consumed_counts = await self.replay_buffer.take_batch(task_batch_sizes)
+        consume_progress.mark_consumed(consumed_counts)
+        result = await self._build_result(batch_by_task)
+        result.task_batch_sizes = task_batch_sizes
+        return result
 
     async def _build_result(
         self,

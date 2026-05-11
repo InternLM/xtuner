@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
+    get_group_status,
 )
 from xtuner.v1.rl.agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
@@ -249,11 +250,13 @@ class ProduceContext:
         return await self.sampler.sample(task_name=self.task_name, group_status=group_status)
 
     async def put_generated_group(self, group: list[RolloutState]) -> bool:
-        # 新约束：is_valid_sample_fn 只判断生成结果本身是否可训练，不依赖 staleness / expired 状态。
-        is_valid = self.is_valid_sample_fn(group)
-        if not is_valid:
-            for item in group:
-                item.status = Status.FILTERED
+        # 只有完整生成的 group 才需要业务有效性过滤；ABORTED / EXPIRED 保留原状态供重试或统计。
+        is_completed = get_group_status(group) == Status.COMPLETED
+        if is_completed:
+            is_valid = self.is_valid_sample_fn(group)
+            if not is_valid:
+                for item in group:
+                    item.status = Status.FILTERED
         await self.replay_buffer.put(
             group,
             self.task_name,
@@ -261,7 +264,9 @@ class ProduceContext:
             current_train_step=self.consumer_step,
             stale_threshold=self.stale_threshold,
         )
-        return is_valid
+        # replay_buffer.put 可能把 stale group 转为 EXPIRED，返回前重新判断是否仍可训练。
+        is_completed = get_group_status(group) == Status.COMPLETED
+        return is_completed
 
 
 class ProduceStrategyConfig(ABC, BaseModel):

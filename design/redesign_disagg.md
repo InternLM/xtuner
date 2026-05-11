@@ -164,19 +164,20 @@ async def count_statuses(
 
 - `ProduceBatchResult` 组装。
 - generate timing / pause time 的训练日志格式。
-- `is_valid_sample_fn` 过滤判断。新的约束是：它只判断生成结果本身是否可训练，不依赖 `response_model_steps / seq_staleness / expired` 状态。
+- `is_valid_sample_fn` 过滤判断。新的约束是：只对 group status 为 `COMPLETED` 的生成结果执行；`ABORTED / EXPIRED / FAILED` 等非完整样本保留原状态，用于重试、过期池或统计。
 - sampler 从 `EXPIRED / ABORTED` 池取样的重试策略。
 
 这些逻辑仍属于 manager / producer 层。
 
-`ReplayBuffer.put(...)` 的默认行为必须保持兼容：不传 `model_step / current_train_step` 时，只按样本当前 `status / staleness` 入库，用于测试和 sampler 手工注入 `ABORTED / EXPIRED / COMPLETED` 样本。生成结果入库时由 producer 显式传入 `model_step / current_train_step`，并在 task 有 stale threshold 时一并传入 `stale_threshold`，`put(...)` 内部再统一执行 version / staleness / expire。
+`ReplayBuffer.put(...)` 的默认行为必须保持兼容：不传 `model_step / current_train_step` 时，只按样本当前 `status / staleness` 入库，用于测试和 sampler 手工注入 `ABORTED / EXPIRED / COMPLETED` 样本。生成结果入库时由 producer 显式传入 `model_step / current_train_step`，并在 task 有 stale threshold 时一并传入 `stale_threshold`，`put(...)` 内部再统一执行 version / staleness / expire。group status 聚合使用 `get_group_status(...)`，它只读不改样本；状态翻转只在显式过滤或过期逻辑里发生。
 
 生成结果的顺序调整为：
 
-1. producer 先执行 `is_valid_sample_fn(group)`。
-2. 如果无效，producer 把整组标记为 `FILTERED`。
+1. producer 先用 `get_group_status(group)` 判断生成结果是否仍为 `COMPLETED`。
+2. 只有 completed group 执行 `is_valid_sample_fn(group)`；无效则把整组标记为 `FILTERED`。
 3. producer 调用 `replay_buffer.put(..., model_step=..., current_train_step=..., stale_threshold=...)`。
-4. `ReplayBuffer.put` 对生成结果统一执行 version / staleness，并在有阈值时执行 expire，再按最终 group status 入库。
+4. `ReplayBuffer.put` 对生成结果统一执行 version / staleness，并在有阈值时执行 expire，再用 `get_group_status(...)` 按最终状态入库。
+5. producer 返回前再次判断 `get_group_status(group) == Status.COMPLETED`，因为 stale group 可能在 put 内被转为 `EXPIRED`。
 
 ## 7. ProduceContext
 
@@ -186,7 +187,6 @@ async def count_statuses(
 
 ```python
 ctx.should_abort()
-ctx.model_expired()
 ctx.expired_count()
 ctx.available_count()
 ctx.sample_group(from_expired_pool=True)
@@ -199,9 +199,10 @@ ctx.put_generated_group(group)
 - `progress.consumed_samples[task_name]`
 - `update_event.is_set()`
 - `replay_buffer.count(task_name, Status.COMPLETED)`
-- `future_step / model_step / stale_threshold` 的过期判断组合
 - sampler 的 `group_status` 组合
 - 生成结果过滤和入库前标准化的顺序
+
+模型过期判断不放在 `ProduceContext` 中重复维护，而是统一由 `ProduceStrategy.is_model_expired(train_step, model_step)` 提供。`AgentLoopManager` 在调度前先检查该入口，strategy 内部如果需要再次判断也调用自己的策略方法。
 
 `ProduceContext` 的目标是隐藏调用契约，不是缩短参数列表。
 
@@ -213,7 +214,7 @@ ctx.put_generated_group(group)
 
 ```python
 class _PendingTasks:
-    async def count(self) -> int: ...
+    def count(self) -> int: ...
     async def claim_ready(self) -> set[asyncio.Task]: ...
     async def wait_and_claim(self, *, timeout_s: float) -> set[asyncio.Task]: ...
     async def schedule_one(
@@ -224,7 +225,7 @@ class _PendingTasks:
         spawn_one: Callable[[], Awaitable[asyncio.Task]],
     ) -> bool: ...
     async def claim_all(self) -> set[asyncio.Task]: ...
-    async def cancel_all(self) -> None: ...
+    async def cancel_all(self) -> int: ...
 ```
 
 放进 `_PendingTasks` 的逻辑：
@@ -263,6 +264,10 @@ class _PendingTasks:
 
 这些状态转移目前仍比较简单，先保留在 `AgentLoopManager` 内部，并新增公开方法 `shutdown()`，避免 trainer 直接写私有字段。
 
+保存 checkpoint 前，`AgentLoopManager.save()` 通过 `produce_strategy.pending_task_count()` 检查各 task 是否还有未收尾的 rollout task；manager 不直接读取 `_PendingTasks` 私有集合。
+
+`_refresh_for_all_tasks(...)` 不再受环境变量控制，colocate / disagg 都统一刷新传入状态的 staleness；异步策略使用自己的 `stale_threshold`，同步策略没有 `stale_threshold` 时使用默认值 1。
+
 ## 10. 核心流程
 
 ### 10.1 共卡 produce_batch
@@ -272,12 +277,17 @@ self.continue_produce(model_step)
 task_sizes = self.get_task_batch_sizes(batch_size, train_step)
 local_progress = ProduceProgress.build_local(self.task_names, task_sizes, train_step)
 
-await self._refresh_before_consume(train_step)
-status = await self._produce_to_buffer(task_sizes, local_progress)
+await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
+status = await self._produce_batch_to_buffer(task_sizes, local_progress)
 await self.pause_produce(use_global_progress=False, progress=local_progress)
 
-batch_by_task, _ = await self.replay_buffer.take_batch(task_sizes)
-return await self._build_result(batch_by_task, status=status)
+result = await self._get_batch_from_buffer(
+    batch_size=batch_size,
+    task_batch_sizes=task_sizes,
+    consume_progress=local_progress,
+)
+result.status = status
+return result
 ```
 
 ### 10.2 非共卡 produce_loop
@@ -289,7 +299,7 @@ task_sizes = progress.ensure_target_upto(
     future_step=progress.producer_future_step,
     allocate_batch_sizes=self.get_task_batch_sizes,
 )
-status = await self._produce_to_buffer(task_sizes, progress)
+status = await self._produce_batch_to_buffer(task_sizes, progress)
 
 if status == NORMAL:
     progress.advance_future_step()
@@ -301,15 +311,18 @@ elif status == EXPIRED_BATCH:
 
 ```python
 progress.begin_consume(train_step)
-await self._refresh_before_consume(train_step)
+await self._refresh_for_all_tasks(train_step, [Status.COMPLETED, Status.ABORTED])
 
 task_sizes = self.get_task_batch_sizes(batch_size, train_step)
 if await self.replay_buffer.is_ready(task_sizes):
-    batch_by_task, consumed = await self.replay_buffer.take_batch(task_sizes)
-    progress.mark_consumed(consumed)
+    result = await self._get_batch_from_buffer(
+        batch_size=batch_size,
+        task_batch_sizes=task_sizes,
+        consume_progress=progress,
+    )
     progress.finish_consume(train_step)
-    await self._refresh_before_consume(train_step + 1)
-    return await self._build_result(batch_by_task)
+    await self._refresh_for_all_tasks(train_step + 1, [Status.COMPLETED, Status.ABORTED])
+    return result
 ```
 
 ## 11. 建议迁移步骤
@@ -325,7 +338,7 @@ if await self.replay_buffer.is_ready(task_sizes):
 - 扩展 `refresh_staleness` 为批量接口，单 task 也用 `{task_name: stale_threshold}` 调用。
 - 新增 `is_ready` 和 `take_batch`。
 - 新增 `count_statuses`。
-- 替换 manager 中 `_is_batch_ready` 和 `_get_batch_from_buffer` 的重复 replay 操作。
+- 替换 manager 中 `_is_batch_ready` 和 `_get_batch_from_buffer` 的重复 replay 操作；`_get_batch_from_buffer` 保留为消费入口，但 `batch_size / task_batch_sizes / consume_progress` 都是必填参数，不保留默认值和跳过 progress 更新的兜底路径。
 
 ### 步骤 3：新增 ProduceContext
 
@@ -355,13 +368,13 @@ if await self.replay_buffer.is_ready(task_sizes):
 - `_build_local_produce_progress`
 - `_is_batch_ready`
 - `_get_single_task_batch_from_buffer`
-- `_get_batch_from_buffer` 中的 replay 操作部分
 
 保留：
 
 - `_build_result`
 - `_aggregate_status`
-- `_produce_to_buffer`
+- `_produce_batch_to_buffer`
+- `_get_batch_from_buffer` 作为唯一消费入口，内部只做参数校验、`take_batch`、`mark_consumed`、leftover 统计和结果组装
 - `_pause_with_progress`
 
 ## 12. 测试建议
@@ -390,8 +403,9 @@ if await self.replay_buffer.is_ready(task_sizes):
 
 ### AsyncProduceStrategy
 
-- strategy 通过 `ProduceContext` 读取 target / available / abort / expired。
+- strategy 通过 `ProduceContext` 读取 target / available / abort，通过 `ProduceStrategy.is_model_expired(...)` 判断 expired。
 - `ctx.put_generated_group` 统一处理生成结果落库。
+- `ctx.put_generated_group` 只对 completed group 执行 valid 判断，非完整样本不被误标成 filtered。
 - pause drain 和 producer claim 不重复 put pending task。
 
 ### _PendingTasks

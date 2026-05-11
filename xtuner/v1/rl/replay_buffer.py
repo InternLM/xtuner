@@ -13,8 +13,8 @@ from pydantic import BaseModel, ConfigDict
 from xtuner.v1.data_proto.rl_data import (
     RolloutState,
     Status,
+    get_group_status,
     refresh_seq_staleness,
-    update_group_status,
     update_sample_version,
 )
 from xtuner.v1.rl.utils import (
@@ -39,7 +39,7 @@ def _expire_group_if_needed(group: list[RolloutState], stale_threshold: int) -> 
     if stale_threshold <= 0:
         raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
 
-    group_status = update_group_status(group)
+    group_status = get_group_status(group)
     if group_status not in (Status.COMPLETED, Status.ABORTED):
         return
     if any(getattr(sample, "seq_staleness", 0) >= stale_threshold for sample in group):
@@ -469,7 +469,7 @@ class ReplayBuffer:
         if stale_threshold is not None:
             _expire_group_if_needed(items, stale_threshold)
 
-        status = update_group_status(items)
+        status = get_group_status(items)
         if status == Status.EXPIRED:
             for item in items:
                 clear_rollout_response_for_rerun(item)
@@ -533,7 +533,7 @@ class ReplayBuffer:
                         status = Status.EXPIRED
                         expired_count += 1
                     else:
-                        status = update_group_status(record.item)
+                        status = get_group_status(record.item)
                     updated_records.append(replace(record, status=status, staleness=staleness))
                 expired_counts[task_name] = expired_count
             await self._storage.update(updated_records)
