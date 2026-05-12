@@ -1,6 +1,7 @@
 import json
 import os
 import random
+import re
 from pathlib import Path
 from shutil import rmtree
 from typing import Any, List, cast
@@ -26,7 +27,12 @@ from xtuner.v1.rl.agent_loop_manager import (
 from xtuner.v1.rl.agent_loop_manager.producer import default_should_continue_fn
 from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.gateway.config import GatewayConfig
-from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SyncReplayBufferConfig
+from xtuner.v1.rl.replay_buffer import (
+    AsyncReplayBufferConfig,
+    SyncReplayBufferConfig,
+    _restore_nested_objectrefs,
+    _snapshot_nested_objectrefs,
+)
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
@@ -69,6 +75,13 @@ def bind_train_rollout(
     info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())  # type: ignore[attr-defined]
     train_controller.update_rollout_info(info_dict)
     return
+
+
+def _parse_debug_rollout_step(path: Path) -> int:
+    match = re.fullmatch(r"debug_rollout_(\d+)\.pt", path.name)
+    if match is None:
+        raise ValueError(f"Unexpected debug rollout file name: {path}")
+    return int(match.group(1))
 
 
 class TrainInfo(TypedDict, total=False):
@@ -210,12 +223,20 @@ class BaseRLTrainerConfig(BaseModel):
     log_dir: Path | str | None = None
     seed: int = 66
     debug_rollout: bool = False
+    debug_rollout_dir: Path | str | None = None
+    debug_train: bool = False
     skip_checkpoint_validation: bool = False
     exp_tracker: Literal["tensorboard", "jsonl"] = "tensorboard"
 
     @model_validator(mode="after")
     def _validate_sync_intervals(self):
-        if self.total_train_steps is None and self.total_epochs is None:
+        if self.debug_rollout and self.debug_train:
+            raise ValueError("debug_rollout and debug_train cannot be enabled at the same time.")
+        if self.debug_rollout and self.debug_rollout_dir is None:
+            raise ValueError("debug_rollout_dir must be provided when debug_rollout=True.")
+        if self.debug_train and self.debug_rollout_dir is None:
+            raise ValueError("debug_rollout_dir must be provided when debug_train=True.")
+        if not self.debug_train and self.total_train_steps is None and self.total_epochs is None:
             raise ValueError("Either total_train_steps or total_epochs must be provided.")
         if self.total_train_steps is not None and self.total_train_steps <= 0:
             raise ValueError(f"total_train_steps must be positive, got {self.total_train_steps}.")
@@ -254,6 +275,7 @@ class BaseRLTrainer:
 
     train_controller: TrainingController
     rollout_controller: RolloutControllerProxy
+    _debug_train_files: dict[int, Path]
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
         check_fa3()
@@ -334,6 +356,9 @@ class BaseRLTrainer:
         self._enable_initial_evaluate = cfg.enable_initial_evaluate and cfg.enable_evaluate
         self._evaluate_step = cfg.evaluate_step
         self._debug_rollout = cfg.debug_rollout
+        self._debug_rollout_dir = Path(cfg.debug_rollout_dir) if cfg.debug_rollout_dir is not None else None
+        self._debug_train = cfg.debug_train
+        self._debug_train_files: dict[int, Path] = {}
 
     def _maybe_start_gateway(self, cfg: BaseRLTrainerConfig) -> None:
         if cfg.gateway_config is None or not cfg.gateway_config.auto_start:
@@ -568,6 +593,38 @@ class BaseRLTrainer:
         self._save_trajectories(eval_batch, eval_trajectory_path)
         self.logger.info(f"Train step {train_step} eval trajectories saved to {eval_trajectory_path}")
         return eval_metrics
+
+    def _save_debug_rollout_batch(self, train_batch: list[list[RolloutState]], train_step: int) -> None:
+        assert self._debug_rollout_dir is not None
+        self._debug_rollout_dir.mkdir(parents=True, exist_ok=True)
+        save_path = self._debug_rollout_dir / f"debug_rollout_{train_step}.pt"
+        serializable_batch = [
+            [cast(RolloutState, _snapshot_nested_objectrefs(rollout_state)) for rollout_state in group]
+            for group in train_batch
+        ]
+        torch.save(serializable_batch, save_path)
+        self.logger.info(f"Debug rollout batch for step {train_step} saved to {save_path}")
+
+    def _list_debug_rollout_files(self, debug_rollout_dir: Path) -> dict[int, Path]:
+        debug_files = {
+            _parse_debug_rollout_step(path): path
+            for path in sorted(debug_rollout_dir.glob("debug_rollout_*.pt"), key=_parse_debug_rollout_step)
+        }
+        if not debug_files:
+            raise FileNotFoundError(f"No debug rollout files found in {debug_rollout_dir}")
+        return debug_files
+
+    def _load_debug_rollout_batch(self, train_step: int) -> list[list[RolloutState]]:
+        debug_file = self._debug_train_files.get(train_step)
+        if debug_file is None:
+            raise FileNotFoundError(f"No debug rollout file found for train step {train_step}")
+        train_batch = torch.load(debug_file, map_location="cpu", weights_only=False)
+        train_batch = [
+            [cast(RolloutState, _restore_nested_objectrefs(rollout_state)) for rollout_state in group]
+            for group in train_batch
+        ]
+        self.logger.info(f"Loaded debug rollout batch for step {train_step} from {debug_file}")
+        return cast(list[list[RolloutState]], train_batch)
 
     # TODO: simplify with Packer.pack_pad_dispatch()
     def _prepare_train_data(
@@ -875,11 +932,37 @@ class RLColocateTrainer(BaseRLTrainer):
         self._init_common(cfg, meta_path=self._META_PATH, logger_tag="RLTrainer")
 
         self._pg = AutoAcceleratorWorkers.build_placement_group(cfg.resources)
+
+        if self._debug_rollout:
+            if self._rollout_config.skip_load_weights:
+                self.logger.info(
+                    "debug_rollout cannot be used with rollout_config.skip_load_weights=True. force set skip_load_weights to False"
+                )
+                self._rollout_config.skip_load_weights = False
+            self.rollout_controller = self._rollout_config.build(self._pg)
+            self._maybe_start_gateway(cfg)
+            replay_buffer = cfg.replay_buffer_config.build()
+            self._build_agent_loop_components(cfg, replay_buffer)
+            self.logger.warning("Debug rollout mode is enabled. Only rollout workers will be started.")
+            return
+
         self.train_controller = self._train_worker_cfg.build(self._pg)
 
         checkpoint_path = self._load_checkpoint_cfg.checkpoint_path
         if checkpoint_path is not None:
             checkpoint_path = self._resume_train_controller_and_state(checkpoint_path)
+
+        if self._debug_train:
+            assert self._debug_rollout_dir is not None
+            self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
+            self._debug_train_files = self._list_debug_rollout_files(self._debug_rollout_dir)
+            if cfg.total_train_steps is None:
+                self._total_train_steps = max(self._debug_train_files)
+            self.logger.warning(
+                "Debug train mode is enabled. Only training workers will be started and rollout weights will not be synchronized."
+            )
+            return
+
         # Free trainer-side GPU memory before bringing up colocated rollout workers.
         # Backends like sglang may size KV cache against their own target utilization
         # instead of the trainer's transient footprint, which can cause init-time OOM.
@@ -897,9 +980,6 @@ class RLColocateTrainer(BaseRLTrainer):
         if self._rollout_config.skip_load_weights:
             self._sync_weights_from_train_workers()
 
-        if self._debug_rollout:
-            self.logger.warning("Debug rollout mode is enabled, rollout will not be offloaded.")
-
     def _sync_weights_from_train_workers(self) -> None:
         self.logger.info("Rollout workers skip load weights, update weights from train workers.")
         ray.get(self.rollout_controller.offload.remote())
@@ -914,6 +994,10 @@ class RLColocateTrainer(BaseRLTrainer):
         self.logger.info("Start RL training")
         if self._cur_step >= self._total_train_steps:
             self.logger.info(f"Train steps {self._total_train_steps} reached, stop training")
+            return
+
+        if self._debug_train:
+            self._fit_debug_train()
             return
 
         if self._enable_initial_evaluate and not self._debug_rollout:
@@ -964,8 +1048,30 @@ class RLColocateTrainer(BaseRLTrainer):
                         with timer("evaluation", step_timer_dict):
                             eval_log_info.update(asyncio_run(self._run_evaluation(train_step)))
                 else:
+                    self._save_debug_rollout_batch(train_batch, train_step)
                     train_log_info = {}
                     eval_log_info = {}
+
+            self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
+            self._cur_step = train_step
+
+    def _fit_debug_train(self) -> None:
+        init_train_step = self._cur_step + 1
+        for train_step in range(init_train_step, self._total_train_steps + 1):
+            self.logger.info(f"Debug train step {train_step}/{self._total_train_steps} start")
+            step_timer_dict: dict[str, float] = {}
+            with timer("step", step_timer_dict):
+                with timer("load_debug_rollout", step_timer_dict):
+                    train_batch = self._load_debug_rollout_batch(train_step)
+                train_log_info = self._train_one_batch(
+                    train_batch,
+                    train_step,
+                    step_timer_dict,
+                    offload_rollout_before_train=False,
+                    onload_train_before_train=False,
+                )
+                eval_log_info: dict[str, float] = {}
+                produce_result = ProduceBatchResult(rollout_states=train_batch)
 
             self._log_step(train_step, step_timer_dict, produce_result, train_log_info, eval_log_info)
             self._cur_step = train_step
@@ -1028,11 +1134,6 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
 
         if self._load_checkpoint_cfg.checkpoint_path is not None:
             self._resume_from_checkpoint(self._load_checkpoint_cfg.checkpoint_path)
-
-        if self._debug_rollout:
-            self.logger.warning(
-                "Debug rollout mode is enabled. Disaggregated training keeps rollout workers resident."
-            )
 
     def _build_disaggregated_placement_groups(
         self,
