@@ -76,10 +76,10 @@ XTunerBaseModelConfig
 │   │   │   └── Qwen2Dense7BConfig
 │   │   └── Qwen3DenseConfig
 │   │       ├── Qwen3Dense8BConfig
+│   │       │   └── Qwen3VLTextDense8BConfig
 │   │       ├── Qwen3Dense4BConfig
-│   │       ├── Qwen3Dense0P6BConfig
-│   │       ├── Qwen3VLTextDense4BConfig
-│   │       └── Qwen3VLTextDense8BConfig
+│   │       │   └── Qwen3VLTextDense4BConfig
+│   │       └── Qwen3Dense0P6BConfig
 │   └── MoE Models (via MoEConfig)
 │       ├── DeepSeekV3Config
 │       ├── GptOssConfig
@@ -87,10 +87,10 @@ XTunerBaseModelConfig
 │       │   └── GptOss117BA5P8Config
 │       ├── Qwen3MoEConfig
 │       │   ├── Qwen3MoE30BA3Config
+│       │   │   └── Qwen3VLTextMoE30BA3Config
 │       │   ├── Qwen3MoE235BA22Config
-│       │   ├── Qwen3MoEFoPEConfig
-│       │   ├── Qwen3VLTextMoE30BA3Config
-│       │   └── Qwen3VLTextMoE235BA22Config
+│       │   │   └── Qwen3VLTextMoE235BA22Config
+│       │   └── Qwen3MoEFoPEConfig
 │       └── Qwen3_5_VLTextMoEConfig
 │           └── Qwen3_5_VLTextMoE35BA3BConfig
 └── BaseComposeConfig
