@@ -154,6 +154,11 @@ class MoEConfig(TransformerConfig):
     freeze_routers: bool = False
     router_async_offload: bool = False
     aux_loss_cfg: AuxLossConfig = AuxLossConfig()
+    # TODO: `FSDPConfig` should be model-specific; temporarily keep
+    # `embed_reshard_after_forward` here until per-submodule FSDP config is supported.
+    # Compose models call `self.embed_tokens` multiple times per step, so default to
+    # keeping it unsharded after forward to avoid repeated all-gathers.
+    embed_reshard_after_forward: bool = True
 
     def build(self) -> "MoE":
         from xtuner.v1.model.moe.moe import MoE
@@ -1054,7 +1059,7 @@ class MoE(BaseModel):
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
-            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            reshard_after_forward=self.config.embed_reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.embed_tokens,
         )
