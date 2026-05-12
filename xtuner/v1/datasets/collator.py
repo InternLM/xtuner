@@ -288,7 +288,9 @@ def qwen3_vl_sft_collator(
         else:
             image_grid_thw = None
 
-        seq_ctx.position_ids = position_ids  # type: ignore
+        if position_ids is not None:
+            seq_ctx.position_ids = position_ids  # type: ignore
+
         seq_ctx.pixel_values = pixel_values  # type: ignore
         seq_ctx.image_grid_thw = image_grid_thw
         seq_ctx.num_img_tokens = num_img_tokens
