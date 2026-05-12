@@ -205,6 +205,43 @@ def _build_produce_context(
 
 
 class TaskSpecConfig(BaseModel):
+    """Configuration for one task managed by ``AgentLoopManager``.
+
+    A task spec binds together the dataset sampler, agent loop, optional judger,
+    production strategy, and sampling weight for one RL data source. Multi-task
+    training is represented as a list of ``TaskSpecConfig`` objects.
+
+    Args:
+        task_name (str): Unique task name used for logging, replay-buffer
+            routing, and checkpoint state.
+        weight (float): Relative batch allocation weight for this task in
+            multi-task training. Defaults to 1.0.
+        agent_loop_config (AgentLoopConfig): Agent loop configuration used to
+            generate rollout samples for this task.
+        judger_config (JudgerConfig | ComposedJudgerConfig | None): Optional
+            judger configuration used to score generated samples. Defaults to
+            None.
+        produce_strategy_config (ProduceStrategyConfig): Strategy used to
+            produce rollout samples. Defaults to ``SyncProduceStrategyConfig``.
+        sampler_config (SamplerConfig): Dataset sampler configuration for this
+            task.
+
+    **Examples:**
+
+    Example configuration for one task::
+
+        task = TaskSpecConfig(
+            task_name="gsm8k",
+            weight=1.0,
+            agent_loop_config=SingleTurnAgentLoopConfig(
+                hf_checkpoint="Qwen/Qwen3-8B",
+                sample_params=SampleParams(max_tokens=1024),
+            ),
+            judger_config=GSM8KJudgerConfig(),
+            sampler_config=SamplerConfig(dataloader_cfg=dataloader_cfg, prompt_repeat_k=8),
+        )
+    """
+
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     task_name: str
@@ -216,6 +253,34 @@ class TaskSpecConfig(BaseModel):
 
 
 class AgentLoopManagerConfig(BaseModel):
+    """Configuration for the agent loop manager.
+
+    ``AgentLoopManagerConfig`` defines the rollout-producing side of RL
+    training. It may manage a single task or a weighted list of tasks, and each
+    task owns its sampler, agent loop, judger, and production strategy.
+
+    Args:
+        tasks (list[TaskSpecConfig] | TaskSpecConfig): One task config or a
+            list of task configs. Task names must be unique when a list is
+            provided.
+
+    **Examples:**
+
+    Example configuration for a single-task manager::
+
+        config = AgentLoopManagerConfig(
+            tasks=TaskSpecConfig(
+                task_name="gsm8k",
+                agent_loop_config=SingleTurnAgentLoopConfig(
+                    hf_checkpoint="Qwen/Qwen3-8B",
+                    sample_params=SampleParams(max_tokens=1024),
+                ),
+                judger_config=GSM8KJudgerConfig(),
+                sampler_config=SamplerConfig(dataloader_cfg=dataloader_cfg, prompt_repeat_k=8),
+            )
+        )
+    """
+
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
     tasks: list[TaskSpecConfig] | TaskSpecConfig

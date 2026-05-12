@@ -262,6 +262,20 @@ class ProduceContext:
 
 
 class ProduceStrategyConfig(ABC, BaseModel):
+    """Base configuration for rollout production strategies.
+
+    Production strategies decide how the agent loop fills the replay buffer and
+    when it should stop producing samples for the current training step.
+
+    Args:
+        is_valid_sample_fn (IsValidSampleFn): Function used to decide whether a
+            generated rollout group is trainable. Defaults to
+            ``default_is_valid_sample_fn``.
+        should_continue_fn (ShouldContinueFn): Function used to decide whether
+            production should continue after a group is processed. Defaults to
+            ``default_should_continue_fn``.
+    """
+
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     is_valid_sample_fn: IsValidSampleFn = default_is_valid_sample_fn
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
@@ -271,6 +285,27 @@ class ProduceStrategyConfig(ABC, BaseModel):
 
 
 class SyncProduceStrategyConfig(ProduceStrategyConfig):
+    """Configuration for synchronous rollout production.
+
+    The synchronous strategy produces samples on demand for the current training
+    step. It is simpler and is the default choice when rollout and training run
+    in a colocated or tightly synchronized workflow.
+
+    Args:
+        is_valid_sample_fn (IsValidSampleFn): Function used to decide whether a
+            generated rollout group is trainable. Defaults to
+            ``default_is_valid_sample_fn``.
+        should_continue_fn (ShouldContinueFn): Function used to decide whether
+            production should continue after a group is processed. Defaults to
+            ``default_should_continue_fn``.
+
+    **Examples:**
+
+    Example synchronous strategy::
+
+        config = SyncProduceStrategyConfig()
+    """
+
     def build(self, *, sync_weights_interval: int = 1) -> "SyncProduceStrategy":
         return SyncProduceStrategy(
             is_valid_sample_fn=self.is_valid_sample_fn, should_continue_fn=self.should_continue_fn
@@ -278,6 +313,40 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
 
 
 class AsyncProduceStrategyConfig(ProduceStrategyConfig):
+    """Configuration for asynchronous rollout production.
+
+    The asynchronous strategy keeps producing rollout samples in the background
+    and stores them in the replay buffer. It can oversample, allow partial
+    rollout continuation, and discard samples that are too stale relative to the
+    current training step.
+
+    Args:
+        is_valid_sample_fn (IsValidSampleFn): Function used to decide whether a
+            generated rollout group is trainable. Defaults to
+            ``default_is_valid_sample_fn``.
+        should_continue_fn (ShouldContinueFn): Function used to decide whether
+            production should continue after a group is processed. Defaults to
+            ``default_should_continue_fn``.
+        over_sample_threshold (float): Extra completed-sample ratio allowed
+            before the producer stops. Defaults to 0.0.
+        enable_partial_rollout (bool): Whether unfinished rollouts can be
+            continued after a weight sync. Defaults to False.
+        max_staleness (int): Maximum allowed model-step staleness for replayed
+            samples. Defaults to 0.
+        tail_batch_trigger_size (int): Minimum pending tail size that can
+            trigger a final batch. Defaults to 0.
+
+    **Examples:**
+
+    Example asynchronous strategy::
+
+        config = AsyncProduceStrategyConfig(
+            over_sample_threshold=0.2,
+            enable_partial_rollout=True,
+            max_staleness=1,
+        )
+    """
+
     over_sample_threshold: float = 0.0
     enable_partial_rollout: bool = False
     max_staleness: int = Field(default=0, ge=0)

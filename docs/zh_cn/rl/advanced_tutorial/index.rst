@@ -6,4 +6,6 @@
 
    model.md
    dataset.md
+   agent_loop.md
+   judger.md
    loss.md

@@ -20,6 +20,29 @@ logger = get_logger(__name__)
 
 
 class SamplerConfig(BaseModel):
+    """Configuration for sampling prompts into rollout groups.
+
+    ``SamplerConfig`` wraps a dataloader configuration and controls how many
+    rollout samples are generated from the same prompt. The sampler first tries
+    to reuse eligible replay-buffer samples and falls back to the dataloader
+    when no reusable sample is available.
+
+    Args:
+        dataloader_cfg (DataloaderConfig): Dataset dataloader configuration
+            that yields ``RolloutState`` prompts.
+        prompt_repeat_k (int): Number of rollout samples to create for each
+            prompt. This is commonly the GRPO group size. Defaults to 1.
+
+    **Examples:**
+
+    Example sampler for an 8-response group::
+
+        config = SamplerConfig(
+            dataloader_cfg=dataloader_cfg,
+            prompt_repeat_k=8,
+        )
+    """
+
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     dataloader_cfg: DataloaderConfig
     prompt_repeat_k: int = 1

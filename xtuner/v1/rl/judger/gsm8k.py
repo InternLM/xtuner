@@ -78,7 +78,33 @@ def compute_reward(response, label, extra_info):
 
 
 class GSM8KJudgerConfig(JudgerConfig):
-    """Configuration for the GSM8K judger."""
+    """Configuration for the built-in GSM8K judger.
+
+    ``GSM8KJudgerConfig`` scores mathematical reasoning responses by extracting
+    the final numeric answer and comparing it with the ground-truth answer. It
+    is a preset ``JudgerConfig`` for the ``openai/gsm8k`` task.
+
+    Args:
+        judger_name (str): Logical judger name. Defaults to "openai/gsm8k".
+        extra_info (dict): Reward values used by the GSM8K reward function.
+            Defaults to ``{"score": 1, "format_score": 0}``.
+        reward_handler (Callable | str): Reward handler used to compute the
+            score. Defaults to ``compute_reward``.
+        request_timeout (float): Timeout in seconds for HTTP reward handlers.
+            Defaults to 30.0.
+        num_ray_actors (int): Number of remote Ray actor judger replicas.
+            ``0`` runs the judger locally. Defaults to 0.
+        num_cpus_per_actor (int): CPU cores requested by each remote judger
+            actor. Defaults to 1.
+        cpu_memory_per_actor (int): CPU memory in bytes requested by each
+            remote judger actor. Defaults to 1 GiB.
+
+    **Examples:**
+
+    Example GSM8K judger::
+
+        config = GSM8KJudgerConfig()
+    """
 
     judger_name: str = "openai/gsm8k"
     extra_info: dict = {"score": 1, "format_score": 0}

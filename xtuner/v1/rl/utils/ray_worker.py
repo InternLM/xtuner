@@ -31,11 +31,24 @@ class CPUResourcesConfig(BaseModel):
     This class provide specific configuration options for CPU-based workers in Ray placement groups.
 
     Args:
+        num_workers (int): Total number of CPU workers in the placement group.
+            Defaults to 1.
         num_cpus_per_worker (float): Number of CPUs to allocate per worker in the
-            placement group. Defaults to 8.
+            placement group. Defaults to 1.
         cpu_memory_per_worker (int): Amount of CPU memory (in bytes) to allocate
-            for each worker in the placement group.
-        num_workers (int): Total number of workers in the placement group.
+            for each worker in the placement group. Defaults to 1 GiB.
+        pg_pack_strategy (str): Ray placement group strategy. Defaults to
+            "SPREAD".
+
+    **Examples:**
+
+    Example CPU resource configuration::
+
+        resources = CPUResourcesConfig(
+            num_workers=4,
+            num_cpus_per_worker=2,
+            cpu_memory_per_worker=4 * 1024**3,
+        )
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -122,6 +135,10 @@ class AcceleratorResourcesConfig(BaseModel):
         num_workers (int): Total number of workers in the placement group.
         accelerator (AcceleratorType): Type of accelerator architecture to use
             (e.g., 'GPU', 'NPU').
+        num_accelerators_per_node (int): Number of accelerators available on
+            each node. Defaults to 8 for GPU and is adjusted to 16 for NPU.
+        pg_pack_strategy (str): Ray placement group strategy. Defaults to
+            "PACK".
 
     **Examples:**
 
