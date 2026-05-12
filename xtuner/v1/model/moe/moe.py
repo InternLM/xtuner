@@ -942,7 +942,8 @@ class MoE(BaseModel):
     ) -> Self:
         self.fsdp_config = fsdp_config
         assert self.fsdp_config.ep_size == self.config.ep_size
-        assert self.fsdp_config.tp_size == self.config.tp_size
+        # TODO: self.config.tp_size is expert tp size, which can be different from fsdp_config.tp_size. Rename it to expert_tp_size.
+        # assert self.fsdp_config.tp_size == self.config.tp_size
         self.mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
@@ -1098,16 +1099,9 @@ class MoE(BaseModel):
                 continue
 
             ep_enabled = self.ep_mesh is not None and self.ep_mesh.size() > 1
-            tp_enabled = self.tp_mesh is not None and self.tp_mesh.size() > 1
             # Scale moe parameters
             if ep_enabled and ".experts" in name:
                 param.grad.div_(self.ep_mesh.size())  # type: ignore
-                # Each TP replica computes an identical expert gradient (redundant computation).
-                # Average across TP replicas so the effective update matches single-GPU.
-                if tp_enabled:
-                    grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
-                    dist.all_reduce(grad, op=ReduceOp.SUM, group=self.tp_mesh.get_group())  # type: ignore
-                    grad.div_(self.tp_mesh.size())  # type: ignore
                 continue
 
             if isinstance(param, DTensor):
@@ -1117,13 +1111,22 @@ class MoE(BaseModel):
                     if isinstance(p, Replicate)
                 )
                 if replicate_dim_names:
-                    # `DeviceMesh.get_group()` only supports a single mesh dimension,
-                    # so calling it directly on a multi-dim sub-mesh raises RuntimeError.
-                    # `_flatten()` collapses all Replicate dims into a 1D mesh whose
-                    # process group covers every rank across those dimensions, allowing
-                    # a single all_reduce regardless of how many Replicate dims exist.
-                    flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
                     grad = param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+                    if len(replicate_dim_names) == 1:
+                        replicate_dim = replicate_dim_names[0]
+                        replicate_dim_idx = param.device_mesh.mesh_dim_names.index(replicate_dim)
+                        group = param.device_mesh.get_group(replicate_dim)
+                        grad.div_(param.device_mesh.size(replicate_dim_idx))  # type: ignore
+                        dist.all_reduce(grad, ReduceOp.SUM, group=group)
+                        continue
+                    # DTensor 的 device_mesh 可能已经是从全局 mesh 切出来的 submesh。
+                    # 当所有维度都是 Replicate 时，可以直接 flatten 当前 submesh；
+                    # 否则才继续按 Replicate 维度切子 mesh。这样可以避免对已经
+                    # 覆盖目标维度的 submesh 再切一次，触发 PyTorch 的限制。
+                    if len(replicate_dim_names) == len(param.device_mesh.mesh_dim_names):
+                        flat_mesh = param.device_mesh._flatten()
+                    else:
+                        flat_mesh = param.device_mesh[replicate_dim_names]._flatten()
                     dist.all_reduce(
                         grad.div_(flat_mesh.size()),  # type: ignore
                         ReduceOp.SUM,
@@ -1218,13 +1221,14 @@ class MoE(BaseModel):
     def _replicate_other_params(self, model: nn.Module):
         def traverse(module: nn.Module) -> None:
             if isinstance(module, MoEBlock):
-                # Expert params are already Shard(0) on ep_mesh (from build_grouped_linear).
-                # Gradient averaging across TP replicas is handled in scale_and_reduce_grad.
+                # Expert params are already partitioned by build_grouped_linear.
                 return
             for name, param in module.named_parameters(recurse=False):
                 assert self.ep_mesh is not None
                 dist_param = nn.Parameter(
-                    distribute_tensor(param, self.ep_mesh, [Replicate()]), requires_grad=param.requires_grad
+                    # TODO: replicate on ep_tp_mesh instead of ep_mesh?
+                    distribute_tensor(param, self.ep_mesh, [Replicate()]),
+                    requires_grad=param.requires_grad,
                 )
                 module.register_parameter(name, dist_param)
             for child in module.children():

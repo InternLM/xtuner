@@ -150,6 +150,7 @@ class MoEBlock(nn.Module):
         n_routed_experts: int,
         moe_bias: bool = False,
         ep_mesh: DeviceMesh | None = None,
+        tp_mesh: DeviceMesh | None = None,
         float8_cfg: Float8Config | None = None,
         moe_act_fn_cfg: MoEActFnConfig,
     ):
@@ -166,6 +167,8 @@ class MoEBlock(nn.Module):
             self.num_routed_experts,
             moe_bias=moe_bias,
             ep_mesh=self.ep_mesh,
+            tp_mesh=tp_mesh,
+            parallel_style="column",
             float8_cfg=float8_cfg,
         )
         self.fused_w2 = build_grouped_linear(
@@ -174,6 +177,8 @@ class MoEBlock(nn.Module):
             self.num_routed_experts,
             moe_bias=moe_bias,
             ep_mesh=self.ep_mesh,
+            tp_mesh=tp_mesh,
+            parallel_style="row",
             float8_cfg=float8_cfg,
         )
         self.moe_act = moe_act_fn_cfg.build()
@@ -269,6 +274,7 @@ class MoEDecoderLayer(nn.Module):
             n_routed_experts=n_routed_experts,
             moe_bias=moe_bias,
             ep_mesh=ep_mesh,
+            tp_mesh=tp_mesh,
             float8_cfg=float8_cfg,
             moe_act_fn_cfg=moe_act_fn_cfg,
         )

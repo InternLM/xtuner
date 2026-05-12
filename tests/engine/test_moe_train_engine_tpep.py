@@ -24,17 +24,16 @@ Strategy
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
-
 import parametrize
 import torch
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor, distribute_tensor
 
 from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.ce_loss import CELossConfig
+from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.moe.moe import SequenceContext
 from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
@@ -120,6 +119,97 @@ def _run_one_step(
     return loss_val, grads
 
 
+def _full_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    if isinstance(tensor, DTensor):
+        return tensor.full_tensor()
+    return tensor
+
+
+def _copy_param_from_full(param: torch.nn.Parameter, full_tensor: torch.Tensor) -> None:
+    if isinstance(param, DTensor):
+        param.copy_(distribute_tensor(full_tensor, param.device_mesh, param.placements))
+    else:
+        param.copy_(full_tensor)
+
+
+def _sync_engine_weights(engine_ref: TrainEngine, engine_tpep: TrainEngine) -> None:
+    """Synchronize a non-TP reference model into the EP+TP model layout."""
+    ref_params = dict(engine_ref.model.named_parameters())
+    ref_modules = dict(engine_ref.model.named_modules())
+    tpep_modules = dict(engine_tpep.model.named_modules())
+
+    with torch.no_grad():
+        for name, param in engine_tpep.model.named_parameters():
+            ref_param = ref_params[name]
+            full_param = _full_tensor(ref_param.detach()).to(device=param.device, dtype=param.dtype)
+
+            module_name, _, param_name = name.rpartition(".")
+            module = tpep_modules[module_name]
+            ref_module = ref_modules[module_name]
+            if isinstance(module, GroupedLinear) and getattr(module, "tp_enabled", False):
+                if param_name == "weight":
+                    shard = _slice_tpep_weight(module, full_param, fused_gate_up="fused_w1w3" in module_name)
+                    _copy_param_from_full(param, shard)
+                elif param_name == "bias":
+                    shard = _slice_tpep_bias(module, full_param)
+                    _copy_param_from_full(param, shard)
+                else:
+                    raise RuntimeError(f"Unexpected GroupedLinear parameter: {name}.")
+            else:
+                ref_full = _full_tensor(getattr(ref_module, param_name).detach()).to(device=param.device, dtype=param.dtype)
+                _copy_param_from_full(param, ref_full)
+
+
+def _slice_tpep_weight(grouped_linear: GroupedLinear, full_weight: torch.Tensor, *, fused_gate_up: bool) -> torch.Tensor:
+    num_experts = grouped_linear.num_routed_experts
+    out_features = grouped_linear.out_features
+    in_features = grouped_linear.in_features
+    expert_weight = full_weight.view(num_experts, out_features, in_features)
+    expert_weight = expert_weight[grouped_linear.local_expert_start : grouped_linear.local_expert_end]
+
+    tp_rank = grouped_linear.tp_rank
+    tp_size = grouped_linear.tp_size
+    if grouped_linear.parallel_style == "column":
+        if fused_gate_up:
+            intermediate_size = out_features // 2
+            local_intermediate_size = intermediate_size // tp_size
+            gate_start = tp_rank * local_intermediate_size
+            gate_end = gate_start + local_intermediate_size
+            up_start = intermediate_size + gate_start
+            up_end = intermediate_size + gate_end
+            expert_weight = torch.cat(
+                [
+                    expert_weight[:, gate_start:gate_end, :],
+                    expert_weight[:, up_start:up_end, :],
+                ],
+                dim=1,
+            )
+        else:
+            local_out_features = out_features // tp_size
+            out_start = tp_rank * local_out_features
+            out_end = out_start + local_out_features
+            expert_weight = expert_weight[:, out_start:out_end, :]
+    elif grouped_linear.parallel_style == "row":
+        local_in_features = in_features // tp_size
+        in_start = tp_rank * local_in_features
+        in_end = in_start + local_in_features
+        expert_weight = expert_weight[:, :, in_start:in_end]
+    else:
+        raise RuntimeError(f"Unexpected grouped linear parallel style: {grouped_linear.parallel_style}.")
+
+    return expert_weight.reshape(grouped_linear.weight.shape)
+
+
+def _slice_tpep_bias(grouped_linear: GroupedLinear, full_bias: torch.Tensor) -> torch.Tensor:
+    expert_bias = full_bias[grouped_linear.local_expert_start : grouped_linear.local_expert_end]
+    if grouped_linear.parallel_style == "column":
+        local_out_features = grouped_linear.out_features // grouped_linear.tp_size
+        out_start = grouped_linear.tp_rank * local_out_features
+        out_end = out_start + local_out_features
+        expert_bias = expert_bias[:, out_start:out_end]
+    return expert_bias.reshape(grouped_linear.bias.shape)
+
+
 class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
     """Verify EP+TP training matches single-GPU (EP=1, TP=1) forward and backward."""
 
@@ -148,17 +238,10 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
         engine_tpep.init_model_weights()
 
         # ------------------------------------------------------------------
-        # Sync weights: save reference engine, load into EP+TP engine.
-        # DCP handles the translation between different tensor layouts.
+        # Sync weights by explicitly slicing full expert weights into the real
+        # TP column/row shards used by GroupedLinear.
         # ------------------------------------------------------------------
-        tmp: list[str] = [tempfile.mkdtemp() if dist.get_rank() == 0 else ""]
-        dist.broadcast_object_list(tmp, src=0)
-        ckpt_root = Path(tmp[0])
-        model_dir = ckpt_root / "model"
-
-        engine_ref.save_dcp(model_dir=model_dir)
-        dist.barrier()
-        engine_tpep.load_dcp(model_dir=model_dir)
+        _sync_engine_weights(engine_ref, engine_tpep)
         dist.barrier()
 
         # ------------------------------------------------------------------

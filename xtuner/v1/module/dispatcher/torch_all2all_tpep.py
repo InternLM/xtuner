@@ -4,23 +4,21 @@ Forward data flow (adds two TP collectives around the existing EP dispatcher):
 
     dispatch_preprocess : permute by expert (each TP rank independently, N_local tokens)
     dispatch            : EP AlltoAll (each TP rank independently, routing N_local token copies)
-    dispatch_postprocess: TP AllGather → merge TP slices into M_total tokens
+    dispatch_postprocess: TP AllGather → merge TP token slices into M_total tokens
                           then permute by local expert (for grouped GEMM)
-    [Expert GEMM]       : each TP rank computes full expert output (redundant across TP)
+    [Expert GEMM]       : column-parallel gate/up + row-parallel down projection
     combine_preprocess  : unpermute back to TP-AllGather order
-                          then TP ReduceScatterMean → restore M_ep_recv per TP rank
+                          then TP ReduceScatterSum → restore M_ep_recv per TP rank
     combine             : EP AlltoAll reverse (each TP rank independently)
     combine_postprocess : unpermute with topk_weights → [N_local, H] per TP rank
 
 Design rationale (mirrors Megatron MoEAlltoAllTokenDispatcher with TP+EP):
-  - Expert weights are NOT sharded by TP; each TP rank holds a full copy.
-  - TP AllGather before experts and TP ReduceScatterMean after experts form a symmetric pair
-    that keeps the forward values numerically identical to the EP-only case.
-  - ReduceScatterMean (avg reduce) is used so that the redundant expert outputs from all TP
-    ranks reduce back to the original values without a TP-factor scaling in the forward pass.
-  - The backward of ReduceScatterMean (AllGather) and AllGather backward (AllReduce+slice)
-    introduce a 1/TP scaling in the gradient. This is a known design trade-off consistent
-    with the Megatron approach; the model learns to compensate via weight initialisation.
+  - Expert weights are sharded by TP: gate/up use column parallelism, down uses row
+    parallelism.
+  - TP AllGather before experts gives every TP rank the same token batch for its local
+    expert weight shard.
+  - TP ReduceScatterSum after the row-parallel down projection sums partial hidden states
+    across TP ranks, then returns each rank's original token slice.
 """
 
 from __future__ import annotations
@@ -49,7 +47,7 @@ class TorchAll2AllTPEPPostDispatchResult(TorchAll2AllPostDispatchResult):
     """Post-dispatch result for TP+EP dispatcher.
 
     Extends the EP-only result with per-TP-rank token counts needed to perform the
-    TP ReduceScatterMean in ``combine_preprocess``.
+    TP ReduceScatterSum in ``combine_preprocess``.
     """
 
     output_splits_tp: list[int]
@@ -59,10 +57,8 @@ class _TPAllGather(torch.autograd.Function):
     """TP AllGather with autograd support.
 
     Forward : ``all_gather`` across the TP group, concatenating along the token dim.
-    Backward: ``all_reduce`` (SUM) the gradient then slice — equivalent to a reduce-scatter
-              sum in the unequal-size case.  This introduces a 1/TP factor relative to the
-              mathematically exact gradient when computation is redundant across TP ranks,
-              consistent with the Megatron redundant-TP-expert design.
+    Backward: ``all_reduce`` (SUM) the gradient then slice, accumulating gradients from
+              each TP weight shard into the original local token slice.
     """
 
     @staticmethod
@@ -87,20 +83,20 @@ class _TPAllGather(torch.autograd.Function):
         ctx: Any,
         grad: torch.Tensor,
     ) -> tuple[torch.Tensor, None, None, None, None]:
+        # TODO: use reduce_scatter instead of all_reduce
         grad = grad.contiguous()
         dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ctx.tp_group)
         offset = sum(ctx.all_sizes[: ctx.tp_rank])
         return grad[offset : offset + ctx.all_sizes[ctx.tp_rank]].clone(), None, None, None, None
 
 
-class _TPReduceScatterMean(torch.autograd.Function):
-    """TP ReduceScatterMean with autograd support.
+class _TPReduceScatterSum(torch.autograd.Function):
+    """TP ReduceScatterSum with autograd support.
 
-    Forward : ``all_reduce`` (SUM) / TP_size then slice — equivalent to a mean reduce-scatter.
-              When all TP ranks hold identical tensors (redundant expert computation), this
-              returns the original un-scaled value for each rank's slice.
+    Forward : ``all_reduce`` (SUM) then slice — equivalent to a sum reduce-scatter
+              for the unequal-size token case used here.
     Backward: ``all_gather`` the gradient slices to reconstruct the full gradient tensor,
-              then divide by TP_size (chain rule through the /TP_size division).
+              matching the sum reduction in the forward pass.
     """
 
     @staticmethod
@@ -112,9 +108,9 @@ class _TPReduceScatterMean(torch.autograd.Function):
         tp_size: int,
         tp_rank: int,
     ) -> torch.Tensor:
+        # TODO: use reduce_scatter instead of all_reduce
         hidden = hidden.clone()
         dist.all_reduce(hidden, op=dist.ReduceOp.SUM, group=tp_group)
-        hidden = hidden / tp_size
         offset = sum(all_sizes[:tp_rank])
         ctx.tp_group = tp_group
         ctx.tp_size = tp_size
@@ -132,7 +128,7 @@ class _TPReduceScatterMean(torch.autograd.Function):
             for s in ctx.all_sizes
         ]
         dist.all_gather(chunks, grad_slice.contiguous(), group=ctx.tp_group)
-        full_grad = torch.cat(chunks, dim=0) / ctx.tp_size
+        full_grad = torch.cat(chunks, dim=0)
         return full_grad, None, None, None, None
 
 
@@ -156,19 +152,19 @@ def _tp_all_gather(
     return gathered, all_sizes
 
 
-def _tp_reduce_scatter_mean(
+def _tp_reduce_scatter_sum(
     hidden: torch.Tensor,
     all_sizes: list[int],
     tp_group: dist.ProcessGroup,
 ) -> torch.Tensor:
-    """Mean-reduce-scatter ``hidden`` across the TP group, returning this
-    rank's slice."""
+    """Sum-reduce-scatter ``hidden`` across the TP group, returning this rank's
+    slice."""
     tp_size = tp_group.size()
     if tp_size == 1:
         return hidden
 
     tp_rank = dist.get_rank(group=tp_group)
-    return _TPReduceScatterMean.apply(hidden, all_sizes, tp_group, tp_size, tp_rank)
+    return _TPReduceScatterSum.apply(hidden, all_sizes, tp_group, tp_size, tp_rank)
 
 
 def _tp_all_gather_tokens_per_expert_group(
@@ -188,7 +184,7 @@ def _tp_all_gather_tokens_per_expert_group(
 
 class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
     """TP+EP dispatcher: wraps ``TorchAll2AllDispatcher`` with TP AllGather and
-    ReduceScatterMean.
+    ReduceScatterSum.
 
     Overrides only ``dispatch_postprocess`` and ``combine_preprocess``; all other steps
     (dispatch_preprocess, dispatch, combine, combine_postprocess) are unchanged from the
@@ -296,8 +292,8 @@ class TorchAll2AllTPEPDispatcher(TorchAll2AllDispatcher):
         # Unpermute [M_total, H] back to TP-AllGather order (tp0_block | tp1_block | ...).
         hidden_states = unpermute(hidden_states, tpep_post["row_ids_map"])
 
-        # TP ReduceScatterMean: [M_total, H] → [M_ep_recv, H] for this TP rank.
-        hidden_states = _tp_reduce_scatter_mean(
+        # TP ReduceScatterSum: [M_total, H] → [M_ep_recv, H] for this TP rank.
+        hidden_states = _tp_reduce_scatter_sum(
             hidden_states,
             all_sizes=tpep_post["output_splits_tp"],
             tp_group=self._tp_group,

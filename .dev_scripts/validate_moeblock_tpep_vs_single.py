@@ -58,6 +58,7 @@ class ParallelInfo:
     tp_rank: int
     device: torch.device
     ep_mesh: DeviceMesh
+    tp_mesh: DeviceMesh
     ep_group: dist.ProcessGroup
     tp_group: dist.ProcessGroup
 
@@ -152,14 +153,16 @@ def _init_distributed() -> ParallelInfo:
         mesh_dim_names=("dp", "ep", "tp"),
     )
     ep_mesh = mesh["ep"]
+    tp_mesh = mesh["tp"]
     return ParallelInfo(
         global_rank=dist.get_rank(),
         ep_rank=ep_mesh.get_local_rank(),
-        tp_rank=mesh["tp"].get_local_rank(),
+        tp_rank=tp_mesh.get_local_rank(),
         device=torch.device("cuda", local_rank),
         ep_mesh=ep_mesh,
+        tp_mesh=tp_mesh,
         ep_group=ep_mesh.get_group(),
-        tp_group=mesh["tp"].get_group(),
+        tp_group=tp_mesh.get_group(),
     )
 
 
@@ -222,7 +225,7 @@ def _run_tpep_moeblock(
         tp_group=parallel_info.tp_group,
         training_dtype="bf16",
     )
-    experts = _build_moeblock(parallel_info.device, ep_mesh=parallel_info.ep_mesh)
+    experts = _build_moeblock(parallel_info.device, ep_mesh=parallel_info.ep_mesh, tp_mesh=parallel_info.tp_mesh)
     _load_weights(experts, full_w1w3, full_w2)
 
     pre_dispatched = dispatcher.dispatch_preprocess(hidden_states=hidden_states, topk_ids=topk_ids)
@@ -283,7 +286,7 @@ def _run_single_moeblock_reference(
     )
 
     dispatcher = NaiveDispatcher(n_routed_experts=N_ROUTED_EXPERTS)
-    experts = _build_moeblock(device, ep_mesh=None)
+    experts = _build_moeblock(device, ep_mesh=None, tp_mesh=None)
     _load_weights(experts, full_w1w3, full_w2)
 
     pre_dispatched = dispatcher.dispatch_preprocess(hidden_states=hidden_states, topk_ids=topk_ids)
@@ -325,13 +328,14 @@ def _run_single_moeblock_reference(
     return post_combined["hidden_states"]
 
 
-def _build_moeblock(device: torch.device, ep_mesh: DeviceMesh | None) -> MoEBlock:
+def _build_moeblock(device: torch.device, ep_mesh: DeviceMesh | None, tp_mesh: DeviceMesh | None) -> MoEBlock:
     block = MoEBlock(
         hidden_size=HIDDEN_SIZE,
         moe_intermediate_size=MOE_INTERMEDIATE_SIZE,
         n_routed_experts=N_ROUTED_EXPERTS,
         moe_bias=False,
         ep_mesh=ep_mesh,
+        tp_mesh=tp_mesh,
         float8_cfg=None,
         moe_act_fn_cfg=MoEActFnConfig(),
     )
@@ -340,15 +344,58 @@ def _build_moeblock(device: torch.device, ep_mesh: DeviceMesh | None) -> MoEBloc
 
 def _load_weights(experts: MoEBlock, full_w1w3: torch.Tensor, full_w2: torch.Tensor) -> None:
     with torch.no_grad():
-        _copy_weight(experts.fused_w1w3.weight, full_w1w3)
-        _copy_weight(experts.fused_w2.weight, full_w2)
+        _copy_weight(experts.fused_w1w3, full_w1w3, fused_gate_up=True)
+        _copy_weight(experts.fused_w2, full_w2, fused_gate_up=False)
 
 
-def _copy_weight(param: torch.Tensor, full_weight: torch.Tensor) -> None:
+def _copy_weight(grouped_linear: torch.nn.Module, full_weight: torch.Tensor, *, fused_gate_up: bool) -> None:
+    param = grouped_linear.weight
     if isinstance(param, DTensor):
         param.copy_(distribute_tensor(full_weight, param.device_mesh, [Shard(0)]))
+    elif getattr(grouped_linear, "tp_enabled", False):
+        param.copy_(_slice_tpep_weight(grouped_linear, full_weight, fused_gate_up=fused_gate_up))
     else:
         param.copy_(full_weight)
+
+
+def _slice_tpep_weight(grouped_linear: torch.nn.Module, full_weight: torch.Tensor, *, fused_gate_up: bool) -> torch.Tensor:
+    num_experts = grouped_linear.num_routed_experts
+    out_features = grouped_linear.out_features
+    in_features = grouped_linear.in_features
+    expert_weight = full_weight.view(num_experts, out_features, in_features)
+    expert_weight = expert_weight[grouped_linear.local_expert_start : grouped_linear.local_expert_end]
+
+    tp_rank = grouped_linear.tp_rank
+    tp_size = grouped_linear.tp_size
+    if grouped_linear.parallel_style == "column":
+        if fused_gate_up:
+            intermediate_size = out_features // 2
+            local_intermediate_size = intermediate_size // tp_size
+            gate_start = tp_rank * local_intermediate_size
+            gate_end = gate_start + local_intermediate_size
+            up_start = intermediate_size + gate_start
+            up_end = intermediate_size + gate_end
+            expert_weight = torch.cat(
+                [
+                    expert_weight[:, gate_start:gate_end, :],
+                    expert_weight[:, up_start:up_end, :],
+                ],
+                dim=1,
+            )
+        else:
+            local_out_features = out_features // tp_size
+            out_start = tp_rank * local_out_features
+            out_end = out_start + local_out_features
+            expert_weight = expert_weight[:, out_start:out_end, :]
+    elif grouped_linear.parallel_style == "row":
+        local_in_features = in_features // tp_size
+        in_start = tp_rank * local_in_features
+        in_end = in_start + local_in_features
+        expert_weight = expert_weight[:, :, in_start:in_end]
+    else:
+        raise RuntimeError(f"Unexpected grouped linear parallel style: {grouped_linear.parallel_style}.")
+
+    return expert_weight.reshape(grouped_linear.weight.shape)
 
 
 def _assert_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
