@@ -349,7 +349,7 @@ class Qwen3VLVisionModel(BaseModel):
             self._fully_shard(
                 mesh=self.fsdp_mesh,
                 mp_policy=decoder_layer_mp_policy,
-                reshard_after_forward=True,
+                reshard_after_forward=self.config.reshard_after_forward,
                 offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
                 module=layer,
             )
@@ -360,7 +360,7 @@ class Qwen3VLVisionModel(BaseModel):
         self._fully_shard(
             mesh=self.fsdp_mesh,
             mp_policy=mp_policy,
-            reshard_after_forward=True,
+            reshard_after_forward=self.config.reshard_after_forward,
             offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
         )
         return self

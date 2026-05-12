@@ -36,6 +36,9 @@ class Qwen3VLVisionConfig(XTunerBaseModelConfig):
     deepstack_visual_indexes: list[int] = [8, 16, 24]
     initializer_range: float = 0.02
     attn_impl: Literal["flash_attention", "flex_attention", "eager_attention"] = "flash_attention"
+    # TODO: `FSDPConfig` should be model-specific; temporarily keep
+    # `reshard_after_forward` here until per-submodule FSDP config is supported.
+    reshard_after_forward: bool = False
 
     def model_post_init(self, _):
         if self.attn_impl == "flash_attention" and get_device() == "cuda":
@@ -60,6 +63,9 @@ class Qwen3VLProjectorConfig(XTunerBaseModelConfig):
     text_hidden_size: int = 2048
     spatial_merge_size: int = 2
     deepstack_visual_indexes: list[int] = [8, 16, 24]
+    # TODO: `FSDPConfig` should be model-specific; temporarily keep
+    # `reshard_after_forward` here until per-submodule FSDP config is supported.
+    reshard_after_forward: bool = False
 
     def build(self):
         from .modeling_projector import Qwen3VLProjector
