@@ -4,7 +4,7 @@ Reinforcement learning loss functions often include policy loss for optimizing t
 
 ## GRPOLoss
 
-All loss calculations in XTuner involve two core components: `LossConfig` and `LossContext`. GRPO Loss corresponds to [`GRPOLossConfig`](xtuner.v1.rl.grpo.loss.GRPOLossConfig) and [`GRPOLossContext`](xtuner.v1.rl.grpo.loss.GRPOLossContext). Below is a simple usage example of GRPO Loss:
+All loss calculations in XTuner involve two core components: `LossConfig` and `LossContext`. GRPO Loss corresponds to [`GRPOLossConfig`](xtuner.v1.rl.loss.GRPOLossConfig) and [`GRPOLossContext`](xtuner.v1.rl.loss.GRPOLossContext). Below is a simple usage example of GRPO Loss:
 
 ```python
 import torch
@@ -70,9 +70,9 @@ Where `policy_loss_cfg` is the configuration related to policy loss, `xtuner/v1/
 
 ### GRPOLossContext
 
-Similar to [`CELossContext`](ce-loss), `GRPOLossContext` also needs to consider global calibration of loss. In `GRPOLossContext`, we introduce two data structures: [`GRPOLossKwargs`](xtuner.v1.rl.grpo.loss.GRPOLossKwargs) and [`RLLossContextInputItem`](xtuner.v1.rl.base.loss.RLLossContextInputItem):
+Similar to [`CELossContext`](ce-loss), `GRPOLossContext` also needs to consider global calibration of loss. In `GRPOLossContext`, we introduce the [`GRPOLossKwargs`](xtuner.v1.rl.loss.GRPOLossKwargs) data structure:
 
-- `GRPOLossKwargs` represents what parameters are needed for actual GRPO Loss calculation. For detailed implementation, please refer to `xtuner/v1/rl/grpo/loss.py`.
+- `GRPOLossKwargs` represents what parameters are needed for actual GRPO Loss calculation. For detailed implementation, please refer to `xtuner/v1/rl/loss/grpo_loss.py`.
 - `RLLossContextInputItem` is a general data structure in RL algorithms, basically including all materials needed for calculating `LossKwargs` in current RL algorithms.
 
 Similar to `CELossContext`, we only need to implement two interfaces in `GRPOLossContext`: classmethod `build_batches_loss_kwargs` and `loss_fn`.

@@ -16,6 +16,45 @@ from .loss_fn import get_policy_loss_fn, kl_penalty, sft_loss_fn
 
 
 class OrealLossConfig(BaseRLLossConfig):
+    """Configuration for OREAL loss computation in XTuner RL.
+
+    ``OrealLossConfig`` extends the base RL loss with separate calibration for
+    positive and negative tokens. It can combine policy loss, optional KL loss,
+    and an SFT-style loss term for positive samples.
+
+    Args:
+        policy_loss_cfg (dict[str, Any]): Configuration parameters for the main
+            policy loss.
+        use_kl_loss (bool): Whether to include KL divergence penalty in the
+            loss. Defaults to False.
+        kl_loss_coef (float): Coefficient for the KL divergence penalty.
+            Defaults to 0.001.
+        kl_loss_type (Literal["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"] | None):
+            Type of KL penalty computation method. Defaults to None.
+        rollout_is (RolloutImportanceSampling): Rollout importance sampling
+            configuration. Defaults to ``RolloutImportanceSampling()``.
+        positive_loss_factor (float): Global multiplier for positive-token
+            losses. Defaults to 1.0.
+        pos_sft_loss_weight (float): Weight of the SFT-style loss on positive
+            tokens. Defaults to 1.0.
+        pos_policy_loss_weight (float): Weight of the policy loss on positive
+            tokens. Defaults to 1.0.
+        negative_loss_factor (float): Global multiplier for negative-token
+            losses. Defaults to 1.0.
+
+    **Examples:**
+
+    Example OREAL loss configuration::
+
+        config = OrealLossConfig(
+            policy_loss_cfg={"loss_type": "vanilla"},
+            positive_loss_factor=1.0,
+            pos_sft_loss_weight=1.0,
+            pos_policy_loss_weight=1.0,
+            negative_loss_factor=1.0,
+        )
+    """
+
     policy_loss_cfg: dict[str, Any]
     use_kl_loss: bool = False
     kl_loss_coef: float = 0.001

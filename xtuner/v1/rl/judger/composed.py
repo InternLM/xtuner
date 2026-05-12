@@ -145,6 +145,36 @@ class ComposedJudger(Judger):
 
 
 class ComposedJudgerConfig(BaseModel):
+    """Configuration for composing multiple judgers.
+
+    ``ComposedJudgerConfig`` routes each rollout to one or more branch judgers
+    and merges the branch outputs back into a single ``RolloutState``. It is
+    useful when different samples in the same task require different reward
+    functions or when multiple rewards must be computed together.
+
+    Args:
+        branches (dict[str, JudgerConfig | ComposedJudgerConfig]): Mapping from
+            branch name to judger configuration.
+        select_fn (JudgerSelectFn): Function that selects which branch names to
+            execute for a rollout. Defaults to ``default_select_fn``.
+        merge_fn (JudgerMergeFn | None): Function that merges branch outputs
+            into the returned rollout state. Defaults to the built-in merger.
+        default_key (str | None): Fallback branch name used when ``select_fn``
+            returns None. Defaults to "default".
+
+    **Examples:**
+
+    Example composed judger with two branches::
+
+        config = ComposedJudgerConfig(
+            branches={
+                "math": GSM8KJudgerConfig(),
+                "format": JudgerConfig(judger_name="format", reward_handler=format_reward),
+            },
+            select_fn=select_judger_branch,
+        )
+    """
+
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     branches: dict[str, JudgerConfigLike]
