@@ -31,93 +31,6 @@ def all_reduce_autograd(tensor, op, group):
     return _AllReduce.apply(op, group, tensor)
 
 
-class BalancingLoss(nn.Module):
-    def __init__(
-        self,
-        balancing_loss_alpha: float,
-        balancing_loss_global_average: bool,
-        router_scoring_func: Literal["sigmoid", "softmax"],
-    ) -> None:
-        super().__init__()
-        self.loss_weight = balancing_loss_alpha
-        self.global_average = balancing_loss_global_average
-
-    def forward(self, router_weights, n_routed_experts, num_experts_per_tok):
-        if self.loss_weight == 0:
-            return torch.tensor(0.0, device=router_weights.device, dtype=torch.float32)
-
-        num_layers = router_weights.shape[0]
-        router_weights = router_weights.float()  # (nlayers, seq, ne)
-        _, selected_experts = torch.topk(router_weights, num_experts_per_tok, dim=-1)
-        selected_experts_flat = selected_experts.view(num_layers, -1)
-        offset = torch.arange(num_layers, device=router_weights.device).unsqueeze(1) * n_routed_experts
-        selected_experts_offset = selected_experts_flat + offset
-        tokens_per_expert_flat = torch.histc(
-            selected_experts_offset.view(-1),
-            bins=num_layers * n_routed_experts,
-            min=0,
-            max=num_layers * n_routed_experts,
-        )
-        tokens_per_expert = tokens_per_expert_flat.view(num_layers, n_routed_experts)  # (nlayers, ne)
-
-        tokens_per_expert_global = tokens_per_expert.to(router_weights.dtype)  # (nlayers, ne)
-        if self.global_average and dist.is_initialized():
-            tokens_per_expert_global = all_reduce(tokens_per_expert_global, "sum", dist.group.WORLD)  # (nlayers, ne)
-            tokens_global = tokens_per_expert_global.sum(-1)  # (nlayers, )
-            seqlen_global = tokens_global // num_experts_per_tok
-            routing_weights_sum_global = all_reduce_autograd(
-                router_weights.sum(dim=1), "sum", dist.group.WORLD
-            )  # (nlayers, )
-            routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
-            scale_global = n_routed_experts / tokens_global
-        else:
-            scale_global = n_routed_experts / (router_weights.shape[1] * num_experts_per_tok)
-            routing_weights_mean_global = router_weights.mean(dim=1)
-        loss = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1)
-        loss = loss.sum()
-        # from xtuner.v1.profiler.prober import ProberList
-        # ProberList.record_tensor(routing_weights_mean_global, "[balancing_loss][after]routing_weights_mean_global")
-        # ProberList.record_tensor(tokens_per_expert_global, "[balancing_loss][after]tokens_per_expert_global")
-        # ProberList.record_tensor(scale_global, "[balancing_loss][after]scale_global")
-        return loss * self.loss_weight
-
-
-def z_loss(router_logits: torch.Tensor, global_average: bool = False):
-    router_logits = router_logits.float()  # (nlayers, seq, ne)
-    num_seq = max(1, router_logits.shape[1])
-    logsum_square = z_loss = torch.logsumexp(router_logits, dim=-1).square()
-    z_loss = (logsum_square.sum(dim=-1) / num_seq).sum()
-
-    if global_average and dist.is_initialized():
-        unmasked_num = router_logits.shape[1]
-        unmasked_num_rank = torch.tensor(unmasked_num, device=router_logits.device, dtype=torch.int64)
-        unmasked_num_global = all_reduce(unmasked_num_rank, "sum", dist.group.WORLD)  # type: ignore
-        world_size = dist.get_world_size()
-        z_loss = z_loss * unmasked_num * world_size / unmasked_num_global
-
-    return z_loss
-
-
-class ZLoss(nn.Module):
-    def __init__(
-        self,
-        z_loss_alpha: float,
-        z_loss_global_average: bool,
-    ) -> None:
-        super().__init__()
-        self.loss_weight = z_loss_alpha
-        self.global_average = z_loss_global_average
-
-    def forward(self, router_logits):
-        if self.loss_weight == 0:
-            return torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
-        loss = z_loss(router_logits, self.global_average)
-        return loss * self.loss_weight
-
-
-# ==================== New LossContext-based implementation ====================
-
-
 class BalancingLossConfig(BaseModel):
     """Balancing loss configuration for MoE models.
 
@@ -168,6 +81,9 @@ class BalancingLossContext(nn.Module):
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
         self._batch_size = 1
+        # Per-layer differentiable accumulator. tokens_per_expert is owned by AuxLossContext
+        # and passed in at finalize() time to avoid duplicate storage / duplicate all_reduce.
+        self.routing_weights_sum_list: list[torch.Tensor] = []
 
     @staticmethod
     def build_batches(
@@ -187,58 +103,70 @@ class BalancingLossContext(nn.Module):
             loss_ctx._batch_size = len(loss_ctx_list)
         return loss_ctx_list
 
-    def forward(
+    def accumulate(
         self,
+        *,
         router_weights: torch.Tensor,
-        n_routed_experts: int,
-        num_experts_per_tok: int,
-    ) -> torch.Tensor:
-        """Compute balancing loss.
+    ) -> None:
+        """Update the per-layer differentiable accumulator for balancing loss.
 
         Args:
-            router_weights (torch.Tensor): Router weights. Shape: (num_layers, seq_len, num_experts).
+            router_weights (torch.Tensor): Router weights with non-padding tokens already selected.
+                Shape: ``(non_pad, n_routed_experts)``.
+        """
+        # router_weights.sum(dim=0) is [n_routed_experts]; sum's backward does not save the input
+        # tensor, so the [non_pad, n_routed_experts] activation is not pinned by this accumulator.
+        self.routing_weights_sum_list.append(router_weights.sum(dim=0))
+
+    def finalize(
+        self,
+        *,
+        tokens_per_expert_local: torch.Tensor,
+        tokens_per_expert_global: torch.Tensor,
+        n_routed_experts: int,
+        num_experts_per_tok: int,
+        non_pad_token: int,
+    ) -> torch.Tensor:
+        """Finalize balancing loss from accumulators.
+
+        Args:
+            tokens_per_expert_local (torch.Tensor): Per-layer expert token counts on this rank,
+                ``(num_layers, n_routed_experts)``. Used by the non-global-average branch.
+            tokens_per_expert_global (torch.Tensor): All-reduced ``tokens_per_expert``,
+                ``(num_layers, n_routed_experts)``. Used by the global-average branch.
             n_routed_experts (int): Number of routed experts.
-            num_experts_per_tok (int): Number of experts per token.
+            num_experts_per_tok (int): Number of experts selected per token.
+            non_pad_token (int): Number of non-padding tokens on this rank.
 
         Returns:
-            torch.Tensor: Balancing loss value.
+            torch.Tensor: Final balancing loss.
         """
-        if self.loss_cfg.balancing_loss_alpha == 0:
-            return torch.tensor(0.0, device=router_weights.device, dtype=torch.float32)
+        routing_weights_sum_list = self.routing_weights_sum_list
+        self.routing_weights_sum_list = []
+        if self.loss_cfg.balancing_loss_alpha == 0 or not routing_weights_sum_list:
+            return torch.tensor(0.0, device=tokens_per_expert_local.device, dtype=torch.float32)
 
-        num_layers = router_weights.shape[0]
-        router_weights = router_weights.float()  # (nlayers, seq, ne)
-        _, selected_experts = torch.topk(router_weights, num_experts_per_tok, dim=-1)
-        selected_experts_flat = selected_experts.view(num_layers, -1)
-        offset = torch.arange(num_layers, device=router_weights.device).unsqueeze(1) * n_routed_experts
-        selected_experts_offset = selected_experts_flat + offset
-        tokens_per_expert_flat = torch.histc(
-            selected_experts_offset.view(-1),
-            bins=num_layers * n_routed_experts,
-            min=0,
-            max=num_layers * n_routed_experts,
-        )
-        tokens_per_expert = tokens_per_expert_flat.view(num_layers, n_routed_experts)  # (nlayers, ne)
+        local_gating_sum = torch.stack(routing_weights_sum_list, dim=0)
 
-        tokens_per_expert_global = tokens_per_expert.to(router_weights.dtype)  # (nlayers, ne)
         if self.loss_cfg.balancing_loss_global_average and dist.is_initialized():
-            tokens_per_expert_global = all_reduce(tokens_per_expert_global, "sum", dist.group.WORLD)  # type: ignore
-            tokens_global = tokens_per_expert_global.sum(-1)  # (nlayers, )
+            group = dist.group.WORLD
+            assert group is not None
+            tokens_global = tokens_per_expert_global.sum(-1)
             seqlen_global = tokens_global // num_experts_per_tok
-            routing_weights_sum_global = all_reduce_autograd(router_weights.sum(dim=1), "sum", dist.group.WORLD)
+
+            routing_weights_sum_global = all_reduce_autograd(local_gating_sum, "sum", group)
             routing_weights_mean_global = routing_weights_sum_global / seqlen_global.unsqueeze(-1)
             scale_global = n_routed_experts / tokens_global
+            tokens_per_expert_for_loss = tokens_per_expert_global
         else:
-            scale_global = n_routed_experts / (router_weights.shape[1] * num_experts_per_tok)
-            routing_weights_mean_global = router_weights.mean(dim=1)
+            valid_tokens = max(non_pad_token, 1)
+            scale_global = n_routed_experts / (valid_tokens * num_experts_per_tok)
+            routing_weights_mean_global = local_gating_sum / valid_tokens
+            tokens_per_expert_for_loss = tokens_per_expert_local
 
-        loss = scale_global * (tokens_per_expert_global * routing_weights_mean_global).sum(-1)
+        loss = scale_global * (tokens_per_expert_for_loss * routing_weights_mean_global).sum(-1)
         loss = loss.sum() * self.loss_cfg.balancing_loss_alpha
-
-        # Normalize by batch size for proper gradient accumulation
-        loss = loss / self._batch_size
-
-        return loss
+        return loss / self._batch_size
 
     @property
     def batch_size(self) -> int:
@@ -287,6 +215,11 @@ class ZLossContext(nn.Module):
         self.loss_cfg = loss_cfg
         self.loss_kwargs = loss_kwargs
         self._batch_size = 1
+        # Z-loss is folded into a running detached scalar for logging only. The differentiable
+        # per-layer scalar is injected back into the main forward graph via AuxLossScaler at
+        # accumulate() time, so we never need to keep per-layer logsum tensors around. This is
+        # the memory-saving pattern adapted from Megatron's MoEAuxLossAutoScaler.
+        self._running_loss_for_log: torch.Tensor | None = None
 
     @staticmethod
     def build_batches(
@@ -306,38 +239,73 @@ class ZLossContext(nn.Module):
             loss_ctx._batch_size = len(loss_ctx_list)
         return loss_ctx_list
 
-    def forward(self, router_logits: torch.Tensor) -> torch.Tensor:
-        """Compute z-loss.
+    def accumulate(
+        self,
+        *,
+        router_logits: torch.Tensor,
+        num_tokens_local: int,
+        num_tokens_global: torch.Tensor | None,
+        world_size: int,
+    ) -> torch.Tensor:
+        """Compute z-loss for one layer and return it as a scalar with autograd
+        attached.
+
+        The caller is expected to inject the returned scalar back into the main forward graph
+        via :class:`AuxLossScaler`; the autograd graph behind this scalar (logsumexp -> square ->
+        sum -> scaling) is then released as soon as the corresponding layer is reached during
+        backward, instead of being pinned until a global ``finalize()``.
 
         Args:
-            router_logits (torch.Tensor): Router logits. Shape: (num_layers, seq_len, num_experts).
+            router_logits (torch.Tensor): Router logits with non-padding tokens already selected.
+                Shape ``(non_pad, n_routed_experts)``.
+            num_tokens_local (int): Number of non-padding tokens on this rank for the current
+                forward (constant across MoE layers in a single forward).
+            num_tokens_global (torch.Tensor | None): All-reduced non-padding token count across
+                ranks, as an int64 scalar tensor. ``None`` when ``z_loss_global_average`` is off
+                or the process group is not initialized.
+            world_size (int): Number of ranks contributing to ``num_tokens_global``. Ignored when
+                ``num_tokens_global`` is ``None``.
 
         Returns:
-            torch.Tensor: Z-loss value.
+            torch.Tensor: Per-layer z-loss as a 0-d tensor with autograd graph back to
+            ``router_logits``.
         """
         if self.loss_cfg.z_loss_alpha == 0:
-            return torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
+            zero = torch.tensor(0.0, device=router_logits.device, dtype=torch.float32)
+            self._update_running(zero)
+            return zero
 
-        router_logits = router_logits.float()  # (nlayers, seq, ne)
-        num_seq = max(1, router_logits.shape[1])
-        logsum_square = torch.logsumexp(router_logits, dim=-1).square()
-        loss = (logsum_square.sum(dim=-1) / num_seq).sum()
+        denom_local = max(num_tokens_local, 1)
+        loss = torch.logsumexp(router_logits, dim=-1).square().sum() / denom_local
 
-        if self.loss_cfg.z_loss_global_average and dist.is_initialized():
-            unmasked_num = router_logits.shape[1]
-            unmasked_num_rank = torch.tensor(unmasked_num, device=router_logits.device, dtype=torch.int64)
-            group = dist.group.WORLD
-            assert group is not None
-            unmasked_num_global = all_reduce(unmasked_num_rank, "sum", group)
-            world_size = dist.get_world_size()
-            loss = loss * unmasked_num * world_size / unmasked_num_global
+        if self.loss_cfg.z_loss_global_average and num_tokens_global is not None:
+            # Equivalent to scaling each layer's local loss by num_tokens_local * world_size /
+            # num_tokens_global, matching the original list-based finalize formula.
+            denom_global = torch.clamp(num_tokens_global, min=1)
+            loss = loss * num_tokens_local * world_size / denom_global
 
-        loss = loss * self.loss_cfg.z_loss_alpha
-
-        # Normalize by batch size for proper gradient accumulation
-        loss = loss / self._batch_size
-
+        loss = loss * self.loss_cfg.z_loss_alpha / self._batch_size
+        self._update_running(loss.detach())
         return loss
+
+    def finalize(self) -> torch.Tensor:
+        """Return the accumulated z-loss as a detached scalar for logging only.
+
+        The differentiable contribution has already been injected into the main forward graph at
+        each ``accumulate()`` call, so this value carries no autograd graph; it exists purely to
+        populate the logging field on the model output.
+        """
+        value = self._running_loss_for_log
+        self._running_loss_for_log = None
+        if value is None:
+            return torch.tensor(0.0, device=DEVICE, dtype=torch.float32)
+        return value
+
+    def _update_running(self, value: torch.Tensor) -> None:
+        if self._running_loss_for_log is None:
+            self._running_loss_for_log = value.clone()
+        else:
+            self._running_loss_for_log = self._running_loss_for_log + value
 
     @property
     def batch_size(self) -> int:

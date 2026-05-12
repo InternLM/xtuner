@@ -114,7 +114,10 @@ class LMHeadLossContext(BaseLossContext):
                 LigerFusedLinearCrossEntropyLoss,
             )
 
-            self.liger_loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="sum")
+            self.liger_loss_fct = LigerFusedLinearCrossEntropyLoss(
+                reduction="sum",
+                accum_dtype=torch.float32,
+            )
         else:
             self.liger_loss_fct = None
 
@@ -134,7 +137,7 @@ class LMHeadLossContext(BaseLossContext):
                 loss_weight = torch.ones_like(shifted_labels, dtype=torch.float32)
             else:
                 assert cu_seq_lens_list is not None, "cu_seq_lens_list must be provided for sample or square reduction"
-                cu_seq_lens = cu_seq_lens_list[i]
+                cu_seq_lens = cu_seq_lens_list[i].to(shifted_labels.device)
                 boundaries = cu_seq_lens[1:]
                 num_tokens = cu_seq_lens[1:] - cu_seq_lens[:-1]
 

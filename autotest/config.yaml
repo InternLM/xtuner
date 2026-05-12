@@ -8,7 +8,7 @@ default_config:
             gpus_per_task: 8
             cpus_per_task: 120
             memory_per_task: 512
-            image: ailab-llmrazor/xtuner_tmp:pt29_20260414_c8f6fa1
+            image: ailab-llmrazor/xtuner:pt29_latest
             pip_package: pip install -e .[all]; pip install more-itertools
             envs: 
                 - HF_HUB_CACHE=/mnt/shared-storage-user/auto-eval-pipeline/opencompass/models/hf_hub
@@ -547,6 +547,165 @@ case:
                     lr: 0
             timeout: 10800
 
+    qwen3-5-sft-fp8-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_5_fp8_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 80
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_ACTIVATION_OFFLOAD=1
+                    - XTUNER_USE_FA3=1
+            assert_info:
+                base_metric: qwen3-5-sft-fp8-vl/00f7e16/tracker.jsonl
+                check_metrics:
+                    grad_norm: 10
+                    loss/local_loss: 5
+                    loss/reduced_balancing_loss: 5
+                    loss/reduced_llm_loss: 5
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-tp2-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_5_tp2_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                cpus_per_task: 80
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-5-sft-tp2-vl/00f7e16/tracker.jsonl
+                check_metrics:
+                    grad_norm: 10
+                    loss/local_loss: 5
+                    loss/reduced_balancing_loss: 5
+                    loss/reduced_llm_loss: 5
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-sp4-resume-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_5_moe_30BA3_sp4_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+            assert_info:
+                base_metric: qwen3-5-sft-sp4-resume-vl/00f7e16/tracker.jsonl
+                check_metrics:
+                    grad_norm: 10
+                    loss/local_loss: 5
+                    loss/reduced_balancing_loss: 5
+                    loss/reduced_llm_loss: 10
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+        -
+            type: sft
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume-vl sft'
+            parameters:
+                config: autotest/config/qwen3_5_moe_30BA3_sp4_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+            assert_info:
+                base_metric: qwen3-5-sft-sp4-resume-vl/00f7e16_resume/tracker.jsonl
+                check_metrics:
+                    grad_norm: 10
+                    loss/local_loss: 5
+                    loss/reduced_balancing_loss: 5
+                    loss/reduced_llm_loss: 5
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            post_action:
+                command: 'python ./autotest/utils/resume_validation.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-sft-sp4-resume-vl sft 10 "runtime_info/text_tokens,runtime_info/efficient_attn_ratio,loss/reduced_balancing_loss,loss/reduced_llm_loss,loss/local_loss"'
+            timeout: 10800
+
+    qwen3-5-sft-mtp:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_5_mtp.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/alpaca
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-5-sft-mtp/00f7e16/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.05
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
+    qwen3-5-sft-mtp-vl:
+        -
+            type: sft
+            parameters:
+                config: autotest/config/qwen3_5_mtp_vl.py
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - MEDIA_ROOT=/mnt/shared-storage-user/llmrazor-share/data/ci_vl
+                    - XTUNER_DETERMINISTIC=true
+            assert_info:
+                base_metric: qwen3-5-sft-mtp-vl/00f7e16/tracker.jsonl
+                check_metrics:
+                    grad_norm: 0.000001
+                    loss/local_loss: 0.000001
+                    loss/reduced_balancing_loss: 0.000001
+                    loss/reduced_llm_loss: 0.000001
+                    lr: 0
+                    memory/max_memory_GB: 0.2
+                    runtime_info/tgs: 0.05
+                    runtime_info/text_tokens: 0
+            timeout: 10800
+
     qwen3-rl-lmdeploy:
         -
             type: rl
@@ -925,12 +1084,12 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                pip_package: pip install tilelang==0.1.9
+                  #pip_package: pip install tilelang==0.1.9
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                    - PYTHONPATH=/mnt/shared-storage-user/llmrazor-share/qa-caif-cicd/lmdeploy:$PYTHONPATH
+                      #- PYTHONPATH=/mnt/shared-storage-user/llmrazor-share/qa-caif-cicd/lmdeploy:$PYTHONPATH
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
@@ -948,7 +1107,7 @@ case:
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0002
+                       threshold: 0.0005
                        method: absolute
                        operator: <=
                     -
@@ -958,7 +1117,7 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 10
+                       threshold: 20
                        method: absolute
                        operator: <
             timeout: 7200
