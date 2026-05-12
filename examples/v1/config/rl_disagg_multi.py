@@ -349,5 +349,4 @@ trainer = RLDisaggregatedTrainerConfig(
     evaluate_step=evaluate_step,
     work_dir=work_dir,
     seed=int(os.environ.get("SEED", "123")),
-    debug_rollout=os.environ.get("DEBUG_ROLLOUT", "0") == "1",
 )

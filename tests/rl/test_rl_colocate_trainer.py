@@ -5,10 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from xtuner.v1.data_proto.rl_data import Status
+import ray
+import torch
+
+from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager, _TaskRunner
-from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
+from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
 from xtuner.v1.train.rl_trainer import RLColocateTrainer
 
 
@@ -83,6 +86,8 @@ class TestRLColocateTrainer(unittest.TestCase):
         trainer.train_batch_size = 1
         trainer._sync_weights_interval = sync_weights_interval
         trainer._debug_rollout = False
+        trainer._debug_rollout_dir = None
+        trainer._debug_train = False
         trainer._enable_evaluate = False
         trainer._enable_initial_evaluate = False
         trainer._evaluate_step = 1
@@ -207,6 +212,112 @@ class TestRLColocateTrainer(unittest.TestCase):
             [1, 2, 3],
         )
         self.assertEqual(trainer._cur_step, 3)
+
+    def test_debug_rollout_saves_raw_batch_and_skips_training(self):
+        rollout_state = RolloutState(
+            message=[{"role": "user", "content": "hello"}],
+            response="ok",
+            response_ids=[1, 2],
+            reward={"score": 1.0},
+            status=Status.COMPLETED,
+        )
+
+        async def _produce_batch(batch_size, train_step, *, model_step):
+            return ProduceBatchResult(rollout_states=[[rollout_state]])
+
+        trainer = self._make_trainer(SimpleNamespace(produce_batch=_produce_batch))
+        trainer._debug_rollout = True
+        trainer._debug_rollout_dir = Path(self.temp_dir.name) / "debug_rollout"
+
+        with (
+            patch("xtuner.v1.train.rl_trainer.asyncio_run", side_effect=asyncio.run),
+            patch("xtuner.v1.train.rl_trainer.ray.get", side_effect=lambda obj: obj),
+        ):
+            trainer.fit()
+
+        saved_path = trainer._debug_rollout_dir / "debug_rollout_1.pt"
+        self.assertTrue(saved_path.exists())
+        saved_batch = torch.load(saved_path, map_location="cpu", weights_only=False)
+        self.assertEqual(saved_batch[0][0].response, "ok")
+        trainer.train_controller.fit.assert_not_called()
+        trainer._sync_weights_and_save.assert_not_called()
+
+    def test_debug_train_loads_batches_and_skips_weight_sync(self):
+        trainer = self._make_trainer(MagicMock(), total_train_steps=2)
+        trainer._debug_train = True
+        trainer._load_debug_rollout_batch = MagicMock(
+            side_effect=[
+                [[SimpleNamespace(uid=1, message_uid=1)]],
+                [[SimpleNamespace(uid=2, message_uid=2)]],
+            ]
+        )
+        trainer._train_one_batch = MagicMock(
+            return_value={
+                "data_info": {"batch_size": 1},
+                "workers_log_item": [
+                    {
+                        "rollout_is_metrics": {},
+                        "mismatch_metrics": {},
+                        "rollout_entropy": 0.0,
+                        "train_entropy": 0.0,
+                        "train_metrics": [],
+                        "sft_train_metrics": {},
+                    }
+                ],
+            }
+        )
+
+        trainer.fit()
+
+        self.assertEqual([call.args[0] for call in trainer._load_debug_rollout_batch.call_args_list], [1, 2])
+        self.assertEqual(trainer._train_one_batch.call_count, 2)
+        trainer._sync_weights_and_save.assert_not_called()
+        self.assertEqual(trainer._cur_step, 2)
+
+    def test_debug_rollout_save_resolves_object_refs_and_load_puts_them_back(self):
+        if not ray.is_initialized():
+            try:
+                ray.init(local_mode=True, ignore_reinit_error=True, include_dashboard=False)
+            except Exception as exc:
+                self.skipTest(f"Ray init failed in this test environment: {exc}")
+        try:
+            pixel_values = torch.ones(1, 2)
+            routed_experts = [1, 2, 3]
+            rollout_state = RolloutState(
+                message=[{"role": "user", "content": "hello"}],
+                mm_info={"pixel_values": ray.put(pixel_values)},
+                routed_experts=ray.put(routed_experts),
+                response="ok",
+                response_ids=[1],
+                reward={"score": 1.0},
+                status=Status.COMPLETED,
+            )
+            trainer = self._make_trainer(MagicMock())
+            trainer._debug_rollout_dir = Path(self.temp_dir.name) / "debug_refs"
+            trainer._save_debug_rollout_batch([[rollout_state]], train_step=1)
+
+            saved_batch = torch.load(
+                trainer._debug_rollout_dir / "debug_rollout_1.pt",
+                map_location="cpu",
+                weights_only=False,
+            )
+            saved_pixel_values = saved_batch[0][0].mm_info["pixel_values"]
+            saved_routed_experts = saved_batch[0][0].routed_experts
+            self.assertFalse(isinstance(saved_pixel_values, ray.ObjectRef))
+            self.assertFalse(isinstance(saved_routed_experts, ray.ObjectRef))
+            self.assertIsInstance(saved_pixel_values, SerializedRayObjectRef)
+            self.assertIsInstance(saved_routed_experts, SerializedRayObjectRef)
+            self.assertTrue(torch.equal(saved_pixel_values.value, pixel_values))
+            self.assertEqual(saved_routed_experts.value, routed_experts)
+
+            trainer._debug_train_files = {1: trainer._debug_rollout_dir / "debug_rollout_1.pt"}
+            loaded_batch = trainer._load_debug_rollout_batch(train_step=1)
+            self.assertIsInstance(loaded_batch[0][0].mm_info["pixel_values"], ray.ObjectRef)
+            self.assertIsInstance(loaded_batch[0][0].routed_experts, ray.ObjectRef)
+            self.assertTrue(torch.equal(ray.get(loaded_batch[0][0].mm_info["pixel_values"]), pixel_values))
+            self.assertEqual(ray.get(loaded_batch[0][0].routed_experts), routed_experts)
+        finally:
+            ray.shutdown()
 
     def test_sync_weights_and_save_can_skip_weight_update_and_restore_rollout(self):
         trainer = RLColocateTrainer.__new__(RLColocateTrainer)
