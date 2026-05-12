@@ -259,7 +259,10 @@ class MoE(BaseModel):
                 ctx_z = ctx.get("z_loss")
                 if ctx_z is not None:
                     z_ctx.append(ctx_z)
-            return balancing_ctx, z_ctx
+            # Collapse empty fan-out lists to None so downstream guards
+            # (`if ctx is None`, `_z_loss_dist_token_count`, AuxLoss.accumulate fan-out)
+            # can treat "no context across any micro-batch" as the no-op case.
+            return (balancing_ctx or None), (z_ctx or None)
 
         return loss_ctx.get("balancing"), loss_ctx.get("z_loss")
 
@@ -1079,7 +1082,7 @@ class MoE(BaseModel):
         self._fully_shard(
             mesh=self.fsdp_mesh if self.hsdp_mesh is None else self.hsdp_mesh,
             mp_policy=mp_policy,
-            reshard_after_forward=self.fsdp_config.reshard_after_forward,
+            reshard_after_forward=False,
             offload_policy=CPUOffloadPolicy() if self.fsdp_config.cpu_offload else None,
             module=self.embed_tokens,
         )
