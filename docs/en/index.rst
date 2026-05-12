@@ -47,7 +47,7 @@ Welcome to XTuner V1 English Documentation
    :maxdepth: 3
    :caption: Reinforcement Learning
 
-   rl/tutorial/rl_grpo_trainer.md
+   rl/tutorial/index.rst
 
 .. toctree::
    :hidden:

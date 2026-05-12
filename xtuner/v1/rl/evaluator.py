@@ -45,6 +45,31 @@ class Evaluator:
 
 
 class EvaluatorConfig(BaseModel):
+    """Configuration for rollout evaluation.
+
+    ``EvaluatorConfig`` controls how many generated samples are selected for
+    evaluation and which metric function is used to summarize them. It is used
+    by RL trainers when evaluation is enabled.
+
+    Args:
+        eval_sample_ratio (float): Ratio of generated samples to evaluate when
+            ``eval_sample_num`` is not set. Defaults to 0.
+        eval_sample_num (int): Fixed number of samples to evaluate. A positive
+            value takes precedence over ``eval_sample_ratio``. Defaults to 0.
+        compute_metric_func (ComputeMetricProtocol | None): Optional function
+            that receives evaluated rollout states and returns metrics. Defaults
+            to None.
+
+    **Examples:**
+
+    Example evaluator using a fixed sample count::
+
+        config = EvaluatorConfig(
+            eval_sample_num=128,
+            compute_metric_func=compute_metrics,
+        )
+    """
+
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     eval_sample_ratio: Annotated[

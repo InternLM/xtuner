@@ -31,6 +31,10 @@ meta_data_path = os.environ["DATA_PATH"]
 eval_data_path = os.environ.get("EVAL_DATA_PATH", "")
 eval_media_root = os.environ.get("EVAL_MEDIA_ROOT", "")
 
+debug_rollout_dir = os.environ.get("DEBUG_ROLLOUT_DIR", "")
+debug_train = os.environ.get("DEBUG_TRAIN", False)
+debug_rollout = os.environ.get("DEBUG_ROLLOUT", False)
+
 enable_evaluate = eval_data_path is not None and eval_data_path != ""
 
 # basic settings
@@ -256,4 +260,7 @@ trainer = RLColocateTrainerConfig(
     evaluate_step=1,
     work_dir=work_dir,
     hf_interval=hf_interval,
+    debug_rollout_dir=debug_rollout_dir,
+    debug_train=debug_train,
+    debug_rollout=debug_rollout,
 )

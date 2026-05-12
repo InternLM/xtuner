@@ -9,6 +9,37 @@ from .agent_loop import AgentLoop, AgentLoopConfig
 
 
 class SingleTurnAgentLoopConfig(AgentLoopConfig):
+    """Configuration for the built-in single-turn agent loop.
+
+    ``SingleTurnAgentLoopConfig`` runs one model generation for each input
+    ``RolloutState`` and optionally sends the completed output to a judger. It
+    is the default choice for math, QA, and other single-response RL tasks.
+
+    Args:
+        sample_params (SampleParams): Sampling parameters used by the rollout
+            backend, such as temperature and maximum generation length.
+        hf_checkpoint (str): Hugging Face checkpoint path used to identify the
+            policy checkpoint for the agent loop.
+        num_ray_actors (int): Number of Ray actor replicas for this agent loop.
+            ``0`` runs the loop in local mode. Defaults to 0.
+        num_cpus (float): CPU cores requested by each AgentLoop Ray actor.
+            Ignored in local mode. Defaults to 1.
+        cpu_memory (int): CPU memory in bytes requested by each AgentLoop Ray
+            actor. Ignored in local mode. Defaults to 1 GiB.
+        enable_batch_judge (bool): Whether to judge a generated group in one
+            batch in ``generate_group``. Defaults to False.
+
+    **Examples:**
+
+    Example configuration for a single-turn task::
+
+        config = SingleTurnAgentLoopConfig(
+            sample_params=SampleParams(max_tokens=1024, temperature=1.0),
+            hf_checkpoint="Qwen/Qwen3-8B",
+            enable_batch_judge=True,
+        )
+    """
+
     enable_batch_judge: bool = False
 
     def build_local(self, rollout_controller, judger: Judger | None = None, logger=None) -> "SingleTurnAgentLoop":
