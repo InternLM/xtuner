@@ -23,6 +23,10 @@ logger = get_logger()
 class GRPOLossConfig(BaseRLLossConfig):
     """Configuration for GRPO loss computation in XTuner RL.
 
+    ``GRPOLossConfig`` implements the loss configuration used by Group Relative
+    Policy Optimization. It consumes advantages computed for each rollout group
+    and supports optional KL regularization through ``BaseRLLossConfig``.
+
     Args:
         policy_loss_cfg (dict[str, Any]): Configuration parameters for the main policy loss.
             Contains algorithm-specific parameters for policy optimization.
@@ -33,6 +37,23 @@ class GRPOLossConfig(BaseRLLossConfig):
         kl_loss_type (Literal["kl", "k1", "abs", "mse", "k2", "low_var_kl", "k3"] | None):
             Type of KL penalty computation method. Different types provide various
             regularization behaviors and numerical stability properties. Defaults to None.
+        rollout_is (RolloutImportanceSampling): Rollout importance sampling
+            configuration. Defaults to ``RolloutImportanceSampling()``.
+
+    **Examples:**
+
+    Example GRPO loss configuration::
+
+        config = GRPOLossConfig(
+            policy_loss_cfg={
+                "loss_type": "vanilla",
+                "cliprange_low": 0.2,
+                "cliprange_high": 0.2,
+            },
+            use_kl_loss=True,
+            kl_loss_coef=0.001,
+            kl_loss_type="low_var_kl",
+        )
     """
 
     @property
