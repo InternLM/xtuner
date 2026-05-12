@@ -8,7 +8,7 @@ import time
 import traceback
 from abc import abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, List, Literal, Optional, Union, cast
 
 import httpx
 import ray
@@ -29,6 +29,8 @@ from xtuner.v1.rl.utils import (
 )
 from xtuner.v1.utils import get_logger
 from xtuner.v1.utils.httpx_utils import HttpRequestErrorType, HttpRequestResult
+
+from .utils import PartialRolloutHandler
 
 
 if TYPE_CHECKING:
@@ -472,6 +474,11 @@ class RolloutWorker(SingleAcceleratorWorker):
         self.abort_timeout = 5.0
         self.dist_init_addr: str = ""
         self.serverl_url: str = ""
+        self.partial_rollout_handler = PartialRolloutHandler()
+        self.enable_partial_rollout: bool = False
+
+    def set_enable_partial_rollout(self, enable: bool) -> None:
+        self.enable_partial_rollout = enable
 
     def init(self, dist_init_addr: str) -> tuple[int, str]:
         """Initialize the worker and launch the server.
@@ -583,7 +590,8 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         uid = rollout_state.uid
         sample_params: SampleParams = rollout_state.sample_params
-
+        max_tokens = sample_params.max_tokens
+        enable_partial_rollout = self.enable_partial_rollout
         if sample_params.return_token_ids:
             endpoint_url = f"{self.server_url}/{self.endpoints['generate']}"
         else:
@@ -594,8 +602,9 @@ class RolloutWorker(SingleAcceleratorWorker):
             "Authorization": f"Bearer {self.config.api_key}",
         }
 
-        max_retries = self.config.max_retry_per_sample
+        rollout_state = self.partial_rollout_handler.preprocess(rollout_state, max_tokens, enable_partial_rollout)
         payload = self._get_request_payload(rollout_state)
+        max_retries = self.config.max_retry_per_sample
 
         # 早退逻辑 1：检查是否已被标记为完成
         if rollout_state.status == Status.COMPLETED:
@@ -604,7 +613,7 @@ class RolloutWorker(SingleAcceleratorWorker):
 
         # 早退逻辑 2：检测输入是否还需要 generation (安全获取变量)
         input_ids = payload.get("input_ids", [])
-        max_tokens = payload.get("max_tokens")
+        max_tokens = cast(int, payload.get("max_tokens"))
 
         last_id = input_ids[-1] if len(input_ids) > 0 else "None"
         is_max_tokens_zero = max_tokens is not None and max_tokens <= 0
@@ -614,13 +623,20 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.debug(
                 f"No generation needed for request {uid}: max_tokens={max_tokens} or last input_id={last_id} is in eos_token."
             )
-            rollout_state.status = Status.COMPLETED
-            rollout_state.response_ids = []
-            rollout_state.response = ""
-            rollout_state.logprobs = []
-            rollout_state.response_mask = []
-            rollout_state.response_model_steps = []
-            rollout_state.finish_reason = "stop" if is_eos_reached else "length"
+            finish_reason = "stop" if is_eos_reached else "length"
+            rollout_state = await self.partial_rollout_handler.postprocess(
+                rollout_state,
+                response="",
+                response_ids=[],
+                logprobs=[],
+                routed_experts=None,
+                finish_reason=finish_reason,
+                status=Status.COMPLETED,
+                enable_partial_rollout=enable_partial_rollout,
+            )
+            if not enable_partial_rollout:
+                rollout_state.response_mask = []
+                rollout_state.response_model_steps = []
             return rollout_state
 
         for attempt in range(max_retries + 1):
@@ -830,6 +846,7 @@ class RolloutWorker(SingleAcceleratorWorker):
         sample_params = rollout_state.sample_params
         is_token_out = sample_params.return_token_ids
         response = http_response.json()
+
         if is_token_out:
             response_ids: list[int] = []
             logprobs: list[float] = []
@@ -914,30 +931,39 @@ class RolloutWorker(SingleAcceleratorWorker):
                     rollout_state.error_msg = error_msg
                     return rollout_state
 
-                rollout_state.response = returned_response
-                rollout_state.response_ids = response_ids
-                rollout_state.logprobs = logprobs
-                rollout_state.routed_experts = routed_experts
-                rollout_state.finish_reason = finish_reason
-                rollout_state.status = rollout_status
+                rollout_state = await self.partial_rollout_handler.postprocess(
+                    rollout_state,
+                    response=returned_response,
+                    response_ids=response_ids,
+                    logprobs=logprobs,
+                    routed_experts=routed_experts,
+                    finish_reason=finish_reason,
+                    status=rollout_status,
+                    enable_partial_rollout=self.enable_partial_rollout,
+                )
                 return rollout_state
             except KeyError as e:
-                error_msg = f"Missing expected key {e} in response {response} for {uid}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"Missing expected key {e} in response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except IndexError as e:
-                error_msg = f"Index error {e} while processing response {response} for {uid}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"Index error {e} while processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except AssertionError as e:
-                error_msg = f"AssertionError: {e} when processing response {response} for {uid}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"AssertionError: {e} when processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except json.JSONDecodeError as e:
                 error_msg = f"JSONDecodeError: {e} when processing response {response} for {uid}"
                 raise RuntimeError(error_msg)
             except TypeError as e:
-                error_msg = f"TypeError: {e} when processing response {response} for {uid}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"TypeError: {e} when processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except Exception as e:
-                error_msg = f"Unexpected error: {e} when processing response {response} for {uid}\nTraceback: {traceback.format_exc()}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"Unexpected error: {e} when processing response {response_for_log} for {uid}\nTraceback: {traceback.format_exc()}"
                 raise RuntimeError(error_msg)
         else:
             # v1/chat/completions API response
@@ -956,22 +982,27 @@ class RolloutWorker(SingleAcceleratorWorker):
                 rollout_state.status = rollout_status
                 return rollout_state
             except KeyError as e:
-                error_msg = f"Missing expected key {e} in response {response} for {uid}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"Missing expected key {e} in response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except IndexError as e:
-                error_msg = f"Index error {e} while processing response {response} for {uid}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"Index error {e} while processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except AssertionError as e:
-                error_msg = f"AssertionError: {e} when processing response {response} for {uid}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"AssertionError: {e} when processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except json.JSONDecodeError as e:
                 error_msg = f"JSONDecodeError: {e} when processing response {response} for {uid}"
                 raise RuntimeError(error_msg)
             except TypeError as e:
-                error_msg = f"TypeError: {e} when processing response {response} for {uid}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"TypeError: {e} when processing response {response_for_log} for {uid}"
                 raise RuntimeError(error_msg)
             except Exception as e:
-                error_msg = f"Unexpected error: {e} when processing response {response} for {uid}\nTraceback: {traceback.format_exc()}"
+                response_for_log = {k: v for k, v in response.items() if k not in ("logprobs", "response_ids")}
+                error_msg = f"Unexpected error: {e} when processing response {response_for_log} for {uid}\nTraceback: {traceback.format_exc()}"
                 raise RuntimeError(error_msg)
 
     def _adapt_input_to_openai_spec(self, prompts, tools, tool_choice):
