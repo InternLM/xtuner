@@ -2,7 +2,6 @@ import json
 import math
 import os
 import time
-from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Iterable, List, Sequence, TypeAlias, TypedDict, cast
 
@@ -12,15 +11,12 @@ if TYPE_CHECKING:
 
 import numpy as np
 import ray
-import requests
 import torch
 import torch.distributed as dist
-import tqdm
 from mmengine.runner import set_random_seed
 from pydantic import BaseModel, ConfigDict
 from ray.actor import ActorClass, ActorProxy
-from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.tensor import DTensor
+from torch.distributed.device_mesh import init_device_mesh
 from typing_extensions import NotRequired
 
 from transformers import AutoTokenizer
@@ -37,10 +33,8 @@ from xtuner.v1.loss.mtp_loss import MTPLossConfig, MTPLossContext
 from xtuner.v1.model.base import BaseModel as XtunerBaseModel
 from xtuner.v1.model.base import ModelItem, TransformerConfig
 from xtuner.v1.model.compose.base import BaseComposeConfig, BaseComposeModel
-from xtuner.v1.model.compose.qwen3_vl import Qwen3VLForConditionalGeneration
 from xtuner.v1.model.utils.misc import ModelForwardExtraLogInfo
 from xtuner.v1.rl.loss import BaseRLLossConfig, BaseRLLossContext, kl_penalty
-from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import SingleAcceleratorWorker
 from xtuner.v1.train.trainer import LoadCheckpointConfig
 from xtuner.v1.utils import (
@@ -49,20 +43,17 @@ from xtuner.v1.utils import (
     get_device,
     get_logger,
     get_torch_device_module,
-    monkey_unpatch_torch_reductions,
     ray_method,
 )
-from xtuner.v1.utils.load_spec import LoadEnum
 
 from ..rollout_is import merge_rollout_is_metrics
-
 from .update_weighter import UpdateWeighter
+
 
 DeviceMeshRaw: TypeAlias = List[List[int]]  # A list of lists representing device mesh indices
 ServiceUrlMap: TypeAlias = Dict[int, str]  # A dictionary mapping service names to their URLs
 DEVICE = get_device()
 DEVICE_MODULE = get_torch_device_module()
-
 
 
 def calculate_entropy(
@@ -251,7 +242,7 @@ class TrainingWorker(SingleAcceleratorWorker, UpdateWeighter):
         if isinstance(worker_cfg.model_cfg, BaseComposeConfig):
             if hasattr(worker_cfg.model_cfg.text_config, "mtp_config"):
                 self.mtp_config = worker_cfg.model_cfg.text_config.mtp_config
-        
+
         self._init_update_weighter()
 
     def _init_sft(self, worker_cfg: WorkerConfig):

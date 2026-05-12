@@ -1,3 +1,4 @@
+import json
 import os
 import socket
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +45,10 @@ DEVICE_MODULE = get_torch_device_module()
 
 
 class UpdateWeighter:
+    rank: int
+    logger: Any
+    config: Any
+
     def _init_update_weighter(self):
         # Used to update weight to rollout engine
         self.rollout_device_mesh: DeviceMesh | None = None
@@ -55,7 +60,7 @@ class UpdateWeighter:
         self.rollout_engine_rank_mesh_array: DeviceMeshRaw = []
         self.rollout_server_url_dict: ServiceUrlMap = {}
         self.worker_server_urls_status: dict[str, bool] = {}
-        
+
         self._global_hf_keys_mapping_cache: dict[str, list[str]] = dict()
         self._ipc_tensor_bytes: int = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
         self._update_params_ipc_tensor = None
@@ -66,6 +71,20 @@ class UpdateWeighter:
         self._sglang_disagg_executor: ThreadPoolExecutor | None = None
         self._train_update_sync_group: dist.ProcessGroup | None = None
         self._sglang_disagg_update_lock = Lock()
+
+    def _hook_compare_test_sent_and_received_weight_hash(
+        self,
+        result: dict[str, Any],
+        *,
+        bucket_idx: int | None = None,
+        names: list[str] | None = None,
+    ) -> None:
+        """Test hook for comparing sent and received weight hashes.
+
+        This hook is intentionally a no-op in production code and is expected to be overridden in unit tests that need
+        to compare training-side sent hashes with rollout-side received hashes returned by SGLang.
+        """
+        return
 
     @ray_method
     def update_rollout_info(
@@ -82,7 +101,9 @@ class UpdateWeighter:
         assert tp == 1 or ep == 1, "Either tensor parallel size or engine parallel size must be 1."
         if self.rollout_device_mesh is None:
             self.rollout_device_mesh = DeviceMesh(
-                "cpu", mesh=engine_rank_mesh_array, mesh_dim_names=("engine_instance", "engine_parallel")
+                "cpu",
+                mesh=engine_rank_mesh_array,
+                mesh_dim_names=("engine_instance", "engine_parallel"),
             )
         rollout_server_url = server_url_dict.get(self.rank, "")
         if worker_server_urls_status.get(rollout_server_url, "False") is False:
@@ -94,11 +115,11 @@ class UpdateWeighter:
         self.rollout_engine_rank_mesh_array = [[int(rank) for rank in ranks] for ranks in engine_rank_mesh_array]
         self.rollout_server_url_dict = {int(rank): url for rank, url in server_url_dict.items()}
         self.worker_server_urls_status = worker_server_urls_status
-        
+
         old_rollout_url = self.rollout_url
         if old_rollout_url != self.rollout_url:
             self._reset_sglang_disagg_group()
-            
+
         self.rollout_cfg_info["tp"] = tp
         self.rollout_cfg_info["ep"] = ep
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
@@ -120,8 +141,7 @@ class UpdateWeighter:
             self.is_train_rollout_colocated = False
         else:
             raise ValueError(
-                f"Unsupported train_rollout_mode: {train_rollout_mode!r}. "
-                "Expected 'colocate' or 'disaggregated'."
+                f"Unsupported train_rollout_mode: {train_rollout_mode!r}. Expected 'colocate' or 'disaggregated'."
             )
 
         if self.is_train_rollout_colocated:
@@ -268,7 +288,10 @@ class UpdateWeighter:
         dtype = torch.bfloat16
         bucket_size = int(self.config.update_weight_bucket_size_in_gb * 1024**3)
         same_gen = model._get_same_hf_param(
-            model._group_param_by_load_spec(LoadEnum.SAME), dtype=dtype, device=DEVICE, bucket_size=bucket_size
+            model._group_param_by_load_spec(LoadEnum.SAME),
+            dtype=dtype,
+            device=DEVICE,
+            bucket_size=bucket_size,
         )
 
         train_enable_ep = model.fsdp_config is not None and model.fsdp_config.ep_size > 1
@@ -296,7 +319,10 @@ class UpdateWeighter:
                 update_weights_for_rl=True,
             )
         shard_gen = model._get_shard_hf_param(
-            model._group_param_by_load_spec(LoadEnum.SHARD), dtype=dtype, device=DEVICE, bucket_size=bucket_size
+            model._group_param_by_load_spec(LoadEnum.SHARD),
+            dtype=dtype,
+            device=DEVICE,
+            bucket_size=bucket_size,
         )
 
         for name_list, fused_param_list in fused_gen:
@@ -309,7 +335,7 @@ class UpdateWeighter:
             self.request_update_params(state_dict, train_enable_ep=train_enable_ep, finished=False)
             del state_dict, name_list, param_list
 
-        if self.rollout_cfg_info["backend"] == "pytorch" and final_update:
+        if self.rollout_cfg_info["backend"] in ("pytorch", "vllm") and final_update:
             self.request_update_params({}, train_enable_ep=train_enable_ep, finished=True)
 
         if self.is_train_rollout_colocated:
@@ -431,7 +457,6 @@ class UpdateWeighter:
             total_bytes += tensor.numel() * tensor.element_size()
         return total_bytes
 
-
     @staticmethod
     def _init_external_process_group(
         backend: str | Backend | None = None,
@@ -455,6 +480,7 @@ class UpdateWeighter:
             timeout = default_pg_timeout
 
         if store is None:
+            assert init_method is not None
             rendezvous_iterator = rendezvous(init_method, rank, world_size, timeout=timeout)
             store, rank, world_size = next(rendezvous_iterator)
             store.set_timeout(timeout)
@@ -501,7 +527,10 @@ class UpdateWeighter:
                 (
                     rank,
                     url,
-                    rank_to_engine_size.get(rank, max(self.rollout_cfg_info["tp"], self.rollout_cfg_info["ep"])),
+                    rank_to_engine_size.get(
+                        rank,
+                        max(self.rollout_cfg_info["tp"], self.rollout_cfg_info["ep"]),
+                    ),
                 )
             )
         return engine_info
@@ -526,7 +555,7 @@ class UpdateWeighter:
             master_address = ray.util.get_node_ip_address()
         except Exception:
             master_address = socket.gethostbyname(socket.gethostname())
-        
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("", 0))
             master_port = int(sock.getsockname()[1])
@@ -601,7 +630,9 @@ class UpdateWeighter:
                 ) from e
 
             names = list(state_dict.keys())
-            tensors = [tensor.detach().to(device=DEVICE, non_blocking=True).contiguous() for tensor in state_dict.values()]
+            tensors = [
+                tensor.detach().to(device=DEVICE, non_blocking=True).contiguous() for tensor in state_dict.values()
+            ]
             payload = {
                 "names": names,
                 "dtypes": [str(tensor.dtype).replace("torch.", "") for tensor in tensors],
@@ -627,6 +658,10 @@ class UpdateWeighter:
                 response = update_future.result()
                 response.raise_for_status()
                 result = response.json()
+                self._hook_compare_test_sent_and_received_weight_hash(
+                    result,
+                    names=names,
+                )
                 assert result.get("success", True), (
                     f"SGLang update_weights_from_distributed failed: {result.get('message', result)}"
                 )
@@ -647,7 +682,7 @@ class UpdateWeighter:
             finished (bool): A flag indicating whether this is the final
                 batch of updates. Defaults to False.
         """
-        
+
         if self.rollout_cfg_info["backend"] == "sglang" and not self.is_train_rollout_colocated:
             self._request_update_params_sglang_disaggregated(state_dict)
             return
@@ -718,7 +753,8 @@ class UpdateWeighter:
                             self._update_params_ipc_event.wait()
                             torch.cuda.synchronize()
                         self._update_params_ipc_tensor = self._create_ipc_tensor(
-                            self._ipc_tensor_bytes, state_dict[next(iter(state_dict))].dtype
+                            self._ipc_tensor_bytes,
+                            state_dict[next(iter(state_dict))].dtype,
                         )
                     else:
                         self._update_params_ipc_event.wait()
@@ -759,7 +795,8 @@ class UpdateWeighter:
                             self._update_params_ipc_event.wait()
                             torch.cuda.synchronize()
                         self._update_params_ipc_tensor = self._create_ipc_tensor(
-                            self._ipc_tensor_bytes, state_dict[next(iter(state_dict))].dtype
+                            self._ipc_tensor_bytes,
+                            state_dict[next(iter(state_dict))].dtype,
                         )
                     else:
                         self._update_params_ipc_event.wait()
@@ -878,7 +915,9 @@ class UpdateWeighter:
             assert response.status_code == 200, f"response.status_code = {response.status_code}"
 
         # TODO(chenchiyu): narrow this condition
-        if finished or (self.rollout_cfg_info["backend"] == "pytorch" and train_enable_ep and self.rollout_cfg_info["tp"] > 1):
+        if finished or (
+            self.rollout_cfg_info["backend"] == "pytorch" and train_enable_ep and self.rollout_cfg_info["tp"] > 1
+        ):
             # This barrier is aim to make each tp head rank sync with other ranks in engine_parallel group
             # which could not be barrier by `fsdp_foreach_allgather` of the next state dict. (Happens in same_gen, shard not tested)
             # Without barrier, some ranks in engine_parallel group would not wait for current iter data ipc event recording in lmdeploy.

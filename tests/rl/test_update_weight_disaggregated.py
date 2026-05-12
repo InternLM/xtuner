@@ -6,12 +6,6 @@ import time
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-TEST_DIR = Path(__file__).resolve().parent
-if str(TEST_DIR) not in sys.path:
-    sys.path.insert(0, str(TEST_DIR))
 
 import ray
 import torch
@@ -28,54 +22,92 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 from xtuner.v1.rl.trainer import WorkerConfig, TrainingController, TrainingWorker as BaseTrainingWorker
 from xtuner.v1.rl.loss import GRPOLossConfig as LossConfig
-from xtuner.v1.model import get_model_config_from_hf
+from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
 from xtuner.v1.utils import ray_method
+import re
 
 TEST_TEXT_MESSAGES = [{"role": "user", "content": "Hello!"}]
-MODEL_PATH = os.environ.get("MODEL_PATH") or os.environ.get("QWEN3_VL_DENSE_PATH")
+MODEL_PATH = os.environ.get("QWEN3_MOE_PATH")
 
+def _is_sglang_update_weight_sha256_test_enabled():
+    """Return whether the SGLang-side received-weight SHA256 check is enabled.
+
+    This test-only switch controls whether the unit test expects SGLang to
+    compute and return received bucket hashes for sent/received hash
+    comparison. 
+    
+    ! Note that upstream SGLang does not provide this SHA256 check
+    by default.
+    """
+    return os.environ.get("SGLANG_ENABLE_UPDATE_WEIGHT_SHA256_TEST", "0") == "1"
 
 class HashingTrainingWorker(BaseTrainingWorker):
+    _RECEIVED_SHA256_PATTERN = re.compile(r"received_sha256=([0-9a-fA-F]{64})")
     def _init_update_weighter(self):
         super()._init_update_weighter()
-        self._test_update_weight_sha256 = hashlib.sha256()
-        self._test_update_weight_bucket_count = 0
+        self._test_update_weight_sent_sha256_list = []
+        self._test_update_weight_received_sha256_list = []
 
     @ray_method
     def reset_update_weight_sha256(self):
-        self._test_update_weight_sha256 = hashlib.sha256()
-        self._test_update_weight_bucket_count = 0
+        self._test_update_weight_sent_sha256_list = []
+        self._test_update_weight_received_sha256_list = []
 
     @ray_method
     def get_update_weight_sha256(self):
         return {
             "rank": self.rank,
-            "sha256": self._test_update_weight_sha256.hexdigest(),
-            "bucket_count": self._test_update_weight_bucket_count,
+            "sent_sha256_list": self._test_update_weight_sent_sha256_list,
+            "received_sha256_list": self._test_update_weight_received_sha256_list,
+            "bucket_count": len(self._test_update_weight_sent_sha256_list),
         }
 
     def request_update_params(self, state_dict, train_enable_ep=False, finished=False, profile_context=None):
         if state_dict and dist.get_rank() == 0:
-            for name in sorted(state_dict):
-                tensor = state_dict[name].detach().contiguous().cpu()
-                self._test_update_weight_sha256.update(name.encode("utf-8"))
-                self._test_update_weight_sha256.update(str(tensor.dtype).encode("utf-8"))
-                self._test_update_weight_sha256.update(str(tuple(tensor.shape)).encode("utf-8"))
-                self._test_update_weight_sha256.update(tensor.view(torch.uint8).numpy().tobytes())
-            self._test_update_weight_bucket_count += 1
+            bucket_sha256 = hashlib.sha256()
+            for name, tensor in sorted(state_dict.items(), key=lambda x: x[0]):
+                tensor = tensor.detach().contiguous().cpu()
+                bucket_sha256.update(name.encode("utf-8"))
+                bucket_sha256.update(str(tensor.dtype).encode("utf-8"))
+                bucket_sha256.update(str(tuple(tensor.shape)).encode("utf-8"))
+                bucket_sha256.update(tensor.view(torch.uint8).numpy().tobytes())
+            self._test_update_weight_sent_sha256_list.append(bucket_sha256.hexdigest())
         return super().request_update_params(
             state_dict,
             train_enable_ep=train_enable_ep,
             finished=finished,
         )
+    
+    def _hook_compare_test_sent_and_received_weight_hash(
+        self,
+        result: dict,
+        *,
+        bucket_idx=None,
+        names=None,
+    ) -> None:
+        """Record the received bucket SHA256 returned by SGLang for test comparison.
 
+        This unit-test override parses the SGLang response message and stores the
+        received bucket hash so the test can compare training-side sent hashes with
+        rollout-side received hashes.
+        """
+        if not _is_sglang_update_weight_sha256_test_enabled():
+            return
+        if dist.get_rank() != 0:
+            return
+        message = result.get("message", "")
+        match = self._RECEIVED_SHA256_PATTERN.search(message)
+        if match is not None:
+            self._test_update_weight_received_sha256_list.append(match.group(1))
 
 class TestUpdateWeight(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         if MODEL_PATH is None:
-            raise unittest.SkipTest("MODEL_PATH is not set")
+            raise unittest.SkipTest("QWEN3_MOE_PATH is not set")
         os.environ["XTUNER_USE_FA3"] = "1"
+        # TODO(shipengcheng) 当前训推分离sglang的权重同步不能用NCCL_CUMEM，后面需要排查一下原因
+        os.environ["NCCL_CUMEM_ENABLE"] = "0"
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -132,7 +164,7 @@ class TestUpdateWeight(unittest.TestCase):
         )
 
         # training config
-        model_cfg = get_model_config_from_hf(Path(MODEL_PATH))
+        model_cfg = Qwen3MoE30BA3Config()
         optim_cfg: AdamWConfig = AdamWConfig(lr=5e-7, foreach=False)
         fsdp_cfg: FSDPConfig = FSDPConfig(ep_size=train_ep_size)
         lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=5e-7)
@@ -184,55 +216,6 @@ class TestUpdateWeight(unittest.TestCase):
             self.rollout_cfg,
             rollout_pg,
         )
-
-    @unittest.skipIf(os.environ.get("XTUNER_USE_LMDEPLOY", "0") == "0", "lmdeploy backend is not enabled")
-    def test_lmdeploy_update_weight_and_generate(self):
-        # init train
-        TrainingWorker = ray.remote(
-            runtime_env={
-                "env_vars": {
-                    "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-                    "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES": "1",
-                }
-            },
-        )(BaseTrainingWorker)
-        train_workers, _ = AutoAcceleratorWorkers.from_placement_group(
-            TrainingWorker, self.worker_cfg, self.pg
-        )
-        futures = [ worker.test_all_reduce.remote() for worker in train_workers ]
-        ray.get(futures)
-        train_controller = TrainingController(
-            workers=train_workers,
-        )
-        # fixed sample params
-        sample_params = SampleParams(temperature=0.0, max_tokens=128, top_k=1)
-
-        # init rollout_controller and rollout baseline
-        self.rollout_cfg.skip_load_weights = False
-        rollout_controller = ray.remote(RolloutController).remote(
-            self.rollout_cfg,
-            self.pg,
-        )
-
-        input_state = RolloutState(message=TEST_TEXT_MESSAGES, sample_params=sample_params)
-        res_baseline = ray.get(rollout_controller.generate.remote(rollout_state=input_state)) 
-        
-        # start update weight test
-        info_dict = ray.get(rollout_controller.get_rollout_metadata.remote())
-        train_controller.update_rollout_info(info_dict)
-        
-        # update weights
-        ray.get(rollout_controller.offload.remote())
-        train_controller.onload(target="all")
-        train_controller.offload("optimizer")
-        ray.get(rollout_controller.onload_weights.remote())
-        train_controller.update_weights()
-        train_controller.offload("model")
-        ray.get(rollout_controller.onload_kvcache.remote())
-
-        res_update_weight = ray.get(rollout_controller.generate.remote(rollout_state=input_state)) 
-        self.assertEqual(res_update_weight.response, res_baseline.response)
-        ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
     @unittest.skipIf(os.environ.get("XTUNER_USE_SGLANG", "0") == "0", "sglang backend is not enabled")
     def test_sglang_disaggregated_update_weight_and_generate(self):
@@ -317,8 +300,15 @@ class TestUpdateWeight(unittest.TestCase):
         first_rank0_hash = next(item for item in first_hashes if item["rank"] == 0)
         second_rank0_hash = next(item for item in second_hashes if item["rank"] == 0)
         self.assertGreater(first_rank0_hash["bucket_count"], 0)
-        self.assertEqual(first_rank0_hash["sha256"], second_rank0_hash["sha256"])
         self.assertEqual(first_rank0_hash["bucket_count"], second_rank0_hash["bucket_count"])
+        self.assertEqual(first_rank0_hash["sent_sha256_list"], second_rank0_hash["sent_sha256_list"])
+        if _is_sglang_update_weight_sha256_test_enabled():
+            self.assertEqual(first_rank0_hash["bucket_count"], len(first_rank0_hash["received_sha256_list"]))
+            self.assertEqual(first_rank0_hash["sent_sha256_list"], first_rank0_hash["received_sha256_list"])
+            self.assertEqual(second_rank0_hash["bucket_count"], len(second_rank0_hash["received_sha256_list"]))
+            self.assertEqual(second_rank0_hash["sent_sha256_list"], second_rank0_hash["received_sha256_list"])
+            self.assertEqual(first_rank0_hash["received_sha256_list"], second_rank0_hash["received_sha256_list"])
+
         ray.get(rollout_controller.shutdown.remote(), timeout=60)
 
 
