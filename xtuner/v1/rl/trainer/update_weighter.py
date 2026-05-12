@@ -116,10 +116,6 @@ class UpdateWeighter:
         self.rollout_server_url_dict = {int(rank): url for rank, url in server_url_dict.items()}
         self.worker_server_urls_status = worker_server_urls_status
 
-        old_rollout_url = self.rollout_url
-        if old_rollout_url != self.rollout_url:
-            self._reset_sglang_disagg_group()
-
         self.rollout_cfg_info["tp"] = tp
         self.rollout_cfg_info["ep"] = ep
         self.rollout_cfg_info["api_key"] = rollout_config.api_key
@@ -169,6 +165,11 @@ class UpdateWeighter:
     @ray_method
     def update_weights(self):
         """Update the model weights."""
+        if not hasattr(self, "is_train_rollout_colocated"):
+            raise RuntimeError(
+                "train/rollout mode is not set. Please call set_train_rollout_mode() before update_weights()."
+            )
+
         if self.is_train_rollout_colocated:
             self._update_weights_colocated()
         else:
