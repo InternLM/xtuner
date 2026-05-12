@@ -321,7 +321,7 @@ class PartialRolloutHandler:
         remaining_tokens = max_tokens - response_len  # compute remaining max_tokens budget
         rollout_state.sample_params = rollout_state.sample_params.copy(update={"max_tokens": remaining_tokens})
 
-        self.logger.info(
+        self.logger.debug(
             f"[PartialRolloutHandler] Sample {rollout_state.uid} continue rollout | Remaining tokens allowed: {remaining_tokens} | Status: {rollout_state.status} | Prompt len: {prompt_len} | Response len: {response_len} | Staleness: {rollout_state.seq_staleness} | Total tokens: {len(rollout_state.tokens)}"
         )
         return rollout_state
@@ -375,7 +375,7 @@ class PartialRolloutHandler:
                 #     [ref for ref in (history_routed_experts_ref, cur_routed_experts_ref) if isinstance(ref, ray.ObjectRef)]
                 # )
                 end_time = time.time()
-                self.logger.info(
+                self.logger.debug(
                     f"[PartialRolloutHandler] Postprocess routed_experts concatenation time: {end_time - start_time:.4f} seconds"
                 )
             elif history_routed_experts is None and routed_experts is not None:

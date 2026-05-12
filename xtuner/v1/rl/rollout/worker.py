@@ -623,13 +623,20 @@ class RolloutWorker(SingleAcceleratorWorker):
             self.logger.debug(
                 f"No generation needed for request {uid}: max_tokens={max_tokens} or last input_id={last_id} is in eos_token."
             )
-            rollout_state.status = Status.COMPLETED
-            rollout_state.response_ids = []
-            rollout_state.response = ""
-            rollout_state.logprobs = []
-            rollout_state.response_mask = []
-            rollout_state.response_model_steps = []
-            rollout_state.finish_reason = "stop" if is_eos_reached else "length"
+            finish_reason = "stop" if is_eos_reached else "length"
+            rollout_state = self.partial_rollout_handler.postprocess(
+                rollout_state,
+                response="",
+                response_ids=[],
+                logprobs=[],
+                routed_experts=None,
+                finish_reason=finish_reason,
+                status=Status.COMPLETED,
+                enable_partial_rollout=enable_partial_rollout,
+            )
+            if not enable_partial_rollout:
+                rollout_state.response_mask = []
+                rollout_state.response_model_steps = []
             return rollout_state
 
         for attempt in range(max_retries + 1):

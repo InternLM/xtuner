@@ -52,14 +52,18 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         target: int,
         train_step: int = 0,
         consumed: int = 0,
+        producer_future_step: int | None = None,
+        target_upto_future_step: int | None = None,
     ) -> ProduceProgress:
-        return ProduceProgress(
-            next_consumer_step=train_step,
-            producer_future_step=train_step,
-            consumed_samples={task_name: consumed},
-            target_samples={task_name: target},
-            target_upto_future_step=train_step,
+        progress = ProduceProgress.build([task_name])
+        progress.next_consumer_step = train_step
+        progress.producer_future_step = producer_future_step if producer_future_step is not None else train_step
+        progress.consumed_samples[task_name] = consumed
+        progress.target_samples[task_name] = target
+        progress.target_upto_future_step = (
+            target_upto_future_step if target_upto_future_step is not None else train_step
         )
+        return progress
 
     def _build_agent_loop(self, sleep_by_id: dict[int, float] | None = None):
         mock_agent_loop = MagicMock()
@@ -416,11 +420,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         sampler = self._build_sampler()
         # 该用例验证版本记录顺序，放宽 stale 策略避免在生产入口提前返回。
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0, max_staleness=3).build()
-        progress = ProduceProgress(
-            next_consumer_step=1,
+        progress = self._build_progress(
+            task_name,
+            target=2,
+            train_step=1,
+            consumed=1,
             producer_future_step=2,
-            consumed_samples={task_name: 1},
-            target_samples={task_name: 2},
             target_upto_future_step=2,
         )
 
