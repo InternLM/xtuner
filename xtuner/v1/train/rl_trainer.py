@@ -227,7 +227,7 @@ class BaseRLTrainerConfig(BaseModel):
     hf_max_keep: int | None = -1
     checkpoint_no_save_optimizer: bool = False
     log_dir: Path | str | None = None
-    seed: int = 66
+    seed: int = 42
     debug_rollout: bool = False
     debug_rollout_dir: Path | str | None = None
     debug_train: bool = False

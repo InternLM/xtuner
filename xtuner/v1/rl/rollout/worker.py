@@ -624,7 +624,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                 f"No generation needed for request {uid}: max_tokens={max_tokens} or last input_id={last_id} is in eos_token."
             )
             finish_reason = "stop" if is_eos_reached else "length"
-            rollout_state = self.partial_rollout_handler.postprocess(
+            rollout_state = await self.partial_rollout_handler.postprocess(
                 rollout_state,
                 response="",
                 response_ids=[],
@@ -931,7 +931,7 @@ class RolloutWorker(SingleAcceleratorWorker):
                     rollout_state.error_msg = error_msg
                     return rollout_state
 
-                rollout_state = self.partial_rollout_handler.postprocess(
+                rollout_state = await self.partial_rollout_handler.postprocess(
                     rollout_state,
                     response=returned_response,
                     response_ids=response_ids,

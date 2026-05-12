@@ -355,6 +355,7 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
 
         config = SyncProduceStrategyConfig()
     """
+
     def build(
         self,
         *,

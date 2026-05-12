@@ -281,9 +281,9 @@ async def check_worker_health(
     return False
 
 
-def _resolve_routed_experts(routed_experts: list[int] | ray.ObjectRef) -> list[int]:
-    if isinstance(routed_experts, ray.ObjectRef):
-        routed_experts = ray.get(routed_experts)
+async def _resolve_routed_experts(routed_experts: list[int] | RayObjectRef) -> list[int]:
+    if isinstance(routed_experts, RayObjectRef):
+        routed_experts = await routed_experts
     if hasattr(routed_experts, "tolist"):
         routed_experts = routed_experts.tolist()
     assert isinstance(routed_experts, list), f"Unexpected routed_experts type: {type(routed_experts)}"
@@ -326,7 +326,7 @@ class PartialRolloutHandler:
         )
         return rollout_state
 
-    def postprocess(
+    async def postprocess(
         self,
         rollout_state: RolloutState,
         *,
@@ -361,8 +361,12 @@ class PartialRolloutHandler:
             history_routed_experts = rollout_state.routed_experts or None
             if history_routed_experts is not None and routed_experts is not None:
                 start_time = time.time()
-                history_routed_experts = _resolve_routed_experts(history_routed_experts)
-                cur_routed_experts = _resolve_routed_experts(routed_experts)
+                history_routed_experts, cur_routed_experts = await asyncio.gather(
+                    _resolve_routed_experts(history_routed_experts),
+                    _resolve_routed_experts(routed_experts),
+                )
+                assert history_routed_experts, "History routed_experts should not be empty after resolution"
+                assert cur_routed_experts, "Current routed_experts should not be empty after resolution"
                 cur_routed_experts_len = len(cur_routed_experts)
                 history_routed_experts_len = len(history_routed_experts)
                 assert history_routed_experts_len - 1 <= cur_routed_experts_len, (
