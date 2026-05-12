@@ -137,10 +137,9 @@ def _format_memory_info_for_console(memory_info: dict) -> str:
     lines = [
         f"[RL_MEM] time={formatted.get('time', '')}",
         f"[RL_MEM] node_id={formatted.get('node_id', '')}",
-        f"[RL_MEM] rollout_gpu_by_device_gb={formatted.get('rollout_gpu_by_device_gb', [])}",
     ]
     for actor_name, actor_info in formatted.items():
-        if actor_name in {"time", "node_id", "rollout_gpu_by_device_gb"}:
+        if actor_name in {"time", "node_id"}:
             continue
         if not isinstance(actor_info, dict):
             continue
@@ -177,14 +176,6 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
 
     print(f"当前节点 GPU 数量: {local_gpus}")
     tb_writer_list = [TensorboardWriter(log_dir=f"{work_dir}/tb/{rank}") for rank in range(max(local_gpus, 1))]
-    rollout_related_actor_names = {
-        "LMDeployWorker",
-        "SGLangWorker",
-        "vLLMWorker",
-        "LMDeployServerProcess",
-        "RayWorkerWrapper",
-        "RayEngineWorker",
-    }
 
     count = 0
     try:
@@ -193,7 +184,6 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
             memory_info = {}
             pid_to_gpu_memory_gb, pid_to_gpu_memory_by_device_gb = _collect_local_gpu_memory_by_pid_gb()
             unmatched_actor_pid_samples: list[tuple[int, int | None]] = []
-            rollout_gpu_by_device_gb = [0.0 for _ in range(local_gpus)]
 
             # Only collect actors on this node. Ray actor metadata is cluster-wide,
             # while psutil and NVML can only query local processes and GPUs.
@@ -240,10 +230,6 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         pass
 
-                if actor_name in rollout_related_actor_names:
-                    for device_idx, device_mem_gb in enumerate(gpu_memory_by_device):
-                        rollout_gpu_by_device_gb[device_idx] += device_mem_gb
-
                 memory_gb = _round_gb(memory_gb)  # type: ignore
                 gpu_memory_gb = _round_gb(gpu_memory_gb)  # type: ignore
 
@@ -258,17 +244,13 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
                         "gpu_mem_gb": [gpu_memory_gb],
                     }
 
-            rollout_gpu_by_device_gb = [_round_gb(v) for v in rollout_gpu_by_device_gb]
-            memory_info["rollout_gpu_by_device_gb"] = rollout_gpu_by_device_gb  # type: ignore
-
             # 写入文件
             json.dump(memory_info, f, ensure_ascii=False)
             f.write("\n")
             f.flush()
 
             if pid_to_gpu_memory_gb and all(
-                actor_name in ["time", "node_id", "rollout_gpu_by_device_gb"]
-                or max(memory_mb_info.get("gpu_mem_gb", [0.0])) <= 0.0  # type: ignore
+                actor_name in ["time", "node_id"] or max(memory_mb_info.get("gpu_mem_gb", [0.0])) <= 0.0  # type: ignore
                 for actor_name, memory_mb_info in memory_info.items()
             ):
                 sample_gpu_pids = list(pid_to_gpu_memory_gb.items())[:10]
@@ -277,15 +259,8 @@ def monitor_actor_memory(work_dir: str, interval: int = 60):
                     f"sample_gpu_pid_mem={sample_gpu_pids}, sample_actor_pid_ngid={unmatched_actor_pid_samples}"
                 )
 
-            for device_idx, device_gpu_gb in enumerate(rollout_gpu_by_device_gb):
-                tb_writer_list[0].add_scalar(
-                    tag=f"rollout/gpu_device_{device_idx}_gb",
-                    scalar_value=_round_gb(device_gpu_gb),
-                    global_step=count,
-                )
-
             for actor_name, memory_mb_info in memory_info.items():
-                if actor_name in ["time", "node_id", "rollout_gpu_by_device_gb"]:
+                if actor_name in ["time", "node_id"]:
                     continue
                 memory_mb: list[float] = memory_mb_info["mem_gb"]  # type: ignore
                 gpu_memory_mb: list[float] = memory_mb_info["gpu_mem_gb"]  # type: ignore
