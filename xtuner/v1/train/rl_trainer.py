@@ -192,6 +192,12 @@ def _validate_sync_intervals(
 
 
 class BaseRLTrainerConfig(BaseModel):
+    """Base configuration shared by XTuner RL trainers.
+
+    This base class defines the common training, rollout, evaluation, checkpoint, and logging fields used by both
+    colocated and disaggregated RL trainers. Concrete trainer configs add their resource layout fields.
+    """
+
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     train_worker_cfg: WorkerConfig
@@ -253,6 +259,86 @@ class BaseRLTrainerConfig(BaseModel):
 
 
 class RLColocateTrainerConfig(BaseRLTrainerConfig):
+    """Configuration for the colocated RL trainer.
+
+    ``RLColocateTrainerConfig`` runs training workers and rollout workers on a
+    shared accelerator resource pool. It is typically used when rollout and
+    training alternate on the same set of devices.
+
+    Args:
+        train_worker_cfg (WorkerConfig): Training worker configuration,
+            including model, optimizer, loss, and FSDP settings.
+        rollout_config (RolloutConfig): Rollout backend configuration.
+        tokenizer_path (str | Path): Tokenizer path used by the agent loop
+            sampler and rollout processing.
+        replay_buffer_config (SyncReplayBufferConfig | AsyncReplayBufferConfig):
+            Replay buffer configuration. Defaults to ``SyncReplayBufferConfig``.
+        agent_loop_manager_cfg (AgentLoopManagerConfig): Agent loop manager
+            configuration used for training rollout production.
+        eval_agent_loop_manager_cfg (AgentLoopManagerConfig | None): Optional
+            agent loop manager for evaluation. Defaults to None.
+        evaluator_config (EvaluatorConfig | None): Optional evaluator
+            configuration. Defaults to None.
+        load_from (str | Path): Initial checkpoint or model path to load.
+        total_train_steps (int | None): Total number of training steps.
+            Defaults to None.
+        total_epochs (int | None): Total number of dataset epochs. Defaults to
+            None.
+        train_batch_size (int): Number of rollout samples consumed per training
+            step.
+        advantage_estimator_config (BaseAdvantageConfig): Advantage estimator
+            configuration. Defaults to ``GRPOAdvantageConfig``.
+        sync_weights_interval (int): Interval, in train steps, for syncing
+            weights from training to rollout. Defaults to 1.
+        gateway_config (GatewayConfig | None): Optional gateway configuration.
+            Defaults to None.
+        enable_evaluate (bool): Whether to run evaluation. Defaults to True.
+        enable_initial_evaluate (bool): Whether to evaluate before training.
+            Defaults to False.
+        evaluate_step (int): Evaluation interval in train steps. Defaults to 1.
+        work_dir (Path | str | None): Directory for checkpoints and runtime
+            state. Defaults to None.
+        auto_resume (bool): Whether to resume automatically from ``work_dir``.
+            Defaults to False.
+        load_checkpoint_cfg (LoadCheckpointConfig): Checkpoint loading policy.
+            Defaults to ``LoadCheckpointConfig()``.
+        checkpoint_interval (int | None): Native checkpoint interval. Defaults
+            to -1.
+        checkpoint_maxkeep (int | None): Maximum number of native checkpoints
+            to keep. Defaults to -1.
+        hf_interval (int | None): Hugging Face checkpoint export interval.
+            Defaults to -1.
+        hf_max_keep (int | None): Maximum number of Hugging Face checkpoints to
+            keep. Defaults to -1.
+        checkpoint_no_save_optimizer (bool): Whether to skip optimizer states
+            when saving checkpoints. Defaults to False.
+        log_dir (Path | str | None): Directory for logs. Defaults to None.
+        seed (int): Global random seed. Defaults to 66.
+        debug_rollout (bool): Whether to enable rollout debugging. Defaults to
+            False.
+        skip_checkpoint_validation (bool): Whether to skip checkpoint
+            validation. Defaults to False.
+        exp_tracker (Literal["tensorboard", "jsonl"]): Experiment tracker type.
+            Defaults to "tensorboard".
+        resources (AcceleratorResourcesConfig): Shared accelerator resources
+            used by both training and rollout workers.
+
+    **Examples:**
+
+    Example colocated trainer configuration::
+
+        config = RLColocateTrainerConfig(
+            train_worker_cfg=train_worker_cfg,
+            rollout_config=rollout_config,
+            tokenizer_path="Qwen/Qwen3-8B",
+            agent_loop_manager_cfg=agent_loop_manager_cfg,
+            load_from="Qwen/Qwen3-8B",
+            total_train_steps=1000,
+            train_batch_size=128,
+            resources=AcceleratorResourcesConfig(num_workers=8),
+        )
+    """
+
     resources: AcceleratorResourcesConfig
 
     def build(self) -> "RLColocateTrainer":
@@ -260,6 +346,89 @@ class RLColocateTrainerConfig(BaseRLTrainerConfig):
 
 
 class RLDisaggregatedTrainerConfig(BaseRLTrainerConfig):
+    """Configuration for the disaggregated RL trainer.
+
+    ``RLDisaggregatedTrainerConfig`` uses separate accelerator resource pools
+    for training and rollout. It is typically used when rollout production runs
+    concurrently with training on dedicated devices.
+
+    Args:
+        train_worker_cfg (WorkerConfig): Training worker configuration,
+            including model, optimizer, loss, and FSDP settings.
+        rollout_config (RolloutConfig): Rollout backend configuration.
+        tokenizer_path (str | Path): Tokenizer path used by the agent loop
+            sampler and rollout processing.
+        replay_buffer_config (SyncReplayBufferConfig | AsyncReplayBufferConfig):
+            Replay buffer configuration. Defaults to ``SyncReplayBufferConfig``.
+        agent_loop_manager_cfg (AgentLoopManagerConfig): Agent loop manager
+            configuration used for training rollout production.
+        eval_agent_loop_manager_cfg (AgentLoopManagerConfig | None): Optional
+            agent loop manager for evaluation. Defaults to None.
+        evaluator_config (EvaluatorConfig | None): Optional evaluator
+            configuration. Defaults to None.
+        load_from (str | Path): Initial checkpoint or model path to load.
+        total_train_steps (int | None): Total number of training steps.
+            Defaults to None.
+        total_epochs (int | None): Total number of dataset epochs. Defaults to
+            None.
+        train_batch_size (int): Number of rollout samples consumed per training
+            step.
+        advantage_estimator_config (BaseAdvantageConfig): Advantage estimator
+            configuration. Defaults to ``GRPOAdvantageConfig``.
+        sync_weights_interval (int): Interval, in train steps, for syncing
+            weights from training to rollout. Defaults to 1.
+        gateway_config (GatewayConfig | None): Optional gateway configuration.
+            Defaults to None.
+        enable_evaluate (bool): Whether to run evaluation. Defaults to True.
+        enable_initial_evaluate (bool): Whether to evaluate before training.
+            Defaults to False.
+        evaluate_step (int): Evaluation interval in train steps. Defaults to 1.
+        work_dir (Path | str | None): Directory for checkpoints and runtime
+            state. Defaults to None.
+        auto_resume (bool): Whether to resume automatically from ``work_dir``.
+            Defaults to False.
+        load_checkpoint_cfg (LoadCheckpointConfig): Checkpoint loading policy.
+            Defaults to ``LoadCheckpointConfig()``.
+        checkpoint_interval (int | None): Native checkpoint interval. Defaults
+            to -1.
+        checkpoint_maxkeep (int | None): Maximum number of native checkpoints
+            to keep. Defaults to -1.
+        hf_interval (int | None): Hugging Face checkpoint export interval.
+            Defaults to -1.
+        hf_max_keep (int | None): Maximum number of Hugging Face checkpoints to
+            keep. Defaults to -1.
+        checkpoint_no_save_optimizer (bool): Whether to skip optimizer states
+            when saving checkpoints. Defaults to False.
+        log_dir (Path | str | None): Directory for logs. Defaults to None.
+        seed (int): Global random seed. Defaults to 66.
+        debug_rollout (bool): Whether to enable rollout debugging. Defaults to
+            False.
+        skip_checkpoint_validation (bool): Whether to skip checkpoint
+            validation. Defaults to False.
+        exp_tracker (Literal["tensorboard", "jsonl"]): Experiment tracker type.
+            Defaults to "tensorboard".
+        train_resources (AcceleratorResourcesConfig): Accelerator resources for
+            training workers.
+        rollout_resources (AcceleratorResourcesConfig): Accelerator resources
+            for rollout workers.
+
+    **Examples:**
+
+    Example disaggregated trainer configuration::
+
+        config = RLDisaggregatedTrainerConfig(
+            train_worker_cfg=train_worker_cfg,
+            rollout_config=rollout_config,
+            tokenizer_path="Qwen/Qwen3-8B",
+            agent_loop_manager_cfg=agent_loop_manager_cfg,
+            load_from="Qwen/Qwen3-8B",
+            total_train_steps=1000,
+            train_batch_size=128,
+            train_resources=AcceleratorResourcesConfig(num_workers=4),
+            rollout_resources=AcceleratorResourcesConfig(num_workers=4),
+        )
+    """
+
     train_resources: AcceleratorResourcesConfig
     rollout_resources: AcceleratorResourcesConfig
 
