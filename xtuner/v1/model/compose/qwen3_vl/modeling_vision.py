@@ -346,23 +346,25 @@ class Qwen3VLVisionModel(BaseModel):
 
             self.blocks[layer_idx] = layer
 
+            if self.config.fully_shard:
+                self._fully_shard(
+                    mesh=self.fsdp_mesh,
+                    mp_policy=decoder_layer_mp_policy,
+                    reshard_after_forward=True,
+                    offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
+                    module=layer,
+                )
+
+        if self.config.fully_shard:
+            for layer_cur, layer_next in zip(self.blocks[:-1],  self.blocks[1:]):
+                layer_cur.set_modules_to_forward_prefetch([layer_next])
+
             self._fully_shard(
                 mesh=self.fsdp_mesh,
-                mp_policy=decoder_layer_mp_policy,
+                mp_policy=mp_policy,
                 reshard_after_forward=True,
                 offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
-                module=layer,
             )
-
-        for layer_cur, layer_next in zip(self.blocks[:-1],  self.blocks[1:]):
-            layer_cur.set_modules_to_forward_prefetch([layer_next])
-
-        self._fully_shard(
-            mesh=self.fsdp_mesh,
-            mp_policy=mp_policy,
-            reshard_after_forward=True,
-            offload_policy=CPUOffloadPolicy() if fsdp_config.cpu_offload else None,
-        )
         return self
 
     # copy from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3_vl.py#L474
