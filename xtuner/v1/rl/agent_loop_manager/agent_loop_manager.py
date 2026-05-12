@@ -48,6 +48,8 @@ class ProduceBatchResult:
         leftover_expired (int): Number of expired groups remaining in the replay buffer.
         leftover_failed (int): Number of failed groups remaining in the replay buffer.
         leftover_filtered (int): Number of filtered groups remaining in the replay buffer.
+        raw_rewards_sum (float): Sum of rewards produced before replay-buffer insertion for the current window.
+        raw_rewards_count (int): Number of reward-bearing samples included in ``raw_rewards_sum``.
     """
 
     rollout_states: list[list[RolloutState]]
@@ -66,9 +68,9 @@ class ProduceBatchResult:
     leftover_expired: int = 0
     leftover_failed: int = 0
     leftover_filtered: int = 0
-    # filtered rewards are not included in rollout_states, but we want to record their scores for diagnostics.
-    filtered_rewards_sum: float = 0.0
-    filtered_rewards_count: int = 0
+    # rewards produced during the current produce window, including completed and filtered groups.
+    raw_rewards_sum: float = 0.0
+    raw_rewards_count: int = 0
     task_batch_sizes: dict[str, int] | None = None
     task_results: dict[str, "ProduceBatchResult"] | None = None
 
@@ -423,8 +425,8 @@ class AgentLoopManager:
         weighted_group_p99_sum = 0.0
         weighted_group_ratio_sum = 0.0
         total_pause_time_s = 0.0
-        filtered_rewards_sum = 0.0
-        filtered_rewards_count = 0
+        raw_rewards_sum = 0.0
+        raw_rewards_count = 0
 
         for task in ordered_tasks:
             result = task_results[task.task_name]
@@ -435,8 +437,8 @@ class AgentLoopManager:
             leftover_expired += result.leftover_expired
             leftover_failed += result.leftover_failed
             leftover_filtered += result.leftover_filtered
-            filtered_rewards_sum += result.filtered_rewards_sum
-            filtered_rewards_count += result.filtered_rewards_count
+            raw_rewards_sum += result.raw_rewards_sum
+            raw_rewards_count += result.raw_rewards_count
             if result.group_gen_count is not None and result.group_gen_mean_s is not None:
                 total_group_count += result.group_gen_count
                 weighted_group_mean_sum += result.group_gen_count * result.group_gen_mean_s
@@ -453,8 +455,8 @@ class AgentLoopManager:
             leftover_expired=leftover_expired,
             leftover_failed=leftover_failed,
             leftover_filtered=leftover_filtered,
-            filtered_rewards_sum=filtered_rewards_sum,
-            filtered_rewards_count=filtered_rewards_count,
+            raw_rewards_sum=raw_rewards_sum,
+            raw_rewards_count=raw_rewards_count,
             task_results={task.task_name: task_results[task.task_name] for task in ordered_tasks},
         )
         if total_group_count > 0:
@@ -580,18 +582,29 @@ class AgentLoopManager:
         batch_by_task: dict[str, list[list[RolloutState]]],
         leftover_counts: dict[str, dict[Status, int]],
         *,
+        progress: ProduceProgress,
         pause_time_s: float,
     ) -> ProduceBatchResult:
         if len(self.task_runners) == 1:
             task = self.task_runners[0]
-            result = ProduceBatchResult(rollout_states=batch_by_task.get(task.task_name, []))
+            raw_rewards_sum, raw_rewards_count = progress.consume_raw_rewards(task.task_name)
+            result = ProduceBatchResult(
+                rollout_states=batch_by_task.get(task.task_name, []),
+                raw_rewards_sum=raw_rewards_sum,
+                raw_rewards_count=raw_rewards_count,
+            )
             _fill_leftover_counts(result, leftover_counts.get(task.task_name, {}))
             _fill_group_timing_stats(result, result.rollout_states, pause_time_s=pause_time_s)
             return result
 
         task_results: dict[str, ProduceBatchResult] = {}
         for task in self.task_runners:
-            result = ProduceBatchResult(rollout_states=batch_by_task.get(task.task_name, []))
+            raw_rewards_sum, raw_rewards_count = progress.consume_raw_rewards(task.task_name)
+            result = ProduceBatchResult(
+                rollout_states=batch_by_task.get(task.task_name, []),
+                raw_rewards_sum=raw_rewards_sum,
+                raw_rewards_count=raw_rewards_count,
+            )
             _fill_leftover_counts(result, leftover_counts.get(task.task_name, {}))
             task_results[task.task_name] = result
 
@@ -620,6 +633,7 @@ class AgentLoopManager:
             task_batch_sizes,
             batch_by_task,
             leftover_counts,
+            progress=consume_progress,
             pause_time_s=pause_time_s,
         )
 

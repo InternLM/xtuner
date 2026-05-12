@@ -16,13 +16,14 @@ from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 
 
 class MockRolloutState:
-    def __init__(self, id, seq_staleness=1, status=Status.COMPLETED):
+    def __init__(self, id, seq_staleness=1, status=Status.COMPLETED, reward_score=None):
         self.id = id
         self.uid = id
         self.status = status
         self.seq_staleness = seq_staleness
         self.response_ids = []
         self.extra_fields = {}
+        self.reward = {"score": reward_score} if reward_score is not None else None
 
 
 class TestProducer(unittest.IsolatedAsyncioTestCase):
@@ -275,6 +276,32 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(valid_checked_statuses, [[Status.COMPLETED]])
         self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 1)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 1)
+
+    async def test_put_generated_group_records_raw_rewards_before_filtering(self):
+        task_name = "test_raw_reward_before_filter"
+
+        def is_valid_sample_fn(samples):
+            return False
+
+        strategy = SyncProduceStrategyConfig(is_valid_sample_fn=is_valid_sample_fn).build()
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            self._build_agent_loop(),
+            self._build_sampler(),
+            batch_size=1,
+        )
+
+        completed_group = [
+            MockRolloutState(1, status=Status.COMPLETED, reward_score=0.25),
+            MockRolloutState(2, status=Status.COMPLETED, reward_score=0.75),
+        ]
+        self.assertFalse(await ctx.put_generated_group(completed_group))
+
+        self.assertEqual([item.status for item in completed_group], [Status.FILTERED, Status.FILTERED])
+        self.assertEqual(ctx.progress.consume_raw_rewards(task_name), (1.0, 2))
+        self.assertEqual(ctx.progress.consume_raw_rewards(task_name), (0.0, 0))
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 1)
 
     async def test_sync_produce_strategy(self):
         task_name = "test_task"

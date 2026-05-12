@@ -632,6 +632,32 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._produce_progress.next_consumer_step, 10)
         self.assertEqual(manager._produce_progress.consumed_samples["task_a"], 1)
 
+    async def test_get_batch_returns_raw_reward_stats_from_progress(self):
+        replay_buffer = _FakeReplayBuffer(
+            rollout_states_by_task={"task_a": [[_FakeRolloutState("a-0", 0.2)]]},
+            leftover_counts={("task_a", Status.COMPLETED): 1},
+        )
+        manager = AgentLoopManager(
+            task_runners=[
+                _TaskRunner(
+                    task_name="task_a",
+                    agent_loop=_fake_agent_loop(),
+                    produce_strategy=_FakeProduceStrategy(),
+                    sampler=_FakeSampler(),
+                    weight=1.0,
+                    order=0,
+                ),
+            ],
+            replay_buffer=replay_buffer,
+        )
+        manager._produce_progress.add_raw_rewards("task_a", 1.25, 2)
+
+        result = await manager.get_batch(batch_size=1, train_step=9)
+
+        self.assertEqual(result.raw_rewards_sum, 1.25)
+        self.assertEqual(result.raw_rewards_count, 2)
+        self.assertEqual(manager._produce_progress.consume_raw_rewards("task_a"), (0.0, 0))
+
     async def test_get_batch_waits_until_requested_batch_size_is_ready(self):
         replay_buffer = _SequencedCompletedReplayBuffer(
             completed_counts=[0, 1, 2],

@@ -55,6 +55,8 @@ class ProduceProgress:
     - consumed_samples：各 task 已被 consumer 从 replay buffer 取走的 group 绝对累计数。
     - target_samples：各 task 截至 target_upto_future_step 应生产出的 group 绝对累计目标。
     - target_upto_future_step：target_samples 已覆盖到的最大 future step。
+    - raw_rewards_sum / raw_rewards_count：各 task 自上次 consumer 取 batch 后，producer 实际生成出的
+      completed group reward 统计。filtered group 在过滤前仍按 completed 生成结果计入。
     """
 
     next_consumer_step: int = 1
@@ -62,12 +64,16 @@ class ProduceProgress:
     consumed_samples: dict[str, int] = field(default_factory=dict)
     target_samples: dict[str, int] = field(default_factory=dict)
     target_upto_future_step: int = 0
+    raw_rewards_sum: dict[str, float] = field(default_factory=dict)
+    raw_rewards_count: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def build(cls, task_names: list[str]) -> "ProduceProgress":
         return cls(
             consumed_samples={task_name: 0 for task_name in task_names},
             target_samples={task_name: 0 for task_name in task_names},
+            raw_rewards_sum={task_name: 0.0 for task_name in task_names},
+            raw_rewards_count={task_name: 0 for task_name in task_names},
         )
 
     @classmethod
@@ -84,6 +90,8 @@ class ProduceProgress:
             consumed_samples={task_name: 0 for task_name in task_names},
             target_samples=dict(task_batch_sizes),
             target_upto_future_step=train_step,
+            raw_rewards_sum={task_name: 0.0 for task_name in task_names},
+            raw_rewards_count={task_name: 0 for task_name in task_names},
         )
 
     def ensure_target_upto(
@@ -112,6 +120,17 @@ class ProduceProgress:
         for task_name, count in consumed_counts.items():
             self.consumed_samples[task_name] += count
 
+    def add_raw_rewards(self, task_name: str, rewards_sum: float, rewards_count: int) -> None:
+        self.raw_rewards_sum[task_name] += rewards_sum
+        self.raw_rewards_count[task_name] += rewards_count
+
+    def consume_raw_rewards(self, task_name: str) -> tuple[float, int]:
+        rewards_sum = self.raw_rewards_sum[task_name]
+        rewards_count = self.raw_rewards_count[task_name]
+        self.raw_rewards_sum[task_name] = 0.0
+        self.raw_rewards_count[task_name] = 0
+        return rewards_sum, rewards_count
+
     def finish_consume(self, train_step: int) -> None:
         self.next_consumer_step = train_step + 1
 
@@ -125,6 +144,8 @@ class ProduceProgress:
             "consumed_samples": dict(self.consumed_samples),
             "target_samples": dict(self.target_samples),
             "target_upto_future_step": self.target_upto_future_step,
+            "raw_rewards_sum": dict(self.raw_rewards_sum),
+            "raw_rewards_count": dict(self.raw_rewards_count),
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -136,6 +157,15 @@ class ProduceProgress:
         self.consumed_samples.update(state["consumed_samples"])
         self.target_samples.clear()
         self.target_samples.update(state["target_samples"])
+        task_names = set(self.consumed_samples) | set(self.target_samples)
+        self.raw_rewards_sum.clear()
+        self.raw_rewards_sum.update(
+            {task_name: float(state.get("raw_rewards_sum", {}).get(task_name, 0.0)) for task_name in task_names}
+        )
+        self.raw_rewards_count.clear()
+        self.raw_rewards_count.update(
+            {task_name: int(state.get("raw_rewards_count", {}).get(task_name, 0)) for task_name in task_names}
+        )
 
 
 class ProduceBatchStatus(Enum):
@@ -249,6 +279,12 @@ class ProduceContext:
         # 只有完整生成的 group 才需要业务有效性过滤；ABORTED / EXPIRED 保留原状态供重试或统计。
         is_completed = get_group_status(group) == Status.COMPLETED
         if is_completed:
+            rewards_sum = 0.0
+            rewards_count = 0
+            for item in group:
+                rewards_sum += float(item.reward["score"])  # type: ignore[index]
+                rewards_count += 1
+            self.progress.add_raw_rewards(self.task_name, rewards_sum, rewards_count)
             is_valid = self.is_valid_sample_fn(group)
             if not is_valid:
                 for item in group:
