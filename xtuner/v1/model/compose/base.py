@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+from shutil import rmtree
 from typing import Callable, Self
 
 import torch
@@ -16,7 +18,7 @@ from typing_extensions import override
 from xtuner.v1.config import FSDPConfig
 from xtuner.v1.loss import BaseLossContext
 from xtuner.v1.model import BaseModel
-from xtuner.v1.model.base import XTunerBaseModelConfig
+from xtuner.v1.model.base import DEVICE_MODULE, XTunerBaseModelConfig, _set_process_qos
 from xtuner.v1.utils import get_device, get_logger
 
 from ..utils.misc import update_weight_map_from_safetensors_index
@@ -160,6 +162,106 @@ class BaseComposeModel(BaseModel):
             with open(hf_dir / "model.safetensors.index.json", "w") as f:
                 json.dump({"weight_map": weight_map_dict, "metadata": {}}, f, indent=4)
         dist.barrier()
+
+    def async_save_hf(
+        self,
+        hf_dir: Path | str,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+    ) -> Path | None:
+        if self._hf_path is None and self.config.hf_config is None:
+            raise NotImplementedError(
+                "The model is not loaded from Huggingface, and the `hf_config` property is not implemented, so it cannot be saved in Huggingface format."
+            )
+        finalized_hf_dir = self.wait_async_hf()
+
+        if isinstance(hf_dir, str):
+            hf_dir = Path(hf_dir)
+        tmp_hf_dir = hf_dir.with_name(f"{hf_dir.name}.incomplete")
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        if rank == 0 and tmp_hf_dir.exists():
+            rmtree(tmp_hf_dir)
+        if dist.is_initialized():
+            dist.barrier()
+        tmp_hf_dir.mkdir(parents=True, exist_ok=True)
+        if dist.is_initialized():
+            dist.barrier()
+
+        status_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.{self._async_hf_writer_status_filename(rank, world_size)}"
+        cleanup_done_path = tmp_hf_dir.parent / f"{tmp_hf_dir.name}.cleanup-done"
+        cleanup_hf_dirs = self._pop_async_hf_cleanup_dirs()
+        if rank == 0:
+            cleanup_done_path.unlink(missing_ok=True)
+
+        module_file_to_names: list[tuple[BaseModel, list[tuple[str, list[str]]]]] = []
+        merged_weight_map: dict[str, str] = {}
+        for module, prefix in (
+            (self.language_model, "model-language"),
+            (self.vision_tower, "model-vision"),
+            (self.multi_modal_projector, "model-projector"),
+        ):
+            file_to_names, weight_map = module._prepare_async_hf_snapshot(
+                save_dtype=save_dtype,
+                safetensors_prefix=prefix,
+                device=DEVICE,
+            )
+            module_file_to_names.append((module, file_to_names))
+            merged_weight_map.update(weight_map)
+
+        if hasattr(DEVICE_MODULE, "synchronize"):
+            DEVICE_MODULE.synchronize()
+
+        pid = os.fork()
+        if pid == 0:
+            try:
+                _set_process_qos(
+                    cpu_priority=self.config.hf_save_cfg.cpu_priority,
+                    io_priority=self.config.hf_save_cfg.io_priority,
+                )
+                self._cleanup_async_hf_dirs_before_write(
+                    cleanup_hf_dirs=cleanup_hf_dirs,
+                    cleanup_done_path=cleanup_done_path,
+                    rank=rank,
+                )
+                for module, file_to_names in module_file_to_names:
+                    self._write_async_hf_module_snapshot(hf_dir=tmp_hf_dir, module=module, file_to_names=file_to_names)
+                status = {"rank": rank, "ok": True, "error": "", "weight_map": merged_weight_map}
+                with status_path.open("w") as f:
+                    f.write(json.dumps(status, indent=2))
+                os._exit(0)
+            except Exception as exc:
+                status = {"rank": rank, "ok": False, "error": str(exc), "weight_map": {}}
+                try:
+                    with status_path.open("w") as f:
+                        f.write(json.dumps(status, indent=2))
+                finally:
+                    os._exit(1)
+
+        self._pending_async_hf = {
+            "pid": pid,
+            "hf_dir": hf_dir,
+            "tmp_hf_dir": tmp_hf_dir,
+            "status_path": status_path,
+            "cleanup_done_path": cleanup_done_path,
+        }
+        return finalized_hf_dir
+
+    def _write_async_hf_module_snapshot(
+        self,
+        hf_dir: Path,
+        module: BaseModel,
+        file_to_names: list[tuple[str, list[str]]],
+    ) -> None:
+        for filename, names in file_to_names:
+            tensors: dict[str, torch.Tensor] = {}
+            for name in names:
+                cache_key = (("root", "hf"), ("name", name))
+                cached_tensor = module._async_hf_tensor_cache.get(cache_key)
+                if cached_tensor is None:
+                    raise RuntimeError(f"Missing cached async HF tensor for key: {name}")
+                tensors[name] = cached_tensor
+            module._write_hf_save_plan({"hf_dir": hf_dir, "save_tasks": [(filename, tensors)]})
 
     def scale_and_reduce_grad(self):
         self.language_model.scale_and_reduce_grad()

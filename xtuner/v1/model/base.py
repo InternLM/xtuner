@@ -771,26 +771,11 @@ class BaseModel(nn.Module):
         if rank == 0:
             cleanup_done_path.unlink(missing_ok=True)
 
-        file_to_names: list[tuple[str, list[str]]] = []
-        weight_map: dict[str, str] = {}
-        for safetensor_name, name_list, hf_tensor_list in self._iter_hf_save_chunks(
+        file_to_names, weight_map = self._prepare_async_hf_snapshot(
             save_dtype=save_dtype,
             safetensors_prefix=safetensors_prefix,
             device=DEVICE,
-        ):
-            cached_names: list[str] = []
-            for name, hf_tensor in zip(name_list, hf_tensor_list):
-                cache_key = (("root", "hf"), ("name", name))
-                self._get_or_update_async_hf_cpu_tensor(
-                    hf_tensor,
-                    cache=self._async_hf_tensor_cache,
-                    path=cache_key,
-                )
-                cached_names.append(name)
-                weight_map[name] = safetensor_name
-            if cached_names:
-                file_to_names.append((safetensor_name, cached_names))
-            del hf_tensor_list
+        )
 
         if hasattr(DEVICE_MODULE, "synchronize"):
             DEVICE_MODULE.synchronize()
@@ -830,6 +815,34 @@ class BaseModel(nn.Module):
             "cleanup_done_path": cleanup_done_path,
         }
         return finalized_hf_dir
+
+    def _prepare_async_hf_snapshot(
+        self,
+        save_dtype: torch.dtype = torch.bfloat16,
+        safetensors_prefix: str = "model",
+        device: torch.device | str = DEVICE,
+    ) -> tuple[list[tuple[str, list[str]]], dict[str, str]]:
+        file_to_names: list[tuple[str, list[str]]] = []
+        weight_map: dict[str, str] = {}
+        for safetensor_name, name_list, hf_tensor_list in self._iter_hf_save_chunks(
+            save_dtype=save_dtype,
+            safetensors_prefix=safetensors_prefix,
+            device=device,
+        ):
+            cached_names: list[str] = []
+            for name, hf_tensor in zip(name_list, hf_tensor_list):
+                cache_key = (("root", "hf"), ("name", name))
+                self._get_or_update_async_hf_cpu_tensor(
+                    hf_tensor,
+                    cache=self._async_hf_tensor_cache,
+                    path=cache_key,
+                )
+                cached_names.append(name)
+                weight_map[name] = safetensor_name
+            if cached_names:
+                file_to_names.append((safetensor_name, cached_names))
+            del hf_tensor_list
+        return file_to_names, weight_map
 
     def add_async_hf_cleanup_dirs(self, cleanup_hf_dirs: Sequence[str | Path]) -> None:
         self._async_hf_cleanup_dirs.extend(Path(hf_dir) for hf_dir in cleanup_hf_dirs)
@@ -1845,9 +1858,10 @@ class BaseModel(nn.Module):
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _hf_save_file_lock_path(self, hf_dir: Path, lock_slot: int) -> Path:
-        hf_dir.mkdir(parents=True, exist_ok=True)
+        lock_dir = hf_dir.parent / ".async-hf-save-file-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
         hostname = re.sub(r"[^A-Za-z0-9_.-]", "_", os.uname().nodename)
-        return hf_dir / f".async-hf-save-file-{hostname}-slot-{lock_slot:03d}.lock"
+        return lock_dir / f"async-hf-save-file-{hostname}-slot-{lock_slot:03d}.lock"
 
     @staticmethod
     def _async_hf_writer_status_filename(rank: int, world_size: int) -> str:
