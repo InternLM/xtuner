@@ -16,13 +16,14 @@ from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
 
 
 class MockRolloutState:
-    def __init__(self, id, seq_staleness=1, status=Status.COMPLETED):
+    def __init__(self, id, seq_staleness=1, status=Status.COMPLETED, reward_score=None):
         self.id = id
         self.uid = id
         self.status = status
         self.seq_staleness = seq_staleness
         self.response_ids = []
         self.extra_fields = {}
+        self.reward = {"score": reward_score} if reward_score is not None else None
 
 
 class TestProducer(unittest.IsolatedAsyncioTestCase):
@@ -51,14 +52,18 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         target: int,
         train_step: int = 0,
         consumed: int = 0,
+        producer_future_step: int | None = None,
+        target_upto_future_step: int | None = None,
     ) -> ProduceProgress:
-        return ProduceProgress(
-            next_consumer_step=train_step,
-            producer_future_step=train_step,
-            consumed_samples={task_name: consumed},
-            target_samples={task_name: target},
-            target_upto_future_step=train_step,
+        progress = ProduceProgress.build([task_name])
+        progress.next_consumer_step = train_step
+        progress.producer_future_step = producer_future_step if producer_future_step is not None else train_step
+        progress.consumed_samples[task_name] = consumed
+        progress.target_samples[task_name] = target
+        progress.target_upto_future_step = (
+            target_upto_future_step if target_upto_future_step is not None else train_step
         )
+        return progress
 
     def _build_agent_loop(self, sleep_by_id: dict[int, float] | None = None):
         mock_agent_loop = MagicMock()
@@ -276,6 +281,32 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 1)
         self.assertEqual(await self.replay_buffer.count(task_name, Status.ABORTED), 1)
 
+    async def test_put_generated_group_records_raw_rewards_before_filtering(self):
+        task_name = "test_raw_reward_before_filter"
+
+        def is_valid_sample_fn(samples):
+            return False
+
+        strategy = SyncProduceStrategyConfig(is_valid_sample_fn=is_valid_sample_fn).build()
+        ctx = self._build_context(
+            strategy,
+            task_name,
+            self._build_agent_loop(),
+            self._build_sampler(),
+            batch_size=1,
+        )
+
+        completed_group = [
+            MockRolloutState(1, status=Status.COMPLETED, reward_score=0.25),
+            MockRolloutState(2, status=Status.COMPLETED, reward_score=0.75),
+        ]
+        self.assertFalse(await ctx.put_generated_group(completed_group))
+
+        self.assertEqual([item.status for item in completed_group], [Status.FILTERED, Status.FILTERED])
+        self.assertEqual(ctx.progress.consume_raw_rewards(task_name), (1.0, 2))
+        self.assertEqual(ctx.progress.consume_raw_rewards(task_name), (0.0, 0))
+        self.assertEqual(await self.replay_buffer.count(task_name, Status.FILTERED), 1)
+
     async def test_sync_produce_strategy(self):
         task_name = "test_task"
         mock_agent_loop = self._build_agent_loop({0: 0.0, 1: 0.01})
@@ -389,11 +420,12 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         sampler = self._build_sampler()
         # 该用例验证版本记录顺序，放宽 stale 策略避免在生产入口提前返回。
         strategy = AsyncProduceStrategyConfig(over_sample_threshold=0.0, max_staleness=3).build()
-        progress = ProduceProgress(
-            next_consumer_step=1,
+        progress = self._build_progress(
+            task_name,
+            target=2,
+            train_step=1,
+            consumed=1,
             producer_future_step=2,
-            consumed_samples={task_name: 1},
-            target_samples={task_name: 2},
             target_upto_future_step=2,
         )
 

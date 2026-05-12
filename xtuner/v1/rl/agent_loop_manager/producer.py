@@ -4,7 +4,11 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Protocol, runtime_checkable
+
+
+if TYPE_CHECKING:
+    from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 
 import ray
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,6 +55,8 @@ class ProduceProgress:
     - consumed_samples：各 task 已被 consumer 从 replay buffer 取走的 group 绝对累计数。
     - target_samples：各 task 截至 target_upto_future_step 应生产出的 group 绝对累计目标。
     - target_upto_future_step：target_samples 已覆盖到的最大 future step。
+    - raw_rewards_sum / raw_rewards_count：各 task 自上次 consumer 取 batch 后，producer 实际生成出的
+      completed group reward 统计。filtered group 在过滤前仍按 completed 生成结果计入。
     """
 
     next_consumer_step: int = 1
@@ -58,12 +64,16 @@ class ProduceProgress:
     consumed_samples: dict[str, int] = field(default_factory=dict)
     target_samples: dict[str, int] = field(default_factory=dict)
     target_upto_future_step: int = 0
+    raw_rewards_sum: dict[str, float] = field(default_factory=dict)
+    raw_rewards_count: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def build(cls, task_names: list[str]) -> "ProduceProgress":
         return cls(
             consumed_samples={task_name: 0 for task_name in task_names},
             target_samples={task_name: 0 for task_name in task_names},
+            raw_rewards_sum={task_name: 0.0 for task_name in task_names},
+            raw_rewards_count={task_name: 0 for task_name in task_names},
         )
 
     @classmethod
@@ -80,6 +90,8 @@ class ProduceProgress:
             consumed_samples={task_name: 0 for task_name in task_names},
             target_samples=dict(task_batch_sizes),
             target_upto_future_step=train_step,
+            raw_rewards_sum={task_name: 0.0 for task_name in task_names},
+            raw_rewards_count={task_name: 0 for task_name in task_names},
         )
 
     def ensure_target_upto(
@@ -108,6 +120,17 @@ class ProduceProgress:
         for task_name, count in consumed_counts.items():
             self.consumed_samples[task_name] += count
 
+    def add_raw_rewards(self, task_name: str, rewards_sum: float, rewards_count: int) -> None:
+        self.raw_rewards_sum[task_name] += rewards_sum
+        self.raw_rewards_count[task_name] += rewards_count
+
+    def consume_raw_rewards(self, task_name: str) -> tuple[float, int]:
+        rewards_sum = self.raw_rewards_sum[task_name]
+        rewards_count = self.raw_rewards_count[task_name]
+        self.raw_rewards_sum[task_name] = 0.0
+        self.raw_rewards_count[task_name] = 0
+        return rewards_sum, rewards_count
+
     def finish_consume(self, train_step: int) -> None:
         self.next_consumer_step = train_step + 1
 
@@ -121,6 +144,8 @@ class ProduceProgress:
             "consumed_samples": dict(self.consumed_samples),
             "target_samples": dict(self.target_samples),
             "target_upto_future_step": self.target_upto_future_step,
+            "raw_rewards_sum": dict(self.raw_rewards_sum),
+            "raw_rewards_count": dict(self.raw_rewards_count),
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -132,6 +157,15 @@ class ProduceProgress:
         self.consumed_samples.update(state["consumed_samples"])
         self.target_samples.clear()
         self.target_samples.update(state["target_samples"])
+        task_names = set(self.consumed_samples) | set(self.target_samples)
+        self.raw_rewards_sum.clear()
+        self.raw_rewards_sum.update(
+            {task_name: float(state.get("raw_rewards_sum", {}).get(task_name, 0.0)) for task_name in task_names}
+        )
+        self.raw_rewards_count.clear()
+        self.raw_rewards_count.update(
+            {task_name: int(state.get("raw_rewards_count", {}).get(task_name, 0)) for task_name in task_names}
+        )
 
 
 class ProduceBatchStatus(Enum):
@@ -245,6 +279,17 @@ class ProduceContext:
         # 只有完整生成的 group 才需要业务有效性过滤；ABORTED / EXPIRED 保留原状态供重试或统计。
         is_completed = get_group_status(group) == Status.COMPLETED
         if is_completed:
+            rewards_sum = 0.0
+            rewards_count = 0
+            for item in group:
+                if item.reward is None or "score" not in item.reward:
+                    logger.warning(
+                        f"Missing reward score in item (uid: {item.uid}) of completed group for task {self.task_name}. This item will be skipped in reward statistics."
+                    )
+                    continue
+                rewards_sum += float(item.reward["score"])  # type: ignore[index]
+                rewards_count += 1
+            self.progress.add_raw_rewards(self.task_name, rewards_sum, rewards_count)
             is_valid = self.is_valid_sample_fn(group)
             if not is_valid:
                 for item in group:
@@ -281,7 +326,12 @@ class ProduceStrategyConfig(ABC, BaseModel):
     should_continue_fn: ShouldContinueFn = default_should_continue_fn
 
     @abstractmethod
-    def build(self, *, sync_weights_interval: int = 1) -> "ProduceStrategy": ...
+    def build(
+        self,
+        *,
+        sync_weights_interval: int = 1,
+        rollout_controller: "Optional[RolloutControllerProxy]" = None,
+    ) -> "ProduceStrategy": ...
 
 
 class SyncProduceStrategyConfig(ProduceStrategyConfig):
@@ -306,7 +356,12 @@ class SyncProduceStrategyConfig(ProduceStrategyConfig):
         config = SyncProduceStrategyConfig()
     """
 
-    def build(self, *, sync_weights_interval: int = 1) -> "SyncProduceStrategy":
+    def build(
+        self,
+        *,
+        sync_weights_interval: int = 1,
+        rollout_controller: "Optional[RolloutControllerProxy]" = None,
+    ) -> "SyncProduceStrategy":
         return SyncProduceStrategy(
             is_valid_sample_fn=self.is_valid_sample_fn, should_continue_fn=self.should_continue_fn
         )
@@ -352,7 +407,16 @@ class AsyncProduceStrategyConfig(ProduceStrategyConfig):
     max_staleness: int = Field(default=0, ge=0)
     tail_batch_trigger_size: int = 0
 
-    def build(self, *, sync_weights_interval: int = 1) -> "AsyncProduceStrategy":
+    def build(
+        self,
+        *,
+        sync_weights_interval: int = 1,
+        rollout_controller: "Optional[RolloutControllerProxy]" = None,
+    ) -> "AsyncProduceStrategy":
+        if rollout_controller is not None:
+            import ray
+
+            ray.get(rollout_controller.set_enable_partial_rollout.remote(self.enable_partial_rollout))
         return AsyncProduceStrategy(
             over_sample_threshold=self.over_sample_threshold,
             enable_partial_rollout=self.enable_partial_rollout,

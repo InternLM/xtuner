@@ -264,7 +264,7 @@ class TrainingController:
                 if data["seq_ctx"].pixel_values is not None:
                     free_pixel_value_refs.extend(data["seq_ctx"].pixel_values)
             # if len(free_pixel_value_refs) > 0:
-            #     free_object_refs(free_pixel_value_refs)
+            # free_object_refs(free_pixel_value_refs)
             del packed_data_batches
         return log_infos
 

@@ -227,7 +227,7 @@ class BaseRLTrainerConfig(BaseModel):
     hf_max_keep: int | None = -1
     checkpoint_no_save_optimizer: bool = False
     log_dir: Path | str | None = None
-    seed: int = 66
+    seed: int = 42
     debug_rollout: bool = False
     debug_rollout_dir: Path | str | None = None
     debug_train: bool = False
@@ -704,8 +704,8 @@ class BaseRLTrainer:
         *,
         offload_rollout_before_train: bool = False,
         onload_train_before_train: bool = False,
-        filtered_rewards_sum: float = 0.0,
-        filtered_rewards_count: int = 0,
+        raw_rewards_sum: float = 0.0,
+        raw_rewards_count: int = 0,
     ) -> TrainInfo:
         train_sample_count = sum(len(group) for group in train_batch)
         self.logger.info(f"generate {train_sample_count} samples for training")
@@ -728,8 +728,8 @@ class BaseRLTrainer:
             data_batches, data_info = self._prepare_train_data(
                 train_batch,
                 self._train_worker_cfg.pack_max_length,
-                filtered_rewards_sum=filtered_rewards_sum,
-                filtered_rewards_count=filtered_rewards_count,
+                raw_rewards_sum=raw_rewards_sum,
+                raw_rewards_count=raw_rewards_count,
             )
         self.logger.info(f"Prepared {len(data_batches)} training data batches")
 
@@ -800,8 +800,8 @@ class BaseRLTrainer:
         self,
         data_groups: list[list[RolloutState]],
         pack_max_length: int,
-        filtered_rewards_sum: float = 0.0,
-        filtered_rewards_count: int = 0,
+        raw_rewards_sum: float = 0.0,
+        raw_rewards_count: int = 0,
     ):
         rewards_list = []
         advantages_list = []
@@ -923,11 +923,7 @@ class BaseRLTrainer:
         prompt_len_t = torch.tensor(prompt_len_list).float() if prompt_len_list else torch.tensor([0.0]).float()
         response_len_t = torch.tensor(response_len_list).float() if response_len_list else torch.tensor([0.0]).float()
 
-        for rewards in rewards_list:
-            filtered_rewards_sum += rewards
-            filtered_rewards_count += 1
-
-        raw_rewards_mean = filtered_rewards_sum / filtered_rewards_count if filtered_rewards_count > 0 else 0.0
+        raw_rewards_mean = raw_rewards_sum / raw_rewards_count if raw_rewards_count > 0 else rewards_t.mean().item()
         info_dict = {
             "batch_size": len(rewards_list),
             "rewards/mean": rewards_t.mean().item(),
@@ -1204,8 +1200,8 @@ class RLColocateTrainer(BaseRLTrainer):
                         step_timer_dict,
                         offload_rollout_before_train=True,
                         onload_train_before_train=True,
-                        filtered_rewards_sum=produce_result.filtered_rewards_sum,
-                        filtered_rewards_count=produce_result.filtered_rewards_count,
+                        raw_rewards_sum=produce_result.raw_rewards_sum,
+                        raw_rewards_count=produce_result.raw_rewards_count,
                     )
 
                     weights_synced = self._sync_weights_and_save(train_step, step_timer_dict)
@@ -1386,8 +1382,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
                             train_batch,
                             train_step,
                             step_timer_dict,
-                            filtered_rewards_sum=produce_result.filtered_rewards_sum,
-                            filtered_rewards_count=produce_result.filtered_rewards_count,
+                            raw_rewards_sum=produce_result.raw_rewards_sum,
+                            raw_rewards_count=produce_result.raw_rewards_count,
                         )
                     else:
                         self.logger.info(
