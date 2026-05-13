@@ -499,8 +499,24 @@ class SequenceContext:
         if self.block_table is not None and hasattr(self.block_table, "to"):
             self.block_table = self.block_table.to(device)  # type: ignore
 
-        if self.pixel_values is not None and hasattr(self.pixel_values, "to"):
-            self.pixel_values = self.pixel_values.to(device)  # type: ignore
+        #################################################################################################
+        # Background:
+        # `Trainer.fit` performs sequence-parallel slicing of the inputs. For text-only training this is
+        # straightforward — just slice `input_ids`. For VL training, however, splitting `pixel_values` is
+        # model-aware, so we deliberately do not slice it inside `SequenceContext`; the model handles it
+        # downstream in its forward pass.
+
+        # Given that, although `trainer` never slices `pixel_values`, it still calls `.to(device)` on it.
+        # Because `pixel_values` here is the full, un-sliced tensor, image/video-heavy batches trigger a
+        # single huge H2D — empirically up to 4–5 GB per step — which hurts both peak memory and step
+        # time significantly. So we intentionally skip the device move here and keep `pixel_values` on
+        # CPU; the model is responsible for moving its own slice to device after the SP split.
+
+        # TODO: hardcoding this is obviously not a great fix. Leaving it to the next person to do better.
+
+        # if self.pixel_values is not None and hasattr(self.pixel_values, "to"):
+        #     self.pixel_values = self.pixel_values.to(device)  # type: ignore
+        #################################################################################################
 
         if self.inputs_embeds is not None and hasattr(self.inputs_embeds, "to"):
             self.inputs_embeds = self.inputs_embeds.to(device)  # type: ignore
