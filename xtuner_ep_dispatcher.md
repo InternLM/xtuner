@@ -181,6 +181,36 @@ dispatched["tokens_per_expert_group"]:    [EP, E_local] = [2, 3]
 
 在这个例子里两个 rank 都是 `M_recv=8`，但真实训练里不保证均匀。
 
+### 2.1 变长 all2all 的 host metadata 同步
+
+上面的 `input_splits` / `output_splits` 在真实 `TorchAll2AllDispatcher` 中不是纯 GPU metadata。
+当前实现会先在 GPU 上统计和交换每个 expert 的 token 数，然后把 split sizes 拉回 CPU：
+
+```python
+tokens_per_expert = torch.histc(topk_ids, bins=n_routed_experts, min=0, max=n_routed_experts)
+dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert, group=process_group)
+
+input_splits = (
+    tokens_per_expert.reshape(ep_size, num_experts_per_rank)
+    .to(device=torch.device("cpu"))
+    .sum(dim=1)
+    .tolist()
+)
+output_splits = tokens_per_expert_group.to(device=torch.device("cpu")).sum(dim=-1).tolist()
+```
+
+这一步会形成 CPU/host 同步点，因为 PyTorch 变长 `all_to_all_single` 需要 Python `list[int]` 形式的
+`input_split_sizes` / `output_split_sizes`。也就是说，EP-only 的 `async_op=True` 并不是“完全无 host 同步”：
+
+- 大块 hidden 的 EP all2all 会被放到 dispatcher 的通信流中，并由 CUDA event 串依赖。
+- 但在真正发起大块 hidden all2all 之前，host 需要等 token count 交换完成并拿到 split list。
+- `combine` 会复用 dispatch 阶段保存的 `input_splits` / `output_splits`，通常不会再新增同类 split-size 同步。
+
+这个细节对 Domino EP 的计算通信重叠很重要。host 等 split list 时，已经 enqueue 到 GPU 的另一个 micro batch
+计算仍然可以继续执行；但 host 不能继续 enqueue 后续的 `dispatch_postprocess -> expert -> combine_preprocess`
+或下一个 dispatch。如果 split-size 同步能被另一个 micro batch 的 attention/gate/pre-dispatch 覆盖，7.3 中的
+流水基本成立；如果同步时间更长，就会吃掉一部分甚至全部重叠窗口。
+
 ## 3. `dispatch_postprocess`: destination rank 内按 local expert 再排序
 
 all2all 后的顺序是：
@@ -306,6 +336,10 @@ input_split_sizes  = dispatched["output_splits"]
 output_split_sizes = dispatched["input_splits"]
 ```
 
+这里没有重新统计 token，也不会再把新的 split tensor 拉回 CPU；它依赖第一次 dispatch 已经确定的
+source/destination 分片关系。因此对于 `TorchAll2AllDispatcher`，前向中最主要的 host metadata 同步点在第一次
+dispatch，而不是 combine。
+
 对 source `ep0` 来说，它会收回自己原来发出去的 8 个 token copy 输出：
 
 ```text
@@ -398,3 +432,36 @@ router_weights: [N, E]
 
 第二次 `post_dispatched["row_ids_map"] [M_recv]` 是 destination EP rank 上第二次 `permute` 产生的还原 map，
 语义相同（scatter，1D indices 无 topk 展开），只负责 expert 计算后恢复 source-block 顺序，方便反向 all2all。
+
+## DeepEP dispatcher 的对应差异
+
+`DeepEPDispatcher` 使用 DeepEP 的 `Buffer.get_dispatch_layout()` / `Buffer.dispatch()` / `Buffer.combine()` 来管理
+layout、通信 handle 和事件。它不像 `TorchAll2AllDispatcher` 那样显式执行：
+
+```python
+to(device=torch.device("cpu")).tolist()
+```
+
+但它仍然存在 host 可见的 metadata 准备点。`xtuner/v1/ops/comm/deepep_op.py::dispatch_forward()` 中已经注明：
+
+```python
+# NOTES: the CPU will wait for GPU's signal to arrive,
+# so this is not compatible with CUDA graph
+```
+
+DeepEP dispatch 会返回：
+
+```python
+num_recv_tokens_per_expert_list, handle, event
+```
+
+其中 `num_recv_tokens_per_expert_list` 是 Python list，`dispatch_postprocess` 需要用它计算 `num_out_tokens` 和
+`tokens_per_expert`。因此 DeepEP 也不是完全没有 host 同步；只是同步被 DeepEP 的 layout/dispatch handle 机制封装
+在库内部，不是 PyTorch split-size list 的 `.tolist()` 同步。
+
+对 Domino EP 来说，两者的影响边界一致：
+
+- 已经 enqueue 到 GPU 的另一个 micro batch 计算不会被 host 同步打断。
+- host 等 metadata 时无法继续 enqueue 后续本地算子和通信。
+- 如果 metadata 等待短于可覆盖的另一个 micro batch 计算，重叠效果基本保留。
+- 如果 metadata 等待更长，`xtuner_ep_domino.md` 7.3 中的理想时间线会被压缩，真实重叠比例下降。
