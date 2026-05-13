@@ -143,6 +143,10 @@ training_sample_params = SampleParams(
 agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=training_sample_params,
+    external_cpu=CPUActorPoolConfig(
+        num_actors=1,
+        num_cpus_per_actor=1,
+    ),
 )
 produce_strategy_config = AsyncProduceStrategyConfig(
     over_sample_threshold = 0.8,
@@ -185,6 +189,10 @@ evaluation_sample_params = SampleParams(
 eval_agent_loop_config = SingleTurnAgentLoopConfig(
     hf_checkpoint=model_path,
     sample_params=evaluation_sample_params,
+    # external_cpu=CPUActorPoolConfig(
+    #     num_actors=4,
+    #     num_cpus_per_actor=1,
+    # ),
 )
 eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
     tasks=TaskSpecConfig(
