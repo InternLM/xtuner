@@ -103,14 +103,18 @@ Judger 负责给 rollout response 写入 reward。GSM8K 可以直接使用 {clas
 ```{code-block} python
 :caption: 配置 GSM8K judger
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
+from xtuner.v1.rl.utils import CPUActorPoolConfig
 
 judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    num_ray_actors=1,
+    external_cpu=CPUActorPoolConfig(
+        num_actors=1,
+        num_cpus_per_actor=1,
+    ),
 )
 ```
 
-`judger_name` 需要和样本中的 `data_source` 对应。打分后，训练流程会从 `RolloutState.reward["score"]` 读取分数并计算 advantage。
+`judger_name` 需要和样本中的 `data_source` 对应。`external_cpu` 表示该 Judger 使用 PG 外 Ray CPU actor 执行打分；如果不配置 `external_cpu`，Judger 会在本地执行。打分后，训练流程会从 `RolloutState.reward["score"]` 读取分数并计算 advantage。
 
 ### 1.4 AgentLoopConfig 和 AgentLoopManagerConfig
 

@@ -25,15 +25,15 @@ Sampler -> list[RolloutState]
 整体关系如下：
 
 ```text
-                           ┌─────────────────────────────┐
-                           │       AgentLoopConfig        │
-                           │ hf_checkpoint, sample_params │
-                           │ num_ray_actors, resources    │
-                           └──────────────┬──────────────┘
-                                          │ build(...)
-             ┌────────────────────────────┼────────────────────────────┐
-             │                            │                            │
-  num_ray_actors = 0           num_ray_actors = 1           num_ray_actors > 1
+	                           ┌─────────────────────────────┐
+	                           │       AgentLoopConfig        │
+	                           │ hf_checkpoint, sample_params │
+	                           │ external_cpu                 │
+	                           └──────────────┬──────────────┘
+	                                          │ build(...)
+	             ┌────────────────────────────┼────────────────────────────┐
+	             │                            │                            │
+	    external_cpu = None       external_cpu.num_actors = 1  external_cpu.num_actors > 1
              │                            │                            │
              ▼                            ▼                            ▼
    ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐
