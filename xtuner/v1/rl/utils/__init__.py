@@ -1,14 +1,4 @@
 from .async_utils import asyncio_run, create_task, handle_task_exception
-from .external_cpu import (
-    CPUActorPoolAllocation,
-    CPUActorPoolConfig,
-    CPUResourceManager,
-    CPUResourceManagerConfig,
-    clear_cpu_resource_manager,
-    format_cpu_resource_manager_uninitialized_error,
-    get_cpu_resource_manager,
-    set_cpu_resource_manager,
-)
 from .misc import (
     BetweenNode,
     BetweenOperator,
@@ -30,6 +20,24 @@ from .misc import (
     parse_query,
     sort_rollout_state_for_deterministic,
 )
+from .ray_accelerator_worker import (
+    AcceleratorResourcesConfig,
+    AutoAcceleratorWorkers,
+    SingleAcceleratorWorker,
+)
+from .ray_cpu_worker import (
+    AutoCPUWorkers,
+    BaseCPUWorker,
+    CPUActorLauncher,
+    CPUResourceAllocation,
+    CPUResourceManager,
+    CPUResourceManagerConfig,
+    CPUResourcesConfig,
+    clear_cpu_resource_manager,
+    format_cpu_resource_manager_uninitialized_error,
+    get_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 from .ray_utils import (
     bind_train_rollout,
     clear_rollout_response_for_rerun,
@@ -39,15 +47,6 @@ from .ray_utils import (
     get_accelerator_ids,
     get_ray_accelerator,
     register_cleanup,
-)
-from .ray_worker import (
-    AcceleratorResourcesConfig,
-    AutoAcceleratorWorkers,
-    AutoCPUWorkers,
-    BaseCPUWorker,
-    CPUActorLauncher,
-    CPUResourcesConfig,
-    SingleAcceleratorWorker,
 )
 
 
@@ -59,8 +58,7 @@ __all__ = [
     "CPUActorLauncher",
     "BaseCPUWorker",
     "AutoCPUWorkers",
-    "CPUActorPoolAllocation",
-    "CPUActorPoolConfig",
+    "CPUResourceAllocation",
     "CPUResourceManager",
     "CPUResourceManagerConfig",
     "clear_cpu_resource_manager",

@@ -58,11 +58,11 @@
 ```text
 JudgerConfig
   ├─ external_cpu = None  ──► NativeJudger
-  └─ external_cpu = CPUActorPoolConfig(...)
-       ├─ num_actors = 1  ──► RemoteJudger
+  └─ external_cpu = CPUResourcesConfig(...)
+       ├─ num_workers = 1  ──► RemoteJudger
        │                        └─ JudgerActor
        │                             └─ NativeJudger
-       └─ num_actors > 1  ──► JudgerPool
+       └─ num_workers > 1  ──► JudgerPool
                                ├─ RemoteJudger -> JudgerActor -> NativeJudger
                                ├─ RemoteJudger -> JudgerActor -> NativeJudger
                                └─ ...
@@ -74,15 +74,15 @@ ComposedJudgerConfig
        └─ select_fn + merge_fn 控制路由和合并
 ```
 
-普通 `JudgerConfig` 根据 `external_cpu` 决定执行模式。`external_cpu` 表示 PG 外 Ray CPU actor pool 的资源需求，类型为 `CPUActorPoolConfig`：
+普通 `JudgerConfig` 根据 `external_cpu` 决定执行模式。`external_cpu` 表示 PG 外 Ray CPU worker 的资源需求，类型为 `CPUResourcesConfig`：
 
 | 配置 | 构建结果 | 含义 |
 | --- | --- | --- |
 | `external_cpu = None` | `NativeJudger` | 本地执行，不启动 Ray Judger actor |
-| `external_cpu=CPUActorPoolConfig(num_actors=1, ...)` | `RemoteJudger -> JudgerActor -> NativeJudger` | 单个 Ray actor 执行打分 |
-| `external_cpu=CPUActorPoolConfig(num_actors>1, ...)` | `JudgerPool` | 多个 Ray actor 副本并发打分 |
+| `external_cpu=CPUResourcesConfig(num_workers=1, ...)` | `RemoteJudger -> JudgerActor -> NativeJudger` | 单个 Ray actor 执行打分 |
+| `external_cpu=CPUResourcesConfig(num_workers>1, ...)` | `JudgerPool` | 多个 Ray actor 副本并发打分 |
 
-`CPUActorPoolConfig.memory_per_actor` 默认是 `1024**3`，通常不需要额外配置。PG 外 CPU actor 资源会注册到全局 `CPUResourceManager`，资源不足时会在组件构建阶段报错，避免 Ray actor 长时间 pending。
+`CPUResourcesConfig.cpu_memory_per_worker` 默认是 `1024**3`，通常不需要额外配置。PG 外 CPU actor 资源会注册到全局 `CPUResourceManager`，资源不足时会在组件构建阶段报错，避免 Ray actor 长时间 pending。
 
 `ComposedJudgerConfig` 用于多分支场景：一个样本可以按 `select_fn` 路由到不同 Judger，也可以同时运行多个 Judger，再用 `merge_fn` 合并结果。
 
@@ -325,12 +325,12 @@ class ToolJudgerConfig(JudgerConfig):
 之后仍可通过 `external_cpu` 控制本地或 Ray actor 模式：
 
 ```python
-from xtuner.v1.rl.utils import CPUActorPoolConfig
+from xtuner.v1.rl.utils import CPUResourcesConfig
 
 judger_config = ToolJudgerConfig(
-    external_cpu=CPUActorPoolConfig(
-        num_actors=4,
-        num_cpus_per_actor=1,
+    external_cpu=CPUResourcesConfig(
+        num_workers=4,
+        num_cpus_per_worker=1,
     ),
 )
 judger = judger_config.build()
@@ -344,13 +344,13 @@ judger = judger_config.build()
 from xtuner.v1.rl.agent_loop import SingleTurnAgentLoopConfig
 from xtuner.v1.rl.agent_loop_manager import TaskSpecConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
-from xtuner.v1.rl.utils import CPUActorPoolConfig
+from xtuner.v1.rl.utils import CPUResourcesConfig
 
 judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    external_cpu=CPUActorPoolConfig(
-        num_actors=1,
-        num_cpus_per_actor=1,
+    external_cpu=CPUResourcesConfig(
+        num_workers=1,
+        num_cpus_per_worker=1,
     ),
 )
 

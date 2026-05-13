@@ -110,13 +110,13 @@ XTuner provides ready-made judges for GSM8K. You can use the example code direct
 ```{code-block} python
 :caption: Configure Reward Model
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
-from xtuner.v1.rl.utils import CPUActorPoolConfig
+from xtuner.v1.rl.utils import CPUResourcesConfig
 
 judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    external_cpu=CPUActorPoolConfig(
-        num_actors=1,
-        num_cpus_per_actor=1,
+    external_cpu=CPUResourcesConfig(
+        num_workers=1,
+        num_cpus_per_worker=1,
     ),
 )
 ```

@@ -31,7 +31,7 @@ def _build_replicated_judger(config: JudgerConfig) -> Judger:
 
     if external_cpu_allocation is None:
         return config.build_local()
-    if external_cpu_allocation.num_actors == 1:
+    if external_cpu_allocation.num_workers == 1:
         return config._build_remote_judger(external_cpu_allocation=external_cpu_allocation)
     return JudgerPool(
         replicas=config._build_remote_judgers(external_cpu_allocation=external_cpu_allocation),

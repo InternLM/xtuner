@@ -12,7 +12,7 @@ from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLQwen3VLTokenizeFnConfig
 from xtuner.v1.model.compose.qwen3_vl import Qwen3VLDense8BConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUActorPoolConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GEO3KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
@@ -68,7 +68,7 @@ rollout_config = RolloutConfig(
 
 # 3. judger
 judger_config = GEO3KJudgerConfig(
-    external_cpu=CPUActorPoolConfig(num_actors=1, num_cpus_per_actor=1),
+    external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
 )
 
 # 4. train worker

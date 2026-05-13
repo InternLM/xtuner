@@ -9,7 +9,7 @@ from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import (
     AcceleratorResourcesConfig,
     AutoAcceleratorWorkers,
-    CPUActorPoolConfig,
+    CPUResourcesConfig,
     CPUResourceManager,
     clear_cpu_resource_manager,
     set_cpu_resource_manager,
@@ -97,7 +97,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
         judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            external_cpu=CPUActorPoolConfig(num_actors=1, num_cpus_per_actor=1),
+            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
@@ -142,12 +142,12 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
         judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            external_cpu=CPUActorPoolConfig(num_actors=1, num_cpus_per_actor=1),
+            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,
             sample_params=SampleParams(max_tokens=self.max_response_length, temperature=0.0),
-            external_cpu=CPUActorPoolConfig(num_actors=1, num_cpus_per_actor=1),
+            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
 
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
@@ -188,7 +188,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         )
         judger_config = GSM8KJudgerConfig(
             judger_name="openai/gsm8k",
-            external_cpu=CPUActorPoolConfig(num_actors=1, num_cpus_per_actor=1),
+            external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
         )
         agent_loop_cfg = SingleTurnAgentLoopConfig(
             hf_checkpoint=self.model_path,

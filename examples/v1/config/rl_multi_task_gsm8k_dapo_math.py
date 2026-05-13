@@ -42,7 +42,7 @@ from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import WorkerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUActorPoolConfig, get_eos_token
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUResourcesConfig, get_eos_token
 from xtuner.v1.train.rl_trainer import RLColocateTrainerConfig
 
 work_dir = os.environ["WORK_DIR"]
@@ -98,7 +98,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 eos_token_str = tokenizer.convert_ids_to_tokens(eos_token_id)
 judger_config = DapoMathJudgerConfig(
     judger_name="dapo_math",
-    external_cpu=CPUActorPoolConfig(num_actors=1, num_cpus_per_actor=1),
+    external_cpu=CPUResourcesConfig(num_workers=1, num_cpus_per_worker=1),
     eos_token=eos_token_str,
     enable_overlong_buffer=True,
     max_response_len=max_response_length,

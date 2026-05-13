@@ -33,7 +33,7 @@ Sampler -> list[RolloutState]
 	                                          │ build(...)
 	             ┌────────────────────────────┼────────────────────────────┐
 	             │                            │                            │
-	    external_cpu = None       external_cpu.num_actors = 1  external_cpu.num_actors > 1
+	    external_cpu = None       external_cpu.num_workers = 1  external_cpu.num_workers > 1
              │                            │                            │
              ▼                            ▼                            ▼
    ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐
