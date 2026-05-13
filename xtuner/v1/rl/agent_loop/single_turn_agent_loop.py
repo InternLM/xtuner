@@ -6,10 +6,40 @@ from xtuner.v1.rl.rollout import RolloutController
 from xtuner.v1.rl.utils import create_task
 
 from .agent_loop import AgentLoop, AgentLoopConfig
-from .utils import PartialRolloutHandler
 
 
 class SingleTurnAgentLoopConfig(AgentLoopConfig):
+    """Configuration for the built-in single-turn agent loop.
+
+    ``SingleTurnAgentLoopConfig`` runs one model generation for each input
+    ``RolloutState`` and optionally sends the completed output to a judger. It
+    is the default choice for math, QA, and other single-response RL tasks.
+
+    Args:
+        sample_params (SampleParams): Sampling parameters used by the rollout
+            backend, such as temperature and maximum generation length.
+        hf_checkpoint (str): Hugging Face checkpoint path used to identify the
+            policy checkpoint for the agent loop.
+        num_ray_actors (int): Number of Ray actor replicas for this agent loop.
+            ``0`` runs the loop in local mode. Defaults to 0.
+        num_cpus (float): CPU cores requested by each AgentLoop Ray actor.
+            Ignored in local mode. Defaults to 1.
+        cpu_memory (int): CPU memory in bytes requested by each AgentLoop Ray
+            actor. Ignored in local mode. Defaults to 1 GiB.
+        enable_batch_judge (bool): Whether to judge a generated group in one
+            batch in ``generate_group``. Defaults to False.
+
+    **Examples:**
+
+    Example configuration for a single-turn task::
+
+        config = SingleTurnAgentLoopConfig(
+            sample_params=SampleParams(max_tokens=1024, temperature=1.0),
+            hf_checkpoint="Qwen/Qwen3-8B",
+            enable_batch_judge=True,
+        )
+    """
+
     enable_batch_judge: bool = False
 
     def build_local(self, rollout_controller, judger: Judger | None = None, logger=None) -> "SingleTurnAgentLoop":
@@ -34,8 +64,6 @@ class SingleTurnAgentLoop(AgentLoop):
         enable_batch_judge: bool = False,
     ):
         super().__init__(rollout_ctl, sample_params, hf_checkpoint, judger, logger)
-        self.max_tokens = self.sample_params.max_tokens
-        self.partial_rollout_handler = PartialRolloutHandler(max_tokens=self.max_tokens)
         self.enable_batch_judge = enable_batch_judge
 
     async def generate_sample(
@@ -43,17 +71,11 @@ class SingleTurnAgentLoop(AgentLoop):
         rollout_state: RolloutState,
         **kwargs,
     ) -> RolloutState:
-        enable_partial_rollout = kwargs.get("enable_partial_rollout", False)
-
-        # rollout state 预处理, enable_partial_rollout = True 会在这里拼接 token 和修正 max_token
-        rollout_state = self.partial_rollout_handler.preprocess(rollout_state, enable_partial_rollout)
         if not rollout_state.tokens:
             rollout_state.tokens = rollout_state.prompt_ids
 
         # 推理引擎generate, 生成的结果会覆盖到 rollout_state.response_ids 上
         rollout_state = await self.rollout_ctl.generate.remote(rollout_state)  # type: ignore[attr-defined]
-        # rollout state 后处理: 合并 partial rollout 的历史上下文
-        rollout_state = self.partial_rollout_handler.postprocess(rollout_state)
         # 非 COMPLETED 状态（如被截断、放弃等）直接早退，不触发打分
         if rollout_state.status != Status.COMPLETED:
             return rollout_state

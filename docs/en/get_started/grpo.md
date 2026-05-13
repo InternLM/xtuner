@@ -107,7 +107,7 @@ After training is completed, the model weights optimized by reinforcement learni
 
 ```{hint}
 Want to learn more about detailed configuration and customization process of RL training?
-- [Customize GRPO Training Using Python Code](../rl/tutorial/rl_grpo_trainer.rst)
+- [Customize GRPO Training Using Python Code](../rl/tutorial/rl_grpo_trainer.md)
 - [RL Trainer Detailed Explanation](../api/rl_trainer.rst)
 - [RL Training Configuration Detailed Explanation](../api/rl_config.rst)
 ```

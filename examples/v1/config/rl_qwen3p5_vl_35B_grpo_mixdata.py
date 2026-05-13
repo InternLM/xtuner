@@ -28,6 +28,14 @@ def _as_list(value):
 work_dir = os.environ["WORK_DIR"]
 model_path = os.environ["MODEL_PATH"]
 meta_data_path = os.environ["DATA_PATH"]
+eval_data_path = os.environ.get("EVAL_DATA_PATH", "")
+eval_media_root = os.environ.get("EVAL_MEDIA_ROOT", "")
+
+debug_rollout_dir = os.environ.get("DEBUG_ROLLOUT_DIR", "")
+debug_train = os.environ.get("DEBUG_TRAIN", False)
+debug_rollout = os.environ.get("DEBUG_ROLLOUT", False)
+
+enable_evaluate = eval_data_path is not None and eval_data_path != ""
 
 # basic settings
 experimental_name = "grpo_mix_data"
@@ -86,7 +94,6 @@ with open(meta_data_path, "r", encoding="utf-8") as f:
     ds_collections = json.load(f)
 
 train_dataset_cfg = []
-eval_dataset_cfg = []
 for name, data in ds_collections.items():
     annotations = _as_list(data["annotation"])
     for annotation in annotations:
@@ -104,27 +111,39 @@ for name, data in ds_collections.items():
                     max_length=max_prompt_length,
                     system_message=data.get("system_message", None),
                     chat_template="qwen3.5-vl",
+                    add_generation_prompt=True,
+                    enable_thinking=True,
                 ),
             }
         )
-        eval_dataset_cfg.append(
-            {
-                "dataset": DatasetConfig(
-                    name=name,
-                    anno_path=annotation,
-                    media_root=data.get("media_root", ""),
-                    sample_ratio=data.get("sample_ratio", 1.0),
-                    class_name="VLMJsonlDataset",
-                ),
-                "tokenize_fn": RLQwen3VLTokenizeFnConfig(
-                    processor_path=model_path,
-                    max_length=max_prompt_length,
-                    system_message=data.get("system_message", None),
-                    chat_template="qwen3.5-vl",
-                    ignore_multimodal_info=True,
-                ),
-            }
-        )
+
+if enable_evaluate:
+    eval_dataset_cfg = [
+        {
+            "dataset": DatasetConfig(
+                name=f"{experimental_name}_eval",
+                anno_path=eval_data_path,
+                media_root=eval_media_root,
+                sample_ratio=1.0,
+                class_name="VLMJsonlDataset",
+            ),
+            "tokenize_fn": RLQwen3VLTokenizeFnConfig(
+                processor_path=model_path,
+                max_length=max_prompt_length,
+                chat_template="qwen3.5-vl",
+                add_generation_prompt=True,
+                enable_thinking=True,
+                ignore_multimodal_info=True,
+            ),
+        }
+    ]
+    eval_dataloader_cfg = DataloaderConfig(
+        dataset_config_list=eval_dataset_cfg,
+        num_workers=8,
+        collator="fake_collator",
+        pack_level="none",
+        pack_max_length=pack_max_length,
+    )
 
 dataloader_cfg = DataloaderConfig(
     dataset_config_list=train_dataset_cfg,
@@ -133,13 +152,7 @@ dataloader_cfg = DataloaderConfig(
     pack_level="none",
     pack_max_length=pack_max_length,
 )
-eval_dataloader_cfg = DataloaderConfig(
-    dataset_config_list=eval_dataset_cfg,
-    num_workers=8,
-    collator="fake_collator",
-    pack_level="none",
-    pack_max_length=pack_max_length,
-)
+
 
 # 4. judger
 tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -210,18 +223,23 @@ agent_loop_manager_cfg = AgentLoopManagerConfig(
     ),
 )
 
-eval_agent_loop_config = SingleTurnAgentLoopConfig(
-    hf_checkpoint=model_path,
-    sample_params=evaluation_sample_params,
-)
-eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
-    tasks=TaskSpecConfig(
-        task_name="eval_task",
-        agent_loop_config=eval_agent_loop_config,
-        judger_config=judger_config,
-        sampler_config=SamplerConfig(dataloader_cfg=eval_dataloader_cfg, prompt_repeat_k=1),
-    ),
-)
+if enable_evaluate:
+    eval_agent_loop_config = SingleTurnAgentLoopConfig(
+        hf_checkpoint=model_path,
+        sample_params=evaluation_sample_params,
+    )
+    eval_agent_loop_manager_cfg = AgentLoopManagerConfig(
+        tasks=TaskSpecConfig(
+            task_name="eval_task",
+            agent_loop_config=eval_agent_loop_config,
+            judger_config=judger_config,
+            sampler_config=SamplerConfig(dataloader_cfg=eval_dataloader_cfg, prompt_repeat_k=1),
+        ),
+    )
+    enable_evaluate=True
+else:
+    eval_agent_loop_manager_cfg = None
+    enable_evaluate=False
 
 # 7. trainer
 trainer = RLColocateTrainerConfig(
@@ -237,9 +255,12 @@ trainer = RLColocateTrainerConfig(
     total_epochs=total_epochs,
     train_batch_size=global_batch_size,
     advantage_estimator_config=GRPOAdvantageConfig(eps=1e-8),
-    enable_evaluate=False,
+    enable_evaluate=enable_evaluate,
     enable_initial_evaluate=False,
     evaluate_step=1,
     work_dir=work_dir,
     hf_interval=hf_interval,
+    debug_rollout_dir=debug_rollout_dir,
+    debug_train=debug_train,
+    debug_rollout=debug_rollout,
 )

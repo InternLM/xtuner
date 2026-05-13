@@ -10,7 +10,13 @@ import ray
 import torch
 from pydantic import BaseModel, ConfigDict
 
-from xtuner.v1.data_proto.rl_data import RolloutState, Status, refresh_seq_staleness, update_group_status
+from xtuner.v1.data_proto.rl_data import (
+    RolloutState,
+    Status,
+    get_group_status,
+    refresh_seq_staleness,
+    update_sample_version,
+)
 from xtuner.v1.rl.utils import (
     BetweenNode,
     ConditionNode,
@@ -27,6 +33,19 @@ from xtuner.v1.utils import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def maybe_expire_group(group: list[RolloutState], stale_threshold: int) -> None:
+    if stale_threshold <= 0:
+        raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
+
+    group_status = get_group_status(group)
+    if group_status not in (Status.COMPLETED, Status.ABORTED):
+        return
+    if any(getattr(sample, "seq_staleness", 0) >= stale_threshold for sample in group):
+        # 生成结果入库前统一做过期翻转，后续存储逻辑只按最终 group status 分类。
+        for sample in group:
+            sample.status = Status.EXPIRED
 
 
 @dataclass
@@ -431,10 +450,26 @@ class ReplayBuffer:
         self._storage = storage_backend
         self._lock = asyncio.Lock()
 
-    async def put(self, items: list[RolloutState], task_name: str) -> None:
+    async def put(
+        self,
+        items: list[RolloutState],
+        task_name: str,
+        *,
+        model_step: int | None = None,
+        current_train_step: int | None = None,
+        stale_threshold: int | None = None,
+    ) -> None:
         if not items:
             return
-        status = update_group_status(items)
+        if model_step is not None:
+            for item in items:
+                update_sample_version(item, model_step)
+        if current_train_step is not None:
+            refresh_seq_staleness(items, current_train_step)
+        if stale_threshold is not None:
+            maybe_expire_group(items, stale_threshold)
+
+        status = get_group_status(items)
         if status == Status.EXPIRED:
             for item in items:
                 clear_rollout_response_for_rerun(item)
@@ -463,42 +498,94 @@ class ReplayBuffer:
 
     async def refresh_staleness(
         self,
-        task_name: str,
+        *,
+        task_stale_thresholds: dict[str, int],
         current_train_step: int,
-        stale_threshold: int,
         statuses: list[Status] | None = None,
-    ) -> int:
+    ) -> dict[str, int]:
         # 刷新可复用样本的 staleness；completed / aborted 都可能来自旧权重，需要按 train_step 淘汰。
-        if stale_threshold <= 0:
-            raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
+        for task_name, stale_threshold in task_stale_thresholds.items():
+            if stale_threshold <= 0:
+                raise ValueError(f"stale_threshold must be positive, got {stale_threshold}.")
         if statuses is None:
             statuses = [Status.COMPLETED, Status.ABORTED]
-        query_dsl: QueryDict = {
-            "$and": [
-                {"task_name": task_name},
-                {"status": {"$in": statuses}},
-            ]
-        }
+        expired_counts: dict[str, int] = {}
         async with self._lock:
-            records = await self._storage.get(query_dsl)
             updated_records: list[StorageItem] = []
-            expired_count = 0
-            for record in records:
-                refresh_seq_staleness(record.item, current_train_step)
-                staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
-                should_expire = any(getattr(item, "seq_staleness", 0) >= stale_threshold for item in record.item)
-                if should_expire:
-                    # completed / aborted 样本超过 step 级阈值时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
-                    for item in record.item:
-                        clear_rollout_response_for_rerun(item)
-                        item.status = Status.EXPIRED
-                    status = Status.EXPIRED
-                    expired_count += 1
-                else:
-                    status = update_group_status(record.item)
-                updated_records.append(replace(record, status=status, staleness=staleness))
+            for task_name, stale_threshold in task_stale_thresholds.items():
+                query_dsl: QueryDict = {
+                    "$and": [
+                        {"task_name": task_name},
+                        {"status": {"$in": statuses}},
+                    ]
+                }
+                records = await self._storage.get(query_dsl)
+                expired_count = 0
+                for record in records:
+                    refresh_seq_staleness(record.item, current_train_step)
+                    staleness = max((getattr(item, "seq_staleness", 0) for item in record.item), default=0)
+                    should_expire = any(getattr(item, "seq_staleness", 0) >= stale_threshold for item in record.item)
+                    if should_expire:
+                        # completed / aborted 样本超过 step 级阈值时整组翻转，后续 sampler 可按 EXPIRED 重新取样。
+                        for item in record.item:
+                            clear_rollout_response_for_rerun(item)
+                            item.status = Status.EXPIRED
+                        status = Status.EXPIRED
+                        expired_count += 1
+                    else:
+                        status = get_group_status(record.item)
+                    updated_records.append(replace(record, status=status, staleness=staleness))
+                expired_counts[task_name] = expired_count
             await self._storage.update(updated_records)
-            return expired_count
+        return expired_counts
+
+    async def is_ready(
+        self,
+        task_batch_sizes: dict[str, int],
+        *,
+        group_status: Status = Status.COMPLETED,
+    ) -> bool:
+        async with self._lock:
+            for task_name, batch_size in task_batch_sizes.items():
+                if batch_size <= 0:
+                    continue
+                query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": group_status}]}
+                if await self._policy.count(query_dsl, self._storage) < batch_size:
+                    return False
+        return True
+
+    async def take_batch(
+        self,
+        task_batch_sizes: dict[str, int],
+        *,
+        group_status: Status = Status.COMPLETED,
+    ) -> tuple[dict[str, list[list[RolloutState]]], dict[str, int]]:
+        batch_by_task: dict[str, list[list[RolloutState]]] = {}
+        consumed_counts: dict[str, int] = {}
+        async with self._lock:
+            for task_name, batch_size in task_batch_sizes.items():
+                if batch_size <= 0:
+                    batch_by_task[task_name] = []
+                    consumed_counts[task_name] = 0
+                    continue
+                query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": group_status}]}
+                task_batch = await self._policy.get(batch_size, query_dsl, self._storage)
+                batch_by_task[task_name] = task_batch
+                consumed_counts[task_name] = len(task_batch)
+        return batch_by_task, consumed_counts
+
+    async def count_statuses(
+        self,
+        task_names: list[str],
+        statuses: list[Status],
+    ) -> dict[str, dict[Status, int]]:
+        counts: dict[str, dict[Status, int]] = {task_name: {} for task_name in task_names}
+        async with self._lock:
+            for task_name in task_names:
+                for status in statuses:
+                    query_dsl: QueryDict = {"$and": [{"task_name": task_name}, {"status": status}]}
+                    counts[task_name][status] = await self._policy.count(query_dsl, self._storage)
+        return counts
 
     def __len__(self) -> int:
         return len(self._storage)
@@ -537,6 +624,22 @@ class ReplayBuffer:
 
 
 class SyncReplayBufferConfig(BaseModel):
+    """Configuration for the synchronous replay buffer.
+
+    The synchronous replay buffer uses FIFO replay policy and in-memory native
+    Python storage. It is intended for on-demand rollout production where
+    samples are consumed by the current training step.
+
+    Args:
+        No user-configurable fields.
+
+    **Examples:**
+
+    Example synchronous replay buffer::
+
+        config = SyncReplayBufferConfig()
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     def build(self):
@@ -544,6 +647,22 @@ class SyncReplayBufferConfig(BaseModel):
 
 
 class AsyncReplayBufferConfig(BaseModel):
+    """Configuration for the asynchronous replay buffer.
+
+    The asynchronous replay buffer uses a staleness-aware replay policy and
+    in-memory native Python storage. It is intended for background rollout
+    production where samples may be generated by an earlier model step.
+
+    Args:
+        No user-configurable fields.
+
+    **Examples:**
+
+    Example asynchronous replay buffer::
+
+        config = AsyncReplayBufferConfig()
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     def build(self):

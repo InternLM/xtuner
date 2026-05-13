@@ -31,7 +31,7 @@ huggingface-cli download Qwen/Qwen3-8B --local-dir </path/to/qwen3-8B>
 
 强化学习（RL）的数据集在SFT微调的基础上，需要增加奖励模型（Reward Model）所需的评估信息，如 `ground_truth`（标准答案）。我们以 `gsm8k` 数据集为例，XTuner 提供了脚本将其从 Hugging Face Hub 直接转换为符合要求的格式。
 
-**您也可以直接使用我们提供的示例测试数据集 `tests/resource/gsm8k_train_example_data.jsonl `**
+**您也可以直接使用我们提供的示例数据集 `tests/resource/gsm8k_train_example_data.jsonl` 和 `tests/resource/gsm8k_val_example_data.jsonl`。**
 
 ```{code-block} bash 
 :caption: 准备数据集
@@ -68,6 +68,8 @@ python xtuner/v1/utils/convert_gsm8k.py --input-dir ./gsm8k_data --out-dir ./gsm
 }
 ```
 
+上述 JSONL 是数据集文件中的原始样本格式。当前文本 RL 数据会由 `RLTextTokenizeFnConfig` 读取 `prompt` 字段，并在训练流程中转换为内部的 `RolloutState`，其中 `prompt` 会成为 `RolloutState.message`，`reward_model` 会被保留用于 Judger 打分。
+
 ## 启动 GRPO 训练
 
 准备好数据集和模型后，即可通过命令行启动 GRPO 训练。XTuner 提供了专门的 RL 训练脚本，您只需指定模型路径、数据集路径和相关训练参数：
@@ -75,7 +77,7 @@ python xtuner/v1/utils/convert_gsm8k.py --input-dir ./gsm8k_data --out-dir ./gsm
 ```{code-block} bash
 :caption: 启动 GRPO 训练
 
-bash examples/v1/run_rl.sh xtuner/examples/v1/config/rl_qwen3_8B_grpo_tiny.py "lmdeploy" <qwen3-8B模型路径> tests/resource/gsm8k_train_example_data.jsonl
+bash examples/v1/scripts/run_rl.sh examples/v1/config/rl_grpo_gsm8k_judge.py "lmdeploy" <qwen3-8B模型路径> tests/resource/gsm8k_train_example_data.jsonl tests/resource/gsm8k_val_example_data.jsonl
 
 ```
 
@@ -107,7 +109,7 @@ rollout_controller for training samples: 100%|██████████| 12
 
 ```{hint}
 想进一步了解 RL 训练的详细配置和自定义流程吗？
-- [使用 Python 代码自定义 GRPO 训练](../rl/tutorial/rl_grpo_trainer.rst)
+- [使用 Python 代码自定义 GRPO 训练](../rl/tutorial/rl_grpo_trainer.md)
 - [RL Trainer详解](../api/rl_trainer.rst)
 - [RL 训练配置详解](../api/rl_config.rst)
 ```

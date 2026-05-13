@@ -46,6 +46,35 @@ from xtuner.v1.data_proto.utils import convert_packed_to_padded, convert_padded_
 
 
 class RolloutImportanceSampling(BaseModel):
+    """Configuration for rollout importance sampling.
+
+    Rollout importance sampling adjusts or filters training tokens according to
+    the mismatch between rollout log probabilities and the current policy log
+    probabilities. It is referenced by RL loss configs.
+
+    Args:
+        rollout_is_level (str): Granularity used to compute importance weights.
+            Common values are "token" and "sequence". Defaults to "token".
+        rollout_is_mode (str): Handling mode for samples outside configured
+            thresholds. Defaults to "truncate".
+        rollout_is_threshold (tuple[float, float] | None): Lower and upper
+            clipping thresholds for importance weights. Defaults to None.
+        rollout_is_mask_threshold (tuple[float, float] | None): Lower and upper
+            thresholds for masking tokens. Defaults to None.
+        rollout_is_veto_threshold (tuple[float, float] | None): Lower and upper
+            thresholds for rejecting a rollout group. Defaults to None.
+
+    **Examples:**
+
+    Example token-level importance sampling::
+
+        config = RolloutImportanceSampling(
+            rollout_is_level="token",
+            rollout_is_mode="truncate",
+            rollout_is_threshold=(0.8, 1.2),
+        )
+    """
+
     model_config = ConfigDict(title="RolloutImportanceSamplingConfig", extra="forbid", arbitrary_types_allowed=True)
     rollout_is_level: str = "token"
     rollout_is_mode: str = "truncate"

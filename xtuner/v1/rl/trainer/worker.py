@@ -96,6 +96,10 @@ class WorkerConfig(BaseModel):
         ref_model_fsdp_cfg (FSDPConfig | None): FSDP configuration for reference model.
             Defaults to None.
         log_dir (str | Path | None): Directory for training logs. Defaults to None.
+        update_weight_bucket_size_in_gb (float): Bucket size used when syncing
+            updated weights to rollout workers. Defaults to 0.5.
+        seed (int | None): Training worker random seed. When None, the RL
+            trainer seed is used. Defaults to None.
 
     **Examples:**
 
@@ -104,11 +108,11 @@ class WorkerConfig(BaseModel):
         config = WorkerConfig(
             model_cfg=TransformerConfig(model_name="llama2-7b"),
             optim_cfg=OptimConfig(optimizer="adamw"),
-            loss_cfg=PPOLossConfig(),
+            loss_cfg=GRPOLossConfig(policy_loss_cfg={"loss_type": "vanilla"}),
             lr_cfg=LRConfig(lr=1e-5),
             fsdp_cfg=FSDPConfig(),
             load_from="meta-llama/Llama-2-7b-hf",
-            pack_max_length=2048
+            pack_max_length=2048,
         )
 
     .. note::

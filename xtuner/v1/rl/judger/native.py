@@ -194,6 +194,47 @@ class JudgerPool(Judger):
 
 
 class JudgerConfig(BaseModel):
+    """Configuration for a native judger.
+
+    ``JudgerConfig`` builds a local judger or a pool of Ray actor judgers behind
+    the same interface. The judger writes reward information into each
+    ``RolloutState`` and is typically referenced from ``TaskSpecConfig``.
+
+    Args:
+        judger_name (str): Logical judger name used in logs and reward output.
+        reward_handler (Callable | str | None): Reward function or HTTP
+            endpoint used to score a rollout. Defaults to None.
+        request_timeout (float): Timeout in seconds for HTTP reward handlers.
+            Defaults to 30.0.
+        extra_info (dict): Extra static information passed to the reward
+            handler. Defaults to an empty dict.
+        num_ray_actors (int): Number of remote Ray actor judger replicas.
+            ``0`` runs the judger locally. Defaults to 0.
+        num_cpus_per_actor (int): CPU cores requested by each remote judger
+            actor. Defaults to 1.
+        cpu_memory_per_actor (int): CPU memory in bytes requested by each
+            remote judger actor. Defaults to 1 GiB.
+
+    **Examples:**
+
+    Example local judger::
+
+        config = JudgerConfig(
+            judger_name="custom/math",
+            reward_handler=compute_reward,
+            extra_info={"score": 1.0},
+        )
+
+    Example remote actor judger::
+
+        config = JudgerConfig(
+            judger_name="custom/math",
+            reward_handler=compute_reward,
+            num_ray_actors=4,
+            num_cpus_per_actor=2,
+        )
+    """
+
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     judger_name: str

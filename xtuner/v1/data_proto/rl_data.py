@@ -212,8 +212,8 @@ def update_status_from_finish_reason(finish_reason: str | None) -> Status:
         return Status.FAILED
 
 
-def update_group_status(rollout_states: list[RolloutState]) -> Status:
-    """Updates the group status based on the individual rollout states.
+def get_group_status(rollout_states: list[RolloutState]) -> Status:
+    """Get the group status based on the individual rollout states.
 
     Group Status Logic:
     -------------------------------------------------------------
