@@ -66,13 +66,6 @@ Welcome to XTuner V1 English Documentation
 
 .. toctree::
    :hidden:
-   :maxdepth: 1
-   :caption: Legacy Documentation
-
-   legacy_index.rst
-
-.. toctree::
-   :hidden:
    :maxdepth: 2
    :caption: API
 
@@ -83,7 +76,7 @@ Welcome to XTuner V1 English Documentation
    Loss Context <api/loss_ctx>
 
 
-XTuner V1 is a new generation large model training engine specifically designed for ultra-large-scale MoE models. Compared with traditional 3D parallel training architectures, XTuner V1 has been deeply optimized for the current mainstream MoE training scenarios in academia.
+XTuner V1 is a next-generation LLM training engine specifically designed for ultra-large-scale MoE models. Unlike traditional 3D parallel training architectures, XTuner V1 is optimized for the mainstream MoE training scenarios prevalent in today's academic research.
 
 🚀 Speed Benchmark
 ==================================
@@ -92,24 +85,24 @@ XTuner V1 is a new generation large model training engine specifically designed 
    :align: center
    :width: 90%
 
-Core Features
+Key Features
 =============
 **📊 Dropless Training**
 
-- **Flexible Scaling, No Complex Configuration:** 200B scale MoE without expert parallelism; 600B MoE only requires intra-node expert parallelism
-- **Optimized Parallel Strategy:** Compared with traditional 3D parallel solutions, smaller expert parallel dimensions enable more efficient Dropless training
+- **Scalable without complexity:** Train 200B-scale MoE models without expert parallelism; 600B models require only intra-node expert parallelism
+- **Optimized parallelism strategy:** Smaller expert parallelism dimension compared to traditional 3D approaches, enabling more efficient Dropless training
 
 **📝 Long Sequence Support**
 
-- **Memory Efficient Design:** Through advanced memory optimization technology combinations, 200B MoE models can train 64k sequence length without sequence parallelism
-- **Flexible Extension Capability:** Full support for DeepSpeed Ulysses sequence parallelism, maximum sequence length can be linearly extended
-- **Stable and Reliable:** Insensitive to expert load imbalance during long sequence training, maintaining stable performance
+- **Memory-efficient design:** Train 200B MoE models on 64k sequence lengths without sequence parallelism through advanced memory optimization techniques
+- **Flexible scaling:** Full support for DeepSpeed Ulysses sequence parallelism with linearly scalable maximum sequence length
+- **Robust performance:** Maintains stability despite expert load imbalance during long sequence training
 
-**⚡ Excellent Efficiency**
+**⚡ Superior Efficiency**
 
-- **Ultra-Large Scale Support:** Supports MoE model training up to 1T parameters
-- **Breakthrough Performance Bottleneck:** First time achieving FSDP training throughput surpassing traditional 3D parallel solutions on MoE models above 200B scale
-- **Hardware Optimization:** Training efficiency surpasses NVIDIA H800 on Ascend A3 NPU supernodes
+- **Massive scale:** Supports MoE training up to 1T parameters
+- **Breakthrough performance:** First to achieve FSDP training throughput that surpasses traditional 3D parallel schemes for MoE models above 200B scale
+- **Hardware optimization:** Achieves training efficiency on Ascend A3 Supernode that exceeds NVIDIA H800
 
 
 .. figure:: ../assets/images/benchmark/structure.png
@@ -121,12 +114,12 @@ Core Features
 🔥 Roadmap
 ==========
 
-XTuner V1 is committed to continuously improving the pretraining, instruction fine-tuning, and reinforcement learning training efficiency of ultra-large-scale MoE models, with a focus on optimizing Ascend NPU support.
+XTuner V1 is committed to continuously improving training efficiency for pre-training, instruction fine-tuning, and reinforcement learning of ultra-large MoE models, with special focus on Ascend NPU optimization.
 
 🚀 Training Engine
------------
+--------------------
 
-Our vision is to build XTuner V1 into a universal training backend that seamlessly integrates into a broader open-source ecosystem.
+Our vision is to establish XTuner V1 as a versatile training backend that seamlessly integrates with the broader open-source ecosystem.
 
 +------------+-----------+----------+-----------+
 |   Model    |  GPU(FP8) | GPU(BF16)| NPU(BF16) |
@@ -147,14 +140,14 @@ Our vision is to build XTuner V1 into a universal training backend that seamless
 +------------+-----------+----------+-----------+
 
 
-🧠 Algorithm Suite
------------
+🧠 Algorithm
+--------------
 
-Algorithm components are rapidly iterating. Community contributions are welcome - use XTuner V1 to scale your algorithms to unprecedented scales!
+The algorithm component is actively evolving. We welcome community contributions - with XTuner V1, scale your algorithms to unprecedented sizes!
 
 **Implemented**
 
-- ✅ **Multimodal Pretraining** - Full support for vision-language model training
+- ✅ **Multimodal Pre-training** - Full support for vision-language model training
 - ✅ **Multimodal Supervised Fine-tuning** - Optimized for instruction following
 - ✅ `GRPO <https://arxiv.org/pdf/2402.03300>`_ - Group Relative Policy Optimization
 
@@ -166,9 +159,9 @@ Algorithm components are rapidly iterating. Community contributions are welcome 
 
 
 ⚡ Inference Engine Integration
----------------
+-----------------------------------
 
-Seamless integration with mainstream inference frameworks
+Seamless deployment with leading inference frameworks:
 
 * |checked| LMDeploy
 * |unchecked| vLLM
@@ -176,34 +169,34 @@ Seamless integration with mainstream inference frameworks
 
 
 
-🤝 Contribution Guidelines
------------
+🤝 Contributing
+-----------------
 
-We thank all contributors for their efforts to improve and enhance XTuner. Please refer to the `Contribution Guidelines <.github/CONTRIBUTING.md>`_ to understand the relevant guidelines for participating in the project.
+We appreciate all contributions to XTuner. Please refer to `Contributing Guide <.github/CONTRIBUTING.md>`_ for the contributing guideline.
 
 🙏 Acknowledgments
------------
+-------------------
 
-The development of XTuner V1 is deeply inspired and supported by excellent projects in the open-source community. We extend our sincere gratitude to the following pioneering projects:
+The development of XTuner V1's training engine has been greatly inspired by and built upon the excellent work of the open-source community. We extend our sincere gratitude to the following pioneering projects:
 
-**Training Engines:**
+**Training Engine:**
 
-- [Torchtitan](https://github.com/pytorch/torchtitan) - PyTorch native distributed training framework
-- [Deepspeed](https://github.com/deepspeedai/DeepSpeed) - Microsoft deep learning optimization library
-- [MindSpeed](https://gitee.com/ascend/MindSpeed) - Ascend high-performance training acceleration library
-- [Megatron](https://github.com/NVIDIA/Megatron-LM) - NVIDIA large-scale Transformer training framework
+- [Torchtitan](https://github.com/pytorch/torchtitan) - A PyTorch native platform for training generative AI models
+- [Deepspeed](https://github.com/deepspeedai/DeepSpeed) - Microsoft's deep learning optimization library
+- [MindSpeed](https://gitee.com/ascend/MindSpeed) - Ascend's high-performance training acceleration library
+- [Megatron](https://github.com/NVIDIA/Megatron-LM) - NVIDIA's large-scale Transformer training framework.
 
 
 **Reinforcement Learning:**
 
-XTuner V1's reinforcement learning capabilities draw on the excellent practices and experience of the following projects
+XTuner V1's reinforcement learning capabilities have been enhanced through insights and best practices from:
 
 - [veRL](https://github.com/volcengine/verl) - Volcano Engine Reinforcement Learning for LLMs
 - [SLIME](https://github.com/THUDM/slime) - THU's scalable RLHF implementation
 - [AReal](https://github.com/inclusionAI/AReaL) - Ant Reasoning Reinforcement Learning for LLMs
 - [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) - An Easy-to-use, Scalable and High-performance RLHF Framework based on Ray
 
-We sincerely thank all contributors and maintainers of these projects for their continuous advancement of the large-scale model training field.
+We are deeply grateful to all contributors and maintainers of these projects for advancing the field of large-scale model training.
 
 
 🖊️ Citation
@@ -219,6 +212,6 @@ We sincerely thank all contributors and maintainers of these projects for their 
    }
 
 Open Source License
-==========
+======================
 
-This project adopts the `Apache License 2.0 Open Source License <LICENSE>`_. At the same time, please comply with the licenses of the models and datasets used.
+The project is released under the `Apache License 2.0 <LICENSE>`_. Please also adhere to the Licenses of models and datasets being used.
