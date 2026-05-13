@@ -403,6 +403,11 @@ class BaseModel(nn.Module):
     def scale_and_reduce_grad(self):
         return
 
+    def cal_grad_norm(self, grads: list[DTensor], dtype=torch.float32):
+        from xtuner.v1.utils.grad_norm import cal_grad_norm
+
+        return cal_grad_norm(grads, dtype=dtype)
+
     def to_hf_key_list(self, key: str) -> list[str]:
         raise NotImplementedError()
 

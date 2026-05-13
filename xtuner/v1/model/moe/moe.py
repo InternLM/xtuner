@@ -18,7 +18,7 @@ from torch.distributed.fsdp import (
     CPUOffloadPolicy,
     MixedPrecisionPolicy,
 )
-from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
+from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from tqdm import tqdm
 from typing_extensions import overload, override
 
@@ -138,7 +138,7 @@ class MoEConfig(TransformerConfig):
     hidden_factor: Annotated[float, Parameter(group="moe")] = 1.0
     moe_intermediate_size: Annotated[int, Parameter(group="moe")]
     ep_size: Annotated[int, Parameter(group="moe")] = 1
-    tp_size: Annotated[int, Parameter(group="moe")] = 1
+    expert_tp_size: Annotated[int, Parameter(group="moe")] = 1
     dispatcher: Annotated[Literal["deepep", "all2all", "agrs"] | None, Parameter(group="moe")] = None
     router: GreedyRouterConfig | NoAuxRouterConfig
     balancing_loss_cfg: BalancingLossConfig | None = BalancingLossConfig()
@@ -178,12 +178,12 @@ class MoE(BaseModel):
         super().__init__(config)
         if config.ep_size is not None and config.ep_size > 1:
             world_size = dist.get_world_size()
-            tp_size = config.tp_size if config.tp_size > 1 else 1
-            fsdp_size = world_size // (config.ep_size * tp_size)
-            if tp_size > 1:
+            expert_tp_size = config.expert_tp_size if config.expert_tp_size > 1 else 1
+            fsdp_size = world_size // (config.ep_size * expert_tp_size)
+            if expert_tp_size > 1:
                 _init_mesh = init_device_mesh(
                     DEVICE,
-                    (fsdp_size, config.ep_size, tp_size),
+                    (fsdp_size, config.ep_size, expert_tp_size),
                     mesh_dim_names=(
                         f"{self.config.mesh_prefix}.dp",
                         f"{self.config.mesh_prefix}.ep",
@@ -942,8 +942,6 @@ class MoE(BaseModel):
     ) -> Self:
         self.fsdp_config = fsdp_config
         assert self.fsdp_config.ep_size == self.config.ep_size
-        # TODO: self.config.tp_size is expert tp size, which can be different from fsdp_config.tp_size. Rename it to expert_tp_size.
-        # assert self.fsdp_config.tp_size == self.config.tp_size
         self.mp_policy = MixedPrecisionPolicy(
             param_dtype=self.fsdp_config.param_dtype, reduce_dtype=fsdp_config.reduce_dtype
         )
@@ -1101,7 +1099,7 @@ class MoE(BaseModel):
             ep_enabled = self.ep_mesh is not None and self.ep_mesh.size() > 1
             # Scale moe parameters
             if ep_enabled and ".experts" in name:
-                param.grad.div_(self.ep_mesh.size())  # type: ignore
+                param.grad.div_(self.ep_mesh.size() * self.config.expert_tp_size)  # type: ignore
                 continue
 
             if isinstance(param, DTensor):
@@ -1133,19 +1131,56 @@ class MoE(BaseModel):
                         group=flat_mesh.get_group(),  # type: ignore
                     )
 
+    def cal_grad_norm(self, grads: list[DTensor], dtype=torch.float32):
+        from xtuner.v1.utils.grad_norm import group_tensors_by_device_mesh_and_placements
+
+        grouped_grads = group_tensors_by_device_mesh_and_placements(grads)
+        if len(grads) == 0:
+            return torch.tensor(0.0, dtype=dtype), grouped_grads
+
+        total_norm_squared = torch.zeros((), dtype=dtype, device=grads[0].device)
+        for name, param in self.trainable_parameters():
+            grad = param.grad
+            if grad is None:
+                continue
+
+            local_grad = grad.to_local() if isinstance(grad, DTensor) else grad
+            local_norm_squared = torch.linalg.vector_norm(local_grad, ord=2.0, dtype=dtype) ** 2
+            if isinstance(grad, DTensor):
+                for i, placement in enumerate(grad.placements):
+                    if isinstance(placement, Shard):
+                        dist.all_reduce(local_norm_squared, group=grad.device_mesh.get_group(i))
+                    elif isinstance(placement, Replicate):
+                        pass
+                    else:
+                        raise ValueError(f"Unsupported placement type {placement} in clip_grad_norm")
+
+            if self.config.expert_tp_size > 1 and ".experts" in name:
+                assert self.ep_mesh is not None and self.tp_mesh is not None
+                # expert 参数的 EP / expert TP 分片不是 DTensor placement，
+                # norm square 需要显式跨这两个维度求和，clip 系数才是全局的。
+                dist.all_reduce(local_norm_squared, op=ReduceOp.SUM, group=self.ep_mesh.get_group())
+                dist.all_reduce(local_norm_squared, op=ReduceOp.SUM, group=self.tp_mesh.get_group())
+
+            total_norm_squared += local_norm_squared
+
+        grad_norm = total_norm_squared**0.5
+        grad_norm = grad_norm.to(grads[0].dtype)
+        return grad_norm, grouped_grads
+
     def _init_device_mesh(self, fsdp_config: FSDPConfig):
         self.fsdp_config = fsdp_config
 
         device = DEVICE
         world_size = dist.get_world_size()
-        tp_size = self.config.tp_size if self.config.tp_size > 1 else 1
-        experts_fsdp_size = world_size // (self.fsdp_config.ep_size * tp_size)
+        expert_tp_size = self.config.expert_tp_size if self.config.expert_tp_size > 1 else 1
+        experts_fsdp_size = world_size // (self.fsdp_config.ep_size * expert_tp_size)
 
         if self.fsdp_config.hsdp_sharding_size is None:
-            if tp_size > 1:
+            if expert_tp_size > 1:
                 model_mesh = init_device_mesh(
                     device,
-                    (experts_fsdp_size, self.fsdp_config.ep_size, tp_size),
+                    (experts_fsdp_size, self.fsdp_config.ep_size, expert_tp_size),
                     mesh_dim_names=(
                         f"{self.config.mesh_prefix}.fsdp",
                         f"{self.config.mesh_prefix}.ep",
@@ -1196,6 +1231,14 @@ class MoE(BaseModel):
             else:
                 self.ep_mesh = model_mesh[f"{self.config.mesh_prefix}.ep"]
 
+            if expert_tp_size > 1:
+                new_tp_mesh = model_mesh[f"{self.config.mesh_prefix}.tp"]
+                if self.tp_mesh is not None:
+                    assert new_tp_mesh.mesh_dim_names == self.tp_mesh.mesh_dim_names
+                    assert torch.equal(self.tp_mesh.mesh, new_tp_mesh.mesh)
+                else:
+                    self.tp_mesh = new_tp_mesh
+
             self.fsdp_mesh = model_mesh[f"{self.config.mesh_prefix}.fsdp"]
         else:
             assert self.fsdp_config.ep_size == 1, "Currently, HSDP requires expert parallel size to be 1"
@@ -1225,9 +1268,18 @@ class MoE(BaseModel):
                 return
             for name, param in module.named_parameters(recurse=False):
                 assert self.ep_mesh is not None
+                replicate_mesh = self.ep_mesh
+                placements = [Replicate()]
+                if self.tp_mesh is not None and self.tp_mesh.size() > 1:
+                    assert self._world_mesh is not None
+                    # 非 expert 参数在 EP 和 expert TP 上都是逻辑副本。
+                    # FSDP 只支持一维 TP/Replicate 布局，所以这里先把
+                    # EP x expert TP 子网格压平成一个 Replicate 维度。
+                    replicate_mesh = self._world_mesh[
+                        (f"{self.config.mesh_prefix}.ep", f"{self.config.mesh_prefix}.tp")
+                    ]._flatten(mesh_dim_name=f"{self.config.mesh_prefix}.ep_tp")
                 dist_param = nn.Parameter(
-                    # TODO: replicate on ep_tp_mesh instead of ep_mesh?
-                    distribute_tensor(param, self.ep_mesh, [Replicate()]),
+                    distribute_tensor(param, replicate_mesh, placements),
                     requires_grad=param.requires_grad,
                 )
                 module.register_parameter(name, dist_param)

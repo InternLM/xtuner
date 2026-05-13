@@ -288,13 +288,100 @@ self.model.scale_and_reduce_grad()
 - expert 参数在 EP 下只除以 `ep_mesh.size()`，不做 EP all-reduce。
 - replicated DTensor 参数会在 replicate mesh 上做平均 all-reduce，使这些未按普通 FSDP shard 语义同步的参数也得到一致梯度。
 
-然后 `cal_grad_norm` 会按 DTensor 的 mesh 和 placement 分组计算 norm。对于 sharded placement，会对局部 norm square 做 all-reduce sum，再开方得到全局 norm。这样 clip 使用的是全局参数梯度范数，而不是单 rank 的局部范数。
+通用 `cal_grad_norm` 会按 DTensor 的 mesh 和 placement 分组计算 norm。对于 sharded placement，会对局部 norm square 做 all-reduce sum，再开方得到全局 norm。这样 clip 使用的是全局参数梯度范数，而不是单 rank 的局部范数。
 
 在 FSDP + EP 下，这个顺序很重要：grad norm 是在 expert 梯度除 EP、replicated 参数 EP 平均 all-reduce 之后计算的。`cal_grad_norm()` 对 `Shard()` 维度累加 norm square，对 `Replicate()` 维度不重复计数。因此：
 
 - expert 参数的 norm 会覆盖所有 EP shard 上的 experts。
 - replicated 参数的 norm 只按一份逻辑参数计数，不会因为 EP replica 数量而重复放大。
 - clip 系数作用在已经完成 FSDP/EP 校准后的梯度上，optimizer step 看到的是校准后的全局梯度。
+
+## FSDP + EP + expert TP 相对 FSDP + EP 的差异
+
+新增的 TP 指 `MoEConfig.expert_tp_size`，这里称为 `T`。它是 expert tensor parallel，用来切分 routed expert 的 column/row 权重 shard；它和 `FSDPConfig.tp_size` 不是同一个概念。当前语境下，不同 expert TP rank 拿到的是不同数据。
+
+相对 FSDP + EP，mesh 从二维变为三维：
+
+```text
+F = fsdp_mesh.size()
+E = ep_mesh.size()
+T = expert_tp_size
+world_size = F * E * T
+```
+
+核心差异只有三类。
+
+### 参数布局多了一维 expert TP
+
+FSDP + EP 下，routed expert 参数只在 EP 维切 expert；开启 expert TP 后，同一个 expert 的权重还会在 expert TP 维继续切 shard：
+
+```text
+expert weight: EP 切 expert, expert TP 切 column/row, FSDP 继续 shard
+```
+
+非 expert 参数在 EP 和 expert TP 维都是 replicated。实现上会把 `EP x expert TP` 子网格 flatten 成一维 replicate mesh，避免 PyTorch FSDP 不支持二维 `Replicate(), Replicate()` TP 布局。
+
+### loss 分母和 autograd all-reduce 覆盖更大的 world
+
+FSDP + EP 下：
+
+```text
+L = sum_{f,e} L_{f,e}
+backward scale = F * E
+FSDP reduce mean 除以 F
+剩余缩放 = E
+```
+
+FSDP + EP + expert TP 下：
+
+```text
+L = sum_{f,e,t} L_{f,e,t}
+backward scale = F * E * T
+FSDP reduce mean 除以 F
+剩余缩放 = E * T
+```
+
+因此，所有 EP-only 里出现的剩余 `E`，在 expert TP 开启后都变成 `E * T`。loss 分母仍然按默认分布式组统计，覆盖所有 FSDP rank、EP rank、expert TP rank 和 micro-batch；每个 token 仍只按 source rank 贡献一次。
+
+### expert 与 replicated 参数的梯度修正多乘一个 T
+
+expert 参数在 expert TP 维不是副本，而是同一个 expert 权重的不同 shard。因此它和 EP 维一样，不能 all-reduce 成一份完整梯度，只能消掉多出来的缩放：
+
+```python
+if ep_enabled and ".experts" in name:
+    param.grad.div_(self.ep_mesh.size() * self.config.expert_tp_size)
+    continue
+```
+
+相对 EP-only 的 `div_(E)`，这里变成 `div_(E * T)`。
+
+非 expert 参数在 `EP x expert TP` 上是 replica，需要聚合所有 source 数据贡献，并让每个 replica 得到一致梯度。EP-only 是在 EP replicate mesh 上平均 all-reduce；开启 expert TP 后是在 flatten 后的 `EP x expert TP` replicate mesh 上平均 all-reduce：
+
+```text
+sum_{e,t} (E * T * sum_f grad(L_{f,e,t}) / (E * T))
+= sum_{e,t} sum_f grad(L_{f,e,t})
+```
+
+这同时完成两件事：
+
+- 消掉 `E * T` 倍缩放。
+- 聚合所有 EP / expert TP rank 的数据贡献。
+
+### grad norm 需要额外覆盖 expert TP shard
+
+FSDP + EP 下，通用 `cal_grad_norm()` 能根据 DTensor placement 汇总 `Shard()` 维的 norm square，并对 `Replicate()` 维不重复计数。
+
+开启 expert TP 后，grouped expert 权重的 EP / expert TP shard 是本地 tensor 布局，并没有编码成 DTensor 的 EP / TP `Shard()` placement。如果继续只用通用逻辑，expert 参数的 global norm 会漏掉跨 `expert_tp_size` 的 norm square 汇总，clip 系数也会偏小或偏大。
+
+因此 MoE 覆盖模型级 `cal_grad_norm()`：在普通 DTensor shard 汇总之外，对 expert 参数的 local norm square 额外沿 `ep_mesh` 和 `tp_mesh` 做 `SUM all_reduce`：
+
+```python
+if expert_tp_size > 1 and ".experts" in name:
+    dist.all_reduce(local_norm_squared, op=ReduceOp.SUM, group=ep_mesh.get_group())
+    dist.all_reduce(local_norm_squared, op=ReduceOp.SUM, group=tp_mesh.get_group())
+```
+
+这样 clip 使用的是覆盖所有 EP / expert TP shard 的 expert norm，同时 replicated 参数仍只按一份逻辑参数计数。
 
 ## 总结
 
@@ -308,5 +395,11 @@ FSDP + EP 时还要再区分两类参数：
 
 - expert 参数：FSDP mean 后剩余的 EP 倍数通过 `grad.div_(ep_size)` 消掉，不能 EP all-reduce。
 - EP replicated 参数：通过 replicate mesh 上的平均 all-reduce 同时消掉 EP 倍数并聚合所有 EP rank 的数据贡献。
+
+FSDP + EP + expert TP 不改变上述主线，只是在 EP 之外多了一维 expert TP：
+
+- expert 参数：剩余缩放从 `E` 变为 `E * T`，通过 `grad.div_(ep_size * expert_tp_size)` 消掉。
+- replicated 参数：replicate mesh 从 EP 扩展为 flatten 后的 `EP x expert TP`。
+- grad norm：expert shard 没有用 DTensor placement 表达 expert TP shard，因此 MoE 需要额外跨 EP 和 expert TP 汇总 expert norm square。
 
 最终效果是：FSDP、EP、SP、梯度累积和不同卡数不应改变同一 global batch 对参数更新的数学含义；grad norm/clip 发生在所有 micro-batch backward 完成之后，基于已经校准和同步后的全局梯度计算。

@@ -16,7 +16,7 @@ Device mesh 排列（mesh_shape=(dp, ep, tp)）:
     dispatch_postprocess: TP AllGather → 将 TP slices 合并成 M_total token
                           + 按 local expert 再排序（供 grouped GEMM）
     [Expert GEMM]       : 冗余计算（同一 EP rank 内各 TP rank 计算结果相同）
-    combine_preprocess  : unpermute → TP ReduceScatterMean → 恢复每 TP rank M_ep_recv
+    combine_preprocess  : unpermute → TP ReduceScatterSum → 恢复每 TP rank M_ep_recv
     combine             : EP AlltoAll 逆向
     combine_postprocess : unpermute + topk 加权求和 → [N_local, H]
 
@@ -139,11 +139,11 @@ EXPECTED: dict[tuple[int, int], RankExpected] = {
         tokens_per_expert=(3.0, 3.0, 2.0),
         # expert adds global_expert_id * 100
         experts_out=(10.0, 13.0, 22.0, 111.0, 120.0, 123.0, 221.0, 212.0),
-        # after ReduceScatterMean — tp0 slice [0:4]
-        pre_combine_hidden=(10.0, 111.0, 120.0, 221.0),
-        # after EP A2A reverse: from self=[10,111], from ep1_tp0=[311,410]
-        combine_hidden=(10.0, 111.0, 311.0, 410.0),
-        post_combine_hidden=(310.0, 191.0),
+        # after ReduceScatterSum — tp0 slice [0:4]
+        pre_combine_hidden=(20.0, 222.0, 240.0, 442.0),
+        # after EP A2A reverse: from self=[20,222], from ep1_tp0=[622,820]
+        combine_hidden=(20.0, 222.0, 622.0, 820.0),
+        post_combine_hidden=(620.0, 382.0),
     ),
     # rank 1: (ep=0, tp=1) — tokens A2, A3
     (0, 1): RankExpected(
@@ -163,11 +163,11 @@ EXPECTED: dict[tuple[int, int], RankExpected] = {
         post_row_ids_map=(0, 3, 4, 6, 1, 7, 2, 5),
         tokens_per_expert=(3.0, 3.0, 2.0),
         experts_out=(10.0, 13.0, 22.0, 111.0, 120.0, 123.0, 221.0, 212.0),
-        # after ReduceScatterMean — tp1 slice [4:8]
-        pre_combine_hidden=(13.0, 212.0, 22.0, 123.0),
-        # after EP A2A reverse: from self=[13,212], from ep1_tp1=[413,512]
-        combine_hidden=(13.0, 212.0, 413.0, 512.0),
-        post_combine_hidden=(302.0, 333.0),
+        # after ReduceScatterSum — tp1 slice [4:8]
+        pre_combine_hidden=(26.0, 424.0, 44.0, 246.0),
+        # after EP A2A reverse: from self=[26,424], from ep1_tp1=[826,1024]
+        combine_hidden=(26.0, 424.0, 826.0, 1024.0),
+        post_combine_hidden=(604.0, 666.0),
     ),
     # rank 2: (ep=1, tp=0) — tokens B0, B1
     (1, 0): RankExpected(
@@ -187,11 +187,11 @@ EXPECTED: dict[tuple[int, int], RankExpected] = {
         post_row_ids_map=(0, 3, 1, 4, 5, 6, 2, 7),
         tokens_per_expert=(3.0, 3.0, 2.0),
         experts_out=(311.0, 320.0, 323.0, 410.0, 421.0, 413.0, 512.0, 522.0),
-        # after ReduceScatterMean — tp0 slice [0:4]
-        pre_combine_hidden=(311.0, 410.0, 320.0, 421.0),
-        # after EP A2A reverse: from ep0_tp0=[120,221], from self=[320,421]
-        combine_hidden=(120.0, 221.0, 320.0, 421.0),
-        post_combine_hidden=(280.0, 321.0),
+        # after ReduceScatterSum — tp0 slice [0:4]
+        pre_combine_hidden=(622.0, 820.0, 640.0, 842.0),
+        # after EP A2A reverse: from ep0_tp0=[240,442], from self=[640,842]
+        combine_hidden=(240.0, 442.0, 640.0, 842.0),
+        post_combine_hidden=(560.0, 642.0),
     ),
     # rank 3: (ep=1, tp=1) — tokens B2, B3
     (1, 1): RankExpected(
@@ -210,11 +210,11 @@ EXPECTED: dict[tuple[int, int], RankExpected] = {
         post_row_ids_map=(0, 3, 1, 4, 5, 6, 2, 7),
         tokens_per_expert=(3.0, 3.0, 2.0),
         experts_out=(311.0, 320.0, 323.0, 410.0, 421.0, 413.0, 512.0, 522.0),
-        # after ReduceScatterMean — tp1 slice [4:8]
-        pre_combine_hidden=(413.0, 512.0, 323.0, 522.0),
-        # after EP A2A reverse: from ep0_tp1=[22,123], from self=[323,522]
-        combine_hidden=(22.0, 123.0, 323.0, 522.0),
-        post_combine_hidden=(472.0, 193.0),
+        # after ReduceScatterSum — tp1 slice [4:8]
+        pre_combine_hidden=(826.0, 1024.0, 646.0, 1044.0),
+        # after EP A2A reverse: from ep0_tp1=[44,246], from self=[646,1044]
+        combine_hidden=(44.0, 246.0, 646.0, 1044.0),
+        post_combine_hidden=(944.0, 386.0),
     ),
 }
 

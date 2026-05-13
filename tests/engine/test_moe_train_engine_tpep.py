@@ -24,6 +24,13 @@ Strategy
 
 from __future__ import annotations
 
+import os
+
+# 本测试关注 FSDP + EP + expert TP 的 loss/梯度校准。
+# Triton TMA grouped-GEMM 在部分本地 Triton/LLVM 组合下会编译失败，
+# 因此沿用 .dev_scripts 的做法，用 Cutlass 后端跑真实 grouped-GEMM。
+os.environ.setdefault("XTUNER_USE_CUTLASS_GROUP_GEMM", "1")
+
 import parametrize
 import torch
 import torch.distributed as dist
@@ -33,28 +40,55 @@ from xtuner._testing import DeterministicDDPTestCase
 from xtuner.v1.config import AdamWConfig, FSDPConfig
 from xtuner.v1.engine.train_engine import TrainEngine
 from xtuner.v1.loss.ce_loss import CELossConfig
+from xtuner.v1.module.attention import MHAConfig
 from xtuner.v1.module.grouped_linear.moe_group_linear import GroupedLinear
+from xtuner.v1.module.router.greedy import GreedyRouterConfig
 from xtuner.v1.model.base import ModelItem
 from xtuner.v1.model.moe.moe import SequenceContext
-from xtuner.v1.model.moe.qwen3 import Qwen3MoE30BA3Config
+from xtuner.v1.model.moe.qwen3 import Qwen3MoEConfig
 from xtuner.v1.utils.device import get_device
 
 DEVICE = get_device()
 
-# Tolerance for bfloat16 numerical differences between the two configs.
-ATOL = 2e-1
-RTOL = 2e-1
+# 本测试的模型参数和主要计算是 bf16，容忍度对齐 torch.testing 的
+# bf16 默认值，避免过宽阈值掩盖 expert TP 维度缺失这类校准错误。
+BF16_ATOL = 1e-5
+BF16_RTOL = 1.6e-2
+# grouped-GEMM 和 TP 分片规约会改变 bf16 的累加顺序；逐元素梯度矩阵
+# 在接近 0 的位置会有数个 ulp 的差异，不能用它承载 loss/norm 校准红灯。
+BF16_GEMM_ATOL = 1e-4
+BF16_GEMM_RTOL = BF16_RTOL
 
 # Use a very small model to keep test runtime manageable.
 _TINY_LAYERS = 2
-_SEQ_LEN = 64
+_SEQ_LEN = 32
+_VOCAB_SIZE = 128
 
 
-def _build_tiny_moe_cfg(ep_size: int = 1, tp_size: int = 1) -> Qwen3MoE30BA3Config:
-    return Qwen3MoE30BA3Config(
+def _build_tiny_moe_cfg(ep_size: int = 1, expert_tp_size: int = 1) -> Qwen3MoEConfig:
+    return Qwen3MoEConfig(
+        vocab_size=_VOCAB_SIZE,
+        max_position_embeddings=128,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
         num_hidden_layers=_TINY_LAYERS,
+        hidden_size=128,
+        intermediate_size=256,
+        rms_norm_eps=1e-6,
+        rope_theta=1e6,
+        hidden_act="silu",
+        attention=MHAConfig(num_attention_heads=4, num_key_value_heads=2, head_dim=32, qk_norm=True),
+        tie_word_embeddings=False,
+        n_routed_experts=4,
+        n_shared_experts=0,
+        num_experts_per_tok=2,
+        first_k_dense_replace=0,
+        hidden_factor=1.0,
+        moe_intermediate_size=64,
+        router=GreedyRouterConfig(scoring_func="softmax", norm_topk_prob=True, router_scaling_factor=1.0),
         ep_size=ep_size,
-        tp_size=tp_size,
+        expert_tp_size=expert_tp_size,
         dispatcher="all2all" if ep_size > 1 else None,
         compile_cfg=False,
         # Disable auxiliary losses to keep the comparison clean.
@@ -63,21 +97,21 @@ def _build_tiny_moe_cfg(ep_size: int = 1, tp_size: int = 1) -> Qwen3MoE30BA3Conf
     )
 
 
-def _build_engine(ep_size: int, tp_size: int) -> TrainEngine:
-    moe_cfg = _build_tiny_moe_cfg(ep_size, tp_size)
+def _build_engine(ep_size: int, expert_tp_size: int, data_tp_size: int = 1) -> TrainEngine:
+    moe_cfg = _build_tiny_moe_cfg(ep_size, expert_tp_size)
     optim_cfg = AdamWConfig()
     fsdp_cfg = FSDPConfig(
         ep_size=ep_size,
-        tp_size=tp_size,
+        tp_size=data_tp_size,
         cpu_offload=False,
     )
     return TrainEngine(model_cfg=moe_cfg, optim_cfg=optim_cfg, fsdp_cfg=fsdp_cfg)
 
 
-def _make_engine_input(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+def _make_engine_input(device: torch.device, seed_offset: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
     """Return (input_ids [1, SEQ_LEN-1], shifted_labels [1, SEQ_LEN-1]) on *device*."""
-    torch.manual_seed(12345)
-    full_ids = torch.randint(0, 151936, (1, _SEQ_LEN), dtype=torch.long, device=device)
+    torch.manual_seed(12345 + seed_offset)
+    full_ids = torch.randint(0, _VOCAB_SIZE, (1, _SEQ_LEN), dtype=torch.long, device=device)
     input_ids = full_ids[:, :-1]  # [1, SEQ_LEN-1]
     labels = full_ids[:, 1:]      # [1, SEQ_LEN-1] already shifted
     return input_ids, labels
@@ -90,19 +124,19 @@ def _run_one_step(
     labels: torch.Tensor,
 ) -> tuple[float, dict[str, torch.Tensor]]:
     """Run one train step; return (loss_value, {param_name: grad_tensor})."""
-    seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
-    shifted_labels = labels.to(DEVICE)
+    loss_val, grads, _ = _run_one_step_with_norm(engine, loss_cfg, input_ids, labels)
+    return loss_val, grads
 
-    LossContext = loss_cfg.loss_ctx_cls
-    loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
-    loss_ctx_list = LossContext.build_batches([loss_ctx])
-    loss_ctx = loss_ctx_list[0]
 
-    engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
-    step_info = engine.train_step(engine_input)
-    engine.clip_grad_norm()
-
-    loss_val: float = step_info["logs_info"]["reduced_llm_loss"]
+def _run_one_step_with_norm(
+    engine: TrainEngine,
+    loss_cfg: CELossConfig,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+) -> tuple[float, dict[str, torch.Tensor], torch.Tensor]:
+    """Run one train step; return loss, gate grads and un-clipped grad norm."""
+    loss_val = _run_train_step_without_clip(engine, loss_cfg, input_ids, labels)
+    grad_norm = engine.clip_grad_norm(do_clip=False)
 
     # Collect gradients from gate (router) parameters; these are non-expert
     # parameters replicated on all ranks in both configs, so they're easy to
@@ -116,7 +150,57 @@ def _run_one_step(
             grads[name] = grad.detach().float().cpu()
             break  # one gate layer is sufficient
 
-    return loss_val, grads
+    return loss_val, grads, grad_norm.detach().float().cpu()
+
+
+def _run_train_step_without_clip(
+    engine: TrainEngine,
+    loss_cfg: CELossConfig,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+) -> float:
+    seq_ctx = SequenceContext.from_input_ids((input_ids,), device=DEVICE)
+    shifted_labels = labels.to(DEVICE)
+
+    LossContext = loss_cfg.loss_ctx_cls
+    loss_ctx = loss_cfg.build(data={"shifted_labels": shifted_labels}, sp_mesh=None)
+    loss_ctx_list = LossContext.build_batches([loss_ctx])
+    loss_ctx = loss_ctx_list[0]
+
+    engine_input = [ModelItem(seq_ctx=seq_ctx, loss_ctx={"lm": loss_ctx})]
+    step_info = engine.train_step(engine_input)
+    return step_info["logs_info"]["reduced_llm_loss"]
+
+
+def _get_param_grad(engine: TrainEngine, name_suffix: str) -> torch.Tensor:
+    for name, param in engine.model.named_parameters():
+        if _canonical_name(name).endswith(name_suffix):
+            grad = param.grad
+            assert grad is not None, f"Missing gradient for {name}"
+            if hasattr(grad, "full_tensor"):
+                grad = grad.full_tensor()  # type: ignore[attr-defined]
+            return grad.detach().float().cpu()
+    raise AssertionError(f"Cannot find parameter ending with {name_suffix}")
+
+
+def _get_tpep_grouped_linear(engine: TrainEngine, module_suffix: str) -> GroupedLinear:
+    for name, module in engine.model.named_modules():
+        if _canonical_name(name).endswith(module_suffix):
+            assert isinstance(module, GroupedLinear)
+            return module
+    raise AssertionError(f"Cannot find grouped linear module ending with {module_suffix}")
+
+
+def _canonical_name(name: str) -> str:
+    # 第一层会被 activation checkpoint wrapper 包一层，比较逻辑不关心该包装。
+    return name.replace("._checkpoint_wrapped_module", "")
+
+
+def _zero_non_expert_grads(engine: TrainEngine) -> None:
+    with torch.no_grad():
+        for name, param in engine.model.named_parameters():
+            if ".experts" not in _canonical_name(name) and param.grad is not None:
+                param.grad.zero_()
 
 
 def _full_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -214,13 +298,13 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
     """Verify EP+TP training matches single-GPU (EP=1, TP=1) forward and backward."""
 
     @parametrize.parametrize(
-        "device,ep_size,tp_size",
+        "device,ep_size,expert_tp_size",
         [
             ("cuda", 2, 2),
         ],
     )
     def test_tpep_forward_backward_matches_single(
-        self, device: str, ep_size: int, tp_size: int
+        self, device: str, ep_size: int, expert_tp_size: int
     ) -> None:
         """Loss and gate gradients with EP+TP must match the EP=1, TP=1 baseline."""
         pg = self.create_pg(device)
@@ -228,13 +312,13 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
         # ------------------------------------------------------------------
         # Build reference engine: EP=1, TP=1 (world acts as pure DP).
         # ------------------------------------------------------------------
-        engine_ref = _build_engine(ep_size=1, tp_size=1)
+        engine_ref = _build_engine(ep_size=1, expert_tp_size=1)
         engine_ref.init_model_weights()
 
         # ------------------------------------------------------------------
         # Build EP+TP engine.
         # ------------------------------------------------------------------
-        engine_tpep = _build_engine(ep_size=ep_size, tp_size=tp_size)
+        engine_tpep = _build_engine(ep_size=ep_size, expert_tp_size=expert_tp_size)
         engine_tpep.init_model_weights()
 
         # ------------------------------------------------------------------
@@ -260,11 +344,11 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
         # Assert losses match.
         # ------------------------------------------------------------------
         if dist.get_rank() == 0:
-            self.assertAlmostEqual(
-                loss_tpep,
-                loss_ref,
-                delta=ATOL,
-                msg=f"Loss mismatch: EP+TP={loss_tpep:.6f}, ref={loss_ref:.6f}",
+            torch.testing.assert_close(
+                torch.tensor(loss_tpep),
+                torch.tensor(loss_ref),
+                atol=BF16_ATOL,
+                rtol=BF16_RTOL,
             )
 
         # ------------------------------------------------------------------
@@ -281,8 +365,8 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
                         torch.testing.assert_close(
                             g_tpep,
                             g_ref,
-                            atol=ATOL,
-                            rtol=RTOL,
+                            atol=BF16_GEMM_ATOL,
+                            rtol=BF16_GEMM_RTOL,
                         )
                     except AssertionError as exc:
                         max_diff = (g_tpep - g_ref).abs().max().item()
@@ -299,16 +383,164 @@ class TestMoETrainEngineTPEP(DeterministicDDPTestCase):
             pass
 
     @parametrize.parametrize(
-        "device,ep_size,tp_size",
+        "device,ep_size,expert_tp_size",
         [
             ("cuda", 2, 2),
         ],
     )
-    def test_tpep_training_stability(self, device: str, ep_size: int, tp_size: int) -> None:
+    def test_tpep_expert_gradients_match_single_with_distinct_expert_tp_data(
+        self, device: str, ep_size: int, expert_tp_size: int
+    ) -> None:
+        """Expert TP shards should match the corresponding single-model expert gradients."""
+        pg = self.create_pg(device)
+
+        engine_ref = _build_engine(ep_size=1, expert_tp_size=1)
+        engine_ref.init_model_weights()
+
+        engine_tpep = _build_engine(ep_size=ep_size, expert_tp_size=expert_tp_size)
+        engine_tpep.init_model_weights()
+        _sync_engine_weights(engine_ref, engine_tpep)
+        dist.barrier()
+
+        input_ids, labels = _make_engine_input(
+            torch.device(device, dist.get_rank() % torch.cuda.device_count()),
+            seed_offset=dist.get_rank(),
+        )
+        loss_cfg = CELossConfig()
+
+        _run_one_step(engine_tpep, loss_cfg, input_ids, labels)
+        _run_one_step(engine_ref, loss_cfg, input_ids, labels)
+
+        ref_grad = _get_param_grad(engine_ref, "layers.0.experts.fused_w1w3.weight")
+        tpep_grad = _get_param_grad(engine_tpep, "layers.0.experts.fused_w1w3.weight")
+        tpep_module = _get_tpep_grouped_linear(engine_tpep, "layers.0.experts.fused_w1w3")
+        expected_tpep_grad = _slice_tpep_weight(tpep_module, ref_grad, fused_gate_up=True)
+
+        torch.testing.assert_close(
+            tpep_grad,
+            expected_tpep_grad,
+            atol=BF16_GEMM_ATOL,
+            rtol=BF16_GEMM_RTOL,
+        )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    @parametrize.parametrize(
+        "device,ep_size,expert_tp_size",
+        [
+            ("cuda", 2, 2),
+        ],
+    )
+    def test_tpep_replicated_gradients_and_norm_match_single_with_distinct_expert_tp_data(
+        self, device: str, ep_size: int, expert_tp_size: int
+    ) -> None:
+        """Non-expert replicas and grad norm should match the single-model baseline."""
+        pg = self.create_pg(device)
+
+        engine_ref = _build_engine(ep_size=1, expert_tp_size=1)
+        engine_ref.init_model_weights()
+
+        engine_tpep = _build_engine(ep_size=ep_size, expert_tp_size=expert_tp_size)
+        engine_tpep.init_model_weights()
+        _sync_engine_weights(engine_ref, engine_tpep)
+        dist.barrier()
+
+        input_ids, labels = _make_engine_input(
+            torch.device(device, dist.get_rank() % torch.cuda.device_count()),
+            seed_offset=dist.get_rank(),
+        )
+        loss_cfg = CELossConfig()
+
+        _, _, norm_tpep = _run_one_step_with_norm(engine_tpep, loss_cfg, input_ids, labels)
+        _, _, norm_ref = _run_one_step_with_norm(engine_ref, loss_cfg, input_ids, labels)
+
+        gate_grad_ref = _get_param_grad(engine_ref, "layers.0.gate.weight")
+        gate_grad_tpep = _get_param_grad(engine_tpep, "layers.0.gate.weight")
+
+        torch.testing.assert_close(
+            gate_grad_tpep,
+            gate_grad_ref,
+            atol=BF16_GEMM_ATOL,
+            rtol=BF16_GEMM_RTOL,
+        )
+        torch.testing.assert_close(
+            norm_tpep,
+            norm_ref,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    @parametrize.parametrize(
+        "device,ep_size,expert_tp_size",
+        [
+            ("cuda", 2, 2),
+        ],
+    )
+    def test_tpep_expert_only_grad_norm_matches_single_with_distinct_expert_tp_data(
+        self, device: str, ep_size: int, expert_tp_size: int
+    ) -> None:
+        """Expert-only grad norm must sum norm square across EP and expert TP shards."""
+        pg = self.create_pg(device)
+
+        engine_ref = _build_engine(ep_size=1, expert_tp_size=1)
+        engine_ref.init_model_weights()
+
+        engine_tpep = _build_engine(ep_size=ep_size, expert_tp_size=expert_tp_size)
+        engine_tpep.init_model_weights()
+        _sync_engine_weights(engine_ref, engine_tpep)
+        dist.barrier()
+
+        input_ids, labels = _make_engine_input(
+            torch.device(device, dist.get_rank() % torch.cuda.device_count()),
+            seed_offset=dist.get_rank(),
+        )
+        loss_cfg = CELossConfig()
+
+        _run_train_step_without_clip(engine_tpep, loss_cfg, input_ids, labels)
+        _run_train_step_without_clip(engine_ref, loss_cfg, input_ids, labels)
+        _zero_non_expert_grads(engine_tpep)
+        _zero_non_expert_grads(engine_ref)
+
+        norm_tpep = engine_tpep.clip_grad_norm(do_clip=False).detach().float().cpu()
+        norm_ref = engine_ref.clip_grad_norm(do_clip=False).detach().float().cpu()
+
+        torch.testing.assert_close(
+            norm_tpep,
+            norm_ref,
+            atol=BF16_ATOL,
+            rtol=BF16_RTOL,
+        )
+
+        dist.barrier()
+        torch.cuda.empty_cache()
+        try:
+            dist.destroy_process_group(pg)
+        except Exception:
+            pass
+
+    @parametrize.parametrize(
+        "device,ep_size,expert_tp_size",
+        [
+            ("cuda", 2, 2),
+        ],
+    )
+    def test_tpep_training_stability(self, device: str, ep_size: int, expert_tp_size: int) -> None:
         """EP+TP training should produce finite losses and decreasing trend."""
         pg = self.create_pg(device)
 
-        engine = _build_engine(ep_size=ep_size, tp_size=tp_size)
+        engine = _build_engine(ep_size=ep_size, expert_tp_size=expert_tp_size)
         engine.init_model_weights()
 
         input_ids, labels = _make_engine_input(torch.device(device, dist.get_rank() % torch.cuda.device_count()))

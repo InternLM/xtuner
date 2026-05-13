@@ -40,8 +40,10 @@ N_ROUTED_EXPERTS = 6
 HIDDEN_SIZE = 128
 MOE_INTERMEDIATE_SIZE = 256
 DTYPE = torch.bfloat16
-ATOL = 3e-2
-RTOL = 3e-2
+# TP 分片会改变 bf16 grouped-GEMM 的累加/规约顺序；这里比较整块输出矩阵，
+# atol 使用约 1 个 bf16 ulp 的量级，rtol 仍对齐 torch.testing 的 bf16 默认值。
+BF16_GEMM_ATOL = 1e-3
+BF16_GEMM_RTOL = 1.6e-2
 
 
 @dataclass(frozen=True)
@@ -400,7 +402,7 @@ def _slice_tpep_weight(grouped_linear: torch.nn.Module, full_weight: torch.Tenso
 
 def _assert_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
     try:
-        torch.testing.assert_close(actual.float(), expected.float(), rtol=RTOL, atol=ATOL)
+        torch.testing.assert_close(actual, expected, rtol=BF16_GEMM_RTOL, atol=BF16_GEMM_ATOL)
     except AssertionError as exc:
         max_abs_diff = (actual.float() - expected.float()).abs().max().item()
         raise AssertionError(
