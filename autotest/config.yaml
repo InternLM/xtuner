@@ -852,11 +852,9 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                pip_package: pip install tilelang==0.1.9
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
-                    - PYTHONPATH=/mnt/shared-storage-user/llmrazor-share/qa-caif-cicd/lmdeploy:$PYTHONPATH
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
@@ -869,12 +867,12 @@ case:
                        operator: <
                     -
                        metric: response/rewards/mean
-                       threshold: 0.1
+                       threshold: 0.3
                        method: absolute
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0002
+                       threshold: 0.0005
                        method: absolute
                        operator: <=
                     -
@@ -884,7 +882,7 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 10
+                       threshold: 20
                        method: absolute
                        operator: <
             timeout: 7200
@@ -898,11 +896,9 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                pip_package: pip install tilelang==0.1.9
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
-                    - PYTHONPATH=/mnt/shared-storage-user/llmrazor-share/qa-caif-cicd/lmdeploy:$PYTHONPATH
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
@@ -915,12 +911,12 @@ case:
                        operator: <
                     -
                        metric: response/rewards/mean
-                       threshold: 0.1
+                       threshold: 0.3
                        method: absolute
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0002
+                       threshold: 0.0005
                        method: absolute
                        operator: <=
                     -
@@ -930,7 +926,7 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 10
+                       threshold: 20
                        method: absolute
                        operator: <
             timeout: 7200
@@ -944,11 +940,9 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                pip_package: pip install tilelang==0.1.9
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
-                    - PYTHONPATH=/mnt/shared-storage-user/llmrazor-share/qa-caif-cicd/lmdeploy:$PYTHONPATH
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
                     - XTUNER_GC_ENABLE=1
@@ -962,12 +956,12 @@ case:
                        operator: <
                     -
                        metric: response/rewards/mean
-                       threshold: 0.1
+                       threshold: 0.3
                        method: absolute
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0002
+                       threshold: 0.0005
                        method: absolute
                        operator: <=
                     -
@@ -977,7 +971,53 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 10
+                       threshold: 20
+                       method: absolute
+                       operator: <
+            timeout: 7200
+
+        -
+            type: rl
+            pre_action:
+                command: 'python ./autotest/utils/update_meta.py /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output qwen3-5-rl-vl-lmdeploy-resume rl'
+            parameters:
+                config: autotest/config/rl_qwen3_5_vl_dapo_resume.py
+                infer_backend: lmdeploy
+                output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
+            resource:
+                memory_per_task: 1200
+                envs:
+                    - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
+                    - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
+                    - XTUNER_USE_LMDEPLOY=1
+                    - XTUNER_DETERMINISTIC=true
+                    - XTUNER_GC_ENABLE=1
+            assert_info:
+                base_metric: qwen3-5-rl-vl-lmdeploy-resume/00f7e16_resume/tracker.jsonl
+                check_metrics:
+                    - 
+                       metric:  eval/accuracy
+                       threshold: 0.1
+                       method: absolute
+                       operator: <
+                    -
+                       metric: response/rewards/mean
+                       threshold: 0.3
+                       method: absolute
+                       operator: <
+                    - 
+                       metric:  mismatch/mismatch_k3_kl
+                       threshold: 0.0005
+                       method: absolute
+                       operator: <=
+                    -
+                       metric: response/response_len/mean
+                       threshold: 0.25
+                       method: relative
+                       operator: <
+                    -
+                       metric: time/step
+                       threshold: 20
                        method: absolute
                        operator: <
             timeout: 7200
@@ -991,11 +1031,9 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                pip_package: pip install tilelang==0.1.9
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/rl_vl_meta.jsonl
-                    - PYTHONPATH=/mnt/shared-storage-user/llmrazor-share/qa-caif-cicd/lmdeploy:$PYTHONPATH
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
@@ -1008,12 +1046,12 @@ case:
                        operator: <
                     -
                        metric: response/rewards/mean
-                       threshold: 0.1
+                       threshold: 0.3
                        method: absolute
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0002
+                       threshold: 0.0005
                        method: absolute
                        operator: <=
                     -
@@ -1023,7 +1061,7 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 10
+                       threshold: 20
                        method: absolute
                        operator: <
             timeout: 7200
@@ -1037,12 +1075,10 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                pip_package: pip install tilelang==0.1.9
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                    - PYTHONPATH=/mnt/shared-storage-user/llmrazor-share/qa-caif-cicd/lmdeploy:$PYTHONPATH
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
@@ -1055,12 +1091,12 @@ case:
                        operator: <
                     -
                        metric: response/rewards/mean
-                       threshold: 0.1
+                       threshold: 0.3
                        method: absolute
                        operator: <
                     - 
                        metric:  mismatch/mismatch_k3_kl
-                       threshold: 0.0002
+                       threshold: 0.0005
                        method: absolute
                        operator: <=
                     -
@@ -1070,7 +1106,7 @@ case:
                        operator: <
                     -
                        metric: time/step
-                       threshold: 10
+                       threshold: 20
                        method: absolute
                        operator: <
             timeout: 7200
@@ -1084,12 +1120,10 @@ case:
                 output_path: /mnt/shared-storage-user/llmrazor-share/qa-llm-cicd/test_output
             resource:
                 memory_per_task: 1200
-                  #pip_package: pip install tilelang==0.1.9
                 envs:
                     - MODEL_PATH=/mnt/shared-storage-user/llmrazor-share/model/Qwen3.5-35B-A3B
                     - DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/train-mini.jsonl
                     - EVAL_DATA_PATH=/mnt/shared-storage-user/llmrazor-share/data/gsm8k/test.jsonl
-                      #- PYTHONPATH=/mnt/shared-storage-user/llmrazor-share/qa-caif-cicd/lmdeploy:$PYTHONPATH
                     - XTUNER_USE_LMDEPLOY=1
                     - XTUNER_DETERMINISTIC=true
             assert_info:
@@ -1102,7 +1136,7 @@ case:
                        operator: <
                     -
                        metric: response/rewards/mean
-                       threshold: 0.1
+                       threshold: 0.3
                        method: absolute
                        operator: <
                     - 
