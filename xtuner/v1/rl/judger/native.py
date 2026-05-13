@@ -70,7 +70,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ray.actor import ActorClass, ActorProxy
 
 from xtuner.v1.data_proto.rl_data import RolloutState
-from xtuner.v1.rl.utils import CPUActorLauncher, ExternalCPUActorPoolAllocation, ExternalCPUActorPoolConfig
+from xtuner.v1.rl.utils import CPUActorLauncher, CPUActorPoolAllocation, CPUActorPoolConfig
 from xtuner.v1.utils.logger import get_logger
 from xtuner.v1.utils.type_helper import ray_method
 
@@ -197,7 +197,7 @@ class JudgerConfig(BaseModel):
 
     ``JudgerConfig`` describes the reward logic and optionally names the
     external CPU pool used to run the judger as Ray actors. CPU quantities are
-    owned by ``ExternalCPUResourcesConfig``.
+    owned by ``CPUResourceManagerConfig``.
 
     Args:
         judger_name (str): Logical judger name used in logs and reward output.
@@ -227,7 +227,7 @@ class JudgerConfig(BaseModel):
     reward_handler: Callable | str | None = Field(default=None, exclude=True)
     request_timeout: float = 30.0
     extra_info: dict = Field(default_factory=dict, exclude=True)
-    external_cpu: ExternalCPUActorPoolConfig | None = None
+    external_cpu: CPUActorPoolConfig | None = None
 
     def build_local(self) -> Judger:
         return NativeJudger(
@@ -237,7 +237,7 @@ class JudgerConfig(BaseModel):
             extra_info=self.extra_info,
         )
 
-    def _build_remote_actor(self, external_cpu_allocation: ExternalCPUActorPoolAllocation) -> RayJudgerProxy:
+    def _build_remote_actor(self, external_cpu_allocation: CPUActorPoolAllocation) -> RayJudgerProxy:
         return CPUActorLauncher.build_actor(
             JudgerActor,
             self,
@@ -247,16 +247,16 @@ class JudgerConfig(BaseModel):
 
     def _build_remote_actors(
         self,
-        external_cpu_allocation: ExternalCPUActorPoolAllocation,
+        external_cpu_allocation: CPUActorPoolAllocation,
     ) -> list[RayJudgerProxy]:
         return [self._build_remote_actor(external_cpu_allocation) for _ in range(external_cpu_allocation.num_actors)]
 
-    def _build_remote_judger(self, external_cpu_allocation: ExternalCPUActorPoolAllocation) -> Judger:
+    def _build_remote_judger(self, external_cpu_allocation: CPUActorPoolAllocation) -> Judger:
         return RemoteJudger(self._build_remote_actor(external_cpu_allocation), judger_name=self.judger_name)
 
     def _build_remote_judgers(
         self,
-        external_cpu_allocation: ExternalCPUActorPoolAllocation,
+        external_cpu_allocation: CPUActorPoolAllocation,
     ) -> list[Judger]:
         return [
             RemoteJudger(actor, judger_name=self.judger_name)

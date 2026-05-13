@@ -11,7 +11,7 @@ PlacementGroups = PlacementGroup | list[PlacementGroup] | tuple[PlacementGroup, 
 logger = get_logger()
 
 
-class ExternalCPUActorPoolConfig(BaseModel):
+class CPUActorPoolConfig(BaseModel):
     """CPU requirements for one PG-external Ray actor pool."""
 
     model_config = ConfigDict(extra="forbid")
@@ -31,7 +31,7 @@ class ExternalCPUActorPoolConfig(BaseModel):
         return self.num_actors * self.memory_per_actor
 
 
-class ExternalCPUResourcesConfig(BaseModel):
+class CPUResourceManagerConfig(BaseModel):
     """Registry for Ray CPU actors that run outside accelerator placement groups.
 
     This config is a bookkeeping and validation layer. It does not reserve or
@@ -42,7 +42,7 @@ class ExternalCPUResourcesConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strict: bool = True
-    pools: dict[str, ExternalCPUActorPoolConfig] = Field(default_factory=dict)
+    pools: dict[str, CPUActorPoolConfig] = Field(default_factory=dict)
 
     @property
     def total_cpus(self) -> float:
@@ -54,9 +54,9 @@ class ExternalCPUResourcesConfig(BaseModel):
 
 
 @dataclass(frozen=True)
-class ExternalCPUActorPoolAllocation:
+class CPUActorPoolAllocation:
     name: str
-    config: ExternalCPUActorPoolConfig
+    config: CPUActorPoolConfig
 
     @property
     def num_actors(self) -> int:
@@ -77,15 +77,15 @@ class ExternalCPUActorPoolAllocation:
         return options
 
 
-class ExternalCPUResourceManager:
+class CPUResourceManager:
     """Validates and serves PG-external CPU actor allocations."""
 
     def __init__(
         self,
-        config: ExternalCPUResourcesConfig | None,
+        config: CPUResourceManagerConfig | None,
         accelerator_placement_groups: PlacementGroups = None,
     ):
-        self.config = config or ExternalCPUResourcesConfig()
+        self.config = config or CPUResourceManagerConfig()
         self._registration_counts: dict[str, int] = {}
         if accelerator_placement_groups is None:
             self._accelerator_placement_groups: tuple[PlacementGroup, ...] = ()
@@ -96,15 +96,15 @@ class ExternalCPUResourceManager:
         else:
             self._accelerator_placement_groups = tuple(accelerator_placement_groups)
 
-    def get(self, name: str) -> ExternalCPUActorPoolAllocation:
+    def get(self, name: str) -> CPUActorPoolAllocation:
         if name not in self.config.pools:
             raise KeyError(
                 f"Unknown external CPU resource pool {name!r}. "
                 f"Available pools: {sorted(self.config.pools)}"
             )
-        return ExternalCPUActorPoolAllocation(name=name, config=self.config.pools[name])
+        return CPUActorPoolAllocation(name=name, config=self.config.pools[name])
 
-    def register(self, name: str, config: ExternalCPUActorPoolConfig) -> ExternalCPUActorPoolAllocation:
+    def register(self, name: str, config: CPUActorPoolConfig) -> CPUActorPoolAllocation:
         registered_name = self._make_unique_registration_name(name)
         self.config.pools[registered_name] = config
         try:
@@ -112,7 +112,7 @@ class ExternalCPUResourceManager:
         except Exception:
             del self.config.pools[registered_name]
             raise
-        return ExternalCPUActorPoolAllocation(name=registered_name, config=config)
+        return CPUActorPoolAllocation(name=registered_name, config=config)
 
     def log_initial_snapshot(self) -> None:
         resource_summary = self._build_resource_summary()
@@ -318,17 +318,17 @@ class ExternalCPUResourceManager:
         return max(node_totals.values())
 
 
-_EXTERNAL_CPU_RESOURCE_MANAGER: ExternalCPUResourceManager | None = None
+_CPU_RESOURCE_MANAGER: CPUResourceManager | None = None
 
 
-def set_external_cpu_resource_manager(manager: ExternalCPUResourceManager | None) -> None:
-    global _EXTERNAL_CPU_RESOURCE_MANAGER
-    _EXTERNAL_CPU_RESOURCE_MANAGER = manager
+def set_cpu_resource_manager(manager: CPUResourceManager | None) -> None:
+    global _CPU_RESOURCE_MANAGER
+    _CPU_RESOURCE_MANAGER = manager
 
 
-def get_external_cpu_resource_manager() -> ExternalCPUResourceManager | None:
-    return _EXTERNAL_CPU_RESOURCE_MANAGER
+def get_cpu_resource_manager() -> CPUResourceManager | None:
+    return _CPU_RESOURCE_MANAGER
 
 
-def clear_external_cpu_resource_manager() -> None:
-    set_external_cpu_resource_manager(None)
+def clear_cpu_resource_manager() -> None:
+    set_cpu_resource_manager(None)

@@ -13,7 +13,7 @@ from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig, ExternalCPUActorPoolConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUActorPoolConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
@@ -69,14 +69,14 @@ rollout_config = RolloutConfig(
 # 3. judger
 train_judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    external_cpu=ExternalCPUActorPoolConfig(
+    external_cpu=CPUActorPoolConfig(
         num_actors=1,
         num_cpus_per_actor=1,
     ),
 )
 eval_judger_config = GSM8KJudgerConfig(
     judger_name="openai/gsm8k",
-    external_cpu=ExternalCPUActorPoolConfig(
+    external_cpu=CPUActorPoolConfig(
         num_actors=1,
         num_cpus_per_actor=1,
     ),

@@ -1,6 +1,6 @@
 from .composed import ComposedJudger, ComposedJudgerConfig, JudgerConfigLike, default_merge_fn
 from .native import Judger, JudgerConfig, JudgerPool
-from xtuner.v1.rl.utils import get_external_cpu_resource_manager
+from xtuner.v1.rl.utils import get_cpu_resource_manager
 
 
 #
@@ -20,11 +20,11 @@ def build_judger(config: JudgerConfigLike) -> Judger:
 def _build_replicated_judger(config: JudgerConfig) -> Judger:
     external_cpu_allocation = None
     if config.external_cpu is not None:
-        external_cpu_manager = get_external_cpu_resource_manager()
+        external_cpu_manager = get_cpu_resource_manager()
         if external_cpu_manager is None:
             raise ValueError(
                 f"Judger {config.judger_name!r} sets external_cpu, "
-                "but no ExternalCPUResourceManager was provided."
+                "but no CPUResourceManager was provided."
             )
         external_cpu_allocation = external_cpu_manager.register(
             name=f"judger:{config.judger_name}",
