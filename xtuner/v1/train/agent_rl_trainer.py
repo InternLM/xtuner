@@ -1,8 +1,8 @@
+import asyncio
 import json
 import os
 import random
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Literal, cast
 
@@ -15,9 +15,9 @@ from mmengine.dist import get_rank
 from pydantic import BaseModel, ConfigDict, field_serializer, model_validator
 from ray.actor import ActorClass
 from ray.util.placement_group import PlacementGroup
+from transformers import AutoTokenizer
 from typing_extensions import Self
 
-from transformers import AutoTokenizer
 from xtuner.v1.data_proto.sequence_context import SequenceContext
 from xtuner.v1.patch import patch_default_save_plan
 from xtuner.v1.ray.dataflow import DataFlow, DataFlowConfig, ReplayBufferConfig
@@ -36,7 +36,6 @@ from .rl_trainer import (
     RLTrainerConfig,
     bind_train_rollout,
 )
-
 
 # TODO: Move DEVICE to `xtuner.utils.device`
 DEVICE = get_device()
@@ -186,8 +185,6 @@ class AgentRLTrainer(RLTrainer):
         self._checkpoint_maxkeep = checkpoint_maxkeep
         self._checkpoint_no_save_optimizer = checkpoint_no_save_optimizer
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-
         self._debug = debug
         self._debug_rollout = debug_rollout
         self._seed = seed
@@ -252,6 +249,9 @@ class AgentRLTrainer(RLTrainer):
             dataflow_cfg=dataflow_config,
             replay_buffer_config=replay_buffer_config,
         )
+        self.tokenizer = None
+        if not hasattr(self._rollout_env_controller, 'rollout_controller'):
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
         rollout_info = ray.get(self._rollout_env_controller.get_rollout_info.remote())
         print(f"rollout_info {rollout_info}")
@@ -559,46 +559,25 @@ class AgentRLTrainer(RLTrainer):
         if not agent_data_groups:
             return data_batches, info_dict
 
-        def _tokenize_agent_messages(data_item):
+        async def _tokenize_agent_messages(data_item):
             if "inputs" in data_item.env.agent.extra_info:
                 return data_item.env.agent.extra_info["inputs"]
-            messages = data_item.env.agent.extra_info.get("messages")
-            tools = data_item.env.agent.extra_info.get("tools")
-            # Fast path: dispatch to the RolloutController's TokenizeController
-            # (256 actor workers, SPREAD scheduled). The driver here just
-            # waits on a Ray object ref — no SentencePiece work on this
-            # process, so GIL is not in the way. If the controller is
-            # unavailable (e.g. eval-only setup) fall back to local tokenize.
-            if messages is None:
-                return tokenize(self.tokenizer, [], tools=tools)
-            if self._rollout_controller is not None:
-                return ray.get(self._rollout_controller.tokenize.remote(messages, tools))
-            return tokenize(self.tokenizer, messages, tools=tools)
-
-        # Fast-path diagnostics: how many samples were pre-tokenized by the
-        # rollout-side TokenizeController vs how many fall back to driver-side
-        # tokenize (SentencePiece slow tokenizer, bottlenecked by GIL).
-        import time as _time
-
-        _flat = [group[i] for group in agent_data_groups for i in range(len(group))]
-        _pre = sum(1 for d in _flat if "inputs" in d.env.agent.extra_info)
-        _fallback = len(_flat) - _pre
-        _t0 = _time.perf_counter()
-        # ThreadPoolExecutor here is fine even when the work is done by
-        # remote actors — each worker just blocks on ray.get, and threads
-        # release the GIL while waiting. Fan-out cap should be ≥ the number
-        # of TokenizeController actors to saturate them.
-        with ThreadPoolExecutor(max_workers=256) as executor:
-            inputs_list = list(
-                executor.map(
-                    _tokenize_agent_messages,
-                    _flat,
+            if self.tokenizer is None:
+                return await self._rollout_env_controller.rollout_controller.tokenize.remote(
+                    data_item.env.agent.extra_info["messages"], data_item.env.agent.extra_info.get("tools")
                 )
+            return tokenize(
+                self.tokenizer, data_item.env.agent.extra_info["messages"], data_item.env.agent.extra_info.get("tools")
             )
-        _dt = _time.perf_counter() - _t0
-        self.logger.info(
-            f"[AgentRLTrainer] tokenize: total={len(_flat)} pre_tokenized={_pre} "
-            f"fallback={_fallback} wall_seconds={_dt:.2f}"
+
+        import nest_asyncio
+
+        nest_asyncio.apply()
+        _loop = asyncio.get_event_loop()
+        inputs_list = _loop.run_until_complete(
+            asyncio.gather(
+                *[_tokenize_agent_messages(group[i]) for group in agent_data_groups for i in range(len(group))],
+            )
         )
 
         rewards_list = []
@@ -648,15 +627,15 @@ class AgentRLTrainer(RLTrainer):
                 response_len_list.append(len(rollout.response_ids))
                 prompt_len_list.append(len(input_ids) - len(rollout.response_ids))
                 advantages_list.extend([advantages[i]] * len(rollout.response_ids))
-                assert len(input_ids) <= pack_max_length, (
-                    f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
-                )
+                assert (
+                    len(input_ids) <= pack_max_length
+                ), f"Input ids length {len(input_ids)} exceed pack max length {pack_max_length}."
                 input_ids = torch.tensor(input_ids, dtype=torch.int64).unsqueeze(0)
                 shifted_labels = torch.tensor(shifted_labels, dtype=torch.int64).unsqueeze(0)
                 rollout_logprobs = torch.tensor(logprobs, dtype=torch.float32).unsqueeze(0)
-                assert rollout_logprobs.size() == shifted_labels.size(), (
-                    f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
-                )
+                assert (
+                    rollout_logprobs.size() == shifted_labels.size()
+                ), f"{rollout_logprobs.size()} vs {shifted_labels.size()}"
 
                 seq_ctx = SequenceContext.from_input_ids((input_ids,), device="cpu")
                 # Pass the accumulator dict {"keys": [...], "length": N} straight
