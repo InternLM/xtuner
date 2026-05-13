@@ -212,7 +212,7 @@ def tb2_rl_pipeline(
             workspace=ws,
             extras={"WORKSPACE": ws},
         ),
-        timeout=4800,
+        timeout=7200,
         post=[
             DownloadHook([ws, "/tmp/agent_response.txt"]),
             ReadFileHook("/tmp/message.json", "message"),

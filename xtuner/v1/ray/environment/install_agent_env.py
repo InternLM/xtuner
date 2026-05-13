@@ -55,13 +55,25 @@ def _import_from_path(path: str):
 
 
 def _resolve_pipeline(pipeline_spec, sandbox_spec: dict | None = None):
-    """Resolve pipeline spec into a Runner-like object with run_single()."""
+    """Resolve pipeline spec into a Runner-like object with run_single().
+
+    If ``sandbox_spec`` is provided (from the data sample's extra_info), it is
+    merged *on top of* the factory's default ``SandboxSpec`` rather than
+    replacing it wholesale — so fields omitted by the data (e.g. ``ttl_seconds``,
+    ``workspace_path``) fall back to the pipeline's own ``DEFAULT_SANDBOX``.
+    """
     obj = _import_from_path(pipeline_spec)
-    # Most configs point to a factory function (e.g., claw_pipeline()).
-    if sandbox_spec is not None:
-        return obj(sandbox=SandboxSpec(**sandbox_spec))
-    else:
+    if not sandbox_spec:
         return obj()
+    try:
+        default_sb = inspect.signature(obj).parameters["sandbox"].default
+    except (ValueError, KeyError):
+        default_sb = None
+    if isinstance(default_sb, SandboxSpec):
+        merged = {**default_sb.model_dump(), **sandbox_spec}
+    else:
+        merged = dict(sandbox_spec)
+    return obj(sandbox=SandboxSpec(**merged))
 
 
 def _sample_task_id(sample: RLDataFlowItem) -> str | None:
@@ -125,6 +137,8 @@ def _classify_mark_failed_reason(reason: str | None) -> str:
             return "entry_daemon_gone"
         if rc == -3:
             return "entry_timeout"
+        if rc == -4:
+            return "sandbox_unreachable"
         if rc == -9 or rc == 137:
             return "oom_killed"
         if rc > 0:

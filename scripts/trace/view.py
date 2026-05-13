@@ -75,6 +75,8 @@ def _reclassify(reason: str | None) -> str:
             return "entry_daemon_gone"
         if rc == -3:
             return "entry_timeout"
+        if rc == -4:
+            return "sandbox_unreachable"
         if rc == -9 or rc == 137:
             return "oom_killed"
         if rc > 0:
@@ -217,6 +219,7 @@ def cmd_stats(trace_dir: Path) -> int:
         print(f"  {'rc':>4}  {'n':>6}  meaning")
         for rc in sorted(rc_counts, key=lambda k: -rc_counts[k]):
             meaning = {
+                -4: "sandbox_unreachable (gateway evicted env / TTL expired)",
                 -3: "infer_timeout (hit SandboxStage.timeout)",
                 -2: "infer_daemon_gone (pgrep lost daemon)",
                 -1: "infer_pid_lost (wrapper shell died)",
@@ -319,6 +322,130 @@ def cmd_llm_stats(trace_dir: Path) -> int:
     return 0
 
 
+def _image_from_task_id(tid: str | None) -> str | None:
+    """Fallback image inference when a span lacks annotated sandbox_image.
+
+    e.g. ``debugging_task_468`` → ``t-debugging-v1``.  Used only for
+    historical traces (before runner.py annotated acquire spans with
+    sandbox_* fields) — new runs carry the real image/url on the span.
+    """
+    if not tid or "_task_" not in tid:
+        return None
+    prefix = tid.split("_task_", 1)[0].replace("_", "-")
+    return f"t-{prefix}-v1"
+
+
+_INFLIGHT_STAGE_ORDER = ("acquire", "infer", "validate", "run_single_total", "env_sample_total")
+
+
+def cmd_inflight(trace_dir: Path, oldest_first: bool = False, limit: int = 60) -> int:
+    """List samples currently stuck in-flight.
+
+    Definition of "in-flight": a uid has an ``acquire`` span emitted but
+    neither an ``env_sample_total`` span nor a fate record — i.e. it's
+    still sitting inside ``_inner_agent_call``, almost certainly hung
+    somewhere inside the sandbox.
+
+    Each row prints the sandbox URL so the operator can directly ``curl``
+    that sandbox's ``/download`` or ``/exec`` endpoint to inspect its
+    state.  URL comes primarily from the ``acquire`` span's annotated
+    ``sandbox_url`` field (written by runner.py on successful acquire);
+    older traces that predate that annotation fall back to a
+    ``task_id``-prefix-based image inference + ``training_log.txt`` grep
+    for the ``env_id``, but those can be missing due to Ray driver-log
+    dedup.
+
+    Args:
+        trace_dir (Path): Directory containing ``fates.*.jsonl`` and
+            ``spans.*.jsonl``.
+        oldest_first (bool): When True, stuck-longest rows appear first.
+        limit (int): Cap on how many rows to print.
+    """
+    # Finished uids — have a fate record.
+    fate_uids: set[str] = set()
+    for r in _load_records(trace_dir, "fates"):
+        uid = r.get("uid")
+        if uid:
+            fate_uids.add(uid)
+
+    # Per-uid: which stages have been emitted + latest timestamp + task_id.
+    # Also stash acquire-span annotations (sandbox_url/env_id/image) since
+    # those are the authoritative source for in-flight debugging.
+    spans_by_uid: dict[str, dict[str, tuple]] = defaultdict(dict)
+    sandbox_info: dict[str, dict] = {}
+    for r in _load_records(trace_dir, "spans"):
+        uid = r.get("uid")
+        if not uid:
+            continue
+        spans_by_uid[uid][r.get("stage")] = (r.get("ts"), r.get("task_id"))
+        if r.get("stage") == "acquire" and r.get("sandbox_url"):
+            sandbox_info[uid] = {
+                "sandbox_url": r["sandbox_url"],
+                "sandbox_env_id": r.get("sandbox_env_id"),
+                "sandbox_image": r.get("sandbox_image"),
+            }
+
+    inflight: list[tuple] = []
+    for uid, stages in spans_by_uid.items():
+        if uid in fate_uids or "acquire" not in stages or "env_sample_total" in stages:
+            continue
+        ts_values = [v[0] for v in stages.values() if v[0] is not None]
+        if not ts_values:
+            continue
+        latest_ts = max(ts_values)
+        task_id = next((v[1] for v in stages.values() if v[1]), None)
+        emitted = [s for s in _INFLIGHT_STAGE_ORDER if s in stages]
+        stuck = (
+            _INFLIGHT_STAGE_ORDER[_INFLIGHT_STAGE_ORDER.index(emitted[-1]) + 1]
+            if emitted and emitted[-1] != _INFLIGHT_STAGE_ORDER[-1]
+            else "?"
+        )
+        inflight.append((latest_ts, uid, task_id, stuck))
+
+    # Default sort: newest latest_ts first so you see the freshest activity
+    # at the top.  ``--oldest-first`` flips to prioritize longest-stuck.
+    inflight.sort(reverse=not oldest_first)
+
+    # Fallback env_id map (pre-annotation traces): grep training_log.txt.
+    env_of: dict[str, str] = {}
+    log_path = trace_dir.parent / "training_log.txt"
+    if log_path.exists() and any(not sandbox_info.get(u) for _, u, _, _ in inflight):
+        rx_ready = re.compile(r"\[([A-Za-z0-9_]+)\] sandbox ready env_id=([a-f0-9]+)")
+        with open(log_path, errors="replace") as f:
+            for line in f:
+                m = rx_ready.search(line)
+                if m:
+                    env_of[m.group(1)] = m.group(2)
+
+    now = time.time()
+    order = "OLDEST FIRST (hung longest at top)" if oldest_first else "NEWEST FIRST"
+    print(f"in-flight samples (n={len(inflight)})  — {order}\n")
+    print(f"{'elapsed':>8}  {'task_id':<34} {'stuck':<10} sandbox_url")
+    print("-" * 140)
+    with_url = 0
+    preview = inflight[:limit]
+    for latest_ts, uid, tid, stuck in preview:
+        elapsed = now - (latest_ts or now)
+        es = f"{elapsed/60:.1f}m" if elapsed > 60 else f"{elapsed:.0f}s"
+        info = sandbox_info.get(uid) or {}
+        url = info.get("sandbox_url")
+        if not url:
+            img = _image_from_task_id(tid)
+            env = env_of.get(tid or "")
+            if img and env:
+                url = f"http://{img}-{env}.ailab.ailab.ai"
+            elif img:
+                url = f"http://{img}-???.ailab.ailab.ai  (env_id dedup-lost)"
+            else:
+                url = "(cannot infer)"
+        if url and "???" not in url and "cannot" not in url:
+            with_url += 1
+        print(f"{es:>8}  {str(tid)[:32]:<34} {stuck:<10} {url}")
+    print()
+    print(f"# shown {len(preview)}/{len(inflight)}; {with_url} rows have a complete sandbox URL")
+    return 0
+
+
 def cmd_tail(trace_dir: Path) -> int:
     open_files: dict[Path, "io_TextFile"] = {}
     try:
@@ -355,6 +482,22 @@ def main() -> int:
     parser.add_argument("--slow", type=int, metavar="N", help="top N slowest spans")
     parser.add_argument("--tail", action="store_true", help="live stream jsonl")
     parser.add_argument("--llm-stats", action="store_true", help="p50/p95/p99 of /v1/chat/completions requests")
+    parser.add_argument(
+        "--inflight",
+        action="store_true",
+        help="list samples currently stuck in-flight (has acquire span but no fate)",
+    )
+    parser.add_argument(
+        "--oldest-first",
+        action="store_true",
+        help="with --inflight: sort so longest-stuck samples appear first",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=60,
+        help="with --inflight: max rows to print (default 60)",
+    )
     args = parser.parse_args()
 
     if not args.trace_dir.exists():
@@ -372,6 +515,8 @@ def main() -> int:
         return cmd_tail(args.trace_dir)
     if args.llm_stats:
         return cmd_llm_stats(args.trace_dir)
+    if args.inflight:
+        return cmd_inflight(args.trace_dir, oldest_first=args.oldest_first, limit=args.limit)
     parser.print_help()
     return 0
 

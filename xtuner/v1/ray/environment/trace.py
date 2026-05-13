@@ -1,6 +1,6 @@
 """Per-sample trace emission for the InstallAgentEnvironment pipeline.
 
-Three jsonl channels written under ``$WORK_DIR/trace/``:
+Four outputs under ``$WORK_DIR/trace/``:
 
 * ``fates.{actor_id}.{pid}.jsonl`` — one terminal line per sample, capturing
   whether it ended up COMPLETED or SKIPPED plus the stage/reason.
@@ -11,6 +11,11 @@ Three jsonl channels written under ``$WORK_DIR/trace/``:
   served by :class:`RolloutController`, with total / tokenize / rollout /
   post durations and token counts.  Independent of the per-sample fate/span
   writer because the controller is its own actor with no owning sample uid.
+* ``diagnostics/{ts}_{task_id}_{uid}.log`` (+ optional ``.daemon.log``) —
+  unstructured per-failure bundle with the pulled daemon log tail.  Written
+  whenever a sample fails with a non-zero entry rc or runner-level
+  exception; the header file is always produced so a missing daemon log
+  still leaves a breadcrumb (``daemon_log_file=(unavailable)``).
 
 Each Ray actor writes its own two files so concurrent writes never contend
 a single file descriptor across processes. Line-buffered + per-line flush
@@ -101,18 +106,32 @@ def emit_fate(
 class SpanHandle:
     """Mutable handle yielded by :func:`span` so the caller can flag logical
     failures that do not raise (e.g. a subprocess returning non-zero without
-    throwing).
+    throwing) or attach runtime-discovered fields (e.g. a sandbox URL that only
+    becomes known after ``acquire`` succeeds).
 
-    Fields default to "success"; see ``mark_error``.
+    Fields default to "success"; see ``mark_error`` and ``annotate``.
     """
 
     def __init__(self) -> None:
         self.ok: bool = True
         self.err: str | None = None
+        # Runtime-discovered fields merged into the span record at emit time.
+        # Separate from the constructor ``extra`` kwargs because those are
+        # fixed at span-entry, whereas these are set mid-block.
+        self.annotations: dict[str, Any] = {}
 
     def mark_error(self, err: str) -> None:
         self.ok = False
         self.err = err
+
+    def annotate(self, **fields: Any) -> None:
+        """Attach runtime-discovered fields to this span record (merged at emit
+        time).
+
+        Useful for values that are only known after the guarded
+        code ran — e.g. the sandbox URL returned by ``_acquire_ready_sandbox``.
+        """
+        self.annotations.update(fields)
 
 
 @contextmanager
@@ -125,11 +144,12 @@ def span(uid: str, stage: str, **extra: Any) -> Iterator[SpanHandle]:
     Args:
         uid (str): Per-sample observation id.
         stage (str): Short stage name (e.g. ``"acquire"``, ``"infer"``).
-        **extra (Any): Additional keys merged into the record.
+        **extra (Any): Additional keys merged into the record (fixed at
+            entry — use ``SpanHandle.annotate()`` for mid-block values).
 
     Returns:
-        SpanHandle: Yielded handle; call ``handle.mark_error(...)`` inside
-        the block to flag a non-raising logical failure.
+        SpanHandle: Yielded handle; call ``handle.mark_error(...)`` or
+        ``handle.annotate(...)`` inside the block to customize the record.
     """
     handle = SpanHandle()
     t_start = time.monotonic()
@@ -152,6 +172,8 @@ def span(uid: str, stage: str, **extra: Any) -> Iterator[SpanHandle]:
             }
             if extra:
                 record.update(extra)
+            if handle.annotations:
+                record.update(handle.annotations)
             _writer.write_span(record)
 
 
@@ -282,3 +304,91 @@ class _TraceWriter:
             fp.write(line + "\n")
         except Exception as exc:
             get_logger().warning(f"[trace] write failed: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Failure-path diagnostics (unstructured dump)
+# ─────────────────────────────────────────────────────────────────
+#
+# ``emit_diagnostic`` writes a per-failure bundle under
+# ``$WORK_DIR/trace/diagnostics/`` whenever a sample dies with a non-zero
+# entry rc or runner-level exception.  The header ``.log`` is always
+# written so a missing ``.daemon.log`` (sandbox unreachable, TTL expired,
+# etc.) still leaves a breadcrumb with the ``download_err`` explanation.
+#
+# Caller (``runner._dump_skipped_diagnostic``) owns the sandbox client and
+# is responsible for downloading the daemon log bytes; this function just
+# writes files.  Keeping HTTP out of trace.py means the module has no
+# runtime deps on lagent/sandbox-client internals.
+
+_DIAGNOSTIC_TAIL_PREVIEW_LINES = 50
+
+
+def emit_diagnostic(
+    task_id: str | None,
+    uid: str | None,
+    data_source: str | None,
+    exception_type: str,
+    exception_msg: str,
+    daemon_log: bytes | None = None,
+    download_err: str | None = None,
+) -> None:
+    """Persist a per-failure diagnostic bundle under
+    ``$WORK_DIR/trace/diagnostics/``.
+
+    Args:
+        task_id (str | None): Dataset task id; used in filename + header.
+        uid (str | None): Per-sample observation id; truncated to 12 chars
+            in the filename so multiple sibling failures don't collide.
+        data_source (str | None): Data source label (e.g. ``"tb2-rl"``).
+        exception_type (str): Class name of the exception that triggered
+            the dump.
+        exception_msg (str): Short error message.
+        daemon_log (bytes | None): Full ``/tmp/agent_daemon.log`` bytes if
+            download succeeded; ``None`` when the caller's download failed
+            (sandbox unreachable, etc.).
+        download_err (str | None): Short description of the download
+            failure when ``daemon_log is None``.
+    """
+    work_dir = os.environ.get("WORK_DIR")
+    if not work_dir:
+        return
+    diag_dir = Path(work_dir) / "trace" / "diagnostics"
+    try:
+        diag_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        get_logger().debug(f"[trace] diagnostic dir mkdir failed: {exc}")
+        return
+
+    ts = time.strftime("%H%M%S")
+    uid_short = (uid or "nouid")[:12]
+    base = diag_dir / f"{ts}_{task_id or 'notask'}_{uid_short}"
+
+    full_size = 0
+    tail_preview = "(no daemon log)"
+    if daemon_log is not None:
+        full_size = len(daemon_log)
+        text = daemon_log.decode(errors="replace")
+        tail_preview = "\n".join(text.splitlines()[-_DIAGNOSTIC_TAIL_PREVIEW_LINES:])
+        try:
+            base.with_suffix(".daemon.log").write_bytes(daemon_log)
+        except Exception as exc:
+            get_logger().debug(f"[trace] daemon log write failed: {exc}")
+    elif download_err is not None:
+        tail_preview = f"(could not pull daemon log: {download_err})"
+
+    try:
+        base.with_suffix(".log").write_text(
+            f"task_id={task_id}\n"
+            f"uid={uid}\n"
+            f"data_source={data_source}\n"
+            f"timestamp={time.time()}\n"
+            f"exception_type={exception_type}\n"
+            f"exception={exception_msg}\n"
+            f"daemon_log_bytes={full_size}\n"
+            f"daemon_log_file={base.with_suffix('.daemon.log').name if daemon_log else '(unavailable)'}\n"
+            f"---daemon_log_tail_preview (last {_DIAGNOSTIC_TAIL_PREVIEW_LINES} lines)---\n"
+            f"{tail_preview}\n"
+        )
+    except Exception as exc:
+        get_logger().debug(f"[trace] diagnostic header write failed at {base}: {exc}")

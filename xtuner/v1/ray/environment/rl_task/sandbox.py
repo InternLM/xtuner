@@ -431,6 +431,12 @@ async def wait_for_detached_entry(
         the entry was still running.  Skipped if ``daemon_pattern`` is
         ``None`` (stage has no external daemon to monitor, e.g. judgers).
       * ``-3`` — exceeded ``max_sec`` (safety ceiling, default 2h).
+      * ``-4`` — sandbox env itself has become unreachable for
+        ``sandbox_dead_consecutive`` consecutive polls.  This catches the
+        "gateway TTL killed the env under us" case that used to hide
+        behind probes silently returning ``None`` — pre-fix those hangs
+        quietly spun until ``max_sec`` and surfaced as either a bogus
+        ``entry_timeout`` or a misleading post-hook 404.
 
     Args:
         client (Any): SandboxClient.
@@ -451,6 +457,15 @@ async def wait_for_detached_entry(
     """
     start = time.monotonic()
     consecutive_entry_missing = 0
+    # Every probe returns ``None`` when the underlying HTTP call failed
+    # (timeout, 404, connection reset).  A single ``None`` can be transient
+    # cross-cluster noise; a run of them means the sandbox env is gone
+    # (TTL expired, gateway evicted, container killed).  We need both
+    # ``_read_*`` probes AND ``_is_pattern_running`` (when applicable)
+    # to come back ``None`` on the same poll for it to count as unreachable
+    # — that rules out a single flaky endpoint.
+    consecutive_sandbox_unreachable = 0
+    _SANDBOX_DEAD_THRESHOLD = 3
     logger = get_logger()
     while True:
         rc = await _read_entry_rc(client, rc_file)
@@ -461,6 +476,28 @@ async def wait_for_detached_entry(
         entry_pid = await _read_entry_pid(client, pid_file)
         entry_alive = await _is_pid_alive(client, entry_pid, probe_timeout_sec) if entry_pid else None
         daemon_alive = await _is_pattern_running(client, daemon_pattern, probe_timeout_sec) if daemon_pattern else None
+
+        # "Sandbox unreachable" = every probe we could run this poll came
+        # back ``None`` AND the rc file is also unreadable.  When daemon
+        # check is disabled (daemon_pattern is None), we skip that leg.
+        rc_probe_failed = rc is None  # already tried above
+        pid_probe_failed = entry_pid is None
+        daemon_probe_failed = daemon_pattern is not None and daemon_alive is None
+        all_failed = rc_probe_failed and pid_probe_failed and (daemon_probe_failed or daemon_pattern is None)
+        if all_failed:
+            consecutive_sandbox_unreachable += 1
+            logger.warning(
+                f"[{tid}] sandbox probes all failing ({consecutive_sandbox_unreachable}/{_SANDBOX_DEAD_THRESHOLD})"
+            )
+            if consecutive_sandbox_unreachable >= _SANDBOX_DEAD_THRESHOLD:
+                logger.warning(f"[{tid}] sandbox appears dead — declaring rc=-4")
+                return {
+                    "return_code": -4,
+                    "stdout": "",
+                    "stderr": f"[{tid}] sandbox unreachable for {consecutive_sandbox_unreachable} consecutive polls",
+                }
+        else:
+            consecutive_sandbox_unreachable = 0
 
         if daemon_alive is False:
             logger.warning(f"[{tid}] daemon process (pattern={daemon_pattern!r}) gone while entry still running")
