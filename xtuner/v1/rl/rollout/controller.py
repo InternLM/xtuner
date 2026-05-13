@@ -1,29 +1,23 @@
-import asyncio
 import os
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, TypeAlias, TypedDict
-from uuid import uuid4
 
 import ray
 from ray.actor import ActorProxy
 from ray.util.placement_group import PlacementGroup
 
-from transformers import AutoTokenizer
-from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.utils import AutoAcceleratorWorkers
-from xtuner.v1.utils import XTUNER_DETERMINISTIC, get_logger
+from xtuner.v1.utils import get_logger
 
-from .parser.factory import build_reasoning_parser, build_tool_call_parser
-from .parser.reasoning_parser import ReasoningParser
-from .parser.tool_parser import ToolCallParser
-from .utils import ROLLOUT_RAY_GET_TIMEOUT, RolloutHealthChecker, SessionRouter
+from .health_manager import RayRolloutHealthManager, RolloutHealthManagerProxy, RolloutWorkerRouteInfo
+from .utils import ROLLOUT_RAY_GET_TIMEOUT
 from .worker import RolloutConfig, RolloutWorker
 
 
 if TYPE_CHECKING:
     from xtuner.v1.rl.gateway.config import GatewayConfig
+    from xtuner.v1.rl.rollout.worker_http_router import WorkerHttpRouterConfig
 
 
 @dataclass
@@ -66,6 +60,9 @@ class RolloutWorkerMetadata(TypedDict):
     # Set after start_gateway() is called; None if the gateway has not been started.
     api_server_url: Optional[str]
 
+    # WorkerHttpRouter URL. Set after start_worker_http_router() is called.
+    worker_http_router_url: Optional[str]
+
 
 # Keep this as a Ray actor because Ray AgentLoop actors need a shared, cross-process handle to the same controller
 # state; passing a normal Python object would serialize a separate copy into each actor.
@@ -97,37 +94,21 @@ class RolloutController:
         self.rank2info: dict[int, WorkerInfo] = {}
         self.engine_rank_mesh_array, self.worker_server_urls_map, self.rank2info = self._init_workers(placement_group)
         self.num_active_workers = len(self.rank2info)
-        self.worker_info_lock = threading.RLock()
         # The timeout for the environment to wait for the rollout controller's response.
         # This should be longer than the controller's internal timeout (`rollout_timeout`)
         # to account for potential queuing delays and other overheads.
         self.timeout_multiplier = 2.0
-        self.router = SessionRouter(self.rank2info, worker_infos_lock=self.worker_info_lock)
-        self.health_checker = RolloutHealthChecker(
-            config=self.config,
-            workers_info=self.rank2info,
-            worker_infos_lock=self.worker_info_lock,
+        self.health_manager: RolloutHealthManagerProxy = RayRolloutHealthManager.options(num_cpus=0).remote(
+            self.config,
+            [
+                RolloutWorkerRouteInfo(rank=rank, actor=info.actor, url=info.url, is_active=info.is_active)
+                for rank, info in self.rank2info.items()
+            ],
         )
-        self.health_checker.start()
-        self._tool_call_parser, self._reasoning_parser = self._build_output_parsers()
         self._gateway_url: str | None = None
+        self._worker_http_router_url: str | None = None
 
     def start_gateway(self, config: "GatewayConfig") -> str | None:
-        """Start the gateway HTTP server in a daemon thread and return its URL.
-
-        The gateway exposes OpenAI-compatible endpoints that forward requests to
-        this controller via :class:`~xtuner.v1.rl.gateway.backend.local_backend.LocalRolloutBackend`.
-        Agent loops (e.g. CamelAgentLoop) discover the URL via :meth:`get_rollout_metadata`.
-
-        Args:
-            config: Gateway configuration.  ``port`` and ``host`` control where
-                the server binds; ``capture_folder`` enables per-request trace files.
-
-        Returns:
-            The base URL of the gateway, e.g. ``"http://1.2.3.4:8080"``, or
-            ``None`` when the configured rollout backend does not support the
-            gateway.
-        """
         if self.config.rollout_backend == "sglang":
             self.logger.error("XTuner gateway is not supported for SGLang rollout backend yet; skip starting gateway.")
             return None
@@ -144,6 +125,25 @@ class RolloutController:
         self._gateway_url = url
         self.logger.info(f"Gateway server started at {url}, capture_folder: {config.capture_folder}")
         return url
+    
+    # TODO: 是否应该绑定到这个类？会有啥风险？
+    def start_worker_http_router(self, config: "WorkerHttpRouterConfig") -> str:
+        from xtuner.v1.rl.rollout.worker_http_router import (
+            build_worker_http_router_app,
+            serve_worker_http_router_in_thread,
+        )
+
+        app = build_worker_http_router_app(
+            health_manager=self.health_manager,
+            rollout_config=self.config,
+            config=config,
+        )
+        serve_worker_http_router_in_thread(app, config)
+        host = ray.util.get_node_ip_address() if config.host in ("", "0.0.0.0") else config.host
+        url = f"http://{host}:{config.port}"
+        self._worker_http_router_url = url
+        self.logger.info(f"Worker HTTP router started at {url}")
+        return url
 
     def get_rollout_metadata(self) -> RolloutWorkerMetadata:
         """Get information about the current rollout setup.
@@ -152,90 +152,31 @@ class RolloutController:
             dict: A dictionary containing the engine mesh list, server URL
                 dictionary, and the rollout configuration.
         """
-        with self.worker_info_lock:
-            worker_server_urls_status = {info.url: info.is_active for info in self.rank2info.values()}
+        health_manager = self.get_health_manager()
+        route_infos = ray.get(health_manager.get_worker_route_infos.remote())
+        worker_server_urls_map = {info.rank: info.url for info in route_infos}
+        worker_server_urls_status = {info.url: info.is_active for info in route_infos}
         rollout_metadata: RolloutWorkerMetadata = {
             "engine_rank_mesh_array": self.engine_rank_mesh_array,
-            "server_url_dict": self.worker_server_urls_map,
+            "server_url_dict": worker_server_urls_map,
             "rollout_config": self.config,
             "worker_server_urls_status": worker_server_urls_status,
-            "api_server_url": self._gateway_url,
+            "api_server_url": self._worker_http_router_url or self._gateway_url,
+            "worker_http_router_url": self._worker_http_router_url,
         }
         return rollout_metadata
 
-    def _build_output_parsers(self) -> tuple[ToolCallParser | None, ReasoningParser | None]:
-        tool_call_parser = None
-        reasoning_parser = None
-
-        if self.config.tool_call_parser != "none":
-            tool_call_parser = build_tool_call_parser(self.config.tool_call_parser)
-
-        if self.config.reasoning_parser != "none":
-            tokenizer_path = self.config.tokenizer_path or self.config.model_path
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-            reasoning_parser = build_reasoning_parser(self.config.reasoning_parser, tokenizer)
-
-        return tool_call_parser, reasoning_parser
+    def get_health_manager(self) -> RolloutHealthManagerProxy:
+        return self.health_manager
 
     def get_ready_status(self) -> tuple[bool, dict[str, Any]]:
-        with self.worker_info_lock:
-            active_workers = sum(1 for info in self.rank2info.values() if info.is_active)
-            total_workers = len(self.rank2info)
-        return active_workers > 0, {
-            "active_workers": active_workers,
-            "total_workers": total_workers,
-        }
-
-    async def generate(self, rollout_state: RolloutState) -> RolloutState:
-        if XTUNER_DETERMINISTIC:
-            sample_params = rollout_state.sample_params.model_copy(deep=True)
-            sample_params.sampling_seed = self.config.random_seed + (
-                (rollout_state.uid or 0) - (rollout_state.message_uid or 0)
-            )
-            rollout_state.sample_params = sample_params
-
-        session_id = rollout_state.session_uid if rollout_state.session_uid is not None else uuid4().int
-        worker = await self.router.get_worker(session_id)
-        if worker is None:
-            rollout_state.status = Status.FAILED
-            rollout_state.error_msg = "No active rollout worker available."
-            return rollout_state
-
-        response_ref = worker.generate.remote(rollout_state=rollout_state)  # type: ignore[attr-defined]
-        try:
-            response_rollout_state = await asyncio.wait_for(
-                response_ref, timeout=self.config.rollout_timeout * self.timeout_multiplier
-            )
-            self._apply_output_parsers(response_rollout_state)
-            return response_rollout_state
-        except asyncio.TimeoutError:
-            self.logger.error(f"Rollout timeout for worker {worker}. Skipping sample.")
-            rollout_state.status = Status.FAILED
-            rollout_state.error_msg = (
-                f"Rollout request timed out after {self.config.rollout_timeout * self.timeout_multiplier} seconds."
-            )
-            return rollout_state
-
-    def _apply_output_parsers(self, rollout_state: RolloutState) -> None:
-        """Apply tool-call and reasoning parsers to the rollout state in-
-        place."""
-        if self._tool_call_parser is not None:
-            parsed = self._tool_call_parser.parse(rollout_state)
-            rollout_state.tool_calls = parsed.tool_calls
-            rollout_state.response = parsed.remaining_text or None
-        if self._reasoning_parser is not None:
-            parsed_reasoning = self._reasoning_parser.parse(rollout_state)
-            rollout_state.response = parsed_reasoning.remaining_text
-            if parsed_reasoning.reasoning_text:
-                rollout_state.extra_fields["reasoning_text"] = parsed_reasoning.reasoning_text
-            else:
-                rollout_state.extra_fields.pop("reasoning_text", None)
+        return ray.get(self.get_health_manager().get_ready_status.remote())
 
     def pause_generation(self):
-        self.health_checker.pause()
+        ray.get(self.get_health_manager().pause.remote())
 
     def continue_generation(self):
-        self.health_checker.resume()
+        ray.get(self.get_health_manager().resume.remote())
         self._broadcast_to_active_workers("continue_generation")
 
     def offload(self):
@@ -257,42 +198,14 @@ class RolloutController:
         Args:
             block (bool): Whether to block until the operation completes.
         """
-        self.health_checker.stop()
+        ray.get(self.get_health_manager().stop.remote())
         self._broadcast_to_active_workers("shutdown")
-
+    
+    # TODO: 是否要移除？目前不改是为了不改 rl_trainer 调用逻辑，实际上直接调用 health_manager 的 recover_failed_workers 更合理
     def recover_failed_workers(self):
         """Recovers from worker failures by restarting failed workers and
         reinitializing the rollout setup."""
-        self.health_checker.pause()
-        with self.worker_info_lock:
-            failed_workers = [info for info in self.rank2info.values() if not info.is_active]
-        if not failed_workers:
-            self.logger.info("No failed workers detected during recovery.")
-            return
-
-        self.logger.warning(f"Detected {len(failed_workers)} failed workers. Initiating recovery process.")
-        for worker in failed_workers:
-            if self._restart_failed_workers(worker.actor):
-                with self.worker_info_lock:
-                    rank = self._get_rank_by_actor(worker.actor)
-                    if rank is not None:
-                        self.rank2info[rank].is_active = True
-        self.health_checker.resume()
-
-    def _restart_failed_workers(self, worker: RolloutWorker) -> bool:
-        try:
-            dist_init_addr = ray.get(worker.init_dist_port.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            _, url = ray.get(worker.init.remote(dist_init_addr), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            is_healthy = ray.get(worker.check_health.remote(), timeout=ROLLOUT_RAY_GET_TIMEOUT)  # type: ignore[attr-defined]
-            if is_healthy:
-                self.logger.info(f"Successfully restarted worker {worker} with URL {url}.")
-                return True
-            else:
-                self.logger.error(f"Worker {worker} is still unhealthy after restart.")
-                return False
-        except Exception as e:
-            self.logger.error(f"Failed to restart worker: {e}")
-            return False
+        return ray.get(self.get_health_manager().recover_failed_workers.remote())
 
     def _update_dist_init_addr(self, nodes_per_engine, server_urls_per_engine, dist_init_addrs, tp_size):
         """Update the distributed initialization addresses for workers.
@@ -362,9 +275,7 @@ class RolloutController:
         Returns:
             A list of futures if `block` is False, otherwise a list of results.
         """
-        futures = []
-        with self.worker_info_lock:
-            active_actors = [info.actor for info in self.rank2info.values() if info.is_active]
+        active_actors = ray.get(self.get_health_manager().get_active_actors.remote())
         futures = [getattr(actor, method_name).remote() for actor in active_actors]
         results = ray.get(futures, timeout=ROLLOUT_RAY_GET_TIMEOUT)
         return results
@@ -388,20 +299,6 @@ class RolloutController:
                 "Please set XTUNER_USE_LMDEPLOY or XTUNER_USE_VLLM"
                 " or XTUNER_USE_SGLANG environment variable."
             )
-
-    def _get_rank_by_actor(self, actor: RolloutWorker) -> Optional[int]:
-        """Get rank by actor object.
-
-        Args:
-            actor: The RolloutWorker actor object.
-
-        Returns:
-            The rank of the worker, or None if not found.
-        """
-        for rank, info in self.rank2info.items():
-            if info.actor == actor:
-                return rank
-        return None
 
     def _update_active_workers_and_urls_map(self, active_rollout_workers, worker_server_urls_map):
         """Update the list of active rollout workers and their server URLs.

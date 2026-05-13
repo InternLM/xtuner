@@ -156,12 +156,18 @@ class RolloutHealthChecker:
         if self._worker_infos_lock is None:
             workers_snapshot = {
                 rank: (info.actor, info.url, info.is_active) for rank, info in self._workers_info.items()
+                if info.is_active
             }
         else:
             with self._worker_infos_lock:
                 workers_snapshot = {
                     rank: (info.actor, info.url, info.is_active) for rank, info in self._workers_info.items()
+                    if info.is_active
                 }
+
+        if not workers_snapshot:
+            logger.debug("No active rollout workers to check.")
+            return
 
         tasks = [
             check_worker_health(

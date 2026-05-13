@@ -62,9 +62,9 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
 
     def _build_agent_loop(self, sleep_by_id: dict[int, float] | None = None):
         mock_agent_loop = MagicMock()
-        mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
-        mock_agent_loop.rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
-        mock_agent_loop.rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+        mock_agent_loop.rollout_controller.continue_generation.remote = AsyncMock(return_value=None)
+        mock_agent_loop.rollout_controller.pause_generation.remote = AsyncMock(return_value=None)
+        mock_agent_loop.rollout_controller.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
 
         sleep_by_id = sleep_by_id or {}
 
@@ -98,6 +98,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
             update_event = asyncio.Event()
         return ProduceContext(
             agent_loop=agent_loop,
+            rollout_controller=getattr(agent_loop, "rollout_controller", MagicMock()),
             sampler=sampler,
             replay_buffer=self.replay_buffer,
             task_batch_size=batch_size,
@@ -310,7 +311,7 @@ class TestProducer(unittest.IsolatedAsyncioTestCase):
         # 异步的其他功能如 partial_rollout, tail_batch不在这里进行验证
         mock_agent_loop = MagicMock()
         mock_agent_loop.pause = AsyncMock()
-        mock_agent_loop.rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
+        mock_agent_loop.rollout_controller.continue_generation.remote = AsyncMock(return_value=None)
         task_name = "test_task"
         call_count = 0
         async def mock_gen(rs, **kwargs):

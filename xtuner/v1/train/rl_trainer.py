@@ -34,6 +34,8 @@ from xtuner.v1.rl.replay_buffer import (
     _snapshot_nested_objectrefs,
 )
 from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
+from xtuner.v1.rl.rollout.endpoint import RolloutEndpointConfig
+from xtuner.v1.rl.rollout.worker_extern_router import WorkerExternRouter
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer.controller import TrainingController
 from xtuner.v1.rl.trainer.worker import WorkerConfig, WorkerLogItem
@@ -208,6 +210,7 @@ class BaseRLTrainerConfig(BaseModel):
     advantage_estimator_config: BaseAdvantageConfig = Field(default_factory=GRPOAdvantageConfig)
     sync_weights_interval: int = 1
     gateway_config: GatewayConfig | None = None
+    rollout_endpoint_config: RolloutEndpointConfig = Field(default_factory=RolloutEndpointConfig)
 
     enable_evaluate: bool = True
     enable_initial_evaluate: bool = False
@@ -276,6 +279,7 @@ class BaseRLTrainer:
     train_controller: TrainingController
     rollout_controller: RolloutControllerProxy
     _debug_train_files: dict[int, Path]
+    _worker_extern_router: WorkerExternRouter | None = None
 
     def _init_common(self, cfg: BaseRLTrainerConfig, *, meta_path: str, logger_tag: str) -> None:
         check_fa3()
@@ -366,10 +370,30 @@ class BaseRLTrainer:
         # gateway 依赖 rollout controller，因此在 rollout controller 构建完成后统一启动。
         ray.get(self.rollout_controller.start_gateway.remote(cfg.gateway_config))
 
+    def _maybe_start_worker_http_router(self, cfg: BaseRLTrainerConfig) -> None:
+        worker_http_router_config = cfg.rollout_endpoint_config.build_worker_http_router_config()
+        if worker_http_router_config is None:
+            return
+        # TODO: 这个 router 应该启动在哪里比较合适？
+        ray.get(self.rollout_controller.start_worker_http_router.remote(worker_http_router_config))
+
+    def _maybe_start_worker_extern_router(self, cfg: BaseRLTrainerConfig) -> None:
+        worker_extern_router_config = cfg.rollout_endpoint_config.build_worker_extern_router_config()
+        if worker_extern_router_config is None:
+            return
+        health_manager = ray.get(self.rollout_controller.get_health_manager.remote())
+        self._worker_extern_router = WorkerExternRouter(
+            health_manager=health_manager,
+            config=worker_extern_router_config,
+            log_dir=str(self.exp_dir / "logs"),
+        )
+        self._worker_extern_router.start()
+
     def _build_agent_loop_components(self, cfg: BaseRLTrainerConfig, replay_buffer) -> None:
+        rollout_endpoint = cfg.rollout_endpoint_config.build(self.rollout_controller)
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.tokenizer_path, trust_remote_code=True)
         self.agent_loop_manager = cfg.agent_loop_manager_cfg.build(
-            rollout_controller=self.rollout_controller,
+            rollout_endpoint=rollout_endpoint,
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
             logger=self.logger,
@@ -379,7 +403,7 @@ class BaseRLTrainer:
         if self._enable_evaluate:
             assert cfg.eval_agent_loop_manager_cfg is not None
             self.eval_agent_loop_manager = cfg.eval_agent_loop_manager_cfg.build(
-                rollout_controller=self.rollout_controller,
+                rollout_endpoint=rollout_endpoint,
                 tokenizer=self.tokenizer,
                 replay_buffer=replay_buffer,
                 logger=self.logger,
@@ -941,6 +965,8 @@ class RLColocateTrainer(BaseRLTrainer):
                 self._rollout_config.skip_load_weights = False
             self.rollout_controller = self._rollout_config.build(self._pg)
             self._maybe_start_gateway(cfg)
+            self._maybe_start_worker_http_router(cfg)
+            self._maybe_start_worker_extern_router(cfg)
             replay_buffer = cfg.replay_buffer_config.build()
             self._build_agent_loop_components(cfg, replay_buffer)
             self.logger.warning("Debug rollout mode is enabled. Only rollout workers will be started.")
@@ -970,6 +996,8 @@ class RLColocateTrainer(BaseRLTrainer):
 
         self.rollout_controller = self._rollout_config.build(self._pg)
         self._maybe_start_gateway(cfg)
+        self._maybe_start_worker_http_router(cfg)
+        self._maybe_start_worker_extern_router(cfg)
         bind_train_rollout(train_controller=self.train_controller, rollout_controller=self.rollout_controller)
 
         replay_buffer = cfg.replay_buffer_config.build()
@@ -1118,6 +1146,8 @@ class RLDisaggregatedTrainer(BaseRLTrainer):
         self.train_controller = self._train_worker_cfg.build(self._train_pg)
         self.rollout_controller = self._rollout_config.build(self._rollout_pg)
         self._maybe_start_gateway(cfg)
+        self._maybe_start_worker_http_router(cfg)
+        self._maybe_start_worker_extern_router(cfg)
 
         replay_buffer = cfg.replay_buffer_config.build()
         self._build_agent_loop_components(cfg, replay_buffer)

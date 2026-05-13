@@ -12,6 +12,7 @@ from xtuner.v1.data_proto.rl_data import RolloutState, Status
 from xtuner.v1.rl.agent_loop_manager import AsyncProduceStrategyConfig, ProduceBatchResult
 from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import AgentLoopManager, _TaskRunner
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig, SerializedRayObjectRef
+from xtuner.v1.rl.rollout import RolloutEndpoint
 from xtuner.v1.train.rl_trainer import RLColocateTrainer
 
 
@@ -49,12 +50,7 @@ class _FakeSampler:
 
 
 def _build_fake_agent_loop():
-    rollout_ctl = MagicMock()
-    rollout_ctl.continue_generation.remote = AsyncMock(return_value=None)
-    rollout_ctl.pause_generation.remote = AsyncMock(return_value=None)
-    rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
     agent_loop = MagicMock()
-    agent_loop.rollout_ctl = rollout_ctl
 
     async def generate_group(rollout_states, **kwargs):
         model_step = kwargs.get("model_step", kwargs.get("train_step", 0))
@@ -68,6 +64,14 @@ def _build_fake_agent_loop():
 
     agent_loop.generate_group = generate_group
     return agent_loop
+
+
+def _fake_rollout_endpoint():
+    rollout_controller = MagicMock()
+    rollout_controller.continue_generation.remote = AsyncMock(return_value=None)
+    rollout_controller.pause_generation.remote = AsyncMock(return_value=None)
+    rollout_controller.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+    return RolloutEndpoint(kind="worker_extern", base_url="http://rollout-router", rollout_controller=rollout_controller)
 
 
 class TestRLColocateTrainer(unittest.TestCase):
@@ -134,6 +138,7 @@ class TestRLColocateTrainer(unittest.TestCase):
     def test_fit_accepts_async_strategy_manager_on_colocate_path(self):
         replay_buffer = AsyncReplayBufferConfig().build()
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="train_task",

@@ -15,7 +15,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.data_proto.rl_data import RolloutState, Status, SampleParams
-from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout import RolloutController, RolloutEndpointConfig
 from xtuner.v1.rl.judger.gsm8k import GSM8KJudgerConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
@@ -96,7 +96,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
         # 3. 创建 AgentLoop
         agent_loop = agent_loop_cfg.build(
-            rollout_controller=rollout_controller,
+            rollout_endpoint=RolloutEndpointConfig().build(rollout_controller),
             judger=judger_config.build(),
         )
         # 4. 构造输入数据
@@ -143,7 +143,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         pg = AutoAcceleratorWorkers.build_placement_group(self.resources_cfg)
         rollout_controller = ray.remote(RolloutController).remote(rollout_config, pg)
         agent_loop = agent_loop_cfg.build(
-            rollout_controller=rollout_controller,
+            rollout_endpoint=RolloutEndpointConfig().build(rollout_controller),
             judger=judger_config.build(),
         )
 
@@ -215,7 +215,7 @@ class TestAgentLoop(unittest.IsolatedAsyncioTestCase):
         replay_buffer_cfg = SyncReplayBufferConfig()
         replay_buffer = replay_buffer_cfg.build()
         agent_loop_manager = agent_loop_manager_cfg.build(
-            rollout_controller=rollout_controller,
+            rollout_endpoint=RolloutEndpointConfig().build(rollout_controller),
             tokenizer=self.tokenizer,
             replay_buffer=replay_buffer,
         )

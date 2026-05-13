@@ -14,6 +14,7 @@ from xtuner.v1.rl.agent_loop_manager.agent_loop_manager import (
     _TaskRunner,
 )
 from xtuner.v1.rl.agent_loop_manager.producer import GROUP_GENERATE_TIME_KEY, ProduceBatchStatus
+from xtuner.v1.rl.rollout import RolloutEndpoint
 from xtuner.v1.rl.utils import calculate_seq_staleness
 
 
@@ -234,13 +235,16 @@ class _SequencedCompletedReplayBuffer(_FakeReplayBuffer):
 
 
 def _fake_agent_loop():
-    rollout_ctl = MagicMock()
-    rollout_ctl.continue_generation.remote = AsyncMock()
-    rollout_ctl.pause_generation.remote = AsyncMock()
-    rollout_ctl.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
     agent_loop = MagicMock()
-    agent_loop.rollout_ctl = rollout_ctl
     return agent_loop
+
+
+def _fake_rollout_endpoint():
+    rollout_controller = MagicMock()
+    rollout_controller.continue_generation.remote = AsyncMock()
+    rollout_controller.pause_generation.remote = AsyncMock()
+    rollout_controller.get_rollout_metadata.remote = AsyncMock(return_value={"server_url_dict": {}})
+    return RolloutEndpoint(kind="worker_extern", base_url="http://rollout-router", rollout_controller=rollout_controller)
 
 
 class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
@@ -282,6 +286,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         multi_task_manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_b",
@@ -346,6 +351,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         sampler = _FakeSampler()
         replay_buffer = _FakeReplayBuffer({}, {})
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -396,6 +402,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         strategy = _FakeProduceStrategy()
         strategy.pending_task_count_value = 1
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -430,6 +437,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
                 return {"task_a": 0, "task_b": global_batch_size}
 
         multi_task_manager = _CustomBatchManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -472,6 +480,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
         )
 
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -507,6 +516,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_produce_batch_requires_non_empty_rollout_states(self):
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -526,6 +536,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
     async def test_pause_produce_from_async_produce_loop_sets_status_and_pause_time(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -553,6 +564,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
     async def test_pause_produce_validates_progress_selection_before_state_change(self):
         strategy = _FakeProduceStrategy(cleanup_pause_time_s=2.5)
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -579,6 +591,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_batch_returns_expired_batch_when_manager_is_expired(self):
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -606,6 +619,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             leftover_counts={("task_a", Status.COMPLETED): 1},
         )
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -643,6 +657,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             },
         )
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -667,6 +682,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_produce_batch_to_buffer_aggregates_status_with_update_abort_priority(self):
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -715,6 +731,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
             statuses=[ProduceBatchStatus.NORMAL, ProduceBatchStatus.EXPIRED_BATCH, ProduceBatchStatus.NORMAL],
         )
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",
@@ -746,6 +763,7 @@ class TestMultiTaskAgentLoopManager(unittest.IsolatedAsyncioTestCase):
 
     async def test_shutdown_sets_finish_signals(self):
         manager = AgentLoopManager(
+            rollout_endpoint=_fake_rollout_endpoint(),
             task_runners=[
                 _TaskRunner(
                     task_name="task_a",

@@ -15,6 +15,7 @@ from xtuner.v1.rl.evaluator import EvaluatorConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.loss import GRPOLossConfig
 from xtuner.v1.rl.replay_buffer import SyncReplayBufferConfig
+from xtuner.v1.rl.rollout import RolloutEndpointConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.trainer import RolloutImportanceSampling, WorkerConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, get_eos_token
@@ -34,13 +35,14 @@ eval_media_root = os.environ.get("EVAL_MEDIA_ROOT", "")
 debug_rollout_dir = os.environ.get("DEBUG_ROLLOUT_DIR", "")
 debug_train = os.environ.get("DEBUG_TRAIN", False)
 debug_rollout = os.environ.get("DEBUG_ROLLOUT", False)
+rollout_endpoint_mode = os.environ.get("ROLLOUT_ENDPOINT_MODE", "1")
 
 enable_evaluate = eval_data_path is not None and eval_data_path != ""
 
 # basic settings
 experimental_name = "grpo_mix_data"
 total_epochs = 15
-global_batch_size = 256
+global_batch_size = 64
 prompt_repeat_k = 8
 rollout_tp_size = 2
 rollout_ep_size = 1
@@ -71,6 +73,27 @@ rollout_config = RolloutConfig(
     context_length=max_response_length + max_prompt_length,
     enable_return_routed_experts=True,
     rollout_max_batch_size_per_instance=512,
+)
+
+rollout_endpoint_kind_map = {
+    "1": "worker_local",
+    "2": "worker_http",
+    "3": "worker_extern",
+}
+if rollout_endpoint_mode not in rollout_endpoint_kind_map:
+    raise ValueError("ROLLOUT_ENDPOINT_MODE must be one of: 1, 2, 3.")
+
+# Mode 1 (worker_local): AgentLoop holds a WorkerLocalRouter object and calls worker Ray actors directly.
+# Mode 2 (worker_http): trainer starts WorkerHttpRouter after rollout workers are ready, and AgentLoop gets its
+# runtime URL from rollout_controller metadata.
+# Mode 3 (worker_extern): AgentLoop uses WORKER_EXTERN_ROUTER_URL, while WorkerExternRouter periodically
+# registers/removes rollout worker URLs to/from that external router.
+rollout_endpoint_config = RolloutEndpointConfig(
+    kind=rollout_endpoint_kind_map[rollout_endpoint_mode],
+    base_url=os.environ.get("WORKER_EXTERN_ROUTER_URL") if rollout_endpoint_mode == "3" else None,
+    worker_http_router_host=os.environ.get("WORKER_HTTP_ROUTER_HOST", "0.0.0.0"),
+    worker_http_router_port=int(os.environ.get("WORKER_HTTP_ROUTER_PORT", "8081")),
+    worker_extern_router_worker_api_key=os.environ.get("ROLLOUT_WORKER_API_KEY") or None,
 )
 
 # sampling params
@@ -263,4 +286,5 @@ trainer = RLColocateTrainerConfig(
     debug_rollout_dir=debug_rollout_dir,
     debug_train=debug_train,
     debug_rollout=debug_rollout,
+    rollout_endpoint_config=rollout_endpoint_config,
 )

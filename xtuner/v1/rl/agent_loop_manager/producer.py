@@ -14,7 +14,7 @@ from xtuner.v1.data_proto.rl_data import (
     Status,
     get_group_status,
 )
-from xtuner.v1.rl.agent_loop import AgentLoopSpec, get_agent_loop_rollout_ctl
+from xtuner.v1.rl.agent_loop import AgentLoopSpec
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
 from xtuner.v1.rl.rollout.utils import pause_generation
 from xtuner.v1.rl.utils import calculate_seq_staleness, create_task
@@ -181,6 +181,7 @@ class ProduceContext:
     """
 
     agent_loop: AgentLoopSpec
+    rollout_controller: Any
     sampler: Sampler
     replay_buffer: ReplayBuffer
     task_batch_size: int
@@ -496,8 +497,7 @@ class AsyncProduceStrategy(ProduceStrategy):
         if self._pending_tasks.count() == 0:
             return 0.0
 
-        rollout_ctl = await get_agent_loop_rollout_ctl(ctx.agent_loop)
-        await pause_generation(rollout_ctl)
+        await pause_generation(ctx.rollout_controller)
         cleanup_start_time = time.perf_counter()
         while True:
             elapsed_time = time.perf_counter() - cleanup_start_time
@@ -523,7 +523,7 @@ class AsyncProduceStrategy(ProduceStrategy):
                     )
                 await ctx.put_generated_group(paused_items)
             if self._pending_tasks.count() > 0:
-                await pause_generation(rollout_ctl)
+                await pause_generation(ctx.rollout_controller)
                 await asyncio.sleep(1)
         return time.perf_counter() - pause_start
 

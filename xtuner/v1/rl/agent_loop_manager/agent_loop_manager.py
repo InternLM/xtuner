@@ -10,10 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from xtuner.v1.data_proto.rl_data import RolloutState, Status
-from xtuner.v1.rl.agent_loop import AgentLoopConfig, AgentLoopSpec, get_agent_loop_rollout_ctl
+from xtuner.v1.rl.agent_loop import AgentLoopConfig, AgentLoopSpec
 from xtuner.v1.rl.judger import ComposedJudgerConfig, JudgerConfig, build_judger
 from xtuner.v1.rl.replay_buffer import ReplayBuffer
-from xtuner.v1.rl.rollout import RolloutController, continue_generation, pause_generation
+from xtuner.v1.rl.rollout import RolloutEndpoint, continue_generation, pause_generation
 from xtuner.v1.rl.utils import asyncio_run
 from xtuner.v1.utils import get_logger
 
@@ -182,6 +182,7 @@ def _fill_leftover_counts(result: ProduceBatchResult, status_counts: dict[Status
 
 def _build_produce_context(
     task_runner: _TaskRunner,
+    rollout_controller,
     replay_buffer: ReplayBuffer,
     batch_size: int,
     train_step: int,
@@ -191,6 +192,7 @@ def _build_produce_context(
 ) -> ProduceContext:
     return ProduceContext(
         agent_loop=task_runner.agent_loop,
+        rollout_controller=rollout_controller,
         sampler=task_runner.sampler,
         replay_buffer=replay_buffer,
         task_batch_size=batch_size,
@@ -222,7 +224,7 @@ class AgentLoopManagerConfig(BaseModel):
 
     def build(
         self,
-        rollout_controller: RolloutController,
+        rollout_endpoint: RolloutEndpoint,
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
         replay_buffer: ReplayBuffer,
         logger=None,
@@ -240,7 +242,7 @@ class AgentLoopManagerConfig(BaseModel):
             seen_task_names.add(task_cfg.task_name)
 
             agent_loop = task_cfg.agent_loop_config.build(
-                rollout_controller=rollout_controller,
+                rollout_endpoint=rollout_endpoint,
                 judger=build_judger(task_cfg.judger_config) if task_cfg.judger_config is not None else None,
                 logger=logger,
             )
@@ -259,6 +261,7 @@ class AgentLoopManagerConfig(BaseModel):
 
         return AgentLoopManager(
             task_runners=task_runners,
+            rollout_endpoint=rollout_endpoint,
             replay_buffer=replay_buffer,
             logger=logger,
         )
@@ -272,6 +275,7 @@ class AgentLoopManager:
     def __init__(
         self,
         task_runners: list[_TaskRunner],
+        rollout_endpoint: RolloutEndpoint,
         replay_buffer: ReplayBuffer,
         logger=None,
     ):
@@ -281,6 +285,8 @@ class AgentLoopManager:
             raise ValueError("At least one task weight must be positive for AgentLoopManager.")
 
         self.task_runners = task_runners
+        self.rollout_endpoint = rollout_endpoint
+        self.rollout_controller = rollout_endpoint.rollout_controller
         self.replay_buffer = replay_buffer
         self.data_sampler = (
             task_runners[0].sampler
@@ -490,6 +496,7 @@ class AgentLoopManager:
                 task.produce_strategy.produce_batch(
                     _build_produce_context(
                         task,
+                        self.rollout_controller,
                         self.replay_buffer,
                         task_batch_sizes[task.task_name],
                         current_future_step,
@@ -538,6 +545,7 @@ class AgentLoopManager:
         for task in self.task_runners:
             ctx = _build_produce_context(
                 task,
+                self.rollout_controller,
                 self.replay_buffer,
                 0,
                 pause_progress.producer_future_step,
@@ -669,9 +677,8 @@ class AgentLoopManager:
         active_tasks = [task for task in self.task_runners if current_sizes[task.task_name] > 0]
         assert active_tasks, "No active tasks found"
 
-        rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
         # TODO: put in self.continue_produce()
-        await continue_generation(rollout_ctl)
+        await continue_generation(self.rollout_controller)
         try:
             # 共卡路径不复用非共卡的 paused producer 状态机。
             # 即使 manager 是从 resume() 恢复出来、当前仍处在 UPDATE_WEIGHT_AND_ABORT，
@@ -702,7 +709,7 @@ class AgentLoopManager:
             )
         finally:
             # TODO: put in self.pause_produce()
-            await pause_generation(rollout_ctl)
+            await pause_generation(self.rollout_controller)
 
         self.logger.info(
             f"[AgentLoopManager][{self.name}] produce_batch done "
@@ -730,8 +737,7 @@ class AgentLoopManager:
                 await self._wait_for_status_exit(self._status)
                 continue
 
-            rollout_ctl = await get_agent_loop_rollout_ctl(self.task_runners[0].agent_loop)
-            await continue_generation(rollout_ctl)
+            await continue_generation(self.rollout_controller)
             task_batch_sizes = self._produce_progress.ensure_target_upto(
                 batch_size=batch_size,
                 future_step=self._produce_progress.producer_future_step,

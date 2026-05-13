@@ -19,7 +19,7 @@ from xtuner.v1.rl.agent_loop_manager import (
     TaskSpecConfig,
 )
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
-from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout import RolloutController, RolloutEndpointConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.utils import AcceleratorResourcesConfig, AutoAcceleratorWorkers
 
@@ -117,7 +117,7 @@ def _build_agent_loop_manager(
         ],
     )
     manager = manager_cfg.build(
-        rollout_controller=rollout_ctl,
+        rollout_endpoint=RolloutEndpointConfig().build(rollout_ctl),
         tokenizer=tokenizer,
         replay_buffer=replay_buffer,
         logger=None,

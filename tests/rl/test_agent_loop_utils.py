@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams, Status, refresh_seq_staleness
 from xtuner.v1.rl.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
 from xtuner.v1.rl.agent_loop.utils import PartialRolloutHandler
+from xtuner.v1.rl.rollout import RolloutEndpoint
 
 
 def _make_rollout_state(
@@ -70,14 +71,20 @@ class TestAgentLoopUtils(unittest.TestCase):
 
 class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
     def _build_agent_loop(self):
-        rollout_ctl = MagicMock()
-        rollout_ctl.generate.remote = AsyncMock()
+        worker_local_router = MagicMock()
+        worker_local_router.rollout_controller = MagicMock()
+        worker_local_router.generate = AsyncMock()
+        rollout_endpoint = RolloutEndpoint(
+            kind="worker_local",
+            worker_local_router=worker_local_router,
+            rollout_controller=worker_local_router.rollout_controller,
+        )
         with (
             patch("xtuner.v1.rl.agent_loop.agent_loop.load_tokenizer", return_value=MagicMock()),
             patch("xtuner.v1.rl.agent_loop.agent_loop.load_processor", return_value=MagicMock()),
         ):
             return SingleTurnAgentLoop(
-                rollout_ctl=rollout_ctl,
+                rollout_endpoint=rollout_endpoint,
                 sample_params=SampleParams(max_tokens=8),
                 hf_checkpoint="dummy",
                 judger=None,
@@ -88,7 +95,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         agent_loop = self._build_agent_loop()
         rollout_state = _make_rollout_state(response_ids=[], status=Status.ABORTED)
         generated_state = _make_rollout_state(response_ids=[30, 31], seq_staleness=7, status=Status.ABORTED)
-        agent_loop.rollout_ctl.generate.remote.return_value = generated_state
+        agent_loop.rollout_endpoint.require_worker_local_router().generate.return_value = generated_state
 
         result = await agent_loop.generate_sample(
             rollout_state,
@@ -101,7 +108,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         agent_loop = self._build_agent_loop()
         rollout_state = _make_rollout_state(response_ids=[], status=Status.ABORTED)
         generated_state = _make_rollout_state(response_ids=[30, 31], status=Status.ABORTED)
-        agent_loop.rollout_ctl.generate.remote.return_value = generated_state
+        agent_loop.rollout_endpoint.require_worker_local_router().generate.return_value = generated_state
 
         result = await agent_loop.generate_sample(rollout_state)
 
@@ -112,7 +119,7 @@ class TestSingleTurnAgentLoop(unittest.IsolatedAsyncioTestCase):
         agent_loop = self._build_agent_loop()
         rollout_state = _make_rollout_state(response_ids=[], status=Status.ABORTED)
         generated_state = _make_rollout_state(response_ids=[30, 31], status=Status.ABORTED)
-        agent_loop.rollout_ctl.generate.remote.return_value = generated_state
+        agent_loop.rollout_endpoint.require_worker_local_router().generate.return_value = generated_state
 
         result = await agent_loop.generate_sample(rollout_state)
 

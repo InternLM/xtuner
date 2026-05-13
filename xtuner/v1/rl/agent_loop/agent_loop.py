@@ -10,7 +10,7 @@ from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import RolloutState, SampleParams
 from xtuner.v1.rl.judger import Judger
-from xtuner.v1.rl.rollout import RolloutController
+from xtuner.v1.rl.rollout import RolloutEndpoint
 from xtuner.v1.rl.utils import CPUActorLauncher, create_task
 from xtuner.v1.utils import get_logger, ray_method
 from xtuner.v1.utils.processing_utils import load_processor, load_tokenizer
@@ -35,21 +35,26 @@ class AgentLoopConfig(ABC, BaseModel):
             logger.warning("num_cpus and cpu_memory are ignored when AgentLoop runs in local mode.")
         return self
 
-    def build(self, rollout_controller, judger: Judger | None = None, logger=None) -> AgentLoopSpec:
+    def build(
+        self,
+        rollout_endpoint: RolloutEndpoint,
+        judger: Judger | None = None,
+        logger=None,
+    ) -> AgentLoopSpec:
         if self.num_ray_actors == 0:
             return self.build_local(
-                rollout_controller=rollout_controller,
+                rollout_endpoint=rollout_endpoint,
                 judger=judger,
                 logger=logger,
             )
         if self.num_ray_actors > 1:
             return self._build_router(
-                rollout_controller=rollout_controller,
+                rollout_endpoint=rollout_endpoint,
                 judger=judger,
                 logger=logger,
             )
         return self._build_ray_actor(
-            rollout_controller=rollout_controller,
+            rollout_endpoint=rollout_endpoint,
             judger=judger,
             logger=logger,
         )
@@ -57,14 +62,14 @@ class AgentLoopConfig(ABC, BaseModel):
     @abstractmethod
     def build_local(
         self,
-        rollout_controller,
+        rollout_endpoint: RolloutEndpoint,
         judger: Judger | None = None,
         logger=None,
     ) -> AgentLoop: ...
 
     def _build_ray_actor(
         self,
-        rollout_controller: RolloutController,
+        rollout_endpoint: RolloutEndpoint,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -74,7 +79,7 @@ class AgentLoopConfig(ABC, BaseModel):
             CPUActorLauncher.build_actor(
                 AgentLoopActor,
                 self,
-                rollout_controller,
+                rollout_endpoint,
                 judger,
                 logger,
                 pg=pg,
@@ -87,7 +92,7 @@ class AgentLoopConfig(ABC, BaseModel):
 
     def _build_ray_actors(
         self,
-        rollout_controller: RolloutController,
+        rollout_endpoint: RolloutEndpoint,
         num_actors: int,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
@@ -99,7 +104,7 @@ class AgentLoopConfig(ABC, BaseModel):
             CPUActorLauncher.build_actors(
                 AgentLoopActor,
                 self,
-                rollout_controller,
+                rollout_endpoint,
                 judger,
                 logger,
                 pg=pg,
@@ -113,7 +118,7 @@ class AgentLoopConfig(ABC, BaseModel):
 
     def _build_router(
         self,
-        rollout_controller: RolloutController,
+        rollout_endpoint: RolloutEndpoint,
         pg: PlacementGroup | None = None,
         judger: Judger | None = None,
         logger=None,
@@ -121,27 +126,26 @@ class AgentLoopConfig(ABC, BaseModel):
     ) -> RouterAgentLoop:
         return RouterAgentLoop(
             workers=self._build_ray_actors(
-                rollout_controller=rollout_controller,
+                rollout_endpoint=rollout_endpoint,
                 num_actors=self.num_ray_actors,
                 pg=pg,
                 judger=judger,
                 logger=logger,
                 start_bundle_idx=start_bundle_idx,
             ),
-            rollout_ctl=rollout_controller,
         )
 
 
 class AgentLoop(ABC):
     def __init__(
         self,
-        rollout_ctl: RolloutController,
+        rollout_endpoint: RolloutEndpoint,
         sample_params: SampleParams,
         hf_checkpoint: str,
         judger: Judger | None = None,
         logger=None,
     ) -> None:
-        self.rollout_ctl = rollout_ctl
+        self.rollout_endpoint = rollout_endpoint
         self.hf_checkpoint = hf_checkpoint
         self.tokenizer = load_tokenizer(hf_checkpoint, trust_remote_code=True)
         self.processor = load_processor(hf_checkpoint, trust_remote_code=True)
@@ -155,6 +159,21 @@ class AgentLoop(ABC):
     @abstractmethod
     async def generate_sample(self, rollout_state: RolloutState, **kwargs) -> RolloutState: ...
 
+    async def rollout_generate(self, rollout_state: RolloutState) -> RolloutState:
+        if self.rollout_endpoint.kind == "worker_local":
+            return await self.rollout_endpoint.require_worker_local_router().generate(rollout_state)
+        return await self.rollout_generate_from_url(
+            rollout_state=rollout_state,
+            base_url=self.rollout_endpoint.require_base_url(),
+        )
+    
+    # 这个地方还需要思考，rollout_state 如何发送给 worker 的 url？ 应该还有一层 gateway，因为要做 token 记录+session 隔离
+    async def rollout_generate_from_url(self, rollout_state: RolloutState, base_url: str) -> RolloutState:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement URL rollout generation for endpoint "
+            f"{self.rollout_endpoint.kind!r} at {base_url!r}."
+        )
+
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         pending_tasks = []
         for state in rollout_state:
@@ -167,9 +186,8 @@ class AgentLoop(ABC):
 
 
 class RouterAgentLoop:
-    def __init__(self, workers: list[RayAgentLoopProxy], rollout_ctl: RolloutController):
+    def __init__(self, workers: list[RayAgentLoopProxy]):
         self.workers = workers
-        self.rollout_ctl = rollout_ctl
         self._worker_loads = dict.fromkeys(workers, 0)
         self._rr_index = 0
         self._lock = asyncio.Lock()
@@ -205,27 +223,17 @@ class RouterAgentLoop:
         return {str(worker): load for worker, load in self._worker_loads.items()}
 
 
-async def get_agent_loop_rollout_ctl(agent_loop: AgentLoopSpec) -> RolloutController:
-    rollout_ctl = getattr(agent_loop, "rollout_ctl", None)
-    if rollout_ctl is not None:
-        return rollout_ctl
-
-    get_rollout_ctl = getattr(agent_loop, "get_rollout_ctl", None)
-    if get_rollout_ctl is None or not hasattr(get_rollout_ctl, "remote"):
-        raise AttributeError(f"Agent loop {type(agent_loop)} does not expose rollout_ctl or get_rollout_ctl().")
-    return await get_rollout_ctl.remote()
-
-
 class AgentLoopActor:
     def __init__(
         self,
         agent_loop_config: AgentLoopConfig,
-        rollout_controller: RolloutController,
+        rollout_endpoint: RolloutEndpoint,
         judger: Judger | None = None,
         logger=None,
     ):
+        self.agent_loop_config = agent_loop_config
         self.agent_loop = agent_loop_config.build_local(
-            rollout_controller=rollout_controller,
+            rollout_endpoint=rollout_endpoint,
             judger=judger,
             logger=logger,
         )
@@ -237,10 +245,6 @@ class AgentLoopActor:
     @ray_method
     async def generate_group(self, rollout_state: list[RolloutState], **kwargs) -> list[RolloutState]:
         return await self.agent_loop.generate_group(rollout_state, **kwargs)
-
-    @ray_method
-    async def get_rollout_ctl(self):
-        return self.agent_loop.rollout_ctl
 
 
 RayAgentLoop = cast(ActorClass[AgentLoopActor], CPUActorLauncher.to_actor_class(AgentLoopActor))
