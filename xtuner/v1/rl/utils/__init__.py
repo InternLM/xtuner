@@ -1,4 +1,13 @@
 from .async_utils import asyncio_run, create_task, handle_task_exception
+from .external_cpu import (
+    CPUActorPoolAllocation,
+    CPUActorPoolConfig,
+    CPUResourceManager,
+    CPUResourceManagerConfig,
+    clear_cpu_resource_manager,
+    get_cpu_resource_manager,
+    set_cpu_resource_manager,
+)
 from .misc import (
     BetweenNode,
     BetweenOperator,
@@ -29,15 +38,6 @@ from .ray_utils import (
     get_accelerator_ids,
     get_ray_accelerator,
     register_cleanup,
-)
-from .external_cpu import (
-    CPUActorPoolAllocation,
-    CPUActorPoolConfig,
-    CPUResourceManager,
-    CPUResourceManagerConfig,
-    clear_cpu_resource_manager,
-    get_cpu_resource_manager,
-    set_cpu_resource_manager,
 )
 from .ray_worker import (
     AcceleratorResourcesConfig,

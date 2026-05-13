@@ -7,7 +7,7 @@ from xtuner.v1.rl.advantage import GRPOAdvantageConfig
 from xtuner.v1.datasets.config import DataloaderConfig, DatasetConfig
 from xtuner.v1.datasets.rl_tokenize_fn import RLTextTokenizeFnConfig
 from xtuner.v1.model import get_model_config_from_hf
-from xtuner.v1.rl.utils import AcceleratorResourcesConfig
+from xtuner.v1.rl.utils import AcceleratorResourcesConfig, CPUActorPoolConfig
 from xtuner.v1.rl.rollout.worker import RolloutConfig
 from xtuner.v1.rl.judger import DapoMathJudgerConfig
 from xtuner.v1.rl.replay_buffer import AsyncReplayBufferConfig
@@ -76,7 +76,10 @@ dapomath_judger_config = DapoMathJudgerConfig(
     overlong_buffer_len=4096, 
     overlong_penalty_factor=1.0, 
     tokenizer=tokenizer)
-judger_config = DapoMathJudgerConfig(judger_name="dapo_math", num_ray_actors=1)
+judger_config = DapoMathJudgerConfig(
+    judger_name="dapo_math",
+    external_cpu=CPUActorPoolConfig(num_actors=1, num_cpus_per_actor=1),
+)
 
 # 4. train worker
 lr_cfg = LRConfig(lr_type="constant", warmup_ratio=0, lr_min=1e-6)

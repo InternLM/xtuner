@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import ray
 from pydantic import BaseModel, ConfigDict, Field
 from ray.util.placement_group import PlacementGroup, placement_group_table
+
 from xtuner.v1.utils.logger import get_logger
 
-PlacementGroups = PlacementGroup | list[PlacementGroup] | tuple[PlacementGroup, ...] | None
+
+PlacementGroups: TypeAlias = PlacementGroup | list[PlacementGroup] | tuple[PlacementGroup, ...] | None
 logger = get_logger()
 
 
@@ -32,11 +35,11 @@ class CPUActorPoolConfig(BaseModel):
 
 
 class CPUResourceManagerConfig(BaseModel):
-    """Registry for Ray CPU actors that run outside accelerator placement groups.
+    """Registry for Ray CPU actors that run outside accelerator placement
+    groups.
 
-    This config is a bookkeeping and validation layer. It does not reserve or
-    isolate all PG-external CPUs; Ray actors that bypass this config can still run
-    if the Ray cluster has ordinary CPU resources available.
+    This config is a bookkeeping and validation layer. It does not reserve or isolate all PG-external CPUs; Ray actors
+    that bypass this config can still run if the Ray cluster has ordinary CPU resources available.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -99,8 +102,7 @@ class CPUResourceManager:
     def get(self, name: str) -> CPUActorPoolAllocation:
         if name not in self.config.pools:
             raise KeyError(
-                f"Unknown external CPU resource pool {name!r}. "
-                f"Available pools: {sorted(self.config.pools)}"
+                f"Unknown external CPU resource pool {name!r}. Available pools: {sorted(self.config.pools)}"
             )
         return CPUActorPoolAllocation(name=name, config=self.config.pools[name])
 
@@ -285,10 +287,7 @@ class CPUResourceManager:
             )
             for item, cpu, memory, note in rows
         ]
-        widths = [
-            max(len(str(row[idx])) for row in (headers, *rendered_rows))
-            for idx in range(len(headers))
-        ]
+        widths = [max(len(str(row[idx])) for row in (headers, *rendered_rows)) for idx in range(len(headers))]
 
         def render(row: tuple[str, str, str, str]) -> str:
             return " | ".join(str(value).ljust(widths[idx]) for idx, value in enumerate(row))

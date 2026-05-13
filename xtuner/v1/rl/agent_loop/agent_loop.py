@@ -39,8 +39,7 @@ class AgentLoopConfig(ABC, BaseModel):
         cpu_manager = get_cpu_resource_manager()
         if cpu_manager is None:
             raise ValueError(
-                f"AgentLoop {self.__class__.__name__!r} sets external_cpu, "
-                "but no CPUResourceManager was provided."
+                f"AgentLoop {self.__class__.__name__!r} sets external_cpu, but no CPUResourceManager was provided."
             )
         allocation = cpu_manager.register(
             name=f"agent_loop:{self.__class__.__name__}",
