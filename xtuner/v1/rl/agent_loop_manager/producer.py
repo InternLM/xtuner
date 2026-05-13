@@ -11,6 +11,8 @@ if TYPE_CHECKING:
     from xtuner.v1.rl.rollout.controller import RolloutControllerProxy
 
 import ray
+import tqdm
+from mmengine.dist import get_rank
 from pydantic import BaseModel, ConfigDict, Field
 
 from xtuner.v1.data_proto.rl_data import (
@@ -29,6 +31,44 @@ from .sampler import Sampler
 
 logger = get_logger()
 GROUP_GENERATE_TIME_KEY = "group_generate_time_s"
+
+
+class _ProgressDisplayer:
+    def __init__(self, progress_bar: Any | None) -> None:
+        self._tqdm = progress_bar
+
+    @classmethod
+    def create(cls, *, strategy_name: str, task_name: str, total: int, initial: int) -> "_ProgressDisplayer":
+        total = max(0, total)
+        initial = min(total, max(0, initial))
+        if total <= 0 or get_rank() != 0:
+            return cls(None)
+        return cls(
+            tqdm.tqdm(
+                total=total,
+                initial=initial,
+                desc=f"{strategy_name} {task_name}",
+                unit="sample",
+                dynamic_ncols=True,
+                mininterval=30,
+                leave=False,
+            )
+        )
+
+    def update(self, value: int) -> None:
+        if self._tqdm is None:
+            return
+        total = max(0, int(self._tqdm.total or 0))
+        value = min(total, max(0, value))
+        delta = value - self._tqdm.n
+        if delta > 0:
+            self._tqdm.update(delta)
+            self._tqdm.n = value
+
+    def close(self) -> None:
+        if self._tqdm is not None:
+            self._tqdm.close()
+            self._tqdm = None
 
 
 @dataclass
@@ -528,37 +568,40 @@ class SyncProduceStrategy(ProduceStrategy):
 
         logger.info(f"[SyncProduceStrategy] Started {len(pending_tasks)} initial tasks.")
 
-        while self.should_continue_fn(completed_sample_count, ctx.task_batch_size):
-            if not pending_tasks:
-                logger.warning("[SyncProduceStrategy] All tasks are done but not enough samples collected.")
-                break
-            done_tasks, pending_tasks = await asyncio.wait(
-                pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
-            )
-            # 如果要过滤，在这个地方处理，然后加入到 replay buffer
-            # 如果被过滤的数据就放到 put_to_filtered pool 中
-            for task in done_tasks:
-                items = task.result()
+        progress_displayer = _ProgressDisplayer.create(
+            strategy_name=self.__class__.__name__,
+            task_name=ctx.task_name,
+            total=ctx.target_abs,
+            initial=completed_sample_count,
+        )
+        try:
+            while self.should_continue_fn(completed_sample_count, ctx.task_batch_size):
+                if not pending_tasks:
+                    logger.warning("[SyncProduceStrategy] All tasks are done but not enough samples collected.")
+                    break
+                done_tasks, pending_tasks = await asyncio.wait(
+                    pending_tasks, timeout=1, return_when=asyncio.FIRST_COMPLETED
+                )
+                # 如果要过滤，在这个地方处理，然后加入到 replay buffer
+                # 如果被过滤的数据就放到 put_to_filtered pool 中
+                for task in done_tasks:
+                    items = task.result()
 
-                is_completed = await ctx.put_generated_group(items)
-                if not is_completed:
-                    continue
+                    is_completed = await ctx.put_generated_group(items)
+                    if not is_completed:
+                        continue
 
-                completed_sample_count += 1
-                if ctx.target_abs > 0:
-                    logger.info(
-                        f"[{self.__class__.__name__}] Collected "
-                        f"{min(ctx.target_abs, max(0, completed_sample_count))}/"
-                        f"{ctx.target_abs} "
-                        f"completed samples for task {ctx.task_name}."
-                    )
+                    completed_sample_count += 1
+                    progress_displayer.update(completed_sample_count)
 
-            while len(pending_tasks) + completed_sample_count < ctx.task_batch_size and self.should_continue_fn(
-                completed_sample_count, ctx.task_batch_size
-            ):
-                rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
-                task = create_task(ctx.generate_group(rollout_state))
-                pending_tasks.add(task)
+                while len(pending_tasks) + completed_sample_count < ctx.task_batch_size and self.should_continue_fn(
+                    completed_sample_count, ctx.task_batch_size
+                ):
+                    rollout_state = await ctx.sampler.sample(task_name=ctx.task_name)
+                    task = create_task(ctx.generate_group(rollout_state))
+                    pending_tasks.add(task)
+        finally:
+            progress_displayer.close()
 
         return ProduceBatchStatus.NORMAL
 
@@ -609,20 +652,15 @@ class AsyncProduceStrategy(ProduceStrategy):
         claimed_tasks: set[asyncio.Task],
         ctx: ProduceContext,
         available_base: int | None = None,
+        progress_displayer: _ProgressDisplayer | None = None,
     ) -> None:
         completed_count = 0
         for task in claimed_tasks:
             is_completed = await ctx.put_generated_group(task.result())
             if is_completed:
                 completed_count += 1
-            if is_completed and available_base is not None:
-                if ctx.target_abs > 0:
-                    logger.info(
-                        f"[{self.__class__.__name__}] Collected "
-                        f"{min(ctx.target_abs, max(0, available_base + completed_count))}/"
-                        f"{ctx.target_abs} "
-                        f"completed samples for task {ctx.task_name}."
-                    )
+            if is_completed and available_base is not None and progress_displayer is not None:
+                progress_displayer.update(available_base + completed_count)
 
     async def pause_produce(self, ctx: ProduceContext) -> float:
         pause_start = time.perf_counter()
@@ -712,38 +750,50 @@ class AsyncProduceStrategy(ProduceStrategy):
                 )
             )
 
-        while True:
-            if ctx.should_abort():
-                return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
-            if self.is_model_expired(ctx.train_step, ctx.model_step):
-                return ProduceBatchStatus.EXPIRED_BATCH
-
-            available = await ctx.available_count()
-            if not self.should_continue_fn(available, target_abs):
-                return ProduceBatchStatus.NORMAL
-
-            pending_count = self._pending_tasks.count()
-            desired_pending = max(0, scheduled_target - available)
-            if available + pending_count < scheduled_target:
-                while await self._pending_tasks.schedule_one(
-                    max_pending=desired_pending,
-                    should_abort=ctx.should_abort,
-                    spawn_one=spawn_one,
-                ):
-                    pass
-                # TODO: remove this check, because will check it when exit if statement, it's redundant
+        initial_available = await ctx.available_count()
+        progress_displayer = _ProgressDisplayer.create(
+            strategy_name=self.__class__.__name__,
+            task_name=ctx.task_name,
+            total=ctx.target_abs,
+            initial=initial_available,
+        )
+        try:
+            while True:
                 if ctx.should_abort():
                     return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
+                if self.is_model_expired(ctx.train_step, ctx.model_step):
+                    return ProduceBatchStatus.EXPIRED_BATCH
 
-            if ctx.should_abort():
-                return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
-            if self._pending_tasks.count() == 0:
-                logger.warning("All tasks are done but not enough samples collected.")
-                return ProduceBatchStatus.NORMAL
+                available = await ctx.available_count()
+                progress_displayer.update(available)
+                if not self.should_continue_fn(available, target_abs):
+                    return ProduceBatchStatus.NORMAL
 
-            claimed_done = await self._pending_tasks.wait_and_claim(timeout_s=1)
-            await self._put_claimed(
-                claimed_done,
-                ctx,
-                available_base=available,
-            )
+                pending_count = self._pending_tasks.count()
+                desired_pending = max(0, scheduled_target - available)
+                if available + pending_count < scheduled_target:
+                    while await self._pending_tasks.schedule_one(
+                        max_pending=desired_pending,
+                        should_abort=ctx.should_abort,
+                        spawn_one=spawn_one,
+                    ):
+                        pass
+                    # TODO: remove this check, because will check it when exit if statement, it's redundant
+                    if ctx.should_abort():
+                        return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
+
+                if ctx.should_abort():
+                    return ProduceBatchStatus.UPDATE_WEIGHT_AND_ABORT
+                if self._pending_tasks.count() == 0:
+                    logger.warning("All tasks are done but not enough samples collected.")
+                    return ProduceBatchStatus.NORMAL
+
+                claimed_done = await self._pending_tasks.wait_and_claim(timeout_s=1)
+                await self._put_claimed(
+                    claimed_done,
+                    ctx,
+                    available_base=available,
+                    progress_displayer=progress_displayer,
+                )
+        finally:
+            progress_displayer.close()
