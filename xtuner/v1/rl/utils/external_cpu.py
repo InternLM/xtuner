@@ -320,6 +320,19 @@ class CPUResourceManager:
 _CPU_RESOURCE_MANAGER: CPUResourceManager | None = None
 
 
+def format_cpu_resource_manager_uninitialized_error(owner: str) -> str:
+    return (
+        f"{owner} sets external_cpu, but CPUResourceManager is not initialized.\n"
+        "This usually means the config is being built outside RLTrainer. In normal training, build the trainer first "
+        "so XTuner can initialize CPUResourceManager after accelerator placement groups are created.\n"
+        "For standalone tests or scripts, initialize it explicitly before building this component:\n"
+        "    from xtuner.v1.rl.utils import CPUResourceManager, set_cpu_resource_manager\n"
+        "    set_cpu_resource_manager(CPUResourceManager(None, accelerator_placement_groups=None))\n"
+        "Note: standalone initialization does not account for accelerator placement group reservation unless you pass "
+        "the placement group(s)."
+    )
+
+
 def set_cpu_resource_manager(manager: CPUResourceManager | None) -> None:
     global _CPU_RESOURCE_MANAGER
     _CPU_RESOURCE_MANAGER = manager

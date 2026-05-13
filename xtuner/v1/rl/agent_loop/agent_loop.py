@@ -16,6 +16,7 @@ from xtuner.v1.rl.utils import (
     CPUActorPoolAllocation,
     CPUActorPoolConfig,
     create_task,
+    format_cpu_resource_manager_uninitialized_error,
     get_cpu_resource_manager,
 )
 from xtuner.v1.utils import get_logger, ray_method
@@ -38,9 +39,7 @@ class AgentLoopConfig(ABC, BaseModel):
 
         cpu_manager = get_cpu_resource_manager()
         if cpu_manager is None:
-            raise ValueError(
-                f"AgentLoop {self.__class__.__name__!r} sets external_cpu, but no CPUResourceManager was provided."
-            )
+            raise ValueError(format_cpu_resource_manager_uninitialized_error(f"AgentLoop {self.__class__.__name__!r}"))
         allocation = cpu_manager.register(
             name=f"agent_loop:{self.__class__.__name__}",
             config=self.external_cpu,

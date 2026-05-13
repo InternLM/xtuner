@@ -5,6 +5,7 @@ from .external_cpu import (
     CPUResourceManager,
     CPUResourceManagerConfig,
     clear_cpu_resource_manager,
+    format_cpu_resource_manager_uninitialized_error,
     get_cpu_resource_manager,
     set_cpu_resource_manager,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "CPUResourceManager",
     "CPUResourceManagerConfig",
     "clear_cpu_resource_manager",
+    "format_cpu_resource_manager_uninitialized_error",
     "get_cpu_resource_manager",
     "set_cpu_resource_manager",
     "get_ray_accelerator",
