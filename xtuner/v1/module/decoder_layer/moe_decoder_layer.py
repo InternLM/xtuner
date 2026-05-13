@@ -184,6 +184,10 @@ class MoEBlock(nn.Module):
         self.moe_act = moe_act_fn_cfg.build()
 
     def forward(self, x, tokens_per_expert, decoding):
+        # short cut for dispatching 0 token in ep_size >1 case
+        if x.numel() == 0:
+            return x
+
         gate_up_out = self.fused_w1w3(x, tokens_per_expert, decoding)
         out = self.moe_act(gate_up_out, split_dim=-1)
         res = self.fused_w2(out, tokens_per_expert, decoding)
