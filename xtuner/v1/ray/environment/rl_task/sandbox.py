@@ -28,13 +28,73 @@ import io
 import json
 import os
 import re
+import shlex
 import tarfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from xtuner.v1.utils import get_logger
+
+
+class DetachConfig(TypedDict, total=False):
+    """Options for ``SandboxStage(detach=...)``.
+
+    All fields are optional (``total=False``) — pass ``{}`` for a
+    minimal detach (background + poll rc file only, default timeouts).
+
+    Keys:
+        daemon_pattern (str | None): ``pgrep -f`` substring that the
+            stage's companion daemon should match while the entry runs.
+            ``None`` or unset → skip daemon liveness check.  Example
+            for the lagent agent loop: ``"lagent.serving.sandbox.daemon"``.
+        poll_sec (float): Seconds between rc/pid/pgrep polls.  Defaults
+            to 30s; drop to 5–10s for short detached entries.
+        probe_timeout_sec (float): Per-probe HTTP budget for the rc/pid
+            reads and ``kill -0`` / ``pgrep`` calls.  Defaults to 10s.
+            Raise it if cross-cluster latency makes individual probes
+            time out even when the sandbox is alive.
+        handshake_timeout_sec (float): HTTP budget for the initial
+            detach ``exec_in`` call that just backgrounds the wrapper.
+            Defaults to 60s.  The wrapper itself runs asynchronously; this
+            cap only protects against a dead sandbox that never ACKs.
+    """
+
+    daemon_pattern: str | None
+    poll_sec: float
+    probe_timeout_sec: float
+    handshake_timeout_sec: float
+
+
+# ─────────────────────────────────────────────────────────────────
+# Detached-entry polling
+# ─────────────────────────────────────────────────────────────────
+#
+# ``SandboxStage.run`` with ``detach=True`` launches the entry command in
+# the background and relies on external polling to detect completion:
+#
+#   1. ``{rc_file}``: written by the wrapping shell once the entry returns.
+#      Presence = finished; content = return code.
+#   2. ``{pid_file}``: written before the entry starts; ``kill -0 <pid>``
+#      reports whether the wrapping shell is still alive.
+#   3. ``pgrep -f <daemon_pattern>``: if the stage's companion daemon has
+#      died while the entry is still running we fail immediately.  Each
+#      stage declares its own pattern (``SandboxStage(daemon_pattern=...)``);
+#      stages that don't spawn a daemon leave it ``None`` to skip.
+#
+# File paths are **per-call** — ``SandboxStage.run`` generates a unique
+# suffix for each invocation.  Earlier builds used fixed paths
+# ``/tmp/lagent_entry.{pid,rc}`` which caused a catastrophic race when two
+# detached stages ran in the same sandbox: the judger's first poll would
+# read the infer stage's stale rc file instantly, the judger's entry would
+# be skipped, ``total`` scored as 0, and training data became silently
+# corrupted.  Keeping the paths per-call isolates stages.
+#
+# This strategy replaces the old heartbeat-file + daemon-log watchdog —
+# that design gave hundreds of false positives on cross-cluster
+# ``/download`` spikes in rc18/rc19 (healthy samples killed mid-rollout).
 
 
 _BUNDLE_SIZE_LOG = Path("/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/work_dir/bundle_sizes.jsonl")
@@ -274,6 +334,173 @@ class DownloadHook(Hook):
 # ─────────────────────────────────────────────────────────────────
 
 
+async def _sandbox_cat(client: Any, path: str, timeout_sec: float = 5.0) -> bytes | None:
+    """Download a sandbox file; return ``None`` on any failure."""
+    try:
+        return await asyncio.wait_for(client.download_file(path), timeout=timeout_sec)
+    except Exception:
+        return None
+
+
+async def _read_entry_rc(client: Any, rc_file: str) -> int | None:
+    """Read ``rc_file`` content and parse as int.
+
+    Returns ``None`` when
+    the file doesn't exist yet (entry hasn't finished) or is malformed.
+    """
+    blob = await _sandbox_cat(client, rc_file)
+    if blob is None:
+        return None
+    try:
+        return int(blob.decode(errors="replace").strip())
+    except ValueError:
+        return None
+
+
+async def _read_entry_pid(client: Any, pid_file: str) -> int | None:
+    blob = await _sandbox_cat(client, pid_file)
+    if blob is None:
+        return None
+    try:
+        return int(blob.decode(errors="replace").strip())
+    except ValueError:
+        return None
+
+
+async def _is_pid_alive(client: Any, pid: int, timeout_sec: float) -> bool | None:
+    """``True`` = alive, ``False`` = gone, ``None`` = probe failed."""
+    try:
+        res = await exec_in(
+            client,
+            f"kill -0 {pid} 2>/dev/null && echo Y || echo N",
+            raise_on_error=False,
+            timeout_sec=timeout_sec,
+        )
+    except Exception:
+        return None
+    out = (res.get("stdout") or "").strip()
+    if "Y" in out:
+        return True
+    if "N" in out:
+        return False
+    return None
+
+
+async def _is_pattern_running(client: Any, pattern: str, timeout_sec: float) -> bool | None:
+    """Pgrep-style liveness probe for a substring match on full command
+    line."""
+    try:
+        res = await exec_in(
+            client,
+            f"pgrep -f {shlex.quote(pattern)} >/dev/null && echo Y || echo N",
+            raise_on_error=False,
+            timeout_sec=timeout_sec,
+        )
+    except Exception:
+        return None
+    out = (res.get("stdout") or "").strip()
+    if "Y" in out:
+        return True
+    if "N" in out:
+        return False
+    return None
+
+
+async def wait_for_detached_entry(
+    client: Any,
+    tid: str,
+    *,
+    pid_file: str,
+    rc_file: str,
+    daemon_pattern: str | None,
+    poll_sec: float,
+    probe_timeout_sec: float,
+    max_sec: int,
+) -> dict[str, Any]:
+    """Poll the sandbox until a detached entry command finishes or fails.
+
+    Returns a dict with the same shape as ``client.execute`` results
+    (``return_code`` / ``stdout`` / ``stderr``) so callers can treat it
+    like a normal synchronous ``exec_in`` result.
+
+    Non-zero ``return_code`` encodings we add on top of the entry's own rc:
+
+      * ``-1`` — entry shell died without writing ``rc_file``
+        (SIGKILL, node eviction, or fatal shell error).
+      * ``-2`` — ``daemon_pattern`` no longer matches ``pgrep`` while
+        the entry was still running.  Skipped if ``daemon_pattern`` is
+        ``None`` (stage has no external daemon to monitor, e.g. judgers).
+      * ``-3`` — exceeded ``max_sec`` (safety ceiling, default 2h).
+
+    Args:
+        client (Any): SandboxClient.
+        tid (str): Task id for log tags.
+        pid_file (str): Sandbox path of the wrapper shell's PID file;
+            must be unique per call to avoid cross-stage contamination.
+        rc_file (str): Sandbox path of the wrapper shell's exit-code file;
+            must be unique per call.
+        daemon_pattern (str | None): ``pgrep -f`` substring that the
+            stage's companion daemon process should match.  When ``None``,
+            the daemon-alive check is skipped entirely — appropriate for
+            stages that don't spawn or depend on a background process
+            (e.g. a judger's one-shot test runner).
+        poll_sec (float): Seconds between polls.
+        probe_timeout_sec (float): Per-probe HTTP budget for rc/pid reads
+            and ``kill -0`` / ``pgrep`` calls.
+        max_sec (int): Hard ceiling on total wait.
+    """
+    start = time.monotonic()
+    consecutive_entry_missing = 0
+    logger = get_logger()
+    while True:
+        rc = await _read_entry_rc(client, rc_file)
+        if rc is not None:
+            logger.info(f"[{tid}] detached entry finished rc={rc}")
+            return {"return_code": rc, "stdout": "", "stderr": ""}
+
+        entry_pid = await _read_entry_pid(client, pid_file)
+        entry_alive = await _is_pid_alive(client, entry_pid, probe_timeout_sec) if entry_pid else None
+        daemon_alive = await _is_pattern_running(client, daemon_pattern, probe_timeout_sec) if daemon_pattern else None
+
+        if daemon_alive is False:
+            logger.warning(f"[{tid}] daemon process (pattern={daemon_pattern!r}) gone while entry still running")
+            return {
+                "return_code": -2,
+                "stdout": "",
+                "stderr": f"[{tid}] daemon process gone (pattern={daemon_pattern!r})",
+            }
+
+        if entry_alive is False:
+            consecutive_entry_missing += 1
+            # One poll of "missing" can be a race with the rc-write step
+            # — the shell may have exited moments before we re-read the
+            # pid.  Require two consecutive misses + rc file still absent
+            # before declaring a crash.
+            if consecutive_entry_missing >= 2:
+                rc = await _read_entry_rc(client, rc_file)
+                if rc is not None:
+                    return {"return_code": rc, "stdout": "", "stderr": ""}
+                logger.warning(f"[{tid}] lagent_entry pid {entry_pid} gone without writing rc file")
+                return {
+                    "return_code": -1,
+                    "stdout": "",
+                    "stderr": f"[{tid}] lagent_entry pid {entry_pid} gone without writing rc file",
+                }
+        else:
+            consecutive_entry_missing = 0
+
+        elapsed = time.monotonic() - start
+        if elapsed > max_sec:
+            logger.warning(f"[{tid}] detached entry exceeded max runtime {max_sec}s")
+            return {
+                "return_code": -3,
+                "stdout": "",
+                "stderr": f"[{tid}] entry exceeded max runtime {max_sec}s",
+            }
+
+        await asyncio.sleep(poll_sec)
+
+
 class SandboxStage:
     """Pre-hooks → entry → post-hooks.  Each field is visible.
 
@@ -282,6 +509,21 @@ class SandboxStage:
       - ``pre`` / ``post`` default to empty.
       - Downloads live in post-hooks via :class:`DownloadHook` — no separate
         ``pull`` contract.
+
+    ``detach`` controls how the entry command is invoked:
+
+    * ``None`` (default): synchronous ``exec_in`` — the sandbox HTTP call
+      blocks until the command finishes; stdout/stderr are captured and
+      returned.  Use this for short-lived stages (judgers, setup) that
+      need the captured output for parsing.
+    * ``{}`` or populated :class:`DetachConfig`: entry is launched in
+      background via ``detach=True`` with a shell wrapper that writes its
+      own PID and the exit code to per-call paths under ``/tmp/``.  The
+      host polls those files + ``pgrep`` (when ``daemon_pattern`` is set)
+      to detect completion or daemon death.  Use this for long-lived
+      rollout stages whose runtime exceeds the HTTP read timeout on
+      cross-cluster networks.  Stdout/stderr are NOT captured — stages
+      that need them must consume output via files pulled by post-hooks.
     """
 
     def __init__(
@@ -293,13 +535,26 @@ class SandboxStage:
         env: Resolvable = None,
         timeout: int = 600,
         post: list[Hook] = (),
+        detach: DetachConfig | None = None,
     ):
         self.sandbox = sandbox
         self.pre = list(pre)
         self._entry = entry
         self._env = env
+        # ``timeout`` is the end-to-end wall-clock ceiling for ``entry``:
+        # in sync mode it's the HTTP read timeout passed to ``exec_in``;
+        # in detach mode it bounds the background poll loop.
         self.timeout = timeout
         self.post = list(post)
+        # Unpack detach config once at init.  ``detach is None`` → sync
+        # path; any dict (even ``{}``) opts into the detach path.
+        self.detach = detach is not None
+        if detach is None:
+            detach = {}
+        self.daemon_pattern: str | None = detach.get("daemon_pattern")
+        self.poll_sec: float = detach.get("poll_sec", 30.0)
+        self.probe_timeout_sec: float = detach.get("probe_timeout_sec", 10.0)
+        self.handshake_timeout_sec: float = detach.get("handshake_timeout_sec", 60.0)
 
     async def run(self, client: Any, ctx: dict[str, Any]) -> StageResult:
         for hook in self.pre:
@@ -311,13 +566,51 @@ class SandboxStage:
         entry = _resolve(self._entry, ctx)
         if entry:
             env = _resolve(self._env, ctx) or {}
-            exec_res = await exec_in(
-                client,
-                entry,
-                env=env,
-                timeout_sec=self.timeout,
-                raise_on_error=True,
-            )
+            tid = (ctx.get("data") and getattr(ctx["data"], "id", None)) or "?"
+
+            if self.detach:
+                # Long-running entry: wrap with PID/rc files so external polling
+                # can detect completion without holding an HTTP connection for
+                # the full rollout.  The file paths are generated per call so
+                # stages that share a sandbox (infer → judger) cannot race on
+                # a stale rc left by the previous stage.
+                stage_id = uuid.uuid4().hex[:12]
+                pid_file = f"/tmp/xt_stage_{stage_id}.pid"
+                rc_file = f"/tmp/xt_stage_{stage_id}.rc"
+                wrapped = f"rm -f {pid_file} {rc_file}; echo $$ > {pid_file}; {entry}; echo $? > {rc_file}"
+                # The detach HTTP handshake itself should return promptly —
+                # it just tells the sandbox to background the command.  Use
+                # a short cap rather than ``self.timeout`` so a dead sandbox
+                # doesn't block for hours before failing over.
+                await exec_in(
+                    client,
+                    wrapped,
+                    env=env,
+                    timeout_sec=self.handshake_timeout_sec,
+                    raise_on_error=True,
+                    detach=True,
+                )
+                exec_res = await wait_for_detached_entry(
+                    client,
+                    tid,
+                    pid_file=pid_file,
+                    rc_file=rc_file,
+                    daemon_pattern=self.daemon_pattern,
+                    poll_sec=self.poll_sec,
+                    probe_timeout_sec=self.probe_timeout_sec,
+                    max_sec=self.timeout,
+                )
+            else:
+                # Synchronous entry: ``exec_in`` blocks until the command
+                # returns and captures stdout/stderr for post-hook parsing
+                # (e.g. ParseJudgerStdout).
+                exec_res = await exec_in(
+                    client,
+                    entry,
+                    env=env,
+                    timeout_sec=self.timeout,
+                    raise_on_error=False,
+                )
             rc = _result_code(exec_res)
             stdout = exec_res.get("stdout") or ""
             stderr = exec_res.get("stderr") or ""
@@ -331,8 +624,29 @@ class SandboxStage:
         )
         ctx["result"] = result
 
+        # Post-hooks run best-effort when the entry failed.  A hung entry
+        # (rc=-3 timeout, rc=-1 pid lost, rc=-2 daemon gone, non-zero rc)
+        # typically leaves the sandbox in a broken state where downloads
+        # 404 or the file the hook wants isn't on disk yet.  If we let those
+        # hook exceptions propagate, they replace the real entry error in
+        # ``run_single``'s ``except Exception`` handler — and the fate is
+        # misclassified (rc22: 3468 ``posthook_download_404`` fates that
+        # were actually ``entry_timeout``).  Swallow hook failures in the
+        # entry-failed path but keep them raising on the happy path so real
+        # post-hook bugs still surface.
+        entry_failed = rc != 0
         for hook in self.post:
-            await _run_hook(hook, client, ctx, phase="post")
+            try:
+                await _run_hook(hook, client, ctx, phase="post")
+            except Exception as hook_exc:
+                if entry_failed:
+                    get_logger().warning(
+                        f"post-hook {type(hook).__name__!r} failed after entry "
+                        f"rc={rc}; preserving entry error: "
+                        f"{type(hook_exc).__name__}: {hook_exc}"
+                    )
+                else:
+                    raise
 
         # Post-hooks may have added downloads; reflect into the returned result.
         result.pulled = ctx.get("pulled", {})
@@ -369,6 +683,7 @@ async def exec_in(
     timeout_sec: int = 600,
     env: dict[str, str] | None = None,
     raise_on_error: bool = True,
+    detach: bool = False,
 ) -> dict[str, Any]:
     """Execute a shell command inside the sandbox.
 
@@ -382,7 +697,7 @@ async def exec_in(
         # wouldn't see RL_LLM_MODEL etc.
         exports = "; ".join(f'export {k}="{v}"' for k, v in env.items())
         command = f"{exports}; {command}"
-    result = await client.execute(command, cwd, timeout_sec)
+    result = await client.execute(command, cwd, timeout_sec, detach)
     rc = _result_code(result)
     if raise_on_error and rc != 0:
         raise RuntimeError(f"command failed (return_code={rc}): {command}\nstderr: {result.get('stderr', '')[:1000]}")
@@ -401,7 +716,7 @@ async def upload_tar_and_extract(
     if not file_map:
         return
     blob = await asyncio.to_thread(_tar_bytes, file_map, extract_root)
-    _log_bundle_size(len(blob), extract_root, len(file_map))
+    # _log_bundle_size(len(blob), extract_root, len(file_map))
     tmp = "/tmp/_bundle.tar.gz"
     await http_upload(client, tmp, base64.b64encode(blob).decode())
     await exec_in(

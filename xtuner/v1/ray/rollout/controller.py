@@ -11,6 +11,7 @@ from uuid import uuid4
 import ray
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import ORJSONResponse
 from ray.util.placement_group import PlacementGroup
 
 from xtuner.v1.data_proto.rl_data import (
@@ -20,6 +21,7 @@ from xtuner.v1.data_proto.rl_data import (
 )
 from xtuner.v1.ray.base import AutoAcceleratorWorkers
 from xtuner.v1.ray.config.worker import RolloutConfig
+from xtuner.v1.ray.environment.trace import emit_llm_call
 from xtuner.v1.ray.rollout.routed_expert_store import get_store
 from xtuner.v1.utils import get_logger
 
@@ -27,6 +29,11 @@ from .worker import RolloutWorker
 
 
 ROLLOUT_RAY_GET_TIMEOUT = os.getenv("XTUNER_ROLLOUT_RAY_GET_TIMEOUT", 5 * 3600)  # default 5 hours
+# Minimum total wall time (seconds) for which a /v1/chat/completions request
+# gets a warning log with per-stage breakdown.  Use to isolate where time
+# goes (tokenize vs rollout vs Python post-processing) without drowning
+# the driver log in normal-latency noise.
+_SLOW_REQUEST_THRESHOLD_SEC = float(os.environ.get("XTUNER_SLOW_REQUEST_THRESHOLD_SEC", "60"))
 
 
 @dataclass
@@ -493,7 +500,11 @@ class RolloutController:
 
     def start_api_server(self, host: str = "0.0.0.0", port: int = 8000):
         """Starts the API server to expose the rollout functionality."""
-        app = FastAPI()
+        # ORJSONResponse replaces FastAPI's default JSON encoder; request
+        # bodies routinely carry 16K–65K tokens worth of history and
+        # responses embed logprobs + token_ids, where orjson's C-level
+        # serializer cuts per-request CPU noticeably.
+        app = FastAPI(default_response_class=ORJSONResponse)
         port = self.config.api_port if self.config.api_port else port
 
         # Resolve the real node IP via Ray so callers outside the cluster can
@@ -526,7 +537,14 @@ class RolloutController:
 
         @app.post("/v1/chat/completions")
         async def chat_completions(request: LagentChatCompletionRequest):
+            # Per-stage timing — only logged when the whole request exceeds
+            # the threshold, to avoid drowning the driver log in noise.  Use
+            # this to identify event-loop saturation (tokenize/rollout both
+            # fast but parse/dump slow) vs downstream latency (tokenize or
+            # rollout dominating).
+            t_start = time.monotonic()
             inputs = await self.tokenize(request.messages, request.tools)
+            t_after_tokenize = time.monotonic()
             if len(inputs["input_ids"]) >= self.config.context_length:
                 response = RLRolloutResponseItem(finish_reason="length")
             else:
@@ -541,12 +559,13 @@ class RolloutController:
                         {"routed_experts": inputs["routed_experts"]} if inputs["routed_experts"] is not None else {}
                     ),
                 )
+            t_after_rollout = time.monotonic()
             message = AgentMessage.from_model_response(response, "assistant")
             message = self.reasoning_parser.parse_response(message)
             message = self.tool_call_parser.parse_response(message)
             completion_message = LagentChatCompletionMessage.from_agent_message(message)
             completion_tokens = response.num_return_tokens or 0
-            return LagentChatCompletion(
+            result = LagentChatCompletion(
                 model=request.model,
                 choices=[
                     LagentChoice(
@@ -563,13 +582,37 @@ class RolloutController:
                     total_tokens=len(inputs["input_ids"]) + completion_tokens,
                 ),
             ).model_dump()
+            t_end = time.monotonic()
+            total = t_end - t_start
+            prompt_tokens = len(inputs["input_ids"])
+            emit_llm_call(
+                total_ms=int(total * 1000),
+                tokenize_ms=int((t_after_tokenize - t_start) * 1000),
+                rollout_ms=int((t_after_rollout - t_after_tokenize) * 1000),
+                post_ms=int((t_end - t_after_rollout) * 1000),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+            if total >= _SLOW_REQUEST_THRESHOLD_SEC:
+                self.logger.warning(
+                    f"slow /v1/chat/completions: total={total:.1f}s "
+                    f"(tokenize={t_after_tokenize - t_start:.2f}s "
+                    f"rollout={t_after_rollout - t_after_tokenize:.2f}s "
+                    f"post={t_end - t_after_rollout:.2f}s) "
+                    f"prompt_tokens={prompt_tokens} completion_tokens={completion_tokens}"
+                )
+            return result
 
         @app.post("/v1/tokenize")
         async def tokenize(request: LagentTokenizeRequest):
             inputs = await self.tokenize(request.messages, request.tools)
             return LagentTokenizeResponse(**inputs).model_dump()
 
-        config = uvicorn.Config(app, host=host, port=port)
+        # uvloop is a drop-in replacement for the default asyncio loop with
+        # lower overhead per await / socket op; FastAPI routinely drives a
+        # few hundred concurrent long-lived agent requests through this
+        # single uvicorn worker, where the loop is the hot path.
+        config = uvicorn.Config(app, host=host, port=port, loop="uvloop")
         server = uvicorn.Server(config)
         server_thread = threading.Thread(target=server.run, daemon=True)
         server_thread.start()

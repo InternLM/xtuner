@@ -53,7 +53,7 @@ model = dict(
     ),
     sample_params=dict(temperature=0.7, top_p=1.0, top_k=50),
     timeout=900,
-    max_retry=1,
+    max_retry=5,
     sleep_interval=5,
     extra_body=dict(spaces_between_special_tokens=False),
 )

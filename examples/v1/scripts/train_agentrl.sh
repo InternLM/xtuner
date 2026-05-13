@@ -53,7 +53,7 @@ export TRAIN_OPTIMIZER_STEPS=8
 current_time=$(date "+%m%d%H")
 
 export CONFIG_PATH='/mnt/shared-storage-user/llmit/user/liukuikun/workspace/xtuner/examples/v1/config/interns2-35ba3-base05-20260424a-rl-data260426rc1-56k-badword-mtp4_agenticrl_tb2_mtp4_0503rc1.py'
-export WORK_DIR='/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0508rc10'
+export WORK_DIR='/mnt/shared-storage-user/llmit1/user/liukuikun/delivery/interns2_preview_0508rc23'
 
 
 if [ ! -d "$WORK_DIR" ]; then
@@ -140,7 +140,8 @@ if [ "$RAY_RANK" -eq 0 ]; then
         \"CUBLAS_WORKSPACE_CONFIG\": \":16:8\",
         \"RL_LLM_MODEL\": \"${RL_LLM_MODEL}\",
         \"RL_LLM_BASE_URL\": \"${RL_LLM_BASE_URL:-}\",
-        \"RL_LLM_API_KEY\": \"${RL_LLM_API_KEY:-}\"
+        \"RL_LLM_API_KEY\": \"${RL_LLM_API_KEY:-}\",
+        \"WORK_DIR\": \"${WORK_DIR}\"
       }
     }"
 
